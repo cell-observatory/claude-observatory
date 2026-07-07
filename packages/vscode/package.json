@@ -1,0 +1,385 @@
+{
+  "name": "claude-observatory-vscode",
+  "displayName": "Claude Observatory",
+  "description": "A running list of every file change Claude Code makes, each with its own Keep / Undo (surgical, git-free).",
+  "version": "0.1.0",
+  "publisher": "claude-observatory",
+  "private": true,
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "SCM Providers",
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "claudeObservatory",
+          "title": "Claude Observatory",
+          "icon": "media/icon.svg"
+        }
+      ],
+      "panel": [
+        {
+          "id": "claudeObservatoryPanel",
+          "title": "Claude Observatory",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "claudeObservatory": [
+        {
+          "id": "claudeObservatory.edits",
+          "name": "Edits",
+          "icon": "media/icon.svg"
+        },
+        {
+          "id": "claudeObservatory.diffs",
+          "name": "Diffs",
+          "icon": "media/icon.svg"
+        }
+      ],
+      "claudeObservatoryPanel": [
+        {
+          "id": "claudeObservatory.observations",
+          "name": "Observations",
+          "icon": "media/icon.svg"
+        },
+        {
+          "id": "claudeObservatory.timeline",
+          "name": "Timeline",
+          "icon": "media/icon.svg"
+        },
+        {
+          "id": "claudeObservatory.stats",
+          "name": "Stats",
+          "type": "webview"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "claudeObservatory.edits",
+        "contents": "No tracked Claude edits in this workspace yet.\nInstall the capture hooks, then let Claude edit a file.\n[Show setup instructions](command:claudeObservatory.setup)"
+      },
+      {
+        "view": "claudeObservatory.diffs",
+        "contents": "No tracked Claude edits in this workspace yet."
+      },
+      {
+        "view": "claudeObservatory.timeline",
+        "contents": "No tracked Claude edits in this workspace yet."
+      },
+      {
+        "view": "claudeObservatory.observations",
+        "contents": "No tracked Claude edits in this workspace yet."
+      }
+    ],
+    "commands": [
+      {
+        "command": "claudeObservatory.refresh",
+        "title": "Refresh",
+        "category": "Claude Observatory",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "claudeObservatory.openDiff",
+        "title": "Open Diff",
+        "category": "Claude Observatory"
+      },
+      {
+        "command": "claudeObservatory.openFileAtEdit",
+        "title": "Open File at Edit",
+        "category": "Claude Observatory"
+      },
+      {
+        "command": "claudeObservatory.openFile",
+        "title": "Open File",
+        "category": "Claude Observatory",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "claudeObservatory.keep",
+        "title": "Keep",
+        "category": "Claude Observatory",
+        "icon": "$(check)"
+      },
+      {
+        "command": "claudeObservatory.undo",
+        "title": "Undo",
+        "category": "Claude Observatory",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "claudeObservatory.redo",
+        "title": "Redo",
+        "category": "Claude Observatory",
+        "icon": "$(redo)"
+      },
+      {
+        "command": "claudeObservatory.keepFile",
+        "title": "Keep all edits in file",
+        "category": "Claude Observatory",
+        "icon": "$(check-all)"
+      },
+      {
+        "command": "claudeObservatory.undoFile",
+        "title": "Undo all edits in file",
+        "category": "Claude Observatory",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "claudeObservatory.setup",
+        "title": "Show setup instructions",
+        "category": "Claude Observatory"
+      },
+      {
+        "command": "claudeObservatory.installHooks",
+        "title": "Install capture hooks",
+        "category": "Claude Observatory"
+      },
+      {
+        "command": "claudeObservatory.inlineDiff",
+        "title": "Show Claude edit diff",
+        "category": "Claude Observatory"
+      },
+      {
+        "command": "claudeObservatory.inlineKeep",
+        "title": "Keep Claude edit",
+        "category": "Claude Observatory"
+      },
+      {
+        "command": "claudeObservatory.inlineUndo",
+        "title": "Undo Claude edit",
+        "category": "Claude Observatory"
+      },
+      {
+        "command": "claudeObservatory.toggleInline",
+        "title": "Toggle inline review overlay",
+        "category": "Claude Observatory",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "claudeObservatory.keepAll",
+        "title": "Accept all edits",
+        "category": "Claude Observatory",
+        "icon": "$(check-all)"
+      },
+      {
+        "command": "claudeObservatory.undoAll",
+        "title": "Revert all edits",
+        "category": "Claude Observatory",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "claudeObservatory.clearResolved",
+        "title": "Clear resolved edits",
+        "category": "Claude Observatory",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "claudeObservatory.chatEdit",
+        "title": "Chat about this edit",
+        "category": "Claude Observatory",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "claudeObservatory.showObservation",
+        "title": "Show observation",
+        "category": "Claude Observatory"
+      },
+      {
+        "command": "claudeObservatory.analyzeEdit",
+        "title": "Analyze edit with Claude",
+        "category": "Claude Observatory",
+        "icon": "$(sparkle)"
+      },
+      {
+        "command": "claudeObservatory.refreshRecap",
+        "title": "Refresh session recap",
+        "category": "Claude Observatory",
+        "icon": "$(sparkle)"
+      },
+      {
+        "command": "claudeObservatory.reviewNext",
+        "title": "Review next pending edit",
+        "category": "Claude Observatory",
+        "icon": "$(debug-step-over)"
+      },
+      {
+        "command": "claudeObservatory.keepAtCursor",
+        "title": "Keep pending edit at cursor",
+        "category": "Claude Observatory"
+      },
+      {
+        "command": "claudeObservatory.undoAtCursor",
+        "title": "Undo pending edit at cursor",
+        "category": "Claude Observatory"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "claudeObservatory.reviewNext",
+        "key": "ctrl+alt+n",
+        "mac": "alt+cmd+n"
+      },
+      {
+        "command": "claudeObservatory.keepAtCursor",
+        "key": "ctrl+alt+y",
+        "mac": "alt+cmd+y",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "claudeObservatory.undoAtCursor",
+        "key": "ctrl+alt+u",
+        "mac": "alt+cmd+u",
+        "when": "editorTextFocus"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "claudeObservatory.reviewNext",
+          "when": "view == claudeObservatory.edits",
+          "group": "navigation@0"
+        },
+        {
+          "command": "claudeObservatory.keepAll",
+          "when": "view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline",
+          "group": "navigation@0"
+        },
+        {
+          "command": "claudeObservatory.undoAll",
+          "when": "view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline",
+          "group": "navigation@1"
+        },
+        {
+          "command": "claudeObservatory.clearResolved",
+          "when": "view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline || view == claudeObservatory.observations",
+          "group": "navigation@2"
+        },
+        {
+          "command": "claudeObservatory.toggleInline",
+          "when": "view == claudeObservatory.edits",
+          "group": "navigation@2"
+        },
+        {
+          "command": "claudeObservatory.refresh",
+          "when": "view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline || view == claudeObservatory.observations",
+          "group": "navigation@3"
+        },
+        {
+          "command": "claudeObservatory.refreshRecap",
+          "when": "view == claudeObservatory.observations",
+          "group": "navigation@0"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "claudeObservatory.refreshRecap",
+          "when": "view == claudeObservatory.observations && viewItem == recap",
+          "group": "inline@0"
+        },
+        {
+          "command": "claudeObservatory.analyzeEdit",
+          "when": "view == claudeObservatory.observations && viewItem == observation",
+          "group": "inline@0"
+        },
+        {
+          "command": "claudeObservatory.chatEdit",
+          "when": "view == claudeObservatory.observations && viewItem == observation",
+          "group": "navigation@1"
+        },
+        {
+          "command": "claudeObservatory.keep",
+          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline) && viewItem == edit",
+          "group": "inline@1"
+        },
+        {
+          "command": "claudeObservatory.undo",
+          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline) && viewItem == edit",
+          "group": "inline@2"
+        },
+        {
+          "command": "claudeObservatory.openFile",
+          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline) && viewItem == edit",
+          "group": "navigation@1"
+        },
+        {
+          "command": "claudeObservatory.redo",
+          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline) && viewItem == editUndone",
+          "group": "inline@1"
+        },
+        {
+          "command": "claudeObservatory.openFile",
+          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline) && viewItem == editUndone",
+          "group": "navigation@1"
+        },
+        {
+          "command": "claudeObservatory.openFile",
+          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline) && viewItem == file",
+          "group": "inline@0"
+        },
+        {
+          "command": "claudeObservatory.keepFile",
+          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline) && viewItem == file",
+          "group": "inline@1"
+        },
+        {
+          "command": "claudeObservatory.undoFile",
+          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline) && viewItem == file",
+          "group": "inline@2"
+        },
+        {
+          "command": "claudeObservatory.chatEdit",
+          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline) && (viewItem == edit || viewItem == editUndone)",
+          "group": "navigation@2"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Claude Observatory",
+      "properties": {
+        "claudeObservatory.inlineReview": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show Claude's pending edits inline in the editor (gutter change-bars + a per-edit ✨ marker with Keep/Undo/Diff/Chat on hover)."
+        },
+        "claudeObservatory.claudeBin": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the `claude` CLI used for opt-in 'Analyze'/'Generate suggestions' (leave empty to auto-detect on PATH / common locations)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "bundle": "esbuild src/extension.ts --bundle --platform=node --format=cjs --external:vscode --outfile=dist/extension.js",
+    "build": "npm run typecheck && npm run bundle",
+    "package": "vsce package --no-dependencies -o claude-observatory.vsix"
+  },
+  "devDependencies": {
+    "@claude-observatory/core": "0.1.0",
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.0.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.0"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cell-observatory/claude-observatory.git"
+  },
+  "homepage": "https://github.com/cell-observatory/claude-observatory#readme",
+  "bugs": {
+    "url": "https://github.com/cell-observatory/claude-observatory/issues"
+  },
+  "icon": "media/icon.png"
+}

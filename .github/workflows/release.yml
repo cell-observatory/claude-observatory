@@ -1,0 +1,36 @@
+name: Release
+
+# Cut a release by pushing a version tag:  git tag v0.1.0 && git push origin v0.1.0
+# CI re-runs the full suite, builds the share artifacts, and attaches them to a GitHub Release —
+# teammates install with `npm i -g ./claude-observatory-<ver>.tgz` and `code --install-extension *.vsix`.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: bash test/e2e.sh
+      - run: npm run release
+      - name: Create GitHub Release with artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          cp release/claude-observatory.vsix "release/claude-observatory-vscode-${TAG}.vsix"
+          gh release create "$TAG" \
+            release/claude-observatory-*.tgz \
+            "release/claude-observatory-vscode-${TAG}.vsix" \
+            --title "Claude Observatory ${TAG}" \
+            --generate-notes

@@ -1,0 +1,479 @@
+/**
+ * claude-observatory — standalone, git-free, per-edit Keep/Undo for Claude Code.
+ *
+ * Commands:
+ *   init                 install the PreToolUse/PostToolUse capture hooks into ~/.claude/settings.json
+ *   uninstall            remove those hooks again
+ *   capture              internal hook entrypoint (invoked by Claude Code; never call by hand)
+ *   list                 list edits in the active session
+ *   diff <id>            colored before/after for one edit
+ *   keep <id>            mark an edit kept (no disk change)
+ *   undo <id> [--force]  surgically undo one edit; --force = per-file restore fallback
+ *
+ * The `capture` path lazy-loads only the zero-dep capture module (no `diff`) so the hook stays fast.
+ */
+import type { EditRecord, InstallResult, StatMetrics } from '@claude-observatory/core';
+
+const VERSION = '0.1.0'; // keep in sync with package.json
+
+function isTTY(): boolean {
+  return Boolean(process.stdout.isTTY);
+}
+
+const c = {
+  dim: (s: string) => (isTTY() ? `\x1b[2m${s}\x1b[0m` : s),
+  bold: (s: string) => (isTTY() ? `\x1b[1m${s}\x1b[0m` : s),
+  green: (s: string) => (isTTY() ? `\x1b[32m${s}\x1b[0m` : s),
+  red: (s: string) => (isTTY() ? `\x1b[31m${s}\x1b[0m` : s),
+  yellow: (s: string) => (isTTY() ? `\x1b[33m${s}\x1b[0m` : s),
+  cyan: (s: string) => (isTTY() ? `\x1b[36m${s}\x1b[0m` : s),
+};
+
+function fail(msg: string): never {
+  process.stderr.write(c.red('claude-observatory: ') + msg + '\n');
+  process.exit(1);
+}
+
+// --- session resolution (shared shape with the VS Code front-end) ---
+
+function getSessionId(args: string[]): string {
+  const i = args.indexOf('--session');
+  if (i >= 0 && args[i + 1]) return args[i + 1];
+  if (process.env.CLAUDE_OBSERVATORY_SESSION) return process.env.CLAUDE_OBSERVATORY_SESSION;
+  if (process.env.CLAUDE_CHANGES_SESSION) return process.env.CLAUDE_CHANGES_SESSION; // legacy name
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  const s = core.resolveSessionId(process.cwd());
+  if (!s) {
+    fail(
+      `could not resolve an active Claude Code session for ${process.cwd()}.\n` +
+        `  Run this from your workspace root, or pass --session <id>.`
+    );
+  }
+  return s;
+}
+
+// --- init / uninstall: delegate the settings.json merge to the shared core installer ---
+
+function captureCommand(_project: boolean): string {
+  const { HOOK_MARKER } = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  // Portable hook: relies on the globally-installed `claude-observatory` bin being on PATH. Survives
+  // moving/renaming the repo and works for teammates who `npm i -g`. The trailing shell-comment marker
+  // makes the hook recognizable for status/uninstall regardless of where the package lives.
+  return `claude-observatory capture #${HOOK_MARKER}`;
+}
+
+function cmdInit(project: boolean): void {
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  const command = captureCommand(project);
+  const target = project ? core.projectSettingsPath(process.cwd()) : core.settingsPath();
+  let res: InstallResult;
+  try {
+    res = core.installHooks(command, target);
+  } catch {
+    fail(`${target} is not valid JSON; fix it and re-run init.`);
+  }
+  if (!res.changed) {
+    process.stdout.write(c.yellow('claude-observatory hooks already installed — nothing to do.\n'));
+    return;
+  }
+  process.stdout.write(
+    c.green('✓ ') +
+      `installed capture hooks into ${res.settingsPath}\n` +
+      (res.backupPath ? c.dim(`  backup: ${res.backupPath}\n`) : '') +
+      c.dim(`  command: ${command}\n`) +
+      (project
+        ? c.yellow(
+            '  note: project hooks call `claude-observatory` on PATH — teammates need it installed ' +
+              '(npm i -g claude-observatory) for capture to run.\n'
+          )
+        : '') +
+      `Edits made by Claude Code (Edit/Write/MultiEdit/NotebookEdit) will now be tracked.\n`
+  );
+}
+
+function cmdUninstall(project: boolean): void {
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  const target = project ? core.projectSettingsPath(process.cwd()) : core.settingsPath();
+  let res: InstallResult;
+  try {
+    res = core.uninstallHooks(target);
+  } catch {
+    fail(`${target} is not valid JSON.`);
+  }
+  process.stdout.write(
+    res.changed
+      ? c.green('✓ ') + `removed capture hooks from ${res.settingsPath}\n`
+      : 'no claude-observatory hooks found.\n'
+  );
+}
+
+function cmdStatus(): void {
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  const fs = require('fs');
+  const installed = core.hooksInstalled();
+  process.stdout.write(
+    `capture hooks:   ${installed ? c.green('installed') : c.red('not installed — run `claude-observatory init`')}\n`
+  );
+  // Verify the installed hook points at a script that still exists — the #1 silent-failure mode
+  // (repo moved / deleted after install, or a stale path on a teammate's machine).
+  const cmd = core.installedHookCommand();
+  const m = cmd ? cmd.match(/"([^"]+)"/) : null;
+  if (m) {
+    const okPath = fs.existsSync(m[1]);
+    process.stdout.write(
+      `hook script:     ${m[1]} ${okPath ? c.green('[ok]') : c.red('[MISSING — re-run init]')}\n`
+    );
+  }
+  const session = core.resolveSessionId(process.cwd());
+  if (!session) {
+    process.stdout.write(`active session:  ${c.dim('none for ' + process.cwd())}\n`);
+    return;
+  }
+  const log = core.readLog(session);
+  const by = (s: string) => log.filter((r) => r.status === s).length;
+  const last = log.length ? core.relTime(Math.max(...log.map((r) => r.ts))) : 'never';
+  process.stdout.write(
+    `active session:  ${session}\n` +
+      `store:           ${core.storeDir(session)}\n` +
+      `last capture:    ${last}\n` +
+      `edits:           ${log.length}  ${c.dim(`(${by('pending')} pending · ${by('kept')} kept · ${by('undone')} undone)`)}\n`
+  );
+}
+
+function cmdSessions(): void {
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  const sessions = core.listSessions();
+  if (sessions.length === 0) {
+    process.stdout.write(c.dim('no sessions in the store yet.\n'));
+    return;
+  }
+  const active = core.resolveSessionId(process.cwd());
+  for (const s of sessions) {
+    const mark = s.id === active ? c.green('● ') : '  ';
+    process.stdout.write(
+      `${mark}${c.bold(s.id)}  ${c.dim(`${s.edits} edit(s) · ${s.pending} pending · ${core.relTime(s.lastMs)}`)}\n`
+    );
+  }
+  process.stdout.write(c.dim('\n● = resolves for this directory · use `--session <id>` to target another\n'));
+}
+
+// --- review commands ---
+
+function relFile(file: string): string {
+  const path = require('path');
+  const r = path.relative(process.cwd(), file);
+  return r && !r.startsWith('..') ? r : file;
+}
+
+function statusLabel(s: string): string {
+  if (s === 'pending') return c.yellow('pending');
+  if (s === 'kept') return c.green('kept');
+  return c.dim('undone');
+}
+
+function cmdList(args: string[]): void {
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  const session = getSessionId(args);
+  let log = core.readLog(session);
+
+  // Filters: --pending | --kept | --undone, and --file <substring>
+  const only = args.includes('--pending')
+    ? 'pending'
+    : args.includes('--kept')
+      ? 'kept'
+      : args.includes('--undone')
+        ? 'undone'
+        : null;
+  if (only) log = log.filter((r) => r.status === only);
+  const fi = args.indexOf('--file');
+  if (fi >= 0 && args[fi + 1]) {
+    const sub = args[fi + 1];
+    log = log.filter((r) => r.file.includes(sub));
+  }
+
+  if (log.length === 0) {
+    process.stdout.write(c.dim(`no matching edits (session ${session}).\n`));
+    return;
+  }
+  // group by file, preserve first-seen order
+  const byFile = new Map<string, EditRecord[]>();
+  for (const r of log) {
+    if (!byFile.has(r.file)) byFile.set(r.file, []);
+    byFile.get(r.file)!.push(r);
+  }
+  const pending = log.filter((r) => r.status === 'pending').length;
+  process.stdout.write(
+    c.bold(`${log.length} edit(s)`) +
+      c.dim(`  ·  ${pending} pending${only ? ` · ${only} only` : ''}  ·  session ${session}\n\n`)
+  );
+  for (const [file, recs] of byFile) {
+    process.stdout.write(c.cyan(relFile(file)) + '\n');
+    for (const r of recs) {
+      const { added, removed } = core.lineDelta(session, r);
+      const delta = c.green(`+${added}`) + ' ' + c.red(`-${removed}`);
+      process.stdout.write(
+        `  ${c.bold('#' + r.id)}  ${statusLabel(r.status).padEnd(7)}  ${delta}  ${c.dim(
+          r.tool
+        )}  ${c.dim(core.relTime(r.ts))}\n`
+      );
+    }
+    process.stdout.write('\n');
+  }
+  process.stdout.write(c.dim('diff <id> · keep <id> · undo <id>\n'));
+}
+
+function requireId(args: string[]): number {
+  let raw: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--session') {
+      i++; // skip the session VALUE so a numeric session id isn't mistaken for the edit id
+      continue;
+    }
+    if (/^\d+$/.test(args[i])) {
+      raw = args[i];
+      break;
+    }
+  }
+  if (!raw) fail('expected an edit id, e.g. `claude-observatory diff 3`');
+  return parseInt(raw, 10);
+}
+
+function cmdDiff(args: string[]): void {
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  const session = getSessionId(args);
+  const id = requireId(args);
+  const rec = core.findRecord(session, id);
+  if (!rec) fail(`no edit #${id} in session ${session}`);
+  process.stdout.write(core.coloredDiff(session, rec as EditRecord, isTTY()) + '\n');
+}
+
+function cmdKeep(args: string[]): void {
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  const session = getSessionId(args);
+  const id = requireId(args);
+  const rec = core.setStatus(session, id, 'kept');
+  if (!rec) fail(`no edit #${id} in session ${session}`);
+  process.stdout.write(c.green('✓ ') + `kept edit #${id} (${relFile(rec.file)})\n`);
+}
+
+function cmdUndo(args: string[]): void {
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  const session = getSessionId(args);
+  const id = requireId(args);
+  const force = args.includes('--force');
+  const res = force ? core.restoreFile(session, id) : core.undoEdit(session, id);
+  if (res.status === 'conflict') {
+    process.stdout.write(c.yellow('⚠ conflict: ') + res.message + '\n');
+    process.exit(1);
+  }
+  process.stdout.write((res.ok ? c.green('✓ ') : c.red('✗ ')) + res.message + '\n');
+  process.exit(res.ok ? 0 : 1);
+}
+
+function cmdRedo(args: string[]): void {
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  const session = getSessionId(args);
+  const id = requireId(args);
+  const force = args.includes('--force');
+  const res = force ? core.reapplyFile(session, id) : core.redoEdit(session, id);
+  if (res.status === 'conflict') {
+    process.stdout.write(c.yellow('⚠ conflict: ') + res.message + '\n');
+    process.exit(1);
+  }
+  process.stdout.write((res.ok ? c.green('✓ ') : c.red('✗ ')) + res.message + '\n');
+  process.exit(res.ok ? 0 : 1);
+}
+
+function parseDuration(spec: string): number | null {
+  const m = spec.match(/^(\d+)([dh])$/);
+  if (!m) return null;
+  return parseInt(m[1], 10) * (m[2] === 'd' ? 86400000 : 3600000);
+}
+function fmtBytes(b: number): string {
+  if (b < 1024) return `${b} B`;
+  if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
+  return `${(b / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function cmdClean(args: string[]): void {
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  // Drop resolved (kept/undone) edits in the active session, keep pending.
+  if (args.includes('--resolved')) {
+    const n = core.clearResolved(getSessionId(args));
+    process.stdout.write(c.green('✓ ') + `cleared ${n} resolved edit(s)\n`);
+    return;
+  }
+  // Destructive: drop a specific session.
+  const di = args.indexOf('--drop');
+  if (di >= 0) {
+    const id = args[di + 1];
+    if (!id) fail('`--drop <session-id>` requires a session id');
+    core.removeSession(id);
+    process.stdout.write(c.green('✓ ') + `dropped session ${id}\n`);
+    return;
+  }
+  // Destructive: drop sessions inactive longer than N.
+  const oi = args.indexOf('--older-than');
+  if (oi >= 0) {
+    const spec = args[oi + 1];
+    const ms = spec ? parseDuration(spec) : null;
+    if (ms === null) fail(`bad --older-than value "${spec ?? ''}" (use e.g. 30d or 12h)`);
+    const stale = core.listSessions().filter((s) => s.lastMs < Date.now() - ms);
+    for (const s of stale) core.removeSession(s.id);
+    process.stdout.write(c.green('✓ ') + `dropped ${stale.length} session(s) inactive > ${spec}\n`);
+    return;
+  }
+  // Destructive: drop everything.
+  if (args.includes('--all')) {
+    const all = core.listSessions();
+    for (const s of all) core.removeSession(s.id);
+    process.stdout.write(c.green('✓ ') + `dropped all ${all.length} session(s)\n`);
+    return;
+  }
+  // Safe default: garbage-collect orphaned blobs (optionally scoped to --session <id>).
+  const si = args.indexOf('--session');
+  const only = si >= 0 ? args[si + 1] : undefined;
+  const targets = only ? [only] : core.listSessions().map((s) => s.id);
+  let removed = 0;
+  let bytes = 0;
+  for (const id of targets) {
+    const r = core.gcSession(id);
+    removed += r.removed;
+    bytes += r.bytes;
+  }
+  process.stdout.write(
+    c.green('✓ ') + `garbage-collected ${removed} orphaned blob(s), freed ${fmtBytes(bytes)}\n`
+  );
+}
+
+function human(n: number): string {
+  if (!Number.isFinite(n)) return '0'; // never render "NaNB" for a malformed metric
+  if (n < 1000) return String(n);
+  if (n < 1e6) return (n / 1e3).toFixed(n < 1e4 ? 1 : 0).replace(/\.0$/, '') + 'k';
+  if (n < 1e9) return (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
+  return (n / 1e9).toFixed(2) + 'B';
+}
+
+function cmdStats(args: string[]): void {
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  let sid: string | undefined;
+  const i = args.indexOf('--session');
+  if (i >= 0 && args[i + 1]) sid = args[i + 1];
+  else sid = core.resolveSessionId(process.cwd()) || undefined;
+  const stats = core.computeStats(sid);
+  if (args.includes('--json')) {
+    process.stdout.write(JSON.stringify(stats));
+    return;
+  }
+  const w = stats.windows;
+  const pad = (s: string, n: number) => s + ' '.repeat(Math.max(1, n - s.length));
+  const metrics: [string, keyof StatMetrics][] = [
+    ['edits', 'edits'],
+    ['tokens', 'tokens'],
+    ['messages', 'messages'],
+    ['thinking', 'thinking'],
+    ['output', 'output'],
+  ];
+  process.stdout.write(c.bold('Claude usage stats') + c.dim('   session · today · 7 days · 30 days\n\n'));
+  process.stdout.write(c.dim(pad('', 11) + pad('session', 10) + pad('today', 10) + pad('7d', 10) + '30d\n'));
+  for (const [label, key] of metrics) {
+    process.stdout.write(
+      pad(label, 11) +
+        pad(human(w.session[key]), 10) +
+        pad(human(w.day[key]), 10) +
+        pad(human(w.week[key]), 10) +
+        human(w.month[key]) +
+        '\n'
+    );
+  }
+  process.stdout.write(c.dim('\nthinking tokens are estimated (~chars/4); tokens include cache.\n'));
+}
+
+function usage(): void {
+  process.stdout.write(
+    `claude-observatory — per-edit Keep/Undo for Claude Code\n\n` +
+      `  init [--project]     install capture hooks (--project = repo ./.claude/settings.json)\n` +
+      `  uninstall [--project] remove the capture hooks\n` +
+      `  status               show hooks + hook-path health + session + edit counts\n` +
+      `  sessions             list all sessions in the store (● = current dir)\n` +
+      `  list [filters]       list edits; filters: --pending|--kept|--undone, --file <substr>\n` +
+      `  diff <id>            show before/after for an edit\n` +
+      `  keep <id>            mark an edit kept\n` +
+      `  undo <id> [--force]  surgically undo an edit (--force = per-file restore)\n` +
+      `  redo <id> [--force]  re-apply an undone edit\n` +
+      `  clean [opts]         GC orphaned blobs; --drop <id> | --older-than <Nd> | --all | --resolved\n` +
+      `  stats [--json]       usage stats (edits/tokens/messages/thinking/output) by session & window\n\n` +
+      `  --session <id>       target a specific session instead of the newest\n` +
+      `  --version            print version\n`
+  );
+}
+
+function main(): void {
+  // Exit cleanly when output is piped to a consumer that closes early (`| head`, `| grep -q`, …)
+  // instead of crashing with an unhandled EPIPE 'error' event.
+  process.stdout.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EPIPE') process.exit(0);
+    throw err;
+  });
+
+  const argv = process.argv.slice(2);
+  const cmd = argv[0];
+  const rest = argv.slice(1);
+  switch (cmd) {
+    case 'capture': {
+      // Hot path: load only the zero-dep capture module, never the diff-based engine.
+      const { runCapture } = require('@claude-observatory/core/dist/capture');
+      runCapture();
+      process.exit(0);
+      break;
+    }
+    case 'init':
+      cmdInit(rest.includes('--project'));
+      break;
+    case 'uninstall':
+      cmdUninstall(rest.includes('--project'));
+      break;
+    case 'status':
+      cmdStatus();
+      break;
+    case 'sessions':
+      cmdSessions();
+      break;
+    case 'list':
+      cmdList(rest);
+      break;
+    case 'diff':
+      cmdDiff(rest);
+      break;
+    case 'keep':
+      cmdKeep(rest);
+      break;
+    case 'undo':
+      cmdUndo(rest);
+      break;
+    case 'redo':
+      cmdRedo(rest);
+      break;
+    case 'clean':
+      cmdClean(rest);
+      break;
+    case 'stats':
+      cmdStats(rest);
+      break;
+    case '--version':
+    case '-v':
+    case 'version':
+      process.stdout.write(`claude-observatory ${VERSION}\n`);
+      break;
+    case undefined:
+    case '-h':
+    case '--help':
+    case 'help':
+      usage();
+      break;
+    default:
+      fail(`unknown command "${cmd}". Run \`claude-observatory help\`.`);
+  }
+}
+
+main();

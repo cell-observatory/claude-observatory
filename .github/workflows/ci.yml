@@ -1,0 +1,49 @@
+name: CI
+
+# Full test matrix on the remote runner. Nothing here needs a Claude account: the unit tests run
+# against temp HOMEs with synthetic transcripts, the extension smoke test mocks the vscode API, and
+# the e2e harness drives the real bundled CLI + capture hook in an isolated store.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, node ${{ matrix.node }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: [20, 22]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      # builds core + cli + the extension bundle, then runs core unit tests + the extension smoke test
+      - run: npm test
+      # end-to-end: real CLI + capture hook over an isolated temp HOME/workspace (dist already built)
+      - run: bash test/e2e.sh
+
+  package:
+    name: build release artifacts
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # release/: the CLI .tgz (npm i -g) + the .vsix (code --install-extension) — no publish, no account
+      - run: npm run release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: claude-observatory-release
+          path: release/

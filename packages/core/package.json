@@ -1,0 +1,29 @@
+{
+  "name": "@claude-observatory/core",
+  "version": "0.1.0",
+  "description": "Capture + git-free snapshot store + surgical undo engine for Claude Observatory. No model calls.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "diff": "^7.0.0"
+  },
+  "devDependencies": {
+    "@types/diff": "^7.0.0",
+    "@types/node": "^22.0.0"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cell-observatory/claude-observatory.git"
+  },
+  "homepage": "https://github.com/cell-observatory/claude-observatory#readme",
+  "bugs": {
+    "url": "https://github.com/cell-observatory/claude-observatory/issues"
+  }
+}

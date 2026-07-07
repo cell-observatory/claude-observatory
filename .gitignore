@@ -1,0 +1,7 @@
+node_modules/
+packages/*/dist/
+*.vsix
+*.bak
+.DS_Store
+demo/
+release/

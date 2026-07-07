@@ -1,0 +1,49 @@
+{
+  "name": "claude-observatory",
+  "version": "0.1.0",
+  "description": "Standalone, git-free, per-edit Keep/Undo for Claude Code. Zero extra Claude tokens.",
+  "keywords": [
+    "claude",
+    "claude-code",
+    "undo",
+    "keep",
+    "diff",
+    "hooks",
+    "cli",
+    "review",
+    "checkpoint"
+  ],
+  "license": "Apache-2.0",
+  "author": "Cell Observatory",
+  "bin": {
+    "claude-observatory": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "bundle": "esbuild src/index.ts src/capture.ts --bundle --platform=node --format=cjs --outdir=dist --banner:js='#!/usr/bin/env node'",
+    "build": "npm run typecheck && npm run bundle",
+    "prepublishOnly": "cd ../.. && npm run build"
+  },
+  "devDependencies": {
+    "@claude-observatory/core": "0.1.0",
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cell-observatory/claude-observatory.git"
+  },
+  "homepage": "https://github.com/cell-observatory/claude-observatory#readme",
+  "bugs": {
+    "url": "https://github.com/cell-observatory/claude-observatory/issues"
+  }
+}
