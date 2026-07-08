@@ -25,8 +25,8 @@ stay in sync because they read and write the same `~/.claude/claude-observatory`
 ```
 
 The script covers macOS (`~/Library/Application Support/JetBrains`), desktop Linux
-(`~/.local/share/JetBrains`), and JetBrains Remote Development backends
-(`~/.config/JetBrains/RemoteDev-*`), so it also works when run on an SSH host.
+(`~/.local/share/JetBrains`), Windows via Git Bash (`%APPDATA%\JetBrains`), and JetBrains Remote
+Development backends (`~/.config/JetBrains/RemoteDev-*`), so it also works when run on an SSH host.
 
 ## Remote development (Gateway / Toolbox over SSH)
 

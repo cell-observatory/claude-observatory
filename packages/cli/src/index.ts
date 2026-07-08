@@ -619,7 +619,10 @@ function cmdStatusline(): void {
     fail(`bundled installer missing (${script}) — install from https://github.com/cell-observatory/claude-statusline`);
   }
   const res = cp.spawnSync('bash', [script], { stdio: 'inherit' });
-  if (res.error) fail(`could not run bash: ${res.error.message} (the status line needs bash + jq)`);
+  if (res.error) {
+    const winHint = process.platform === 'win32' ? ' — on Windows run this from Git Bash or WSL' : '';
+    fail(`could not run bash: ${res.error.message} (the status line needs bash + jq${winHint})`);
+  }
   process.exit(res.status ?? 1);
 }
 

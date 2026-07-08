@@ -60,6 +60,7 @@ export function resolveClaudeBin(configured?: string): string {
     path.join(os.homedir(), '.npm-global', 'bin', 'claude'),
     path.join(os.homedir(), '.volta', 'bin', 'claude'),
     ...nvmBins('claude'),
+    process.env.APPDATA ? path.join(process.env.APPDATA, 'npm', 'claude.cmd') : undefined,
   ].filter(Boolean) as string[];
   for (const c of cands) {
     try {
@@ -81,7 +82,10 @@ export function runClaude(
   return new Promise((resolve, reject) => {
     const args = ['-p'];
     if (opts.resumeSessionId) args.push('--resume', opts.resumeSessionId);
-    const child = spawn(opts.claudeBin || 'claude', args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    // Windows: npm installs `claude` as a .cmd shim, which spawn() can't exec without a shell.
+    const bin = opts.claudeBin || 'claude';
+    const winShell = process.platform === 'win32';
+    const child = spawn(winShell ? `"${bin}"` : bin, args, { stdio: ['pipe', 'pipe', 'pipe'], shell: winShell });
     let out = '';
     let err = '';
     const timer = setTimeout(() => {

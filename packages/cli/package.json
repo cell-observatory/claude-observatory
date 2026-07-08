@@ -1,6 +1,6 @@
 {
   "name": "claude-observatory",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Standalone, git-free, per-edit Keep/Undo for Claude Code. Zero extra Claude tokens.",
   "keywords": [
     "claude",
@@ -34,7 +34,7 @@
     "prepublishOnly": "cd ../.. && npm run build"
   },
   "devDependencies": {
-    "@claude-observatory/core": "0.2.1",
+    "@claude-observatory/core": "0.3.0",
     "@types/node": "^22.0.0",
     "esbuild": "^0.24.0",
     "typescript": "^5.6.0"

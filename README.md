@@ -25,6 +25,12 @@ Complements Claude Code's native `/rewind` (whole-turn) with per-edit control.
 ./install.sh                 # deps → build → CLI on PATH → extension → status line → offer `init`
 ```
 
+**Platforms:** macOS and Linux work as-is. On **Windows**, the CLI, capture hooks, and both editor
+plugins run natively (npm's `.cmd` shims are handled) — but the install scripts and the bundled
+status line are bash, so run them from **Git Bash** (`jq` needed for the status line) or use WSL
+and follow the Linux path. No Git Bash? Run the by-hand commands below in PowerShell and drop
+`--with-statusline`.
+
 Or by hand:
 
 ```bash

@@ -6,6 +6,7 @@ import com.cellobservatory.observatory.settings.ObservatorySettings
 import com.google.gson.JsonParser
 import com.intellij.execution.configurations.GeneralCommandLine
 import com.intellij.execution.util.ExecUtil
+import com.intellij.openapi.util.SystemInfo
 import java.io.File
 
 /**
@@ -33,6 +34,7 @@ object ObservatoryCli {
             "$home/.npm-global/bin/claude-observatory",
             "$home/.volta/bin/claude-observatory",
             nvmBin(home, "claude-observatory"),
+            System.getenv("APPDATA")?.let { "$it\\npm\\claude-observatory.cmd" },
         )
         for (c in candidates) if (c.isNotBlank() && File(c).exists()) return c
         return "claude-observatory" // PATH fallback
@@ -47,7 +49,11 @@ object ObservatoryCli {
             ?.path
 
     fun run(args: List<String>, workDir: String? = null, stdin: String? = null, timeoutMs: Int = 30_000): CliResult {
-        val cmd = GeneralCommandLine(listOf(resolveBin()) + args)
+        // Windows: npm installs the CLI as a .cmd shim, which ProcessBuilder can't exec directly —
+        // route through cmd.exe (which also does PATH+PATHEXT resolution for the bare fallback).
+        val bin = resolveBin()
+        val exec = if (SystemInfo.isWindows) listOf("cmd", "/c", bin) + args else listOf(bin) + args
+        val cmd = GeneralCommandLine(exec)
             .withCharset(Charsets.UTF_8)
             .withRedirectErrorStream(false)
         workDir?.let { cmd.withWorkingDirectory(java.nio.file.Path.of(it)) }

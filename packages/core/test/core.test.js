@@ -13,6 +13,7 @@ const CAPTURE = path.resolve(__dirname, '../../cli/dist/capture.js');
 function freshHome() {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-home-'));
   process.env.HOME = home;
+  process.env.USERPROFILE = home; // os.homedir() reads USERPROFILE on Windows, HOME elsewhere
   return home;
 }
 function tmpWork() {

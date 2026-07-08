@@ -926,6 +926,7 @@ function resolveObservatoryBin(): string {
     path.join(os.homedir(), '.npm-global', 'bin', 'claude-observatory'),
     path.join(os.homedir(), '.volta', 'bin', 'claude-observatory'),
     ...nvmBins('claude-observatory'),
+    process.env.APPDATA ? path.join(process.env.APPDATA, 'npm', 'claude-observatory.cmd') : undefined,
   ].filter(Boolean) as string[];
   for (const c of cands) {
     try {
@@ -1131,7 +1132,13 @@ class StatsUsageViewProvider implements vscode.WebviewViewProvider {
     if (session) args.push('--session', session);
     let child: cp.ChildProcess;
     try {
-      child = cp.spawn(resolveObservatoryBin(), args, { stdio: ['ignore', 'pipe', 'ignore'] });
+      // Windows: npm installs the CLI as a .cmd shim, which spawn() can't exec without a shell.
+      const bin = resolveObservatoryBin();
+      const winShell = process.platform === 'win32';
+      child = cp.spawn(winShell ? `"${bin}"` : bin, args, {
+        stdio: ['ignore', 'pipe', 'ignore'],
+        shell: winShell,
+      });
     } catch {
       this.statsRunning = false;
       this.postStatsError();

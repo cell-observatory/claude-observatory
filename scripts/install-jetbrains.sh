@@ -30,6 +30,12 @@ done
 for DIR in "$HOME/.config/JetBrains/RemoteDev-"*/*; do
   [ -d "$DIR/plugins" ] && PLUGIN_DIRS+=("$DIR/plugins")
 done
+# Windows via Git Bash: plugins live under %APPDATA%\JetBrains\<Product><Version>\plugins.
+if [ -n "${APPDATA:-}" ]; then
+  for DIR in "${APPDATA//\\//}/JetBrains/"{PyCharm,IntelliJIdea,WebStorm,GoLand}*; do
+    [ -d "$DIR/plugins" ] && PLUGIN_DIRS+=("$DIR/plugins")
+  done
+fi
 INSTALLED=0
 for DEST in "${PLUGIN_DIRS[@]}"; do
   rm -rf "$DEST/claude-observatory-jetbrains"
@@ -39,6 +45,6 @@ for DEST in "${PLUGIN_DIRS[@]}"; do
 done
 [ "$INSTALLED" -eq 1 ] || {
   echo "no JetBrains IDE plugin dirs found (looked in ~/Library/Application Support/JetBrains,"
-  echo "~/.local/share/JetBrains, and ~/.config/JetBrains/RemoteDev-*)"; exit 1; }
+  echo "~/.local/share/JetBrains, ~/.config/JetBrains/RemoteDev-*, and %APPDATA%/JetBrains)"; exit 1; }
 echo
 echo "Now FULLY restart the IDE (⌘Q → reopen) — or the remote-dev backend — to load the new version."

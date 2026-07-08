@@ -14,6 +14,7 @@ test('extension: three views, click commands, inline annotations, chat, status s
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-ext-home-'));
   const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-ext-ws-'));
   process.env.HOME = home;
+  process.env.USERPROFILE = home; // os.homedir() reads USERPROFILE on Windows, HOME elsewhere
   const S = 'extSess';
 
   // seed: projects dir so resolveSessionId(ws) === S, and a store with 2 edits on one file
