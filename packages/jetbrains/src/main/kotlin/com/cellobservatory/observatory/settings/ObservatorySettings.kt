@@ -69,6 +69,10 @@ class ObservatoryConfigurable : Configurable {
         s.claudeBin = claudeBin.text.ifBlank { null }
         s.configDir = configDir.text.ifBlank { null }
         s.inlineReview = inlineReview.isSelected
+        // Re-render every open project so a config-dir change or overlay toggle applies immediately.
+        for (p in com.intellij.openapi.project.ProjectManager.getInstance().openProjects) {
+            com.cellobservatory.observatory.services.ObservatoryService.getInstance(p).refresh()
+        }
     }
 
     override fun reset() {

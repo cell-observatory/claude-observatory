@@ -74,9 +74,14 @@ class ObservatoryService(private val project: Project) : Disposable {
     }
 }
 
-/** Startup: touch the project service so the watcher is armed even before the tool window opens. */
+/** Startup: arm the watcher and the inline overlay even before the tool window is first opened. */
 class ObservatoryStartup : ProjectActivity {
     override suspend fun execute(project: Project) {
         ObservatoryService.getInstance(project)
+        com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater {
+            if (!project.isDisposed) {
+                com.cellobservatory.observatory.ui.inline.InlineOverlay.getInstance(project).install()
+            }
+        }
     }
 }

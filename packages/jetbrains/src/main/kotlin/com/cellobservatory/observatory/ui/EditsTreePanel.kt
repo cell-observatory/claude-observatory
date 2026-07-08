@@ -42,6 +42,7 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
     sealed class NodeData {
         data class Folder(val label: String) : NodeData()
         data class FileN(val rel: String, val file: String, val edits: List<EditRecord>) : NodeData()
+        data class Cls(val name: String, val edits: Int, val pending: Int) : NodeData()
         data class Edit(val rec: EditRecord, val added: Int, val removed: Int) : NodeData()
     }
 
@@ -67,6 +68,8 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
         })
         PopupHandler.installPopupMenu(tree, buildPopupGroup(), "ClaudeObservatoryTreePopup")
         ObservatoryService.getInstance(project).addListener(refreshListener)
+        // Regroup by class once background locate results land (placementsFor above is async).
+        com.cellobservatory.observatory.services.PlacementsCache.getInstance(project).addUpdateListener { rebuild() }
         rebuild()
     }
 
@@ -138,8 +141,40 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
             val recs = byRel[rel] ?: continue
             val fileNode = DefaultMutableTreeNode(NodeData.FileN(rel, recs.first().file, recs))
             parent.add(fileNode)
-            for (r in recs) fileNode.add(DefaultMutableTreeNode(editData(r)))
+            addFileChildren(fileNode, recs)
         }
+    }
+
+    /** Group a file's edits under the class each currently falls in (folder → file → class → edit).
+     *  Line geometry comes from the placements cache; a cache miss renders flat and regroups when
+     *  the background locate lands (the cache update triggers a service refresh → rebuild). */
+    private fun addFileChildren(fileNode: DefaultMutableTreeNode, recs: List<EditRecord>) {
+        val file = recs.first().file
+        val f = File(file)
+        val text = if (f.isFile && f.length() < 512 * 1024) runCatching { f.readText() }.getOrNull() else null
+        val placements = text?.let {
+            com.cellobservatory.observatory.services.PlacementsCache.getInstance(project)
+                .placementsFor(file, it, "${f.lastModified()}:${f.length()}")
+        }
+        val spans = text?.let { com.cellobservatory.observatory.core.Classes.detectClasses(it) } ?: emptyList()
+        if (text == null || placements == null || spans.isEmpty()) {
+            for (r in recs) fileNode.add(DefaultMutableTreeNode(editData(r)))
+            return
+        }
+        val byClass = LinkedHashMap<String, Pair<com.cellobservatory.observatory.core.ClassSpan, MutableList<EditRecord>>>()
+        val loose = mutableListOf<EditRecord>()
+        for (r in recs) {
+            val line = placements.find { it.id == r.id }?.lines?.firstOrNull()
+            val span = line?.let { com.cellobservatory.observatory.core.Classes.classAt(spans, it) }
+            if (span == null) loose.add(r)
+            else byClass.getOrPut("${span.name}@${span.start}") { span to mutableListOf() }.second.add(r)
+        }
+        for ((span, edits) in byClass.values) {
+            val clsNode = DefaultMutableTreeNode(NodeData.Cls(span.name, edits.size, edits.count { it.pending }))
+            fileNode.add(clsNode)
+            for (r in edits) clsNode.add(DefaultMutableTreeNode(editData(r)))
+        }
+        for (r in loose) fileNode.add(DefaultMutableTreeNode(editData(r)))
     }
 
     private fun editData(rec: EditRecord): NodeData.Edit {
@@ -181,6 +216,11 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
                     val pending = node.edits.count { it.pending }
                     append("  ${node.edits.size} edit(s) · $pending pending", SimpleTextAttributes.GRAYED_ATTRIBUTES)
                     toolTipText = node.file
+                }
+                is NodeData.Cls -> {
+                    icon = AllIcons.Nodes.Class
+                    append(node.name)
+                    append("  ${node.edits} edit(s) · ${node.pending} pending", SimpleTextAttributes.GRAYED_ATTRIBUTES)
                 }
                 is NodeData.Edit -> {
                     val r = node.rec
