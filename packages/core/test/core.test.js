@@ -412,6 +412,24 @@ test('observe: usageLine prefers the exact statusline cache (ctx/5h/week + reset
   assert.equal(u.weekTokens, 14000000, 'week token estimate from the cache');
 });
 
+test('observe: usageLine derives ctx tokens from pct when ctx_used is a stuck 0', () => {
+  // Newer Claude Code builds stopped sending context_window token totals, so the statusline
+  // persists ctx_used: 0 while ctx_pct is real — the bar must not read "0/1M".
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const cwd = tmpWork();
+  const claudeDir = path.join(os.homedir(), '.claude');
+  fs.mkdirSync(claudeDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(claudeDir, 'statusline-last.json'),
+    JSON.stringify({ ctx_pct: 3, ctx_used: 0, ctx_size: 1000000 })
+  );
+  const u = core.usageLine(cwd, 'nosession');
+  assert.equal(u.ctx.pct, 3);
+  assert.equal(u.ctx.tokens, 30000, '3% of 1M derived, not the stuck 0');
+  assert.equal(u.ctx.size, 1000000);
+});
+
 test('observe: usageLine normalizes an epoch-seconds reset from the cache', () => {
   freshHome();
   delete process.env.CLAUDE_CONFIG_DIR;

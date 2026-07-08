@@ -336,7 +336,11 @@ export function usageLine(cwd: string, sessionId: string): UsageLine {
     out.cachedAtMs = fs.statSync(cachePath).mtimeMs;
     if (fin(last.ctx_pct)) {
       const size = fin(last.ctx_size) && last.ctx_size > 0 ? last.ctx_size : 200000;
-      const tokens = fin(last.ctx_used) ? last.ctx_used : Math.round((last.ctx_pct / 100) * size);
+      // ctx_used can be a stuck 0 (newer Claude Code builds stopped sending the context_window
+      // token totals, so the statusline persists 0 while the percentage is real) — trust it only
+      // when positive, otherwise derive tokens from the percentage so the bar never reads "0/1M".
+      const tokens =
+        fin(last.ctx_used) && last.ctx_used > 0 ? last.ctx_used : Math.round((last.ctx_pct / 100) * size);
       out.ctx = { tokens, size, pct: Math.min(100, last.ctx_pct) };
     }
     if (fin(last.five_pct)) out.fiveHourPct = Math.min(100, last.five_pct);

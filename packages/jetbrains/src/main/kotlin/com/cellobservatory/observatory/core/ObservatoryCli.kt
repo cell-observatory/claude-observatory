@@ -34,7 +34,7 @@ object ObservatoryCli {
         return "claude-observatory" // PATH fallback
     }
 
-    fun run(args: List<String>, workDir: String? = null, stdin: String? = null): CliResult {
+    fun run(args: List<String>, workDir: String? = null, stdin: String? = null, timeoutMs: Int = 30_000): CliResult {
         val cmd = GeneralCommandLine(listOf(resolveBin()) + args)
             .withCharset(Charsets.UTF_8)
             .withRedirectErrorStream(false)
@@ -52,7 +52,7 @@ object ObservatoryCli {
                 val code = proc.waitFor()
                 CliResult(code, stdout, stderr)
             } else {
-                val o = ExecUtil.execAndGetOutput(cmd, 30_000)
+                val o = ExecUtil.execAndGetOutput(cmd, timeoutMs)
                 CliResult(o.exitCode, o.stdout, o.stderr)
             }
             out
@@ -114,6 +114,25 @@ object ObservatoryCli {
     fun observeJson(session: String, workDir: String?): String? {
         val r = run(listOf("observe", "--session", session), workDir)
         return if (r.ok) r.stdout else null
+    }
+
+    /** Opt-in `claude -p` layer: cached unless fresh; can run for minutes. Returns text or null. */
+    fun analyze(session: String, id: Int, workDir: String?): String? {
+        val r = run(listOf("analyze", id.toString(), "--session", session, "--json"), workDir, timeoutMs = 150_000)
+        return analysisText(r)
+    }
+
+    fun recap(session: String, fresh: Boolean, workDir: String?): String? {
+        val args = buildList {
+            add("recap"); add("--session"); add(session); add("--json"); if (fresh) add("--fresh")
+        }
+        return analysisText(run(args, workDir, timeoutMs = 150_000))
+    }
+
+    private fun analysisText(r: CliResult): String? = try {
+        if (r.ok) JsonParser.parseString(r.stdout).asJsonObject.get("text").asString else null
+    } catch (_: Exception) {
+        null
     }
 
     private fun parseUndo(r: CliResult): UndoResult = try {

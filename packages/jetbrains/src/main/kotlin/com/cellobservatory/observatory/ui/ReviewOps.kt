@@ -125,6 +125,23 @@ object ReviewOps {
         }
     }
 
+    /** Chat about an edit: build the same before/after prompt as VS Code and copy it to the
+     *  clipboard (Anthropic's JetBrains plugin exposes no public API to open its chat). */
+    fun chatAbout(project: Project, session: String, id: Int) {
+        val rec = com.cellobservatory.observatory.core.StoreReader.findRecord(session, id) ?: return
+        val rel = project.basePath?.let { base -> rec.file.removePrefix("$base/") } ?: rec.file
+        val before = if (rec.beforeBlob == null) "(new file)"
+        else com.cellobservatory.observatory.core.StoreReader.readBlob(session, rec.beforeBlob)
+        val after = if (rec.afterBlob == null) "(deleted)"
+        else com.cellobservatory.observatory.core.StoreReader.readBlob(session, rec.afterBlob)
+        val prompt = "I'm reviewing a change Claude Code made to `$rel` (edit #${rec.id}, ${rec.tool}).\n\n" +
+            "--- before ---\n$before\n--- after ---\n$after\n\n" +
+            "Please explain what this change does and whether it looks correct."
+        com.intellij.openapi.ide.CopyPasteManager.getInstance()
+            .setContents(java.awt.datatransfer.StringSelection(prompt))
+        notify(project, "Prompt about edit #$id copied — paste it into your Claude Code terminal/chat.")
+    }
+
     // --- shared plumbing ---
 
     private fun isDirty(file: String): Boolean {

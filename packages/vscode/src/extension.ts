@@ -634,16 +634,20 @@ function pendingAtCursor(session: string): core.EditRecord | undefined {
   return cachedPlacements(session, editor.document).find((p) => p.lines.includes(line))?.rec;
 }
 
-/** Trusted-markdown hover with clickable Keep / Undo / Diff links for the edits anchored to a line. */
-function buildHover(recs: core.EditRecord[]): vscode.MarkdownString {
+/** Trusted-markdown hover: Claude's reasoning for the edit + clickable Keep/Undo/Diff/Chat links. */
+function buildHover(session: string, recs: core.EditRecord[]): vscode.MarkdownString {
   const md = new vscode.MarkdownString();
   md.isTrusted = true;
   md.supportThemeIcons = true;
   const link = (cmd: string, id: number) => `command:${cmd}?${encodeURIComponent(JSON.stringify([id]))}`;
+  const cwd = workspaceRoot();
+  const reasoning = cwd ? cachedTranscript(cwd, session).reasoning : new Map<number, string>();
   for (const rec of recs) {
+    md.appendMarkdown(`**Claude edit #${rec.id}** · ${rec.tool}\n\n`);
+    const why = reasoning.get(rec.id)?.trim();
+    if (why) md.appendMarkdown(`💭 ${why.replace(/\n/g, '  \n')}\n\n`); // full reasoning, soft line breaks
     md.appendMarkdown(
-      `**Claude edit #${rec.id}** · ${rec.tool}\n\n` +
-        `[$(check) Keep](${link('claudeObservatory.inlineKeep', rec.id)}) &nbsp; ` +
+      `[$(check) Keep](${link('claudeObservatory.inlineKeep', rec.id)}) &nbsp; ` +
         `[$(discard) Undo](${link('claudeObservatory.inlineUndo', rec.id)}) &nbsp; ` +
         `[$(diff) Diff](${link('claudeObservatory.inlineDiff', rec.id)}) &nbsp; ` +
         `[$(comment-discussion) Chat](${link('claudeObservatory.chatEdit', rec.id)})\n\n`
@@ -702,7 +706,7 @@ function decorateEditor(editor: vscode.TextEditor): void {
           margin: '0 0 0 3ch',
         },
       },
-      hoverMessage: buildHover(recs),
+      hoverMessage: buildHover(session, recs),
     });
   }
   editor.setDecorations(annotationDecoration, annotations);
@@ -1235,7 +1239,7 @@ export function activate(context: vscode.ExtensionContext): void {
           const recs = cachedPlacements(session, doc)
             .filter((p) => p.lines.includes(pos.line))
             .map((p) => p.rec);
-          return recs.length ? new vscode.Hover(buildHover(recs), doc.lineAt(pos.line).range) : undefined;
+          return recs.length ? new vscode.Hover(buildHover(session, recs), doc.lineAt(pos.line).range) : undefined;
         },
       }
     ),

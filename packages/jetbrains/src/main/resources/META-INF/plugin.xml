@@ -15,8 +15,12 @@
   <depends>com.intellij.modules.platform</depends>
 
   <extensions defaultExtensionNs="com.intellij">
-    <toolWindow id="Claude Observatory" anchor="left" icon="/icons/observatory.svg"
+    <!-- Stripe icons need explicit 13x13 size + palette hex colors (the IDE recolors known hex
+         values per theme; `currentColor` is not supported by the platform SVG icon loader). -->
+    <toolWindow id="Claude Observatory" anchor="left" icon="/icons/toolWindowObservatory.svg"
                 factoryClass="com.cellobservatory.observatory.ui.ObservatoryToolWindowFactory"/>
+    <toolWindow id="Claude Observatory Dashboards" anchor="bottom" icon="/icons/toolWindowObservatory.svg"
+                factoryClass="com.cellobservatory.observatory.ui.ObservatoryDashboardsFactory"/>
     <statusBarWidgetFactory id="claudeObservatoryStatus" order="first"
                             implementation="com.cellobservatory.observatory.ui.ObservatoryStatusBarWidgetFactory"/>
     <applicationConfigurable parentId="tools" id="com.cell-observatory.claude-observatory.settings"
