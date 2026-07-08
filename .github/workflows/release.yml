@@ -1,6 +1,6 @@
 name: Release
 
-# Cut a release by pushing a version tag:  git tag v0.1.0 && git push origin v0.1.0
+# Cut a release by pushing a version tag:  git tag v0.1.1 && git push origin v0.1.1
 # CI re-runs the full suite, builds the share artifacts, and attaches them to a GitHub Release —
 # teammates install with `npm i -g ./claude-observatory-<ver>.tgz` and `code --install-extension *.vsix`.
 on:
