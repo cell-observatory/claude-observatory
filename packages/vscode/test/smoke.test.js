@@ -230,10 +230,10 @@ test('extension: three views, click commands, inline annotations, chat, status s
     stProvider.postStatsError();
     assert.ok(stMsgs.some((m) => m.type === 'statsError'), 'failed stats scan posts the CLI-missing hint');
 
-    // realtime observatory: status-bar telescope shows the pending count + the review scoreboard tooltip
-    assert.match(statusBarItem.text, /telescope/, 'status bar telescope present');
+    // realtime observatory: status-bar microscope shows the pending count + the review scoreboard tooltip
+    assert.match(statusBarItem.text, /🔬/, 'status bar microscope present');
     assert.match(statusBarItem.text, /2/, 'status bar shows 2 pending');
-    assert.match(statusBarItem.tooltip.value, /2 pending · 0 accepted · 0 reverted/, 'scoreboard lives in the telescope tooltip');
+    assert.match(statusBarItem.tooltip.value, /2 pending · 0 accepted · 0 reverted/, 'scoreboard lives in the microscope tooltip');
     assert.ok(typeof commands['claudeObservatory.reviewNext'] === 'function', 'reviewNext registered');
     await commands['claudeObservatory.reviewNext']();
     assert.ok(opened && opened.uri.fsPath === F, 'reviewNext opened the file with the oldest pending edit');
