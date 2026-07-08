@@ -464,7 +464,8 @@ test('paths: CLAUDE_CONFIG_DIR relocates the store, sessions, hooks, and usage t
     assert.ok(!core.projectDir('/Users/x/proj').startsWith(homeClaude), 'projects do not fall back to ~/.claude');
 
     // end-to-end: session resolution + hook install land under the relocated dir, not the home
-    const cwd = '/Users/x/proj';
+    // (path.resolve makes the fake cwd drive-absolute on Windows, matching resolveSessionId's resolve)
+    const cwd = path.resolve('/Users/x/proj');
     const proj = core.projectDir(cwd);
     fs.mkdirSync(proj, { recursive: true });
     fs.writeFileSync(path.join(proj, 'sess.jsonl'), '{}');
@@ -672,7 +673,9 @@ test('install: isOurCommand uses the stable marker (path-independent) + legacy f
 
 test('session: resolveSessionId picks newest and walks up from a subdirectory', () => {
   const home = freshHome();
-  const cwd = '/Users/x/proj';
+  // path.resolve makes the fake cwd drive-absolute on Windows (D:\Users\x\proj), matching what
+  // resolveSessionId's own resolve() produces — a POSIX literal would mangle to a different dir name.
+  const cwd = path.resolve('/Users/x/proj');
   const proj = path.join(home, '.claude', 'projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'));
   fs.mkdirSync(proj, { recursive: true });
   fs.writeFileSync(path.join(proj, 'old.jsonl'), '{}');
