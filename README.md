@@ -2,6 +2,8 @@
 
 [![CI](https://github.com/cell-observatory/claude-observatory/actions/workflows/ci.yml/badge.svg)](https://github.com/cell-observatory/claude-observatory/actions/workflows/ci.yml)
 
+**[🔬 Live showcase →](https://cell-observatory.github.io/claude-observatory/)**
+
 Per-edit **Keep / Undo** for [Claude Code](https://claude.com/claude-code) — a running log of every file change Claude makes, each with its own surgical undo. Like the Cursor "keep/undo each change" experience, but:
 
 - **Standalone & shareable** — a small package you own and hand to teammates.
@@ -13,7 +15,7 @@ Per-edit **Keep / Undo** for [Claude Code](https://claude.com/claude-code) — a
 
 Complements Claude Code's native `/rewind` (whole-turn) with per-edit control.
 
-![The observatory in VS Code: Edits/Diffs in the sidebar, inline review in the editor, Observations · Timeline · Stats in the bottom panel, and the telescope scoreboard in the status bar](docs/media/layout.png)
+![The observatory in VS Code: Edits/Diffs in the sidebar, inline review in the editor, Observations · Timeline · Stats in the bottom panel, and the microscope scoreboard in the status bar](docs/media/layout.png)
 
 ![The same observatory in PyCharm: the Claude Observatory tool window, the inline lens + hover card with Claude's reasoning, and the Dashboards window (Observations | Timeline | Stats) at the bottom](docs/media/pyc-layout.png)
 
@@ -88,6 +90,21 @@ the statusline usage cache live. Everything therefore installs **on the remote**
    \<host\>"**, or run `code --install-extension claude-observatory.vsix` in the remote terminal
    (VS Code puts `code` on the remote PATH there).
 
+**JetBrains Gateway / Toolbox (PyCharm etc.) over SSH:** the plugin needs no special build — it
+uses only platform APIs (and no JCEF), so it installs **"On Host"** and runs entirely on the
+backend, next to `~/.claude`, with the tool windows/status bar remoted to the JetBrains Client.
+Steps 2–3 above (CLI + hooks + status line **on the remote**) apply unchanged; then:
+
+1. Install the plugin **on the host**: run `./scripts/install-jetbrains.sh` in the remote terminal
+   (it knows the desktop-Linux and remote-dev backend plugin dirs), or unzip a release into
+   `~/.local/share/JetBrains/<Product><Version>/`. Restart the backend afterwards.
+2. The backend is launched by sshd, **not a login shell** — `CLAUDE_CONFIG_DIR` or PATH exports in
+   `~/.bashrc`/`~/.zshrc` are invisible to it. If Stats says the CLI is missing or the store looks
+   empty, set the CLI path and config dir explicitly in **Settings → Tools → Claude Observatory**
+   (a host-side setting).
+3. On some remote-dev layouts host plugins are **per project** — if the tool windows don't appear
+   after opening a different remote project, re-run the install script.
+
 **Inside a devcontainer:** copy the ready-to-use template in
 [docs/devcontainer/](docs/devcontainer/) into your `.devcontainer/`. It sets `TZ` (so Stats bucket
 correctly), points `CLAUDE_CONFIG_DIR` at a **persistent volume** (so Edits/Stats survive rebuilds),
@@ -111,7 +128,7 @@ container-level env var covers all three).
 
 Built for **surgical Claude usage on critical infrastructure**: the developer stays in the loop, seeing every change in realtime and accepting / editing / reverting each one — while Claude accelerates the work.
 
-**Review surfaces** (activity bar, telescope icon badged with the pending count):
+**Review surfaces** (activity bar, microscope icon badged with the pending count):
 
 | View | What you get |
 | --- | --- |
@@ -126,7 +143,7 @@ Built for **surgical Claude usage on critical infrastructure**: the developer st
 | **Timeline** | Files ordered by most-recent activity, each expanding to its edits (id + a small dimmed time + delta); status by icon. |
 | **Stats** | Step-line plots with a **Today / 7 days / 30 days** toggle (Today hourly): **edits** split into pending / accepted / reverted, **tokens** into total / input / output (linear y-axis for edits, log for tokens). Below them: the live **Usage** bars — context fill plus 5h / week plan usage with `~token` estimates (from [claude-statusline](https://github.com/cell-observatory/claude-statusline)). |
 
-**Realtime awareness:** a **status-bar telescope** shows the pending-edit count the moment Claude writes (amber while anything awaits review); its tooltip is the **review scoreboard** (pending · accepted · reverted · acceptance rate · oldest pending). The whole review loop runs from the keyboard: **⌥⌘N** (`ctrl+alt+n`) jumps to the oldest pending edit, **⌥⌘Y** keeps the edit under the cursor, **⌥⌘U** undoes it — jump, decide, repeat.
+**Realtime awareness:** a **status-bar microscope** shows the pending-edit count the moment Claude writes (amber while anything awaits review); its tooltip is the **review scoreboard** (pending · accepted · reverted · acceptance rate · oldest pending). The whole review loop runs from the keyboard: **⌥⌘N** (`ctrl+alt+n`) jumps to the oldest pending edit, **⌥⌘Y** keeps the edit under the cursor, **⌥⌘U** undoes it — jump, decide, repeat.
 
 Plus an **inline overlay** in the editor: clickable **Keep / Undo / Diff** above each pending edit, a gutter change-bar on its lines, and a `✨ #N` marker with a Chat action on hover. Kept edits grey out; reverted edits stay struck through across every view. View-title buttons do **Accept all**, **Revert all**, and **Clear resolved**.
 

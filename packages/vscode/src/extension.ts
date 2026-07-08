@@ -905,13 +905,27 @@ async function showSuggestionsDoc(): Promise<void> {
 // Scanning ~GBs of transcripts would block the UI, so the scan runs in a subprocess (the CLI `stats`
 // command, which maintains an incremental mtime cache) and this view just renders the JSON it returns.
 
-/** Locate the globally-installed `claude-observatory` bin (GUI apps often miss ~/.local/bin on PATH). */
+/** nvm has no stable bin dir — globals land under ~/.nvm/versions/node/<ver>/bin. */
+function nvmBins(name: string): string[] {
+  try {
+    const root = path.join(os.homedir(), '.nvm', 'versions', 'node');
+    return fs.readdirSync(root).sort().reverse().map((v) => path.join(root, v, 'bin', name));
+  } catch {
+    return [];
+  }
+}
+
+/** Locate the globally-installed `claude-observatory` bin (GUI apps and SSH-launched remote hosts
+ *  often miss ~/.local/bin on PATH). */
 function resolveObservatoryBin(): string {
   const cands = [
     process.env.CLAUDE_OBSERVATORY_BIN,
     path.join(os.homedir(), '.local', 'bin', 'claude-observatory'),
     '/opt/homebrew/bin/claude-observatory',
     '/usr/local/bin/claude-observatory',
+    path.join(os.homedir(), '.npm-global', 'bin', 'claude-observatory'),
+    path.join(os.homedir(), '.volta', 'bin', 'claude-observatory'),
+    ...nvmBins('claude-observatory'),
   ].filter(Boolean) as string[];
   for (const c of cands) {
     try {
@@ -1097,7 +1111,7 @@ class StatsUsageViewProvider implements vscode.WebviewViewProvider {
     this.refreshStats();
   }
   /** Cheap + sync: post the current usage snapshot for the bars. (The review scoreboard lives in the
-   *  status-bar telescope's tooltip, not here.) */
+   *  status-bar microscope's tooltip, not here.) */
   private postUsage(): void {
     if (!this.view) return;
     const session = currentSession();
@@ -1181,7 +1195,7 @@ export function activate(context: vscode.ExtensionContext): void {
   annotationDecoration = vscode.window.createTextEditorDecorationType({});
   inlineLens = new InlineLensProvider();
 
-  // Realtime observatory readout: a status-bar telescope with the pending count — always visible,
+  // Realtime observatory readout: a status-bar microscope with the pending count — always visible,
   // amber while edits await review. Click = jump to the next pending edit.
   const statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 90);
   statusItem.command = 'claudeObservatory.reviewNext';
@@ -1192,7 +1206,7 @@ export function activate(context: vscode.ExtensionContext): void {
     const pending = pendingRecs.length;
     const kept = log.filter((r) => r.status === 'kept').length;
     const undone = log.filter((r) => r.status === 'undone').length;
-    statusItem.text = pending ? `$(telescope) ${pending}` : '$(telescope)';
+    statusItem.text = pending ? `🔬 ${pending}` : '🔬';
     // The review scoreboard lives here (not in the Stats webview): always one glance away.
     const reviewed = kept + undone;
     const rate = reviewed ? ` · ${Math.round((kept / reviewed) * 100)}% accepted` : '';

@@ -19,8 +19,9 @@ object ObservatoryCli {
         val ok get() = exitCode == 0
     }
 
-    /** GUI-launched IDEs have a stripped PATH — probe the standard install dirs first (same
-     *  candidate list as the VS Code extension and core's resolveClaudeBin). */
+    /** GUI-launched IDEs and SSH-launched remote-dev backends have a stripped, non-login-shell
+     *  PATH — probe the standard install dirs first (same candidate list as the VS Code extension
+     *  and core's resolveClaudeBin). */
     fun resolveBin(): String {
         val home = System.getProperty("user.home")
         val candidates = listOfNotNull(
@@ -29,10 +30,21 @@ object ObservatoryCli {
             "$home/.local/bin/claude-observatory",
             "/opt/homebrew/bin/claude-observatory",
             "/usr/local/bin/claude-observatory",
+            "$home/.npm-global/bin/claude-observatory",
+            "$home/.volta/bin/claude-observatory",
+            nvmBin(home, "claude-observatory"),
         )
         for (c in candidates) if (c.isNotBlank() && File(c).exists()) return c
         return "claude-observatory" // PATH fallback
     }
+
+    /** nvm has no stable bin dir — globals land under ~/.nvm/versions/node/<ver>/bin. */
+    private fun nvmBin(home: String, name: String): String? =
+        File("$home/.nvm/versions/node").listFiles()
+            ?.sortedByDescending { it.name }
+            ?.map { File(it, "bin/$name") }
+            ?.firstOrNull { it.exists() }
+            ?.path
 
     fun run(args: List<String>, workDir: String? = null, stdin: String? = null, timeoutMs: Int = 30_000): CliResult {
         val cmd = GeneralCommandLine(listOf(resolveBin()) + args)

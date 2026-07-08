@@ -94,9 +94,7 @@ const scene = (w, body) =>
   `<!doctype html><html><head><meta charset="utf-8"><style>${CSS}</style></head>
    <body style="width:${w}px;padding:24px;">${body}</body></html>`;
 
-const telescope = `<svg width="22" height="22" viewBox="0 0 32 32" fill="none" stroke="#ccc" stroke-width="2.4">
-  <path d="M4 22.5 L19 8.2 a3 3 0 0 1 4.3 0 l1.5 1.6 a3 3 0 0 1 0 4.2 L10.6 28.4" stroke-linejoin="round"/>
-  <path d="M6.6 20 l5.6 5.7"/><path d="M25.5 3.5 l0.9 2.6 2.6 0.9 -2.6 0.9 -0.9 2.6 -0.9 -2.6 L22.5 7 l2.6 -0.9 z" fill="#ccc" stroke="none"/></svg>`;
+const microscope = '🔬';
 
 // ---------- scene bits reused across images ----------
 const editsTree = `
@@ -192,7 +190,7 @@ const scenes = {
       <div class="row" style="align-items:stretch; height:472px;">
         <div style="width:48px;background:var(--side);border-right:1px solid var(--border);display:flex;flex-direction:column;align-items:center;padding-top:12px;gap:20px;">
           <span style="opacity:.4">🗎</span><span style="opacity:.4">🔍</span>
-          <span style="position:relative">${telescope}<span style="position:absolute;right:-7px;bottom:-5px;background:var(--accent);color:#fff;border-radius:8px;font-size:9px;padding:0 4px;">3</span></span>
+          <span style="position:relative;font-size:18px">${microscope}<span style="position:absolute;right:-7px;bottom:-5px;background:var(--accent);color:#fff;border-radius:8px;font-size:9px;padding:0 4px;">3</span></span>
           <span style="opacity:.4">⚙</span>
         </div>
         <div style="width:300px;background:var(--side);border-right:1px solid var(--border);">
@@ -216,7 +214,7 @@ const scenes = {
         </div>
       </div>
       <div class="statusbar">
-        <span class="sb-warn">${telescope.replace('width="22" height="22"', 'width="12" height="12"').replace(/#ccc/g, '#fff')} 3</span>
+        <span class="sb-warn">${microscope} 3</span>
         <span>⎇ main</span><span style="margin-left:auto">Ln 9, Col 14&nbsp;&nbsp;UTF-8&nbsp;&nbsp;JavaScript</span>
       </div>
     </div>`),
@@ -228,7 +226,7 @@ const scenes = {
         <div style="padding:8px 18px;background:var(--bg);border-right:1px solid var(--border);font-size:12.5px;">User.js</div>
       </div>
       ${editorCode(true)}
-      <div class="statusbar"><span class="sb-warn">${telescope.replace('width="22" height="22"', 'width="12" height="12"').replace(/#ccc/g, '#fff')} 3</span><span style="color:var(--faint)">⌥⌘N next · ⌥⌘Y keep · ⌥⌘U undo</span></div>
+      <div class="statusbar"><span class="sb-warn">${microscope} 3</span><span style="color:var(--faint)">⌥⌘N next · ⌥⌘Y keep · ⌥⌘U undo</span></div>
     </div>`),
 
   // C. observations panel closeup

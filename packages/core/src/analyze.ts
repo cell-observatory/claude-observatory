@@ -38,7 +38,18 @@ function save(sessionId: string, a: Analysis): void {
   fs.renameSync(tmp, p); // atomic: a concurrent cachedAnalysis() never reads a torn file
 }
 
-/** Best-effort location of the `claude` binary (GUI apps often lack ~/.local/bin on PATH). */
+/** nvm has no stable bin dir — globals land under ~/.nvm/versions/node/<ver>/bin. */
+function nvmBins(name: string): string[] {
+  try {
+    const root = path.join(os.homedir(), '.nvm', 'versions', 'node');
+    return fs.readdirSync(root).sort().reverse().map((v) => path.join(root, v, 'bin', name));
+  } catch {
+    return [];
+  }
+}
+
+/** Best-effort location of the `claude` binary (GUI apps and SSH-launched remote hosts often lack
+ *  ~/.local/bin on PATH). */
 export function resolveClaudeBin(configured?: string): string {
   const cands = [
     configured,
@@ -46,6 +57,9 @@ export function resolveClaudeBin(configured?: string): string {
     path.join(os.homedir(), '.local', 'bin', 'claude'),
     '/opt/homebrew/bin/claude',
     '/usr/local/bin/claude',
+    path.join(os.homedir(), '.npm-global', 'bin', 'claude'),
+    path.join(os.homedir(), '.volta', 'bin', 'claude'),
+    ...nvmBins('claude'),
   ].filter(Boolean) as string[];
   for (const c of cands) {
     try {

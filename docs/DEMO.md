@@ -137,14 +137,14 @@ in the others instantly. The layout is deliberately identical; only the host chr
 | Surface | VS Code | PyCharm / JetBrains |
 | --- | --- | --- |
 | Install | `code --install-extension claude-observatory.vsix` | `./scripts/install-jetbrains.sh` (or Install Plugin from Disk) |
-| **Edits · Diffs** (review) | telescope in the Activity Bar, badged with the pending count | **Claude Observatory** tool window, left stripe |
+| **Edits · Diffs** (review) | microscope in the Activity Bar, badged with the pending count | **Claude Observatory** tool window, left stripe |
 | **Observations · Timeline · Stats** | bottom panel, side by side (like Terminal/Problems) | **Claude Observatory Dashboards** tool window, bottom stripe — three panes side by side |
-| Inline review | CodeLens **Keep / Undo / Diff** + gutter bar + `✨ #N` marker | lens **✓ Keep · ↩ Undo · ⇄ Diff · 💬 Chat** + gutter telescope + `✨ #N` marker |
+| Inline review | CodeLens **Keep / Undo / Diff** + gutter bar + `✨ #N` marker | lens **✓ Keep · ↩ Undo · ⇄ Diff · 💬 Chat** + gutter microscope + `✨ #N` marker |
 | Hover card (full reasoning + actions) | hover any changed line or the ✨ marker | hover any changed line or the ✨ marker |
-| Scoreboard | status-bar `🔭 N` (amber while pending) | status-bar `🔭 N` |
+| Scoreboard | status-bar `🔬 N` (amber while pending) | status-bar `🔬 N` |
 | Keyboard loop | `⌥⌘N` next · `⌥⌘Y` keep · `⌥⌘U` undo (`Ctrl+Alt` on Win/Linux) | same keys |
 
-The **status-bar telescope** shows the pending count in realtime — the moment Claude writes a
+The **status-bar microscope** shows the pending count in realtime — the moment Claude writes a
 change. Click it (or **Review next pending edit**) to jump straight to the oldest unreviewed edit;
 review, decide, click again. That's the surgical loop, in either editor.
 
@@ -210,7 +210,7 @@ Step-line plots of **edits** (pending / accepted / reverted) and **tokens** (tot
 with a **Today / 7 days / 30 days** toggle — Today is hourly; the token axis is logarithmic. Beneath
 them, the live **Usage** bars (context fill + 5h / week plan usage with `~token` estimates). The
 **review scoreboard** (`3 pending · 42 accepted · 5 reverted · 89% accepted · oldest 12m`) lives in
-the status-bar telescope's tooltip. The stats scan runs in a subprocess with an incremental cache, so
+the status-bar microscope's tooltip. The stats scan runs in a subprocess with an incremental cache, so
 the UI never blocks.
 
 ---

@@ -3,8 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="Claude Observatory — surgical per-edit review for Claude Code. Standalone, git-free, zero extra tokens.">
+<meta name="description" content="Per-edit Keep/Undo for Claude Code — surgical, git-free review in the terminal, VS Code, and PyCharm/JetBrains, with live dashboards: a Timeline change feed and edit/token Stats + plan-usage bars. Zero extra tokens.">
 <title>Claude Observatory</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%AC%3C/text%3E%3C/svg%3E">
 </head>
 <body>
 <style>
@@ -133,7 +134,7 @@
   .hero { padding-top: clamp(30px, 6vw, 60px); }
   .topbar { display: flex; align-items: center; justify-content: space-between; padding: 22px 0 0; }
   .wordmark { display: inline-flex; align-items: center; gap: 12px; font-family: var(--mono); letter-spacing: 0.02em; }
-  .wordmark svg { width: 30px; height: 30px; color: var(--accent); filter: drop-shadow(var(--glow)); }
+  .wordmark .mark { font-size: 24px; line-height: 1; filter: drop-shadow(var(--glow)); }
   .wordmark b { font-weight: 600; font-size: 1.02rem; letter-spacing: 0.06em; }
   .wordmark span { color: var(--ink-faint); font-size: 0.82rem; }
   .theme-toggle {
@@ -339,11 +340,7 @@
     <div class="plate">
       <div class="topbar">
         <span class="wordmark">
-          <svg viewBox="0 0 32 32" fill="none" aria-hidden="true">
-            <path d="M4 22.5 L19 8.2 a3 3 0 0 1 4.3 0 l1.5 1.6 a3 3 0 0 1 0 4.2 L10.6 28.4" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
-            <path d="M6.6 20 l5.6 5.7" stroke="currentColor" stroke-width="2"/>
-            <path d="M25.5 3.5 l0.9 2.6 2.6 0.9 -2.6 0.9 -0.9 2.6 -0.9 -2.6 L22.5 7 l2.6 -0.9 z" fill="currentColor"/>
-          </svg>
+          <span class="mark" aria-hidden="true">🔬</span>
           <b>CLAUDE OBSERVATORY</b>
         </span>
         <button class="theme-toggle" id="tt" aria-label="Switch light or dark theme">◐ Theme</button>
@@ -456,7 +453,7 @@
     <div class="plate">
       <div class="feat-head" style="margin-bottom:8px"><span class="eyebrow">The observatory</span><span class="plate-no">PLATE III</span></div>
       <h2 style="max-width:22ch">Review in the sidebar. Observe in the panel.</h2>
-      <p class="prose" style="margin-top:16px"><strong>Edits</strong> and <strong>Diffs</strong> live in the activity bar, grouping changes by <strong>folder → file → class</strong>. <strong>Observations</strong>, <strong>Timeline</strong>, and <strong>Stats</strong> sit side-by-side in the bottom panel — a live dashboard next to your terminal. A status-bar telescope counts pending edits in realtime; click it to jump to the next unreviewed change.</p>
+      <p class="prose" style="margin-top:16px"><strong>Edits</strong> and <strong>Diffs</strong> live in the activity bar, grouping changes by <strong>folder → file → class</strong>. <strong>Observations</strong>, <strong>Timeline</strong>, and <strong>Stats</strong> sit side-by-side in the bottom panel — a live dashboard next to your terminal. A status-bar microscope counts pending edits in realtime; click it to jump to the next unreviewed change.</p>
 
       <div class="hero-grid" style="margin-top:36px; align-items:start">
         <div class="panel reveal" aria-hidden="true">
@@ -624,11 +621,7 @@
       <div class="foot-grid">
         <div class="col" style="max-width:34ch">
           <span class="wordmark" style="margin-bottom:14px">
-            <svg viewBox="0 0 32 32" fill="none" aria-hidden="true">
-              <path d="M4 22.5 L19 8.2 a3 3 0 0 1 4.3 0 l1.5 1.6 a3 3 0 0 1 0 4.2 L10.6 28.4" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
-              <path d="M6.6 20 l5.6 5.7" stroke="currentColor" stroke-width="2"/>
-              <path d="M25.5 3.5 l0.9 2.6 2.6 0.9 -2.6 0.9 -0.9 2.6 -0.9 -2.6 L22.5 7 l2.6 -0.9 z" fill="currentColor"/>
-            </svg>
+            <span class="mark" aria-hidden="true">🔬</span>
             <b>CLAUDE OBSERVATORY</b>
           </span>
           <p>Complements Claude Code's native <code>/rewind</code> (whole-turn) with per-edit control. Built to be owned, forked, and shared.</p>

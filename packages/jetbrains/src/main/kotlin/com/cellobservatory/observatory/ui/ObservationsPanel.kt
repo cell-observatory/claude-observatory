@@ -206,7 +206,7 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
         ) {
             when (val node = (value as? DefaultMutableTreeNode)?.userObject) {
                 is RecapMarker -> {
-                    icon = Icons.Telescope
+                    icon = Icons.Microscope
                     val recap = ObserveCache.getInstance(project).payload()?.recap
                     append(recap ?: "No recap yet — hit ✨ to generate one.")
                     append("  session recap", SimpleTextAttributes.GRAYED_ATTRIBUTES)

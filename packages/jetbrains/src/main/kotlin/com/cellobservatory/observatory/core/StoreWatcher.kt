@@ -34,6 +34,7 @@ class StoreWatcher : Disposable {
 
     @Volatile
     private var watcher: WatchService? = null
+    private var started = false
 
     fun addListener(l: Runnable) {
         listeners.add(l)
@@ -44,7 +45,8 @@ class StoreWatcher : Disposable {
 
     @Synchronized
     private fun ensureStarted() {
-        if (watcher != null) return
+        if (started) return
+        started = true
         val root = ClaudePaths.rootDir()
         try {
             Files.createDirectories(root) // watch works even before the first capture
@@ -54,8 +56,32 @@ class StoreWatcher : Disposable {
             root.listDirectoryEntries().filter { it.isDirectory() }.forEach { register(ws, it) }
             Thread({ loop(ws, root) }, "claude-observatory-watch").apply { isDaemon = true }.start()
         } catch (e: Exception) {
-            log.warn("store watch unavailable (${e.message}) — falling back to refresh-on-focus only")
+            log.warn("store watch unavailable (${e.message}) — falling back to 2s mtime polling")
+            startPollFallback(root)
         }
+    }
+
+    /** Network/overlay mounts (NFS, some devcontainer volumes) don't deliver inotify events —
+     *  poll session-log mtimes instead so remote-dev setups still refresh live. */
+    private fun startPollFallback(root: Path) {
+        var last = pollStamp(root)
+        debouncer.scheduleWithFixedDelay({
+            val now = pollStamp(root)
+            if (now != last) {
+                last = now
+                debounceNotify()
+            }
+        }, 2, 2, TimeUnit.SECONDS)
+    }
+
+    private fun pollStamp(root: Path): Long = try {
+        if (!root.exists()) 0L
+        else root.listDirectoryEntries().filter { it.isDirectory() }.sumOf { dir ->
+            val logFile = dir.resolve("log.jsonl")
+            if (logFile.exists()) Files.getLastModifiedTime(logFile).toMillis() else 1L
+        }
+    } catch (_: Exception) {
+        0L
     }
 
     private fun register(ws: WatchService, dir: Path) {

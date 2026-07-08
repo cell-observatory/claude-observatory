@@ -15,18 +15,30 @@ fi
 ZIP=$(ls -t build/distributions/claude-observatory-jetbrains-*.zip 2>/dev/null | head -1)
 [ -n "$ZIP" ] || { echo "no plugin zip found — build failed?"; exit 1; }
 
-# Newest JetBrains IDE config dirs that have a plugins folder (PyCharm, IntelliJ, …).
+# Plugin dirs across platforms: macOS keeps them under <config>/plugins; desktop Linux puts them
+# straight in ~/.local/share/JetBrains/<Product>; JetBrains Remote Development (Gateway/Toolbox)
+# backends use per-project ~/.config/JetBrains/RemoteDev-*/<project>/plugins. Covering all three
+# means this script also works when run ON an SSH host that serves remote development.
 shopt -s nullglob
-CANDIDATES=("$HOME/Library/Application Support/JetBrains/"{PyCharm,IntelliJIdea,WebStorm,GoLand}*)
+PLUGIN_DIRS=()
+for DIR in "$HOME/Library/Application Support/JetBrains/"{PyCharm,IntelliJIdea,WebStorm,GoLand}*; do
+  [ -d "$DIR/plugins" ] && PLUGIN_DIRS+=("$DIR/plugins")
+done
+for DIR in "$HOME/.local/share/JetBrains/"{PyCharm,IntelliJIdea,WebStorm,GoLand}*; do
+  [ -d "$DIR" ] && PLUGIN_DIRS+=("$DIR")
+done
+for DIR in "$HOME/.config/JetBrains/RemoteDev-"*/*; do
+  [ -d "$DIR/plugins" ] && PLUGIN_DIRS+=("$DIR/plugins")
+done
 INSTALLED=0
-for DIR in "${CANDIDATES[@]}"; do
-  [ -d "$DIR/plugins" ] || continue
-  DEST="$DIR/plugins/claude-observatory-jetbrains"
-  rm -rf "$DEST"
-  unzip -qo "$ZIP" -d "$DIR/plugins/"
-  echo "✓ installed $(basename "$ZIP") → $DEST"
+for DEST in "${PLUGIN_DIRS[@]}"; do
+  rm -rf "$DEST/claude-observatory-jetbrains"
+  unzip -qo "$ZIP" -d "$DEST/"
+  echo "✓ installed $(basename "$ZIP") → $DEST/claude-observatory-jetbrains"
   INSTALLED=1
 done
-[ "$INSTALLED" -eq 1 ] || { echo "no JetBrains IDE plugin dirs found under ~/Library/Application Support/JetBrains"; exit 1; }
+[ "$INSTALLED" -eq 1 ] || {
+  echo "no JetBrains IDE plugin dirs found (looked in ~/Library/Application Support/JetBrains,"
+  echo "~/.local/share/JetBrains, and ~/.config/JetBrains/RemoteDev-*)"; exit 1; }
 echo
-echo "Now FULLY restart the IDE (⌘Q → reopen) to load the new version."
+echo "Now FULLY restart the IDE (⌘Q → reopen) — or the remote-dev backend — to load the new version."

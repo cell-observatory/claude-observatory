@@ -253,7 +253,7 @@ private class EditGutterRenderer(
     private val session: String,
     private val rec: EditRecord,
 ) : GutterIconRenderer() {
-    override fun getIcon(): Icon = com.cellobservatory.observatory.ui.Icons.Telescope
+    override fun getIcon(): Icon = com.cellobservatory.observatory.ui.Icons.Microscope
     override fun getTooltipText() = "Claude edit #${rec.id} · ${rec.tool} — click for actions"
     override fun equals(other: Any?) = (other as? EditGutterRenderer)?.rec?.id == rec.id
     override fun hashCode() = rec.id

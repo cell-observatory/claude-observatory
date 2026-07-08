@@ -12,7 +12,7 @@ import java.awt.event.MouseEvent
 
 private const val WIDGET_ID = "claudeObservatoryStatus"
 
-/** The telescope scoreboard: pending count at a glance, full review stats in the tooltip,
+/** The microscope scoreboard: pending count at a glance, full review stats in the tooltip,
  *  click = review the next pending edit — parity with the VS Code status-bar item. */
 class ObservatoryStatusBarWidgetFactory : StatusBarWidgetFactory {
     override fun getId() = WIDGET_ID
@@ -43,7 +43,7 @@ private class ObservatoryWidget(private val project: Project) :
 
     override fun getText(): String {
         val pending = ObservatoryService.getInstance(project).counts().pending
-        return if (pending > 0) "🔭 $pending" else "🔭"
+        return if (pending > 0) "🔬 $pending" else "🔬"
     }
 
     override fun getTooltipText(): String {

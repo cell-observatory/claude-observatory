@@ -16,14 +16,27 @@ stay in sync because they read and write the same `~/.claude/claude-observatory`
 ## Install
 
 **From a GitHub Release:** download `claude-observatory-jetbrains-<ver>.zip` → Settings → Plugins →
-⚙ → **Install Plugin from Disk…** → restart. Under JetBrains Remote Development, install it on the
-**host** (Settings → Plugins (Host)).
+⚙ → **Install Plugin from Disk…** → restart.
 
 **From this repo:**
 
 ```bash
-./scripts/install-jetbrains.sh   # builds + installs into your local JetBrains IDEs, then restart the IDE
+./scripts/install-jetbrains.sh   # builds + installs into every JetBrains IDE it finds, then restart the IDE
 ```
+
+The script covers macOS (`~/Library/Application Support/JetBrains`), desktop Linux
+(`~/.local/share/JetBrains`), and JetBrains Remote Development backends
+(`~/.config/JetBrains/RemoteDev-*`), so it also works when run on an SSH host.
+
+## Remote development (Gateway / Toolbox over SSH)
+
+The plugin runs **on the host** — platform-only APIs, no JCEF — which is exactly where `~/.claude`,
+the store, and Claude Code live; the tool windows and status bar are remoted to the JetBrains
+Client. Install it on the host with the script above (in the remote terminal), and install the
+CLI + hooks + status line on the remote too. One caveat: the backend isn't a login shell, so
+`CLAUDE_CONFIG_DIR`/PATH exports in shell profiles don't reach it — if the CLI or store isn't
+found, set both explicitly in **Settings → Tools → Claude Observatory**. Full walkthrough:
+[main README → Remote development](../../README.md#remote-development-ssh--devcontainers).
 
 ## What you get
 
@@ -31,9 +44,9 @@ stay in sync because they read and write the same `~/.claude/claude-observatory`
 | --- | --- |
 | **Edits / Diffs** trees (folder → file → class → edit; Keep/Undo/Redo/Diff via context menu) | "Claude Observatory" tool window, left stripe |
 | **Observations · Timeline · Stats** side-by-side panes | "Claude Observatory Dashboards" tool window, bottom stripe |
-| **Inline review** — lens (`✓ Keep · ↩ Undo · ⇄ Diff · 💬 Chat`) above each pending edit, diff-tinted lines, gutter telescope, `✨ #N` markers | every editor |
+| **Inline review** — lens (`✓ Keep · ↩ Undo · ⇄ Diff · 💬 Chat`) above each pending edit, diff-tinted lines, gutter microscope, `✨ #N` markers | every editor |
 | **Hover card** — Claude's full reasoning + actions, on hover over any edited line or the ✨ marker | every editor |
-| **🔭 scoreboard** — pending count, accept rate, oldest pending; click = review next | status bar |
+| **🔬 scoreboard** — pending count, accept rate, oldest pending; click = review next | status bar |
 | **Keyboard loop** — `⌥⌘N` review next · `⌥⌘Y` keep at cursor · `⌥⌘U` undo at cursor (`Ctrl+Alt` on Windows/Linux) | global |
 
 Undo is surgical (position-anchored 3-way merge, via the CLI): reverting one edit preserves later
