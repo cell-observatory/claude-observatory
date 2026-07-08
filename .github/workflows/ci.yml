@@ -41,7 +41,7 @@ jobs:
           distribution: temurin
           java-version: 21
       - uses: gradle/actions/setup-gradle@v4
-      - run: gradle buildPlugin --console=plain
+      - run: gradle test buildPlugin --console=plain
         working-directory: packages/jetbrains
       - uses: actions/upload-artifact@v4
         with:

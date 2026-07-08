@@ -5,7 +5,8 @@ below are from an actual `claude -p` run that created a small `User` model — n
 
 ![The observatory layout](media/layout.png)
 
-> Prefer pictures? Open [showcase.html](showcase.html) for the visual tour.
+> Prefer pictures? See the **[visual showcase](https://cell-observatory.github.io/claude-observatory/showcase.html)**
+> in your browser (rendered from [showcase.html](showcase.html) via GitHub Pages).
 
 ## The demo session
 
@@ -26,8 +27,8 @@ reasoning, for free.
 ## 1 · Setup (once, with Claude Code closed)
 
 ```bash
-./install.sh                 # or: npm run build && npm i -g ./packages/cli
-claude-observatory init      # writes the PreToolUse/PostToolUse hooks (backs up settings.json)
+./install.sh                              # or: npm run build && npm i -g ./packages/cli
+claude-observatory init --with-statusline # capture hooks + the bundled status line (usage bars)
 ```
 
 > Install the hooks **before** launching Claude Code — a running session reverts hook edits made
@@ -128,16 +129,26 @@ $ claude-observatory clean                # GC orphaned blobs across all session
 
 ---
 
-## 6 · The VS Code observatory
+## 6 · The editor observatories — VS Code & PyCharm/JetBrains
 
-Open the telescope in the Activity Bar — it's badged with the pending-edit count. The **review
-surfaces (Edits, Diffs)** live there; the **observatory dashboards (Observations, Timeline, Stats)**
-sit side-by-side in the bottom panel, next to Terminal/Problems. Everything reads the same store as
-the CLI, so a Keep/Undo in one surface shows up in the other instantly.
+Both editor front-ends read the **same store** as the CLI, so a Keep/Undo in any surface shows up
+in the others instantly. The layout is deliberately identical; only the host chrome differs:
 
-A **status-bar telescope** shows the pending count in realtime — it turns amber the moment Claude
-writes a change. Click it (or the ▶ **Review next pending edit** button on the Edits view) to jump
-straight to the oldest unreviewed edit; review, decide, click again. That's the surgical loop.
+| Surface | VS Code | PyCharm / JetBrains |
+| --- | --- | --- |
+| Install | `code --install-extension claude-observatory.vsix` | `./scripts/install-jetbrains.sh` (or Install Plugin from Disk) |
+| **Edits · Diffs** (review) | telescope in the Activity Bar, badged with the pending count | **Claude Observatory** tool window, left stripe |
+| **Observations · Timeline · Stats** | bottom panel, side by side (like Terminal/Problems) | **Claude Observatory Dashboards** tool window, bottom stripe — three panes side by side |
+| Inline review | CodeLens **Keep / Undo / Diff** + gutter bar + `✨ #N` marker | lens **✓ Keep · ↩ Undo · ⇄ Diff · 💬 Chat** + gutter telescope + `✨ #N` marker |
+| Hover card (full reasoning + actions) | hover any changed line or the ✨ marker | hover any changed line or the ✨ marker |
+| Scoreboard | status-bar `🔭 N` (amber while pending) | status-bar `🔭 N` |
+| Keyboard loop | `⌥⌘N` next · `⌥⌘Y` keep · `⌥⌘U` undo (`Ctrl+Alt` on Win/Linux) | same keys |
+
+The **status-bar telescope** shows the pending count in realtime — the moment Claude writes a
+change. Click it (or **Review next pending edit**) to jump straight to the oldest unreviewed edit;
+review, decide, click again. That's the surgical loop, in either editor.
+
+![The observatory in PyCharm — Edits tree, inline lens + hover card, and the Dashboards window](media/pyc-layout.png)
 
 ### Edits — folder → file → class
 
@@ -157,9 +168,11 @@ class for **Keep all / Undo all** in that scope; click an edit to open the file 
 
 ### Inline overlay
 
-In the open file, each pending line gets a gutter change-bar and a right-side `✨ #N` marker. Hover it
-for **Keep · Undo · Diff · Chat** — accept or surgically revert without leaving the editor. "Chat about
-this edit" copies a ready-made prompt and opens the Claude sidebar so you can ask about the change.
+In the open file, each pending edit gets diff-tinted lines, a gutter marker, a clickable action
+lens above its first line, and a `✨ #N` marker after its last. **Hover anywhere on the edited
+text** for the hover card: Claude's full reasoning for that edit plus **Keep · Undo · Diff · Chat**
+— accept or surgically revert without leaving the editor. "Chat about this edit" copies a
+ready-made prompt (before/after included) for your Claude Code chat or terminal.
 
 ### Timeline — a collapsed change feed
 

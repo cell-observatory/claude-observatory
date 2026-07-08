@@ -18,7 +18,7 @@
  */
 import type { EditRecord, FileMemory, InstallResult, StatMetrics } from '@claude-observatory/core';
 
-const VERSION = '0.1.2'; // keep in sync with package.json
+const VERSION = '0.2.0'; // keep in sync with package.json
 
 function isTTY(): boolean {
   return Boolean(process.stdout.isTTY);

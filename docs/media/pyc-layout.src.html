@@ -1,0 +1,220 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+  /* PyCharm 2026 New UI, Dark theme palette */
+  :root{
+    --bg:#1e1f22; --panel:#2b2d30; --panel2:#26282b; --border:#393b40; --border2:#43454a;
+    --ink:#dfe1e5; --dim:#9da0a8; --faint:#6f737a; --blue:#3574f0; --blue-soft:#25324d;
+    --green:#57965c; --green-bright:#5fad65; --yellow:#d6ae58; --red:#e5534b;
+    --sel:#2e436e; --added:#294436; --added-line:#1f3328;
+    --mono:"JetBrains Mono","SF Mono",Menlo,monospace;
+    --ui:-apple-system,"SF Pro Text","Segoe UI",sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{background:#000;width:1568px;height:830px;overflow:hidden}
+  body{font-family:var(--ui);color:var(--ink);font-size:12.5px;-webkit-font-smoothing:antialiased}
+  .win{position:absolute;inset:14px;background:var(--bg);border-radius:11px;overflow:hidden;
+       display:flex;flex-direction:column;border:1px solid #000}
+  /* title bar */
+  .titlebar{height:38px;background:var(--panel);display:flex;align-items:center;padding:0 14px;
+            border-bottom:1px solid var(--border);flex:none}
+  .lights span{display:inline-block;width:12px;height:12px;border-radius:50%;margin-right:8px}
+  .titlebar .proj{display:flex;align-items:center;gap:8px;margin-left:14px;font-weight:600;font-size:12.5px}
+  .titlebar .proj .chev{color:var(--faint);font-weight:400}
+  .titlebar .center{flex:1;text-align:center;color:var(--faint);font-size:12px}
+  .titlebar .run{display:flex;gap:12px;color:var(--dim);font-size:12px}
+  /* main row */
+  .main{flex:1;display:flex;min-height:0}
+  .stripe{width:40px;background:var(--panel);border-right:1px solid var(--border);
+          display:flex;flex-direction:column;align-items:center;padding-top:8px;gap:14px;flex:none}
+  .stripe .ic{width:24px;height:24px;display:flex;align-items:center;justify-content:center;
+              color:var(--dim);font-size:14px;border-radius:6px}
+  .stripe .ic.on{background:var(--sel);color:var(--ink)}
+  .stripe .spacer{flex:1}
+  /* tool window (left) */
+  .tw{width:340px;background:var(--panel2);border-right:1px solid var(--border);display:flex;
+      flex-direction:column;flex:none;min-height:0}
+  .tw-head{height:36px;display:flex;align-items:center;padding:0 12px;gap:14px;border-bottom:1px solid var(--border);flex:none}
+  .tw-head .title{font-weight:600;font-size:12.5px}
+  .tw-tabs{display:flex;gap:2px;margin-left:2px}
+  .tw-tab{padding:3px 10px;border-radius:5px;color:var(--dim);font-size:12px}
+  .tw-tab.on{background:var(--sel);color:var(--ink)}
+  .tw-head .tools{margin-left:auto;color:var(--faint);letter-spacing:2px}
+  .tree{padding:6px 0;font-size:12.5px;overflow:hidden}
+  .trow{display:flex;align-items:center;height:24px;padding:0 10px;gap:6px;white-space:nowrap}
+  .trow .tw-ic{width:16px;text-align:center;color:var(--dim);font-size:11px}
+  .trow .arrow{width:12px;color:var(--faint);font-size:9px}
+  .trow .meta{margin-left:auto;color:var(--faint);font-size:11px}
+  .trow.sel{background:var(--sel)}
+  .pill{font-family:var(--mono);font-size:9.5px;padding:1px 7px;border-radius:8px;border:1px solid}
+  .pill.pending{color:var(--yellow);border-color:color-mix(in srgb,var(--yellow) 50%,transparent)}
+  .pill.kept{color:var(--green-bright);border-color:color-mix(in srgb,var(--green-bright) 45%,transparent)}
+  .id{font-family:var(--mono);color:var(--blue);font-size:11.5px}
+  .delta{font-family:var(--mono);font-size:11.5px;color:var(--dim)}
+  .struck{text-decoration:line-through;color:var(--faint)}
+  .grey{color:var(--faint)}
+  /* editor */
+  .ed{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0}
+  .ed-tabs{height:34px;background:var(--bg);border-bottom:1px solid var(--border);display:flex;align-items:flex-end;padding:0 8px;flex:none}
+  .ed-tab{padding:7px 14px;font-size:12px;color:var(--ink);border-bottom:2px solid var(--blue);display:flex;gap:7px;align-items:center}
+  .ed-tab .js{color:var(--yellow);font-family:var(--mono);font-size:10px}
+  .ed-body{flex:1;font-family:var(--mono);font-size:13px;line-height:22px;padding-top:8px;position:relative;overflow:hidden}
+  .cl{display:flex;height:22px;align-items:center}
+  .cl .gut{width:74px;flex:none;display:flex;align-items:center;justify-content:flex-end;gap:8px;
+           padding-right:14px;color:#5a5d63;font-size:11.5px}
+  .cl .gut .tele{font-size:10px;line-height:1}
+  .cl .code{white-space:pre}
+  .cl.added{background:var(--added-line)}
+  .cl.added .gutbar{position:absolute;left:0;width:3px;height:22px;background:var(--green)}
+  .k{color:#cf8e6d}.fn{color:#56a8f5}.str{color:#6aab73}.pn{color:#dfe1e5}.cmt{color:#7a7e85}.this{color:#c77dbb}
+  .lens{color:#7a7e85;font-size:11.5px;padding-left:74px;height:22px;display:flex;align-items:center;gap:0}
+  .lens .a{color:#7a7e85}
+  .lens .hov{color:#548af7;text-decoration:underline}
+  .marker{color:#7a7e85;font-style:italic;font-size:11.5px;margin-left:26px}
+  /* hover card */
+  .card{position:absolute;left:420px;top:224px;width:420px;background:#2b2d30;border:1px solid var(--border2);
+        border-radius:8px;box-shadow:0 10px 34px rgba(0,0,0,.55);padding:12px 14px;font-family:var(--ui);z-index:5}
+  .card .h{font-weight:600;font-size:12.5px}
+  .card .why{color:var(--dim);font-size:12px;margin-top:7px;line-height:1.5}
+  .card .links{display:flex;gap:18px;margin-top:10px;font-size:12px}
+  .card .links span{color:#548af7}
+  /* bottom tool window */
+  .bottom{height:252px;background:var(--panel2);border-top:1px solid var(--border);display:flex;flex-direction:column;flex:none}
+  .bt-head{height:32px;display:flex;align-items:center;gap:14px;padding:0 12px;border-bottom:1px solid var(--border);flex:none}
+  .bt-head .title{font-weight:600;font-size:12.5px}
+  .bt-head .others{color:var(--faint);font-size:12px;display:flex;gap:14px}
+  .panes{flex:1;display:flex;min-height:0}
+  .pane{flex:1;min-width:0;display:flex;flex-direction:column;border-right:1px solid var(--border)}
+  .pane:last-child{border-right:none}
+  .pane-h{font-weight:700;font-size:11px;color:var(--dim);padding:8px 12px 4px}
+  .prow{display:flex;align-items:center;gap:8px;padding:3px 12px;font-size:12px;white-space:nowrap;overflow:hidden}
+  .prow .pic{width:14px;text-align:center;font-size:11px}
+  .prow .dim2{color:var(--dim)}
+  .grp{color:var(--faint);font-size:10.5px;font-weight:700;letter-spacing:.4px;padding:7px 12px 2px}
+  /* stats pane */
+  .ranges{display:flex;gap:6px;padding:6px 12px 2px}
+  .rng{font-size:10.5px;padding:2px 10px;border:1px solid var(--border2);border-radius:4px;color:var(--dim)}
+  .rng.on{background:var(--sel);color:var(--ink);border-color:var(--sel)}
+  .chart{padding:4px 12px 0}
+  .chart .lbl{font-size:9px;letter-spacing:1px;color:var(--faint);display:flex;gap:10px}
+  .chart .lbl b{font-weight:700}
+  .chart .lg{display:inline-flex;align-items:center;gap:4px;font-weight:400}
+  .chart .swl{display:inline-block;width:9px;height:2px}
+  .chart svg{display:block;margin-top:3px}
+  .ubar{display:flex;align-items:center;gap:8px;padding:2px 12px;font-family:var(--mono);font-size:10.5px;color:var(--dim)}
+  .ubar .l{width:20px}
+  .track{flex:1;height:4px;border-radius:2px;background:#3a3d42;position:relative;overflow:hidden}
+  .track i{position:absolute;left:0;top:0;bottom:0;border-radius:2px}
+  /* status bar */
+  .status{height:26px;background:var(--panel);border-top:1px solid var(--border);display:flex;align-items:center;
+          padding:0 12px;color:var(--dim);font-size:11.5px;gap:16px;flex:none}
+  .status .right{margin-left:auto;display:flex;gap:16px}
+</style>
+<div class="win">
+  <div class="titlebar">
+    <span class="lights"><span style="background:#ff5f57"></span><span style="background:#febc2e"></span><span style="background:#28c840"></span></span>
+    <span class="proj">demo <span class="chev">›</span> <span style="color:var(--dim);font-weight:400">src/models/User.js</span></span>
+    <span class="center">demo — PyCharm</span>
+    <span class="run">▷ &nbsp;🐞 &nbsp;⚙</span>
+  </div>
+  <div class="main">
+    <div class="stripe">
+      <span class="ic">📁</span>
+      <span class="ic on" title="Claude Observatory">🔭</span>
+      <span class="ic">⌕</span>
+      <span class="ic">⎇</span>
+      <span class="spacer"></span>
+      <span class="ic">▤</span>
+    </div>
+    <div class="tw">
+      <div class="tw-head">
+        <span class="title">Claude Observatory</span>
+        <span class="tw-tabs"><span class="tw-tab on">Edits</span><span class="tw-tab">Diffs</span></span>
+        <span class="tools">⟳ ⋮</span>
+      </div>
+      <div class="tree">
+        <div class="trow"><span class="arrow">▾</span><span class="tw-ic">▦</span>src/models</div>
+        <div class="trow" style="padding-left:26px"><span class="arrow">▾</span><span class="tw-ic" style="color:var(--yellow)">JS</span>User.js<span class="meta">2 edit(s) · 1 pending</span></div>
+        <div class="trow" style="padding-left:44px"><span class="arrow">▾</span><span class="tw-ic" style="color:#c77dbb">◆</span>class User<span class="meta">2 edit(s) · 1 pending</span></div>
+        <div class="trow" style="padding-left:62px"><span class="tw-ic" style="color:var(--green-bright)">✓</span><span class="id grey">#1</span><span class="delta grey">+11 −0</span><span class="grey" style="font-size:11px">kept · Write</span><span class="meta"><span class="pill kept">kept</span></span></div>
+        <div class="trow sel" style="padding-left:62px"><span class="tw-ic" style="color:var(--yellow)">●</span><span class="id">#2</span><span class="delta">+4 −0</span><span style="color:var(--dim);font-size:11px">pending · Edit</span><span class="meta"><span class="pill pending">pending</span></span></div>
+        <div class="trow" style="padding-left:26px"><span class="tw-ic" style="color:var(--yellow)">JS</span>index.js<span class="meta">1 edit(s) · 1 pending</span></div>
+        <div class="trow" style="padding-left:44px"><span class="tw-ic" style="color:var(--yellow)">●</span><span class="id">#3</span><span class="delta">+4 −0</span><span style="color:var(--dim);font-size:11px">pending · Write</span><span class="meta"><span class="pill pending">pending</span></span></div>
+      </div>
+    </div>
+    <div class="ed">
+      <div class="ed-tabs"><span class="ed-tab"><span class="js">JS</span> User.js</span></div>
+      <div class="ed-body">
+        <div class="cl"><span class="gut">5</span><span class="code">  <span class="fn">greet</span><span class="pn">() {</span></span></div>
+        <div class="cl"><span class="gut">6</span><span class="code">    <span class="k">return</span> <span class="str">`Hello, my name is ${</span><span class="this">this</span><span class="str">.name}!`</span><span class="pn">;</span></span></div>
+        <div class="cl"><span class="gut">7</span><span class="code">  <span class="pn">}</span></span></div>
+        <div class="cl"><span class="gut">8</span><span class="code"></span></div>
+        <div class="lens"><span class="a">✓ Keep #2</span><span class="a">&nbsp;&nbsp;·&nbsp;&nbsp;</span><span class="hov">↩ Undo</span><span class="a">&nbsp;&nbsp;·&nbsp;&nbsp;</span><span class="a">⇄ Diff</span><span class="a">&nbsp;&nbsp;·&nbsp;&nbsp;</span><span class="a">💬 Chat</span></div>
+        <div class="cl added"><span class="gutbar"></span><span class="gut"><span class="tele">🔭</span>9</span><span class="code">  <span class="fn">farewell</span><span class="pn">() {</span></span></div>
+        <div class="cl added"><span class="gutbar"></span><span class="gut">10</span><span class="code">    <span class="k">return</span> <span class="str">`Goodbye from ${</span><span class="this">this</span><span class="str">.name}!`</span><span class="pn">;</span></span></div>
+        <div class="cl added"><span class="gutbar"></span><span class="gut">11</span><span class="code">  <span class="pn">}</span><span class="marker">✨ #2</span></span></div>
+        <div class="cl"><span class="gut">12</span><span class="code"><span class="pn">}</span></span></div>
+        <div class="cl"><span class="gut">13</span><span class="code"></span></div>
+        <div class="cl"><span class="gut">14</span><span class="code"><span class="pn">module</span>.<span class="pn">exports</span> = <span class="pn">User</span>;</span></div>
+        <div class="card">
+          <div class="h">Claude edit #2 · Edit</div>
+          <div class="why">💭 Adding a farewell() method to mirror greet(), so the model covers both directions.</div>
+          <div class="links"><span>✓ Keep</span><span>↩ Undo</span><span>⇄ Diff</span><span>💬 Chat</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="bottom">
+    <div class="bt-head">
+      <span class="title">🔭 Claude Observatory Dashboards</span>
+      <span class="others">Terminal &nbsp; Problems &nbsp; Services</span>
+    </div>
+    <div class="panes">
+      <div class="pane" style="flex:1.15">
+        <div class="pane-h">Observations</div>
+        <div class="prow"><span class="pic">🔭</span>Create User class and test imports <span class="dim2">&nbsp;session recap</span></div>
+        <div class="grp">PER-EDIT REASONING</div>
+        <div class="prow"><span class="pic" style="color:var(--yellow)">●</span><span class="id">#3</span>&nbsp;created index.js <span class="dim2">💭 Wiring up an entry point that imports User…</span></div>
+        <div class="prow"><span class="pic" style="color:var(--yellow)">●</span><span class="id">#2</span>&nbsp;edited User.js (+4 −0) <span class="dim2">💭 Adding a farewell() method to mirror greet()…</span></div>
+        <div class="prow"><span class="pic" style="color:var(--green-bright)">✓</span><span class="id grey">#1</span>&nbsp;<span class="grey">created User.js</span> <span class="dim2">🧠 6 edits across sessions · 83% accepted</span></div>
+      </div>
+      <div class="pane" style="flex:1">
+        <div class="pane-h">Timeline</div>
+        <div class="prow"><span class="pic" style="color:var(--yellow)">●</span><span style="font-family:var(--mono);color:var(--dim)">14:02</span>&nbsp;index.js <span class="delta">+4 −0</span> <span class="dim2">· created index.js</span></div>
+        <div class="prow"><span class="pic" style="color:var(--yellow)">●</span><span style="font-family:var(--mono);color:var(--dim)">14:01</span>&nbsp;User.js&nbsp;<b style="font-size:11px">×2</b> <span class="delta">+15 −0</span> <span class="dim2">· added farewell() to mirror greet()</span></div>
+        <div class="prow" style="padding-left:34px"><span class="pic" style="color:var(--yellow)">●</span><span class="id">#2</span> <span class="dim2">💭 Adding a farewell() method…</span></div>
+        <div class="prow" style="padding-left:34px"><span class="pic" style="color:var(--green-bright)">✓</span><span class="id grey">#1</span> <span class="dim2">💭 Creating the User model…</span></div>
+      </div>
+      <div class="pane" style="flex:1.25">
+        <div class="pane-h">Stats</div>
+        <div class="ranges"><span class="rng">Today</span><span class="rng on">7 days</span><span class="rng">30 days</span></div>
+        <div class="chart">
+          <div class="lbl"><b>EDITS</b><span class="lg"><span class="swl" style="background:#d6ae58"></span>pending</span><span class="lg"><span class="swl" style="background:#5fad65"></span>accepted</span><span class="lg"><span class="swl" style="background:#9da0a8"></span>reverted</span></div>
+          <svg width="100%" height="40" viewBox="0 0 400 40" preserveAspectRatio="none">
+            <line x1="0" y1="39" x2="400" y2="39" stroke="#393b40"/>
+            <path d="M0,30 H57 V26 H114 V28 H171 V20 H228 V22 H285 V12 H342 V16 H400" fill="none" stroke="#d6ae58" stroke-width="1.5"/>
+            <path d="M0,34 H57 V30 H114 V24 H171 V26 H228 V16 H285 V18 H342 V8 H400" fill="none" stroke="#5fad65" stroke-width="1.5"/>
+            <path d="M0,37 H57 V36 H114 V37 H171 V34 H228 V36 H285 V33 H342 V35 H400" fill="none" stroke="#9da0a8" stroke-width="1.5"/>
+          </svg>
+        </div>
+        <div class="chart">
+          <div class="lbl"><b>TOKENS</b><span class="lg"><span class="swl" style="background:#548af7"></span>total</span><span class="lg"><span class="swl" style="background:#c77dbb"></span>input</span><span class="lg"><span class="swl" style="background:#cf8e6d"></span>output</span></div>
+          <svg width="100%" height="34" viewBox="0 0 400 34" preserveAspectRatio="none">
+            <line x1="0" y1="33" x2="400" y2="33" stroke="#393b40"/>
+            <path d="M0,16 H57 V12 H114 V14 H171 V9 H228 V11 H285 V6 H342 V8 H400" fill="none" stroke="#548af7" stroke-width="1.5"/>
+            <path d="M0,19 H57 V15 H114 V17 H171 V12 H228 V14 H285 V9 H342 V11 H400" fill="none" stroke="#c77dbb" stroke-width="1.5"/>
+            <path d="M0,28 H57 V26 H114 V27 H171 V24 H228 V26 H285 V22 H342 V24 H400" fill="none" stroke="#cf8e6d" stroke-width="1.5"/>
+          </svg>
+        </div>
+        <div class="ubar" style="margin-top:2px"><span class="l">ctx</span><span class="track"><i style="width:58%;background:#d6ae58"></i></span><span style="color:#d6ae58">58%</span><span>575k/1M</span></div>
+        <div class="ubar"><span class="l">5h</span><span class="track"><i style="width:33%;background:#5fad65"></i></span><span style="color:#5fad65">33%</span><span>·2h10m ~31M</span></div>
+        <div class="ubar"><span class="l">wk</span><span class="track"><i style="width:63%;background:#d6ae58"></i></span><span style="color:#d6ae58">63%</span><span>·4d6h ~73M</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="status">
+    <span style="color:var(--yellow)">🔭 2</span>
+    <span>⎇ main</span>
+    <span class="right"><span>9:14</span><span>UTF-8</span><span>4 spaces</span><span>JavaScript</span></span>
+  </div>
+</div>

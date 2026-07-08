@@ -10,8 +10,15 @@ import java.nio.file.Paths
  * itself honors), defaulting to ~/.claude — devcontainers relocate it onto a persistent volume.
  */
 object ClaudePaths {
+    /** Test seam: unit tests point the whole path layer at a temp dir without an IDE application. */
+    @Volatile
+    var configDirOverride: Path? = null
+
     fun configDir(): Path {
-        val fromSettings = ObservatorySettings.instance.state.configDir
+        configDirOverride?.let { return it }
+        // runCatching: the settings service needs a running Application — absent in unit tests
+        // and during very early startup; fall back to the env var Claude Code itself honors.
+        val fromSettings = runCatching { ObservatorySettings.instance.state.configDir }.getOrNull()
         if (!fromSettings.isNullOrBlank()) return Paths.get(fromSettings)
         System.getenv("CLAUDE_CONFIG_DIR")?.takeIf { it.isNotBlank() }?.let { return Paths.get(it) }
         return Paths.get(System.getProperty("user.home"), ".claude")

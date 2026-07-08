@@ -358,7 +358,7 @@
             <span class="cmd"><span><span class="dollar">$</span> claude-observatory init</span><button id="copyInstall">Copy</button></span>
             <a class="btn-ghost" href="#install">Read the quickstart →</a>
           </div>
-          <p class="caption">Zero extra Claude tokens · terminal + VS Code · macOS / Linux / Windows</p>
+          <p class="caption">Zero extra Claude tokens · terminal · VS Code · PyCharm &amp; JetBrains IDEs · macOS / Linux / Windows</p>
         </div>
 
         <!-- hero mock: the Timeline change feed -->
@@ -379,7 +379,7 @@
       <div class="specs reveal">
         <div class="spec"><div class="k">0</div><div class="l">Claude tokens</div><div class="d">Capture runs in local hooks, entirely outside the model loop.</div></div>
         <div class="spec"><div class="k">1</div><div class="l">edit, 1 undo</div><div class="d">Revert a single change and keep every later edit to the same file.</div></div>
-        <div class="spec"><div class="k">2</div><div class="l">surfaces, 1 store</div><div class="d">The CLI and the VS Code sidebar read &amp; write the same log, in sync.</div></div>
+        <div class="spec"><div class="k">3</div><div class="l">surfaces, 1 store</div><div class="d">The CLI, VS Code, and PyCharm/JetBrains read &amp; write the same log, in sync.</div></div>
         <div class="spec"><div class="k">git</div><div class="l">not required</div><div class="d">A content-addressed snapshot store — no repo, no commits, no staging.</div></div>
       </div>
     </div>
@@ -392,7 +392,7 @@
         <div class="feat-copy">
           <div class="feat-head"><span class="eyebrow">Inline review</span><span class="plate-no">PLATE I</span></div>
           <h2>Keep or undo, right where Claude wrote it.</h2>
-          <p class="prose">Pending edits are marked in the gutter with a <span class="sw">✨</span> tag. Hover for the actions — <strong>Keep</strong> to accept, <strong>Undo</strong> to surgically revert, <strong>Diff</strong> to inspect, or <strong>Chat</strong> to ask Claude about it. No decisions forced; nothing touches disk until you say so.</p>
+          <p class="prose">Pending edits are marked in the gutter with a <span class="sw">✨</span> tag. Hover anywhere on the edited text for the card — Claude's <strong>reasoning</strong> for the change, plus <strong>Keep</strong> to accept, <strong>Undo</strong> to surgically revert, <strong>Diff</strong> to inspect, or <strong>Chat</strong> to ask about it. Identical in VS Code and PyCharm. Nothing touches disk until you say so.</p>
           <ul class="ticks">
             <li><strong>Keep</strong> marks an edit reviewed — no file change.</li>
             <li><strong>Undo</strong> rewrites just that change back out.</li>
@@ -407,6 +407,7 @@
             <div class="eline"><span class="gutn">8</span>  }</div>
             <div class="hovercard">
               <div class="h">Claude edit <span class="id">#2</span> · Edit</div>
+              <div style="color:var(--ink-soft); font-size:0.85rem; margin:7px 0 2px">💭 Added a farewell() method to mirror greet()</div>
               <div class="actions">
                 <span class="act keep"><span class="g">✓</span> Keep</span>
                 <span class="act undo"><span class="g">⤺</span> Undo</span>
@@ -486,10 +487,65 @@
     </div>
   </section>
 
-  <!-- ================= PLATE IV — HOW CAPTURE WORKS ================= -->
+  <!-- ================= PLATE IV — TWO EDITORS, ONE OBSERVATORY ================= -->
   <section>
     <div class="plate">
-      <div class="feat-head" style="margin-bottom:8px"><span class="eyebrow">Zero-token capture</span><span class="plate-no">PLATE IV</span></div>
+      <div class="feat-head" style="margin-bottom:8px"><span class="eyebrow">VS Code &amp; PyCharm</span><span class="plate-no">PLATE IV</span></div>
+      <h2 style="max-width:24ch">Two editors. One observatory.</h2>
+      <p class="prose" style="margin-top:16px">The <strong>VS Code extension</strong> and the <strong>PyCharm/JetBrains plugin</strong> are full peers — the same trees, inline lenses, hover cards, dashboards, stats, and keyboard loop (<code>⌥⌘N</code> next · <code>⌥⌘Y</code> keep · <code>⌥⌘U</code> undo), all over the same store. Keep an edit in PyCharm and it greys out in VS Code and the CLI the same instant. The JetBrains plugin uses platform-only APIs, so it runs in PyCharm CE/Pro, IntelliJ, WebStorm, GoLand — any JetBrains IDE, including on a Remote Development host.</p>
+
+      <div class="panel reveal" style="margin-top:36px; padding:0; overflow:hidden">
+        <img src="media/layout.png" alt="Claude Observatory in VS Code: Edits tree, inline CodeLens and hover card with Claude's reasoning, and the bottom panel with Observations, Timeline, and Stats" style="display:block; width:100%; height:auto">
+      </div>
+      <p class="caption"><strong>VS Code</strong> — the Edits tree, inline review with the hover card (Claude's reasoning + Keep/Undo/Diff/Chat), and the Observations · Timeline · Stats panel.</p>
+      <div class="panel reveal" style="margin-top:26px; padding:0; overflow:hidden">
+        <img src="media/pyc-layout.png" alt="Claude Observatory in PyCharm: Edits tree, inline lens and hover card with Claude's reasoning, and the Dashboards window with Observations, Timeline, and Stats" style="display:block; width:100%; height:auto">
+      </div>
+      <p class="caption"><strong>PyCharm</strong> — the same session, same store: Edits tool window, the lens + hover card, and the Claude Observatory Dashboards window.</p>
+    </div>
+  </section>
+
+  <!-- ================= PLATE V — TIMELINE & STATS ================= -->
+  <section>
+    <div class="plate">
+      <div class="feat">
+        <div class="feat-copy">
+          <div class="feat-head"><span class="eyebrow">The dashboards</span><span class="plate-no">PLATE V</span></div>
+          <h2>A change feed and a flight recorder.</h2>
+          <p class="prose"><strong>Timeline</strong> is the session as a feed: newest first, consecutive edits to the same file coalesced into one <code>×N</code> row with the combined delta and Claude's own change summary. <strong>Stats</strong> is the long view — step-line trends of <strong>edits</strong> (pending / accepted / reverted) and <strong>tokens</strong> (total / input / output, log axis) over <strong>Today / 7 days / 30 days</strong>, with live <strong>usage bars</strong> below: context fill plus your 5-hour and weekly plan windows, reset countdowns and <code>~token</code> estimates included.</p>
+          <ul class="ticks">
+            <li>Timeline rows expand to individual edits, statuses intact.</li>
+            <li>The stats scan runs in a subprocess with an incremental cache — the UI never blocks.</li>
+            <li>Usage values are stamped with their age when the status-line cache goes stale.</li>
+          </ul>
+        </div>
+        <div class="panel reveal" aria-hidden="true">
+          <div class="panel-head"><span class="dot" style="background:var(--accent)"></span> Timeline · Stats</div>
+          <div class="timeline" style="border-bottom:1px solid var(--border)">
+            <div class="tl-row pending"><div class="t">19:32</div><div class="body"><span class="n">index.js</span><span class="f">+6 −0 · created index.js</span></div></div>
+            <div class="tl-row kept"><div class="t">19:31</div><div class="body"><span class="n">User.js&nbsp;&nbsp;×2</span><span class="f">+13 −1 · added farewell() to mirror greet()</span></div></div>
+          </div>
+          <div style="padding:14px 16px 6px; font-family:var(--mono); font-size:0.62rem; letter-spacing:0.12em; color:var(--ink-faint)">EDITS <span style="color:var(--pending)">— pending</span> <span style="color:var(--kept)">— accepted</span> <span style="color:var(--reverted)">— reverted</span></div>
+          <svg width="100%" height="44" viewBox="0 0 400 44" preserveAspectRatio="none" style="display:block; padding:0 16px 4px; box-sizing:border-box">
+            <line x1="0" y1="43" x2="400" y2="43" stroke="var(--border)"/>
+            <path d="M0,33 H57 V28 H114 V30 H171 V21 H228 V24 H285 V12 H342 V17 H400" fill="none" stroke="var(--pending)" stroke-width="1.6"/>
+            <path d="M0,37 H57 V32 H114 V26 H171 V28 H228 V17 H285 V19 H342 V8 H400" fill="none" stroke="var(--kept)" stroke-width="1.6"/>
+            <path d="M0,41 H57 V40 H114 V41 H171 V38 H228 V40 H285 V37 H342 V39 H400" fill="none" stroke="var(--reverted)" stroke-width="1.6"/>
+          </svg>
+          <div style="padding:2px 16px 16px; font-family:var(--mono); font-size:0.72rem; color:var(--ink-soft)">
+            <div style="display:flex; align-items:center; gap:10px; margin-top:6px"><span style="width:22px">ctx</span><span style="flex:1; height:4px; border-radius:2px; background:var(--border); position:relative; overflow:hidden"><i style="position:absolute; inset:0 42% 0 0; background:var(--pending); border-radius:2px"></i></span><span style="color:var(--pending)">58%</span><span class="dimmed">575k/1M</span></div>
+            <div style="display:flex; align-items:center; gap:10px; margin-top:6px"><span style="width:22px">5h</span><span style="flex:1; height:4px; border-radius:2px; background:var(--border); position:relative; overflow:hidden"><i style="position:absolute; inset:0 67% 0 0; background:var(--kept); border-radius:2px"></i></span><span style="color:var(--kept)">33%</span><span class="dimmed">·2h10m ~31M</span></div>
+            <div style="display:flex; align-items:center; gap:10px; margin-top:6px"><span style="width:22px">wk</span><span style="flex:1; height:4px; border-radius:2px; background:var(--border); position:relative; overflow:hidden"><i style="position:absolute; inset:0 37% 0 0; background:var(--pending); border-radius:2px"></i></span><span style="color:var(--pending)">63%</span><span class="dimmed">·4d6h ~73M</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= PLATE VI — HOW CAPTURE WORKS ================= -->
+  <section>
+    <div class="plate">
+      <div class="feat-head" style="margin-bottom:8px"><span class="eyebrow">Zero-token capture</span><span class="plate-no">PLATE VI</span></div>
       <h2 style="max-width:24ch">Hooks do the watching, not the model.</h2>
       <p class="prose" style="margin-top:16px">Claude Code fires a hook before and after every edit. The observatory snapshots the file on each side and appends one record to an append-only log — never spending a token, never touching the model's context.</p>
 
@@ -503,12 +559,12 @@
     </div>
   </section>
 
-  <!-- ================= PLATE V — TERMINAL ================= -->
+  <!-- ================= PLATE VII — TERMINAL ================= -->
   <section>
     <div class="plate">
       <div class="feat">
         <div class="feat-copy">
-          <div class="feat-head"><span class="eyebrow">Same store, no GUI</span><span class="plate-no">PLATE V</span></div>
+          <div class="feat-head"><span class="eyebrow">Same store, no GUI</span><span class="plate-no">PLATE VII</span></div>
           <h2>A full review deck in the terminal.</h2>
           <p class="prose">Prefer the shell, or running Claude Code headless? Every action has a command. The active session is resolved from your working directory — no ids to memorize.</p>
           <ul class="ticks">
@@ -545,12 +601,13 @@
       <div class="panel reveal" style="margin-top:26px" aria-hidden="true">
         <div class="cli">
           <div class="l"><span class="muted"># from the repo</span></div>
-          <div class="l"><span class="p">$</span> <span class="c">./install.sh</span><span class="muted">                    # deps → build → CLI on PATH → VS Code ext</span></div>
+          <div class="l"><span class="p">$</span> <span class="c">./install.sh</span><span class="muted">                    # deps → build → CLI → VS Code ext → status line</span></div>
+          <div class="l"><span class="p">$</span> <span class="c">./scripts/install-jetbrains.sh</span><span class="muted">  # the PyCharm/JetBrains plugin</span></div>
           <div class="l">&nbsp;</div>
           <div class="l"><span class="muted"># or by hand</span></div>
           <div class="l"><span class="p">$</span> <span class="c">npm install &amp;&amp; npm run build</span></div>
           <div class="l"><span class="p">$</span> <span class="c">npm i -g ./packages/cli</span><span class="muted">           # `claude-observatory` command</span></div>
-          <div class="l"><span class="p">$</span> <span class="c">claude-observatory init</span><span class="muted">              # write capture hooks (backs up settings first)</span></div>
+          <div class="l"><span class="p">$</span> <span class="c">claude-observatory init --with-statusline</span><span class="muted">  # hooks + usage bars (backs up settings)</span></div>
         </div>
       </div>
 
@@ -580,7 +637,8 @@
           <h4>Packages</h4>
           <p><code>@claude-observatory/core</code> — capture · store · undo</p>
           <p><code>claude-observatory</code> — the CLI</p>
-          <p><code>claude-observatory-vscode</code> — the sidebar</p>
+          <p><code>claude-observatory-vscode</code> — the VS Code sidebar</p>
+          <p><code>claude-observatory-jetbrains</code> — PyCharm &amp; friends</p>
         </div>
         <div class="col">
           <h4>Install before launch</h4>

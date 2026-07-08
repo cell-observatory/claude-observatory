@@ -9,7 +9,7 @@ plugins {
 }
 
 group = "com.cell-observatory"
-version = "0.1.2" // keep in lockstep with the monorepo/vscode version (see root package.json)
+version = "0.2.0" // keep in lockstep with the monorepo/vscode version (see root package.json)
 
 repositories {
     mavenCentral()
@@ -21,7 +21,9 @@ dependencies {
         // Compile against the canonical platform baseline; the plugin declares only
         // com.intellij.modules.platform so it loads in PyCharm CE/Pro and every other JetBrains IDE.
         intellijIdeaCommunity("2025.2")
+        testFramework(org.jetbrains.intellij.platform.gradle.TestFrameworkType.Platform)
     }
+    testImplementation("junit:junit:4.13.2")
 }
 
 kotlin { jvmToolchain(21) }

@@ -6,13 +6,16 @@ Per-edit **Keep / Undo** for [Claude Code](https://claude.com/claude-code) — a
 
 - **Standalone & shareable** — a small package you own and hand to teammates.
 - **Git-free** — snapshots each edit to a local content-addressed store (the same trick Cursor uses).
-- **Cross-surface** — works whether Claude Code runs in the **terminal** or the **VS Code extension**; the CLI and sidebar read/write the same store and stay in sync.
+- **Cross-surface** — works whether Claude Code runs in the **terminal**, **VS Code**, or a **JetBrains IDE** (PyCharm, IntelliJ, …); the CLI and both editor sidebars read/write the same store and stay in sync.
 - **Surgical undo** — revert one edit while keeping later edits to the same file.
+- **Live dashboards** — a **Timeline** change feed (edits coalesced per file, with Claude's own change summaries) and **Stats** trends (edits + tokens over Today / 7 days / 30 days) with live plan-usage bars, right in the editor's bottom panel.
 - **Zero extra Claude tokens** — capture runs in local hooks, entirely outside the model loop.
 
 Complements Claude Code's native `/rewind` (whole-turn) with per-edit control.
 
-![The observatory: Edits/Diffs in the sidebar, inline review in the editor, Observations · Timeline · Stats in the bottom panel, and the telescope scoreboard in the status bar](docs/media/layout.png)
+![The observatory in VS Code: Edits/Diffs in the sidebar, inline review in the editor, Observations · Timeline · Stats in the bottom panel, and the telescope scoreboard in the status bar](docs/media/layout.png)
+
+![The same observatory in PyCharm: the Claude Observatory tool window, the inline lens + hover card with Claude's reasoning, and the Dashboards window (Observations | Timeline | Stats) at the bottom](docs/media/pyc-layout.png)
 
 ## Install
 
@@ -54,16 +57,18 @@ code --install-extension claude-observatory.vsix
 
 Fully quit VS Code (⌘Q) once after installing so the activity-bar icon refreshes.
 
-**JetBrains / PyCharm plugin** (optional; needs JDK 21 to build):
+**JetBrains / PyCharm plugin** (optional; needs JDK 21 + Gradle to build — or grab the `.zip` from a
+[Release](https://github.com/cell-observatory/claude-observatory/releases)):
 
 ```bash
-cd packages/jetbrains && gradle buildPlugin   # -> build/distributions/claude-observatory-jetbrains-<ver>.zip
+./scripts/install-jetbrains.sh   # build + install into your local JetBrains IDEs, then restart the IDE
 ```
 
-Install via **Settings → Plugins → ⚙ → Install Plugin from Disk…** (under JetBrains Remote
-Development, install it on the **host**: Settings → Plugins (Host)). The plugin drives the same
-`claude-observatory` CLI and store as the CLI/VS Code front-ends, so all three stay in sync. It
-works in every JetBrains IDE (platform-only APIs — PyCharm CE/Pro, IntelliJ, WebStorm, …).
+Or manually: **Settings → Plugins → ⚙ → Install Plugin from Disk…** with the built/downloaded zip
+(under JetBrains Remote Development, install on the **host**: Settings → Plugins (Host)). The plugin
+drives the same `claude-observatory` CLI and store as the CLI/VS Code front-ends, so all three stay
+in sync, and it works in every JetBrains IDE (platform-only APIs — PyCharm CE/Pro, IntelliJ,
+WebStorm, …). Details: [packages/jetbrains/README.md](packages/jetbrains/README.md).
 
 ## Remote development (SSH & devcontainers)
 
@@ -175,8 +180,9 @@ Built to add **zero overhead** to your Claude sessions:
 ## Packages
 
 - `packages/core` — capture + store + surgical undo + transcript observations + shared installer (pure TS; only runtime dep is `diff`). No model calls.
-- `packages/cli` — the `claude-observatory` bin (installer + terminal review UI).
-- `packages/vscode` — the sidebar extension (depends on core; bundled with esbuild).
+- `packages/cli` — the `claude-observatory` bin: installer + terminal review UI + the machine-readable `--json` surface other front-ends build on. Bundles the [claude-statusline](https://github.com/cell-observatory/claude-statusline) installer (`claude-observatory statusline`).
+- `packages/vscode` — the VS Code extension (depends on core; bundled with esbuild).
+- `packages/jetbrains` — the PyCharm/JetBrains plugin (Kotlin; a front-end over the CLI + store — see its [README](packages/jetbrains/README.md)).
 
 ## Develop & share
 
@@ -186,12 +192,15 @@ npm run e2e       # end-to-end CLI + capture-hook integration harness
 npm run release   # build shareable artifacts into ./release (CLI .tgz + .vsix)
 ```
 
-To cut a release: `git tag v0.1.2 && git push origin v0.1.2` — CI re-runs the suite and attaches the
-`.tgz` + `.vsix` to a [GitHub Release](https://github.com/cell-observatory/claude-observatory/releases).
-Teammates install with `npm i -g ./claude-observatory-<ver>.tgz` and `code --install-extension <file>.vsix`
-(no tokens or registry setup needed).
+To cut a release: `git tag v0.2.0 && git push origin v0.2.0` — CI re-runs the suites (npm + e2e +
+Gradle) and attaches the CLI `.tgz`, the VS Code `.vsix`, and the JetBrains `.zip` to a
+[GitHub Release](https://github.com/cell-observatory/claude-observatory/releases). Teammates install
+with `npm i -g ./claude-observatory-<ver>.tgz`, `code --install-extension <file>.vsix`, and
+Settings → Plugins → Install Plugin from Disk for the `.zip` (no tokens or registry setup needed).
 
-See [docs/DEMO.md](docs/DEMO.md) for a feature-by-feature walkthrough, or open [docs/showcase.html](docs/showcase.html) for the visual tour.
+See [docs/DEMO.md](docs/DEMO.md) for a feature-by-feature walkthrough, or the
+**[visual showcase](https://cell-observatory.github.io/claude-observatory/showcase.html)** — rendered
+in your browser via GitHub Pages (source: [docs/showcase.html](docs/showcase.html)).
 
 ## Notes
 
