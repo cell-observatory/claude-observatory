@@ -153,6 +153,49 @@ ok "human stats renders the table"   "cc stats | grep -q 'Claude usage stats'"
 STATS2=$(cc stats --json 2>/dev/null)
 ok "second run (warm cache) agrees"  "[ \"\$(printf '%s' \"\$STATS\" | jq -S '.daily')\" = \"\$(printf '%s' \"\$STATS2\" | jq -S '.daily')\" ]"
 
+echo "════════ E2E 14: machine-readable surface (--json + blob/locate/observe/usage) ════════"
+# Two overlapping edits on a fresh file: #A b->X, #B X->Y (undo #A must report a structured conflict).
+J="$WS/json.txt"; printf 'a\nb\nc\n' > "$J"
+hook PreToolUse Edit "$J"; node "$SETLINE" "$J" 1 "X"; hook PostToolUse Edit "$J"
+hook PreToolUse Edit "$J"; node "$SETLINE" "$J" 1 "Y"; hook PostToolUse Edit "$J"
+LISTJ=$(cc list --json)
+ok "list --json is valid JSON with deltas" "printf '%s' \"\$LISTJ\" | jq -e '.edits[0].added >= 0' >/dev/null"
+IDA=$(printf '%s' "$LISTJ" | jq "[.edits[] | select(.file|endswith(\"json.txt\")) | .id] | .[0]")
+IDB=$(printf '%s' "$LISTJ" | jq "[.edits[] | select(.file|endswith(\"json.txt\")) | .id] | .[1]")
+ok "status --json reports the session + counts" "cc status --json | jq -e '.session == \"$SESSION\" and .counts.total >= 2' >/dev/null"
+ok "sessions --json marks the active session"   "cc sessions --json | jq -e '.active == \"$SESSION\"' >/dev/null"
+# undo --json: conflict is STRUCTURED (front-ends branch on .status, not prose), exit stays 1
+UJ=$(cc undo "$IDA" --json); rc=$?
+ok "undo --json overlap -> status:conflict"  "printf '%s' \"\$UJ\" | jq -e '.status == \"conflict\" and .ok == false' >/dev/null"
+ok "undo --json conflict exit code is 1"     "[ $rc -eq 1 ]"
+UJ2=$(cc undo "$IDB" --json); rc2=$?
+ok "undo --json clean -> status:undone, exit 0" "[ $rc2 -eq 0 ] && printf '%s' \"\$UJ2\" | jq -e '.status == \"undone\"' >/dev/null"
+ok "redo --json re-applies"                  "cc redo \"$IDB\" --json | jq -e '.status == \"redone\"' >/dev/null"
+ok "keep --json single"                      "cc keep \"$IDB\" --json | jq -e '.kept == 1' >/dev/null"
+ok "keep --all --json sweeps the rest"       "cc keep --all --json | jq -e '.kept >= 0' >/dev/null"
+# blob: raw bytes round-trip through the store
+SHA=$(jq -r 'select(.afterBlob != null) | .afterBlob' "$HOME/.claude/claude-observatory/$SESSION/log.jsonl" | head -1)
+ok "blob streams raw bytes"                  "[ -n \"\$(cc blob \"$SHA\")\" ]"
+# locate: live-buffer text on stdin -> per-edit current line indices (prior edits were all kept, so re-edit)
+hook PreToolUse Edit "$J"; node "$SETLINE" "$J" 2 "Z"; hook PostToolUse Edit "$J"
+LOC=$(cc locate --file "$J" < "$J")
+ok "locate emits placements for the pending edit" "printf '%s' \"\$LOC\" | jq -e '.placements | length >= 1' >/dev/null"
+ok "locate maps the edit to its current line"     "printf '%s' \"\$LOC\" | jq -e '.placements[-1].lines | index(2) != null' >/dev/null"
+# observe: one payload for the Observations view
+OBS=$(cc observe)
+ok "observe emits per-edit summaries"        "printf '%s' \"\$OBS\" | jq -e '.edits[0].summary | length > 0' >/dev/null"
+ok "observe carries memory + flags fields"   "printf '%s' \"\$OBS\" | jq -e '.edits[0] | has(\"memory\") and has(\"flags\")' >/dev/null"
+# usage: no statusline cache in this HOME -> statuslineCache false + shared staleness threshold
+ok "usage reports cache-missing + staleMs"   "cc usage | jq -e '.statuslineCache == false and .staleMs == 300000' >/dev/null"
+
+echo "════════ E2E 15: bundled statusline installs with no network ════════"
+cc statusline >/dev/null 2>&1; rc=$?
+ok "statusline command exits 0"               "[ $rc -eq 0 ]"
+ok "statusline.sh written under ~/.claude"    "[ -x \"$HOME/.claude/statusline.sh\" ]"
+ok "settings.json gained the statusLine entry" "jq -e '.statusLine.command | test(\"statusline.sh\")' \"$HOME/.claude/settings.json\" >/dev/null"
+ok "existing settings keys preserved"          "jq -e '.theme == \"dark\"' \"$HOME/.claude/settings.json\" >/dev/null"
+ok "idempotent on re-run"                      "cc statusline >/dev/null 2>&1"
+
 echo "════════════════════════════════════════════════════════"
 echo "E2E RESULT: $pass passed, $fail failed"
 [ $fail -eq 0 ]

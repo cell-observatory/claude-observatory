@@ -1,0 +1,71 @@
+package com.cellobservatory.observatory.actions
+
+import com.cellobservatory.observatory.services.ObservatoryService
+import com.cellobservatory.observatory.ui.Navigate
+import com.cellobservatory.observatory.ui.ReviewOps
+import com.intellij.notification.NotificationType
+import com.intellij.openapi.actionSystem.ActionUpdateThread
+import com.intellij.openapi.actionSystem.AnAction
+import com.intellij.openapi.actionSystem.AnActionEvent
+import com.intellij.openapi.actionSystem.CommonDataKeys
+import com.intellij.openapi.project.DumbAware
+
+/** ⌥⌘N — jump to the oldest pending edit (the keyboard review loop's entry point). */
+class ReviewNextAction : AnAction(), DumbAware {
+    override fun getActionUpdateThread() = ActionUpdateThread.BGT
+    override fun update(e: AnActionEvent) {
+        e.presentation.isEnabled = e.project != null
+    }
+
+    override fun actionPerformed(e: AnActionEvent) {
+        val project = e.project ?: return
+        val service = ObservatoryService.getInstance(project)
+        val session = service.currentSession()
+            ?: return ReviewOps.notify(project, "No active Claude Code session for this project", NotificationType.WARNING)
+        val next = service.log().filter { it.pending }.minByOrNull { it.id }
+            ?: return ReviewOps.notify(project, "No pending Claude edits — all caught up")
+        Navigate.openFileAtEdit(project, session, next)
+    }
+}
+
+/** ⌥⌘Y — keep the pending edit under the cursor. */
+class KeepAtCursorAction : AnAction(), DumbAware {
+    override fun getActionUpdateThread() = ActionUpdateThread.BGT
+    override fun update(e: AnActionEvent) {
+        e.presentation.isEnabled = e.project != null && e.getData(CommonDataKeys.EDITOR) != null
+    }
+
+    override fun actionPerformed(e: AnActionEvent) {
+        val project = e.project ?: return
+        val editor = e.getData(CommonDataKeys.EDITOR) ?: return
+        Navigate.pendingAtCursor(project, editor) { rec ->
+            if (rec == null) {
+                ReviewOps.notify(project, "No pending Claude edit at the cursor")
+            } else {
+                val session = ObservatoryService.getInstance(project).currentSession() ?: return@pendingAtCursor
+                ReviewOps.keep(project, session, rec.id)
+            }
+        }
+    }
+}
+
+/** ⌥⌘U — surgically undo the pending edit under the cursor. */
+class UndoAtCursorAction : AnAction(), DumbAware {
+    override fun getActionUpdateThread() = ActionUpdateThread.BGT
+    override fun update(e: AnActionEvent) {
+        e.presentation.isEnabled = e.project != null && e.getData(CommonDataKeys.EDITOR) != null
+    }
+
+    override fun actionPerformed(e: AnActionEvent) {
+        val project = e.project ?: return
+        val editor = e.getData(CommonDataKeys.EDITOR) ?: return
+        Navigate.pendingAtCursor(project, editor) { rec ->
+            if (rec == null) {
+                ReviewOps.notify(project, "No pending Claude edit at the cursor")
+            } else {
+                val session = ObservatoryService.getInstance(project).currentSession() ?: return@pendingAtCursor
+                ReviewOps.undoOrRedo(project, session, rec, redo = false)
+            }
+        }
+    }
+}

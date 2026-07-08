@@ -17,7 +17,7 @@ Complements Claude Code's native `/rewind` (whole-turn) with per-edit control.
 ## Install
 
 ```bash
-./install.sh                 # deps → build → CLI on PATH → VS Code extension → offer `init`
+./install.sh                 # deps → build → CLI on PATH → extension → status line → offer `init`
 ```
 
 Or by hand:
@@ -26,8 +26,14 @@ Or by hand:
 npm install                  # workspace deps
 npm run build                # build core + cli
 npm i -g ./packages/cli      # put `claude-observatory` on PATH  (or: npm link in packages/cli)
-claude-observatory init      # write PreToolUse/PostToolUse hooks into ~/.claude/settings.json (backs it up first)
+claude-observatory init --with-statusline   # capture hooks + the bundled status line (backs settings up first)
 ```
+
+The [claude-statusline](https://github.com/cell-observatory/claude-statusline) status line is
+**bundled with the CLI** — `claude-observatory statusline` installs/refreshes it with no network
+and no second repo (it powers the sidebar's 5h/week Usage bars). The upstream repo remains the
+standalone home for people who want just the status line. Refresh the vendored copy with
+`scripts/sync-statusline.sh`.
 
 > **Important — install hooks _before_ launching Claude Code.** Claude Code snapshots your hooks at
 > session start and reconciles `~/.claude/settings.json` from that snapshot, so hooks added to a
@@ -48,6 +54,17 @@ code --install-extension claude-observatory.vsix
 
 Fully quit VS Code (⌘Q) once after installing so the activity-bar icon refreshes.
 
+**JetBrains / PyCharm plugin** (optional; needs JDK 21 to build):
+
+```bash
+cd packages/jetbrains && gradle buildPlugin   # -> build/distributions/claude-observatory-jetbrains-<ver>.zip
+```
+
+Install via **Settings → Plugins → ⚙ → Install Plugin from Disk…** (under JetBrains Remote
+Development, install it on the **host**: Settings → Plugins (Host)). The plugin drives the same
+`claude-observatory` CLI and store as the CLI/VS Code front-ends, so all three stay in sync. It
+works in every JetBrains IDE (platform-only APIs — PyCharm CE/Pro, IntelliJ, WebStorm, …).
+
 ## Remote development (SSH & devcontainers)
 
 The extension is declared `extensionKind: workspace`, so on **Remote-SSH, devcontainers, and WSL it
@@ -60,9 +77,8 @@ the statusline usage cache live. Everything therefore installs **on the remote**
 2. In the **remote** terminal, install the CLI + hooks: clone and run `./install.sh` (or copy a
    release `.tgz` and `npm i -g ./claude-observatory-<ver>.tgz`), then run `claude-observatory init`
    with Claude Code closed.
-3. Install the status line **on the remote** so the Usage bars populate — from
-   [claude-statusline](https://github.com/cell-observatory/claude-statusline):
-   `ssh user@host 'bash -s' < install-statusline.sh`, or run its curl one-liner in the remote terminal.
+3. Install the status line **on the remote** so the Usage bars populate — it's bundled with the
+   CLI: `claude-observatory statusline` in the remote terminal (no network needed).
 4. Install the extension **into the remote**: Extensions view → the `.vsix` → **"Install in SSH:
    \<host\>"**, or run `code --install-extension claude-observatory.vsix` in the remote terminal
    (VS Code puts `code` on the remote PATH there).

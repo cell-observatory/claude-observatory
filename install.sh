@@ -7,7 +7,7 @@ cd "$(dirname "$0")"
 c_arrow=$'\033[1;36m▸\033[0m'; c_warn=$'\033[1;33m!\033[0m'; c_dim=$'\033[2m'; c_off=$'\033[0m'
 say()  { printf '%s %s\n' "$c_arrow" "$1"; }
 warn() { printf '%s %s\n' "$c_warn" "$1"; }
-step=0; total=4
+step=0; total=5
 head() { step=$((step+1)); printf '\n%s[%d/%d]%s %s\n' "$c_dim" "$step" "$total" "$c_off" "$1"; }
 
 command -v npm >/dev/null 2>&1 || { warn "npm not found — install Node.js 18+ first."; exit 1; }
@@ -44,6 +44,22 @@ else
   printf "      installs on the remote host (where it belongs). Or: Extensions view → '…' → 'Install\n"
   printf "      from VSIX…' and choose 'Install in SSH: <host>' / 'Install in Dev Container'.%s\n" "$c_off"
   printf "    • No 'code' at all:           Cmd/Ctrl-Shift-P → \"Shell Command: Install 'code' command in PATH\".\n"
+fi
+
+head "Installing the bundled status line (powers the sidebar Usage bars)"
+# The status line is bundled (packages/cli/statusline). Never clobber a user's own statusLine:
+# install only when none is configured, or when the existing one is already claude-statusline.
+SETTINGS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
+EXISTING=$(jq -r '.statusLine.command // ""' "$SETTINGS" 2>/dev/null || echo "")
+if [ -z "$EXISTING" ] || printf '%s' "$EXISTING" | grep -q 'statusline\.sh'; then
+  if command -v jq >/dev/null 2>&1; then
+    bash packages/cli/statusline/install-statusline.sh && say "Status line installed (idempotent — safe to re-run)."
+  else
+    warn "jq not found — skipped the status line. Install jq, then run: claude-observatory statusline"
+  fi
+else
+  warn "You already have a custom statusLine configured — left it alone."
+  printf '  %sTo switch to claude-statusline later:  claude-observatory statusline%s\n' "$c_dim" "$c_off"
 fi
 
 cat <<EOF

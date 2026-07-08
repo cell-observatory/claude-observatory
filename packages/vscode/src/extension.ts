@@ -979,7 +979,7 @@ function combinedShell(): string {
     ['ctx', '5h', 'wk']
       .map((l) => `<div class="row"><span class="lbl">${l}</span><span class="track"><span class="fill" id="uf-${l}"></span></span><span class="pct" id="up-${l}">—</span><span class="sub" id="us-${l}"></span></div>`)
       .join('') +
-    `<div id="uhint" class="empty" style="display:none">5h / week plan usage needs <b>claude-statusline</b> writing on this host.<br><span class="dim">install it (see the <b>claude-statusline</b> repo), then start a Claude session.</span></div>` +
+    `<div id="uhint" class="empty" style="display:none">5h / week plan usage needs <b>claude-statusline</b> writing on this host.<br><span class="dim">run <b>claude-observatory statusline</b> (bundled — no download), then start a Claude session.</span></div>` +
     `<div id="ustale" class="empty" style="display:none">5h / week last refreshed <b><span id="ustale-age"></span> ago</b> — the VS Code panel doesn't run Claude's status line.<br><span class="dim">open a terminal <b>claude</b> session to refresh plan usage; ctx stays live from the transcript.</span></div>`;
   const script = `
     const vscode = acquireVsCodeApi();

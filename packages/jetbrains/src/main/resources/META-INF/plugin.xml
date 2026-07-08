@@ -1,0 +1,54 @@
+<idea-plugin>
+  <id>com.cell-observatory.claude-observatory</id>
+  <name>Claude Observatory</name>
+  <vendor url="https://github.com/cell-observatory/claude-observatory">Cell Observatory</vendor>
+  <description><![CDATA[
+    Per-edit <b>Keep / Undo</b> for Claude Code — a running log of every file change Claude makes,
+    each with its own surgical undo. Git-free, zero extra Claude tokens (capture runs in local
+    hooks, outside the model loop).<br/><br/>
+    Requires the <code>claude-observatory</code> CLI on this machine (the plugin drives it for all
+    store mutations) and the capture hooks installed via <code>claude-observatory init</code>.
+    Works in every JetBrains IDE; on Remote Development the plugin installs on the host.
+  ]]></description>
+
+  <!-- Platform-only: loads in PyCharm CE/Pro, IntelliJ, WebStorm, … no Python APIs used. -->
+  <depends>com.intellij.modules.platform</depends>
+
+  <extensions defaultExtensionNs="com.intellij">
+    <toolWindow id="Claude Observatory" anchor="left" icon="/icons/observatory.svg"
+                factoryClass="com.cellobservatory.observatory.ui.ObservatoryToolWindowFactory"/>
+    <statusBarWidgetFactory id="claudeObservatoryStatus" order="first"
+                            implementation="com.cellobservatory.observatory.ui.ObservatoryStatusBarWidgetFactory"/>
+    <applicationConfigurable parentId="tools" id="com.cell-observatory.claude-observatory.settings"
+                             displayName="Claude Observatory"
+                             instance="com.cellobservatory.observatory.settings.ObservatoryConfigurable"/>
+    <notificationGroup id="Claude Observatory" displayType="BALLOON"/>
+    <postStartupActivity implementation="com.cellobservatory.observatory.services.ObservatoryStartup"/>
+  </extensions>
+
+  <actions>
+    <group id="ClaudeObservatory.Group" text="Claude Observatory" popup="false">
+      <action id="ClaudeObservatory.ReviewNext"
+              class="com.cellobservatory.observatory.actions.ReviewNextAction"
+              text="Claude Observatory: Review Next Pending Edit"
+              description="Jump to the oldest pending Claude edit">
+        <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt N"/>
+        <keyboard-shortcut keymap="Mac OS X 10.5+" first-keystroke="meta alt N" replace-all="true"/>
+      </action>
+      <action id="ClaudeObservatory.KeepAtCursor"
+              class="com.cellobservatory.observatory.actions.KeepAtCursorAction"
+              text="Claude Observatory: Keep Pending Edit at Cursor"
+              description="Keep the pending Claude edit under the cursor">
+        <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt Y"/>
+        <keyboard-shortcut keymap="Mac OS X 10.5+" first-keystroke="meta alt Y" replace-all="true"/>
+      </action>
+      <action id="ClaudeObservatory.UndoAtCursor"
+              class="com.cellobservatory.observatory.actions.UndoAtCursorAction"
+              text="Claude Observatory: Undo Pending Edit at Cursor"
+              description="Surgically undo the pending Claude edit under the cursor">
+        <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt U"/>
+        <keyboard-shortcut keymap="Mac OS X 10.5+" first-keystroke="meta alt U" replace-all="true"/>
+      </action>
+    </group>
+  </actions>
+</idea-plugin>

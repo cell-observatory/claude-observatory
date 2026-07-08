@@ -45,11 +45,16 @@ else
   fi
 fi
 
-# 3) The status line (writes statusline-last.json that the sidebar's Usage bars read). Honors
-#    CLAUDE_CONFIG_DIR, so it lands in the same persistent dir the extension reads.
-say "Installing claude-statusline"
-curl -fsSL https://raw.githubusercontent.com/cell-observatory/claude-statusline/main/install-statusline.sh | bash \
-  || say "  statusline install skipped (no network?) — run its installer manually later."
+# 3) The status line (writes statusline-last.json that the sidebar's Usage bars read). It is
+#    BUNDLED with the CLI — no network needed; honors CLAUDE_CONFIG_DIR so it lands in the same
+#    persistent dir the extension reads. Curl fallback only if the CLI install failed above.
+say "Installing the bundled claude-statusline"
+if command -v claude-observatory >/dev/null 2>&1; then
+  claude-observatory statusline || say "  statusline install failed — is jq installed?"
+else
+  curl -fsSL https://raw.githubusercontent.com/cell-observatory/claude-statusline/main/install-statusline.sh | bash \
+    || say "  statusline install skipped (no CLI, no network) — run 'claude-observatory statusline' later."
+fi
 
 # 4) Capture hooks into $CFG/settings.json. Safe here: postCreate runs with no live Claude session,
 #    and Claude Code reverts hooks edited mid-session. init honors CLAUDE_CONFIG_DIR.

@@ -23,14 +23,23 @@ jobs:
       - run: npm test
       - run: bash test/e2e.sh
       - run: npm run release
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+      - run: gradle buildPlugin --console=plain
+        working-directory: packages/jetbrains
       - name: Create GitHub Release with artifacts
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${GITHUB_REF_NAME}"
           cp release/claude-observatory.vsix "release/claude-observatory-vscode-${TAG}.vsix"
+          cp packages/jetbrains/build/distributions/*.zip "release/claude-observatory-jetbrains-${TAG}.zip"
           gh release create "$TAG" \
             release/claude-observatory-*.tgz \
             "release/claude-observatory-vscode-${TAG}.vsix" \
+            "release/claude-observatory-jetbrains-${TAG}.zip" \
             --title "Claude Observatory ${TAG}" \
             --generate-notes

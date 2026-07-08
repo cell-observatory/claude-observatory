@@ -1,0 +1,35 @@
+package com.cellobservatory.observatory.core
+
+import com.cellobservatory.observatory.settings.ObservatorySettings
+import java.nio.file.Path
+import java.nio.file.Paths
+
+/**
+ * Single source of truth for Claude paths — mirrors core's paths.ts/session.ts exactly.
+ * Everything lives under CLAUDE_CONFIG_DIR (settings override first, then the env var Claude Code
+ * itself honors), defaulting to ~/.claude — devcontainers relocate it onto a persistent volume.
+ */
+object ClaudePaths {
+    fun configDir(): Path {
+        val fromSettings = ObservatorySettings.instance.state.configDir
+        if (!fromSettings.isNullOrBlank()) return Paths.get(fromSettings)
+        System.getenv("CLAUDE_CONFIG_DIR")?.takeIf { it.isNotBlank() }?.let { return Paths.get(it) }
+        return Paths.get(System.getProperty("user.home"), ".claude")
+    }
+
+    /** The edit store root: <config>/claude-observatory */
+    fun rootDir(): Path = configDir().resolve("claude-observatory")
+
+    fun storeDir(sessionId: String): Path = rootDir().resolve(sessionId)
+
+    fun logPath(sessionId: String): Path = storeDir(sessionId).resolve("log.jsonl")
+
+    fun blobPath(sessionId: String, sha: String): Path = storeDir(sessionId).resolve("blobs").resolve(sha)
+
+    /** Claude Code's project-dir mangling: every non-alphanumeric char becomes '-'. */
+    fun mangleCwd(cwd: String): String = cwd.replace(Regex("[^a-zA-Z0-9]"), "-")
+
+    fun projectDir(cwd: String): Path = configDir().resolve("projects").resolve(mangleCwd(cwd))
+
+    fun statuslineCache(): Path = configDir().resolve("statusline-last.json")
+}
