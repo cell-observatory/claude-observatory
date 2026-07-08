@@ -48,6 +48,44 @@ code --install-extension claude-observatory.vsix
 
 Fully quit VS Code (⌘Q) once after installing so the activity-bar icon refreshes.
 
+## Remote development (SSH & devcontainers)
+
+The extension is declared `extensionKind: workspace`, so on **Remote-SSH, devcontainers, and WSL it
+runs on the remote host** — because that's where Claude Code, your transcripts, the edit store, and
+the statusline usage cache live. Everything therefore installs **on the remote**, not your laptop.
+
+**Over SSH (no container):**
+
+1. Connect the Remote-SSH window to the host.
+2. In the **remote** terminal, install the CLI + hooks: clone and run `./install.sh` (or copy a
+   release `.tgz` and `npm i -g ./claude-observatory-<ver>.tgz`), then run `claude-observatory init`
+   with Claude Code closed.
+3. Install the status line **on the remote** so the Usage bars populate — from
+   [claude-statusline](https://github.com/cell-observatory/claude-statusline):
+   `ssh user@host 'bash -s' < install-statusline.sh`, or run its curl one-liner in the remote terminal.
+4. Install the extension **into the remote**: Extensions view → the `.vsix` → **"Install in SSH:
+   \<host\>"**, or run `code --install-extension claude-observatory.vsix` in the remote terminal
+   (VS Code puts `code` on the remote PATH there).
+
+**Inside a devcontainer:** copy the ready-to-use template in
+[docs/devcontainer/](docs/devcontainer/) into your `.devcontainer/`. It sets `TZ` (so Stats bucket
+correctly), points `CLAUDE_CONFIG_DIR` at a **persistent volume** (so Edits/Stats survive rebuilds),
+and provisions the CLI + status line + hooks via `postCreateCommand`.
+
+**Relocating the config dir.** Everything the observatory reads/writes lives under
+`CLAUDE_CONFIG_DIR` (default `~/.claude`) — the edit store, transcripts, capture hooks, and the
+statusline cache all follow it. Point it at a mounted volume to persist history across container
+rebuilds; just set the **same** value for Claude Code, the status line, and the extension host (a
+container-level env var covers all three).
+
+**Two gotchas:**
+
+- The `claude-observatory` CLI (Stats) and `claude` (opt-in Analyze) must be on the **remote** PATH.
+  The Stats tab shows an install hint if the CLI is missing, and the Usage bars show one if the
+  status line isn't writing on that host.
+- Set `TZ` on the remote, or the Stats plots bucket by the remote's timezone (usually UTC in a
+  container) instead of yours.
+
 ## The observatory
 
 Built for **surgical Claude usage on critical infrastructure**: the developer stays in the loop, seeing every change in realtime and accepting / editing / reverting each one — while Claude accelerates the work.

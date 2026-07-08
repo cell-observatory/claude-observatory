@@ -24,15 +24,26 @@ npm i -g ./packages/cli --silent || {
 CLI="$(command -v claude-observatory || true)"
 [ -n "$CLI" ] && say "CLI ready: $CLI" || warn "claude-observatory not on PATH — check your npm global bin dir (npm bin -g)."
 
-head "Building + installing the VS Code extension"
+head "Building + packaging the VS Code extension"
+npm run build:vscode --silent
+( cd packages/vscode && npm run package --silent )
+VSIX="$PWD/packages/vscode/claude-observatory.vsix"
+say "Packaged: $VSIX"
 if command -v code >/dev/null 2>&1; then
-  npm run build:vscode --silent
-  ( cd packages/vscode && npm run package --silent )
-  code --install-extension packages/vscode/claude-observatory.vsix --force
+  # Run inside a Remote-SSH / devcontainer terminal and this installs into the REMOTE extension
+  # host — exactly where the extension must live (it reads the remote's ~/.claude). Run it locally
+  # and it installs locally. Either way it targets the host whose 'code' is on PATH.
+  code --install-extension "$VSIX" --force
   say "Extension installed. Fully quit VS Code (⌘Q) once so its activity-bar icon refreshes."
 else
-  warn "VS Code 'code' CLI not found — skipping the extension."
-  printf '  %sIn VS Code: Cmd/Ctrl-Shift-P → \"Shell Command: Install '\''code'\'' command in PATH\", then re-run.%s\n' "$c_dim" "$c_off"
+  warn "VS Code 'code' CLI not found — packaged the .vsix but did not install it."
+  printf '  %sInstall it yourself:%s\n' "$c_dim" "$c_off"
+  printf "    • Local VS Code:              code --install-extension %s\n" "$VSIX"
+  printf "    • Remote-SSH / devcontainer:  open the folder on the remote, then run that same command\n"
+  printf "      %sinside the remote window's terminal — VS Code injects 'code' into the remote PATH so it\n" "$c_dim"
+  printf "      installs on the remote host (where it belongs). Or: Extensions view → '…' → 'Install\n"
+  printf "      from VSIX…' and choose 'Install in SSH: <host>' / 'Install in Dev Container'.%s\n" "$c_off"
+  printf "    • No 'code' at all:           Cmd/Ctrl-Shift-P → \"Shell Command: Install 'code' command in PATH\".\n"
 fi
 
 cat <<EOF

@@ -1,0 +1,46 @@
+// Example .devcontainer/devcontainer.json for using Claude Observatory + claude-statusline inside a
+// devcontainer. Copy BOTH this file and setup.sh into your project's .devcontainer/ directory and
+// adapt the marked lines. This is a starting point, not a drop-in — swap the base image/features for
+// whatever your project already uses.
+{
+  "name": "claude-observatory (example)",
+
+  // ── Adapt: use your project's own image / Dockerfile / compose service. ─────────────────────────
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "features": {
+    // The claude-observatory CLI is a Node package; ensure node/npm exist in the container.
+    "ghcr.io/devcontainers/features/node:1": { "version": "20" }
+  },
+
+  // ── Why these env vars matter (set at the CONTAINER level so the capture hook, the extension host,
+  //    and integrated terminals all agree — remoteEnv alone misses processes started outside VS Code):
+  "containerEnv": {
+    // TZ: the Observatory "Stats" plots bucket days/hours by the extension host's LOCAL time. A
+    // container defaults to UTC, which mis-buckets your charts. Set this to your timezone.
+    "TZ": "America/Los_Angeles",
+
+    // CLAUDE_CONFIG_DIR: relocates ALL Claude state — transcripts, the edit store, the capture
+    // hooks (settings.json), and the statusline usage cache — under one directory. Point it at the
+    // persistent volume mounted below so your edit history and stats survive a container REBUILD
+    // (otherwise they live on the throwaway container layer and reset to empty every rebuild).
+    "CLAUDE_CONFIG_DIR": "/opt/claude-config"
+  },
+
+  // ── Persist the config dir with a named volume. Target MUST equal CLAUDE_CONFIG_DIR above. ───────
+  "mounts": [
+    "source=claude-observatory-config,target=/opt/claude-config,type=volume"
+  ],
+
+  // Provisions jq + the CLI + statusline + capture hooks inside the container. Idempotent on rebuild.
+  "postCreateCommand": "bash .devcontainer/setup.sh",
+
+  "customizations": {
+    "vscode": {
+      // This extension is distributed as a private .vsix (not on the Marketplace), so it can't be
+      // auto-installed by id here. setup.sh prints how to install the packaged .vsix into the
+      // container. If you publish it to the Marketplace or a private registry, add its id here to
+      // auto-install on rebuild, e.g. "claude-observatory.claude-observatory-vscode".
+      "extensions": []
+    }
+  }
+}

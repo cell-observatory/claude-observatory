@@ -4,8 +4,8 @@
  * Adds only the `hooks` entries; never disturbs existing permissions/statusLine/etc.
  */
 import * as fs from 'fs';
-import * as os from 'os';
 import * as path from 'path';
+import { claudeConfigDir } from './paths';
 
 export const MATCHER = 'Edit|Write|MultiEdit|NotebookEdit';
 
@@ -22,7 +22,7 @@ interface HookGroup {
 }
 
 export function settingsPath(): string {
-  return path.join(os.homedir(), '.claude', 'settings.json');
+  return path.join(claudeConfigDir(), 'settings.json');
 }
 
 /** Project-scoped settings file (checked into a repo so teammates get capture). */

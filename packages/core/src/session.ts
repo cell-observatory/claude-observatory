@@ -9,20 +9,20 @@
  * supplies session_id directly) — it exists for the CLI and the VS Code sidebar.
  */
 import * as fs from 'fs';
-import * as os from 'os';
 import * as path from 'path';
+import { claudeConfigDir } from './paths';
 
 /** Mangle an absolute path the same way Claude Code names its project dirs. */
 export function mangleCwd(cwd: string): string {
   return cwd.replace(/[^a-zA-Z0-9]/g, '-');
 }
 
-// REVIEW: projectDir (and everything built on it: resolveSessionId, findTranscript, the store) is
-// pinned to ~/.claude, while stats.transcriptFiles/usageLine honor CLAUDE_CONFIG_DIR. A user who
-// sets CLAUDE_CONFIG_DIR gets transcripts scanned from there but session resolution from ~/.claude.
-// Left as-is deliberately: changing it touches the previously-audited store/session layer.
+// projectDir (and everything built on it: resolveSessionId, findTranscript, the store) resolves
+// under claudeConfigDir(), the same CLAUDE_CONFIG_DIR-aware base that stats.transcriptFiles and
+// usageLine use — so relocating the config dir (e.g. onto a mounted devcontainer volume) moves
+// session resolution, the store, and usage together instead of splitting them across two roots.
 export function projectDir(cwd: string): string {
-  return path.join(os.homedir(), '.claude', 'projects', mangleCwd(cwd));
+  return path.join(claudeConfigDir(), 'projects', mangleCwd(cwd));
 }
 
 /** Newest session id in a specific project dir, or null if none / the dir doesn't exist. */

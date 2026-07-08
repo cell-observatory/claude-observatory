@@ -13,9 +13,9 @@
  * numbers, and "messages" is meant to count the turns the user actually saw.
  */
 import * as fs from 'fs';
-import * as os from 'os';
 import * as path from 'path';
 import { listSessions, readLog, rootDir } from './store';
+import { claudeConfigDir } from './paths';
 
 export interface StatMetrics {
   edits: number;
@@ -61,10 +61,6 @@ interface FileEntry {
   /** Today's per-hour aggregates, cached alongside the days so an unchanged file modified today is
    *  not re-read on every refresh (today's files are the largest). Stale-day entries are pruned. */
   hourly?: { day: string; hours: Record<string, DayAgg> };
-}
-
-function claudeConfigDir(): string {
-  return process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
 }
 
 function dayKey(ts: number): string {

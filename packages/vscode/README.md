@@ -15,6 +15,8 @@ Think of it as the Cursor "keep/undo each change" experience, but for Claude Cod
    (Not installed globally yet? Run `node <repo>/packages/cli/dist/index.js init`. Install the hooks while Claude Code is **not** running, then launch it.)
 2. Open the **Claude Observatory** view in the Activity Bar (the telescope icon, badged with the pending-edit count). As Claude edits files, they appear grouped by folder → file → class.
 
+> **Remote-SSH / devcontainers / WSL:** this extension runs on the **workspace host**, so install it — along with the `claude-observatory` CLI, the status line, and the capture hooks — **on the remote**, where `~/.claude` lives (not on your laptop). See the main repo's [Remote development guide](https://github.com/cell-observatory/claude-observatory#remote-development-ssh--devcontainers).
+
 ## Views
 
 **Review surfaces** live in the activity bar; the **observatory dashboards** live side-by-side in the bottom panel (like Terminal/Problems). A **status-bar telescope** shows the pending count in realtime (amber while anything awaits review), with the full **review scoreboard** (pending · accepted · reverted · acceptance rate · oldest pending) in its tooltip. The review loop is fully keyboard-driven: **⌥⌘N** (`ctrl+alt+n`) jumps to the oldest pending edit, **⌥⌘Y** keeps the edit under the cursor, **⌥⌘U** undoes it.

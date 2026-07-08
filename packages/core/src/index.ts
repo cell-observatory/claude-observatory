@@ -1,3 +1,4 @@
+export * from './paths';
 export * from './store';
 export * from './session';
 export * from './undo';

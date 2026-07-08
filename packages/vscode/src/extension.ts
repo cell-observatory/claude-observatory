@@ -978,7 +978,8 @@ function combinedShell(): string {
     `<div class="uhead">Usage</div>` +
     ['ctx', '5h', 'wk']
       .map((l) => `<div class="row"><span class="lbl">${l}</span><span class="track"><span class="fill" id="uf-${l}"></span></span><span class="pct" id="up-${l}">—</span><span class="sub" id="us-${l}"></span></div>`)
-      .join('');
+      .join('') +
+    `<div id="uhint" class="empty" style="display:none">5h / week plan usage needs <b>claude-statusline</b> writing on this host.<br><span class="dim">install it (see the <b>claude-statusline</b> repo), then start a Claude session.</span></div>`;
   const script = `
     const vscode = acquireVsCodeApi();
     const PLOTS = ${JSON.stringify(PLOTS)};
@@ -1005,10 +1006,14 @@ function combinedShell(): string {
     function ucolor(p){ if(p>=80)return 'var(--vscode-charts-red,#e5534b)'; if(p>=50)return 'var(--vscode-charts-yellow,#d9a441)'; return 'var(--vscode-charts-green,#3fb950)'; }
     function until(ms){ if(ms==null)return ''; var d=ms-Date.now(); if(!isFinite(d)||d<=0)return ''; var mins=Math.round(d/60000),h=Math.floor(mins/60); if(h>=24)return Math.floor(h/24)+'d'+(h%24)+'h'; return h>0? h+'h'+(mins%60)+'m' : (mins%60)+'m'; }
     function setRow(l,pct,sub){ var f=document.getElementById('uf-'+l),p=document.getElementById('up-'+l),s=document.getElementById('us-'+l); if(pct==null){ f.style.width='0'; p.textContent='—'; p.style.color=''; s.textContent=''; return; } var c=ucolor(pct); f.style.width=Math.max(2,Math.min(100,pct))+'%'; f.style.background=c; p.textContent=Math.round(pct)+'%'; p.style.color=c; s.textContent=sub||''; }
-    function renderUsage(u){ if(!u){ setRow('ctx',null); setRow('5h',null); setRow('wk',null); return; }
+    function renderUsage(u){ var hint=document.getElementById('uhint');
+      if(!u){ setRow('ctx',null); setRow('5h',null); setRow('wk',null); if(hint) hint.style.display='none'; return; }
       setRow('ctx', u.ctx? u.ctx.pct : null, u.ctx? (human(u.ctx.tokens)+'/'+human(u.ctx.size)) : '');
       setRow('5h', u.fiveHourPct, [until(u.fiveReset), u.fiveTokens? '~'+human(u.fiveTokens):''].filter(Boolean).join(' · '));
       setRow('wk', u.weekPct, [until(u.weekReset), u.weekTokens? '~'+human(u.weekTokens):''].filter(Boolean).join(' · '));
+      // Only nudge when the statusline cache is truly absent — not on a fresh session whose rate_limits
+      // haven't arrived yet (cache present, 5h/wk momentarily null), nor on non-subscription plans.
+      if(hint) hint.style.display = u.statuslineCache ? 'none' : 'block';
     }
     window.addEventListener('message', function(e){ var m=e.data||{};
       if(m.type==='usage'){ renderUsage(m.u); }

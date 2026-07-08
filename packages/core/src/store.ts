@@ -13,9 +13,9 @@
  * Pure local filesystem — no network, no model calls, zero tokens.
  */
 import * as fs from 'fs';
-import * as os from 'os';
 import * as path from 'path';
 import * as crypto from 'crypto';
+import { claudeConfigDir } from './paths';
 
 export type EditStatus = 'pending' | 'kept' | 'undone';
 
@@ -43,7 +43,7 @@ export interface StagingRecord {
 }
 
 export function rootDir(): string {
-  return path.join(os.homedir(), '.claude', 'claude-observatory');
+  return path.join(claudeConfigDir(), 'claude-observatory');
 }
 
 export function storeDir(sessionId: string): string {

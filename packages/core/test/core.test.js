@@ -426,6 +426,65 @@ test('observe: usageLine normalizes an epoch-seconds reset from the cache', () =
   assert.equal(u.weekReset, 1783540800 * 1000, 'epoch seconds scaled to epoch ms');
 });
 
+test('paths: CLAUDE_CONFIG_DIR relocates the store, sessions, hooks, and usage together', () => {
+  // Regression for the devcontainer split: the store/session/hook-install layer used to be pinned to
+  // ~/.claude while usage/stats honored CLAUDE_CONFIG_DIR — so relocating the config dir onto a
+  // mounted volume only half-worked (edit history reset on rebuild). Now ALL of them follow it.
+  const home = freshHome();
+  const cfg = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-cfg-'));
+  process.env.CLAUDE_CONFIG_DIR = cfg;
+  try {
+    assert.equal(core.claudeConfigDir(), cfg);
+    assert.equal(core.rootDir(), path.join(cfg, 'claude-observatory'), 'edit store under CLAUDE_CONFIG_DIR');
+    assert.equal(core.projectDir('/Users/x/proj'), path.join(cfg, 'projects', '-Users-x-proj'), 'transcripts under it');
+    assert.equal(core.settingsPath(), path.join(cfg, 'settings.json'), 'hook install target under it');
+
+    // and none of them leak back into the home ~/.claude
+    const homeClaude = path.join(home, '.claude');
+    assert.ok(!core.rootDir().startsWith(homeClaude), 'store does not fall back to ~/.claude');
+    assert.ok(!core.projectDir('/Users/x/proj').startsWith(homeClaude), 'projects do not fall back to ~/.claude');
+
+    // end-to-end: session resolution + hook install land under the relocated dir, not the home
+    const cwd = '/Users/x/proj';
+    const proj = core.projectDir(cwd);
+    fs.mkdirSync(proj, { recursive: true });
+    fs.writeFileSync(path.join(proj, 'sess.jsonl'), '{}');
+    assert.equal(core.resolveSessionId(cwd), 'sess', 'session resolved from the relocated projects dir');
+
+    assert.ok(core.installHooks('claude-observatory capture #claude-observatory-hook').changed);
+    assert.ok(fs.existsSync(path.join(cfg, 'settings.json')), 'hooks written under CLAUDE_CONFIG_DIR');
+    assert.ok(!fs.existsSync(path.join(homeClaude, 'settings.json')), 'home ~/.claude/settings.json untouched');
+
+    // usage cache is read from the relocated dir too
+    fs.writeFileSync(path.join(cfg, 'statusline-last.json'), JSON.stringify({ ctx_pct: 42, ctx_size: 200000 }));
+    const u = core.usageLine(cwd, 'sess');
+    assert.equal(u.ctx.pct, 42, 'usage read from the relocated statusline cache');
+    assert.equal(u.statuslineCache, true, 'cache present flag set');
+  } finally {
+    delete process.env.CLAUDE_CONFIG_DIR;
+  }
+});
+
+test('paths: without CLAUDE_CONFIG_DIR everything falls back to ~/.claude (unchanged default)', () => {
+  const home = freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const hc = path.join(home, '.claude');
+  assert.equal(core.claudeConfigDir(), hc);
+  assert.equal(core.rootDir(), path.join(hc, 'claude-observatory'));
+  assert.equal(core.projectDir('/a/b'), path.join(hc, 'projects', '-a-b'));
+  assert.equal(core.settingsPath(), path.join(hc, 'settings.json'));
+});
+
+test('observe: usageLine flags a missing statusline cache (drives the sidebar "install" hint)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const cwd = tmpWork();
+  const u = core.usageLine(cwd, 'nosession'); // no statusline-last.json, no transcript
+  assert.equal(u.statuslineCache, false, 'no cache file -> false; the webview shows the install nudge');
+  assert.equal(u.fiveHourPct, null);
+  assert.equal(u.weekPct, null);
+});
+
 test('stats: computeStats rolls up transcripts + edits into windows and a daily series', () => {
   freshHome();
   delete process.env.CLAUDE_CONFIG_DIR;
@@ -1037,7 +1096,10 @@ test('stats: transcriptFiles honors CLAUDE_CONFIG_DIR for the transcript scan', 
     // nothing under $HOME/.claude/projects — the message must come from CLAUDE_CONFIG_DIR
     const st = core.computeStats(undefined, now);
     assert.equal(st.daily[29].messages, 1, 'transcripts read from CLAUDE_CONFIG_DIR');
-    assert.ok(fs.existsSync(path.join(home, '.claude', 'claude-observatory', 'stats-cache.json')), 'cache stays in the store dir');
+    // Unified config dir: the store (and its stats-cache) now follows CLAUDE_CONFIG_DIR too, instead
+    // of splitting the cache into the home ~/.claude while transcripts came from the relocated dir.
+    assert.ok(fs.existsSync(path.join(alt, 'claude-observatory', 'stats-cache.json')), 'cache lives under the relocated store dir');
+    assert.ok(!fs.existsSync(path.join(home, '.claude', 'claude-observatory', 'stats-cache.json')), 'not split back into home ~/.claude');
   } finally {
     delete process.env.CLAUDE_CONFIG_DIR;
   }

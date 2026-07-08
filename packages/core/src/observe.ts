@@ -4,11 +4,11 @@
  * suggestions. No model calls — the transcript already contains Claude's words.
  */
 import * as fs from 'fs';
-import * as os from 'os';
 import * as path from 'path';
 import { diffArrays } from 'diff';
 import { EditRecord, readLog, readBlob } from './store';
 import { projectDir } from './session';
+import { claudeConfigDir } from './paths';
 
 /** Locate the Claude Code transcript jsonl for a session, walking up from cwd (like resolveSessionId). */
 export function findTranscript(cwd: string, sessionId: string): string | null {
@@ -294,10 +294,8 @@ export interface UsageLine {
   weekReset: number | null; // reset time for the 7-day window, epoch ms
   fiveTokens: number | null; // ~estimated tokens used in the 5h window
   weekTokens: number | null; // ~estimated tokens used in the 7-day window
-}
-
-function claudeConfigDir(): string {
-  return process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+  statuslineCache: boolean; // whether statusline-last.json was found — false ⇒ claude-statusline
+  //                           isn't installed/writing on this host, so the 5h/week bars can't fill
 }
 
 /** Claude Code sends `resets_at` as either epoch seconds (a number) or an ISO string → epoch ms. */
@@ -322,10 +320,12 @@ export function usageLine(cwd: string, sessionId: string): UsageLine {
     weekReset: null,
     fiveTokens: null,
     weekTokens: null,
+    statuslineCache: false,
   };
   const fin = (v: unknown): v is number => typeof v === 'number' && isFinite(v); // reject NaN from a corrupt cache
   try {
     const last = JSON.parse(fs.readFileSync(path.join(claudeConfigDir(), 'statusline-last.json'), 'utf8'));
+    out.statuslineCache = true; // the cache exists and parsed — statusline is installed & writing
     if (fin(last.ctx_pct)) {
       const size = fin(last.ctx_size) && last.ctx_size > 0 ? last.ctx_size : 200000;
       const tokens = fin(last.ctx_used) ? last.ctx_used : Math.round((last.ctx_pct / 100) * size);
