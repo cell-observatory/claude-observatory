@@ -170,7 +170,7 @@ npm run e2e       # end-to-end CLI + capture-hook integration harness
 npm run release   # build shareable artifacts into ./release (CLI .tgz + .vsix)
 ```
 
-To cut a release: `git tag v0.1.1 && git push origin v0.1.1` — CI re-runs the suite and attaches the
+To cut a release: `git tag v0.1.2 && git push origin v0.1.2` — CI re-runs the suite and attaches the
 `.tgz` + `.vsix` to a [GitHub Release](https://github.com/cell-observatory/claude-observatory/releases).
 Teammates install with `npm i -g ./claude-observatory-<ver>.tgz` and `code --install-extension <file>.vsix`
 (no tokens or registry setup needed).

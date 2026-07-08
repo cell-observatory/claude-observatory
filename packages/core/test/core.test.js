@@ -483,6 +483,70 @@ test('observe: usageLine flags a missing statusline cache (drives the sidebar "i
   assert.equal(u.statuslineCache, false, 'no cache file -> false; the webview shows the install nudge');
   assert.equal(u.fiveHourPct, null);
   assert.equal(u.weekPct, null);
+  assert.equal(u.cachedAtMs, null, 'no cache -> no age; the stale hint must not fire');
+});
+
+test('observe: usageLine exposes the statusline cache age (drives the sidebar "stale" hint)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const cwd = tmpWork();
+  const claudeDir = path.join(os.homedir(), '.claude');
+  fs.mkdirSync(claudeDir, { recursive: true });
+  const cache = path.join(claudeDir, 'statusline-last.json');
+  fs.writeFileSync(cache, JSON.stringify({ ctx_pct: 39, five_pct: 12.5 }));
+  const t = Date.now() - 42 * 60000; // backdate 42 minutes (utimes takes seconds; mtimeMs returns ms)
+  fs.utimesSync(cache, t / 1000, t / 1000);
+  const u = core.usageLine(cwd, 'nosession');
+  assert.equal(u.statuslineCache, true);
+  assert.ok(Math.abs(u.cachedAtMs - t) < 1500, 'cachedAtMs reflects the cache mtime');
+  assert.equal(u.fiveHourPct, 12.5, 'stale values still render as last-known');
+  assert.equal(typeof core.USAGE_STALE_MS, 'number', 'threshold exported for the webview');
+});
+
+test('observe: usageLine prefers a newer transcript ctx over a stale cache (panel-only sessions)', () => {
+  // The VS Code panel never runs the statusLine, so the cache can be hours old while the
+  // transcript is live: ctx must track the transcript; 5h/week keep the cache (their only source).
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'live';
+  const cwd = tmpWork();
+  const claudeDir = path.join(os.homedir(), '.claude');
+  fs.mkdirSync(claudeDir, { recursive: true });
+  const cache = path.join(claudeDir, 'statusline-last.json');
+  fs.writeFileSync(cache, JSON.stringify({ ctx_pct: 39, ctx_used: 78000, ctx_size: 200000, five_pct: 12.5, five_reset: '2099-01-01T00:00:00Z' }));
+  const old = Date.now() - 3600 * 1000;
+  fs.utimesSync(cache, old / 1000, old / 1000);
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  fs.writeFileSync(
+    path.join(proj, S + '.jsonl'),
+    JSON.stringify({ message: { role: 'assistant', usage: { input_tokens: 1000, cache_read_input_tokens: 40000, cache_creation_input_tokens: 9000 }, content: [] } })
+  );
+  const u = core.usageLine(cwd, S);
+  assert.equal(u.ctx.tokens, 50000, 'ctx re-derived from the newer transcript');
+  assert.equal(Math.round(u.ctx.pct), 25, 'not the stale 39% from the cache');
+  assert.equal(u.fiveHourPct, 12.5, '5h still comes from the cache');
+  assert.equal(u.statuslineCache, true);
+  assert.ok(Math.abs(u.cachedAtMs - old) < 1500, 'age reported so the UI can flag staleness');
+});
+
+test('observe: usageLine keeps the exact cache ctx when the cache is newer than the transcript', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'term';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const tx = path.join(proj, S + '.jsonl');
+  fs.writeFileSync(tx, JSON.stringify({ message: { role: 'assistant', usage: { input_tokens: 1000, cache_read_input_tokens: 40000 }, content: [] } }));
+  const old = Date.now() - 3600 * 1000;
+  fs.utimesSync(tx, old / 1000, old / 1000);
+  const claudeDir = path.join(os.homedir(), '.claude');
+  fs.mkdirSync(claudeDir, { recursive: true });
+  fs.writeFileSync(path.join(claudeDir, 'statusline-last.json'), JSON.stringify({ ctx_pct: 39, ctx_used: 78000, ctx_size: 200000 }));
+  const u = core.usageLine(cwd, S);
+  assert.equal(u.ctx.pct, 39, 'fresh cache wins: exact terminal values, byte-identical to before');
+  assert.equal(u.ctx.tokens, 78000);
 });
 
 test('stats: computeStats rolls up transcripts + edits into windows and a daily series', () => {

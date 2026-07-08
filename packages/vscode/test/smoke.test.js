@@ -223,6 +223,7 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.match(stView.webview.html, /5h/, 'usage bars present (5h row)');
     assert.match(stView.webview.html, />Today</, 'the Today/7d/30d range toggle is present');
     assert.match(stView.webview.html, /Gathering stats/i, 'stats placeholder present until the scan returns');
+    assert.match(stView.webview.html, /id="ustale"/, 'stale-cache hint present (panel-only sessions)');
     // CLI-missing hint: a failed scan (before any data) posts statsError so the webview shows install help
     const stMsgs = [];
     stView.webview.postMessage = (m) => stMsgs.push(m);

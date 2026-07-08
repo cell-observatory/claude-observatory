@@ -296,7 +296,12 @@ export interface UsageLine {
   weekTokens: number | null; // ~estimated tokens used in the 7-day window
   statuslineCache: boolean; // whether statusline-last.json was found — false ⇒ claude-statusline
   //                           isn't installed/writing on this host, so the 5h/week bars can't fill
+  cachedAtMs: number | null; // statusline-last.json mtime, epoch ms — only the terminal TUI runs the
+  //                            statusLine, so panel-only sessions leave the cache (and 5h/week) stale
 }
+
+/** Statusline cache older than this ⇒ the UI should surface its age and the terminal remedy. */
+export const USAGE_STALE_MS = 5 * 60 * 1000;
 
 /** Claude Code sends `resets_at` as either epoch seconds (a number) or an ISO string → epoch ms. */
 function toEpochMs(v: unknown): number | null {
@@ -321,11 +326,14 @@ export function usageLine(cwd: string, sessionId: string): UsageLine {
     fiveTokens: null,
     weekTokens: null,
     statuslineCache: false,
+    cachedAtMs: null,
   };
   const fin = (v: unknown): v is number => typeof v === 'number' && isFinite(v); // reject NaN from a corrupt cache
+  const cachePath = path.join(claudeConfigDir(), 'statusline-last.json');
   try {
-    const last = JSON.parse(fs.readFileSync(path.join(claudeConfigDir(), 'statusline-last.json'), 'utf8'));
+    const last = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
     out.statuslineCache = true; // the cache exists and parsed — statusline is installed & writing
+    out.cachedAtMs = fs.statSync(cachePath).mtimeMs;
     if (fin(last.ctx_pct)) {
       const size = fin(last.ctx_size) && last.ctx_size > 0 ? last.ctx_size : 200000;
       const tokens = fin(last.ctx_used) ? last.ctx_used : Math.round((last.ctx_pct / 100) * size);
@@ -340,8 +348,20 @@ export function usageLine(cwd: string, sessionId: string): UsageLine {
   } catch {
     /* no statusline cache yet (or corrupt JSON) — fall back to a transcript estimate below */
   }
-  if (!out.ctx) {
-    const transcript = findTranscript(cwd, sessionId);
+  // A panel-only session never runs the statusLine, so the cache (and its ctx) can be arbitrarily
+  // old while the transcript is live — prefer the transcript's ctx whenever it is newer. When a
+  // terminal session is open the statusline rewrites the cache every render, so its exact values
+  // still win. 5h/week always come from the cache: they have no other source.
+  const transcript = findTranscript(cwd, sessionId);
+  let transcriptNewer = false;
+  if (transcript && out.cachedAtMs !== null) {
+    try {
+      transcriptNewer = fs.statSync(transcript).mtimeMs > out.cachedAtMs;
+    } catch {
+      /* transcript vanished between find and stat */
+    }
+  }
+  if (!out.ctx || transcriptNewer) {
     if (transcript) {
       try {
         // Only the LATEST usage-bearing line matters, so scan from the END and stop at the first

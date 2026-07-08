@@ -979,7 +979,8 @@ function combinedShell(): string {
     ['ctx', '5h', 'wk']
       .map((l) => `<div class="row"><span class="lbl">${l}</span><span class="track"><span class="fill" id="uf-${l}"></span></span><span class="pct" id="up-${l}">—</span><span class="sub" id="us-${l}"></span></div>`)
       .join('') +
-    `<div id="uhint" class="empty" style="display:none">5h / week plan usage needs <b>claude-statusline</b> writing on this host.<br><span class="dim">install it (see the <b>claude-statusline</b> repo), then start a Claude session.</span></div>`;
+    `<div id="uhint" class="empty" style="display:none">5h / week plan usage needs <b>claude-statusline</b> writing on this host.<br><span class="dim">install it (see the <b>claude-statusline</b> repo), then start a Claude session.</span></div>` +
+    `<div id="ustale" class="empty" style="display:none">5h / week last refreshed <b><span id="ustale-age"></span> ago</b> — the VS Code panel doesn't run Claude's status line.<br><span class="dim">open a terminal <b>claude</b> session to refresh plan usage; ctx stays live from the transcript.</span></div>`;
   const script = `
     const vscode = acquireVsCodeApi();
     const PLOTS = ${JSON.stringify(PLOTS)};
@@ -1006,15 +1007,25 @@ function combinedShell(): string {
     function ucolor(p){ if(p>=80)return 'var(--vscode-charts-red,#e5534b)'; if(p>=50)return 'var(--vscode-charts-yellow,#d9a441)'; return 'var(--vscode-charts-green,#3fb950)'; }
     function until(ms){ if(ms==null)return ''; var d=ms-Date.now(); if(!isFinite(d)||d<=0)return ''; var mins=Math.round(d/60000),h=Math.floor(mins/60); if(h>=24)return Math.floor(h/24)+'d'+(h%24)+'h'; return h>0? h+'h'+(mins%60)+'m' : (mins%60)+'m'; }
     function setRow(l,pct,sub){ var f=document.getElementById('uf-'+l),p=document.getElementById('up-'+l),s=document.getElementById('us-'+l); if(pct==null){ f.style.width='0'; p.textContent='—'; p.style.color=''; s.textContent=''; return; } var c=ucolor(pct); f.style.width=Math.max(2,Math.min(100,pct))+'%'; f.style.background=c; p.textContent=Math.round(pct)+'%'; p.style.color=c; s.textContent=sub||''; }
-    function renderUsage(u){ var hint=document.getElementById('uhint');
-      if(!u){ setRow('ctx',null); setRow('5h',null); setRow('wk',null); if(hint) hint.style.display='none'; return; }
+    var STALE_MS = ${core.USAGE_STALE_MS};
+    var LASTU = null;
+    function ago(ms){ var m=Math.round(ms/60000); if(m<60)return m+'m'; var h=Math.floor(m/60); if(h<24)return h+'h'+(m%60? (m%60)+'m':''); return Math.floor(h/24)+'d'; }
+    function renderUsage(u){ LASTU=u; var hint=document.getElementById('uhint'), stale=document.getElementById('ustale');
+      if(!u){ setRow('ctx',null); setRow('5h',null); setRow('wk',null); if(hint) hint.style.display='none'; if(stale) stale.style.display='none'; return; }
+      // Only the terminal TUI runs the statusLine, so panel-only sessions leave the 5h/wk cache
+      // stale: keep the last-known values but stamp their age instead of pretending they're live.
+      var age = (u.statuslineCache && u.cachedAtMs!=null) ? Date.now()-u.cachedAtMs : null;
+      var isStale = age!=null && age > STALE_MS;
+      var mark = isStale ? ago(age)+' ago' : '';
       setRow('ctx', u.ctx? u.ctx.pct : null, u.ctx? (human(u.ctx.tokens)+'/'+human(u.ctx.size)) : '');
-      setRow('5h', u.fiveHourPct, [until(u.fiveReset), u.fiveTokens? '~'+human(u.fiveTokens):''].filter(Boolean).join(' · '));
-      setRow('wk', u.weekPct, [until(u.weekReset), u.weekTokens? '~'+human(u.weekTokens):''].filter(Boolean).join(' · '));
+      setRow('5h', u.fiveHourPct, [until(u.fiveReset), u.fiveTokens? '~'+human(u.fiveTokens):'', mark].filter(Boolean).join(' · '));
+      setRow('wk', u.weekPct, [until(u.weekReset), u.weekTokens? '~'+human(u.weekTokens):'', mark].filter(Boolean).join(' · '));
       // Only nudge when the statusline cache is truly absent — not on a fresh session whose rate_limits
       // haven't arrived yet (cache present, 5h/wk momentarily null), nor on non-subscription plans.
       if(hint) hint.style.display = u.statuslineCache ? 'none' : 'block';
+      if(stale){ stale.style.display = isStale ? 'block' : 'none'; if(isStale) document.getElementById('ustale-age').textContent = ago(age); }
     }
+    setInterval(function(){ if(LASTU) renderUsage(LASTU); }, 60000); // the "Xm ago" stamp ticks between posts
     window.addEventListener('message', function(e){ var m=e.data||{};
       if(m.type==='usage'){ renderUsage(m.u); }
       else if(m.type==='stats'){ STATS=m.data; drawStats(); }
@@ -1116,15 +1127,22 @@ class StatsUsageViewProvider implements vscode.WebviewViewProvider {
     });
     child.on('close', () => {
       this.statsRunning = false;
-      let s: core.StatsResult;
+      let data: unknown;
       try {
-        s = JSON.parse(out) as core.StatsResult;
+        const s = JSON.parse(out) as core.StatsResult;
+        // Guard against a foreign process answering to `claude-observatory` on PATH: any
+        // valid-but-wrong JSON on stdout (e.g. a launch.json) would otherwise sail past the
+        // parse and throw inside statsData() — an *unhandled* exception in this callback that
+        // crashes the extension host and surfaces the raw payload. Require the StatsResult shape,
+        // and build the series inside the try so any throw routes to the clean error hint.
+        if (!s || !Array.isArray(s.daily) || !Array.isArray(s.hourly)) throw new Error('not a StatsResult');
+        data = statsData(s);
       } catch {
         this.postStatsError();
         return;
       }
       this.statsEverLoaded = true;
-      this.view?.webview.postMessage({ type: 'stats', data: statsData(s) });
+      this.view?.webview.postMessage({ type: 'stats', data });
     });
   }
   /** The #1 teammate-onboarding trap: .vsix installed but the global CLI missing → the panel used to
