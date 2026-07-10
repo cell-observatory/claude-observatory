@@ -79,7 +79,7 @@ class StoreReaderTest {
     }
 
     @Test
-    fun `listSessions reports counts and sorts newest first`() {
+    fun `listSessions sorts by log mtime (not max edit ts) and reports counts`() {
         writeLog(
             """{"id":1,"ts":1000,"tool":"Edit","file":"/w/a.txt","beforeBlob":"aa","afterBlob":"bb","status":"pending"}""",
             """{"op":"status","id":1,"status":"kept","ts":2000}""",
@@ -90,10 +90,17 @@ class StoreReaderTest {
             ClaudePaths.logPath(other),
             """{"id":1,"ts":9000,"tool":"Edit","file":"/w/z.txt","beforeBlob":"aa","afterBlob":"bb","status":"pending"}""" + "\n",
         )
+        // CONTRADICTING mtimes: `other` has the larger edit ts (9000) but the OLDER file mtime. A
+        // max(edit.ts) sort would rank `other` first; the correct mtime sort (matching core.listSessions)
+        // ranks `session` first. This is what makes the test discriminate against the old drift.
+        val ft = { ms: Long -> java.nio.file.attribute.FileTime.fromMillis(ms) }
+        Files.setLastModifiedTime(ClaudePaths.logPath(other), ft(1_000_000))
+        Files.setLastModifiedTime(ClaudePaths.logPath(session), ft(2_000_000))
         val sessions = StoreReader.listSessions()
         assertEquals(2, sessions.size)
-        assertEquals(other, sessions[0].id) // newest lastMs first
-        assertEquals(1, sessions[0].pending)
-        assertEquals(0, sessions[1].pending) // the kept edit is not pending
+        assertEquals(session, sessions[0].id) // newer log mtime first, NOT the larger edit ts
+        assertEquals(other, sessions[1].id)
+        assertEquals(0, sessions[0].pending) // session's edit was kept
+        assertEquals(1, sessions[1].pending) // other's edit is pending
     }
 }

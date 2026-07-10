@@ -9,6 +9,7 @@ const cp = require('child_process');
 
 const core = require('../dist/index.js');
 const CAPTURE = path.resolve(__dirname, '../../cli/dist/capture.js');
+const CLI = path.resolve(__dirname, '../../cli/dist/index.js');
 
 function freshHome() {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-home-'));
@@ -919,6 +920,37 @@ test('session: resolveSessionId picks newest and walks up from a subdirectory', 
   assert.equal(core.resolveSessionId(cwd), 'new');
   assert.equal(core.resolveSessionId(cwd + '/sub/deep'), 'new', 'ancestor walk');
   assert.equal(core.resolveSessionId('/nowhere/zzz'), null);
+});
+
+test('contract: each --json command emits the documented key set (rename-guard for both editors)', () => {
+  const home = freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'contract';
+  const F = path.join(tmpWork(), 'app.js');
+  seedEdit(S, F, 'a\n', 'a\nb\n'); // #1
+  seedEdit(S, F, 'a\nb\n', 'a\nB\n'); // #2
+  const env = { ...process.env, HOME: home, USERPROFILE: home, CLAUDE_OBSERVATORY_SESSION: S };
+  const runJson = (args) => JSON.parse(cp.execFileSync('node', [CLI, ...args], { env, encoding: 'utf8' }));
+  const hasKeys = (obj, keys, where) => {
+    for (const k of keys) assert.ok(obj && Object.prototype.hasOwnProperty.call(obj, k), `${where}: missing key "${k}"`);
+  };
+  // Read-only shapes (JetBrains + scripts key on these names — add fields, never rename).
+  const list = runJson(['list', '--json']);
+  hasKeys(list, ['session', 'edits'], 'list');
+  hasKeys(list.edits[0], ['id', 'ts', 'tool', 'file', 'status', 'added', 'removed'], 'list.edits[]');
+  hasKeys(runJson(['status', '--json']), ['hooksInstalled', 'hookScript', 'session', 'store', 'lastCaptureTs', 'counts', 'skipped'], 'status');
+  const sessions = runJson(['sessions', '--json']);
+  hasKeys(sessions, ['active', 'sessions'], 'sessions');
+  hasKeys(sessions.sessions[0], ['id', 'edits', 'pending', 'lastMs'], 'sessions.sessions[]');
+  hasKeys(runJson(['tree', '--json']), ['folders', 'files'], 'tree');
+  const observe = runJson(['observe']); // observe is always JSON
+  hasKeys(observe, ['session', 'recap', 'insights', 'suggestions', 'edits'], 'observe');
+  hasKeys(observe.edits[0], ['id', 'ts', 'tool', 'file', 'status', 'summary', 'reasoning', 'flags', 'memory', 'analysis'], 'observe.edits[]');
+  hasKeys(runJson(['usage']), ['staleMs'], 'usage');
+  // Mutations (undo/redo branch on `status`; keep on `kept`) — run these last.
+  hasKeys(runJson(['keep', '1', '--json']), ['kept', 'ids'], 'keep');
+  const undo = runJson(['undo', '2', '--json']);
+  hasKeys(undo, ['ok', 'status', 'message'], 'undo');
 });
 
 test('capture: hook subprocess records an edit and prints NOTHING to stdout', () => {

@@ -74,11 +74,18 @@ object StoreReader {
             .filter { Files.isDirectory(it) && it.resolve("log.jsonl").exists() }
             .map { dir ->
                 val log = readLog(dir.fileName.toString())
+                // mtime of log.jsonl — matches core.listSessions (store.ts). Status ops (keep/undo)
+                // bump the mtime but not any record.ts, so max(edit.ts) would drift after review.
+                val lastMs = try {
+                    Files.getLastModifiedTime(dir.resolve("log.jsonl")).toMillis()
+                } catch (_: Exception) {
+                    0L
+                }
                 SessionInfo(
                     id = dir.fileName.toString(),
                     edits = log.size,
                     pending = log.count { it.pending },
-                    lastMs = log.maxOfOrNull { it.ts } ?: 0L,
+                    lastMs = lastMs,
                 )
             }
             .sortedByDescending { it.lastMs }
