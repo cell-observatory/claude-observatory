@@ -30,6 +30,7 @@
                              displayName="Claude Observatory"
                              instance="com.cellobservatory.observatory.settings.ObservatoryConfigurable"/>
     <notificationGroup id="Claude Observatory" displayType="BALLOON"/>
+    <projectViewNodeDecorator implementation="com.cellobservatory.observatory.ui.ObservatoryNodeDecorator"/>
     <postStartupActivity implementation="com.cellobservatory.observatory.services.ObservatoryStartup"/>
   </extensions>
 

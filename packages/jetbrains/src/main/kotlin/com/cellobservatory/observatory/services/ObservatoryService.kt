@@ -49,15 +49,24 @@ class ObservatoryService(private val project: Project) : Disposable {
         }
     }
 
+    @Volatile private var pendingByFile: Map<String, Int> = emptyMap()
+
     /** Folded log for the current session, cached on the log file's (mtime,size). */
     fun log(): List<EditRecord> {
-        val session = currentSession() ?: return emptyList()
+        val session = currentSession() ?: run { pendingByFile = emptyMap(); return emptyList() }
         val key = "$session:${StoreReader.logKey(session)}"
         if (key != cachedKey) {
             cachedLog = StoreReader.readLog(session)
+            pendingByFile = cachedLog.filter { it.pending }.groupingBy { it.file }.eachCount() // for the Project-view decorator
             cachedKey = key
         }
         return cachedLog
+    }
+
+    /** Pending-edit count for a file path — O(1), cached with the log (drives the Project-view badge). */
+    fun pendingCount(path: String): Int {
+        log() // ensure the cache is current
+        return pendingByFile[path] ?: 0
     }
 
     // Review-loop cursor: id of the pending edit last opened, so repeated ←/→ invocations step
@@ -179,6 +188,13 @@ class ObservatoryStartup : ProjectActivity {
                 }
                 svc.addListener(updateBadge)
                 updateBadge.run()
+                // Re-run the Project-view decorator (pending-edit badges) on each store change; keep the
+                // tree expansion so it never collapses under the user.
+                svc.addListener {
+                    if (!project.isDisposed) {
+                        com.intellij.ide.projectView.ProjectView.getInstance(project).currentProjectViewPane?.updateFromRoot(true)
+                    }
+                }
             }
         }
     }
