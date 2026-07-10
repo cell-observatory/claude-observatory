@@ -2,7 +2,7 @@
   "name": "claude-observatory-vscode",
   "displayName": "Claude Observatory",
   "description": "A running list of every file change Claude Code makes, each with its own Keep / Undo (surgical, git-free).",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "publisher": "claude-observatory",
   "private": true,
   "engines": {
@@ -45,6 +45,11 @@
           "id": "claudeObservatory.diffs",
           "name": "Diffs",
           "icon": "media/icon.svg"
+        },
+        {
+          "id": "claudeObservatory.fileHistory",
+          "name": "File History",
+          "icon": "media/icon.svg"
         }
       ],
       "claudeObservatoryPanel": [
@@ -73,6 +78,10 @@
       {
         "view": "claudeObservatory.diffs",
         "contents": "No tracked Claude edits in this workspace yet."
+      },
+      {
+        "view": "claudeObservatory.fileHistory",
+        "contents": "Open a file Claude has edited to see its edit history here."
       },
       {
         "view": "claudeObservatory.timeline",
@@ -128,13 +137,25 @@
         "command": "claudeObservatory.keepFile",
         "title": "Keep all edits in file",
         "category": "Claude Observatory",
-        "icon": "$(check-all)"
+        "icon": "$(check)"
       },
       {
         "command": "claudeObservatory.undoFile",
         "title": "Undo all edits in file",
         "category": "Claude Observatory",
-        "icon": "$(discard)"
+        "icon": "$(close)"
+      },
+      {
+        "command": "claudeObservatory.keepOpenFile",
+        "title": "Accept all edits in this file",
+        "category": "Claude Observatory",
+        "icon": "$(check)"
+      },
+      {
+        "command": "claudeObservatory.undoOpenFile",
+        "title": "Revert all edits in this file",
+        "category": "Claude Observatory",
+        "icon": "$(close)"
       },
       {
         "command": "claudeObservatory.setup",
@@ -152,6 +173,41 @@
         "category": "Claude Observatory"
       },
       {
+        "command": "claudeObservatory.viewChanges",
+        "title": "View changes (inline review)",
+        "category": "Claude Observatory"
+      },
+      {
+        "command": "claudeObservatory.peekKeep",
+        "title": "Accept this edit",
+        "category": "Claude Observatory",
+        "icon": "$(check)"
+      },
+      {
+        "command": "claudeObservatory.peekUndo",
+        "title": "Revert this edit",
+        "category": "Claude Observatory",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "claudeObservatory.peekChat",
+        "title": "Chat about this edit",
+        "category": "Claude Observatory",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "claudeObservatory.peekPrev",
+        "title": "Previous edit in this file",
+        "category": "Claude Observatory",
+        "icon": "$(arrow-up)"
+      },
+      {
+        "command": "claudeObservatory.peekNext",
+        "title": "Next edit in this file",
+        "category": "Claude Observatory",
+        "icon": "$(arrow-down)"
+      },
+      {
         "command": "claudeObservatory.inlineKeep",
         "title": "Keep Claude edit",
         "category": "Claude Observatory"
@@ -162,10 +218,52 @@
         "category": "Claude Observatory"
       },
       {
+        "command": "claudeObservatory.diffKeep",
+        "title": "Keep this edit",
+        "category": "Claude Observatory",
+        "icon": "$(check)"
+      },
+      {
+        "command": "claudeObservatory.diffUndo",
+        "title": "Undo this edit",
+        "category": "Claude Observatory",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "claudeObservatory.diffChat",
+        "title": "Chat about this edit",
+        "category": "Claude Observatory",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "claudeObservatory.diffPrevEdit",
+        "title": "Previous edit in this file",
+        "category": "Claude Observatory",
+        "icon": "$(arrow-up)"
+      },
+      {
+        "command": "claudeObservatory.diffNextEdit",
+        "title": "Next edit in this file",
+        "category": "Claude Observatory",
+        "icon": "$(arrow-down)"
+      },
+      {
         "command": "claudeObservatory.toggleInline",
         "title": "Toggle inline review overlay",
         "category": "Claude Observatory",
         "icon": "$(eye)"
+      },
+      {
+        "command": "claudeObservatory.toggleHeatmap",
+        "title": "Toggle file heatmap (dim unmodified lines)",
+        "category": "Claude Observatory",
+        "icon": "$(file-text)"
+      },
+      {
+        "command": "claudeObservatory.switchSession",
+        "title": "Switch session",
+        "category": "Claude Observatory",
+        "icon": "$(versions)"
       },
       {
         "command": "claudeObservatory.keepAll",
@@ -209,10 +307,46 @@
         "icon": "$(sparkle)"
       },
       {
+        "command": "claudeObservatory.reviewPrev",
+        "title": "Review previous pending edit",
+        "category": "Claude Observatory",
+        "icon": "$(debug-step-back)"
+      },
+      {
         "command": "claudeObservatory.reviewNext",
         "title": "Review next pending edit",
         "category": "Claude Observatory",
         "icon": "$(debug-step-over)"
+      },
+      {
+        "command": "claudeObservatory.diffPrevRevision",
+        "title": "Diff previous revision of this file",
+        "category": "Claude Observatory",
+        "icon": "$(git-compare)"
+      },
+      {
+        "command": "claudeObservatory.diffNextRevision",
+        "title": "Diff next revision of this file",
+        "category": "Claude Observatory",
+        "icon": "$(git-compare)"
+      },
+      {
+        "command": "claudeObservatory.searchEdits",
+        "title": "Search edits",
+        "category": "Claude Observatory",
+        "icon": "$(search)"
+      },
+      {
+        "command": "claudeObservatory.exportSummary",
+        "title": "Export review summary",
+        "category": "Claude Observatory",
+        "icon": "$(export)"
+      },
+      {
+        "command": "claudeObservatory.doctor",
+        "title": "Setup check (doctor)",
+        "category": "Claude Observatory",
+        "icon": "$(pulse)"
       },
       {
         "command": "claudeObservatory.keepAtCursor",
@@ -232,6 +366,11 @@
         "mac": "alt+cmd+n"
       },
       {
+        "command": "claudeObservatory.reviewPrev",
+        "key": "ctrl+alt+p",
+        "mac": "alt+cmd+p"
+      },
+      {
         "command": "claudeObservatory.keepAtCursor",
         "key": "ctrl+alt+y",
         "mac": "alt+cmd+y",
@@ -242,44 +381,212 @@
         "key": "ctrl+alt+u",
         "mac": "alt+cmd+u",
         "when": "editorTextFocus"
+      },
+      {
+        "command": "claudeObservatory.keepOpenFile",
+        "key": "ctrl+alt+k",
+        "mac": "alt+cmd+k",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "claudeObservatory.undoOpenFile",
+        "key": "ctrl+alt+r",
+        "mac": "alt+cmd+r",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "claudeObservatory.diffPrevRevision",
+        "key": "ctrl+alt+[",
+        "mac": "alt+cmd+[",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "claudeObservatory.diffNextRevision",
+        "key": "ctrl+alt+]",
+        "mac": "alt+cmd+]",
+        "when": "editorTextFocus"
       }
     ],
     "menus": {
+      "comments/commentThread/title": [
+        {
+          "command": "claudeObservatory.peekKeep",
+          "when": "commentController == claudeObservatory && commentThread == claudeEdit",
+          "group": "inline@1"
+        },
+        {
+          "command": "claudeObservatory.peekUndo",
+          "when": "commentController == claudeObservatory && commentThread == claudeEdit",
+          "group": "inline@2"
+        },
+        {
+          "command": "claudeObservatory.peekChat",
+          "when": "commentController == claudeObservatory && commentThread == claudeEdit",
+          "group": "inline@3"
+        },
+        {
+          "command": "claudeObservatory.peekPrev",
+          "when": "commentController == claudeObservatory && commentThread == claudeEdit",
+          "group": "inline@4"
+        },
+        {
+          "command": "claudeObservatory.peekNext",
+          "when": "commentController == claudeObservatory && commentThread == claudeEdit",
+          "group": "inline@5"
+        }
+      ],
       "view/title": [
+        {
+          "command": "claudeObservatory.searchEdits",
+          "when": "view == claudeObservatory.edits || view == claudeObservatory.diffs",
+          "group": "navigation@1"
+        },
+        {
+          "command": "claudeObservatory.reviewPrev",
+          "when": "view == claudeObservatory.edits",
+          "group": "navigation@2"
+        },
         {
           "command": "claudeObservatory.reviewNext",
           "when": "view == claudeObservatory.edits",
-          "group": "navigation@0"
+          "group": "navigation@3"
         },
         {
           "command": "claudeObservatory.keepAll",
           "when": "view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline",
-          "group": "navigation@0"
+          "group": "navigation@4"
         },
         {
           "command": "claudeObservatory.undoAll",
           "when": "view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline",
-          "group": "navigation@1"
+          "group": "navigation@5"
+        },
+        {
+          "command": "claudeObservatory.keepOpenFile",
+          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs) && claudeObservatory.activeFileHasPending",
+          "group": "navigation@6"
+        },
+        {
+          "command": "claudeObservatory.undoOpenFile",
+          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs) && claudeObservatory.activeFileHasPending",
+          "group": "navigation@7"
         },
         {
           "command": "claudeObservatory.clearResolved",
           "when": "view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline || view == claudeObservatory.observations",
-          "group": "navigation@2"
+          "group": "navigation@8"
         },
         {
-          "command": "claudeObservatory.toggleInline",
-          "when": "view == claudeObservatory.edits",
-          "group": "navigation@2"
+          "command": "claudeObservatory.switchSession",
+          "when": "view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline || view == claudeObservatory.observations",
+          "group": "navigation@9"
         },
         {
           "command": "claudeObservatory.refresh",
           "when": "view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline || view == claudeObservatory.observations",
-          "group": "navigation@3"
+          "group": "navigation@10"
+        },
+        {
+          "command": "claudeObservatory.toggleInline",
+          "when": "view == claudeObservatory.edits",
+          "group": "navigation@11"
+        },
+        {
+          "command": "claudeObservatory.exportSummary",
+          "when": "view == claudeObservatory.edits || view == claudeObservatory.diffs",
+          "group": "1_export"
+        },
+        {
+          "command": "claudeObservatory.doctor",
+          "when": "view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.observations",
+          "group": "1_export"
         },
         {
           "command": "claudeObservatory.refreshRecap",
           "when": "view == claudeObservatory.observations",
           "group": "navigation@0"
+        },
+        {
+          "command": "claudeObservatory.diffPrevRevision",
+          "when": "view == claudeObservatory.fileHistory",
+          "group": "navigation@1"
+        },
+        {
+          "command": "claudeObservatory.diffNextRevision",
+          "when": "view == claudeObservatory.fileHistory",
+          "group": "navigation@2"
+        },
+        {
+          "command": "claudeObservatory.keepOpenFile",
+          "when": "view == claudeObservatory.fileHistory && claudeObservatory.activeFileHasPending",
+          "group": "navigation@3"
+        },
+        {
+          "command": "claudeObservatory.undoOpenFile",
+          "when": "view == claudeObservatory.fileHistory && claudeObservatory.activeFileHasPending",
+          "group": "navigation@4"
+        },
+        {
+          "command": "claudeObservatory.refresh",
+          "when": "view == claudeObservatory.fileHistory",
+          "group": "navigation@5"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "claudeObservatory.reviewPrev",
+          "when": "claudeObservatory.activeFileHasPending",
+          "group": "navigation@1"
+        },
+        {
+          "command": "claudeObservatory.reviewNext",
+          "when": "claudeObservatory.activeFileHasPending",
+          "group": "navigation@2"
+        },
+        {
+          "command": "claudeObservatory.keepOpenFile",
+          "when": "claudeObservatory.activeFileHasPending",
+          "group": "navigation@3"
+        },
+        {
+          "command": "claudeObservatory.undoOpenFile",
+          "when": "claudeObservatory.activeFileHasPending",
+          "group": "navigation@4"
+        },
+        {
+          "command": "claudeObservatory.searchEdits",
+          "when": "claudeObservatory.activeFileHasPending",
+          "group": "navigation@5"
+        },
+        {
+          "command": "claudeObservatory.toggleHeatmap",
+          "when": "claudeObservatory.activeFileHasPending",
+          "group": "navigation@6"
+        },
+        {
+          "command": "claudeObservatory.diffKeep",
+          "when": "isInDiffEditor && resourceScheme == claude-edit",
+          "group": "navigation@1"
+        },
+        {
+          "command": "claudeObservatory.diffUndo",
+          "when": "isInDiffEditor && resourceScheme == claude-edit",
+          "group": "navigation@2"
+        },
+        {
+          "command": "claudeObservatory.diffChat",
+          "when": "isInDiffEditor && resourceScheme == claude-edit",
+          "group": "navigation@3"
+        },
+        {
+          "command": "claudeObservatory.diffPrevEdit",
+          "when": "isInDiffEditor && resourceScheme == claude-edit",
+          "group": "navigation@4"
+        },
+        {
+          "command": "claudeObservatory.diffNextEdit",
+          "when": "isInDiffEditor && resourceScheme == claude-edit",
+          "group": "navigation@5"
         }
       ],
       "view/item/context": [
@@ -300,27 +607,27 @@
         },
         {
           "command": "claudeObservatory.keep",
-          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline) && viewItem == edit",
+          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline || view == claudeObservatory.fileHistory) && viewItem == edit",
           "group": "inline@1"
         },
         {
           "command": "claudeObservatory.undo",
-          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline) && viewItem == edit",
+          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline || view == claudeObservatory.fileHistory) && viewItem == edit",
           "group": "inline@2"
         },
         {
           "command": "claudeObservatory.openFile",
-          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline) && viewItem == edit",
+          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline || view == claudeObservatory.fileHistory) && viewItem == edit",
           "group": "navigation@1"
         },
         {
           "command": "claudeObservatory.redo",
-          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline) && viewItem == editUndone",
+          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline || view == claudeObservatory.fileHistory) && viewItem == editUndone",
           "group": "inline@1"
         },
         {
           "command": "claudeObservatory.openFile",
-          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline) && viewItem == editUndone",
+          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline || view == claudeObservatory.fileHistory) && viewItem == editUndone",
           "group": "navigation@1"
         },
         {
@@ -340,7 +647,7 @@
         },
         {
           "command": "claudeObservatory.chatEdit",
-          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline) && (viewItem == edit || viewItem == editUndone)",
+          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline || view == claudeObservatory.fileHistory) && (viewItem == edit || viewItem == editUndone)",
           "group": "navigation@2"
         }
       ]
@@ -353,10 +660,20 @@
           "default": true,
           "description": "Show Claude's pending edits inline in the editor (gutter change-bars + a per-edit ✨ marker with Keep/Undo/Diff/Chat on hover)."
         },
+        "claudeObservatory.inlineDiffView": {
+          "type": "boolean",
+          "default": true,
+          "description": "Open a Claude edit's before ⟷ after diff in the unified (inline) view — the red/green single-column look — instead of side-by-side. Best-effort: flips a freshly opened diff via VS Code's built-in inline toggle when your editor defaults to side-by-side."
+        },
         "claudeObservatory.claudeBin": {
           "type": "string",
           "default": "",
           "description": "Path to the `claude` CLI used for opt-in 'Analyze'/'Generate suggestions' (leave empty to auto-detect on PATH / common locations)."
+        },
+        "claudeObservatory.session": {
+          "type": "string",
+          "default": "",
+          "description": "Pin which capture session the observatory shows (a session id, e.g. `demo-showcase`). Leave empty to auto-resolve the newest session for the workspace. Use the 'Switch session' button to change it."
         }
       }
     }

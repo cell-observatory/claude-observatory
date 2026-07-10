@@ -1,9 +1,12 @@
 /**
  * Capture hook logic for Claude Observatory.
  *
- * Wired as PreToolUse + PostToolUse hooks (matcher: Edit|Write|MultiEdit|NotebookEdit).
- * Snapshots the WHOLE file off disk before and after each edit — robust across all four tools
- * (including Write overwrites and .ipynb JSON) and independent of tool_input string shapes.
+ * Wired as PreToolUse + PostToolUse hooks (matcher: Edit|Write|MultiEdit|NotebookEdit|Bash).
+ * For the four file tools it snapshots the WHOLE named file off disk before and after the edit.
+ * For Bash (which names no file) it snapshots the whole candidate tree under cwd before the command
+ * and diffs it after, recording one edit per changed/created/deleted file — so Bash-driven changes
+ * are fully undoable too. The Bash walk is bounded (skips vendor/build dirs, caps the file count) and
+ * degrades silently when a tree is too large; set CLAUDE_OBSERVATORY_NO_BASH=1 to opt out entirely.
  *
  * HARD RULES (preserve zero-token, non-blocking behavior):
  *   - never write to stdout (nothing must reach the model context)
@@ -22,12 +25,23 @@ import {
   writeStaging,
   readStaging,
   deleteStaging,
+  writeBashManifest,
+  readBashManifest,
+  deleteBashManifest,
   appendLog,
   nextId,
 } from './store';
 
 const MAX_BYTES = 5 * 1024 * 1024; // skip files larger than 5 MB
 const CAPTURED_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
+
+// Bash full-snapshot bounds — keep the per-command walk from ever hanging Claude on a huge tree.
+const BASH_MAX_FILES = 4000;
+const BASH_SKIP_DIRS = new Set([
+  '.git', 'node_modules', '.venv', 'venv', 'env', 'dist', 'build', 'out', 'target',
+  '.next', '.nuxt', '.svelte-kit', '.cache', '__pycache__', '.gradle', '.idea',
+  '.mypy_cache', '.pytest_cache', '.ruff_cache', 'vendor', 'coverage', '.terraform',
+]);
 
 interface HookPayload {
   session_id?: string;
@@ -119,6 +133,74 @@ function handlePost(session: string, payload: HookPayload): void {
   deleteStaging(session, key);
 }
 
+/** Walk files under root, skipping vendor/build dirs and symlinks. Returns false if it hit the file
+ *  cap (truncated) — the caller then degrades rather than record a partial/incorrect diff. */
+function walkCandidates(root: string, onFile: (abs: string) => void): boolean {
+  const stack: string[] = [root];
+  let count = 0;
+  while (stack.length) {
+    const dir = stack.pop() as string;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue; // unreadable dir — skip
+    }
+    for (const e of entries) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        if (!BASH_SKIP_DIRS.has(e.name)) stack.push(full); // isDirectory() is false for symlinks → no loops
+      } else if (e.isFile()) {
+        if (++count > BASH_MAX_FILES) return false;
+        onFile(full);
+      }
+    }
+  }
+  return true;
+}
+
+/** Bash Pre: snapshot the before-content of every candidate file under cwd into a manifest. */
+function handlePreBash(session: string, payload: HookPayload): void {
+  const cwd = payload.cwd;
+  if (!cwd) return;
+  ensureStore(session);
+  deleteBashManifest(session); // clear any stale manifest from an interrupted command
+  const files: Record<string, string | null> = {};
+  const ok = walkCandidates(cwd, (abs) => {
+    const s = snapshot(abs);
+    if (s.kind === 'text') files[abs] = writeBlob(session, s.content);
+  });
+  if (!ok) return; // tree too large — degrade silently rather than half-capture (no manifest → Post no-ops)
+  writeBashManifest(session, { files, ts: Date.now() });
+}
+
+/** Bash Post: diff the tree against the manifest and log one edit per changed/created/deleted file. */
+function handlePostBash(session: string, payload: HookPayload): void {
+  const cwd = payload.cwd;
+  if (!cwd) return;
+  const manifest = readBashManifest(session);
+  if (!manifest) return; // Pre skipped/truncated — nothing reliable to diff
+  const before = manifest.files;
+  const seen = new Set<string>();
+  const ok = walkCandidates(cwd, (abs) => {
+    seen.add(abs);
+    const s = snapshot(abs);
+    if (s.kind !== 'text') return;
+    const afterBlob = writeBlob(session, s.content);
+    const beforeBlob = Object.prototype.hasOwnProperty.call(before, abs) ? before[abs] : null;
+    if (beforeBlob === afterBlob) return; // unchanged — no edit
+    appendLog(session, { id: nextId(session), ts: Date.now(), tool: 'Bash', file: abs, beforeBlob, afterBlob, status: 'pending' });
+  });
+  // Deletions: present before, gone now. Only trust this when the post-walk wasn't truncated.
+  if (ok) {
+    for (const abs of Object.keys(before)) {
+      if (seen.has(abs) || before[abs] === null) continue;
+      appendLog(session, { id: nextId(session), ts: Date.now(), tool: 'Bash', file: abs, beforeBlob: before[abs], afterBlob: null, status: 'pending' });
+    }
+  }
+  deleteBashManifest(session);
+}
+
 /**
  * Read the hook payload from stdin and record the edit. Never throws, never writes stdout.
  * The caller is responsible for exit(0).
@@ -130,8 +212,15 @@ export function runCapture(): void {
     const payload = JSON.parse(raw) as HookPayload;
     const session = payload.session_id;
     if (!session) return;
-    if (payload.hook_event_name === 'PreToolUse') handlePre(session, payload);
-    else if (payload.hook_event_name === 'PostToolUse') handlePost(session, payload);
+    const isBash = payload.tool_name === 'Bash';
+    if (isBash && process.env.CLAUDE_OBSERVATORY_NO_BASH) return; // opt-out escape hatch
+    if (payload.hook_event_name === 'PreToolUse') {
+      if (isBash) handlePreBash(session, payload);
+      else handlePre(session, payload);
+    } else if (payload.hook_event_name === 'PostToolUse') {
+      if (isBash) handlePostBash(session, payload);
+      else handlePost(session, payload);
+    }
   } catch {
     // Silent by design: capture must never block, slow, or perturb an edit.
   }

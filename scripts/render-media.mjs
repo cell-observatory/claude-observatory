@@ -19,8 +19,8 @@ const CSS = `
     --bg:#1f1f1f; --side:#181818; --panel:#181818; --border:#2b2b2b; --border2:#3c3c3c;
     --ink:#cccccc; --dim:#9d9d9d; --faint:#6e6e6e;
     --pending:#d9a441; --kept:#3fb950; --reverted:#8b949e;
-    --blue:#4c8bf5; --purple:#9a6ac2; --orange:#c9713f; --accent:#4c8bf5;
-    --hl:rgba(63,185,80,0.10); --hlborder:#2ea043;
+    --blue:#4c8bf5; --purple:#9a6ac2; --orange:#c9713f; --accent:#4c8bf5; --coral:#cc785c;
+    --hl:rgba(63,185,80,0.09); --hlborder:#cc785c; --delborder:#f85149; --delhl:rgba(248,81,73,0.09);
   }
   body { font-family:-apple-system,'Segoe UI',sans-serif; font-size:13px; color:var(--ink); background:#000; }
   .mono { font-family:'SF Mono',Menlo,monospace; }
@@ -46,10 +46,30 @@ const CSS = `
   .codeline > span:last-child { white-space:pre; }
   .codeline .ln { width:44px; text-align:right; padding-right:16px; color:#6e7681; user-select:none; }
   .codeline.hl { background:var(--hl); box-shadow:inset 3px 0 0 var(--hlborder); }
+  /* deletion: red line highlight + bar with the removed line shown as red "ghost" text */
+  .codeline.del { background:var(--delhl); box-shadow:inset 3px 0 0 var(--delborder); }
+  .delnote { color:var(--delborder); font-style:italic; font-size:11.5px; margin-left:26px; }
   .codelens { font-size:11px; color:var(--dim); padding:2px 0 0 60px; font-family:-apple-system,sans-serif; }
-  .codelens a { color:var(--dim); text-decoration:none; margin-right:14px; }
+  .codelens a { color:var(--dim); text-decoration:none; margin-right:15px; }
+  .codelens a.why { font-style:italic; color:var(--faint); }
   .tok-k{color:#569cd6} .tok-f{color:#dcdcaa} .tok-s{color:#ce9178} .tok-c{color:#6a9955} .tok-v{color:#9cdcfe}
-  .sparkle { color:#8b8b8b; font-style:italic; font-size:11.5px; margin-left:26px; }
+  .gutstar { color:var(--coral); font-size:11px; margin-right:6px; }
+  /* inline review bubble — the comment-thread widget "view changes" opens, diff in git's colors */
+  .bubble { margin:4px 0 8px 60px; border:1px solid var(--border2); border-radius:6px; background:#252526;
+            overflow:hidden; max-width:900px; }
+  .bb-head { display:flex; align-items:center; gap:14px; padding:8px 13px; background:var(--side);
+             border-bottom:1px solid var(--border); font-size:12px; white-space:nowrap; }
+  .bb-head .bb-title { color:var(--ink); }
+  .bb-head .bb-id { color:var(--coral); font-family:'SF Mono',Menlo,monospace; }
+  .bb-head .bb-why { color:var(--faint); font-style:italic; overflow:hidden; text-overflow:ellipsis; }
+  .bb-tools { margin-left:auto; display:flex; gap:16px; white-space:nowrap; }
+  .bb-tools span { color:var(--dim); font-size:12px; }
+  .bb-diff { font-family:'SF Mono',Menlo,monospace; font-size:12px; line-height:1.7; padding:8px 0; }
+  .bb-diff .dl { display:block; padding:0 13px; white-space:pre; }
+  .bb-diff .add { background:rgba(63,185,80,0.15); color:#7ee787; }
+  .bb-diff .rem { background:rgba(248,81,73,0.15); color:#ffa198; }
+  .bb-diff .ctx { color:var(--dim); }
+  .bb-diff .hunk { color:var(--blue); }
   /* panel bits */
   .paneltabs { display:flex; gap:18px; padding:6px 16px 0; font-size:11px; letter-spacing:.05em; color:var(--faint);
                border-bottom:1px solid var(--border); background:var(--panel); }
@@ -88,6 +108,13 @@ const CSS = `
                box-shadow:0 6px 24px rgba(0,0,0,.5); font-size:12px; width:340px; }
   .hovercard .actions { display:flex; gap:12px; margin-top:8px; }
   .hovercard .actions span { color:var(--accent); font-size:12px; }
+  /* review scoreboard (Stats) */
+  .scoreboard { display:flex; gap:6px; margin:2px 16px 8px; }
+  .sc { flex:1; text-align:center; border:1px solid var(--border); border-radius:6px; padding:6px 2px; }
+  .scn { font-size:18px; font-weight:600; line-height:1.05; font-family:'SF Mono',Menlo,monospace; }
+  .scl { font-size:8.5px; text-transform:uppercase; letter-spacing:.06em; color:var(--dim); margin-top:2px; }
+  .scmeta { display:flex; justify-content:space-between; font-size:9px; color:var(--dim); margin:5px 16px 0;
+            font-family:'SF Mono',Menlo,monospace; }
 `;
 
 const scene = (w, body) =>
@@ -108,22 +135,57 @@ const editsTree = `
   <div class="trow" style="padding-left:26px"><span class="tw"></span><span class="ic">📄</span>index.js<span class="meta">1 edit · 1 pending</span></div>
   <div class="trow mono" style="padding-left:60px"><span class="dot" style="background:var(--pending)"></span>&nbsp;#3&nbsp; +4 −0<span class="meta"><span class="pill p-pending">pending</span></span></div>`;
 
-const editorCode = (withHover) => `
+const editorCode = () => `
   <div style="background:var(--bg);padding:10px 0 14px;">
-    <div class="codelens"><a>✓ Keep #2</a><a>↩ Undo</a><a>± Diff</a></div>
+    <div class="codelens"><a>✨ #2 +4 −0 view changes</a><a>✓ Keep</a><a>↩ Undo</a><a>💬 Chat</a><a>⧉ View diff</a></div>
     <div class="codeline"><span class="ln">5</span><span>  <span class="tok-f">greet</span>() {</span></div>
     <div class="codeline"><span class="ln">6</span><span>    <span class="tok-k">return</span> <span class="tok-s">\`Hello, my name is \${</span><span class="tok-v">this</span><span class="tok-s">.name}!\`</span>;</span></div>
     <div class="codeline"><span class="ln">7</span><span>  }</span></div>
     <div class="codeline hl"><span class="ln">8</span><span></span></div>
-    <div class="codeline hl"><span class="ln">9</span><span>  <span class="tok-f">farewell</span>() {<span class="sparkle">✨ #2</span></span></div>
+    <div class="codeline hl"><span class="ln">9</span><span class="gutstar">✨</span><span>  <span class="tok-f">farewell</span>() {</span></div>
     <div class="codeline hl"><span class="ln">10</span><span>    <span class="tok-k">return</span> <span class="tok-s">\`Goodbye from \${</span><span class="tok-v">this</span><span class="tok-s">.name}!\`</span>;</span></div>
     <div class="codeline hl"><span class="ln">11</span><span>  }</span></div>
     <div class="codeline"><span class="ln">12</span><span>}</span></div>
-    ${withHover ? `<div class="hovercard" style="margin:10px 0 0 120px;">
-      <b>Claude edit #2</b> · Edit<br>
-      <span style="color:var(--dim)">💭 "Operation 2 — edit that existing file to add a farewell() method…"</span>
-      <div class="actions"><span>✓ Keep</span><span>↩ Undo</span><span>± Diff</span><span>💬 Chat</span></div>
-    </div>` : ''}
+  </div>`;
+
+// inline frame showing a single edit that BOTH adds (green) and deletes (red rule) — feature closeup
+const editorCodeCombined = () => `
+  <div style="background:var(--bg);padding:10px 0 14px;">
+    <div class="codelens"><a>✨ #5 +2 −4 view changes</a><a>✓ Keep</a><a>↩ Undo</a><a>💬 Chat</a><a>⧉ View diff</a></div>
+    <div class="codeline"><span class="ln">2</span><span>  <span class="tok-f">constructor</span>(<span class="tok-v">name</span>) {</span></div>
+    <div class="codeline"><span class="ln">3</span><span>    <span class="tok-v">this</span>.name = name;</span></div>
+    <div class="codeline"><span class="ln">4</span><span>  }</span></div>
+    <div class="codeline del"><span class="ln">5</span><span>}<span class="delnote">− greet() { …(+3)</span></span></div>
+    <div class="codeline"><span class="ln">6</span><span></span></div>
+    <div class="codeline hl"><span class="ln">7</span><span class="gutstar">✨</span><span><span class="tok-v">User</span>.role = <span class="tok-s">'member'</span>;</span></div>
+    <div class="codeline"><span class="ln">8</span><span></span></div>
+    <div class="codeline"><span class="ln">9</span><span><span class="tok-k">module</span>.exports = <span class="tok-v">User</span>;</span></div>
+  </div>`;
+
+// the inline review bubble that "view changes" opens at the edit (comment-thread widget): the diff in
+// git's own colors + reasoning + counts in the body, Accept/Revert/Chat/Prev/Next on its toolbar
+const dl = (kind, text) => `<span class="dl ${kind}">${text}</span>`;
+const reviewBubble = () => `
+  <div class="bubble">
+    <div class="bb-head">
+      <span class="bb-title">✨ Claude edit <span class="bb-id">#5</span></span>
+      <span class="bb-id">+2 −4</span>
+      <span class="bb-why">💭 dropped greet(); added a role field</span>
+      <span class="bb-tools"><span>✓ Accept</span><span>↩ Revert</span><span>💬 Chat</span><span>↑ Prev</span><span>↓ Next</span></span>
+    </div>
+    <div class="bb-diff">
+      ${dl('hunk', '@@ -2,9 +2,7 @@')}
+      ${dl('ctx', '   constructor(name) {')}
+      ${dl('ctx', '     this.name = name;')}
+      ${dl('ctx', '   }')}
+      ${dl('rem', '-  greet() {')}
+      ${dl('rem', '-    return `Hello, my name is ${this.name}!`;')}
+      ${dl('rem', '-  }')}
+      ${dl('rem', '-')}
+      ${dl('add', "+  User.role = 'member';")}
+      ${dl('add', '+  User.active = true;')}
+      ${dl('ctx', '     module.exports = User;')}
+    </div>
   </div>`;
 
 const observationsCol = `
@@ -161,14 +223,20 @@ const step = (pts, color, H) => {
   return `<path d="${d}" fill="none" stroke="${color}" stroke-width="1.6" vector-effect="non-scaling-stroke"/>`;
 };
 
+// Live review scoreboard: pending / accepted / reverted counts + a progress bar (reviewed / total).
+const reviewBoard = `
+  <div class="scoreboard">
+    <div class="sc"><div class="scn" style="color:var(--pending)">3</div><div class="scl">pending</div></div>
+    <div class="sc"><div class="scn" style="color:var(--kept)">42</div><div class="scl">accepted</div></div>
+    <div class="sc"><div class="scn" style="color:var(--reverted)">5</div><div class="scl">reverted</div></div>
+  </div>
+  <div class="track" style="margin:0 16px"><span class="fill" style="width:94%;background:var(--blue)"></span></div>
+  <div class="scmeta"><span>47 of 50 reviewed (94%)</span><span>89% accepted</span></div>`;
+
 const statsCol = (H1 = 52, H2 = 52) => `
+  ${reviewBoard}
+  <div style="border-top:1px solid var(--border);margin:10px 16px 6px"></div>
   <div class="seg"><div>Today</div><div class="on">7 days</div><div>30 days</div></div>
-  ${stepPlot('EDITS',
-    `<span><i style="background:var(--pending)"></i>pending</span><span><i style="background:var(--kept)"></i>accepted</span><span><i style="background:var(--reverted)"></i>reverted</span>`,
-    step([0.05, 0.1, 0.05, 0.3, 0.15, 0.9, 0.55], 'var(--pending)', H1) +
-    step([0.02, 0.3, 0.4, 0.15, 0.5, 0.6, 0.75], 'var(--kept)', H1) +
-    step([0, 0.05, 0.02, 0.05, 0.1, 0.15, 0.08], 'var(--reverted)', H1),
-    [['58', 4], ['29', H1 / 2]], H1)}
   ${stepPlot('TOKENS',
     `<span><i style="background:var(--blue)"></i>total</span><span><i style="background:var(--purple)"></i>input</span><span><i style="background:var(--orange)"></i>output</span>`,
     step([0.55, 0.7, 0.6, 0.75, 0.65, 0.97, 0.9], 'var(--blue)', H2) +
@@ -197,12 +265,13 @@ const scenes = {
           <div style="padding:10px 14px 2px;font-size:11px;color:var(--dim);letter-spacing:.06em;">CLAUDE OBSERVATORY</div>
           ${editsTree}
           <div class="viewhead" style="border-top:1px solid var(--border);margin-top:8px;">DIFFS</div>
+          <div class="viewhead" style="border-top:1px solid var(--border);">FILE HISTORY <span style="float:right;color:var(--faint)">User.js</span></div>
         </div>
         <div style="flex:1;display:flex;flex-direction:column;">
           <div style="display:flex;background:var(--side);border-bottom:1px solid var(--border);">
             <div style="padding:8px 18px;background:var(--bg);border-right:1px solid var(--border);font-size:12.5px;">User.js</div>
           </div>
-          ${editorCode(false)}
+          ${editorCode()}
         </div>
       </div>
       <div style="border-top:1px solid var(--border);background:var(--panel);">
@@ -225,8 +294,9 @@ const scenes = {
       <div style="display:flex;background:var(--side);border-bottom:1px solid var(--border);">
         <div style="padding:8px 18px;background:var(--bg);border-right:1px solid var(--border);font-size:12.5px;">User.js</div>
       </div>
-      ${editorCode(true)}
-      <div class="statusbar"><span class="sb-warn">${microscope} 3</span><span style="color:var(--faint)">⌥⌘N next · ⌥⌘Y keep · ⌥⌘U undo</span></div>
+      ${editorCodeCombined()}
+      ${reviewBubble()}
+      <div class="statusbar"><span class="sb-warn">${microscope} 3</span><span style="color:var(--faint)">⌥⌘N next · ⌥⌘Y keep · ⌥⌘U undo · ⌥⌘[ / ⌥⌘] revisions</span></div>
     </div>`),
 
   // C. observations panel closeup
@@ -262,8 +332,21 @@ for (const [name, html] of Object.entries(scenes)) {
     '--headless', '--disable-gpu', '--default-background-color=00000000',
     '--force-device-scale-factor=2', '--hide-scrollbars',
     `--screenshot=${join(OUT, `${name}.png`)}`,
-    `--window-size=${name === 'layout' ? '1568,830' : name === 'stats' ? '808,478' : name === 'inline-review' ? '1028,436' : '1028,344'}`,
+    `--window-size=${name === 'layout' ? '1568,830' : name === 'stats' ? '808,478' : name === 'inline-review' ? '1028,720' : '1028,344'}`,
     `file://${src}`,
+  ], { stdio: 'pipe' });
+  console.log('rendered', `${name}.png`);
+}
+
+// Full-window mockups authored as standalone .src.html (their own PyCharm/JetBrains New-UI styling,
+// which the shared VS Code scene bits above don't cover). Each sets its own 1568x830 body size.
+for (const name of ['pyc-layout']) {
+  execFileSync(CHROME, [
+    '--headless', '--disable-gpu', '--default-background-color=00000000',
+    '--force-device-scale-factor=2', '--hide-scrollbars',
+    `--screenshot=${join(OUT, `${name}.png`)}`,
+    '--window-size=1568,830',
+    `file://${join(OUT, `${name}.src.html`)}`,
   ], { stdio: 'pipe' });
   console.log('rendered', `${name}.png`);
 }

@@ -48,19 +48,20 @@ function nvmBins(name: string): string[] {
   }
 }
 
-/** Best-effort location of the `claude` binary (GUI apps and SSH-launched remote hosts often lack
- *  ~/.local/bin on PATH). */
-export function resolveClaudeBin(configured?: string): string {
+/** Best-effort location of a globally-installed bin (`claude`, `claude-observatory`) — GUI apps and
+ *  SSH-launched remote hosts often lack ~/.local/bin and the nvm/volta dirs on PATH. Shared by the
+ *  CLI resolver below and the VS Code stats subprocess so the candidate list lives in exactly one place. */
+export function resolveBin(name: string, opts: { configured?: string; env?: string } = {}): string {
   const cands = [
-    configured,
-    process.env.CLAUDE_BIN,
-    path.join(os.homedir(), '.local', 'bin', 'claude'),
-    '/opt/homebrew/bin/claude',
-    '/usr/local/bin/claude',
-    path.join(os.homedir(), '.npm-global', 'bin', 'claude'),
-    path.join(os.homedir(), '.volta', 'bin', 'claude'),
-    ...nvmBins('claude'),
-    process.env.APPDATA ? path.join(process.env.APPDATA, 'npm', 'claude.cmd') : undefined,
+    opts.configured,
+    opts.env ? process.env[opts.env] : undefined,
+    path.join(os.homedir(), '.local', 'bin', name),
+    `/opt/homebrew/bin/${name}`,
+    `/usr/local/bin/${name}`,
+    path.join(os.homedir(), '.npm-global', 'bin', name),
+    path.join(os.homedir(), '.volta', 'bin', name),
+    ...nvmBins(name),
+    process.env.APPDATA ? path.join(process.env.APPDATA, 'npm', `${name}.cmd`) : undefined,
   ].filter(Boolean) as string[];
   for (const c of cands) {
     try {
@@ -69,7 +70,12 @@ export function resolveClaudeBin(configured?: string): string {
       /* ignore */
     }
   }
-  return 'claude'; // fall back to PATH
+  return name; // fall back to PATH
+}
+
+/** Best-effort location of the `claude` binary. */
+export function resolveClaudeBin(configured?: string): string {
+  return resolveBin('claude', { configured, env: 'CLAUDE_BIN' });
 }
 
 /** Run `claude -p` with `prompt` on stdin; resolve stdout. Rejects on spawn error / non-zero / timeout.

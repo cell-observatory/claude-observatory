@@ -3,6 +3,7 @@ package com.cellobservatory.observatory.actions
 import com.cellobservatory.observatory.services.ObservatoryService
 import com.cellobservatory.observatory.ui.Navigate
 import com.cellobservatory.observatory.ui.ReviewOps
+import com.cellobservatory.observatory.ui.RevisionNav
 import com.intellij.notification.NotificationType
 import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnAction
@@ -10,7 +11,7 @@ import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.CommonDataKeys
 import com.intellij.openapi.project.DumbAware
 
-/** ⌥⌘N — jump to the oldest pending edit (the keyboard review loop's entry point). */
+/** ⌥⌘N — step to the next pending edit, cycling through all of them (the keyboard review loop). */
 class ReviewNextAction : AnAction(), DumbAware {
     override fun getActionUpdateThread() = ActionUpdateThread.BGT
     override fun update(e: AnActionEvent) {
@@ -22,9 +23,27 @@ class ReviewNextAction : AnAction(), DumbAware {
         val service = ObservatoryService.getInstance(project)
         val session = service.currentSession()
             ?: return ReviewOps.notify(project, "No active Claude Code session for this project", NotificationType.WARNING)
-        val next = service.log().filter { it.pending }.minByOrNull { it.id }
+        val next = service.nextPendingEdit()
             ?: return ReviewOps.notify(project, "No pending Claude edits — all caught up")
         Navigate.openFileAtEdit(project, session, next)
+    }
+}
+
+/** ⌥⌘P — step to the previous pending edit, cycling through all of them (the keyboard review loop). */
+class ReviewPrevAction : AnAction(), DumbAware {
+    override fun getActionUpdateThread() = ActionUpdateThread.BGT
+    override fun update(e: AnActionEvent) {
+        e.presentation.isEnabled = e.project != null
+    }
+
+    override fun actionPerformed(e: AnActionEvent) {
+        val project = e.project ?: return
+        val service = ObservatoryService.getInstance(project)
+        val session = service.currentSession()
+            ?: return ReviewOps.notify(project, "No active Claude Code session for this project", NotificationType.WARNING)
+        val prev = service.prevPendingEdit()
+            ?: return ReviewOps.notify(project, "No pending Claude edits — all caught up")
+        Navigate.openFileAtEdit(project, session, prev)
     }
 }
 
@@ -67,5 +86,33 @@ class UndoAtCursorAction : AnAction(), DumbAware {
                 ReviewOps.undoOrRedo(project, session, rec, redo = false)
             }
         }
+    }
+}
+
+/** ⌥⌘[ — diff the current file against the state the previous Claude edit produced. */
+class DiffPrevRevisionAction : AnAction(), DumbAware {
+    override fun getActionUpdateThread() = ActionUpdateThread.BGT
+    override fun update(e: AnActionEvent) {
+        e.presentation.isEnabled = e.project != null && e.getData(CommonDataKeys.EDITOR) != null
+    }
+
+    override fun actionPerformed(e: AnActionEvent) {
+        val project = e.project ?: return
+        val editor = e.getData(CommonDataKeys.EDITOR) ?: return
+        RevisionNav.step(project, editor, -1)
+    }
+}
+
+/** ⌥⌘] — diff the current file against the state the next Claude edit produced. */
+class DiffNextRevisionAction : AnAction(), DumbAware {
+    override fun getActionUpdateThread() = ActionUpdateThread.BGT
+    override fun update(e: AnActionEvent) {
+        e.presentation.isEnabled = e.project != null && e.getData(CommonDataKeys.EDITOR) != null
+    }
+
+    override fun actionPerformed(e: AnActionEvent) {
+        val project = e.project ?: return
+        val editor = e.getData(CommonDataKeys.EDITOR) ?: return
+        RevisionNav.step(project, editor, 1)
     }
 }

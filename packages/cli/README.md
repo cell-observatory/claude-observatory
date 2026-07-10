@@ -5,9 +5,18 @@ Standalone, git-free, **per-edit Keep / Undo for [Claude Code](https://claude.co
 ## Install
 
 ```bash
-npm i -g claude-observatory
+# one command — installs the CLI + editor extensions from the latest release, then wires hooks
+curl -fsSL https://raw.githubusercontent.com/cell-observatory/claude-observatory/main/scripts/bootstrap.sh | bash
+```
+
+Or install just the CLI from a [release](https://github.com/cell-observatory/claude-observatory/releases) tarball:
+
+```bash
+npm i -g ./claude-observatory-<ver>.tgz
 claude-observatory init --with-statusline   # run with Claude Code CLOSED, then launch it — sessions now capture
 ```
+
+Update anytime with `claude-observatory update` (or re-run the bootstrap).
 
 `--with-statusline` also installs the **bundled** [claude-statusline](https://github.com/cell-observatory/claude-statusline) (no download — it ships inside this package) so the editor sidebars can show 5h/week plan-usage bars. Install/refresh it any time with `claude-observatory statusline`.
 

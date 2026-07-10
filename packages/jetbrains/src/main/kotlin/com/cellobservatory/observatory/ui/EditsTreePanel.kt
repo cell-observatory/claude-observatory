@@ -1,6 +1,8 @@
 package com.cellobservatory.observatory.ui
 
 import com.cellobservatory.observatory.model.EditRecord
+import com.cellobservatory.observatory.model.TreeFileNode
+import com.cellobservatory.observatory.model.TreeFolderNode
 import com.cellobservatory.observatory.model.relTime
 import com.cellobservatory.observatory.services.ObservatoryService
 import com.intellij.icons.AllIcons
@@ -68,8 +70,6 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
         })
         PopupHandler.installPopupMenu(tree, buildPopupGroup(), "ClaudeObservatoryTreePopup")
         ObservatoryService.getInstance(project).addListener(refreshListener)
-        // Regroup by class once background locate results land (placementsFor above is async).
-        com.cellobservatory.observatory.services.PlacementsCache.getInstance(project).addUpdateListener { rebuild() }
         rebuild()
     }
 
@@ -89,112 +89,39 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
     private fun selectedFile(): NodeData.FileN? =
         (tree.lastSelectedPathComponent as? DefaultMutableTreeNode)?.userObject as? NodeData.FileN
 
-    // --- tree building ---
+    // --- tree building (renders core's `tree --json` view-model; no local tree/class logic) ---
 
     fun rebuild() {
-        val log = service().log()
+        val vm = service().editTree()
+        val q = service().filterQuery
+        tree.emptyText.clear()
+        tree.emptyText.appendLine(if (q.isNotBlank()) "No edits match \"$q\"" else "No tracked Claude edits yet")
+        if (q.isBlank()) tree.emptyText.appendLine("Run `claude-observatory init`, then let Claude Code edit.")
         root.removeAllChildren()
-        if (log.isNotEmpty()) {
-            val base = project.basePath
-            val byRel = LinkedHashMap<String, MutableList<EditRecord>>()
-            for (r in log) {
-                val rel = relPath(base, r.file)
-                byRel.getOrPut(rel) { mutableListOf() }.add(r)
-            }
-            addChildren("", byRel.keys.toList(), byRel, root)
+        if (vm != null) {
+            for (f in vm.folders) addFolderNode(root, f)
+            for (file in vm.files) addFileNode(root, file)
         }
         model.reload()
         TreeUtil.expandAll(tree)
     }
 
-    private fun relPath(base: String?, file: String): String {
-        if (base != null && file.startsWith("$base/")) return file.removePrefix("$base/")
-        return file.trimStart('/')
+    private fun addFolderNode(parent: DefaultMutableTreeNode, f: TreeFolderNode) {
+        val node = DefaultMutableTreeNode(NodeData.Folder(f.label))
+        parent.add(node)
+        for (sub in f.folders) addFolderNode(node, sub)
+        for (file in f.files) addFileNode(node, file)
     }
 
-    /** Folder grouping with single-child chain compaction — port of the VS Code tree logic. */
-    private fun addChildren(
-        prefix: String,
-        rels: List<String>,
-        byRel: Map<String, List<EditRecord>>,
-        parent: DefaultMutableTreeNode,
-    ) {
-        val files = rels.filter { !it.removePrefix(prefix).contains('/') }
-        val folderGroups = rels.filter { it.removePrefix(prefix).contains('/') }
-            .groupBy { it.removePrefix(prefix).substringBefore('/') }
-        for ((seg, children) in folderGroups.toSortedMap()) {
-            var label = seg
-            var pfx = "$prefix$seg/"
-            while (true) { // compact folder chains with a single folder child and no terminating file
-                val subs = children.map { it.removePrefix(pfx) }
-                if (subs.isEmpty() || subs.any { !it.contains('/') }) break
-                val nextSegs = subs.map { it.substringBefore('/') }.toSet()
-                if (nextSegs.size != 1) break
-                label += "/${nextSegs.first()}"
-                pfx += "${nextSegs.first()}/"
-            }
-            val node = DefaultMutableTreeNode(NodeData.Folder(label))
-            parent.add(node)
-            addChildren(pfx, children, byRel, node)
-        }
-        for (rel in files.sorted()) {
-            val recs = byRel[rel] ?: continue
-            val fileNode = DefaultMutableTreeNode(NodeData.FileN(rel, recs.first().file, recs))
-            parent.add(fileNode)
-            addFileChildren(fileNode, recs)
-        }
-    }
-
-    /** Group a file's edits under the class each currently falls in (folder → file → class → edit).
-     *  Line geometry comes from the placements cache; a cache miss renders flat and regroups when
-     *  the background locate lands (the cache update triggers a service refresh → rebuild). */
-    private fun addFileChildren(fileNode: DefaultMutableTreeNode, recs: List<EditRecord>) {
-        val file = recs.first().file
-        val f = File(file)
-        val text = if (f.isFile && f.length() < 512 * 1024) runCatching { f.readText() }.getOrNull() else null
-        val placements = text?.let {
-            com.cellobservatory.observatory.services.PlacementsCache.getInstance(project)
-                .placementsFor(file, it, "${f.lastModified()}:${f.length()}")
-        }
-        val spans = text?.let { com.cellobservatory.observatory.core.Classes.detectClasses(it) } ?: emptyList()
-        if (text == null || placements == null || spans.isEmpty()) {
-            for (r in recs) fileNode.add(DefaultMutableTreeNode(editData(r)))
-            return
-        }
-        val byClass = LinkedHashMap<String, Pair<com.cellobservatory.observatory.core.ClassSpan, MutableList<EditRecord>>>()
-        val loose = mutableListOf<EditRecord>()
-        for (r in recs) {
-            val line = placements.find { it.id == r.id }?.lines?.firstOrNull()
-            val span = line?.let { com.cellobservatory.observatory.core.Classes.classAt(spans, it) }
-            if (span == null) loose.add(r)
-            else byClass.getOrPut("${span.name}@${span.start}") { span to mutableListOf() }.second.add(r)
-        }
-        for ((span, edits) in byClass.values) {
-            val clsNode = DefaultMutableTreeNode(NodeData.Cls(span.name, edits.size, edits.count { it.pending }))
+    private fun addFileNode(parent: DefaultMutableTreeNode, file: TreeFileNode) {
+        val fileNode = DefaultMutableTreeNode(NodeData.FileN(file.rel, file.file, file.allEdits))
+        parent.add(fileNode)
+        for (cls in file.classes) {
+            val clsNode = DefaultMutableTreeNode(NodeData.Cls(cls.name, cls.edits.size, cls.edits.count { it.rec.pending }))
             fileNode.add(clsNode)
-            for (r in edits) clsNode.add(DefaultMutableTreeNode(editData(r)))
+            for (e in cls.edits) clsNode.add(DefaultMutableTreeNode(NodeData.Edit(e.rec, e.added, e.removed)))
         }
-        for (r in loose) fileNode.add(DefaultMutableTreeNode(editData(r)))
-    }
-
-    private fun editData(rec: EditRecord): NodeData.Edit {
-        // Line delta comes from list --json in Phase 2's cache; a cheap blob-line diff keeps Phase 1 offline.
-        val session = service().currentSession()
-        var added = 0
-        var removed = 0
-        if (session != null) {
-            val before = com.cellobservatory.observatory.core.StoreReader.readBlob(session, rec.beforeBlob)
-            val after = com.cellobservatory.observatory.core.StoreReader.readBlob(session, rec.afterBlob)
-            val b = if (before.isEmpty()) emptyList() else before.lines()
-            val a = if (after.isEmpty()) emptyList() else after.lines()
-            // upper-bound estimate (exact per-hunk deltas arrive with the placements cache)
-            added = (a.size - b.size).coerceAtLeast(0)
-            removed = (b.size - a.size).coerceAtLeast(0)
-            if (added == 0 && removed == 0 && before != after) {
-                added = 1; removed = 1
-            }
-        }
-        return NodeData.Edit(rec, added, removed)
+        for (e in file.loose) fileNode.add(DefaultMutableTreeNode(NodeData.Edit(e.rec, e.added, e.removed)))
     }
 
     // --- rendering ---
@@ -246,8 +173,10 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
 
     private fun buildToolbar(): javax.swing.JComponent {
         val group = DefaultActionGroup(
-            action("Refresh", AllIcons.Actions.Refresh) { service().refresh() },
-            action("Accept All Edits", AllIcons.Actions.Commit) {
+            action("Search Edits", AllIcons.Actions.Find) { searchEdits() },
+            action("Review Previous Pending Edit", AllIcons.Actions.Back) { reviewPrev() },
+            action("Review Next Pending Edit", AllIcons.Actions.Forward) { reviewNext() },
+            action("Accept All Edits", Icons.CheckAll) {
                 withSession { s -> ReviewOps.keepAll(project, s) }
             },
             action("Revert All Edits", AllIcons.Actions.Rollback) {
@@ -259,6 +188,10 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
                     if (resolved > 0) ReviewOps.clearResolved(project, s, resolved)
                 }
             },
+            action("Switch Session", AllIcons.Vcs.Branch) { switchSession() },
+            action("Refresh", AllIcons.Actions.Refresh) { service().refresh() },
+            action("Export Review Summary", AllIcons.ToolbarDecorator.Export) { exportSummary() },
+            action("Setup Check (doctor)", AllIcons.General.Information) { runDoctor() },
         )
         val tb = ActionManager.getInstance().createActionToolbar("ClaudeObservatoryTree", group, true)
         tb.targetComponent = tree
@@ -266,6 +199,8 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
     }
 
     private fun buildPopupGroup(): DefaultActionGroup = DefaultActionGroup(
+        action("Review Previous Pending Edit", AllIcons.Actions.Back) { reviewPrev() },
+        action("Review Next Pending Edit", AllIcons.Actions.Forward) { reviewNext() },
         action("Open File at Edit", AllIcons.Actions.EditSource) {
             selectedEdit()?.let { rec -> withSession { s -> Navigate.openFileAtEdit(project, s, rec) } }
         },
@@ -289,10 +224,99 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
                 }
             }
         },
+        action("Keep All in File", Icons.CheckAll) {
+            selectedFile()?.let { f -> withSession { s -> ReviewOps.keepAll(project, s, f.edits, File(f.file).name) } }
+        },
         action("Undo All in File", AllIcons.Actions.Rollback) {
             selectedFile()?.let { f -> withSession { s -> ReviewOps.undoAll(project, s, f.edits, File(f.file).name) } }
         },
     )
+
+    /** Export a shareable markdown review summary (kept/reverted per file) and open it in an editor tab.
+     *  Runs the CLI off the EDT (parity with VS Code's core-in-process export — same markdown). */
+    private fun exportSummary() = withSession { s ->
+        runAndOpenMarkdown("claude-review-summary", "Could not generate a review summary (is the claude-observatory CLI installed?)") {
+            com.cellobservatory.observatory.core.ObservatoryCli.summaryMarkdown(s, project.basePath)
+        }
+    }
+
+    /** Run `doctor` and open the setup diagnostics (hooks, PATH, config, session, status line) in a tab. */
+    private fun runDoctor() {
+        runAndOpenMarkdown("claude-observatory-doctor", "Could not run doctor (is the claude-observatory CLI installed?)") {
+            com.cellobservatory.observatory.core.ObservatoryCli.doctorMarkdown(project.basePath)
+        }
+    }
+
+    /** Fetch markdown off the EDT and open it in an editor tab (or notify on failure). */
+    private fun runAndOpenMarkdown(name: String, errorMsg: String, produce: () -> String?) {
+        val app = com.intellij.openapi.application.ApplicationManager.getApplication()
+        app.executeOnPooledThread {
+            val md = produce()
+            app.invokeLater {
+                if (md.isNullOrBlank()) {
+                    ReviewOps.notify(project, errorMsg)
+                } else {
+                    val tmp = File.createTempFile(name, ".md")
+                    tmp.writeText(md)
+                    LocalFileSystem.getInstance().refreshAndFindFileByPath(tmp.path)?.let { vf ->
+                        FileEditorManager.getInstance(project).openFile(vf, true)
+                    }
+                }
+            }
+        }
+    }
+
+    /** Filter the Edits/Diffs trees by file path (empty clears). Shared via the service so both trees filter together. */
+    private fun searchEdits() {
+        val q = com.intellij.openapi.ui.Messages.showInputDialog(
+            project,
+            "Filter edits by file path (empty to clear):",
+            "Search Edits",
+            null,
+            service().filterQuery,
+            null,
+        )
+        if (q != null) service().setFilter(q)
+    }
+
+    /** Step to the next (⏭) / previous (⏮) pending edit, cycling through all of them (parity with VS Code). */
+    private fun reviewNext() = withSession { s ->
+        val next = service().nextPendingEdit()
+        if (next == null) ReviewOps.notify(project, "No pending Claude edits — all caught up")
+        else Navigate.openFileAtEdit(project, s, next)
+    }
+
+    private fun reviewPrev() = withSession { s ->
+        val prev = service().prevPendingEdit()
+        if (prev == null) ReviewOps.notify(project, "No pending Claude edits — all caught up")
+        else Navigate.openFileAtEdit(project, s, prev)
+    }
+
+    /** Pin which capture session the observatory shows (e.g. the demo-showcase fixture) instead of the
+     *  auto-resolved newest one — a chooser over every session in the store. */
+    private fun switchSession() {
+        val settings = com.cellobservatory.observatory.settings.ObservatorySettings.instance
+        val pinned = settings.state.session?.takeIf { it.isNotBlank() }
+        val auto = project.basePath?.let { com.cellobservatory.observatory.core.SessionResolver.resolveSessionId(it) }
+        val labelToId = LinkedHashMap<String, String?>()
+        labelToId["Auto — newest for this workspace" + (auto?.let { " ($it)" } ?: "")] = null
+        for (s in com.cellobservatory.observatory.core.StoreReader.listSessions()) {
+            val mark = if (s.id == pinned) "● " else ""
+            val autoTag = if (s.id == auto) " · auto" else ""
+            labelToId["$mark${s.id}  —  ${s.pending} pending · ${relTime(s.lastMs)}$autoTag"] = s.id
+        }
+        com.intellij.openapi.ui.popup.JBPopupFactory.getInstance()
+            .createPopupChooserBuilder(labelToId.keys.toList())
+            .setTitle("Review which session?")
+            .setItemChosenCallback { chosen ->
+                settings.state.session = labelToId[chosen]
+                for (p in com.intellij.openapi.project.ProjectManager.getInstance().openProjects) {
+                    ObservatoryService.getInstance(p).refresh()
+                }
+            }
+            .createPopup()
+            .showInCenterOf(tree)
+    }
 
     private fun withSession(block: (String) -> Unit) {
         val s = service().currentSession()

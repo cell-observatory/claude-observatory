@@ -17,21 +17,29 @@ Complements Claude Code's native `/rewind` (whole-turn) with per-edit control.
 
 ![The observatory in VS Code: Edits/Diffs in the sidebar, inline review in the editor, Observations · Timeline · Stats in the bottom panel, and the microscope scoreboard in the status bar](docs/media/layout.png)
 
-![The same observatory in PyCharm: the Claude Observatory tool window, the inline lens + hover card with Claude's reasoning, and the Dashboards window (Observations | Timeline | Stats) at the bottom](docs/media/pyc-layout.png)
+![The same observatory in PyCharm: the Claude Observatory tool window, the inline lens carrying Claude's reasoning + Keep/Undo/Diff/Chat, and the Dashboards window (Observations | Timeline | Stats) at the bottom](docs/media/pyc-layout.png)
 
 ## Install
+
+**One command** — installs the CLI + editor extensions from the latest [release](https://github.com/cell-observatory/claude-observatory/releases), wires the capture hooks, and runs a health check. No build toolchain, no accounts:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/cell-observatory/claude-observatory/main/scripts/bootstrap.sh | bash
+```
+
+**Update** any time by re-running that command, or with `claude-observatory update`. Check your setup any time with `claude-observatory doctor`.
+
+**Platforms:** macOS and Linux work as-is. On **Windows**, the CLI, capture hooks, and both editor
+plugins run natively (npm's `.cmd` shims are handled) — but the installer and the bundled status
+line are bash, so run them from **Git Bash** (`jq` needed for the status line) or use WSL.
+
+### Build from source (contributors)
 
 ```bash
 ./install.sh                 # deps → build → CLI on PATH → extension → status line → offer `init`
 ```
 
-**Platforms:** macOS and Linux work as-is. On **Windows**, the CLI, capture hooks, and both editor
-plugins run natively (npm's `.cmd` shims are handled) — but the install scripts and the bundled
-status line are bash, so run them from **Git Bash** (`jq` needed for the status line) or use WSL
-and follow the Linux path. No Git Bash? Run the by-hand commands below in PowerShell and drop
-`--with-statusline`.
-
-Or by hand:
+Or step by step:
 
 ```bash
 npm install                  # workspace deps
@@ -140,6 +148,7 @@ Built for **surgical Claude usage on critical infrastructure**: the developer st
 | --- | --- |
 | **Edits** | Pending edits grouped **folder → file → class**, each with inline Keep / Undo. Click to open the file at the edit. |
 | **Diffs** | The same tree; click any edit for a before ⟷ after diff. |
+| **File History** | A flat, chronological list of just the **active file's** edits (id · time · status · Claude's reasoning) that **follows the editor** as you switch tabs — click a row to jump to that edit, keep/undo it, or diff it. |
 
 **Observatory dashboards** (bottom panel, side by side — like Terminal/Problems):
 
@@ -147,13 +156,21 @@ Built for **surgical Claude usage on critical infrastructure**: the developer st
 | --- | --- |
 | **Observations** | A **session recap** on top (Claude Code's own title — zero token; ✨ to refine via `claude -p --resume`), then a per-edit row with Claude's actual reasoning (click for a combined report). Each row also carries the observatory's **memory of that file** — its cross-session accept/revert history and prior Claude analyses; files whose edits get reverted repeatedly are flagged for careful review. |
 | **Timeline** | Files ordered by most-recent activity, each expanding to its edits (id + a small dimmed time + delta); status by icon. |
-| **Stats** | Step-line plots with a **Today / 7 days / 30 days** toggle (Today hourly): **edits** split into pending / accepted / reverted, **tokens** into total / input / output (linear y-axis for edits, log for tokens). Below them: the live **Usage** bars — context fill plus 5h / week plan usage with `~token` estimates (from [claude-statusline](https://github.com/cell-observatory/claude-statusline)). |
+| **Stats** | A live **review scoreboard** on top — pending / accepted / reverted counts and a **progress bar** that fills as you review — then a **tokens** step-line plot (total / input / output, log y-axis) with a **Today / 7 days / 30 days** toggle. Below: the live **Usage** bars — context fill plus 5h / week plan usage with `~token` estimates (from [claude-statusline](https://github.com/cell-observatory/claude-statusline)). |
 
 **Realtime awareness:** a **status-bar microscope** shows the pending-edit count the moment Claude writes (amber while anything awaits review); its tooltip is the **review scoreboard** (pending · accepted · reverted · acceptance rate · oldest pending). The whole review loop runs from the keyboard: **⌥⌘N** (`ctrl+alt+n`) jumps to the oldest pending edit, **⌥⌘Y** keeps the edit under the cursor, **⌥⌘U** undoes it — jump, decide, repeat.
 
-Plus an **inline overlay** in the editor: clickable **Keep / Undo / Diff** above each pending edit, a gutter change-bar on its lines, and a `✨ #N` marker with a Chat action on hover. Kept edits grey out; reverted edits stay struck through across every view. View-title buttons do **Accept all**, **Revert all**, and **Clear resolved**.
+Plus an **inline overlay** in the editor: a **✨ gutter star** at the start of each pending edit, a **subtle** green tint on added lines and a red tint (with the removed text shown as red ghost text) on deletions — deliberately toned down so a heavily edited file doesn't drown in color — and a distinct **Claude-coral marker** on the overview ruler / scrollbar. Above each edit sits an **inline menu**: **✨ #N · +A −R · view changes** then **✓ Keep · ↩ Undo · 💬 Chat · ⧉ View diff**. Kept edits grey out; reverted edits stay struck through across every view. View-title buttons do **Accept all**, **Revert all**, and **Clear resolved**.
 
-![Inline review: CodeLens Keep/Undo/Diff above the edit, highlighted lines, and the hover card with Claude's reasoning](docs/media/inline-review.png)
+**Click "view changes" → the changes, inline, in git's colors.** In **VS Code**, "view changes" opens an **inline review bubble** right at the edit — no tab — showing the diff in **git's own theme colors** (green/red text over the diff editor's translucent line fills) plus Claude's **reasoning** and the `+A −R` counts, with **Accept · Revert · Chat · Prev · Next** as real buttons on the bubble's toolbar (Prev/Next step through that file's edits). **⧉ View diff** opens the same edit as a **full diff tab** — always its own tab, with title-bar Prev/Next cycling the file's edits in place. The same Keep / Undo / Chat also live on the CodeLens above the edit (and **⌥⌘Y / ⌥⌘U** and the Edits tree). In **JetBrains**, the ✨ gutter star / lens opens the edit's before ⟷ after as a **unified diff** (Keep / Undo / Chat on its toolbar, reasoning in the title).
+
+**More extras** (all mirrored in both editors):
+
+- **File heatmap** — dim every unmodified line so Claude's edits stand out (a spotlight). Toggle with the 📄 tab-bar / banner button.
+- **Revision navigation** — step a file's edit history in a *current-vs-revision* diff with **⌥⌘[** / **⌥⌘]** (`ctrl+alt+[` / `]`), or the buttons atop the **File History** view.
+- **Per-file review** — the editor tab-bar / banner and the File-History toolbar carry **Accept all in this file** / **Revert all in this file** so you can clear one file without touching the session.
+
+![Inline review: the ✨ gutter star at each edit, a subtle green/red line tint, the inline menu (✨ #N view changes · Keep · Undo · Chat), and clicking an edit opens its unified inline diff with the reasoning in the title and Keep/Undo/Chat on the title bar](docs/media/inline-review.png)
 
 <p>
   <img src="docs/media/observations.png" width="55%" alt="Observations: session recap, per-edit reasoning, and cross-session file memory with revert-risk flags">
@@ -196,7 +213,7 @@ The active session is resolved from your workspace; override with `--session <id
 Built to add **zero overhead** to your Claude sessions:
 
 - **Capture** runs in local hooks entirely outside the model loop — zero tokens, zero-dependency hot path, always `exit 0`.
-- **Every render is cache-backed.** The extension memoizes the edit log, transcript reasoning, and blob reads on each source file's `(mtime, size)` — a cache hit costs one `stat()` instead of re-parsing a multi-MB transcript (~40 ms) per tree node. Inline decorations, CodeLens, and hovers share one placement computation per document version.
+- **Every render is cache-backed.** The extension memoizes the edit log, transcript reasoning, and blob reads on each source file's `(mtime, size)` — a cache hit costs one `stat()` instead of re-parsing a multi-MB transcript (~40 ms) per tree node. Inline decorations, the CodeLens menu, and the gutter stars share one placement computation per document version.
 - **Heavy scans never touch the UI thread.** Stats aggregation (potentially GBs of transcripts) runs in a `claude-observatory stats` subprocess with an incremental on-disk cache — only changed files are re-parsed (first scan ~0.4 s, steady-state ~0.05 s).
 - **Refreshes are debounced** — a burst of capture events produces one re-render.
 
@@ -227,6 +244,6 @@ in your browser via GitHub Pages (source: [docs/showcase.html](docs/showcase.htm
 
 ## Notes
 
-- Binary and >5 MB files are skipped. Bash-driven file changes are intentionally not tracked (a workspace watcher could add that later).
+- Binary and >5 MB files are skipped. **Bash-driven file changes are tracked too** — a Bash command snapshots the candidate tree under its cwd before/after and records one edit per changed file (bounded: skips vendor/build dirs, caps the file count, degrades on very large trees). Opt out with `CLAUDE_OBSERVATORY_NO_BASH=1`.
 - New-file creates are captured (undo deletes the file). No-op edits are not logged.
 - Everything is local: no network calls, no telemetry. Deep analysis only runs the `claude` CLI you already have, and only when you ask.

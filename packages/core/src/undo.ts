@@ -15,7 +15,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { diffArrays } from 'diff';
-import { findRecord, readBlob, setStatus } from './store';
+import { findRecord, readBlob, readLog, setStatus } from './store';
 
 export interface UndoResult {
   ok: boolean;
@@ -107,6 +107,37 @@ function threeWayMerge(base: string, ours: string, theirs: string): string | nul
   }
   while (i < baseTok.length) res.push(baseTok[i++]);
   return res.join('');
+}
+
+/**
+ * The file's baseline for a quick-diff: `current` with every still-PENDING edit reverted, computed
+ * in-memory (the same position-anchored 3-way merge undoEdit uses, applied newest→oldest) so an editor
+ * can show a git-style dirty-diff of exactly Claude's pending changes without touching disk. A manual
+ * (non-Claude) edit stays in the baseline (it's `ours`, not reverted), so the diff shows only Claude's
+ * work. Best-effort: an edit that won't cleanly revert is left in place rather than corrupting the text.
+ */
+export function fileBaseline(sessionId: string, file: string, current: string): string {
+  const resolved = path.resolve(file);
+  const pending = readLog(sessionId)
+    .filter((r) => path.resolve(r.file) === resolved && r.status === 'pending')
+    .sort((a, b) => b.id - a.id); // newest → oldest
+  let text = current;
+  for (const rec of pending) {
+    const before = blobText(sessionId, rec.beforeBlob);
+    const after = blobText(sessionId, rec.afterBlob);
+    if (after === null) continue; // edit deleted the file, but it exists now — leave as-is
+    if (before === null) {
+      // new-file create: the baseline had no such content — drop what this edit added.
+      text = text === after ? '' : threeWayMerge(after, text, '') ?? text;
+      continue;
+    }
+    if (text === after) {
+      text = before; // clean exact revert (no later edits since)
+      continue;
+    }
+    text = threeWayMerge(after, text, before) ?? text; // later edits present — surgical revert
+  }
+  return text;
 }
 
 /**

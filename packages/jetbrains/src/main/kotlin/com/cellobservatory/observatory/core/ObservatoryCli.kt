@@ -134,6 +134,28 @@ object ObservatoryCli {
         return if (r.ok) r.stdout else null
     }
 
+    /** The folder→file→class→edit view-model (with exact deltas) — the single source both editors render. */
+    fun treeJson(session: String, workDir: String?, filter: String?): String? {
+        val args = buildList {
+            add("tree"); add("--session"); add(session)
+            workDir?.let { add("--root"); add(it) }
+            if (!filter.isNullOrBlank()) { add("--filter"); add(filter) }
+        }
+        val r = run(args, workDir)
+        return if (r.ok) r.stdout else null
+    }
+
+    /** Portable markdown review summary (kept/reverted per file) for export. */
+    fun summaryMarkdown(session: String, workDir: String?): String? {
+        val r = run(listOf("summary", "--markdown", "--session", session), workDir)
+        return if (r.ok) r.stdout else null
+    }
+
+    /** Setup diagnostics as markdown. `doctor` exits 1 when there are failures but still prints, so
+     *  we take stdout regardless of the exit code. */
+    fun doctorMarkdown(workDir: String?): String? =
+        run(listOf("doctor", "--markdown"), workDir).stdout.takeIf { it.isNotBlank() }
+
     /** Opt-in `claude -p` layer: cached unless fresh; can run for minutes. Returns text or null. */
     fun analyze(session: String, id: Int, workDir: String?): String? {
         val r = run(listOf("analyze", id.toString(), "--session", session, "--json"), workDir, timeoutMs = 150_000)

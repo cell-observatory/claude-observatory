@@ -58,7 +58,7 @@ private class ObservatoryWidget(private val project: Project) :
     override fun getClickConsumer(): Consumer<MouseEvent> = Consumer {
         val service = ObservatoryService.getInstance(project)
         val session = service.currentSession() ?: return@Consumer
-        val next = service.log().filter { it.pending }.minByOrNull { it.id } ?: return@Consumer
+        val next = service.nextPendingEdit() ?: return@Consumer
         Navigate.openFileAtEdit(project, session, next)
     }
 
