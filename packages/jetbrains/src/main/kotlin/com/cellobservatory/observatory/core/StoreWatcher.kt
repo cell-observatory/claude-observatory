@@ -4,6 +4,7 @@ import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.diagnostic.logger
+import com.intellij.openapi.util.SystemInfo
 import java.nio.file.FileSystems
 import java.nio.file.Files
 import java.nio.file.Path
@@ -50,6 +51,13 @@ class StoreWatcher : Disposable {
         val root = ClaudePaths.rootDir()
         try {
             Files.createDirectories(root) // watch works even before the first capture
+            // macOS's default WatchService is a ~10s POLLING watcher (the JDK exposes no HIGH-sensitivity
+            // knob) — slower than our own 2s mtime poll, so a fresh capture would sit invisible for
+            // seconds. Use the 2s poll directly on macOS; native inotify/ReadDirectoryChanges elsewhere.
+            if (SystemInfo.isMac) {
+                startPollFallback(root)
+                return
+            }
             val ws = FileSystems.getDefault().newWatchService()
             watcher = ws
             register(ws, root)
