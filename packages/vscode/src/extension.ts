@@ -1015,7 +1015,11 @@ const MD_SCHEME = 'claude-observation'; // virtual markdown docs
 
 // One "Insights" view (was two): a "Next steps" group (heuristic suggestions + opt-in Claude) and an
 // "Observations" group (one row per edit — reasoning surfaced inline, click opens the combined report).
-type ObsNode = { kind: 'recap' } | { kind: 'obs'; rec: core.EditRecord };
+type ObsNode =
+  | { kind: 'recap' }
+  | { kind: 'obs'; rec: core.EditRecord }
+  | { kind: 'steps' }
+  | { kind: 'suggestion'; text: string };
 
 function firstLine(s: string): string {
   const l = s.split('\n').find((x) => x.trim()) ?? '';
@@ -1042,10 +1046,19 @@ class ObservationsProvider implements vscode.TreeDataProvider<ObsNode> {
     const session = currentSession();
     if (!session || node) return [];
     this.memo.clear(); // one memory computation per file per render cycle
-    // A one-line "what were you doing" recap on top, then one observation row per edit (newest first).
+    // A one-line "what were you doing" recap on top, then one observation row per edit (newest first),
+    // then a "Next steps" group (Claude's open to-dos + heuristics) — parity with the CLI `insights`
+    // view and the JetBrains Observations panel.
+    const cwd = workspaceRoot();
+    const suggestions = [
+      ...new Set([...(cwd ? core.transcriptSuggestions(cwd, session) : []), ...core.heuristicSuggestions(session)]),
+    ];
     return [
       { kind: 'recap' },
       ...cachedLog(session).slice().sort((a, b) => b.ts - a.ts).map((rec) => ({ kind: 'obs' as const, rec })),
+      ...(suggestions.length
+        ? [{ kind: 'steps' as const }, ...suggestions.map((text) => ({ kind: 'suggestion' as const, text }))]
+        : []),
     ];
   }
   /** Zero-token: Claude Code's own session title, or a Claude-refined recap once generated. */
@@ -1071,6 +1084,21 @@ class ObservationsProvider implements vscode.TreeDataProvider<ObsNode> {
       item.tooltip = tip;
       item.contextValue = 'recap';
       return item; // refresh is the ✨ button (inline + view title), not a click
+    }
+    if (node.kind === 'steps') {
+      const item = new vscode.TreeItem('Next steps', vscode.TreeItemCollapsibleState.None);
+      item.iconPath = new vscode.ThemeIcon('lightbulb');
+      item.description = "Claude's to-dos + heuristics";
+      item.contextValue = 'steps';
+      item.command = { command: 'claudeObservatory.showSuggestions', title: 'Suggestions' };
+      return item;
+    }
+    if (node.kind === 'suggestion') {
+      const item = new vscode.TreeItem(node.text, vscode.TreeItemCollapsibleState.None);
+      item.iconPath = new vscode.ThemeIcon('arrow-small-right');
+      item.tooltip = node.text;
+      item.command = { command: 'claudeObservatory.showSuggestions', title: 'Suggestions' };
+      return item;
     }
     // One row per edit; click opens the single combined report (summary + reasoning + flags + analysis).
     const rec = node.rec;
@@ -1853,6 +1881,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     // Insights (observations + suggestions)
     vscode.commands.registerCommand('claudeObservatory.showObservation', (id: number) => showObservationDoc(id)),
+    vscode.commands.registerCommand('claudeObservatory.showSuggestions', () => showSuggestionsDoc()),
     vscode.commands.registerCommand('claudeObservatory.analyzeEdit', (arg: ObsNode | number) => {
       const s = currentSession();
       if (!s) return undefined;

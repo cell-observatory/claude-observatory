@@ -54,6 +54,8 @@ class PortParserTest {
         val p = ObserveParser.parse(json)!!
         assertEquals("s1", p.session)
         assertEquals("did stuff", p.recap)
+        assertEquals("ls", p.insights?.lastSummary)
+        assertEquals("t", p.insights?.title)
         assertEquals(listOf("do X", "do Y"), p.suggestions)
         val e = p.edits[0]
         assertEquals(1, e.id)
@@ -71,6 +73,7 @@ class PortParserTest {
         val p = ObserveParser.parse("""{"session":"s2","recap":null,"suggestions":[],"edits":[]}""")!!
         assertEquals("s2", p.session)
         assertNull(p.recap)
+        assertNull(p.insights) // absent insights object -> null, not a crash
         assertTrue(p.suggestions.isEmpty())
         assertTrue(p.edits.isEmpty())
     }

@@ -45,6 +45,7 @@ import javax.swing.tree.TreeSelectionModel
 class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(true, true) {
 
     private object RecapMarker
+    private object StepsMarker
 
     private val root = DefaultMutableTreeNode()
     private val model = DefaultTreeModel(root)
@@ -79,6 +80,11 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
         if (payload != null && payload.edits.isNotEmpty()) {
             root.add(DefaultMutableTreeNode(RecapMarker))
             for (e in payload.edits) root.add(DefaultMutableTreeNode(e))
+        }
+        // Next-steps: Claude's own open to-dos + heuristic suggestions (parity with VS Code + `insights`).
+        if (payload != null && payload.suggestions.isNotEmpty()) {
+            root.add(DefaultMutableTreeNode(StepsMarker))
+            for (s in payload.suggestions) root.add(DefaultMutableTreeNode(s))
         }
         model.reload()
     }
@@ -216,9 +222,19 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
             when (val node = (value as? DefaultMutableTreeNode)?.userObject) {
                 is RecapMarker -> {
                     icon = Icons.Microscope
-                    val recap = ObserveCache.getInstance(project).payload()?.recap
+                    val payload = ObserveCache.getInstance(project).payload()
+                    val recap = payload?.recap ?: payload?.insights?.lastSummary
                     append(recap ?: "No recap yet — hit ✨ to generate one.")
                     append("  session recap", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                }
+                is StepsMarker -> {
+                    icon = AllIcons.Actions.IntentionBulb
+                    append("Next steps", SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES)
+                    append("  from Claude's to-dos + heuristics", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                }
+                is String -> {
+                    icon = AllIcons.General.ArrowRight
+                    append(node, SimpleTextAttributes.REGULAR_ATTRIBUTES)
                 }
                 is ObsEdit -> {
                     val warn = node.risky || node.flags.any { it.level == "warn" }
