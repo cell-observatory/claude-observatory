@@ -982,23 +982,46 @@ class InlineLensProvider implements vscode.CodeLensProvider {
     if (!inlineEnabled()) return [];
     const session = currentSession();
     if (!session || doc.lineCount > MAX_INLINE_LINES) return [];
-    const lenses: vscode.CodeLens[] = [];
+    // Group pending edits by their anchor LINE first. Several edits often anchor the same line (a hunk
+    // edited twice, or adjacent edits that collapse to one anchor); emitting each edit's 5 lenses then
+    // piles NxM ambiguous rows above that line. Instead: one edit -> its full menu; a stack -> one
+    // compact row (id list + Keep-all / Undo-all).
+    const byLine = new Map<number, { ids: number[]; recs: core.EditRecord[]; added: number; removed: number }>();
     for (const p of cachedPlacements(session, doc)) {
       const anchors = anchorLines(p);
-      if (anchors.length === 0) continue; // later fully rewritten — no anchor line
+      if (anchors.length === 0) continue; // later fully rewritten - no anchor line
       const line = Math.min(anchors[0], Math.max(0, doc.lineCount - 1));
-      const range = new vscode.Range(line, 0, line, 0);
-      const id = p.rec.id;
-      // The inline menu above each edit: id + line delta, then Keep / Undo / Chat / View diff. "view
-      // changes" opens the inline review bubble at the edit (reasoning rides in the bubble, so it's not
-      // repeated here); "View diff" opens the same edit as a full diff tab. CodeLens font can't be
-      // enlarged by an extension; per-edit keep/undo is also on ⌥⌘Y / ⌥⌘U and the Edits tree.
       const d = cachedDelta(session, p.rec);
-      lenses.push(new vscode.CodeLens(range, { title: `✨ #${id}  +${d.added} \u2212${d.removed}  view changes`, command: 'claudeObservatory.viewChanges', arguments: [id] }));
-      lenses.push(new vscode.CodeLens(range, { title: `✓ Keep`, command: 'claudeObservatory.inlineKeep', arguments: [id] }));
-      lenses.push(new vscode.CodeLens(range, { title: `↩ Undo`, command: 'claudeObservatory.inlineUndo', arguments: [id] }));
-      lenses.push(new vscode.CodeLens(range, { title: `💬 Chat`, command: 'claudeObservatory.chatEdit', arguments: [id] }));
-      lenses.push(new vscode.CodeLens(range, { title: `⧉ View diff`, command: 'claudeObservatory.openDiff', arguments: [{ kind: 'edit', rec: p.rec }] }));
+      const g = byLine.get(line) ?? { ids: [], recs: [], added: 0, removed: 0 };
+      g.ids.push(p.rec.id);
+      g.recs.push(p.rec);
+      g.added += d.added;
+      g.removed += d.removed;
+      byLine.set(line, g);
+    }
+    const lenses: vscode.CodeLens[] = [];
+    for (const [line, g] of byLine) {
+      const range = new vscode.Range(line, 0, line, 0);
+      if (g.ids.length === 1) {
+        // Single edit: the full menu. "view changes" opens the review bubble (reasoning rides there);
+        // per-edit keep/undo is also on the keybindings and the Edits tree.
+        const id = g.ids[0];
+        lenses.push(new vscode.CodeLens(range, { title: `✨ #${id}  +${g.added} −${g.removed}  view changes`, command: 'claudeObservatory.viewChanges', arguments: [id] }));
+        lenses.push(new vscode.CodeLens(range, { title: `✓ Keep`, command: 'claudeObservatory.inlineKeep', arguments: [id] }));
+        lenses.push(new vscode.CodeLens(range, { title: `↩ Undo`, command: 'claudeObservatory.inlineUndo', arguments: [id] }));
+        lenses.push(new vscode.CodeLens(range, { title: `💬 Chat`, command: 'claudeObservatory.chatEdit', arguments: [id] }));
+        lenses.push(new vscode.CodeLens(range, { title: `⧉ View diff`, command: 'claudeObservatory.openDiff', arguments: [{ kind: 'edit', rec: g.recs[0] }] }));
+      } else {
+        // Stacked edits on one line -> one compact group. "view changes" opens the bubble at the first
+        // edit (its Prev/Next steps through the rest); Keep-all / Undo-all act on the whole stack (undo
+        // runs newest-first, a clean sequential revert). Ids are listed so the row stays unambiguous.
+        const first = g.ids[0];
+        const idList = g.ids.map((i) => `#${i}`).join(' ');
+        lenses.push(new vscode.CodeLens(range, { title: `✨ ${g.ids.length} edits ${idList}  +${g.added} −${g.removed}  view changes`, command: 'claudeObservatory.viewChanges', arguments: [first] }));
+        lenses.push(new vscode.CodeLens(range, { title: `✓ Keep all`, command: 'claudeObservatory.inlineKeepMany', arguments: [g.ids] }));
+        lenses.push(new vscode.CodeLens(range, { title: `↩ Undo all`, command: 'claudeObservatory.inlineUndoMany', arguments: [g.ids] }));
+        lenses.push(new vscode.CodeLens(range, { title: `⧉ View diffs`, command: 'claudeObservatory.openDiff', arguments: [{ kind: 'edit', rec: g.recs[0] }] }));
+      }
     }
     return lenses;
   }
@@ -1958,6 +1981,18 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
     vscode.commands.registerCommand('claudeObservatory.inlineUndo', (id: number) =>
       withSession((s) => undoOne(s, id))()
+    ),
+    // Keep/Undo a whole stack of same-line edits (the grouped inline lens). Undo runs newest-first so
+    // each is a clean sequential revert; Keep just marks them.
+    vscode.commands.registerCommand('claudeObservatory.inlineKeepMany', (ids: number[]) =>
+      withSession((s) => {
+        for (const id of ids) core.setStatus(s, id, 'kept');
+      })()
+    ),
+    vscode.commands.registerCommand('claudeObservatory.inlineUndoMany', (ids: number[]) =>
+      withSession(async (s) => {
+        for (const id of [...ids].sort((a, b) => b - a)) await undoOne(s, id);
+      })()
     ),
     // Diff title-bar actions: the editor/title command receives the diff's resource URI, which carries
     // the edit id in its query — resolve it, then reuse the id-based keep/undo/chat commands.
