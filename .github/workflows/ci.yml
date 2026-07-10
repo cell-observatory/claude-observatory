@@ -34,7 +34,7 @@ jobs:
       # the artifact (no log-viewer access needed).
       - run: npm test 2>&1 | tee test-output.txt
         shell: bash
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: failure()
         with:
           name: test-output-${{ matrix.os }}-node${{ matrix.node }}
@@ -57,7 +57,7 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - run: ./gradlew test buildPlugin --console=plain
         working-directory: packages/jetbrains
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: claude-observatory-jetbrains
           path: packages/jetbrains/build/distributions/*.zip
@@ -75,7 +75,7 @@ jobs:
       - run: npm ci
       # release/: the CLI .tgz (npm i -g) + the .vsix (code --install-extension) — no publish, no account
       - run: npm run release
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: claude-observatory-release
           path: release/
