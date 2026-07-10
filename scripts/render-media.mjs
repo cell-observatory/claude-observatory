@@ -360,7 +360,7 @@ const scenes = {
         <div class="row" style="align-items:stretch;height:212px;">
           <div class="col" style="flex:1.2;border-right:1px solid var(--border);"><div class="colhead">OBSERVATIONS</div>${observationsCol}</div>
           <div class="col" style="flex:1.1;border-right:1px solid var(--border);"><div class="colhead">TIMELINE</div>${timelineCol}</div>
-          <div class="col" style="flex:1;"><div class="colhead">STATS</div>${statsCol(34, 34).replace('USAGE', 'USAGE').replace(/<div class="uhead">USAGE<\/div>[\s\S]*$/, '<div class="urow"><span class="lbl">ctx</span><span class="track"><span class="fill" style="width:39%;background:var(--kept)"></span></span><span class="pct" style="color:var(--kept)">39%</span><span class="sub">390k/1M</span></div>')}</div>
+          <div class="col" style="flex:1;"><div class="colhead">STATS</div>${statsCol(34, 34).replace(/<div class="uhead">USAGE<\/div>[\s\S]*$/, '<div class="urow"><span class="lbl">ctx</span><span class="track"><span class="fill" style="width:39%;background:var(--kept)"></span></span><span class="pct" style="color:var(--kept)">39%</span><span class="sub">390k/1M</span></div>')}</div>
         </div>
       </div>
       <div class="statusbar">

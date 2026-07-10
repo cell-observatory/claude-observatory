@@ -9,6 +9,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Least-privilege GITHUB_TOKEN for all jobs — they only checkout and upload artifacts.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: test (${{ matrix.os }}, node ${{ matrix.node }})

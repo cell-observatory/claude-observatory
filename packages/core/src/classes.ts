@@ -40,7 +40,7 @@ export function detectClasses(text: string): ClassSpan[] {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     // Python: `class Name(...):` — allows a trailing comment; \s also eats a CR on CRLF files.
-    const py = /^(\s*)class\s+([A-Za-z_$][\w$]*)\s*(?:\([^)]*\))?\s*:\s*(?:#.*)?$/.exec(line);
+    const py = /^(\s*)class\s+([A-Za-z_$][\w$]*)\s*(?:\([^)]*\)\s*)?:\s*(?:#.*)?$/.exec(line);
     if (py) {
       const indent = py[1].length;
       let end = i;
