@@ -158,12 +158,18 @@ export function transcriptInsights(cwd: string, sessionId: string): TranscriptIn
 
 /** Pull a "Next steps / TODO / Follow-ups" bullet section out of Claude's recap (last summary). */
 function recapNextSteps(summary: string): string[] {
-  const heading = /^#{0,4}\s*\**\s*(next steps?|to-?dos?|follow[- ]?ups?|remaining|still to do)\b/i;
+  // Linear: a SINGLE character class for the leading markdown noise (#, *, whitespace). The previous
+  // `\s*\**\s*` had two whitespace matchers around an empty-matching `\**`, which backtracks O(n²) on
+  // a line of many spaces — and `summary` is Claude-transcript text (a prompt-injected line could hang
+  // the review UI). One quantifier over a char class can't backtrack catastrophically.
+  const heading = /^[#*\s]*(next steps?|to-?dos?|follow[- ]?ups?|remaining|still to do)\b/i;
   const bullet = /^\s*(?:[-*•]|\d+[.)])\s+(.*\S)/;
   const out: string[] = [];
   let capturing = false;
   for (const raw of summary.split('\n')) {
-    const line = raw.replace(/\s+$/, '');
+    // Native trimEnd (linear) — `/\s+$/.replace` retries from every index and is O(n^2) when a long
+    // whitespace run is followed by a non-space char (the same ReDoS class as the heading regex).
+    const line = raw.trimEnd();
     if (heading.test(line.trim())) {
       capturing = true;
       continue;

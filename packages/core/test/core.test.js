@@ -160,6 +160,56 @@ test('undo: create WITH a later edit conflicts (never deletes); --force deletes'
   assert.ok(!fs.existsSync(F));
 });
 
+// Seed one edit from raw before/after Buffers (bypasses seedEdit's Buffer.from(string)).
+function seedEditBytes(session, file, beforeBuf, afterBuf) {
+  core.ensureStore(session);
+  const b = beforeBuf === null ? null : core.writeBlob(session, beforeBuf);
+  const a = afterBuf === null ? null : core.writeBlob(session, afterBuf);
+  const id = core.nextId(session);
+  core.appendLog(session, { id, ts: id * 1000, tool: 'Edit', file, beforeBlob: b, afterBlob: a, status: 'pending' });
+  return id;
+}
+
+test('undo: clean revert preserves EXACT bytes of a non-UTF-8 file (no UTF-8 round-trip)', () => {
+  freshHome();
+  const S = 'bytes';
+  const F = path.join(tmpWork(), 'latin1.txt');
+  const before = Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x0a]); // "caf<0xE9>\n" — 0xE9 is invalid standalone UTF-8
+  const after = Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x21, 0x0a]); // + "!"
+  const id = seedEditBytes(S, F, before, after);
+  fs.writeFileSync(F, after); // file currently at "after" (clean-revert path: current === after)
+  const r = core.undoEdit(S, id);
+  assert.equal(r.status, 'undone');
+  assert.equal(Buffer.compare(fs.readFileSync(F), before), 0, 'restored to exact before-bytes, not U+FFFD');
+});
+
+test('redo: clean re-apply preserves EXACT bytes of a non-UTF-8 file', () => {
+  freshHome();
+  const S = 'bytes2';
+  const F = path.join(tmpWork(), 'latin1.txt');
+  const before = Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x0a]);
+  const after = Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x21, 0x0a]);
+  const id = seedEditBytes(S, F, before, after);
+  fs.writeFileSync(F, after);
+  core.undoEdit(S, id); // now at `before` (byte-exact, tested above)
+  assert.equal(Buffer.compare(fs.readFileSync(F), before), 0);
+  const r = core.redoEdit(S, id);
+  assert.equal(r.status, 'redone');
+  assert.equal(Buffer.compare(fs.readFileSync(F), after), 0, 're-applied to exact after-bytes');
+});
+
+test('undo: --force restore of a deleted non-UTF-8 file preserves exact bytes', () => {
+  freshHome();
+  const S = 'bytes3';
+  const F = path.join(tmpWork(), 'bin.txt');
+  const before = Buffer.from([0x80, 0x81, 0x82, 0x0a]); // high bytes, invalid UTF-8
+  const id = seedEditBytes(S, F, before, null); // edit deleted the file
+  // file is absent now (after === null); undo restores it
+  const r = core.undoEdit(S, id);
+  assert.equal(r.status, 'undone');
+  assert.equal(Buffer.compare(fs.readFileSync(F), before), 0, 'deleted file restored byte-exact');
+});
+
 test('undo: fileBaseline reverts all pending edits (quick-diff baseline)', () => {
   freshHome();
   const S = 'baseline';
@@ -221,6 +271,59 @@ test('clean: gcSession removes only unreferenced blobs; removeSession deletes th
   assert.ok(!fs.existsSync(core.storeDir(S)));
 });
 
+test('clean: gcSession keeps blobs referenced by an in-flight staging record (not yet committed)', () => {
+  freshHome();
+  const S = 'gcstage';
+  core.ensureStore(S);
+  const F = path.join(tmpWork(), 'f.txt');
+  seedEdit(S, F, 'a\n', 'b\n'); // a committed edit (its blobs are referenced)
+  // A PreToolUse that already snapshotted a before-blob but whose PostToolUse hasn't appended yet.
+  const stagedBlob = core.writeBlob(S, Buffer.from('staged-before\n'));
+  const key = core.pathKey('/some/other.txt');
+  core.writeStaging(S, key, { file: '/some/other.txt', tool: 'Edit', beforeBlob: stagedBlob });
+  core.gcSession(S);
+  assert.ok(
+    fs.existsSync(path.join(core.storeDir(S), 'blobs', stagedBlob)),
+    'staged before-blob must survive GC (else the imminent edit is unrecoverable)'
+  );
+});
+
+test('clean: gcSession keeps blobs referenced by the __bash__ manifest', () => {
+  freshHome();
+  const S = 'gcbash';
+  core.ensureStore(S);
+  const blob = core.writeBlob(S, Buffer.from('bash-before\n'));
+  core.writeBashManifest(S, { files: { '/x/y.txt': blob }, ts: 1000 });
+  core.gcSession(S);
+  assert.ok(fs.existsSync(path.join(core.storeDir(S), 'blobs', blob)), 'manifest before-blob survives GC');
+});
+
+test('store: a stale lock is broken so appendLog can never permanently block', () => {
+  freshHome();
+  const S = 'lock';
+  core.ensureStore(S);
+  // Simulate a crashed holder: a .lock file older than the stale threshold.
+  const lp = path.join(core.storeDir(S), '.lock');
+  fs.writeFileSync(lp, '999999');
+  const old = new Date(Date.now() - 60000); // 60s ago > LOCK_STALE_MS (10s)
+  fs.utimesSync(lp, old, old);
+  const F = path.join(tmpWork(), 'f.txt');
+  const id = seedEdit(S, F, 'a\n', 'b\n'); // seedEdit → appendLog acquires the lock; must not hang
+  assert.equal(core.findRecord(S, id).status, 'pending', 'append succeeded despite a stale lock');
+});
+
+test('store: rejects traversing session ids (no read/write/rm -rf outside the store)', () => {
+  freshHome();
+  assert.equal(core.isSafeSessionId('750d33e9-aedd-4186-98a4-f03ce6716ed0'), true, 'a real UUID is fine');
+  assert.equal(core.isSafeSessionId('..'), false);
+  assert.equal(core.isSafeSessionId('.'), false);
+  assert.equal(core.isSafeSessionId('a/b'), false);
+  assert.equal(core.isSafeSessionId('../evil'), false);
+  assert.throws(() => core.storeDir('..'), /invalid session id/, 'storeDir fail-closes on traversal');
+  assert.throws(() => core.storeDir('../../etc'), /invalid session id/);
+  assert.throws(() => core.removeSession('..'), /invalid session id|outside the store/, 'removeSession refuses to escape');
+});
+
 test('clean: clearResolved drops kept+undone, keeps pending', () => {
   freshHome();
   const S = 'clr';
@@ -271,6 +374,29 @@ test('ranges: locateDeletionsInCurrent surfaces removed text + its anchor (red g
   assert.deepEqual(D('a\nb\nc\n', 'a\nc\n', 'HEADER\na\nc\n'), [{ anchor: 2, lines: ['b'] }]);
   // the deletion's region was later rewritten -> the hunk drops out
   assert.deepEqual(D('a\nb\nc\n', 'a\nc\n', 'a\nZZ\n'), []);
+});
+
+test('observe: recap "next steps" heading matching is linear-time on a pathological line (no ReDoS)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const cwd = tmpWork();
+  const S = 'redos';
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  // A line that made the old `\s*\**\s*` heading regex backtrack O(n^2): marker, 100k spaces, marker.
+  const evil = '#' + ' '.repeat(100000) + 'x';
+  const tx = JSON.stringify({
+    sessionId: S,
+    timestamp: new Date().toISOString(),
+    type: 'assistant',
+    message: { role: 'assistant', content: [{ type: 'text', text: evil }] },
+  });
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), tx);
+  const t0 = Date.now();
+  const sug = core.transcriptSuggestions(cwd, S); // runs recapNextSteps on lastSummary
+  const elapsed = Date.now() - t0;
+  assert.ok(Array.isArray(sug), 'returns a list');
+  assert.ok(elapsed < 1000, `heading match must be linear (took ${elapsed}ms; the O(n^2) bug takes many seconds)`);
 });
 
 test('classes: detectClasses spans + classAt (brace langs + python)', () => {
@@ -652,6 +778,36 @@ test('stats: computeStats rolls up transcripts + edits into windows and a daily 
   assert.equal(st.hourly[hr].editsKept, 1, 'accepted edit in its hour');
   assert.equal(st.hourly[hr].tokensInput, 110, 'hourly input tokens');
   assert.equal(st.hourly[hr].tokensOutput, 50, 'hourly output tokens');
+});
+
+test('stats: one assistant message split across content-block lines is counted once (no multi-count)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'splitSess';
+  const now = Date.now();
+  const proj = path.join(os.homedir(), '.claude', 'projects', 'proj');
+  fs.mkdirSync(proj, { recursive: true });
+  // Current Claude Code writes ONE line per content block, each stamped with the SAME message.id and
+  // the IDENTICAL usage. Here: one logical message split into thinking+text+tool_use (3 lines).
+  const usage = { input_tokens: 10, cache_read_input_tokens: 100, cache_creation_input_tokens: 0, output_tokens: 50 };
+  const iso = new Date(now).toISOString();
+  const mk = (content) =>
+    JSON.stringify({ sessionId: S, timestamp: iso, type: 'assistant', message: { id: 'msg_split1', role: 'assistant', usage, content } });
+  const lines = [
+    mk([{ type: 'thinking', thinking: 'abcdefghijklmnop' }]), // 16 chars → thinking 4
+    mk([{ type: 'text', text: 'hi' }]),
+    mk([{ type: 'tool_use', name: 'Edit', input: { file_path: '/w/a.js' } }]),
+  ];
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), lines.join('\n') + '\n');
+
+  const st = core.computeStats(S, now);
+  const today = st.daily[st.daily.length - 1];
+  assert.equal(today.messages, 1, 'split message counts as ONE turn, not three');
+  assert.equal(today.tokensOutput, 50, 'output usage counted once (not 150)');
+  assert.equal(today.tokensInput, 110, 'input+cache usage counted once (not 330)');
+  assert.equal(today.thinking, 4, 'thinking accrues from the thinking-block line');
+  assert.equal(st.windows.session.messages, 1, 'session window: one message');
+  assert.equal(st.windows.session.output, 50, 'session window: output counted once');
 });
 
 test('install: --project targets a repo-local settings file, leaving global untouched', () => {
@@ -1467,6 +1623,43 @@ test('capture: CLAUDE_OBSERVATORY_NO_BASH opts out of Bash capture', () => {
   fs.writeFileSync(F, 'TWO\n');
   bash('PostToolUse');
   assert.equal(fs.existsSync(path.join(home, '.claude', 'claude-observatory', S, 'log.jsonl')), false, 'no log written when opted out');
+});
+
+test('capture: the Bash full-tree walk never snapshots secret files (.env), only ordinary edits', () => {
+  const home = freshHome();
+  const dir = tmpWork();
+  const ENV = path.join(dir, '.env'); // secret — must NOT be captured
+  const SRC = path.join(dir, 'app.js'); // ordinary — must be captured
+  fs.writeFileSync(ENV, 'API_KEY=sk-secret-000\n');
+  fs.writeFileSync(SRC, 'let x = 1;\n');
+  const S = 'bashSecret';
+  runHookBash(home, S, dir, 'PreToolUse');
+  fs.writeFileSync(ENV, 'API_KEY=sk-secret-999\n'); // the Bash command "changed" both
+  fs.writeFileSync(SRC, 'let x = 2;\n');
+  runHookBash(home, S, dir, 'PostToolUse');
+
+  const log = fs
+    .readFileSync(path.join(home, '.claude', 'claude-observatory', S, 'log.jsonl'), 'utf8')
+    .trim().split('\n').map(JSON.parse);
+  assert.ok(log.some((r) => r.file === SRC), 'ordinary source edit is captured');
+  assert.ok(!log.some((r) => r.file === ENV), '.env is never recorded');
+  // and its secret content never lands in a blob
+  const blobs = fs.readdirSync(path.join(home, '.claude', 'claude-observatory', S, 'blobs'));
+  const anySecret = blobs.some((b) =>
+    fs.readFileSync(path.join(home, '.claude', 'claude-observatory', S, 'blobs', b), 'utf8').includes('sk-secret')
+  );
+  assert.ok(!anySecret, 'no blob contains the .env secret');
+});
+
+test('store: session dirs are 0700 and blobs 0600 (not world/group-readable)', { skip: process.platform === 'win32' }, () => {
+  freshHome();
+  const S = 'perms';
+  core.ensureStore(S);
+  const sha = core.writeBlob(S, Buffer.from('secret-ish\n'));
+  const dirMode = fs.statSync(core.storeDir(S)).mode & 0o777;
+  const blobMode = fs.statSync(path.join(core.storeDir(S), 'blobs', sha)).mode & 0o777;
+  assert.equal(dirMode & 0o077, 0, `store dir must have no group/other bits (got ${dirMode.toString(8)})`);
+  assert.equal(blobMode & 0o077, 0, `blob must have no group/other bits (got ${blobMode.toString(8)})`);
 });
 
 test('install: re-init migrates a legacy matcher in place (adds Bash) without duplicating', () => {

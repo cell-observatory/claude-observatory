@@ -56,19 +56,24 @@ function emitJson(v: unknown): void {
 // --- session resolution (shared shape with the VS Code front-end) ---
 
 function getSessionId(args: string[]): string {
-  const i = args.indexOf('--session');
-  if (i >= 0 && args[i + 1]) return args[i + 1];
-  if (process.env.CLAUDE_OBSERVATORY_SESSION) return process.env.CLAUDE_OBSERVATORY_SESSION;
-  if (process.env.CLAUDE_CHANGES_SESSION) return process.env.CLAUDE_CHANGES_SESSION; // legacy name
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
-  const s = core.resolveSessionId(process.cwd());
-  if (!s) {
+  const i = args.indexOf('--session');
+  let id: string | null = null;
+  if (i >= 0 && args[i + 1]) id = args[i + 1];
+  else if (process.env.CLAUDE_OBSERVATORY_SESSION) id = process.env.CLAUDE_OBSERVATORY_SESSION;
+  else if (process.env.CLAUDE_CHANGES_SESSION) id = process.env.CLAUDE_CHANGES_SESSION; // legacy name
+  else id = core.resolveSessionId(process.cwd());
+  if (!id) {
     fail(
       `could not resolve an active Claude Code session for ${process.cwd()}.\n` +
         `  Run this from your workspace root, or pass --session <id>.`
     );
   }
-  return s;
+  // Reject a traversing/garbage session id before it reaches any store path (read, write, or delete).
+  if (!core.isSafeSessionId(id)) {
+    fail(`invalid session id "${id}" (letters, digits, dot, dash, underscore only).`);
+  }
+  return id;
 }
 
 // --- init / uninstall: delegate the settings.json merge to the shared core installer ---
@@ -451,6 +456,7 @@ function cmdClean(args: string[]): void {
   if (di >= 0) {
     const id = args[di + 1];
     if (!id) fail('`--drop <session-id>` requires a session id');
+    if (!core.isSafeSessionId(id)) fail(`invalid session id "${id}" — refusing to delete.`);
     core.removeSession(id);
     process.stdout.write(c.green('✓ ') + `dropped session ${id}\n`);
     return;

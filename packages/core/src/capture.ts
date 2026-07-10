@@ -43,6 +43,22 @@ const BASH_SKIP_DIRS = new Set([
   '.mypy_cache', '.pytest_cache', '.ruff_cache', 'vendor', 'coverage', '.terraform',
 ]);
 
+/**
+ * Commonly secret-bearing file names. The Bash capture path snapshots the WHOLE cwd tree, so without
+ * this it would vacuum unrelated `.env`/keys/credentials into the store — never do that. (A deliberate
+ * Edit/Write to such a file is still captured, so undo keeps working; those blobs are written 0600.)
+ * Patterns are simple/linear — no nested quantifiers — so they can't backtrack catastrophically.
+ */
+function isSecretName(name: string): boolean {
+  return (
+    /^\.env(\.|$)/i.test(name) || // .env, .env.local, .env.production
+    /\.(pem|key|p12|pfx|keystore|jks)$/i.test(name) || // private keys / keystores
+    /^id_(rsa|dsa|ecdsa|ed25519)$/i.test(name) || // ssh private keys
+    /^\.(npmrc|netrc|pgpass|git-credentials)$/i.test(name) || // token-bearing dotfiles
+    /(^|[._-])(secret|secrets|credential|credentials)([._-]|$)/i.test(name)
+  );
+}
+
 interface HookPayload {
   session_id?: string;
   cwd?: string;
@@ -167,6 +183,7 @@ function handlePreBash(session: string, payload: HookPayload): void {
   deleteBashManifest(session); // clear any stale manifest from an interrupted command
   const files: Record<string, string | null> = {};
   const ok = walkCandidates(cwd, (abs) => {
+    if (isSecretName(path.basename(abs))) return; // never sweep secrets into the store via the Bash walk
     const s = snapshot(abs);
     if (s.kind === 'text') files[abs] = writeBlob(session, s.content);
   });
@@ -183,6 +200,7 @@ function handlePostBash(session: string, payload: HookPayload): void {
   const before = manifest.files;
   const seen = new Set<string>();
   const ok = walkCandidates(cwd, (abs) => {
+    if (isSecretName(path.basename(abs))) return; // symmetric with Pre: secrets are out of scope
     seen.add(abs);
     const s = snapshot(abs);
     if (s.kind !== 'text') return;
