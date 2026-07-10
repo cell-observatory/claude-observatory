@@ -847,6 +847,28 @@ test('install: --project targets a repo-local settings file, leaving global unto
   assert.equal(core.hooksInstalled(projSettings), false);
 });
 
+test('install: uninstallStatusline reverts ONLY our statusline, never a user custom one', () => {
+  const home = freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const cdir = path.join(home, '.claude');
+  fs.mkdirSync(cdir, { recursive: true });
+  const sp = path.join(cdir, 'settings.json');
+  fs.writeFileSync(path.join(cdir, 'statusline.sh'), '#!/bin/bash\n');
+  const ours = 'bash ' + path.join(cdir, 'statusline.sh');
+  // ours → reverted, other settings preserved, script removed
+  fs.writeFileSync(sp, JSON.stringify({ theme: 'dark', statusLine: { type: 'command', command: ours } }));
+  let r = core.uninstallStatusline(sp);
+  assert.ok(r.changed && r.scriptRemoved, 'ours is reverted + script removed');
+  let d = JSON.parse(fs.readFileSync(sp, 'utf8'));
+  assert.equal(d.statusLine, undefined, 'our statusLine removed');
+  assert.equal(d.theme, 'dark', 'unrelated settings preserved');
+  // a user's own statusLine is left untouched
+  fs.writeFileSync(sp, JSON.stringify({ statusLine: { type: 'command', command: 'my-own-statusline.sh' } }));
+  r = core.uninstallStatusline(sp);
+  assert.equal(r.changed, false, 'a custom statusLine is NOT touched');
+  assert.equal(JSON.parse(fs.readFileSync(sp, 'utf8')).statusLine.command, 'my-own-statusline.sh');
+});
+
 test('install: hooks merged non-destructively, idempotent, and reversible', () => {
   const home = freshHome();
   fs.mkdirSync(path.join(home, '.claude'), { recursive: true });

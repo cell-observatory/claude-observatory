@@ -127,8 +127,10 @@ function cmdInit(project: boolean, withStatusline = false): void {
   if (withStatusline) cmdStatusline();
 }
 
-function cmdUninstall(project: boolean): void {
+function cmdUninstall(args: string[]): void {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  const project = args.includes('--project');
+  const all = args.includes('--all');
   const target = project ? core.projectSettingsPath(process.cwd()) : core.settingsPath();
   let res: InstallResult;
   try {
@@ -140,6 +142,36 @@ function cmdUninstall(project: boolean): void {
     res.changed
       ? c.green('✓ ') + `removed capture hooks from ${res.settingsPath}\n`
       : 'no claude-observatory hooks found.\n'
+  );
+  if (!all) {
+    process.stdout.write(
+      c.dim('tip: `claude-observatory uninstall --all` also reverts the bundled status line + prints full teardown steps.\n')
+    );
+    return;
+  }
+  // --all: revert the bundled status line too, but only if it's still ours (never a user's custom one).
+  try {
+    const sl = core.uninstallStatusline(target);
+    if (sl.changed || sl.scriptRemoved) {
+      process.stdout.write(c.green('✓ ') + `reverted the bundled status line${sl.changed ? ' (settings.json + script)' : ' (script)'}\n`);
+    }
+  } catch {
+    /* leave a custom/hand-edited statusLine alone */
+  }
+  if (args.includes('--purge-store')) {
+    const sessions = core.listSessions();
+    for (const s of sessions) core.removeSession(s.id);
+    process.stdout.write(c.green('✓ ') + `purged the store (${sessions.length} session(s))\n`);
+  }
+  // We can't remove the global CLI or the editor extensions from here — print the exact steps.
+  process.stdout.write(
+    '\n' + c.bold('To finish removing Claude Observatory:\n') +
+      c.dim('  • CLI:        ') + 'npm rm -g claude-observatory\n' +
+      c.dim('  • VS Code:    ') + 'uninstall the “Claude Observatory” extension (Extensions view)\n' +
+      c.dim('  • JetBrains:  ') + 'Settings → Plugins → Claude Observatory → Uninstall\n' +
+      (args.includes('--purge-store')
+        ? ''
+        : c.dim('  • Stored edits: ') + '`claude-observatory clean --all`  (or re-run with `--purge-store`)\n')
   );
 }
 
@@ -343,6 +375,41 @@ function cmdList(args: string[]): void {
     process.stdout.write('\n');
   }
   process.stdout.write(c.dim('diff <id> · keep <id> · undo <id>\n'));
+}
+
+/** `timeline` — a newest-first chronological feed of edits (time · id · status · Δ · file), the
+ *  terminal counterpart to the editors' Timeline. `list` groups by file; this is time-ordered. */
+function cmdTimeline(args: string[]): void {
+  const core = require('@claude-observatory/core') as Core;
+  const session = getSessionId(args);
+  const log = core.readLog(session);
+  if (args.includes('--json')) {
+    emitJson({
+      session,
+      edits: [...log]
+        .reverse()
+        .map((r) => {
+          const d = core.lineDelta(session, r);
+          return { id: r.id, ts: r.ts, tool: r.tool, file: r.file, status: r.status, added: d.added, removed: d.removed };
+        }),
+    });
+    return;
+  }
+  if (log.length === 0) {
+    process.stdout.write(c.dim(`no edits (session ${session}).\n`));
+    return;
+  }
+  const pending = log.filter((r) => r.status === 'pending').length;
+  process.stdout.write(
+    c.bold('Timeline') + c.dim(`  ${log.length} edit(s) · ${pending} pending · newest first · session ${session}\n\n`)
+  );
+  for (const r of [...log].reverse()) {
+    const { added, removed } = core.lineDelta(session, r);
+    const delta = c.green(`+${added}`) + ' ' + c.red(`-${removed}`);
+    process.stdout.write(
+      `${c.dim(core.relTime(r.ts).padEnd(12))} ${c.bold('#' + r.id)}  ${statusLabel(r.status).padEnd(7)} ${delta}  ${c.cyan(relFile(r.file))} ${c.dim(r.tool)}\n`
+    );
+  }
 }
 
 function requireId(args: string[]): number {
@@ -632,11 +699,11 @@ function cmdTree(args: string[]): void {
   emitJson(core.buildEditTree(session, { root, filter }));
 }
 
-/** One JSON payload for an Observations-style view: recap + per-edit reasoning/flags/memory. */
-function cmdObserve(args: string[]): void {
-  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
-  const session = getSessionId(args);
-  const cwd = process.cwd();
+type Core = typeof import('@claude-observatory/core');
+
+/** Build the Observations payload (recap + per-edit reasoning/flags/memory) once — shared by the
+ *  machine `observe --json` surface and the human `insights` view. */
+function buildObserve(core: Core, session: string, cwd: string) {
   const log = core.readLog(session);
   const reasoning = core.reasoningByEdit(cwd, session);
   const insights = core.transcriptInsights(cwd, session);
@@ -664,7 +731,46 @@ function cmdObserve(args: string[]): void {
       analysis: core.cachedAnalysis(session, `edit-${r.id}`)?.text ?? null,
     };
   });
-  emitJson({ session, recap, insights, suggestions, edits });
+  return { session, recap, insights, suggestions, edits };
+}
+
+/** One JSON payload for an Observations-style view: recap + per-edit reasoning/flags/memory. */
+function cmdObserve(args: string[]): void {
+  const core = require('@claude-observatory/core') as Core;
+  emitJson(buildObserve(core, getSessionId(args), process.cwd()));
+}
+
+/** `insights` — the human-readable Observations view (recap + per-edit summary/reasoning/flags/
+ *  file-memory + next steps). The terminal counterpart to the editors' Observations panel. */
+function cmdInsights(args: string[]): void {
+  const core = require('@claude-observatory/core') as Core;
+  const session = getSessionId(args);
+  const p = buildObserve(core, session, process.cwd());
+  if (args.includes('--json')) {
+    emitJson(p);
+    return;
+  }
+  if (p.edits.length === 0) {
+    process.stdout.write(c.dim(`no edits yet (session ${session}).\n`));
+    return;
+  }
+  process.stdout.write(c.bold('Observations') + c.dim(`  session ${session}\n`));
+  if (p.recap) process.stdout.write(c.dim(p.recap) + '\n');
+  process.stdout.write('\n');
+  for (const e of p.edits) {
+    process.stdout.write(
+      `${c.bold('#' + e.id)}  ${statusLabel(e.status).padEnd(7)}  ${c.cyan(relFile(e.file))}  ${c.dim(e.summary)}\n`
+    );
+    if (e.reasoning) process.stdout.write('     ' + c.dim(e.reasoning.split('\n')[0].slice(0, 140)) + '\n');
+    for (const f of e.flags) {
+      process.stdout.write('     ' + (f.level === 'warn' ? c.yellow('⚠ ') : c.dim('· ')) + f.message + '\n');
+    }
+    if (e.memory.risky) process.stdout.write('     ' + c.yellow('⚑ ') + c.dim(e.memory.summary) + '\n');
+  }
+  if (p.suggestions.length) {
+    process.stdout.write('\n' + c.bold('Next steps') + '\n');
+    for (const s of p.suggestions) process.stdout.write('  • ' + s + '\n');
+  }
 }
 
 /** The UsageLine snapshot (ctx / 5h / week) + the shared staleness threshold; always JSON. */
@@ -832,19 +938,23 @@ function usage(): void {
       `                       install capture hooks (--project = repo ./.claude/settings.json;\n` +
       `                       --with-statusline also installs the bundled status line)\n` +
       `  statusline           install/refresh the bundled claude-statusline (usage bars; needs bash+jq)\n` +
-      `  uninstall [--project] remove the capture hooks\n` +
+      `  uninstall [--project] [--all] [--purge-store]\n` +
+      `                       remove the capture hooks (--all also reverts the bundled status line +\n` +
+      `                       prints teardown steps; --purge-store also deletes the stored edits)\n` +
       `  status               show hooks + hook-path health + session + edit counts\n` +
       `  doctor [--json]      diagnose setup (hooks, PATH, config dir, session, status line) with fixes\n` +
       `  update [--check]     update the CLI to the latest GitHub Release (\`--check\` only reports)\n` +
       `  sessions             list all sessions in the store (● = current dir)\n` +
-      `  list [filters]       list edits; filters: --pending|--kept|--undone, --file <substr>\n` +
+      `  list [filters]       list edits (grouped by file); filters: --pending|--kept|--undone, --file <substr>\n` +
+      `  timeline [--json]    edits newest-first as a chronological feed (time · id · Δ · file)\n` +
       `  diff <id>            show before/after for an edit\n` +
       `  keep <id>            mark an edit kept\n` +
       `  undo <id> [--force]  surgically undo an edit (--force = per-file restore)\n` +
       `  redo <id> [--force]  re-apply an undone edit\n` +
       `  clean [opts]         GC orphaned blobs; --drop <id> | --older-than <Nd> | --all | --resolved\n` +
       `  stats [--json]       usage stats (edits/tokens/messages/thinking/output) by session & window\n` +
-      `  summary [--markdown] per-session review recap (kept/reverted per file); --markdown to export\n\n` +
+      `  summary [--markdown] per-session review recap (kept/reverted per file); --markdown to export\n` +
+      `  insights [--json]    Observations view: recap + per-edit reasoning/flags/file-memory + next steps\n\n` +
       `machine-readable (for front-ends/scripts; list/status/sessions/keep/undo/redo also take --json):\n` +
       `  blob <sha>           raw blob bytes to stdout\n` +
       `  tree [--root <d>] [--filter <q>]   folder→file→class→edit view-model as JSON (both editors)\n` +
@@ -886,7 +996,7 @@ function main(): void {
       cmdStatusline();
       break;
     case 'uninstall':
-      cmdUninstall(rest.includes('--project'));
+      cmdUninstall(rest);
       break;
     case 'status':
       cmdStatus(rest);
@@ -899,6 +1009,9 @@ function main(): void {
       break;
     case 'list':
       cmdList(rest);
+      break;
+    case 'timeline':
+      cmdTimeline(rest);
       break;
     case 'diff':
       cmdDiff(rest);
@@ -932,6 +1045,9 @@ function main(): void {
       break;
     case 'observe':
       cmdObserve(rest);
+      break;
+    case 'insights':
+      cmdInsights(rest);
       break;
     case 'usage':
       cmdUsage(rest);
