@@ -17,6 +17,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { diffArrays } from 'diff';
 import { findRecord, readBlob, readLog, setStatus } from './store';
+import { groupMembers } from './groups';
 
 export interface UndoResult {
   ok: boolean;
@@ -342,6 +343,51 @@ export function redoEdit(sessionId: string, id: number): UndoResult {
     status: 'redone',
     message: `re-applied edit #${id}, preserving later edits (${rec.file})`,
   };
+}
+
+// --- group-aware review actions: keep/undo/redo operate on the whole same-code review unit (the
+// collapsed group), so a superseded intermediate edit is never kept/reverted on its own ---
+
+export interface GroupResult extends UndoResult {
+  ids: number[]; // the member edit ids acted on
+}
+
+/** Keep every edit in the review group containing `id`. */
+export function keepGroup(sessionId: string, id: number): { kept: number; ids: number[] } {
+  const ids = groupMembers(sessionId, id);
+  for (const m of ids) setStatus(sessionId, m, 'kept');
+  return { kept: ids.length, ids };
+}
+
+/**
+ * Undo every edit in the review group containing `id`, NEWEST-first — a clean sequential revert back
+ * to the group's earliest before-state (the members are a chained overlap, so each step reverts
+ * cleanly). Stops and returns the conflict if a member genuinely conflicts with an out-of-group edit.
+ */
+export function undoGroup(sessionId: string, id: number): GroupResult {
+  const ids = [...groupMembers(sessionId, id)].sort((a, b) => b - a); // newest → oldest
+  // Singleton (the common case) keeps the exact single-edit semantics: noop / error / conflict / undone.
+  if (ids.length === 1) return { ...undoEdit(sessionId, ids[0]), ids };
+  let undone = 0;
+  for (const m of ids) {
+    const res = undoEdit(sessionId, m);
+    if (!res.ok && res.status !== 'noop') return { ...res, ids }; // conflict or error → stop + report
+    if (res.status !== 'noop') undone++;
+  }
+  return { ok: true, status: 'undone', message: `reverted this change — ${undone} edit(s)`, ids };
+}
+
+/** Re-apply every undone edit in a group, OLDEST-first (rebuilds the chain). Mirror of undoGroup. */
+export function redoGroup(sessionId: string, id: number): GroupResult {
+  const ids = [...groupMembers(sessionId, id)].sort((a, b) => a - b); // oldest → newest
+  if (ids.length === 1) return { ...redoEdit(sessionId, ids[0]), ids };
+  let redone = 0;
+  for (const m of ids) {
+    const res = redoEdit(sessionId, m);
+    if (!res.ok && res.status !== 'noop') return { ...res, ids };
+    if (res.status !== 'noop') redone++;
+  }
+  return { ok: true, status: 'redone', message: `re-applied this change — ${redone} edit(s)`, ids };
 }
 
 /** Force a redo: write the edit's `after` content wholesale (dropping later edits to the file). */

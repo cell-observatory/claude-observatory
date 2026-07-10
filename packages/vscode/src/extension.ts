@@ -453,7 +453,7 @@ class EditPeek implements vscode.Disposable {
   keep(): void {
     const s = currentSession();
     if (this.edit && s) {
-      core.setStatus(s, this.edit.id, 'kept');
+      core.keepGroup(s, this.edit.id); // keep the whole same-code review unit
       this.closeThread();
     }
   }
@@ -639,7 +639,7 @@ async function blockedByDirtyBuffer(file: string): Promise<boolean> {
 async function undoOne(session: string, id: number): Promise<void> {
   const rec = core.findRecord(session, id);
   if (rec && (await blockedByDirtyBuffer(rec.file))) return;
-  const res = core.undoEdit(session, id);
+  const res = core.undoGroup(session, id); // reverts the whole same-code review unit (collapsed group)
   if (res.status === 'conflict') {
     const pick = await vscode.window.showWarningMessage(res.message, { modal: true }, 'Force-restore file');
     if (pick === 'Force-restore file') {
@@ -654,7 +654,7 @@ async function undoOne(session: string, id: number): Promise<void> {
 async function redoOne(session: string, id: number): Promise<void> {
   const rec = core.findRecord(session, id);
   if (rec && (await blockedByDirtyBuffer(rec.file))) return;
-  const res = core.redoEdit(session, id);
+  const res = core.redoGroup(session, id); // re-applies the whole review unit (collapsed group)
   if (res.status === 'conflict') {
     const pick = await vscode.window.showWarningMessage(res.message, { modal: true }, 'Force re-apply');
     if (pick === 'Force re-apply') {
@@ -690,10 +690,16 @@ async function chatAboutEdit(session: string, id: number): Promise<void> {
   );
 }
 
-/** Keep every pending edit in one file (shared by keepFile and keepOpenFile). */
-function keepEditsInFile(session: string, file: string, edits: core.EditRecord[]): void {
+/** Keep every pending edit in one file (shared by keepFile and keepOpenFile). Reads the RAW log so it
+ *  covers every member of a collapsed review group, not just the reps the tree renders. */
+function keepEditsInFile(session: string, file: string, _edits: core.EditRecord[]): void {
   let kept = 0;
-  for (const e of edits) if (e.status === 'pending') { core.setStatus(session, e.id, 'kept'); kept++; }
+  for (const e of core.readLog(session)) {
+    if (e.file === file && e.status === 'pending') {
+      core.setStatus(session, e.id, 'kept');
+      kept++;
+    }
+  }
   vscode.window.showInformationMessage(
     kept ? `Kept ${kept} edit(s) in ${path.basename(file)}.` : 'No pending edits to keep in this file.'
   );
@@ -701,8 +707,9 @@ function keepEditsInFile(session: string, file: string, edits: core.EditRecord[]
 
 /** Surgically undo every non-undone edit in one file, newest-first, after a confirm + dirty-buffer
  *  guard (shared by undoFile and undoOpenFile). */
-async function undoEditsInFile(session: string, file: string, edits: core.EditRecord[]): Promise<void> {
-  const targets = [...edits].filter((e) => e.status !== 'undone').sort((a, b) => b.id - a.id);
+async function undoEditsInFile(session: string, file: string, _edits: core.EditRecord[]): Promise<void> {
+  // Raw log (not the collapsed reps) so we undo every member of a review group in the file, newest-first.
+  const targets = core.readLog(session).filter((e) => e.file === file && e.status !== 'undone').sort((a, b) => b.id - a.id);
   const base = path.basename(file);
   if (targets.length === 0) {
     vscode.window.showInformationMessage(`Nothing to undo in ${base}.`);
@@ -1835,7 +1842,7 @@ export function activate(context: vscode.ExtensionContext): void {
           vscode.window.setStatusBarMessage('Claude Observatory: no pending edit under the cursor', 3000);
           return;
         }
-        core.setStatus(s, rec.id, 'kept');
+        core.keepGroup(s, rec.id);
         vscode.window.setStatusBarMessage(`Claude Observatory: kept edit #${rec.id}`, 3000);
       })()
     ),
@@ -1960,7 +1967,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand('claudeObservatory.keep', (n: EditNode) =>
       withSession((s) => {
-        core.setStatus(s, n.rec.id, 'kept');
+        core.keepGroup(s, n.rec.id);
       })()
     ),
     vscode.commands.registerCommand('claudeObservatory.undo', (n: EditNode) =>
@@ -1989,7 +1996,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('claudeObservatory.diffNextEdit', (uri?: vscode.Uri) => stepDiffEdit(uri, 1)),
     vscode.commands.registerCommand('claudeObservatory.inlineKeep', (id: number) =>
       withSession((s) => {
-        core.setStatus(s, id, 'kept');
+        core.keepGroup(s, id);
       })()
     ),
     vscode.commands.registerCommand('claudeObservatory.inlineUndo', (id: number) =>

@@ -211,6 +211,163 @@ test('undo: --force restore of a deleted non-UTF-8 file preserves exact bytes', 
   assert.equal(Buffer.compare(fs.readFileSync(F), before), 0, 'deleted file restored byte-exact');
 });
 
+test('groups: consecutive same-line edits collapse into one review unit (keep the latest)', () => {
+  freshHome();
+  const S = 'grp';
+  const F = path.join(tmpWork(), 'f.txt');
+  seedEdit(S, F, 'L1\nA\nL3\n', 'L1\nB\nL3\n'); // #1: line 2 A->B
+  seedEdit(S, F, 'L1\nB\nL3\n', 'L1\nC\nL3\n'); // #2: line 2 B->C (chained; #1's "B" is superseded)
+  const groups = core.pendingGroups(S);
+  assert.equal(groups.size, 1, 'the two same-line edits collapse into ONE group');
+  const [rep, members] = [...groups.entries()][0];
+  assert.equal(rep, 2, 'represented by the most-recent edit');
+  assert.deepEqual(members, [1, 2]);
+  assert.deepEqual(core.groupMembers(S, 1), [1, 2], 'membership resolves from either id');
+});
+
+test('groups: edits to different regions of a file stay separate', () => {
+  freshHome();
+  const S = 'grp2';
+  const F = path.join(tmpWork(), 'f.txt');
+  seedEdit(S, F, 'L1\nL2\nL3\nL4\nL5\n', 'X1\nL2\nL3\nL4\nL5\n'); // #1: line 1
+  seedEdit(S, F, 'X1\nL2\nL3\nL4\nL5\n', 'X1\nL2\nL3\nL4\nX5\n'); // #2: line 5 (chained, non-overlapping)
+  assert.equal(core.pendingGroups(S).size, 2, 'different regions -> two independent groups');
+  assert.deepEqual(core.groupMembers(S, 1), [1]);
+  assert.deepEqual(core.groupMembers(S, 2), [2]);
+});
+
+test('groups: undoGroup reverts to the earliest before; redoGroup rebuilds; keepGroup keeps all', () => {
+  freshHome();
+  const S = 'grp3';
+  const F = path.join(tmpWork(), 'f.txt');
+  const A = 'L1\nA\nL3\n', B = 'L1\nB\nL3\n', C = 'L1\nC\nL3\n';
+  seedEdit(S, F, A, B); // #1
+  seedEdit(S, F, B, C); // #2
+  fs.writeFileSync(F, C); // current on disk = the latest state
+  const u = core.undoGroup(S, 2);
+  assert.equal(u.status, 'undone');
+  assert.deepEqual([...u.ids].sort((a, b) => a - b), [1, 2]);
+  assert.equal(fs.readFileSync(F, 'utf8'), A, 'reverted the whole chain back to the earliest before-state');
+  assert.equal(core.findRecord(S, 1).status, 'undone');
+  assert.equal(core.findRecord(S, 2).status, 'undone');
+  const r = core.redoGroup(S, 2);
+  assert.equal(r.status, 'redone');
+  assert.equal(fs.readFileSync(F, 'utf8'), C, 're-applied the whole chain');
+  const k = core.keepGroup(S, 1);
+  assert.equal(k.kept, 2, 'keepGroup keeps every member');
+  assert.equal(core.findRecord(S, 1).status, 'kept');
+  assert.equal(core.findRecord(S, 2).status, 'kept');
+});
+
+test('groups: a three-edit chain on the same line collapses transitively into one unit', () => {
+  freshHome();
+  const S = 'g4';
+  const F = path.join(tmpWork(), 'f.txt');
+  seedEdit(S, F, 'x\nA\ny\n', 'x\nB\ny\n'); // #1
+  seedEdit(S, F, 'x\nB\ny\n', 'x\nC\ny\n'); // #2
+  seedEdit(S, F, 'x\nC\ny\n', 'x\nD\ny\n'); // #3
+  const g = core.pendingGroups(S);
+  assert.equal(g.size, 1, 'all three collapse');
+  assert.deepEqual([...g.get(3)], [1, 2, 3], 'rep is #3; members are 1-3');
+});
+
+test('groups: same-line edits group while a different-region edit stays a separate unit', () => {
+  freshHome();
+  const S = 'g5';
+  const F = path.join(tmpWork(), 'f.txt');
+  seedEdit(S, F, 'L0\nL1\nL2\nL3\nL4\n', 'A\nL1\nL2\nL3\nL4\n'); // #1 line 0
+  seedEdit(S, F, 'A\nL1\nL2\nL3\nL4\n', 'B\nL1\nL2\nL3\nL4\n'); // #2 line 0 (groups with #1)
+  seedEdit(S, F, 'B\nL1\nL2\nL3\nL4\n', 'B\nL1\nL2\nL3\nX\n'); // #3 line 4 (separate region)
+  assert.equal(core.pendingGroups(S).size, 2, 'two independent groups');
+  assert.deepEqual(core.groupMembers(S, 1), [1, 2]);
+  assert.deepEqual(core.groupMembers(S, 3), [3]);
+});
+
+test('groups: undoGroup reverts its region ONLY, surgically preserving an unrelated edit in the same file', () => {
+  freshHome();
+  const S = 'g6';
+  const F = path.join(tmpWork(), 'f.txt');
+  seedEdit(S, F, 'L0\nL1\nL2\nL3\nL4\n', 'A\nL1\nL2\nL3\nL4\n'); // #1 line 0
+  seedEdit(S, F, 'A\nL1\nL2\nL3\nL4\n', 'B\nL1\nL2\nL3\nL4\n'); // #2 line 0 (group)
+  seedEdit(S, F, 'B\nL1\nL2\nL3\nL4\n', 'B\nL1\nL2\nL3\nX\n'); // #3 line 4 (separate)
+  fs.writeFileSync(F, 'B\nL1\nL2\nL3\nX\n');
+  const res = core.undoGroup(S, 2);
+  assert.equal(res.status, 'undone');
+  assert.equal(fs.readFileSync(F, 'utf8'), 'L0\nL1\nL2\nL3\nX\n', 'line 0 reverted; line 4 (#3) preserved');
+  assert.equal(core.findRecord(S, 3).status, 'pending', 'the unrelated edit is untouched');
+});
+
+test('groups: a resolved (kept) edit never drags into a later pending same-line group', () => {
+  freshHome();
+  const S = 'g7';
+  const F = path.join(tmpWork(), 'f.txt');
+  seedEdit(S, F, 'x\nA\ny\n', 'x\nB\ny\n'); // #1
+  core.setStatus(S, 1, 'kept'); // resolve #1
+  seedEdit(S, F, 'x\nB\ny\n', 'x\nC\ny\n'); // #2 pending (chained after #1)
+  assert.deepEqual(core.groupMembers(S, 2), [2], 'only the pending edit is in the group');
+  assert.equal(core.keepGroup(S, 2).kept, 1);
+  assert.equal(core.findRecord(S, 1).status, 'kept', 'the already-kept edit is unchanged');
+});
+
+test('groups: a new-file create + an immediate same-line edit collapse (before=null chain)', () => {
+  freshHome();
+  const S = 'g8';
+  const F = path.join(tmpWork(), 'new.txt');
+  seedEdit(S, F, null, 'hello\n'); // #1 create
+  seedEdit(S, F, 'hello\n', 'HELLO\n'); // #2 edit
+  assert.equal(core.pendingGroups(S).size, 1, 'create + edit collapse');
+  assert.deepEqual(core.groupMembers(S, 1), [1, 2]);
+  fs.writeFileSync(F, 'HELLO\n');
+  const res = core.undoGroup(S, 2);
+  assert.ok(res.ok, 'undoing the whole unit succeeds');
+  assert.ok(!fs.existsSync(F), 'reverting the group removes the created file');
+});
+
+test('groups: undoGroup then redoGroup round-trips to the exact final state', () => {
+  freshHome();
+  const S = 'g9';
+  const F = path.join(tmpWork(), 'f.txt');
+  const A = 'p\nA\nq\n', B = 'p\nB\nq\n', C = 'p\nC\nq\n';
+  seedEdit(S, F, A, B);
+  seedEdit(S, F, B, C);
+  fs.writeFileSync(F, C);
+  core.undoGroup(S, 2);
+  assert.equal(fs.readFileSync(F, 'utf8'), A, 'undo -> earliest before');
+  core.redoGroup(S, 2);
+  assert.equal(fs.readFileSync(F, 'utf8'), C, 'redo -> exact final state');
+  assert.equal(core.findRecord(S, 1).status, 'pending');
+  assert.equal(core.findRecord(S, 2).status, 'pending');
+});
+
+test('groups: identical edits to two different files never group across files', () => {
+  freshHome();
+  const S = 'g10';
+  const dir = tmpWork();
+  seedEdit(S, path.join(dir, 'a.txt'), 'x\n', 'y\n'); // #1 file A
+  seedEdit(S, path.join(dir, 'b.txt'), 'x\n', 'y\n'); // #2 file B
+  assert.equal(core.pendingGroups(S).size, 2, 'different files -> different groups');
+});
+
+test('groups: reviewEdits collapses pending to one net rep (earliest before -> latest after)', () => {
+  freshHome();
+  const S = 'g11';
+  const F = path.join(tmpWork(), 'f.txt');
+  seedEdit(S, F, 'a\nX\nb\n', 'a\nY\nb\n'); // #1 line 1
+  seedEdit(S, F, 'a\nY\nb\n', 'a\nZ\nb\n'); // #2 line 1 (group)
+  const rev = core.reviewEdits(S);
+  assert.equal(rev.length, 1, 'one collapsed review record');
+  assert.equal(rev[0].id, 2, 'rep carries the most-recent id');
+  const d = core.lineDelta(S, rev[0]);
+  assert.equal(d.added, 1, 'net delta is earliest-before -> latest-after (X -> Z)');
+  assert.equal(d.removed, 1);
+  // resolved edits stay individual (history) alongside a new pending rep
+  core.setStatus(S, 1, 'kept');
+  core.setStatus(S, 2, 'kept'); // the group is now resolved
+  seedEdit(S, F, 'a\nZ\nb\n', 'a\nW\nb\n'); // #3 pending, chained after the kept group
+  const rev2 = core.reviewEdits(S);
+  assert.equal(rev2.length, 3, 'both kept edits stay individual; the new pending edit is its own rep');
+});
+
 test('undo: fileBaseline reverts all pending edits (quick-diff baseline)', () => {
   freshHome();
   const S = 'baseline';

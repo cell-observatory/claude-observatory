@@ -11,6 +11,7 @@ import { lineDelta } from './format';
 import { detectClasses, classAt } from './classes';
 import { locateEditInCurrent } from './ranges';
 import { matchesQuery } from './filter';
+import { reviewEdits } from './groups';
 
 export interface TreeEdit {
   id: number;
@@ -134,8 +135,10 @@ export function buildEditTree(session: string, opts: { root?: string; filter?: s
     const r = opts.root ? path.relative(opts.root, file) : file;
     return r.split(path.sep).join('/');
   };
+  // Collapse same-code pending edits into one review unit (shared with the CLI `list`).
+  const display = reviewEdits(session);
   const grouped = new Map<string, { file: string; edits: EditRecord[] }>();
-  for (const rec of log) {
+  for (const rec of display) {
     const rel = relOf(rec.file);
     if (filter && !matchesQuery(rel, filter)) continue;
     if (!grouped.has(rel)) grouped.set(rel, { file: rec.file, edits: [] });

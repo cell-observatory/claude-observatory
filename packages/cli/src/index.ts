@@ -328,7 +328,7 @@ function statusLabel(s: string): string {
 function cmdList(args: string[]): void {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const session = getSessionId(args);
-  let log = core.readLog(session);
+  let log = core.reviewEdits(session); // collapse same-code pending edits into one review unit (like the tree)
 
   // Filters: --pending | --kept | --undone, and --file <substring>
   const only = args.includes('--pending')
@@ -470,13 +470,15 @@ function cmdKeep(args: string[]): void {
     return;
   }
   const id = requireId(args);
-  const rec = core.setStatus(session, id, 'kept');
+  const rec = core.findRecord(session, id);
   if (!rec) fail(`no edit #${id} in session ${session}`);
+  const g = core.keepGroup(session, id); // keep the whole same-code review unit (collapsed group)
   if (json) {
-    emitJson({ kept: 1, ids: [id] });
+    emitJson({ kept: g.kept, ids: g.ids });
     return;
   }
-  process.stdout.write(c.green('✓ ') + `kept edit #${id} (${relFile(rec.file)})\n`);
+  const label = g.kept > 1 ? `${g.kept} edits for this change` : `edit #${id}`;
+  process.stdout.write(c.green('✓ ') + `kept ${label} (${relFile(rec.file)})\n`);
 }
 
 function cmdUndo(args: string[]): void {
@@ -484,7 +486,8 @@ function cmdUndo(args: string[]): void {
   const session = getSessionId(args);
   const id = requireId(args);
   const force = args.includes('--force');
-  const res = force ? core.restoreFile(session, id) : core.undoEdit(session, id);
+  // Undo the whole same-code review unit (collapsed group), newest-first; --force is the per-file fallback.
+  const res = force ? core.restoreFile(session, id) : core.undoGroup(session, id);
   // --json: the full structured UndoResult, so a front-end can branch conflict → offer --force
   // instead of string-matching prose. Exit codes match the human path exactly.
   if (args.includes('--json')) {
@@ -504,7 +507,7 @@ function cmdRedo(args: string[]): void {
   const session = getSessionId(args);
   const id = requireId(args);
   const force = args.includes('--force');
-  const res = force ? core.reapplyFile(session, id) : core.redoEdit(session, id);
+  const res = force ? core.reapplyFile(session, id) : core.redoGroup(session, id);
   if (args.includes('--json')) {
     emitJson({ ok: res.ok, status: res.status, message: res.message });
     process.exit(res.status === 'conflict' ? 1 : res.ok ? 0 : 1);

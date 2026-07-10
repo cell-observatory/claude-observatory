@@ -154,25 +154,33 @@ STATS2=$(cc stats --json 2>/dev/null)
 ok "second run (warm cache) agrees"  "[ \"\$(printf '%s' \"\$STATS\" | jq -S '.daily')\" = \"\$(printf '%s' \"\$STATS2\" | jq -S '.daily')\" ]"
 
 echo "════════ E2E 14: machine-readable surface (--json + blob/locate/observe/usage) ════════"
-# Two overlapping edits on a fresh file: #A b->X, #B X->Y (undo #A must report a structured conflict).
+# Two chained same-line edits collapse into ONE review unit (#A a->X superseded by #B X->Y).
 J="$WS/json.txt"; printf 'a\nb\nc\n' > "$J"
 hook PreToolUse Edit "$J"; node "$SETLINE" "$J" 1 "X"; hook PostToolUse Edit "$J"
 hook PreToolUse Edit "$J"; node "$SETLINE" "$J" 1 "Y"; hook PostToolUse Edit "$J"
 LISTJ=$(cc list --json)
 ok "list --json is valid JSON with deltas" "printf '%s' \"\$LISTJ\" | jq -e '.edits[0].added >= 0' >/dev/null"
-IDA=$(printf '%s' "$LISTJ" | jq "[.edits[] | select(.file|endswith(\"json.txt\")) | .id] | .[0]")
-IDB=$(printf '%s' "$LISTJ" | jq "[.edits[] | select(.file|endswith(\"json.txt\")) | .id] | .[1]")
+ok "same-code edits collapse to one review unit" "[ \$(printf '%s' \"\$LISTJ\" | jq '[.edits[]|select(.file|endswith(\"json.txt\"))]|length') -eq 1 ]"
+REP=$(printf '%s' "$LISTJ" | jq "[.edits[] | select(.file|endswith(\"json.txt\")) | .id] | .[0]")
 ok "status --json reports the session + counts" "cc status --json | jq -e '.session == \"$SESSION\" and .counts.total >= 2' >/dev/null"
 ok "sessions --json marks the active session"   "cc sessions --json | jq -e '.active == \"$SESSION\"' >/dev/null"
-# undo --json: conflict is STRUCTURED (front-ends branch on .status, not prose), exit stays 1
-UJ=$(cc undo "$IDA" --json); rc=$?
-ok "undo --json overlap -> status:conflict"  "printf '%s' \"\$UJ\" | jq -e '.status == \"conflict\" and .ok == false' >/dev/null"
+# undo the collapsed group --json: clean revert of the whole change back to the original, exit 0
+UJ2=$(cc undo "$REP" --json); rc2=$?
+ok "undo group --json -> status:undone, exit 0" "[ $rc2 -eq 0 ] && printf '%s' \"\$UJ2\" | jq -e '.status == \"undone\"' >/dev/null"
+ok "undo group reverts to the original"         "head -1 \"$J\" | grep -q '^a\$'"
+ok "redo group --json re-applies"               "cc redo \"$REP\" --json | jq -e '.status == \"redone\"' >/dev/null"
+ok "keep group --json"                          "cc keep \"$REP\" --json | jq -e '.kept >= 1' >/dev/null"
+ok "keep --all --json sweeps the rest"          "cc keep --all --json | jq -e '.kept >= 0' >/dev/null"
+# Structured conflict path: a MANUAL change between two same-line edits breaks the chain, so they do
+# NOT collapse; undoing the earlier one then reports a structured conflict (front-ends branch on .status).
+K="$WS/conflict.txt"; printf 'p\nq\nr\n' > "$K"
+hook PreToolUse Edit "$K"; node "$SETLINE" "$K" 0 "M1"; hook PostToolUse Edit "$K"   # E1: line 0 p->M1
+printf 'M1\nQX\nr\n' > "$K"   # manual (non-hook) change to line 1 -> breaks the before/after chain
+hook PreToolUse Edit "$K"; node "$SETLINE" "$K" 0 "M2"; hook PostToolUse Edit "$K"   # E2: line 0 M1->M2 (not chained)
+CID=$(cc list --json | jq "[.edits[] | select(.file|endswith(\"conflict.txt\")) | .id] | min")
+UJ=$(cc undo "$CID" --json); rc=$?
+ok "undo --json non-chained overlap -> status:conflict" "printf '%s' \"\$UJ\" | jq -e '.status == \"conflict\" and .ok == false' >/dev/null"
 ok "undo --json conflict exit code is 1"     "[ $rc -eq 1 ]"
-UJ2=$(cc undo "$IDB" --json); rc2=$?
-ok "undo --json clean -> status:undone, exit 0" "[ $rc2 -eq 0 ] && printf '%s' \"\$UJ2\" | jq -e '.status == \"undone\"' >/dev/null"
-ok "redo --json re-applies"                  "cc redo \"$IDB\" --json | jq -e '.status == \"redone\"' >/dev/null"
-ok "keep --json single"                      "cc keep \"$IDB\" --json | jq -e '.kept == 1' >/dev/null"
-ok "keep --all --json sweeps the rest"       "cc keep --all --json | jq -e '.kept >= 0' >/dev/null"
 # blob: raw bytes round-trip through the store
 SHA=$(jq -r 'select(.afterBlob != null) | .afterBlob' "$HOME/.claude/claude-observatory/$SESSION/log.jsonl" | head -1)
 ok "blob streams raw bytes"                  "[ -n \"\$(cc blob \"$SHA\")\" ]"
