@@ -98,6 +98,9 @@ object ObservatoryCli {
 
     // --- typed wrappers over the CLI's --json surface ---
 
+    /** Install the PreToolUse/PostToolUse capture hooks (non-interactive `claude-observatory init`). */
+    fun init(workDir: String?): CliResult = run(listOf("init"), workDir)
+
     fun keep(session: String, id: Int, workDir: String?): Boolean =
         run(listOf("keep", id.toString(), "--session", session, "--json"), workDir).ok
 

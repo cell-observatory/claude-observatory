@@ -172,8 +172,24 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
 
     // --- toolbar / menu / renderer ---
 
+    private fun installHooks() {
+        ProgressManager.getInstance().run(object : Task.Backgroundable(project, "Installing capture hooks…", false) {
+            override fun run(indicator: ProgressIndicator) {
+                val r = ObservatoryCli.init(project.basePath)
+                ApplicationManager.getApplication().invokeLater {
+                    if (r.ok) {
+                        ReviewOps.notify(project, "Capture hooks installed. Quit Claude Code and relaunch it — hooks are snapshotted at session start.")
+                    } else {
+                        ReviewOps.notify(project, "Install failed — is the claude-observatory CLI installed? ${r.stderr.take(200)}", NotificationType.ERROR)
+                    }
+                }
+            }
+        })
+    }
+
     private fun buildToolbar(): JComponent {
         val group = DefaultActionGroup(
+            action("Install Capture Hooks", AllIcons.Actions.Install) { installHooks() },
             action("Refresh Recap with Claude (spends tokens)", AllIcons.Actions.ForceRefresh) { refreshRecap() },
             action("Clear Resolved Edits", AllIcons.Actions.GC) {
                 val service = ObservatoryService.getInstance(project)
