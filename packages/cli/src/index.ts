@@ -120,7 +120,8 @@ function cmdInit(project: boolean, withStatusline = false): void {
               '(npm i -g claude-observatory) for capture to run.\n'
           )
         : '') +
-      `Edits made by Claude Code (Edit/Write/MultiEdit/NotebookEdit) will now be tracked.\n`
+      `Edits made by Claude Code (Edit/Write/MultiEdit/NotebookEdit — plus files changed by Bash; ` +
+      `set CLAUDE_OBSERVATORY_NO_BASH=1 to opt out) will now be tracked.\n`
   );
   if (statuslineNote) process.stdout.write(statuslineNote);
   if (withStatusline) cmdStatusline();
@@ -149,8 +150,15 @@ function cmdStatus(args: string[] = []): void {
   // Verify the installed hook points at a script that still exists — the #1 silent-failure mode
   // (repo moved / deleted after install, or a stale path on a teammate's machine).
   const cmd = core.installedHookCommand();
-  const m = cmd ? cmd.match(/"([^"]+)"/) : null;
-  const hookScript = m ? { path: m[1], ok: fs.existsSync(m[1]) } : null;
+  const quoted = cmd ? cmd.match(/"([^"]+)"/) : null;
+  // Legacy hooks embed an absolute script path (in quotes); the current portable hook is just
+  // `claude-observatory capture #marker` and resolves the bin on PATH — probe THAT instead, else the
+  // health check is silently inert (never fires) for every current install.
+  const hookScript = quoted
+    ? { path: quoted[1], ok: fs.existsSync(quoted[1]) }
+    : cmd
+      ? { path: 'claude-observatory (on PATH)', ok: onPath('claude-observatory') === true }
+      : null;
   const session = core.resolveSessionId(process.cwd());
   const log = session ? core.readLog(session) : [];
   const by = (s: string) => log.filter((r) => r.status === s).length;
@@ -174,7 +182,7 @@ function cmdStatus(args: string[] = []): void {
   );
   if (hookScript) {
     process.stdout.write(
-      `hook script:     ${hookScript.path} ${hookScript.ok ? c.green('[ok]') : c.red('[MISSING — re-run init]')}\n`
+      `hook script:     ${hookScript.path} ${hookScript.ok ? c.green('[ok]') : c.red('[not resolving — run `claude-observatory doctor`]')}\n`
     );
   }
   if (!session) {

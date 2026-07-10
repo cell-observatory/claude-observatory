@@ -178,7 +178,19 @@ export function writeBlob(sessionId: string, content: Buffer): string {
   const sha = crypto.createHash('sha256').update(content).digest('hex');
   const dest = path.join(blobsDir(sessionId), sha);
   if (!fs.existsSync(dest)) {
-    fs.writeFileSync(dest, content, { mode: 0o600 });
+    // tmp + atomic rename: a concurrent reader never sees a half-written blob, and a crash mid-write
+    // leaves a `.tmp-*` (ignored by GC + reads) instead of a truncated file at the real sha path.
+    const tmp = `${dest}.tmp-${process.pid}`;
+    fs.writeFileSync(tmp, content, { mode: 0o600 });
+    try {
+      fs.renameSync(tmp, dest);
+    } catch {
+      try {
+        fs.unlinkSync(tmp);
+      } catch {
+        /* lost the race to an identical-content writer — dest already exists */
+      }
+    }
   }
   return sha;
 }
@@ -390,6 +402,7 @@ function gcSessionCore(sessionId: string): { removed: number; bytes: number } {
   let removed = 0;
   let bytes = 0;
   for (const name of names) {
+    if (!/^[0-9a-f]{64}$/.test(name)) continue; // only blob files are GC candidates (skip in-flight .tmp-*)
     if (referenced.has(name)) continue;
     const p = path.join(dir, name);
     try {

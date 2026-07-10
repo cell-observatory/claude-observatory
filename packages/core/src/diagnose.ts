@@ -129,7 +129,7 @@ export function diagnose(input: DiagnoseInput): Check[] {
       label: '`claude-observatory` on PATH',
       level: 'fail',
       detail: 'the capture hook runs `claude-observatory` from PATH, but it does not resolve here — capture will silently do nothing.',
-      fix: 'Put the global npm bin dir on PATH (see `npm bin -g`), or reinstall the CLI.',
+      fix: 'Add the global npm bin dir (`$(npm prefix -g)/bin`) to your PATH, or reinstall the CLI.',
     });
   } else if (input.binOnPath === true) {
     checks.push({ id: 'bin-path', label: '`claude-observatory` on PATH', level: 'ok', detail: 'resolves on PATH' });

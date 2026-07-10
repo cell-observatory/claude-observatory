@@ -28,7 +28,7 @@ jobs:
           distribution: temurin
           java-version: 21
       - uses: gradle/actions/setup-gradle@v4
-      - run: gradle buildPlugin --console=plain
+      - run: ./gradlew buildPlugin --console=plain
         working-directory: packages/jetbrains
       - name: Create GitHub Release with artifacts
         env:
