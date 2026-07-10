@@ -987,6 +987,35 @@ test('capture: a PostToolUse with no matching Pre records nothing (no phantom ed
   assert.equal(readStoreLog(home, S).length, 0, 'nothing committed without a staged before-snapshot');
 });
 
+test('store: skip markers are recorded, ignored by readLog, and surfaced by readSkips', () => {
+  freshHome();
+  const S = 'skips';
+  const F = path.join(tmpWork(), 'f.txt');
+  seedEdit(S, F, 'a\n', 'b\n'); // a normal edit (#1)
+  core.appendSkip(S, '/big/file.bin', 'file too large');
+  core.appendSkip(S, '<bash-tree>', 'tree too large');
+  const log = core.readLog(S);
+  assert.equal(log.length, 1, 'skip markers are NOT edit records (folded out of readLog)');
+  assert.equal(log[0].id, 1);
+  const skips = core.readSkips(S);
+  assert.equal(skips.length, 2);
+  assert.equal(skips[0].reason, 'file too large');
+  assert.equal(skips[1].file, '<bash-tree>');
+});
+
+test('capture: an edit that grows a file past 5MB leaves a skip marker (not a silent drop)', () => {
+  const home = freshHome();
+  const dir = tmpWork();
+  const F = path.join(dir, 'big.txt');
+  fs.writeFileSync(F, 'small\n'); // ≤5MB at Pre
+  const S = 'toobig';
+  runHook(home, S, dir, 'PreToolUse', 'Edit', F);
+  fs.writeFileSync(F, 'X'.repeat(5 * 1024 * 1024 + 1)); // grew past MAX_BYTES
+  runHook(home, S, dir, 'PostToolUse', 'Edit', F);
+  assert.equal(core.readLog(S).length, 0, 'no edit record for the too-large file');
+  assert.equal(core.readSkips(S).length, 1, 'but a skip marker IS recorded');
+});
+
 test('store: readLog skips malformed/partial lines and folds status ops', () => {
   freshHome();
   const S = 'malformed';

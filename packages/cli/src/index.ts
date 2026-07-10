@@ -193,6 +193,7 @@ function cmdStatus(args: string[] = []): void {
       : null;
   const session = core.resolveSessionId(process.cwd());
   const log = session ? core.readLog(session) : [];
+  const skips = session ? core.readSkips(session) : [];
   const by = (s: string) => log.filter((r) => r.status === s).length;
 
   if (args.includes('--json')) {
@@ -205,6 +206,7 @@ function cmdStatus(args: string[] = []): void {
       counts: session
         ? { total: log.length, pending: by('pending'), kept: by('kept'), undone: by('undone') }
         : null,
+      skipped: session ? skips.length : null,
     });
     return;
   }
@@ -228,6 +230,12 @@ function cmdStatus(args: string[] = []): void {
       `last capture:    ${last}\n` +
       `edits:           ${log.length}  ${c.dim(`(${by('pending')} pending · ${by('kept')} kept · ${by('undone')} undone)`)}\n`
   );
+  if (skips.length) {
+    process.stdout.write(
+      c.yellow(`not captured:    ${skips.length} change(s)`) +
+        c.dim(' — too large (>5MB) / binary, or a Bash tree too large to snapshot\n')
+    );
+  }
 }
 
 /** Does `bin` resolve on PATH? Cross-platform; null if we couldn't determine it. */

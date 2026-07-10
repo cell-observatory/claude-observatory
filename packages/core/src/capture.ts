@@ -29,6 +29,7 @@ import {
   readBashManifest,
   deleteBashManifest,
   appendLog,
+  appendSkip,
   nextId,
 } from './store';
 
@@ -126,6 +127,9 @@ function handlePost(session: string, payload: HookPayload): void {
 
   const s = snapshot(file);
   if (s.kind === 'skip') {
+    // Pre snapshotted a before, but the file is now too large/binary to record — this edit is real
+    // but untracked; leave a marker so `status` can surface it instead of failing silently.
+    appendSkip(session, file, 'file too large (>5MB) or binary at commit — edit not captured');
     deleteStaging(session, key);
     return;
   }
@@ -187,7 +191,12 @@ function handlePreBash(session: string, payload: HookPayload): void {
     const s = snapshot(abs);
     if (s.kind === 'text') files[abs] = writeBlob(session, s.content);
   });
-  if (!ok) return; // tree too large — degrade silently rather than half-capture (no manifest → Post no-ops)
+  if (!ok) {
+    // Tree too large to snapshot reliably — record one marker for the whole command rather than
+    // half-capture (no manifest → Post no-ops).
+    appendSkip(session, '<bash-tree>', `Bash working tree exceeds ${BASH_MAX_FILES} files — changes not captured`);
+    return;
+  }
   writeBashManifest(session, { files, ts: Date.now() });
 }
 

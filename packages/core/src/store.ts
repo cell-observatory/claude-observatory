@@ -265,6 +265,15 @@ interface StatusOp {
   ts: number;
 }
 
+/** A real edit that capture could not snapshot (too large / binary / Bash tree too large). Recorded
+ *  so the CLI/editors can tell the user "N change(s) weren't captured" instead of failing silently. */
+export interface SkipOp {
+  op: 'skip';
+  file: string; // absolute path, or a short marker like '<bash-tree>' for a truncated Bash walk
+  reason: string;
+  ts: number;
+}
+
 /** Read the log, folding append-only status ops onto their edit records (in file order). */
 export function readLog(sessionId: string): EditRecord[] {
   const p = logPath(sessionId);
@@ -274,15 +283,19 @@ export function readLog(sessionId: string): EditRecord[] {
   for (const line of fs.readFileSync(p, 'utf8').split('\n')) {
     const t = line.trim();
     if (!t) continue;
-    let obj: EditRecord | StatusOp;
+    let obj: EditRecord | StatusOp | SkipOp;
     try {
       obj = JSON.parse(t);
     } catch {
       continue; // skip a partially-written line
     }
-    if ((obj as StatusOp).op === 'status') {
-      const rec = byId.get((obj as StatusOp).id);
-      if (rec) rec.status = (obj as StatusOp).status;
+    // Any line with an `op` is a control op, not an edit record: fold 'status', ignore the rest
+    // (e.g. 'skip' markers, read separately by readSkips).
+    if ((obj as { op?: string }).op) {
+      if ((obj as StatusOp).op === 'status') {
+        const rec = byId.get((obj as StatusOp).id);
+        if (rec) rec.status = (obj as StatusOp).status;
+      }
       continue;
     }
     const rec = obj as EditRecord;
@@ -290,6 +303,32 @@ export function readLog(sessionId: string): EditRecord[] {
     byId.set(rec.id, rec);
   }
   return records;
+}
+
+/** Append a 'skip' marker (a real edit capture had to drop). Best-effort, under the lock. */
+export function appendSkip(sessionId: string, file: string, reason: string): void {
+  const op: SkipOp = { op: 'skip', file, reason, ts: Date.now() };
+  withLock(sessionId, APPEND_LOCK_BUDGET_MS, () =>
+    fs.appendFileSync(logPath(sessionId), JSON.stringify(op) + '\n', { mode: 0o600 })
+  );
+}
+
+/** The 'skip' markers in a session's log (dropped, untracked changes). */
+export function readSkips(sessionId: string): SkipOp[] {
+  const p = logPath(sessionId);
+  if (!fs.existsSync(p)) return [];
+  const out: SkipOp[] = [];
+  for (const line of fs.readFileSync(p, 'utf8').split('\n')) {
+    const t = line.trim();
+    if (!t || t.indexOf('"skip"') === -1) continue;
+    try {
+      const o = JSON.parse(t);
+      if (o && o.op === 'skip') out.push(o as SkipOp);
+    } catch {
+      /* skip a partial line */
+    }
+  }
+  return out;
 }
 
 /** Next monotonic id = max existing id + 1 (safe: hooks run serially within a session). */
