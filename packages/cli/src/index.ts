@@ -237,7 +237,9 @@ function onPath(bin: string): boolean | null {
     const res =
       process.platform === 'win32'
         ? cp.spawnSync('where', [bin], { stdio: 'ignore' })
-        : cp.spawnSync('sh', ['-c', `command -v ${bin}`], { stdio: 'ignore' });
+        // Pass `bin` as $1, never interpolated into the shell string — no injection even if a future
+        // caller passes a config-derived value.
+        : cp.spawnSync('sh', ['-c', 'command -v "$1"', 'sh', bin], { stdio: 'ignore' });
     if (res.error) return null;
     return res.status === 0;
   } catch {

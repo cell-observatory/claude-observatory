@@ -23,7 +23,8 @@ class ObservatoryService(private val project: Project) : Disposable {
     private val listeners = CopyOnWriteArrayList<Runnable>()
     private var cachedLog: List<EditRecord> = emptyList()
     private var cachedKey: String = ""
-    private var cachedSession: String? = null
+    @Volatile private var cachedAutoSession: String? = null
+    @Volatile private var cachedAutoRoot: String? = null
     private val watchListener = Runnable { refresh() }
 
     init {
@@ -39,7 +40,13 @@ class ObservatoryService(private val project: Project) : Disposable {
             ?.takeIf { it.isNotBlank() }
             ?.let { return it }
         val root = workspaceRoot ?: return null
-        return SessionResolver.resolveSessionId(root).also { cachedSession = it }
+        // Memoize the auto-resolution (invalidated on refresh()): resolveSessionId walks parent dirs
+        // listing *.jsonl, and currentSession() is hit per cell renderer + per log()/counts()/tree call.
+        cachedAutoSession?.let { if (cachedAutoRoot == root) return it }
+        return SessionResolver.resolveSessionId(root).also {
+            cachedAutoSession = it
+            cachedAutoRoot = root
+        }
     }
 
     /** Folded log for the current session, cached on the log file's (mtime,size). */
@@ -139,6 +146,7 @@ class ObservatoryService(private val project: Project) : Disposable {
     /** Invalidate caches and re-render every registered surface. Call on the EDT. */
     fun refresh() {
         cachedKey = "" // force re-read
+        cachedAutoSession = null // re-resolve the session (a new session may have appeared)
         refreshEditTree() // kick a background tree fetch; repaints when it lands
         listeners.forEach { it.run() }
     }

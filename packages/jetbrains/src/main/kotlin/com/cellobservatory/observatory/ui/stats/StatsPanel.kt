@@ -90,7 +90,7 @@ private fun ago(ms: Long): String {
  * estimates, and the v0.1.2 staleness stamps ("Xm ago" + terminal hint when the statusline cache
  * is older than USAGE_STALE_MS, since IDE panels never run Claude's statusLine).
  */
-class StatsPanel(private val project: Project) : JPanel(BorderLayout()) {
+class StatsPanel(private val project: Project) : JPanel(BorderLayout()), com.intellij.openapi.Disposable {
 
     private var series: Map<String, List<Bucket>> = emptyMap()
     private var usage: Usage? = null
@@ -98,6 +98,10 @@ class StatsPanel(private val project: Project) : JPanel(BorderLayout()) {
     private var statsEverLoaded = false
     private var lastStatsRun = 0L
     private var statsRunning = false
+    // Held so dispose() can stop them — otherwise the Swing TimerQueue + the service listener keep the
+    // panel (and the captured, now-disposed Project) reachable after the tool window/project closes.
+    private val serviceListener = Runnable { refresh() }
+    private var refreshTimer: Timer? = null
 
     private val gathering = JBLabel("Gathering stats…").apply {
         foreground = UIUtil.getContextHelpForeground()
@@ -145,10 +149,16 @@ class StatsPanel(private val project: Project) : JPanel(BorderLayout()) {
         add(JBScrollPane(stack, JBScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED, JBScrollPane.HORIZONTAL_SCROLLBAR_NEVER), BorderLayout.CENTER)
 
         scoreboard.update(ObservatoryService.getInstance(project).counts()) // populate before first show
-        ObservatoryService.getInstance(project).addListener { refresh() }
+        ObservatoryService.getInstance(project).addListener(serviceListener)
         // 30s tick: refresh usage + stale stamps; stats self-throttles to one subprocess per 20s.
-        Timer(30_000) { if (isShowing) refresh() }.apply { isRepeats = true }.start()
+        refreshTimer = Timer(30_000) { if (isShowing) refresh() }.apply { isRepeats = true; start() }
         addHierarchyListener { if (isShowing) refresh() }
+    }
+
+    override fun dispose() {
+        refreshTimer?.stop()
+        refreshTimer = null
+        ObservatoryService.getInstance(project).removeListener(serviceListener)
     }
 
     private fun repaintCharts() {
