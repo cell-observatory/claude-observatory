@@ -204,6 +204,27 @@ ok "settings.json gained the statusLine entry" "jq -e '.statusLine.command | tes
 ok "existing settings keys preserved"          "jq -e '.theme == \"dark\"' \"$HOME/.claude/settings.json\" >/dev/null"
 ok "idempotent on re-run"                      "cc statusline >/dev/null 2>&1"
 
+echo "════════ E2E 16: folder/file scoped Accept/Revert/Clear (--under) ════════"
+mkdir -p "$WS/pkgA/sub" "$WS/pkgB"
+FA="$WS/pkgA/a.txt";     printf 'a1\n' > "$FA"
+FSU="$WS/pkgA/sub/s.txt"; printf 's1\n' > "$FSU"
+FBP="$WS/pkgB/b.txt";    printf 'b1\n' > "$FBP"
+hook PreToolUse Edit "$FA";  node "$SETLINE" "$FA"  0 "A2"; hook PostToolUse Edit "$FA"    # pkgA/a
+hook PreToolUse Edit "$FSU"; node "$SETLINE" "$FSU" 0 "S2"; hook PostToolUse Edit "$FSU"   # pkgA/sub/s
+hook PreToolUse Edit "$FBP"; node "$SETLINE" "$FBP" 0 "B2"; hook PostToolUse Edit "$FBP"   # pkgB/b
+# keep --under a FOLDER accepts every pending edit beneath it (pkgA/a + pkgA/sub/s), never the sibling pkgB.
+KOUT=$(cc keep --under "$WS/pkgA")
+ok "keep --under folder accepts both edits beneath it" "echo \"\$KOUT\" | grep -qiE 'kept 2'"
+ok "sibling pkgB edit is left pending"                 "cc list --json | jq -e '[.edits[]|select((.file|endswith(\"pkgB/b.txt\")) and .status==\"pending\")]|length==1' >/dev/null"
+# clean --resolved --under a folder drops only that folder's resolved edits.
+COUT=$(cc clean --resolved --under "$WS/pkgA")
+ok "clean --resolved --under folder clears the 2 kept"  "echo \"\$COUT\" | grep -qiE 'cleared 2'"
+ok "pkgA edits gone from the log; pkgB still present"    "cc list --json | jq -e '([.edits[]|select(.file|contains(\"pkgA\"))]|length==0) and ([.edits[]|select(.file|endswith(\"pkgB/b.txt\"))]|length==1)' >/dev/null"
+# undo --under an EXACT FILE reverts just that file's edit (folder-prefix rule matches the file itself).
+UOUT=$(cc undo --under "$FBP")
+ok "undo --under file reverts that file's edit"          "echo \"\$UOUT\" | grep -qiE 'reverted 1'"
+ok "pkgB/b.txt restored to original 'b1'"                "grep -qx 'b1' '$FBP'"
+
 echo "════════════════════════════════════════════════════════"
 echo "E2E RESULT: $pass passed, $fail failed"
 [ $fail -eq 0 ]

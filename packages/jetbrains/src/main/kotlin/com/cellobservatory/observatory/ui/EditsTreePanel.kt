@@ -47,7 +47,7 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
     enum class Mode { EDITS, DIFFS }
 
     sealed class NodeData {
-        data class Folder(val label: String) : NodeData()
+        data class Folder(val label: String, val path: String, val edits: List<EditRecord>) : NodeData()
         data class FileN(val rel: String, val file: String, val edits: List<EditRecord>) : NodeData()
         data class Cls(val name: String, val edits: Int, val pending: Int) : NodeData()
         data class Edit(val rec: EditRecord, val added: Int, val removed: Int) : NodeData()
@@ -94,6 +94,9 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
     private fun selectedFile(): NodeData.FileN? =
         (tree.lastSelectedPathComponent as? DefaultMutableTreeNode)?.userObject as? NodeData.FileN
 
+    private fun selectedFolder(): NodeData.Folder? =
+        (tree.lastSelectedPathComponent as? DefaultMutableTreeNode)?.userObject as? NodeData.Folder
+
     // --- tree building (renders core's `tree --json` view-model; no local tree/class logic) ---
 
     fun rebuild() {
@@ -112,7 +115,7 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
     }
 
     private fun addFolderNode(parent: DefaultMutableTreeNode, f: TreeFolderNode) {
-        val node = DefaultMutableTreeNode(NodeData.Folder(f.label))
+        val node = DefaultMutableTreeNode(NodeData.Folder(f.label, f.path, f.allEdits))
         parent.add(node)
         for (sub in f.folders) addFolderNode(node, sub)
         for (file in f.files) addFileNode(node, file)
@@ -247,6 +250,24 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
         },
         action("Undo All in File", AllIcons.Actions.Rollback) {
             selectedFile()?.let { f -> withSession { s -> ReviewOps.undoAll(project, s, f.edits, File(f.file).name) } }
+        },
+        action("Clear Resolved in File", AllIcons.Actions.GC) {
+            selectedFile()?.let { f ->
+                withSession { s -> ReviewOps.clearResolvedScoped(project, s, f.edits.count { !it.pending }, File(f.file).name, f.file) }
+            }
+        },
+        // Folder-scoped: accept / revert / clear every edit at-or-beneath the selected folder (parity
+        // with VS Code's folder-row inline actions; reuses the file-scoped keep/undo plumbing).
+        action("Accept All in Folder", Icons.CheckAll) {
+            selectedFolder()?.let { f -> withSession { s -> ReviewOps.keepAll(project, s, f.edits, f.label) } }
+        },
+        action("Revert All in Folder", AllIcons.Actions.Rollback) {
+            selectedFolder()?.let { f -> withSession { s -> ReviewOps.undoAll(project, s, f.edits, f.label) } }
+        },
+        action("Clear Resolved in Folder", AllIcons.Actions.GC) {
+            selectedFolder()?.let { f ->
+                withSession { s -> ReviewOps.clearResolvedScoped(project, s, f.edits.count { !it.pending }, f.label, f.path) }
+            }
         },
     )
 

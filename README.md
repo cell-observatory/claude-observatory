@@ -142,13 +142,13 @@ claude-observatory list            # edits in the active session (grouped by fil
 claude-observatory list --pending  # filters: --pending | --kept | --undone, and --file <substr>
 claude-observatory timeline        # edits newest-first as a chronological feed (time · id · Δ · file)
 claude-observatory diff <id>       # colored before/after for one edit
-claude-observatory keep <id>       # mark reviewed; no disk change
-claude-observatory undo <id>       # surgically undo one edit
+claude-observatory keep <id>       # mark reviewed; no disk change (bulk: --all | --file <substr> | --under <path>)
+claude-observatory undo <id>       # surgically undo one edit (bulk: --under <path> reverts a file/folder)
 claude-observatory undo <id> --force   # per-file restore fallback (used on overlap conflicts)
 claude-observatory redo <id>       # re-apply an undone edit (--force to override later edits)
 claude-observatory insights        # Observations: recap + per-edit reasoning/flags/memory + next steps
 claude-observatory summary         # per-session review recap (kept/reverted per file); --markdown to export
-claude-observatory clean           # GC orphaned blobs; --resolved | --drop <id> | --older-than 30d | --all
+claude-observatory clean           # GC orphaned blobs; --resolved [--under <path>] | --drop <id> | --older-than 30d | --all
 claude-observatory update          # self-update the CLI to the latest release (--check to only report)
 claude-observatory uninstall       # remove the capture hooks (--all also reverts the bundled status line)
 claude-observatory --version

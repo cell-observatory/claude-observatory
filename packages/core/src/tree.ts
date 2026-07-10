@@ -36,6 +36,7 @@ export interface TreeFile {
 }
 export interface TreeFolder {
   label: string; // may be a compacted chain like "src/utils"
+  path: string; // absolute directory path (drives scoped folder Accept/Revert/Clear)
   folders: TreeFolder[];
   files: TreeFile[];
 }
@@ -58,6 +59,27 @@ function immediate(rels: string[], prefix: string): { folderSegs: Set<string>; f
   return { folderSegs, files };
 }
 
+/** Any descendant file of a folder (folders only exist because some file lives beneath them). */
+function firstFile(f: { folders: TreeFolder[]; files: TreeFile[] }): TreeFile | undefined {
+  if (f.files.length) return f.files[0];
+  for (const c of f.folders) {
+    const r = firstFile(c);
+    if (r) return r;
+  }
+  return undefined;
+}
+
+/** Absolute directory path for the folder at rel-prefix `p`, derived from a descendant file's
+ *  absolute path (so it's correct regardless of `opts.root` or the OS separator). */
+function folderAbs(prefix: string, node: { folders: TreeFolder[]; files: TreeFile[] }): string {
+  const sample = firstFile(node);
+  if (!sample) return '';
+  const nativeTail = sample.rel.slice(prefix.length).split('/').join(path.sep); // file's path below the folder
+  let abs = sample.file.slice(0, sample.file.length - nativeTail.length);
+  if (abs.endsWith(path.sep)) abs = abs.slice(0, -1);
+  return abs;
+}
+
 /** Folders + files under `prefix`, with single-child folder chains compacted (src/utils/…). */
 function subtree(rels: string[], prefix: string, byRel: Map<string, TreeFile>): { folders: TreeFolder[]; files: TreeFile[] } {
   const { folderSegs, files } = immediate(rels, prefix);
@@ -73,7 +95,7 @@ function subtree(rels: string[], prefix: string, byRel: Map<string, TreeFile>): 
       } else break;
     }
     const child = subtree(rels, p, byRel);
-    return { label, folders: child.folders, files: child.files };
+    return { label, path: folderAbs(p, child), folders: child.folders, files: child.files };
   });
   const fileNodes = files.sort().map((rel) => byRel.get(rel) as TreeFile);
   return { folders, files: fileNodes };

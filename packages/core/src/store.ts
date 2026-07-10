@@ -472,21 +472,30 @@ export function removeSession(sessionId: string): void {
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
+/** True when `file` is the scope path itself (exact file) or lives beneath it (folder prefix). The one
+ *  rule shared by every `--under` operation, so file-scope and folder-scope match identically. */
+export function isUnderPath(file: string, scope: string): boolean {
+  return file === scope || file.startsWith(scope.endsWith(path.sep) ? scope : scope + path.sep);
+}
+
 /**
- * Drop resolved (kept + undone) edits, keeping only pending ones — rewrites the log to just the
- * pending records and GCs the now-orphaned blobs. Returns how many resolved edits were removed.
+ * Drop resolved (kept + undone) edits, keeping every pending one — rewrites the log to just the
+ * kept records and GCs the now-orphaned blobs. Returns how many resolved edits were removed.
+ * With `under` set, only resolved edits at-or-beneath that path are dropped (scoped Clear for a file
+ * or folder); pending edits and resolved edits outside the scope are preserved.
  */
-export function clearResolved(sessionId: string): number {
+export function clearResolved(sessionId: string, under?: string): number {
   // Whole read→rewrite→rename→GC runs under the lock so a concurrent capture appendLog (which also
   // takes the lock) can't be silently clobbered by the rename.
   return withLock(sessionId, MAINT_LOCK_BUDGET_MS, () => {
     const log = readLog(sessionId);
-    const pending = log.filter((r) => r.status === 'pending');
-    const removed = log.length - pending.length;
+    const inScope = (r: EditRecord) => !under || isUnderPath(r.file, under);
+    const keep = log.filter((r) => r.status === 'pending' || !inScope(r));
+    const removed = log.length - keep.length;
     if (removed === 0) return 0;
     const lp = logPath(sessionId);
     const tmp = lp + '.tmp';
-    fs.writeFileSync(tmp, pending.length ? pending.map((r) => JSON.stringify(r)).join('\n') + '\n' : '', { mode: 0o600 });
+    fs.writeFileSync(tmp, keep.length ? keep.map((r) => JSON.stringify(r)).join('\n') + '\n' : '', { mode: 0o600 });
     fs.renameSync(tmp, lp);
     gcSessionCore(sessionId); // reclaim blobs referenced only by the removed edits (already locked)
     return removed;

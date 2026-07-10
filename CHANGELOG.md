@@ -5,6 +5,37 @@ All notable changes to Claude Observatory are recorded here, following
 Per-tag release artifacts and auto-generated notes are on the
 [Releases page](https://github.com/cell-observatory/claude-observatory/releases).
 
+## [0.5.1] — 2026-07-10
+
+Two review-workflow additions. No breaking changes — the `--json` contract only gains a field, and the
+on-disk store format is unchanged.
+
+### Added — folder- and file-scoped Accept / Revert / Clear
+
+The edits bar can now act on a whole **folder** or a single **file** at once, not just one edit:
+
+- **VS Code** — hover a folder or file row in the Edits/Diffs tree for inline icons: Accept all
+  (`✓`), Revert all (`⟲`), and Clear resolved (`⌫`). Files already had Accept/Revert; both now also
+  get Clear.
+- **JetBrains** — the tree's right-click menu gains *Accept / Revert / Clear Resolved in Folder* and
+  *Clear Resolved in File* (the tool window has no per-row hover icons; the context menu is the parity
+  equivalent).
+- **CLI** — `keep --under <path>`, `undo --under <path>`, and `clean --resolved --under <path>` scope
+  each operation to a file (exact match) or folder (everything beneath it) with one shared path rule,
+  so a sibling like `src/api-v2/` never gets swept by an action on `src/api/`.
+
+Shared in `core`: each tree folder now carries an absolute `path`, `clearResolved` takes an optional
+scope, and `isUnderPath` is the single file/folder-prefix predicate every surface uses.
+
+### Added — marketplace-free update notifier (VS Code)
+
+VS Code has no custom-repository mechanism like JetBrains', so the extension now does a throttled
+(once-a-day) background check of GitHub Releases and, when a newer version exists, offers to download
+the `.vsix` (with *Skip this version*). Also available on demand via **Claude Observatory: Check for
+updates**. JetBrains gets real auto-update instead — add the plugin repository
+`https://github.com/cell-observatory/claude-observatory/releases/latest/download/updatePlugins.xml`
+under Settings → Plugins → ⚙ → Manage Plugin Repositories.
+
 ## [0.5.0] — 2026-07-10
 
 A big review-experience upgrade on top of a full-project correctness/security/parity audit. No

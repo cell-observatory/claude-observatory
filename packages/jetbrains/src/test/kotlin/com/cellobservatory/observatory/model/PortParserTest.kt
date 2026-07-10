@@ -15,7 +15,7 @@ class PortParserTest {
     @Test
     fun `TreeParser extracts folders, files, classes, loose edits and exact deltas`() {
         val json = """
-            {"folders":[{"label":"src","folders":[],"files":[
+            {"folders":[{"label":"src","path":"/w/src","folders":[],"files":[
               {"rel":"src/a.ts","file":"/w/src/a.ts","classes":[
                 {"name":"Foo","edits":[{"id":1,"ts":1000,"tool":"Edit","file":"/w/src/a.ts","beforeBlob":"aa","afterBlob":"bb","status":"pending","added":3,"removed":1}]}
               ],"loose":[{"id":2,"ts":2000,"tool":"Write","file":"/w/src/a.ts","beforeBlob":null,"afterBlob":"cc","status":"kept","added":5,"removed":0}]}
@@ -25,6 +25,8 @@ class PortParserTest {
         assertEquals(1, tree.folders.size)
         val folder = tree.folders[0]
         assertEquals("src", folder.label)
+        assertEquals("/w/src", folder.path) // drives the folder-scoped Accept/Revert/Clear actions
+        assertEquals(listOf(1, 2), folder.allEdits.map { it.id }) // every descendant edit, for folder ops
         val file = folder.files[0]
         assertEquals("src/a.ts", file.rel)
         assertEquals("/w/src/a.ts", file.file)
