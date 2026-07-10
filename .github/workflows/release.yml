@@ -21,6 +21,21 @@ jobs:
           node-version: 22
           cache: npm
           registry-url: 'https://registry.npmjs.org'
+      - name: Verify the tag matches the committed version
+        # The generated updatePlugins.xml (+ the vsix/zip filenames) derive their version from the tag,
+        # while the built plugin's internal version comes from the committed source. If they disagree,
+        # the descriptor advertises a version the zip doesn't contain and IDEs re-offer it on every poll
+        # (an update that never sticks). Fail fast before the ~minutes of build. `npm test` below runs
+        # version:check, which locksteps build.gradle.kts + every package.json + the lockfile to root
+        # package.json — so gating the tag on root package.json transitively covers them all.
+        run: |
+          TAG="${GITHUB_REF_NAME}"; VER="${TAG#v}"
+          PKG_VER="$(node -p "require('./package.json').version")"
+          if [ "$VER" != "$PKG_VER" ]; then
+            echo "::error::tag $TAG (=$VER) != committed version $PKG_VER — bump versions (npm run version:set) or fix the tag"
+            exit 1
+          fi
+          echo "tag $TAG matches committed version $PKG_VER"
       - run: npm ci
       - run: npm test
       - run: bash test/e2e.sh
@@ -37,12 +52,28 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${GITHUB_REF_NAME}"
+          VER="${TAG#v}"
           cp release/claude-observatory.vsix "release/claude-observatory-vscode-${TAG}.vsix"
           cp packages/jetbrains/build/distributions/*.zip "release/claude-observatory-jetbrains-${TAG}.zip"
+          # JetBrains self-hosted plugin repository descriptor. IDEs subscribed to the stable URL
+          #   https://github.com/cell-observatory/claude-observatory/releases/latest/download/updatePlugins.xml
+          # poll it for updates. It MUST be regenerated + attached every release — once this tag becomes
+          # "latest", that URL serves this file, so a release without it 404s and auto-update goes silent.
+          cat > release/updatePlugins.xml <<XML
+          <?xml version="1.0" encoding="UTF-8"?>
+          <plugins>
+            <plugin id="com.cell-observatory.claude-observatory" version="${VER}"
+                    url="https://github.com/cell-observatory/claude-observatory/releases/download/${TAG}/claude-observatory-jetbrains-${TAG}.zip">
+              <name>Claude Observatory</name>
+              <idea-version since-build="252"/>
+            </plugin>
+          </plugins>
+          XML
           gh release create "$TAG" \
             release/claude-observatory-*.tgz \
             "release/claude-observatory-vscode-${TAG}.vsix" \
             "release/claude-observatory-jetbrains-${TAG}.zip" \
+            release/updatePlugins.xml \
             --title "Claude Observatory ${TAG}" \
             --generate-notes
       - name: Publish CLI to npm (provenance)
