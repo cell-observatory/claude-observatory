@@ -460,6 +460,29 @@ test('observe: reasoning carries forward across messages (thinking + separate to
   assert.equal(m.get(2), 'Now adding z.', 'edit #2 uses its own same-message text');
 });
 
+test('observe: a Bash record between two edits does not shift reasoning to the wrong edit', () => {
+  freshHome();
+  const S = 'obs3';
+  const cwd = tmpWork();
+  const F = path.join(cwd, 'app.js');
+  // #1 Edit, #2 Bash (e.g. `prettier --write app.js`), #3 Edit — all to the same file.
+  seedEdit(S, F, 'a\n', 'b\n'); // #1 Edit
+  core.appendLog(S, { id: core.nextId(S), ts: 2000, tool: 'Bash', file: F, beforeBlob: null, afterBlob: core.writeBlob(S, Buffer.from('B\n')), status: 'pending' }); // #2 Bash
+  seedEdit(S, F, 'B\n', 'C\n'); // #3 Edit
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const tx = [
+    { message: { role: 'assistant', content: [{ type: 'text', text: 'First edit.' }, { type: 'tool_use', name: 'Edit', input: { file_path: F } }] } },
+    { message: { role: 'assistant', content: [{ type: 'text', text: 'Second edit.' }, { type: 'tool_use', name: 'Edit', input: { file_path: F } }] } },
+  ].map((o) => JSON.stringify(o)).join('\n');
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), tx);
+
+  const m = core.reasoningByEdit(cwd, S);
+  assert.equal(m.get(1), 'First edit.', 'edit #1 gets the first tool_use reasoning');
+  assert.equal(m.get(2), undefined, 'the Bash record gets no reasoning (no transcript tool_use)');
+  assert.equal(m.get(3), 'Second edit.', 'edit #3 gets the second reasoning, NOT shifted by the Bash record');
+});
+
 test("observe: transcriptSuggestions surfaces Claude's latest open to-dos (zero token)", () => {
   freshHome();
   const S = 'todos';

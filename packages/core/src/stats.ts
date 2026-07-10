@@ -201,6 +201,10 @@ export function computeStats(activeSessionId?: string, nowMs?: number): StatsRes
   const now = nowMs ?? Date.now();
   const cutoff = now - 31 * 86400000;
   const cachePath = path.join(rootDir(), 'stats-cache.json');
+  // The cache VALUE is per-day/per-hour aggregates keyed in the machine's LOCAL zone. If the zone
+  // changes (travel, or a differing TZ between subprocess and host) an unchanged file's cached buckets
+  // would be reinterpreted under the new zone — so stamp the offset and invalidate on mismatch.
+  const tzOffset = new Date(now).getTimezoneOffset();
   const todayKey = dayKey(now);
   const startOfToday = (() => {
     const t = new Date(now);
@@ -211,13 +215,18 @@ export function computeStats(activeSessionId?: string, nowMs?: number): StatsRes
   let prev: Record<string, FileEntry> = {};
   try {
     const c = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
-    if (c && c.v === CACHE_VERSION && c.files) prev = c.files; // ignore caches from an older agg version
+    // Reuse only a cache from the same agg version AND the same local TZ offset (else its local-day
+    // buckets are wrong under the current zone).
+    if (c && c.v === CACHE_VERSION && c.tz === tzOffset && c.files) prev = c.files;
   } catch {
     /* no cache yet */
   }
 
   let dirty = false;
   const files: Record<string, FileEntry> = {};
+  // The active session's own transcript is always parsed (even if aged out), so its "current session"
+  // token/message numbers stay consistent with its edit count, which has no cutoff.
+  const activeFile = activeSessionId ? `${activeSessionId}.jsonl` : null;
   for (const file of transcriptFiles()) {
     let st: fs.Stats;
     try {
@@ -225,7 +234,7 @@ export function computeStats(activeSessionId?: string, nowMs?: number): StatsRes
     } catch {
       continue;
     }
-    if (st.mtimeMs < cutoff) continue; // ignore transcripts older than the window
+    if (st.mtimeMs < cutoff && path.basename(file) !== activeFile) continue; // ignore transcripts older than the window
     const needHourly = st.mtimeMs >= startOfToday; // only today's files can hold today's messages
     const cached = prev[file];
     if (
@@ -253,7 +262,7 @@ export function computeStats(activeSessionId?: string, nowMs?: number): StatsRes
     try {
       fs.mkdirSync(path.dirname(cachePath), { recursive: true });
       const tmp = cachePath + '.tmp';
-      fs.writeFileSync(tmp, JSON.stringify({ v: CACHE_VERSION, files }));
+      fs.writeFileSync(tmp, JSON.stringify({ v: CACHE_VERSION, tz: tzOffset, files }));
       fs.renameSync(tmp, cachePath); // atomic: a concurrent reader never sees a torn cache
     } catch {
       /* cache is best-effort */
@@ -329,7 +338,9 @@ export function computeStats(activeSessionId?: string, nowMs?: number): StatsRes
   const session = ZERO();
   if (activeSessionId) {
     for (const f in files) {
-      if (files[f].sid !== activeSessionId) continue;
+      // Match the transcript by FILENAME (== the session id resolveSessionId returns), not the last
+      // message's parsed sessionId, which can diverge on a resumed/renamed session.
+      if (path.basename(f) !== activeFile) continue;
       for (const key in files[f].days) {
         const d = files[f].days[key];
         session.output += d.out;
