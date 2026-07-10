@@ -959,6 +959,34 @@ function readStoreLog(home, session) {
   return fs.readFileSync(p, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
 }
 
+test('capture: MultiEdit is captured as one record (tool=MultiEdit) and undoes cleanly', () => {
+  const home = freshHome();
+  const dir = tmpWork();
+  const F = path.join(dir, 'm.txt');
+  const before = 'L1\nL2\nL3\nL4\nL5\n';
+  fs.writeFileSync(F, before);
+  const S = 'multi';
+  runHook(home, S, dir, 'PreToolUse', 'MultiEdit', F);
+  fs.writeFileSync(F, 'TOP\nL2\nL3\nL4\nBOT\n'); // two non-adjacent hunks committed as one MultiEdit
+  runHook(home, S, dir, 'PostToolUse', 'MultiEdit', F);
+  const log = readStoreLog(home, S);
+  assert.equal(log.length, 1, 'one record for the whole MultiEdit');
+  assert.equal(log[0].tool, 'MultiEdit', 'recorded tool field is MultiEdit');
+  const res = core.undoEdit(S, log[0].id); // clean revert (no later edits) — byte-exact
+  assert.equal(res.status, 'undone');
+  assert.equal(fs.readFileSync(F, 'utf8'), before, 'the whole MultiEdit is reverted');
+});
+
+test('capture: a PostToolUse with no matching Pre records nothing (no phantom edit)', () => {
+  const home = freshHome();
+  const dir = tmpWork();
+  const F = path.join(dir, 'x.txt');
+  fs.writeFileSync(F, 'hi\n');
+  const S = 'nopre';
+  runHook(home, S, dir, 'PostToolUse', 'Edit', F); // Post only — Pre never ran
+  assert.equal(readStoreLog(home, S).length, 0, 'nothing committed without a staged before-snapshot');
+});
+
 test('store: readLog skips malformed/partial lines and folds status ops', () => {
   freshHome();
   const S = 'malformed';
