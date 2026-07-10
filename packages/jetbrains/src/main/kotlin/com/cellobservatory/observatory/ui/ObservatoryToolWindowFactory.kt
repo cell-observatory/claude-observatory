@@ -35,17 +35,19 @@ class ObservatoryToolWindowFactory : ToolWindowFactory, DumbAware {
  *  draggable, each pane carrying its name in a header. */
 class ObservatoryDashboardsFactory : ToolWindowFactory, DumbAware {
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
+        val stats = com.cellobservatory.observatory.ui.stats.StatsPanel(project)
         val right = com.intellij.ui.OnePixelSplitter(false, 0.55f).apply {
             firstComponent = titled("Timeline", TimelinePanel(project))
-            secondComponent = titled("Stats", com.cellobservatory.observatory.ui.stats.StatsPanel(project))
+            secondComponent = titled("Stats", stats)
         }
         val split = com.intellij.ui.OnePixelSplitter(false, 0.4f).apply {
             firstComponent = titled("Observations", ObservationsPanel(project))
             secondComponent = right
         }
-        toolWindow.contentManager.addContent(
-            ContentFactory.getInstance().createContent(split, "", false)
-        )
+        val content = ContentFactory.getInstance().createContent(split, "", false)
+        // Tie the StatsPanel's Timer + service listener to the content's lifecycle (stopped on close).
+        com.intellij.openapi.util.Disposer.register(content, stats)
+        toolWindow.contentManager.addContent(content)
     }
 
     private fun titled(title: String, c: javax.swing.JComponent): javax.swing.JComponent =

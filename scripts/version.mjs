@@ -33,6 +33,12 @@ const reFor = (rel) => (rel === GRADLE ? gradleVersionRe : pkgVersionRe);
 const CORE_PIN_FILES = ['packages/cli/package.json', 'packages/vscode/package.json'];
 const corePinRe = /("@claude-observatory\/core":\s*")([^"]+)(")/;
 
+// The lockfile records the same versions again (`npm ci` in CI + release hard-fails if it disagrees
+// with package.json). A bump that skips it passes this drift check but reddens every CI run — so we
+// sync + verify it here too. Patched by field (round-trip is byte-identical) to avoid npm/network churn.
+const LOCKFILE = 'package-lock.json';
+const WORKSPACE_KEYS = ['packages/core', 'packages/cli', 'packages/vscode'];
+
 const read = (rel) => readFileSync(join(root, rel), 'utf8');
 
 function versionOf(rel) {
@@ -57,6 +63,41 @@ function setCorePin(rel, next) {
   writeFileSync(join(root, rel), out);
 }
 
+/** The version fields the lockfile derives from the workspace manifests (all must equal `next`). */
+function lockfileVersionFields(lock) {
+  const out = [];
+  out.push({ label: 'top', get: () => lock.version, set: (v) => (lock.version = v) });
+  if (lock.packages?.['']) out.push({ label: 'packages[""]', get: () => lock.packages[''].version, set: (v) => (lock.packages[''].version = v) });
+  for (const k of WORKSPACE_KEYS) {
+    const p = lock.packages?.[k];
+    if (!p) continue;
+    if (p.version !== undefined) out.push({ label: `${k}#version`, get: () => p.version, set: (v) => (p.version = v) });
+    for (const dep of ['dependencies', 'devDependencies']) {
+      if (p[dep]?.['@claude-observatory/core'] !== undefined)
+        out.push({ label: `${k}#${dep}.core`, get: () => p[dep]['@claude-observatory/core'], set: (v) => (p[dep]['@claude-observatory/core'] = v) });
+    }
+  }
+  return out;
+}
+
+function setLockfileVersions(next) {
+  const lock = JSON.parse(read(LOCKFILE));
+  for (const f of lockfileVersionFields(lock)) f.set(next);
+  writeFileSync(join(root, LOCKFILE), JSON.stringify(lock, null, 2) + '\n');
+}
+
+/** Returns true on drift; logs each field. */
+function checkLockfile(rootVersion) {
+  let drift = false;
+  const lock = JSON.parse(read(LOCKFILE));
+  for (const f of lockfileVersionFields(lock)) {
+    const v = f.get();
+    if (v !== rootVersion) drift = true;
+    console.log(`${v === rootVersion ? '✓' : '✗'} ${LOCKFILE} (${f.label}): ${v}`);
+  }
+  return drift;
+}
+
 const arg = process.argv[2];
 
 // `node scripts/version.mjs <version>` — set an explicit version everywhere.
@@ -67,7 +108,8 @@ if (arg && arg !== '--write' && arg !== 'check') {
   }
   for (const t of targets) setVersion(t, arg);
   for (const t of CORE_PIN_FILES) setCorePin(t, arg);
-  console.log(`✓ set version ${arg} across ${targets.length} files (+ ${CORE_PIN_FILES.length} core pins)`);
+  setLockfileVersions(arg);
+  console.log(`✓ set version ${arg} across ${targets.length} files (+ ${CORE_PIN_FILES.length} core pins + ${LOCKFILE})`);
   process.exit(0);
 }
 
@@ -77,7 +119,8 @@ const rootVersion = versionOf('package.json');
 if (arg === '--write') {
   for (const t of targets) setVersion(t, rootVersion);
   for (const t of CORE_PIN_FILES) setCorePin(t, rootVersion);
-  console.log(`✓ propagated root version ${rootVersion} to ${targets.length} files (+ ${CORE_PIN_FILES.length} core pins)`);
+  setLockfileVersions(rootVersion);
+  console.log(`✓ propagated root version ${rootVersion} to ${targets.length} files (+ ${CORE_PIN_FILES.length} core pins + ${LOCKFILE})`);
   process.exit(0);
 }
 
@@ -93,6 +136,7 @@ for (const t of CORE_PIN_FILES) {
   if (v !== rootVersion) drift = true;
   console.log(`${v === rootVersion ? '✓' : '✗'} ${t} (core pin): ${v}`);
 }
+if (checkLockfile(rootVersion)) drift = true;
 if (drift) {
   console.error(`\nversion drift — root is ${rootVersion}. Run \`node scripts/version.mjs --write\` to fix.`);
   process.exit(1);

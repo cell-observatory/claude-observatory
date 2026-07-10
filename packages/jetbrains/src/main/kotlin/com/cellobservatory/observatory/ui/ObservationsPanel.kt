@@ -45,6 +45,7 @@ import javax.swing.tree.TreeSelectionModel
 class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(true, true) {
 
     private object RecapMarker
+    private object StepsMarker
 
     private val root = DefaultMutableTreeNode()
     private val model = DefaultTreeModel(root)
@@ -79,6 +80,11 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
         if (payload != null && payload.edits.isNotEmpty()) {
             root.add(DefaultMutableTreeNode(RecapMarker))
             for (e in payload.edits) root.add(DefaultMutableTreeNode(e))
+        }
+        // Next-steps: Claude's own open to-dos + heuristic suggestions (parity with VS Code + `insights`).
+        if (payload != null && payload.suggestions.isNotEmpty()) {
+            root.add(DefaultMutableTreeNode(StepsMarker))
+            for (s in payload.suggestions) root.add(DefaultMutableTreeNode(s))
         }
         model.reload()
     }
@@ -166,8 +172,61 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
 
     // --- toolbar / menu / renderer ---
 
+    private fun installHooks() {
+        ProgressManager.getInstance().run(object : Task.Backgroundable(project, "Installing capture hooks…", false) {
+            override fun run(indicator: ProgressIndicator) {
+                val r = ObservatoryCli.init(project.basePath)
+                ApplicationManager.getApplication().invokeLater {
+                    if (r.ok) {
+                        ReviewOps.notify(project, "Capture hooks installed. Quit Claude Code and relaunch it — hooks are snapshotted at session start.")
+                    } else {
+                        ReviewOps.notify(project, "Install failed — is the claude-observatory CLI installed? ${r.stderr.take(200)}", NotificationType.ERROR)
+                    }
+                }
+            }
+        })
+    }
+
+    /** Store maintenance (parity with the CLI `clean`): GC orphaned blobs, or drop the whole session. */
+    private fun cleanStore() {
+        val session = ObservatoryService.getInstance(project).currentSession()
+            ?: return ReviewOps.notify(project, "No active Claude Code session for this project", NotificationType.WARNING)
+        val gcOpt = "Reclaim disk — garbage-collect orphaned blobs"
+        val dropOpt = "Drop this session — delete its edits + blobs (files on disk are unchanged)"
+        com.intellij.openapi.ui.popup.JBPopupFactory.getInstance()
+            .createPopupChooserBuilder(listOf(gcOpt, dropOpt))
+            .setTitle("Clean the store")
+            .setItemChosenCallback { chosen ->
+                val drop = chosen == dropOpt
+                if (drop) {
+                    val ok = com.intellij.openapi.ui.Messages.showYesNoDialog(
+                        project, "Drop session $session? This deletes its captured edits + blobs. Files on disk are NOT changed.",
+                        "Claude Observatory", "Drop Session", "Cancel", com.intellij.openapi.ui.Messages.getWarningIcon(),
+                    )
+                    if (ok != com.intellij.openapi.ui.Messages.YES) return@setItemChosenCallback
+                }
+                ProgressManager.getInstance().run(object : Task.Backgroundable(project, "Cleaning store…", false) {
+                    override fun run(indicator: ProgressIndicator) {
+                        val r = if (drop) ObservatoryCli.dropSession(session, project.basePath) else ObservatoryCli.gc(session, project.basePath)
+                        ApplicationManager.getApplication().invokeLater {
+                            if (r.ok) {
+                                ObservatoryService.getInstance(project).refresh()
+                                ReviewOps.notify(project, if (drop) "Dropped session $session." else "Reclaimed disk (GC complete).")
+                            } else {
+                                ReviewOps.notify(project, "Clean failed — ${r.stderr.take(160)}", NotificationType.ERROR)
+                            }
+                        }
+                    }
+                })
+            }
+            .createPopup()
+            .showInCenterOf(tree)
+    }
+
     private fun buildToolbar(): JComponent {
         val group = DefaultActionGroup(
+            action("Install Capture Hooks", AllIcons.Actions.Install) { installHooks() },
+            action("Clean Store…", AllIcons.Vcs.Remove) { cleanStore() },
             action("Refresh Recap with Claude (spends tokens)", AllIcons.Actions.ForceRefresh) { refreshRecap() },
             action("Clear Resolved Edits", AllIcons.Actions.GC) {
                 val service = ObservatoryService.getInstance(project)
@@ -216,9 +275,19 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
             when (val node = (value as? DefaultMutableTreeNode)?.userObject) {
                 is RecapMarker -> {
                     icon = Icons.Microscope
-                    val recap = ObserveCache.getInstance(project).payload()?.recap
+                    val payload = ObserveCache.getInstance(project).payload()
+                    val recap = payload?.recap ?: payload?.insights?.lastSummary
                     append(recap ?: "No recap yet — hit ✨ to generate one.")
                     append("  session recap", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                }
+                is StepsMarker -> {
+                    icon = AllIcons.Actions.IntentionBulb
+                    append("Next steps", SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES)
+                    append("  from Claude's to-dos + heuristics", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                }
+                is String -> {
+                    icon = AllIcons.General.ArrowRight
+                    append(node, SimpleTextAttributes.REGULAR_ATTRIBUTES)
                 }
                 is ObsEdit -> {
                     val warn = node.risky || node.flags.any { it.level == "warn" }

@@ -172,3 +172,37 @@ export function uninstallHooks(file: string = settingsPath()): InstallResult {
   }
   return { changed, settingsPath: p };
 }
+
+/**
+ * Revert the bundled status line — but ONLY if settings.json's `statusLine.command` still points at
+ * OUR `<configDir>/statusline.sh` (never disturb a user's own custom statusLine). Also removes the
+ * vendored script + its cache. Part of `uninstall --all`.
+ */
+export function uninstallStatusline(file: string = settingsPath()): {
+  changed: boolean;
+  settingsPath: string;
+  scriptRemoved: boolean;
+} {
+  const { path: p, exists, data } = readSettings(file);
+  const ourScript = path.join(claudeConfigDir(), 'statusline.sh');
+  let changed = false;
+  const sl = data.statusLine as { command?: string } | undefined;
+  if (exists && sl && typeof sl.command === 'string' && sl.command.includes(ourScript)) {
+    delete data.statusLine;
+    changed = true;
+    fs.writeFileSync(p + '.bak', fs.readFileSync(p));
+    fs.writeFileSync(p, JSON.stringify(data, null, 2) + '\n');
+  }
+  let scriptRemoved = false;
+  for (const f of [ourScript, path.join(claudeConfigDir(), 'statusline-last.json')]) {
+    try {
+      if (fs.existsSync(f)) {
+        fs.unlinkSync(f);
+        if (f === ourScript) scriptRemoved = true;
+      }
+    } catch {
+      /* best-effort */
+    }
+  }
+  return { changed, settingsPath: p, scriptRemoved };
+}

@@ -23,7 +23,8 @@ class ObservatoryService(private val project: Project) : Disposable {
     private val listeners = CopyOnWriteArrayList<Runnable>()
     private var cachedLog: List<EditRecord> = emptyList()
     private var cachedKey: String = ""
-    private var cachedSession: String? = null
+    @Volatile private var cachedAutoSession: String? = null
+    @Volatile private var cachedAutoRoot: String? = null
     private val watchListener = Runnable { refresh() }
 
     init {
@@ -39,18 +40,33 @@ class ObservatoryService(private val project: Project) : Disposable {
             ?.takeIf { it.isNotBlank() }
             ?.let { return it }
         val root = workspaceRoot ?: return null
-        return SessionResolver.resolveSessionId(root).also { cachedSession = it }
+        // Memoize the auto-resolution (invalidated on refresh()): resolveSessionId walks parent dirs
+        // listing *.jsonl, and currentSession() is hit per cell renderer + per log()/counts()/tree call.
+        cachedAutoSession?.let { if (cachedAutoRoot == root) return it }
+        return SessionResolver.resolveSessionId(root).also {
+            cachedAutoSession = it
+            cachedAutoRoot = root
+        }
     }
+
+    @Volatile private var pendingByFile: Map<String, Int> = emptyMap()
 
     /** Folded log for the current session, cached on the log file's (mtime,size). */
     fun log(): List<EditRecord> {
-        val session = currentSession() ?: return emptyList()
+        val session = currentSession() ?: run { pendingByFile = emptyMap(); return emptyList() }
         val key = "$session:${StoreReader.logKey(session)}"
         if (key != cachedKey) {
             cachedLog = StoreReader.readLog(session)
+            pendingByFile = cachedLog.filter { it.pending }.groupingBy { it.file }.eachCount() // for the Project-view decorator
             cachedKey = key
         }
         return cachedLog
+    }
+
+    /** Pending-edit count for a file path — O(1), cached with the log (drives the Project-view badge). */
+    fun pendingCount(path: String): Int {
+        log() // ensure the cache is current
+        return pendingByFile[path] ?: 0
     }
 
     // Review-loop cursor: id of the pending edit last opened, so repeated ←/→ invocations step
@@ -139,6 +155,7 @@ class ObservatoryService(private val project: Project) : Disposable {
     /** Invalidate caches and re-render every registered surface. Call on the EDT. */
     fun refresh() {
         cachedKey = "" // force re-read
+        cachedAutoSession = null // re-resolve the session (a new session may have appeared)
         refreshEditTree() // kick a background tree fetch; repaints when it lands
         listeners.forEach { it.run() }
     }
@@ -171,6 +188,13 @@ class ObservatoryStartup : ProjectActivity {
                 }
                 svc.addListener(updateBadge)
                 updateBadge.run()
+                // Re-run the Project-view decorator (pending-edit badges) on each store change; keep the
+                // tree expansion so it never collapses under the user.
+                svc.addListener {
+                    if (!project.isDisposed) {
+                        com.intellij.ide.projectView.ProjectView.getInstance(project).currentProjectViewPane?.updateFromRoot(true)
+                    }
+                }
             }
         }
     }

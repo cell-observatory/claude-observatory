@@ -20,9 +20,16 @@ data class ObsEdit(
 
 data class ObsFlag(val level: String, val message: String)
 
+data class ObsTodo(val content: String, val status: String)
+
+/** The CLI's `insights` object — Claude's own to-dos + last summary + auto session title. `recap`
+ *  falls back to `lastSummary` when no `claude -p` recap has been generated (VS Code does the same). */
+data class ObsInsights(val todos: List<ObsTodo>, val lastSummary: String?, val title: String?)
+
 data class ObservePayload(
     val session: String,
     val recap: String?,
+    val insights: ObsInsights?,
     val suggestions: List<String>,
     val edits: List<ObsEdit>, // newest-first, as emitted by the CLI
 )
@@ -33,6 +40,17 @@ object ObserveParser {
         ObservePayload(
             session = o.get("session").asString,
             recap = o.get("recap")?.takeIf { !it.isJsonNull }?.asString,
+            insights = o.getAsJsonObject("insights")?.let { ins ->
+                ObsInsights(
+                    todos = ins.getAsJsonArray("todos")?.mapNotNull { t ->
+                        val to = t.asJsonObject
+                        val content = to.get("content")?.takeIf { !it.isJsonNull }?.asString ?: return@mapNotNull null
+                        ObsTodo(content, to.get("status")?.takeIf { !it.isJsonNull }?.asString ?: "")
+                    } ?: emptyList(),
+                    lastSummary = ins.get("lastSummary")?.takeIf { !it.isJsonNull }?.asString,
+                    title = ins.get("title")?.takeIf { !it.isJsonNull }?.asString,
+                )
+            },
             suggestions = o.getAsJsonArray("suggestions")?.map { it.asString } ?: emptyList(),
             edits = o.getAsJsonArray("edits")?.map { parseEdit(it.asJsonObject) } ?: emptyList(),
         )

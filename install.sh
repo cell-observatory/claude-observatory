@@ -22,7 +22,7 @@ head "Linking the claude-observatory CLI onto your PATH"
 npm i -g ./packages/cli --silent || {
   warn "Global install failed (permissions?). Try:  sudo npm i -g ./packages/cli"; exit 1; }
 CLI="$(command -v claude-observatory || true)"
-[ -n "$CLI" ] && say "CLI ready: $CLI" || warn "claude-observatory not on PATH — check your npm global bin dir (npm bin -g)."
+[ -n "$CLI" ] && say "CLI ready: $CLI" || warn "claude-observatory not on PATH — check your npm global bin dir (npm prefix -g)."
 
 head "Building + packaging the VS Code extension"
 npm run build:vscode --silent

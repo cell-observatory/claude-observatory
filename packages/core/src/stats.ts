@@ -76,6 +76,10 @@ function num(v: unknown): number {
 
 const ZERO = (): StatMetrics => ({ edits: 0, tokens: 0, messages: 0, thinking: 0, output: 0 });
 
+/** Bump when parseTranscript's aggregation changes so stale per-file caches (with the old, wrong
+ *  numbers) are discarded instead of reused by their unchanged (mtime,size) key. */
+const CACHE_VERSION = 2;
+
 /** Parse one transcript into per-day aggregates (assistant turns only), plus per-hour aggregates
  *  for messages timestamped on `hourlyDay` (pass null to skip the hourly pass). */
 function parseTranscript(
@@ -91,6 +95,12 @@ function parseTranscript(
   } catch {
     return { sid, days, hours };
   }
+  // Current Claude Code splits one logical assistant message into one JSONL line PER content block
+  // (thinking / text / tool_use …), each stamped with the SAME message.id and the IDENTICAL usage
+  // block. Count each message's usage + turn exactly once (first line seen for that id) — otherwise a
+  // 3-block message triples its tokens/messages. `thinking` still accrues from every line, since each
+  // thinking block lands on its own line.
+  const seenMsgIds = new Set<string>();
   for (const line of content.split('\n')) {
     if (!line || line.indexOf('"assistant"') === -1) continue; // fast filter before JSON.parse
     let o: any;
@@ -122,9 +132,16 @@ function parseTranscript(
         hours[hk] = h;
       }
     }
+    // First line for this message.id counts the turn + its usage; later lines of the same message
+    // contribute only their thinking. A missing id (older transcripts) can't be deduped → count it.
+    const id = typeof m.id === 'string' ? m.id : null;
+    const firstSeen = id === null || !seenMsgIds.has(id);
+    if (id !== null) seenMsgIds.add(id);
     const u = m.usage || {};
-    const out = num(u.output_tokens);
-    const inTok = num(u.input_tokens) + num(u.cache_read_input_tokens) + num(u.cache_creation_input_tokens);
+    const out = firstSeen ? num(u.output_tokens) : 0;
+    const inTok = firstSeen
+      ? num(u.input_tokens) + num(u.cache_read_input_tokens) + num(u.cache_creation_input_tokens)
+      : 0;
     let think = 0;
     if (Array.isArray(m.content)) {
       for (const b of m.content) {
@@ -134,15 +151,19 @@ function parseTranscript(
         }
       }
     }
-    d.msgs++;
-    d.out += out;
-    d.inTok += inTok;
     d.think += think;
+    if (firstSeen) {
+      d.msgs++;
+      d.out += out;
+      d.inTok += inTok;
+    }
     if (h) {
-      h.msgs++;
-      h.out += out;
-      h.inTok += inTok;
       h.think += think;
+      if (firstSeen) {
+        h.msgs++;
+        h.out += out;
+        h.inTok += inTok;
+      }
     }
   }
   return { sid, days, hours };
@@ -180,6 +201,10 @@ export function computeStats(activeSessionId?: string, nowMs?: number): StatsRes
   const now = nowMs ?? Date.now();
   const cutoff = now - 31 * 86400000;
   const cachePath = path.join(rootDir(), 'stats-cache.json');
+  // The cache VALUE is per-day/per-hour aggregates keyed in the machine's LOCAL zone. If the zone
+  // changes (travel, or a differing TZ between subprocess and host) an unchanged file's cached buckets
+  // would be reinterpreted under the new zone — so stamp the offset and invalidate on mismatch.
+  const tzOffset = new Date(now).getTimezoneOffset();
   const todayKey = dayKey(now);
   const startOfToday = (() => {
     const t = new Date(now);
@@ -190,13 +215,18 @@ export function computeStats(activeSessionId?: string, nowMs?: number): StatsRes
   let prev: Record<string, FileEntry> = {};
   try {
     const c = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
-    if (c && c.files) prev = c.files;
+    // Reuse only a cache from the same agg version AND the same local TZ offset (else its local-day
+    // buckets are wrong under the current zone).
+    if (c && c.v === CACHE_VERSION && c.tz === tzOffset && c.files) prev = c.files;
   } catch {
     /* no cache yet */
   }
 
   let dirty = false;
   const files: Record<string, FileEntry> = {};
+  // The active session's own transcript is always parsed (even if aged out), so its "current session"
+  // token/message numbers stay consistent with its edit count, which has no cutoff.
+  const activeFile = activeSessionId ? `${activeSessionId}.jsonl` : null;
   for (const file of transcriptFiles()) {
     let st: fs.Stats;
     try {
@@ -204,7 +234,7 @@ export function computeStats(activeSessionId?: string, nowMs?: number): StatsRes
     } catch {
       continue;
     }
-    if (st.mtimeMs < cutoff) continue; // ignore transcripts older than the window
+    if (st.mtimeMs < cutoff && path.basename(file) !== activeFile) continue; // ignore transcripts older than the window
     const needHourly = st.mtimeMs >= startOfToday; // only today's files can hold today's messages
     const cached = prev[file];
     if (
@@ -232,7 +262,7 @@ export function computeStats(activeSessionId?: string, nowMs?: number): StatsRes
     try {
       fs.mkdirSync(path.dirname(cachePath), { recursive: true });
       const tmp = cachePath + '.tmp';
-      fs.writeFileSync(tmp, JSON.stringify({ v: 1, files }));
+      fs.writeFileSync(tmp, JSON.stringify({ v: CACHE_VERSION, tz: tzOffset, files }));
       fs.renameSync(tmp, cachePath); // atomic: a concurrent reader never sees a torn cache
     } catch {
       /* cache is best-effort */
@@ -308,7 +338,9 @@ export function computeStats(activeSessionId?: string, nowMs?: number): StatsRes
   const session = ZERO();
   if (activeSessionId) {
     for (const f in files) {
-      if (files[f].sid !== activeSessionId) continue;
+      // Match the transcript by FILENAME (== the session id resolveSessionId returns), not the last
+      // message's parsed sessionId, which can diverge on a resumed/renamed session.
+      if (path.basename(f) !== activeFile) continue;
       for (const key in files[f].days) {
         const d = files[f].days[key];
         session.output += d.out;

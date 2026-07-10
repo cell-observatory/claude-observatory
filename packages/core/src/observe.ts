@@ -22,6 +22,10 @@ export function findTranscript(cwd: string, sessionId: string): string | null {
   }
 }
 
+/** The file-editing tools that appear as tool_uses in the transcript (parseToolUses queues these);
+ *  a store record with any other tool (e.g. Bash) has no transcript counterpart to correlate. */
+const CORRELATED_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
+
 interface ToolUse {
   file: string;
   reasoning: string;
@@ -68,7 +72,7 @@ function parseToolUses(transcriptPath: string): ToolUse[] {
     const reasoning = text || think; // prefer the visible explanation; fall back to thinking
     if (reasoning) lastReasoning = reasoning;
     for (const b of msg.content) {
-      if (b.type === 'tool_use' && ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(b.name)) {
+      if (b.type === 'tool_use' && CORRELATED_TOOLS.has(b.name)) {
         const f = b.input && (b.input.file_path || b.input.notebook_path);
         if (typeof f === 'string') out.push({ file: path.resolve(f), reasoning: lastReasoning });
       }
@@ -89,6 +93,10 @@ export function reasoningByEdit(cwd: string, sessionId: string): Map<number, str
   }
   const cursor = new Map<string, number>();
   for (const rec of readLog(sessionId)) {
+    // Only records that HAVE a transcript tool_use may consume a file's cursor. A Bash record (files
+    // changed by a `prettier --write`/`eslint --fix` etc.) has no tool_use in parseToolUses, so
+    // advancing the cursor for it would shift every later edit's reasoning to the wrong entry.
+    if (!CORRELATED_TOOLS.has(rec.tool)) continue;
     const q = byFile.get(path.resolve(rec.file));
     if (!q) continue;
     const i = cursor.get(rec.file) ?? 0;
@@ -158,12 +166,18 @@ export function transcriptInsights(cwd: string, sessionId: string): TranscriptIn
 
 /** Pull a "Next steps / TODO / Follow-ups" bullet section out of Claude's recap (last summary). */
 function recapNextSteps(summary: string): string[] {
-  const heading = /^#{0,4}\s*\**\s*(next steps?|to-?dos?|follow[- ]?ups?|remaining|still to do)\b/i;
+  // Linear: a SINGLE character class for the leading markdown noise (#, *, whitespace). The previous
+  // `\s*\**\s*` had two whitespace matchers around an empty-matching `\**`, which backtracks O(n²) on
+  // a line of many spaces — and `summary` is Claude-transcript text (a prompt-injected line could hang
+  // the review UI). One quantifier over a char class can't backtrack catastrophically.
+  const heading = /^[#*\s]*(next steps?|to-?dos?|follow[- ]?ups?|remaining|still to do)\b/i;
   const bullet = /^\s*(?:[-*•]|\d+[.)])\s+(.*\S)/;
   const out: string[] = [];
   let capturing = false;
   for (const raw of summary.split('\n')) {
-    const line = raw.replace(/\s+$/, '');
+    // Native trimEnd (linear) — `/\s+$/.replace` retries from every index and is O(n^2) when a long
+    // whitespace run is followed by a non-space char (the same ReDoS class as the heading regex).
+    const line = raw.trimEnd();
     if (heading.test(line.trim())) {
       capturing = true;
       continue;
@@ -368,8 +382,9 @@ export function usageLine(cwd: string, sessionId: string): UsageLine {
   if (!out.ctx || transcriptNewer) {
     if (transcript) {
       try {
-        // Only the LATEST usage-bearing line matters, so scan from the END and stop at the first
-        // hit — on a 15MB transcript this parses a handful of lines instead of thousands.
+        // Only the LATEST usage-bearing line matters, so scan from the END and JSON.parse just the
+        // first hit (not thousands). NOTE: the file is still fully read into memory here; a transcript
+        // over Node's ~512MB max string length would throw and be swallowed below (silent empty ctx).
         let latest: any = null;
         const lines = fs.readFileSync(transcript, 'utf8').split('\n');
         for (let i = lines.length - 1; i >= 0 && !latest; i--) {

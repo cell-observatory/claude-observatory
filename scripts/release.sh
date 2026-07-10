@@ -21,13 +21,14 @@ npm run build:vscode --silent
 cp packages/vscode/claude-observatory.vsix release/
 
 echo "▸ Building the JetBrains plugin…"
-if command -v gradle >/dev/null 2>&1; then
-  ( cd packages/jetbrains && \
-    JAVA_HOME="${JAVA_HOME:-$([ -d /opt/homebrew/opt/openjdk@21 ] && echo /opt/homebrew/opt/openjdk@21 || echo "")}" \
-    gradle buildPlugin --console=plain -q )
+# Use the committed Gradle wrapper (pins the Gradle version) — never the ambient `gradle`. It still
+# needs a JDK: honor $JAVA_HOME, else fall back to a local Homebrew openjdk@21 if present.
+: "${JAVA_HOME:=$([ -d /opt/homebrew/opt/openjdk@21 ] && echo /opt/homebrew/opt/openjdk@21 || true)}"
+if [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/java" ]; then
+  ( cd packages/jetbrains && JAVA_HOME="$JAVA_HOME" ./gradlew buildPlugin --console=plain -q )
   cp packages/jetbrains/build/distributions/claude-observatory-jetbrains-*.zip release/
 else
-  echo "  (skipped — gradle not found; CI builds the .zip on tagged releases)"
+  echo "  (skipped — no JDK at \$JAVA_HOME; CI builds the .zip on tagged releases)"
 fi
 
 echo

@@ -9,6 +9,7 @@ const cp = require('child_process');
 
 const core = require('../dist/index.js');
 const CAPTURE = path.resolve(__dirname, '../../cli/dist/capture.js');
+const CLI = path.resolve(__dirname, '../../cli/dist/index.js');
 
 function freshHome() {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-home-'));
@@ -160,6 +161,213 @@ test('undo: create WITH a later edit conflicts (never deletes); --force deletes'
   assert.ok(!fs.existsSync(F));
 });
 
+// Seed one edit from raw before/after Buffers (bypasses seedEdit's Buffer.from(string)).
+function seedEditBytes(session, file, beforeBuf, afterBuf) {
+  core.ensureStore(session);
+  const b = beforeBuf === null ? null : core.writeBlob(session, beforeBuf);
+  const a = afterBuf === null ? null : core.writeBlob(session, afterBuf);
+  const id = core.nextId(session);
+  core.appendLog(session, { id, ts: id * 1000, tool: 'Edit', file, beforeBlob: b, afterBlob: a, status: 'pending' });
+  return id;
+}
+
+test('undo: clean revert preserves EXACT bytes of a non-UTF-8 file (no UTF-8 round-trip)', () => {
+  freshHome();
+  const S = 'bytes';
+  const F = path.join(tmpWork(), 'latin1.txt');
+  const before = Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x0a]); // "caf<0xE9>\n" — 0xE9 is invalid standalone UTF-8
+  const after = Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x21, 0x0a]); // + "!"
+  const id = seedEditBytes(S, F, before, after);
+  fs.writeFileSync(F, after); // file currently at "after" (clean-revert path: current === after)
+  const r = core.undoEdit(S, id);
+  assert.equal(r.status, 'undone');
+  assert.equal(Buffer.compare(fs.readFileSync(F), before), 0, 'restored to exact before-bytes, not U+FFFD');
+});
+
+test('redo: clean re-apply preserves EXACT bytes of a non-UTF-8 file', () => {
+  freshHome();
+  const S = 'bytes2';
+  const F = path.join(tmpWork(), 'latin1.txt');
+  const before = Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x0a]);
+  const after = Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x21, 0x0a]);
+  const id = seedEditBytes(S, F, before, after);
+  fs.writeFileSync(F, after);
+  core.undoEdit(S, id); // now at `before` (byte-exact, tested above)
+  assert.equal(Buffer.compare(fs.readFileSync(F), before), 0);
+  const r = core.redoEdit(S, id);
+  assert.equal(r.status, 'redone');
+  assert.equal(Buffer.compare(fs.readFileSync(F), after), 0, 're-applied to exact after-bytes');
+});
+
+test('undo: --force restore of a deleted non-UTF-8 file preserves exact bytes', () => {
+  freshHome();
+  const S = 'bytes3';
+  const F = path.join(tmpWork(), 'bin.txt');
+  const before = Buffer.from([0x80, 0x81, 0x82, 0x0a]); // high bytes, invalid UTF-8
+  const id = seedEditBytes(S, F, before, null); // edit deleted the file
+  // file is absent now (after === null); undo restores it
+  const r = core.undoEdit(S, id);
+  assert.equal(r.status, 'undone');
+  assert.equal(Buffer.compare(fs.readFileSync(F), before), 0, 'deleted file restored byte-exact');
+});
+
+test('groups: consecutive same-line edits collapse into one review unit (keep the latest)', () => {
+  freshHome();
+  const S = 'grp';
+  const F = path.join(tmpWork(), 'f.txt');
+  seedEdit(S, F, 'L1\nA\nL3\n', 'L1\nB\nL3\n'); // #1: line 2 A->B
+  seedEdit(S, F, 'L1\nB\nL3\n', 'L1\nC\nL3\n'); // #2: line 2 B->C (chained; #1's "B" is superseded)
+  const groups = core.pendingGroups(S);
+  assert.equal(groups.size, 1, 'the two same-line edits collapse into ONE group');
+  const [rep, members] = [...groups.entries()][0];
+  assert.equal(rep, 2, 'represented by the most-recent edit');
+  assert.deepEqual(members, [1, 2]);
+  assert.deepEqual(core.groupMembers(S, 1), [1, 2], 'membership resolves from either id');
+});
+
+test('groups: edits to different regions of a file stay separate', () => {
+  freshHome();
+  const S = 'grp2';
+  const F = path.join(tmpWork(), 'f.txt');
+  seedEdit(S, F, 'L1\nL2\nL3\nL4\nL5\n', 'X1\nL2\nL3\nL4\nL5\n'); // #1: line 1
+  seedEdit(S, F, 'X1\nL2\nL3\nL4\nL5\n', 'X1\nL2\nL3\nL4\nX5\n'); // #2: line 5 (chained, non-overlapping)
+  assert.equal(core.pendingGroups(S).size, 2, 'different regions -> two independent groups');
+  assert.deepEqual(core.groupMembers(S, 1), [1]);
+  assert.deepEqual(core.groupMembers(S, 2), [2]);
+});
+
+test('groups: undoGroup reverts to the earliest before; redoGroup rebuilds; keepGroup keeps all', () => {
+  freshHome();
+  const S = 'grp3';
+  const F = path.join(tmpWork(), 'f.txt');
+  const A = 'L1\nA\nL3\n', B = 'L1\nB\nL3\n', C = 'L1\nC\nL3\n';
+  seedEdit(S, F, A, B); // #1
+  seedEdit(S, F, B, C); // #2
+  fs.writeFileSync(F, C); // current on disk = the latest state
+  const u = core.undoGroup(S, 2);
+  assert.equal(u.status, 'undone');
+  assert.deepEqual([...u.ids].sort((a, b) => a - b), [1, 2]);
+  assert.equal(fs.readFileSync(F, 'utf8'), A, 'reverted the whole chain back to the earliest before-state');
+  assert.equal(core.findRecord(S, 1).status, 'undone');
+  assert.equal(core.findRecord(S, 2).status, 'undone');
+  const r = core.redoGroup(S, 2);
+  assert.equal(r.status, 'redone');
+  assert.equal(fs.readFileSync(F, 'utf8'), C, 're-applied the whole chain');
+  const k = core.keepGroup(S, 1);
+  assert.equal(k.kept, 2, 'keepGroup keeps every member');
+  assert.equal(core.findRecord(S, 1).status, 'kept');
+  assert.equal(core.findRecord(S, 2).status, 'kept');
+});
+
+test('groups: a three-edit chain on the same line collapses transitively into one unit', () => {
+  freshHome();
+  const S = 'g4';
+  const F = path.join(tmpWork(), 'f.txt');
+  seedEdit(S, F, 'x\nA\ny\n', 'x\nB\ny\n'); // #1
+  seedEdit(S, F, 'x\nB\ny\n', 'x\nC\ny\n'); // #2
+  seedEdit(S, F, 'x\nC\ny\n', 'x\nD\ny\n'); // #3
+  const g = core.pendingGroups(S);
+  assert.equal(g.size, 1, 'all three collapse');
+  assert.deepEqual([...g.get(3)], [1, 2, 3], 'rep is #3; members are 1-3');
+});
+
+test('groups: same-line edits group while a different-region edit stays a separate unit', () => {
+  freshHome();
+  const S = 'g5';
+  const F = path.join(tmpWork(), 'f.txt');
+  seedEdit(S, F, 'L0\nL1\nL2\nL3\nL4\n', 'A\nL1\nL2\nL3\nL4\n'); // #1 line 0
+  seedEdit(S, F, 'A\nL1\nL2\nL3\nL4\n', 'B\nL1\nL2\nL3\nL4\n'); // #2 line 0 (groups with #1)
+  seedEdit(S, F, 'B\nL1\nL2\nL3\nL4\n', 'B\nL1\nL2\nL3\nX\n'); // #3 line 4 (separate region)
+  assert.equal(core.pendingGroups(S).size, 2, 'two independent groups');
+  assert.deepEqual(core.groupMembers(S, 1), [1, 2]);
+  assert.deepEqual(core.groupMembers(S, 3), [3]);
+});
+
+test('groups: undoGroup reverts its region ONLY, surgically preserving an unrelated edit in the same file', () => {
+  freshHome();
+  const S = 'g6';
+  const F = path.join(tmpWork(), 'f.txt');
+  seedEdit(S, F, 'L0\nL1\nL2\nL3\nL4\n', 'A\nL1\nL2\nL3\nL4\n'); // #1 line 0
+  seedEdit(S, F, 'A\nL1\nL2\nL3\nL4\n', 'B\nL1\nL2\nL3\nL4\n'); // #2 line 0 (group)
+  seedEdit(S, F, 'B\nL1\nL2\nL3\nL4\n', 'B\nL1\nL2\nL3\nX\n'); // #3 line 4 (separate)
+  fs.writeFileSync(F, 'B\nL1\nL2\nL3\nX\n');
+  const res = core.undoGroup(S, 2);
+  assert.equal(res.status, 'undone');
+  assert.equal(fs.readFileSync(F, 'utf8'), 'L0\nL1\nL2\nL3\nX\n', 'line 0 reverted; line 4 (#3) preserved');
+  assert.equal(core.findRecord(S, 3).status, 'pending', 'the unrelated edit is untouched');
+});
+
+test('groups: a resolved (kept) edit never drags into a later pending same-line group', () => {
+  freshHome();
+  const S = 'g7';
+  const F = path.join(tmpWork(), 'f.txt');
+  seedEdit(S, F, 'x\nA\ny\n', 'x\nB\ny\n'); // #1
+  core.setStatus(S, 1, 'kept'); // resolve #1
+  seedEdit(S, F, 'x\nB\ny\n', 'x\nC\ny\n'); // #2 pending (chained after #1)
+  assert.deepEqual(core.groupMembers(S, 2), [2], 'only the pending edit is in the group');
+  assert.equal(core.keepGroup(S, 2).kept, 1);
+  assert.equal(core.findRecord(S, 1).status, 'kept', 'the already-kept edit is unchanged');
+});
+
+test('groups: a new-file create + an immediate same-line edit collapse (before=null chain)', () => {
+  freshHome();
+  const S = 'g8';
+  const F = path.join(tmpWork(), 'new.txt');
+  seedEdit(S, F, null, 'hello\n'); // #1 create
+  seedEdit(S, F, 'hello\n', 'HELLO\n'); // #2 edit
+  assert.equal(core.pendingGroups(S).size, 1, 'create + edit collapse');
+  assert.deepEqual(core.groupMembers(S, 1), [1, 2]);
+  fs.writeFileSync(F, 'HELLO\n');
+  const res = core.undoGroup(S, 2);
+  assert.ok(res.ok, 'undoing the whole unit succeeds');
+  assert.ok(!fs.existsSync(F), 'reverting the group removes the created file');
+});
+
+test('groups: undoGroup then redoGroup round-trips to the exact final state', () => {
+  freshHome();
+  const S = 'g9';
+  const F = path.join(tmpWork(), 'f.txt');
+  const A = 'p\nA\nq\n', B = 'p\nB\nq\n', C = 'p\nC\nq\n';
+  seedEdit(S, F, A, B);
+  seedEdit(S, F, B, C);
+  fs.writeFileSync(F, C);
+  core.undoGroup(S, 2);
+  assert.equal(fs.readFileSync(F, 'utf8'), A, 'undo -> earliest before');
+  core.redoGroup(S, 2);
+  assert.equal(fs.readFileSync(F, 'utf8'), C, 'redo -> exact final state');
+  assert.equal(core.findRecord(S, 1).status, 'pending');
+  assert.equal(core.findRecord(S, 2).status, 'pending');
+});
+
+test('groups: identical edits to two different files never group across files', () => {
+  freshHome();
+  const S = 'g10';
+  const dir = tmpWork();
+  seedEdit(S, path.join(dir, 'a.txt'), 'x\n', 'y\n'); // #1 file A
+  seedEdit(S, path.join(dir, 'b.txt'), 'x\n', 'y\n'); // #2 file B
+  assert.equal(core.pendingGroups(S).size, 2, 'different files -> different groups');
+});
+
+test('groups: reviewEdits collapses pending to one net rep (earliest before -> latest after)', () => {
+  freshHome();
+  const S = 'g11';
+  const F = path.join(tmpWork(), 'f.txt');
+  seedEdit(S, F, 'a\nX\nb\n', 'a\nY\nb\n'); // #1 line 1
+  seedEdit(S, F, 'a\nY\nb\n', 'a\nZ\nb\n'); // #2 line 1 (group)
+  const rev = core.reviewEdits(S);
+  assert.equal(rev.length, 1, 'one collapsed review record');
+  assert.equal(rev[0].id, 2, 'rep carries the most-recent id');
+  const d = core.lineDelta(S, rev[0]);
+  assert.equal(d.added, 1, 'net delta is earliest-before -> latest-after (X -> Z)');
+  assert.equal(d.removed, 1);
+  // resolved edits stay individual (history) alongside a new pending rep
+  core.setStatus(S, 1, 'kept');
+  core.setStatus(S, 2, 'kept'); // the group is now resolved
+  seedEdit(S, F, 'a\nZ\nb\n', 'a\nW\nb\n'); // #3 pending, chained after the kept group
+  const rev2 = core.reviewEdits(S);
+  assert.equal(rev2.length, 3, 'both kept edits stay individual; the new pending edit is its own rep');
+});
+
 test('undo: fileBaseline reverts all pending edits (quick-diff baseline)', () => {
   freshHome();
   const S = 'baseline';
@@ -221,6 +429,59 @@ test('clean: gcSession removes only unreferenced blobs; removeSession deletes th
   assert.ok(!fs.existsSync(core.storeDir(S)));
 });
 
+test('clean: gcSession keeps blobs referenced by an in-flight staging record (not yet committed)', () => {
+  freshHome();
+  const S = 'gcstage';
+  core.ensureStore(S);
+  const F = path.join(tmpWork(), 'f.txt');
+  seedEdit(S, F, 'a\n', 'b\n'); // a committed edit (its blobs are referenced)
+  // A PreToolUse that already snapshotted a before-blob but whose PostToolUse hasn't appended yet.
+  const stagedBlob = core.writeBlob(S, Buffer.from('staged-before\n'));
+  const key = core.pathKey('/some/other.txt');
+  core.writeStaging(S, key, { file: '/some/other.txt', tool: 'Edit', beforeBlob: stagedBlob });
+  core.gcSession(S);
+  assert.ok(
+    fs.existsSync(path.join(core.storeDir(S), 'blobs', stagedBlob)),
+    'staged before-blob must survive GC (else the imminent edit is unrecoverable)'
+  );
+});
+
+test('clean: gcSession keeps blobs referenced by the __bash__ manifest', () => {
+  freshHome();
+  const S = 'gcbash';
+  core.ensureStore(S);
+  const blob = core.writeBlob(S, Buffer.from('bash-before\n'));
+  core.writeBashManifest(S, { files: { '/x/y.txt': blob }, ts: 1000 });
+  core.gcSession(S);
+  assert.ok(fs.existsSync(path.join(core.storeDir(S), 'blobs', blob)), 'manifest before-blob survives GC');
+});
+
+test('store: a stale lock is broken so appendLog can never permanently block', () => {
+  freshHome();
+  const S = 'lock';
+  core.ensureStore(S);
+  // Simulate a crashed holder: a .lock file older than the stale threshold.
+  const lp = path.join(core.storeDir(S), '.lock');
+  fs.writeFileSync(lp, '999999');
+  const old = new Date(Date.now() - 60000); // 60s ago > LOCK_STALE_MS (10s)
+  fs.utimesSync(lp, old, old);
+  const F = path.join(tmpWork(), 'f.txt');
+  const id = seedEdit(S, F, 'a\n', 'b\n'); // seedEdit → appendLog acquires the lock; must not hang
+  assert.equal(core.findRecord(S, id).status, 'pending', 'append succeeded despite a stale lock');
+});
+
+test('store: rejects traversing session ids (no read/write/rm -rf outside the store)', () => {
+  freshHome();
+  assert.equal(core.isSafeSessionId('750d33e9-aedd-4186-98a4-f03ce6716ed0'), true, 'a real UUID is fine');
+  assert.equal(core.isSafeSessionId('..'), false);
+  assert.equal(core.isSafeSessionId('.'), false);
+  assert.equal(core.isSafeSessionId('a/b'), false);
+  assert.equal(core.isSafeSessionId('../evil'), false);
+  assert.throws(() => core.storeDir('..'), /invalid session id/, 'storeDir fail-closes on traversal');
+  assert.throws(() => core.storeDir('../../etc'), /invalid session id/);
+  assert.throws(() => core.removeSession('..'), /invalid session id|outside the store/, 'removeSession refuses to escape');
+});
+
 test('clean: clearResolved drops kept+undone, keeps pending', () => {
   freshHome();
   const S = 'clr';
@@ -271,6 +532,29 @@ test('ranges: locateDeletionsInCurrent surfaces removed text + its anchor (red g
   assert.deepEqual(D('a\nb\nc\n', 'a\nc\n', 'HEADER\na\nc\n'), [{ anchor: 2, lines: ['b'] }]);
   // the deletion's region was later rewritten -> the hunk drops out
   assert.deepEqual(D('a\nb\nc\n', 'a\nc\n', 'a\nZZ\n'), []);
+});
+
+test('observe: recap "next steps" heading matching is linear-time on a pathological line (no ReDoS)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const cwd = tmpWork();
+  const S = 'redos';
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  // A line that made the old `\s*\**\s*` heading regex backtrack O(n^2): marker, 100k spaces, marker.
+  const evil = '#' + ' '.repeat(100000) + 'x';
+  const tx = JSON.stringify({
+    sessionId: S,
+    timestamp: new Date().toISOString(),
+    type: 'assistant',
+    message: { role: 'assistant', content: [{ type: 'text', text: evil }] },
+  });
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), tx);
+  const t0 = Date.now();
+  const sug = core.transcriptSuggestions(cwd, S); // runs recapNextSteps on lastSummary
+  const elapsed = Date.now() - t0;
+  assert.ok(Array.isArray(sug), 'returns a list');
+  assert.ok(elapsed < 1000, `heading match must be linear (took ${elapsed}ms; the O(n^2) bug takes many seconds)`);
 });
 
 test('classes: detectClasses spans + classAt (brace langs + python)', () => {
@@ -332,6 +616,29 @@ test('observe: reasoning carries forward across messages (thinking + separate to
   const m = core.reasoningByEdit(cwd, S);
   assert.equal(m.get(1), 'Plan: create y then add z.', 'edit #1 inherits the preceding thinking block');
   assert.equal(m.get(2), 'Now adding z.', 'edit #2 uses its own same-message text');
+});
+
+test('observe: a Bash record between two edits does not shift reasoning to the wrong edit', () => {
+  freshHome();
+  const S = 'obs3';
+  const cwd = tmpWork();
+  const F = path.join(cwd, 'app.js');
+  // #1 Edit, #2 Bash (e.g. `prettier --write app.js`), #3 Edit — all to the same file.
+  seedEdit(S, F, 'a\n', 'b\n'); // #1 Edit
+  core.appendLog(S, { id: core.nextId(S), ts: 2000, tool: 'Bash', file: F, beforeBlob: null, afterBlob: core.writeBlob(S, Buffer.from('B\n')), status: 'pending' }); // #2 Bash
+  seedEdit(S, F, 'B\n', 'C\n'); // #3 Edit
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const tx = [
+    { message: { role: 'assistant', content: [{ type: 'text', text: 'First edit.' }, { type: 'tool_use', name: 'Edit', input: { file_path: F } }] } },
+    { message: { role: 'assistant', content: [{ type: 'text', text: 'Second edit.' }, { type: 'tool_use', name: 'Edit', input: { file_path: F } }] } },
+  ].map((o) => JSON.stringify(o)).join('\n');
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), tx);
+
+  const m = core.reasoningByEdit(cwd, S);
+  assert.equal(m.get(1), 'First edit.', 'edit #1 gets the first tool_use reasoning');
+  assert.equal(m.get(2), undefined, 'the Bash record gets no reasoning (no transcript tool_use)');
+  assert.equal(m.get(3), 'Second edit.', 'edit #3 gets the second reasoning, NOT shifted by the Bash record');
 });
 
 test("observe: transcriptSuggestions surfaces Claude's latest open to-dos (zero token)", () => {
@@ -654,6 +961,36 @@ test('stats: computeStats rolls up transcripts + edits into windows and a daily 
   assert.equal(st.hourly[hr].tokensOutput, 50, 'hourly output tokens');
 });
 
+test('stats: one assistant message split across content-block lines is counted once (no multi-count)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'splitSess';
+  const now = Date.now();
+  const proj = path.join(os.homedir(), '.claude', 'projects', 'proj');
+  fs.mkdirSync(proj, { recursive: true });
+  // Current Claude Code writes ONE line per content block, each stamped with the SAME message.id and
+  // the IDENTICAL usage. Here: one logical message split into thinking+text+tool_use (3 lines).
+  const usage = { input_tokens: 10, cache_read_input_tokens: 100, cache_creation_input_tokens: 0, output_tokens: 50 };
+  const iso = new Date(now).toISOString();
+  const mk = (content) =>
+    JSON.stringify({ sessionId: S, timestamp: iso, type: 'assistant', message: { id: 'msg_split1', role: 'assistant', usage, content } });
+  const lines = [
+    mk([{ type: 'thinking', thinking: 'abcdefghijklmnop' }]), // 16 chars → thinking 4
+    mk([{ type: 'text', text: 'hi' }]),
+    mk([{ type: 'tool_use', name: 'Edit', input: { file_path: '/w/a.js' } }]),
+  ];
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), lines.join('\n') + '\n');
+
+  const st = core.computeStats(S, now);
+  const today = st.daily[st.daily.length - 1];
+  assert.equal(today.messages, 1, 'split message counts as ONE turn, not three');
+  assert.equal(today.tokensOutput, 50, 'output usage counted once (not 150)');
+  assert.equal(today.tokensInput, 110, 'input+cache usage counted once (not 330)');
+  assert.equal(today.thinking, 4, 'thinking accrues from the thinking-block line');
+  assert.equal(st.windows.session.messages, 1, 'session window: one message');
+  assert.equal(st.windows.session.output, 50, 'session window: output counted once');
+});
+
 test('install: --project targets a repo-local settings file, leaving global untouched', () => {
   freshHome();
   const proj = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-proj-'));
@@ -666,6 +1003,28 @@ test('install: --project targets a repo-local settings file, leaving global unto
   assert.equal(core.hooksInstalled(), false, 'global settings NOT touched');
   assert.ok(core.uninstallHooks(projSettings).changed);
   assert.equal(core.hooksInstalled(projSettings), false);
+});
+
+test('install: uninstallStatusline reverts ONLY our statusline, never a user custom one', () => {
+  const home = freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const cdir = path.join(home, '.claude');
+  fs.mkdirSync(cdir, { recursive: true });
+  const sp = path.join(cdir, 'settings.json');
+  fs.writeFileSync(path.join(cdir, 'statusline.sh'), '#!/bin/bash\n');
+  const ours = 'bash ' + path.join(cdir, 'statusline.sh');
+  // ours → reverted, other settings preserved, script removed
+  fs.writeFileSync(sp, JSON.stringify({ theme: 'dark', statusLine: { type: 'command', command: ours } }));
+  let r = core.uninstallStatusline(sp);
+  assert.ok(r.changed && r.scriptRemoved, 'ours is reverted + script removed');
+  let d = JSON.parse(fs.readFileSync(sp, 'utf8'));
+  assert.equal(d.statusLine, undefined, 'our statusLine removed');
+  assert.equal(d.theme, 'dark', 'unrelated settings preserved');
+  // a user's own statusLine is left untouched
+  fs.writeFileSync(sp, JSON.stringify({ statusLine: { type: 'command', command: 'my-own-statusline.sh' } }));
+  r = core.uninstallStatusline(sp);
+  assert.equal(r.changed, false, 'a custom statusLine is NOT touched');
+  assert.equal(JSON.parse(fs.readFileSync(sp, 'utf8')).statusLine.command, 'my-own-statusline.sh');
 });
 
 test('install: hooks merged non-destructively, idempotent, and reversible', () => {
@@ -720,6 +1079,37 @@ test('session: resolveSessionId picks newest and walks up from a subdirectory', 
   assert.equal(core.resolveSessionId('/nowhere/zzz'), null);
 });
 
+test('contract: each --json command emits the documented key set (rename-guard for both editors)', () => {
+  const home = freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'contract';
+  const F = path.join(tmpWork(), 'app.js');
+  seedEdit(S, F, 'a\n', 'a\nb\n'); // #1
+  seedEdit(S, F, 'a\nb\n', 'a\nB\n'); // #2
+  const env = { ...process.env, HOME: home, USERPROFILE: home, CLAUDE_OBSERVATORY_SESSION: S };
+  const runJson = (args) => JSON.parse(cp.execFileSync('node', [CLI, ...args], { env, encoding: 'utf8' }));
+  const hasKeys = (obj, keys, where) => {
+    for (const k of keys) assert.ok(obj && Object.prototype.hasOwnProperty.call(obj, k), `${where}: missing key "${k}"`);
+  };
+  // Read-only shapes (JetBrains + scripts key on these names — add fields, never rename).
+  const list = runJson(['list', '--json']);
+  hasKeys(list, ['session', 'edits'], 'list');
+  hasKeys(list.edits[0], ['id', 'ts', 'tool', 'file', 'status', 'added', 'removed'], 'list.edits[]');
+  hasKeys(runJson(['status', '--json']), ['hooksInstalled', 'hookScript', 'session', 'store', 'lastCaptureTs', 'counts', 'skipped'], 'status');
+  const sessions = runJson(['sessions', '--json']);
+  hasKeys(sessions, ['active', 'sessions'], 'sessions');
+  hasKeys(sessions.sessions[0], ['id', 'edits', 'pending', 'lastMs'], 'sessions.sessions[]');
+  hasKeys(runJson(['tree', '--json']), ['folders', 'files'], 'tree');
+  const observe = runJson(['observe']); // observe is always JSON
+  hasKeys(observe, ['session', 'recap', 'insights', 'suggestions', 'edits'], 'observe');
+  hasKeys(observe.edits[0], ['id', 'ts', 'tool', 'file', 'status', 'summary', 'reasoning', 'flags', 'memory', 'analysis'], 'observe.edits[]');
+  hasKeys(runJson(['usage']), ['staleMs'], 'usage');
+  // Mutations (undo/redo branch on `status`; keep on `kept`) — run these last.
+  hasKeys(runJson(['keep', '1', '--json']), ['kept', 'ids'], 'keep');
+  const undo = runJson(['undo', '2', '--json']);
+  hasKeys(undo, ['ok', 'status', 'message'], 'undo');
+});
+
 test('capture: hook subprocess records an edit and prints NOTHING to stdout', () => {
   const home = freshHome();
   const dir = tmpWork();
@@ -757,6 +1147,63 @@ function readStoreLog(home, session) {
   if (!fs.existsSync(p)) return [];
   return fs.readFileSync(p, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
 }
+
+test('capture: MultiEdit is captured as one record (tool=MultiEdit) and undoes cleanly', () => {
+  const home = freshHome();
+  const dir = tmpWork();
+  const F = path.join(dir, 'm.txt');
+  const before = 'L1\nL2\nL3\nL4\nL5\n';
+  fs.writeFileSync(F, before);
+  const S = 'multi';
+  runHook(home, S, dir, 'PreToolUse', 'MultiEdit', F);
+  fs.writeFileSync(F, 'TOP\nL2\nL3\nL4\nBOT\n'); // two non-adjacent hunks committed as one MultiEdit
+  runHook(home, S, dir, 'PostToolUse', 'MultiEdit', F);
+  const log = readStoreLog(home, S);
+  assert.equal(log.length, 1, 'one record for the whole MultiEdit');
+  assert.equal(log[0].tool, 'MultiEdit', 'recorded tool field is MultiEdit');
+  const res = core.undoEdit(S, log[0].id); // clean revert (no later edits) — byte-exact
+  assert.equal(res.status, 'undone');
+  assert.equal(fs.readFileSync(F, 'utf8'), before, 'the whole MultiEdit is reverted');
+});
+
+test('capture: a PostToolUse with no matching Pre records nothing (no phantom edit)', () => {
+  const home = freshHome();
+  const dir = tmpWork();
+  const F = path.join(dir, 'x.txt');
+  fs.writeFileSync(F, 'hi\n');
+  const S = 'nopre';
+  runHook(home, S, dir, 'PostToolUse', 'Edit', F); // Post only — Pre never ran
+  assert.equal(readStoreLog(home, S).length, 0, 'nothing committed without a staged before-snapshot');
+});
+
+test('store: skip markers are recorded, ignored by readLog, and surfaced by readSkips', () => {
+  freshHome();
+  const S = 'skips';
+  const F = path.join(tmpWork(), 'f.txt');
+  seedEdit(S, F, 'a\n', 'b\n'); // a normal edit (#1)
+  core.appendSkip(S, '/big/file.bin', 'file too large');
+  core.appendSkip(S, '<bash-tree>', 'tree too large');
+  const log = core.readLog(S);
+  assert.equal(log.length, 1, 'skip markers are NOT edit records (folded out of readLog)');
+  assert.equal(log[0].id, 1);
+  const skips = core.readSkips(S);
+  assert.equal(skips.length, 2);
+  assert.equal(skips[0].reason, 'file too large');
+  assert.equal(skips[1].file, '<bash-tree>');
+});
+
+test('capture: an edit that grows a file past 5MB leaves a skip marker (not a silent drop)', () => {
+  const home = freshHome();
+  const dir = tmpWork();
+  const F = path.join(dir, 'big.txt');
+  fs.writeFileSync(F, 'small\n'); // ≤5MB at Pre
+  const S = 'toobig';
+  runHook(home, S, dir, 'PreToolUse', 'Edit', F);
+  fs.writeFileSync(F, 'X'.repeat(5 * 1024 * 1024 + 1)); // grew past MAX_BYTES
+  runHook(home, S, dir, 'PostToolUse', 'Edit', F);
+  assert.equal(core.readLog(S).length, 0, 'no edit record for the too-large file');
+  assert.equal(core.readSkips(S).length, 1, 'but a skip marker IS recorded');
+});
 
 test('store: readLog skips malformed/partial lines and folds status ops', () => {
   freshHome();
@@ -1467,6 +1914,43 @@ test('capture: CLAUDE_OBSERVATORY_NO_BASH opts out of Bash capture', () => {
   fs.writeFileSync(F, 'TWO\n');
   bash('PostToolUse');
   assert.equal(fs.existsSync(path.join(home, '.claude', 'claude-observatory', S, 'log.jsonl')), false, 'no log written when opted out');
+});
+
+test('capture: the Bash full-tree walk never snapshots secret files (.env), only ordinary edits', () => {
+  const home = freshHome();
+  const dir = tmpWork();
+  const ENV = path.join(dir, '.env'); // secret — must NOT be captured
+  const SRC = path.join(dir, 'app.js'); // ordinary — must be captured
+  fs.writeFileSync(ENV, 'API_KEY=sk-secret-000\n');
+  fs.writeFileSync(SRC, 'let x = 1;\n');
+  const S = 'bashSecret';
+  runHookBash(home, S, dir, 'PreToolUse');
+  fs.writeFileSync(ENV, 'API_KEY=sk-secret-999\n'); // the Bash command "changed" both
+  fs.writeFileSync(SRC, 'let x = 2;\n');
+  runHookBash(home, S, dir, 'PostToolUse');
+
+  const log = fs
+    .readFileSync(path.join(home, '.claude', 'claude-observatory', S, 'log.jsonl'), 'utf8')
+    .trim().split('\n').map(JSON.parse);
+  assert.ok(log.some((r) => r.file === SRC), 'ordinary source edit is captured');
+  assert.ok(!log.some((r) => r.file === ENV), '.env is never recorded');
+  // and its secret content never lands in a blob
+  const blobs = fs.readdirSync(path.join(home, '.claude', 'claude-observatory', S, 'blobs'));
+  const anySecret = blobs.some((b) =>
+    fs.readFileSync(path.join(home, '.claude', 'claude-observatory', S, 'blobs', b), 'utf8').includes('sk-secret')
+  );
+  assert.ok(!anySecret, 'no blob contains the .env secret');
+});
+
+test('store: session dirs are 0700 and blobs 0600 (not world/group-readable)', { skip: process.platform === 'win32' }, () => {
+  freshHome();
+  const S = 'perms';
+  core.ensureStore(S);
+  const sha = core.writeBlob(S, Buffer.from('secret-ish\n'));
+  const dirMode = fs.statSync(core.storeDir(S)).mode & 0o777;
+  const blobMode = fs.statSync(path.join(core.storeDir(S), 'blobs', sha)).mode & 0o777;
+  assert.equal(dirMode & 0o077, 0, `store dir must have no group/other bits (got ${dirMode.toString(8)})`);
+  assert.equal(blobMode & 0o077, 0, `blob must have no group/other bits (got ${blobMode.toString(8)})`);
 });
 
 test('install: re-init migrates a legacy matcher in place (adds Bash) without duplicating', () => {

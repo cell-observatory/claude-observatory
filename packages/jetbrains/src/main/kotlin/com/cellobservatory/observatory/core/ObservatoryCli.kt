@@ -8,6 +8,7 @@ import com.intellij.execution.configurations.GeneralCommandLine
 import com.intellij.execution.util.ExecUtil
 import com.intellij.openapi.util.SystemInfo
 import java.io.File
+import java.util.concurrent.TimeUnit
 
 /**
  * Drives the `claude-observatory` CLI — the backend for every store MUTATION (keep/undo/redo) and
@@ -65,13 +66,29 @@ object ObservatoryCli {
             val out = if (stdin != null) {
                 val proc = cmd.createProcess()
                 proc.outputStream.use { it.write(stdin.toByteArray(Charsets.UTF_8)) }
-                val stdout = proc.inputStream.bufferedReader().readText()
-                val stderr = proc.errorStream.bufferedReader().readText()
-                val code = proc.waitFor()
-                CliResult(code, stdout, stderr)
+                // Drain stdout AND stderr on separate threads with a bounded wait: reading stdout to
+                // completion first can deadlock if the child fills the stderr pipe buffer, and the
+                // old bare waitFor() had NO timeout — a wedged `locate` (run on every inline render)
+                // would hang the pooled worker forever and silently strand inline/navigate/keep.
+                val outBuf = StringBuilder()
+                val errBuf = StringBuilder()
+                val tOut = Thread { proc.inputStream.bufferedReader(Charsets.UTF_8).use { outBuf.append(it.readText()) } }
+                val tErr = Thread { proc.errorStream.bufferedReader(Charsets.UTF_8).use { errBuf.append(it.readText()) } }
+                tOut.start(); tErr.start()
+                if (proc.waitFor(timeoutMs.toLong(), TimeUnit.MILLISECONDS)) {
+                    tOut.join(1000); tErr.join(1000)
+                    CliResult(proc.exitValue(), outBuf.toString(), errBuf.toString())
+                } else {
+                    proc.destroyForcibly()
+                    tOut.join(500); tErr.join(500)
+                    CliResult(-1, outBuf.toString(), "claude-observatory timed out after ${timeoutMs}ms")
+                }
             } else {
                 val o = ExecUtil.execAndGetOutput(cmd, timeoutMs)
-                CliResult(o.exitCode, o.stdout, o.stderr)
+                // ExecUtil signals a timeout via isTimeout, not a non-zero exit — treat it as a failure
+                // so callers don't mistake a killed run's partial output for a result.
+                if (o.isTimeout) CliResult(-1, o.stdout, "claude-observatory timed out after ${timeoutMs}ms")
+                else CliResult(o.exitCode, o.stdout, o.stderr)
             }
             out
         } catch (e: Exception) {
@@ -81,12 +98,22 @@ object ObservatoryCli {
 
     // --- typed wrappers over the CLI's --json surface ---
 
+    /** Install the PreToolUse/PostToolUse capture hooks (non-interactive `claude-observatory init`). */
+    fun init(workDir: String?): CliResult = run(listOf("init"), workDir)
+
+    /** Garbage-collect orphaned blobs in a session (`clean --session <id>`). */
+    fun gc(session: String, workDir: String?): CliResult = run(listOf("clean", "--session", session), workDir)
+
+    /** Drop a whole session from the store (`clean --drop <id>`). */
+    fun dropSession(session: String, workDir: String?): CliResult = run(listOf("clean", "--drop", session), workDir)
+
     fun keep(session: String, id: Int, workDir: String?): Boolean =
         run(listOf("keep", id.toString(), "--session", session, "--json"), workDir).ok
 
-    fun keepAll(session: String, workDir: String?): Int {
+    /** Kept count, or null if the CLI call failed (distinct from a genuine 0-pending result). */
+    fun keepAll(session: String, workDir: String?): Int? {
         val r = run(listOf("keep", "--all", "--session", session, "--json"), workDir)
-        return if (r.ok) parseInt(r.stdout, "kept") else 0
+        return if (r.ok) parseInt(r.stdout, "kept") else null
     }
 
     fun undo(session: String, id: Int, force: Boolean, workDir: String?): UndoResult =
@@ -156,15 +183,24 @@ object ObservatoryCli {
     fun doctorMarkdown(workDir: String?): String? =
         run(listOf("doctor", "--markdown"), workDir).stdout.takeIf { it.isNotBlank() }
 
+    /** `--claude-bin <path>` when the user set an explicit claude CLI path (Settings → Tools → Claude
+     *  Observatory). Without this the setting is dead: a GUI-launched IDE with a stripped PATH can't
+     *  find `claude`, and Analyze/Recap fail even though the user pointed us at the binary. */
+    private fun claudeBinArgs(): List<String> =
+        ObservatorySettings.instance.state.claudeBin?.takeIf { it.isNotBlank() }
+            ?.let { listOf("--claude-bin", it) } ?: emptyList()
+
     /** Opt-in `claude -p` layer: cached unless fresh; can run for minutes. Returns text or null. */
     fun analyze(session: String, id: Int, workDir: String?): String? {
-        val r = run(listOf("analyze", id.toString(), "--session", session, "--json"), workDir, timeoutMs = 150_000)
+        val args = listOf("analyze", id.toString(), "--session", session, "--json") + claudeBinArgs()
+        val r = run(args, workDir, timeoutMs = 150_000)
         return analysisText(r)
     }
 
     fun recap(session: String, fresh: Boolean, workDir: String?): String? {
         val args = buildList {
             add("recap"); add("--session"); add(session); add("--json"); if (fresh) add("--fresh")
+            addAll(claudeBinArgs())
         }
         return analysisText(run(args, workDir, timeoutMs = 150_000))
     }

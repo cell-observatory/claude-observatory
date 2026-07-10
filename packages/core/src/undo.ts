@@ -14,8 +14,10 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
+import * as crypto from 'crypto';
 import { diffArrays } from 'diff';
 import { findRecord, readBlob, readLog, setStatus } from './store';
+import { groupMembers } from './groups';
 
 export interface UndoResult {
   ok: boolean;
@@ -23,11 +25,23 @@ export interface UndoResult {
   message: string;
 }
 
-function blobText(sessionId: string, sha: string | null): string | null {
-  return sha === null ? null : readBlob(sessionId, sha).toString('utf8');
+/** Raw blob bytes (exactly what capture stored) — the fidelity-preserving read. */
+function blobBuf(sessionId: string, sha: string | null): Buffer | null {
+  return sha === null ? null : readBlob(sessionId, sha);
 }
 
-function writeEnsuringDir(file: string, content: string): void {
+/** UTF-8 decode — ONLY for the line-based 3-way merge, which is inherently a text operation. Every
+ *  whole-file restore path writes raw bytes instead, so a non-UTF-8 file is never corrupted. */
+function blobText(sessionId: string, sha: string | null): string | null {
+  const b = blobBuf(sessionId, sha);
+  return b === null ? null : b.toString('utf8');
+}
+
+function sha256(buf: Buffer): string {
+  return crypto.createHash('sha256').update(buf).digest('hex');
+}
+
+function writeEnsuringDir(file: string, content: Buffer | string): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, content);
 }
@@ -152,14 +166,14 @@ export function undoEdit(sessionId: string, id: number): UndoResult {
     return { ok: true, status: 'noop', message: `edit #${id} is already undone` };
   }
 
-  const before = blobText(sessionId, rec.beforeBlob);
-  const after = blobText(sessionId, rec.afterBlob);
-  let current: string | null;
+  const beforeBuf = blobBuf(sessionId, rec.beforeBlob);
+  let currentBuf: Buffer | null;
   try {
-    current = fs.readFileSync(rec.file, 'utf8');
+    currentBuf = fs.readFileSync(rec.file);
   } catch {
-    current = null;
+    currentBuf = null;
   }
+  const currentSha = currentBuf ? sha256(currentBuf) : null;
 
   const conflict = (): UndoResult => ({
     ok: false,
@@ -170,11 +184,12 @@ export function undoEdit(sessionId: string, id: number): UndoResult {
       `state (this also drops later edits to this file).`,
   });
 
-  // New-file create -> undo deletes the file, but ONLY if no later edit changed it since.
-  if (before === null) {
-    if (current !== null && after !== null && current !== after) return conflict();
+  // New-file create -> undo deletes the file, but ONLY if no later edit changed it since (compare by
+  // sha of the raw bytes, never a UTF-8 round-trip).
+  if (rec.beforeBlob === null) {
+    if (currentSha !== null && rec.afterBlob !== null && currentSha !== rec.afterBlob) return conflict();
     try {
-      if (current !== null) fs.unlinkSync(rec.file);
+      if (currentBuf !== null) fs.unlinkSync(rec.file);
     } catch (e) {
       return { ok: false, status: 'error', message: `could not delete ${rec.file}: ${String(e)}` };
     }
@@ -182,17 +197,17 @@ export function undoEdit(sessionId: string, id: number): UndoResult {
     return { ok: true, status: 'deleted', message: `deleted ${rec.file} (created by edit #${id})` };
   }
 
-  // Edit deleted the file -> undo restores it, unless a later edit re-created it.
-  if (after === null) {
-    if (current !== null) return conflict();
-    writeEnsuringDir(rec.file, before);
+  // Edit deleted the file -> undo restores it (raw bytes), unless a later edit re-created it.
+  if (rec.afterBlob === null) {
+    if (currentBuf !== null) return conflict();
+    writeEnsuringDir(rec.file, beforeBuf as Buffer);
     setStatus(sessionId, id, 'undone');
     return { ok: true, status: 'undone', message: `restored ${rec.file}` };
   }
 
-  // Normal in-place edit; file missing now -> restore wholesale.
-  if (current === null) {
-    writeEnsuringDir(rec.file, before);
+  // Normal in-place edit; file missing now -> restore wholesale (raw bytes).
+  if (currentBuf === null) {
+    writeEnsuringDir(rec.file, beforeBuf as Buffer);
     setStatus(sessionId, id, 'undone');
     return {
       ok: true,
@@ -201,15 +216,20 @@ export function undoEdit(sessionId: string, id: number): UndoResult {
     };
   }
 
-  // No later edits touched this file -> clean, exact revert.
-  if (current === after) {
-    fs.writeFileSync(rec.file, before);
+  // No later edits touched this file -> clean, exact byte-for-byte revert.
+  if (currentSha === rec.afterBlob) {
+    fs.writeFileSync(rec.file, beforeBuf as Buffer);
     setStatus(sessionId, id, 'undone');
     return { ok: true, status: 'undone', message: `undid edit #${id} (${rec.file})` };
   }
 
   // Later edits exist -> position-anchored 3-way merge (base = after_N, ours = current, theirs = before).
-  const merged = threeWayMerge(after, current, before);
+  // Text-domain by necessity; the clean paths above already preserved bytes exactly.
+  const merged = threeWayMerge(
+    (blobText(sessionId, rec.afterBlob) as string),
+    currentBuf.toString('utf8'),
+    (beforeBuf as Buffer).toString('utf8')
+  );
   if (merged === null) return conflict(); // edit #id and a later edit genuinely overlap
   fs.writeFileSync(rec.file, merged);
   setStatus(sessionId, id, 'undone');
@@ -228,8 +248,8 @@ export function restoreFile(sessionId: string, id: number): UndoResult {
   const rec = findRecord(sessionId, id);
   if (!rec) return { ok: false, status: 'error', message: `no edit #${id} in this session` };
 
-  const before = blobText(sessionId, rec.beforeBlob);
-  if (before === null) {
+  const beforeBuf = blobBuf(sessionId, rec.beforeBlob);
+  if (beforeBuf === null) {
     try {
       if (fs.existsSync(rec.file)) fs.unlinkSync(rec.file);
     } catch (e) {
@@ -238,7 +258,7 @@ export function restoreFile(sessionId: string, id: number): UndoResult {
     setStatus(sessionId, id, 'undone');
     return { ok: true, status: 'deleted', message: `deleted ${rec.file} (created by edit #${id})` };
   }
-  writeEnsuringDir(rec.file, before);
+  writeEnsuringDir(rec.file, beforeBuf);
   setStatus(sessionId, id, 'undone');
   return {
     ok: true,
@@ -259,14 +279,15 @@ export function redoEdit(sessionId: string, id: number): UndoResult {
     return { ok: true, status: 'noop', message: `edit #${id} is not undone — nothing to redo` };
   }
 
-  const before = blobText(sessionId, rec.beforeBlob);
-  const after = blobText(sessionId, rec.afterBlob);
-  let current: string | null;
+  const afterBuf = blobBuf(sessionId, rec.afterBlob);
+  const beforeBuf = blobBuf(sessionId, rec.beforeBlob);
+  let currentBuf: Buffer | null;
   try {
-    current = fs.readFileSync(rec.file, 'utf8');
+    currentBuf = fs.readFileSync(rec.file);
   } catch {
-    current = null;
+    currentBuf = null;
   }
+  const currentSha = currentBuf ? sha256(currentBuf) : null;
 
   const conflict = (): UndoResult => ({
     ok: false,
@@ -276,19 +297,19 @@ export function redoEdit(sessionId: string, id: number): UndoResult {
       `Run \`claude-observatory redo ${id} --force\` to force it (drops later edits to this file).`,
   });
 
-  // Redo a creation -> re-create the file with `after`.
-  if (before === null) {
-    if (current !== null && after !== null && current !== after) return conflict();
-    writeEnsuringDir(rec.file, after ?? '');
+  // Redo a creation -> re-create the file with `after` (raw bytes).
+  if (rec.beforeBlob === null) {
+    if (currentSha !== null && rec.afterBlob !== null && currentSha !== rec.afterBlob) return conflict();
+    writeEnsuringDir(rec.file, afterBuf ?? Buffer.alloc(0));
     setStatus(sessionId, id, 'pending');
     return { ok: true, status: 'redone', message: `re-applied edit #${id} — created ${rec.file}` };
   }
 
   // Redo a deletion -> delete the file again (only if it still matches its pre-deletion content).
-  if (after === null) {
-    if (current !== null && current !== before) return conflict();
+  if (rec.afterBlob === null) {
+    if (currentSha !== null && currentSha !== rec.beforeBlob) return conflict();
     try {
-      if (current !== null) fs.unlinkSync(rec.file);
+      if (currentBuf !== null) fs.unlinkSync(rec.file);
     } catch (e) {
       return { ok: false, status: 'error', message: `could not delete ${rec.file}: ${String(e)}` };
     }
@@ -296,20 +317,24 @@ export function redoEdit(sessionId: string, id: number): UndoResult {
     return { ok: true, status: 'deleted', message: `re-applied edit #${id} — deleted ${rec.file}` };
   }
 
-  // Normal edit: file missing now -> write after wholesale.
-  if (current === null) {
-    writeEnsuringDir(rec.file, after);
+  // Normal edit: file missing now -> write after wholesale (raw bytes).
+  if (currentBuf === null) {
+    writeEnsuringDir(rec.file, afterBuf as Buffer);
     setStatus(sessionId, id, 'pending');
     return { ok: true, status: 'redone', message: `re-applied edit #${id} (${rec.file})` };
   }
-  // No later edits -> clean forward apply.
-  if (current === before) {
-    fs.writeFileSync(rec.file, after);
+  // No later edits -> clean forward apply (raw bytes).
+  if (currentSha === rec.beforeBlob) {
+    fs.writeFileSync(rec.file, afterBuf as Buffer);
     setStatus(sessionId, id, 'pending');
     return { ok: true, status: 'redone', message: `re-applied edit #${id} (${rec.file})` };
   }
-  // Later edits exist -> 3-way merge with before_N as the common base.
-  const merged = threeWayMerge(before, current, after);
+  // Later edits exist -> 3-way merge with before_N as the common base (text-domain by necessity).
+  const merged = threeWayMerge(
+    (beforeBuf as Buffer).toString('utf8'),
+    currentBuf.toString('utf8'),
+    (afterBuf as Buffer).toString('utf8')
+  );
   if (merged === null) return conflict();
   fs.writeFileSync(rec.file, merged);
   setStatus(sessionId, id, 'pending');
@@ -320,12 +345,57 @@ export function redoEdit(sessionId: string, id: number): UndoResult {
   };
 }
 
+// --- group-aware review actions: keep/undo/redo operate on the whole same-code review unit (the
+// collapsed group), so a superseded intermediate edit is never kept/reverted on its own ---
+
+export interface GroupResult extends UndoResult {
+  ids: number[]; // the member edit ids acted on
+}
+
+/** Keep every edit in the review group containing `id`. */
+export function keepGroup(sessionId: string, id: number): { kept: number; ids: number[] } {
+  const ids = groupMembers(sessionId, id);
+  for (const m of ids) setStatus(sessionId, m, 'kept');
+  return { kept: ids.length, ids };
+}
+
+/**
+ * Undo every edit in the review group containing `id`, NEWEST-first — a clean sequential revert back
+ * to the group's earliest before-state (the members are a chained overlap, so each step reverts
+ * cleanly). Stops and returns the conflict if a member genuinely conflicts with an out-of-group edit.
+ */
+export function undoGroup(sessionId: string, id: number): GroupResult {
+  const ids = [...groupMembers(sessionId, id)].sort((a, b) => b - a); // newest → oldest
+  // Singleton (the common case) keeps the exact single-edit semantics: noop / error / conflict / undone.
+  if (ids.length === 1) return { ...undoEdit(sessionId, ids[0]), ids };
+  let undone = 0;
+  for (const m of ids) {
+    const res = undoEdit(sessionId, m);
+    if (!res.ok && res.status !== 'noop') return { ...res, ids }; // conflict or error → stop + report
+    if (res.status !== 'noop') undone++;
+  }
+  return { ok: true, status: 'undone', message: `reverted this change — ${undone} edit(s)`, ids };
+}
+
+/** Re-apply every undone edit in a group, OLDEST-first (rebuilds the chain). Mirror of undoGroup. */
+export function redoGroup(sessionId: string, id: number): GroupResult {
+  const ids = [...groupMembers(sessionId, id)].sort((a, b) => a - b); // oldest → newest
+  if (ids.length === 1) return { ...redoEdit(sessionId, ids[0]), ids };
+  let redone = 0;
+  for (const m of ids) {
+    const res = redoEdit(sessionId, m);
+    if (!res.ok && res.status !== 'noop') return { ...res, ids };
+    if (res.status !== 'noop') redone++;
+  }
+  return { ok: true, status: 'redone', message: `re-applied this change — ${redone} edit(s)`, ids };
+}
+
 /** Force a redo: write the edit's `after` content wholesale (dropping later edits to the file). */
 export function reapplyFile(sessionId: string, id: number): UndoResult {
   const rec = findRecord(sessionId, id);
   if (!rec) return { ok: false, status: 'error', message: `no edit #${id} in this session` };
-  const after = blobText(sessionId, rec.afterBlob);
-  if (after === null) {
+  const afterBuf = blobBuf(sessionId, rec.afterBlob);
+  if (afterBuf === null) {
     try {
       if (fs.existsSync(rec.file)) fs.unlinkSync(rec.file);
     } catch (e) {
@@ -334,7 +404,7 @@ export function reapplyFile(sessionId: string, id: number): UndoResult {
     setStatus(sessionId, id, 'pending');
     return { ok: true, status: 'deleted', message: `re-applied edit #${id} — deleted ${rec.file}` };
   }
-  writeEnsuringDir(rec.file, after);
+  writeEnsuringDir(rec.file, afterBuf);
   setStatus(sessionId, id, 'pending');
   return {
     ok: true,

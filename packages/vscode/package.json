@@ -2,7 +2,7 @@
   "name": "claude-observatory-vscode",
   "displayName": "Claude Observatory",
   "description": "A running list of every file change Claude Code makes, each with its own Keep / Undo (surgical, git-free).",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "publisher": "claude-observatory",
   "private": true,
   "engines": {
@@ -284,6 +284,12 @@
         "icon": "$(clear-all)"
       },
       {
+        "command": "claudeObservatory.cleanStore",
+        "title": "Clean store (reclaim disk / drop session)",
+        "category": "Claude Observatory",
+        "icon": "$(database)"
+      },
+      {
         "command": "claudeObservatory.chatEdit",
         "title": "Chat about this edit",
         "category": "Claude Observatory",
@@ -480,6 +486,11 @@
           "command": "claudeObservatory.switchSession",
           "when": "view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline || view == claudeObservatory.observations",
           "group": "navigation@9"
+        },
+        {
+          "command": "claudeObservatory.cleanStore",
+          "when": "view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline || view == claudeObservatory.observations",
+          "group": "navigation@10"
         },
         {
           "command": "claudeObservatory.refresh",
@@ -685,7 +696,7 @@
     "package": "vsce package --no-dependencies -o claude-observatory.vsix"
   },
   "devDependencies": {
-    "@claude-observatory/core": "0.4.1",
+    "@claude-observatory/core": "0.5.0",
     "@types/node": "^22.0.0",
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^3.0.0",

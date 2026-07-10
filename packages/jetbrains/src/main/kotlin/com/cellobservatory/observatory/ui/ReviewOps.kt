@@ -31,17 +31,23 @@ object ReviewOps {
             .notify(project)
     }
 
+    /** Shared failure message when a keep/clean CLI call returns non-ok (usually a missing binary). */
+    private fun cliFailMsg(action: String) =
+        "Could not $action — the claude-observatory CLI failed or isn't installed. " +
+            "Install it and set its path in Settings → Tools → Claude Observatory."
+
     fun keep(project: Project, session: String, id: Int) {
         runBg(project, "Keeping edit #$id") {
-            ObservatoryCli.keep(session, id, project.basePath)
-            done(project, "Kept edit #$id")
+            if (ObservatoryCli.keep(session, id, project.basePath)) done(project, "Kept edit #$id")
+            else done(project, cliFailMsg("keep edit #$id"), NotificationType.ERROR)
         }
     }
 
     fun keepAll(project: Project, session: String) {
         runBg(project, "Keeping all pending edits") {
             val n = ObservatoryCli.keepAll(session, project.basePath)
-            done(project, "Kept $n edit(s)")
+            if (n != null) done(project, "Kept $n edit(s)")
+            else done(project, cliFailMsg("keep all edits"), NotificationType.ERROR)
         }
     }
 
@@ -53,8 +59,16 @@ object ReviewOps {
             return
         }
         runBg(project, "Accepting ${pending.size} edit(s) in $scope") {
-            for (r in pending) ObservatoryCli.keep(session, r.id, project.basePath)
-            done(project, "Accepted ${pending.size} edit(s) in $scope")
+            val okCount = pending.count { ObservatoryCli.keep(session, it.id, project.basePath) }
+            if (okCount == pending.size) {
+                done(project, "Accepted ${pending.size} edit(s) in $scope")
+            } else {
+                done(
+                    project,
+                    "Accepted $okCount of ${pending.size} edit(s) in $scope — ${pending.size - okCount} failed (is the CLI installed?)",
+                    if (okCount > 0) NotificationType.WARNING else NotificationType.ERROR,
+                )
+            }
         }
     }
 
@@ -134,8 +148,8 @@ object ReviewOps {
         )
         if (ok != Messages.YES) return
         runBg(project, "Clearing resolved edits") {
-            ObservatoryCli.clearResolved(session, project.basePath)
-            done(project, "Cleared $resolvedCount resolved edit(s)")
+            if (ObservatoryCli.clearResolved(session, project.basePath)) done(project, "Cleared $resolvedCount resolved edit(s)")
+            else done(project, cliFailMsg("clear resolved edits"), NotificationType.ERROR)
         }
     }
 

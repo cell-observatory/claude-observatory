@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/cell-observatory/claude-observatory/actions/workflows/ci.yml/badge.svg)](https://github.com/cell-observatory/claude-observatory/actions/workflows/ci.yml)
 &nbsp;·&nbsp; **[🔬 Live showcase →](https://cell-observatory.github.io/claude-observatory/)**
+&nbsp;·&nbsp; [Changelog](CHANGELOG.md)
 
 **Per-edit Keep / Undo for [Claude Code](https://claude.com/claude-code).** Every file change Claude makes
 becomes a reviewable entry with its own surgical undo — in your **terminal**, **VS Code**, and **JetBrains
@@ -139,13 +140,17 @@ claude-observatory status          # hooks + hook-path health + active session +
 claude-observatory sessions        # list all sessions in the store (● = current dir)
 claude-observatory list            # edits in the active session (grouped by file, ±lines, status)
 claude-observatory list --pending  # filters: --pending | --kept | --undone, and --file <substr>
+claude-observatory timeline        # edits newest-first as a chronological feed (time · id · Δ · file)
 claude-observatory diff <id>       # colored before/after for one edit
 claude-observatory keep <id>       # mark reviewed; no disk change
 claude-observatory undo <id>       # surgically undo one edit
 claude-observatory undo <id> --force   # per-file restore fallback (used on overlap conflicts)
 claude-observatory redo <id>       # re-apply an undone edit (--force to override later edits)
+claude-observatory insights        # Observations: recap + per-edit reasoning/flags/memory + next steps
+claude-observatory summary         # per-session review recap (kept/reverted per file); --markdown to export
 claude-observatory clean           # GC orphaned blobs; --resolved | --drop <id> | --older-than 30d | --all
-claude-observatory uninstall       # remove the capture hooks
+claude-observatory update          # self-update the CLI to the latest release (--check to only report)
+claude-observatory uninstall       # remove the capture hooks (--all also reverts the bundled status line)
 claude-observatory --version
 ```
 
@@ -216,7 +221,7 @@ template, and relocating `CLAUDE_CONFIG_DIR` — is in **[docs/REMOTE.md](docs/R
 
 | Piece | What it does |
 | --- | --- |
-| **Capture hook** (`capture`) | PreToolUse snapshots the file before an edit, PostToolUse commits before + after. Zero-dep, always `exit 0`, never writes to the model context. Captures `Edit` / `Write` / `MultiEdit` / `NotebookEdit`. |
+| **Capture hook** (`capture`) | PreToolUse snapshots the file before an edit, PostToolUse commits before + after. Zero-dep, always `exit 0`, never writes to the model context. Captures `Edit` / `Write` / `MultiEdit` / `NotebookEdit` — and files changed by `Bash` (set `CLAUDE_OBSERVATORY_NO_BASH=1` to opt out). |
 | **Store** | `~/.claude/claude-observatory/<session_id>/` — `log.jsonl` (append-only) + content-addressed `blobs/`. No network. |
 | **Undo engine** | Position-anchored 3-way line merge (base = the file right after the edit; sides = current on-disk content and the pre-edit content). Later edits to other lines survive; a genuine overlap → clear conflict + per-file restore. Anchoring on line positions (not fuzzy text search) keeps it safe against duplicated content. |
 | **Observations** | Correlates each edit with Claude's real reasoning + to-dos parsed from the session transcript — zero token. |

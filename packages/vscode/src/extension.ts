@@ -453,7 +453,7 @@ class EditPeek implements vscode.Disposable {
   keep(): void {
     const s = currentSession();
     if (this.edit && s) {
-      core.setStatus(s, this.edit.id, 'kept');
+      core.keepGroup(s, this.edit.id); // keep the whole same-code review unit
       this.closeThread();
     }
   }
@@ -639,7 +639,7 @@ async function blockedByDirtyBuffer(file: string): Promise<boolean> {
 async function undoOne(session: string, id: number): Promise<void> {
   const rec = core.findRecord(session, id);
   if (rec && (await blockedByDirtyBuffer(rec.file))) return;
-  const res = core.undoEdit(session, id);
+  const res = core.undoGroup(session, id); // reverts the whole same-code review unit (collapsed group)
   if (res.status === 'conflict') {
     const pick = await vscode.window.showWarningMessage(res.message, { modal: true }, 'Force-restore file');
     if (pick === 'Force-restore file') {
@@ -654,7 +654,7 @@ async function undoOne(session: string, id: number): Promise<void> {
 async function redoOne(session: string, id: number): Promise<void> {
   const rec = core.findRecord(session, id);
   if (rec && (await blockedByDirtyBuffer(rec.file))) return;
-  const res = core.redoEdit(session, id);
+  const res = core.redoGroup(session, id); // re-applies the whole review unit (collapsed group)
   if (res.status === 'conflict') {
     const pick = await vscode.window.showWarningMessage(res.message, { modal: true }, 'Force re-apply');
     if (pick === 'Force re-apply') {
@@ -690,10 +690,16 @@ async function chatAboutEdit(session: string, id: number): Promise<void> {
   );
 }
 
-/** Keep every pending edit in one file (shared by keepFile and keepOpenFile). */
-function keepEditsInFile(session: string, file: string, edits: core.EditRecord[]): void {
+/** Keep every pending edit in one file (shared by keepFile and keepOpenFile). Reads the RAW log so it
+ *  covers every member of a collapsed review group, not just the reps the tree renders. */
+function keepEditsInFile(session: string, file: string, _edits: core.EditRecord[]): void {
   let kept = 0;
-  for (const e of edits) if (e.status === 'pending') { core.setStatus(session, e.id, 'kept'); kept++; }
+  for (const e of core.readLog(session)) {
+    if (e.file === file && e.status === 'pending') {
+      core.setStatus(session, e.id, 'kept');
+      kept++;
+    }
+  }
   vscode.window.showInformationMessage(
     kept ? `Kept ${kept} edit(s) in ${path.basename(file)}.` : 'No pending edits to keep in this file.'
   );
@@ -701,8 +707,9 @@ function keepEditsInFile(session: string, file: string, edits: core.EditRecord[]
 
 /** Surgically undo every non-undone edit in one file, newest-first, after a confirm + dirty-buffer
  *  guard (shared by undoFile and undoOpenFile). */
-async function undoEditsInFile(session: string, file: string, edits: core.EditRecord[]): Promise<void> {
-  const targets = [...edits].filter((e) => e.status !== 'undone').sort((a, b) => b.id - a.id);
+async function undoEditsInFile(session: string, file: string, _edits: core.EditRecord[]): Promise<void> {
+  // Raw log (not the collapsed reps) so we undo every member of a review group in the file, newest-first.
+  const targets = core.readLog(session).filter((e) => e.file === file && e.status !== 'undone').sort((a, b) => b.id - a.id);
   const base = path.basename(file);
   if (targets.length === 0) {
     vscode.window.showInformationMessage(`Nothing to undo in ${base}.`);
@@ -982,23 +989,32 @@ class InlineLensProvider implements vscode.CodeLensProvider {
     if (!inlineEnabled()) return [];
     const session = currentSession();
     if (!session || doc.lineCount > MAX_INLINE_LINES) return [];
-    const lenses: vscode.CodeLens[] = [];
+    // Only the LATEST edit per anchor line gets an inline lens: several edits often land on one line
+    // (a hunk edited twice), and stacking a menu per edit is noisy + ambiguous. Undoing the latest
+    // surgically reveals the previous state (its lens then takes over); the full per-edit sequence for
+    // a line lives in the Timeline. Keeps the inline surface to one clear action-row per line.
+    const byLine = new Map<number, { rec: core.EditRecord; added: number; removed: number }>();
     for (const p of cachedPlacements(session, doc)) {
       const anchors = anchorLines(p);
-      if (anchors.length === 0) continue; // later fully rewritten — no anchor line
+      if (anchors.length === 0) continue; // later fully rewritten - no anchor line
       const line = Math.min(anchors[0], Math.max(0, doc.lineCount - 1));
+      const cur = byLine.get(line);
+      if (!cur || p.rec.id > cur.rec.id) {
+        const d = cachedDelta(session, p.rec);
+        byLine.set(line, { rec: p.rec, added: d.added, removed: d.removed });
+      }
+    }
+    const lenses: vscode.CodeLens[] = [];
+    for (const [line, g] of byLine) {
       const range = new vscode.Range(line, 0, line, 0);
-      const id = p.rec.id;
-      // The inline menu above each edit: id + line delta, then Keep / Undo / Chat / View diff. "view
-      // changes" opens the inline review bubble at the edit (reasoning rides in the bubble, so it's not
-      // repeated here); "View diff" opens the same edit as a full diff tab. CodeLens font can't be
-      // enlarged by an extension; per-edit keep/undo is also on ⌥⌘Y / ⌥⌘U and the Edits tree.
-      const d = cachedDelta(session, p.rec);
-      lenses.push(new vscode.CodeLens(range, { title: `✨ #${id}  +${d.added} \u2212${d.removed}  view changes`, command: 'claudeObservatory.viewChanges', arguments: [id] }));
+      const id = g.rec.id;
+      // "view changes" opens the review bubble (reasoning rides there); per-edit keep/undo is also on
+      // ⌥⌘Y / ⌥⌘U and the Edits tree.
+      lenses.push(new vscode.CodeLens(range, { title: `✨ #${id}  +${g.added} −${g.removed}  view changes`, command: 'claudeObservatory.viewChanges', arguments: [id] }));
       lenses.push(new vscode.CodeLens(range, { title: `✓ Keep`, command: 'claudeObservatory.inlineKeep', arguments: [id] }));
       lenses.push(new vscode.CodeLens(range, { title: `↩ Undo`, command: 'claudeObservatory.inlineUndo', arguments: [id] }));
       lenses.push(new vscode.CodeLens(range, { title: `💬 Chat`, command: 'claudeObservatory.chatEdit', arguments: [id] }));
-      lenses.push(new vscode.CodeLens(range, { title: `⧉ View diff`, command: 'claudeObservatory.openDiff', arguments: [{ kind: 'edit', rec: p.rec }] }));
+      lenses.push(new vscode.CodeLens(range, { title: `⧉ View diff`, command: 'claudeObservatory.openDiff', arguments: [{ kind: 'edit', rec: g.rec }] }));
     }
     return lenses;
   }
@@ -1015,7 +1031,11 @@ const MD_SCHEME = 'claude-observation'; // virtual markdown docs
 
 // One "Insights" view (was two): a "Next steps" group (heuristic suggestions + opt-in Claude) and an
 // "Observations" group (one row per edit — reasoning surfaced inline, click opens the combined report).
-type ObsNode = { kind: 'recap' } | { kind: 'obs'; rec: core.EditRecord };
+type ObsNode =
+  | { kind: 'recap' }
+  | { kind: 'obs'; rec: core.EditRecord }
+  | { kind: 'steps' }
+  | { kind: 'suggestion'; text: string };
 
 function firstLine(s: string): string {
   const l = s.split('\n').find((x) => x.trim()) ?? '';
@@ -1042,10 +1062,19 @@ class ObservationsProvider implements vscode.TreeDataProvider<ObsNode> {
     const session = currentSession();
     if (!session || node) return [];
     this.memo.clear(); // one memory computation per file per render cycle
-    // A one-line "what were you doing" recap on top, then one observation row per edit (newest first).
+    // A one-line "what were you doing" recap on top, then one observation row per edit (newest first),
+    // then a "Next steps" group (Claude's open to-dos + heuristics) — parity with the CLI `insights`
+    // view and the JetBrains Observations panel.
+    const cwd = workspaceRoot();
+    const suggestions = [
+      ...new Set([...(cwd ? core.transcriptSuggestions(cwd, session) : []), ...core.heuristicSuggestions(session)]),
+    ];
     return [
       { kind: 'recap' },
       ...cachedLog(session).slice().sort((a, b) => b.ts - a.ts).map((rec) => ({ kind: 'obs' as const, rec })),
+      ...(suggestions.length
+        ? [{ kind: 'steps' as const }, ...suggestions.map((text) => ({ kind: 'suggestion' as const, text }))]
+        : []),
     ];
   }
   /** Zero-token: Claude Code's own session title, or a Claude-refined recap once generated. */
@@ -1071,6 +1100,21 @@ class ObservationsProvider implements vscode.TreeDataProvider<ObsNode> {
       item.tooltip = tip;
       item.contextValue = 'recap';
       return item; // refresh is the ✨ button (inline + view title), not a click
+    }
+    if (node.kind === 'steps') {
+      const item = new vscode.TreeItem('Next steps', vscode.TreeItemCollapsibleState.None);
+      item.iconPath = new vscode.ThemeIcon('lightbulb');
+      item.description = "Claude's to-dos + heuristics";
+      item.contextValue = 'steps';
+      item.command = { command: 'claudeObservatory.showSuggestions', title: 'Suggestions' };
+      return item;
+    }
+    if (node.kind === 'suggestion') {
+      const item = new vscode.TreeItem(node.text, vscode.TreeItemCollapsibleState.None);
+      item.iconPath = new vscode.ThemeIcon('arrow-small-right');
+      item.tooltip = node.text;
+      item.command = { command: 'claudeObservatory.showSuggestions', title: 'Suggestions' };
+      return item;
     }
     // One row per edit; click opens the single combined report (summary + reasoning + flags + analysis).
     const rec = node.rec;
@@ -1798,7 +1842,7 @@ export function activate(context: vscode.ExtensionContext): void {
           vscode.window.setStatusBarMessage('Claude Observatory: no pending edit under the cursor', 3000);
           return;
         }
-        core.setStatus(s, rec.id, 'kept');
+        core.keepGroup(s, rec.id);
         vscode.window.setStatusBarMessage(`Claude Observatory: kept edit #${rec.id}`, 3000);
       })()
     ),
@@ -1845,6 +1889,33 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.window.showInformationMessage(`Cleared ${n} resolved edit(s).`);
       })()
     ),
+    // Store maintenance (parity with the CLI `clean`): reclaim disk (GC orphaned blobs) or drop the
+    // whole session. Previously editor-only users had to drop to a terminal for these.
+    vscode.commands.registerCommand('claudeObservatory.cleanStore', () =>
+      withSession(async (s) => {
+        const pick = await vscode.window.showQuickPick(
+          [
+            { label: '$(trash) Reclaim disk', description: 'garbage-collect orphaned blobs in this session', act: 'gc' as const },
+            { label: '$(close) Drop this session…', description: "delete this session's captured edits + blobs (files on disk are NOT changed)", act: 'drop' as const },
+          ],
+          { placeHolder: 'Clean the Claude Observatory store' }
+        );
+        if (!pick) return;
+        if (pick.act === 'gc') {
+          const r = core.gcSession(s);
+          vscode.window.showInformationMessage(`Reclaimed ${r.removed} orphaned blob(s) (${(r.bytes / 1024).toFixed(1)} KB).`);
+        } else {
+          const ok = await vscode.window.showWarningMessage(
+            `Drop session ${s}? This deletes its captured edits + blobs. Files on disk are NOT changed.`,
+            { modal: true },
+            'Drop session'
+          );
+          if (ok !== 'Drop session') return;
+          core.removeSession(s);
+          vscode.window.showInformationMessage(`Dropped session ${s}.`);
+        }
+      })()
+    ),
     // Chat about a specific edit (from a tree node or an edit id).
     vscode.commands.registerCommand('claudeObservatory.chatEdit', (arg: EditNode | number) => {
       const s = currentSession();
@@ -1853,6 +1924,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     // Insights (observations + suggestions)
     vscode.commands.registerCommand('claudeObservatory.showObservation', (id: number) => showObservationDoc(id)),
+    vscode.commands.registerCommand('claudeObservatory.showSuggestions', () => showSuggestionsDoc()),
     vscode.commands.registerCommand('claudeObservatory.analyzeEdit', (arg: ObsNode | number) => {
       const s = currentSession();
       if (!s) return undefined;
@@ -1895,7 +1967,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand('claudeObservatory.keep', (n: EditNode) =>
       withSession((s) => {
-        core.setStatus(s, n.rec.id, 'kept');
+        core.keepGroup(s, n.rec.id);
       })()
     ),
     vscode.commands.registerCommand('claudeObservatory.undo', (n: EditNode) =>
@@ -1924,7 +1996,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('claudeObservatory.diffNextEdit', (uri?: vscode.Uri) => stepDiffEdit(uri, 1)),
     vscode.commands.registerCommand('claudeObservatory.inlineKeep', (id: number) =>
       withSession((s) => {
-        core.setStatus(s, id, 'kept');
+        core.keepGroup(s, id);
       })()
     ),
     vscode.commands.registerCommand('claudeObservatory.inlineUndo', (id: number) =>
