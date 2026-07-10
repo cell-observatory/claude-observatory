@@ -146,19 +146,31 @@ class InlineOverlay(private val project: Project) : Disposable {
         val hs = highlighters.getOrPut(editor) { mutableListOf() }
         val ins = inlays.getOrPut(editor) { mutableListOf() }
         val regions = mutableListOf<Pair<IntRange, EditRecord>>()
+        // Only the LATEST edit per anchor line gets a gutter star + inline lens: several edits often
+        // land on one line, and one menu per edit is noisy/ambiguous. Older same-line edits stay in the
+        // Timeline; undoing the latest surgically reveals the previous state (its lens then takes over).
+        val latestByAnchor = HashMap<Int, Int>()
+        for (p in placements) {
+            val ls = p.lines.filter { it < editor.document.lineCount }
+            if (ls.isEmpty()) continue
+            val anchor = ls.min()
+            latestByAnchor[anchor] = maxOf(latestByAnchor[anchor] ?: Int.MIN_VALUE, p.id)
+        }
         for (p in placements) {
             val rec = pending.find { it.id == p.id } ?: continue
             val lines = p.lines.filter { it < editor.document.lineCount }
             if (lines.isEmpty()) continue
             // A SUBTLE green line fill (toned down, not the default diff green) + a coral error-stripe mark
-            // per changed line, so a file Claude edited heavily doesn't drown in color.
+            // per changed line, so a file Claude edited heavily doesn't drown in color. Shown for ALL edits.
             for (line in lines) {
                 val h = markup.addLineHighlighter(line, HighlighterLayer.CARET_ROW - 1, TextAttributes(null, ADDED_LINE_BG, null, null, Font.PLAIN))
                 h.setErrorStripeMarkColor(CLAUDE_MARK)
                 hs.add(h)
             }
-            // ✨ gutter icon at the START of the edit — click it (or the lens below) to open the inline diff.
             val first = lines.min()
+            regions.add(lines.min()..lines.max() to rec)
+            // Gutter star + lens only for the latest edit anchored at this line (others -> Timeline).
+            if (rec.id != latestByAnchor[first]) continue
             val gutter = markup.addLineHighlighter(first, HighlighterLayer.CARET_ROW - 1, null)
             gutter.gutterIconRenderer = EditGutterRenderer(project, session, rec)
             hs.add(gutter)
@@ -166,7 +178,6 @@ class InlineOverlay(private val project: Project) : Disposable {
                 editor.document.getLineStartOffset(first), false, true, 0,
                 LensRenderer(project, session, rec),
             )?.let { ins.add(it) }
-            regions.add(lines.min()..lines.max() to rec)
         }
         // Heatmap: dim every UNMODIFIED line (flat grey, no syntax colors) so Claude's edits stand out.
         // JetBrains can't alpha-blend text, so "dim" is a muted foreground (parity with VS Code's opacity).
