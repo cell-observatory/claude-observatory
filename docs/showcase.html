@@ -160,6 +160,8 @@
   .cmd .copy{margin-left:auto;flex:none;border:1px solid var(--line);background:var(--surface-2);color:var(--ink-soft);border-radius:7px;padding:5px 11px;font-family:var(--mono);font-size:.74rem;cursor:pointer;transition:.15s}
   .cmd .copy:hover{color:var(--ink);border-color:var(--ink-faint)}
   .install-cta{display:flex;gap:12px;flex-wrap:wrap;justify-content:center;margin-top:26px}
+  .stay-current{margin:34px auto 0;max-width:560px;font-size:.86rem;color:var(--ink-faint)}
+  .stay-current code{font-family:var(--mono);font-size:.82em;color:var(--ink-soft);background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:1px 6px}
   .or-claude{margin:40px auto 0;max-width:600px}
   .or-claude .or{font-family:var(--mono);font-size:.7rem;text-transform:uppercase;letter-spacing:.18em;color:var(--ink-faint);margin-bottom:14px}
   .promptbox{position:relative;background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:20px 20px 18px;text-align:left}
@@ -359,6 +361,7 @@
         <code class="prompt">Install Claude Observatory for me — run its bootstrap installer, then `claude-observatory doctor`. The capture hooks only take effect on a fresh session, so afterward have me quit, run `claude-observatory init` in a plain terminal, and relaunch.</code>
       </div>
     </div>
+    <p class="stay-current rv">Already installed? Stay up to date by re-running the one-liner above, or run <code>claude-observatory update</code> — add <code>--check</code> to just see what's new.</p>
   </div>
 </section>
 

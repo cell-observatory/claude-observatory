@@ -5,10 +5,21 @@ All notable changes to Claude Observatory are recorded here, following
 Per-tag release artifacts and auto-generated notes are on the
 [Releases page](https://github.com/cell-observatory/claude-observatory/releases).
 
-## [0.4.2] — 2026-07-10
+## [0.5.0] — 2026-07-10
 
-A correctness, security, and cross-editor-parity release from a full-project audit. No breaking
-changes — the `--json` contract is additive only, and the on-disk store format is unchanged.
+A big review-experience upgrade on top of a full-project correctness/security/parity audit. No
+breaking changes — the `--json` contract is additive only, and the on-disk store format is unchanged.
+
+### Added — collapse same-code edits into one review unit (headline)
+
+You can't sensibly keep or revert an edit whose result a later edit already overwrote. Successive edits
+to the **same code** now collapse into a single review unit, represented by the **most-recent** edit;
+edits to different regions of a file stay separate and independently reviewable. The logic lives in
+`core` (`pendingGroups`/`reviewEdits`/`keepGroup`/`undoGroup`/`redoGroup`), so the CLI, VS Code, and
+JetBrains all collapse identically: the Edits tree and `list` show one net rep per group, keep/undo/redo
+act on the whole unit (undo runs newest-first — a clean sequential revert to the group's earliest
+before-state), and the inline lens shows one action-row per line. The full per-edit sequence still lives
+in the Timeline.
 
 ### Fixed — data integrity & correctness (core engine)
 
@@ -71,4 +82,4 @@ changes — the `--json` contract is additive only, and the on-disk store format
   editors) and JetBrains port-fidelity tests (`TreeParser`/`ObserveParser` + a discriminating
   `listSessions` test).
 
-[0.4.2]: https://github.com/cell-observatory/claude-observatory/releases/tag/v0.4.2
+[0.5.0]: https://github.com/cell-observatory/claude-observatory/releases/tag/v0.5.0
