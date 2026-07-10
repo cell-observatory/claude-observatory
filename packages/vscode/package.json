@@ -284,6 +284,12 @@
         "icon": "$(clear-all)"
       },
       {
+        "command": "claudeObservatory.cleanStore",
+        "title": "Clean store (reclaim disk / drop session)",
+        "category": "Claude Observatory",
+        "icon": "$(database)"
+      },
+      {
         "command": "claudeObservatory.chatEdit",
         "title": "Chat about this edit",
         "category": "Claude Observatory",
@@ -480,6 +486,11 @@
           "command": "claudeObservatory.switchSession",
           "when": "view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline || view == claudeObservatory.observations",
           "group": "navigation@9"
+        },
+        {
+          "command": "claudeObservatory.cleanStore",
+          "when": "view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline || view == claudeObservatory.observations",
+          "group": "navigation@10"
         },
         {
           "command": "claudeObservatory.refresh",

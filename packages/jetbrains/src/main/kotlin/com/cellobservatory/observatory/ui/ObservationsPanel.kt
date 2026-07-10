@@ -187,9 +187,46 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
         })
     }
 
+    /** Store maintenance (parity with the CLI `clean`): GC orphaned blobs, or drop the whole session. */
+    private fun cleanStore() {
+        val session = ObservatoryService.getInstance(project).currentSession()
+            ?: return ReviewOps.notify(project, "No active Claude Code session for this project", NotificationType.WARNING)
+        val gcOpt = "Reclaim disk — garbage-collect orphaned blobs"
+        val dropOpt = "Drop this session — delete its edits + blobs (files on disk are unchanged)"
+        com.intellij.openapi.ui.popup.JBPopupFactory.getInstance()
+            .createPopupChooserBuilder(listOf(gcOpt, dropOpt))
+            .setTitle("Clean the store")
+            .setItemChosenCallback { chosen ->
+                val drop = chosen == dropOpt
+                if (drop) {
+                    val ok = com.intellij.openapi.ui.Messages.showYesNoDialog(
+                        project, "Drop session $session? This deletes its captured edits + blobs. Files on disk are NOT changed.",
+                        "Claude Observatory", "Drop Session", "Cancel", com.intellij.openapi.ui.Messages.getWarningIcon(),
+                    )
+                    if (ok != com.intellij.openapi.ui.Messages.YES) return@setItemChosenCallback
+                }
+                ProgressManager.getInstance().run(object : Task.Backgroundable(project, "Cleaning store…", false) {
+                    override fun run(indicator: ProgressIndicator) {
+                        val r = if (drop) ObservatoryCli.dropSession(session, project.basePath) else ObservatoryCli.gc(session, project.basePath)
+                        ApplicationManager.getApplication().invokeLater {
+                            if (r.ok) {
+                                ObservatoryService.getInstance(project).refresh()
+                                ReviewOps.notify(project, if (drop) "Dropped session $session." else "Reclaimed disk (GC complete).")
+                            } else {
+                                ReviewOps.notify(project, "Clean failed — ${r.stderr.take(160)}", NotificationType.ERROR)
+                            }
+                        }
+                    }
+                })
+            }
+            .createPopup()
+            .showInCenterOf(tree)
+    }
+
     private fun buildToolbar(): JComponent {
         val group = DefaultActionGroup(
             action("Install Capture Hooks", AllIcons.Actions.Install) { installHooks() },
+            action("Clean Store…", AllIcons.Vcs.Remove) { cleanStore() },
             action("Refresh Recap with Claude (spends tokens)", AllIcons.Actions.ForceRefresh) { refreshRecap() },
             action("Clear Resolved Edits", AllIcons.Actions.GC) {
                 val service = ObservatoryService.getInstance(project)

@@ -1882,6 +1882,33 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.window.showInformationMessage(`Cleared ${n} resolved edit(s).`);
       })()
     ),
+    // Store maintenance (parity with the CLI `clean`): reclaim disk (GC orphaned blobs) or drop the
+    // whole session. Previously editor-only users had to drop to a terminal for these.
+    vscode.commands.registerCommand('claudeObservatory.cleanStore', () =>
+      withSession(async (s) => {
+        const pick = await vscode.window.showQuickPick(
+          [
+            { label: '$(trash) Reclaim disk', description: 'garbage-collect orphaned blobs in this session', act: 'gc' as const },
+            { label: '$(close) Drop this session…', description: "delete this session's captured edits + blobs (files on disk are NOT changed)", act: 'drop' as const },
+          ],
+          { placeHolder: 'Clean the Claude Observatory store' }
+        );
+        if (!pick) return;
+        if (pick.act === 'gc') {
+          const r = core.gcSession(s);
+          vscode.window.showInformationMessage(`Reclaimed ${r.removed} orphaned blob(s) (${(r.bytes / 1024).toFixed(1)} KB).`);
+        } else {
+          const ok = await vscode.window.showWarningMessage(
+            `Drop session ${s}? This deletes its captured edits + blobs. Files on disk are NOT changed.`,
+            { modal: true },
+            'Drop session'
+          );
+          if (ok !== 'Drop session') return;
+          core.removeSession(s);
+          vscode.window.showInformationMessage(`Dropped session ${s}.`);
+        }
+      })()
+    ),
     // Chat about a specific edit (from a tree node or an edit id).
     vscode.commands.registerCommand('claudeObservatory.chatEdit', (arg: EditNode | number) => {
       const s = currentSession();

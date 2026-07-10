@@ -101,6 +101,12 @@ object ObservatoryCli {
     /** Install the PreToolUse/PostToolUse capture hooks (non-interactive `claude-observatory init`). */
     fun init(workDir: String?): CliResult = run(listOf("init"), workDir)
 
+    /** Garbage-collect orphaned blobs in a session (`clean --session <id>`). */
+    fun gc(session: String, workDir: String?): CliResult = run(listOf("clean", "--session", session), workDir)
+
+    /** Drop a whole session from the store (`clean --drop <id>`). */
+    fun dropSession(session: String, workDir: String?): CliResult = run(listOf("clean", "--drop", session), workDir)
+
     fun keep(session: String, id: Int, workDir: String?): Boolean =
         run(listOf("keep", id.toString(), "--session", session, "--json"), workDir).ok
 
