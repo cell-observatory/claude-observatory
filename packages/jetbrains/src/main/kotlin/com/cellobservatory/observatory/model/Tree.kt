@@ -14,7 +14,10 @@ data class TreeFileNode(val rel: String, val file: String, val classes: List<Tre
     /** Every edit under this file (class-grouped + loose), for the file-scoped Undo-All action. */
     val allEdits: List<EditRecord> get() = classes.flatMap { c -> c.edits.map { it.rec } } + loose.map { it.rec }
 }
-data class TreeFolderNode(val label: String, val folders: List<TreeFolderNode>, val files: List<TreeFileNode>)
+data class TreeFolderNode(val label: String, val path: String, val folders: List<TreeFolderNode>, val files: List<TreeFileNode>) {
+    /** Every edit at-or-beneath this folder — for the folder-scoped Accept / Revert / Clear actions. */
+    val allEdits: List<EditRecord> get() = files.flatMap { it.allEdits } + folders.flatMap { it.allEdits }
+}
 data class EditTree(val folders: List<TreeFolderNode>, val files: List<TreeFileNode>)
 
 object TreeParser {
@@ -30,6 +33,7 @@ object TreeParser {
 
     private fun folder(o: JsonObject): TreeFolderNode = TreeFolderNode(
         o.get("label").asString,
+        o.get("path")?.takeIf { !it.isJsonNull }?.asString ?: "", // tolerate an older CLI that predates the field
         o.getAsJsonArray("folders").map { folder(it.asJsonObject) },
         o.getAsJsonArray("files").map { file(it.asJsonObject) },
     )

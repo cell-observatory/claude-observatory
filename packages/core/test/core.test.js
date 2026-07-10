@@ -456,6 +456,75 @@ test('clean: gcSession keeps blobs referenced by the __bash__ manifest', () => {
   assert.ok(fs.existsSync(path.join(core.storeDir(S), 'blobs', blob)), 'manifest before-blob survives GC');
 });
 
+// --- scoped folder/file operations (--under): the one path rule shared by keep/undo/clean ---------
+test('scope: isUnderPath matches an exact file + folder prefix, never a shared-prefix sibling', () => {
+  const root = path.join(path.sep, 'root');
+  const api = path.join(root, 'src', 'api');
+  assert.ok(core.isUnderPath(api, api), 'exact path is under itself (file scope)');
+  assert.ok(core.isUnderPath(path.join(api, 'x.ts'), api), 'a file beneath the folder matches');
+  assert.ok(core.isUnderPath(path.join(api, 'deep', 'y.ts'), api), 'a nested file matches');
+  assert.ok(!core.isUnderPath(path.join(root, 'src', 'api-v2', 'z.ts'), api), 'sibling sharing a name prefix must NOT match');
+  assert.ok(!core.isUnderPath(path.join(root, 'src', 'other.ts'), api), 'unrelated file must NOT match');
+});
+
+test('scope: clearResolved(session, folder) drops resolved edits under the folder only', () => {
+  freshHome();
+  const S = 'scopeclear';
+  core.ensureStore(S);
+  const W = tmpWork();
+  const src = path.join(W, 'src');
+  const a = path.join(src, 'a.ts'); // resolved, under src → cleared
+  const b = path.join(src, 'util', 'b.ts'); // resolved (nested), under src → cleared
+  const c = path.join(W, 'lib', 'c.ts'); // resolved, OUTSIDE src → preserved
+  const ia = seedEdit(S, a, 'a1\n', 'a2\n');
+  const ib = seedEdit(S, b, 'b1\n', 'b2\n');
+  const ic = seedEdit(S, c, 'c1\n', 'c2\n');
+  const ip = seedEdit(S, a, 'a2\n', 'a3\n'); // pending, under src → preserved (never cleared)
+  core.setStatus(S, ia, 'kept');
+  core.setStatus(S, ib, 'undone');
+  core.setStatus(S, ic, 'kept');
+  const removed = core.clearResolved(S, src);
+  assert.equal(removed, 2, 'only the two resolved edits under src are cleared');
+  const survivors = core.readLog(S).map((r) => r.id).sort((x, y) => x - y);
+  assert.deepEqual(survivors, [ic, ip].sort((x, y) => x - y), 'pending-under-scope + resolved-outside-scope survive');
+});
+
+test('scope: clearResolved(session, exactFile) clears only that file, leaving a sibling in the same dir', () => {
+  freshHome();
+  const S = 'scopeclearfile';
+  core.ensureStore(S);
+  const dir = path.join(tmpWork(), 'src');
+  const a = path.join(dir, 'a.ts');
+  const b = path.join(dir, 'b.ts'); // same folder, different file
+  const ia = seedEdit(S, a, 'a1\n', 'a2\n');
+  const ib = seedEdit(S, b, 'b1\n', 'b2\n');
+  core.setStatus(S, ia, 'kept');
+  core.setStatus(S, ib, 'kept');
+  const removed = core.clearResolved(S, a); // file scope = exact match
+  assert.equal(removed, 1);
+  assert.deepEqual(core.readLog(S).map((r) => r.id), [ib], 'the sibling file is untouched');
+});
+
+test('scope: buildEditTree gives each folder an absolute path that matches its files via isUnderPath', () => {
+  freshHome();
+  const S = 'scopetree';
+  core.ensureStore(S);
+  const W = tmpWork();
+  const a = path.join(W, 'src', 'a.ts'); // keeps `src` from compacting into `src/utils`
+  const b = path.join(W, 'src', 'utils', 'b.ts');
+  for (const [f, txt] of [[a, 'a2\n'], [b, 'b2\n']]) {
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(f, txt);
+  }
+  seedEdit(S, a, 'a1\n', 'a2\n');
+  seedEdit(S, b, 'b1\n', 'b2\n');
+  const tree = core.buildEditTree(S, { root: W });
+  const src = tree.folders.find((f) => f.label === 'src');
+  assert.ok(src, 'expected a top-level "src" folder');
+  assert.equal(src.path, path.join(W, 'src'), 'folder.path is the absolute directory');
+  assert.ok(core.isUnderPath(a, src.path) && core.isUnderPath(b, src.path), 'both files fall under the folder path');
+});
+
 test('store: a stale lock is broken so appendLog can never permanently block', () => {
   freshHome();
   const S = 'lock';
@@ -1086,6 +1155,7 @@ test('contract: each --json command emits the documented key set (rename-guard f
   const F = path.join(tmpWork(), 'app.js');
   seedEdit(S, F, 'a\n', 'a\nb\n'); // #1
   seedEdit(S, F, 'a\nb\n', 'a\nB\n'); // #2
+  seedEdit(S, path.join(path.dirname(F), 'sub', 'nested.js'), 'x\n', 'x\ny\n'); // #3 — forces a folder node
   const env = { ...process.env, HOME: home, USERPROFILE: home, CLAUDE_OBSERVATORY_SESSION: S };
   const runJson = (args) => JSON.parse(cp.execFileSync('node', [CLI, ...args], { env, encoding: 'utf8' }));
   const hasKeys = (obj, keys, where) => {
@@ -1099,7 +1169,9 @@ test('contract: each --json command emits the documented key set (rename-guard f
   const sessions = runJson(['sessions', '--json']);
   hasKeys(sessions, ['active', 'sessions'], 'sessions');
   hasKeys(sessions.sessions[0], ['id', 'edits', 'pending', 'lastMs'], 'sessions.sessions[]');
-  hasKeys(runJson(['tree', '--json']), ['folders', 'files'], 'tree');
+  const tree = runJson(['tree', '--json']);
+  hasKeys(tree, ['folders', 'files'], 'tree');
+  hasKeys(tree.folders[0], ['label', 'path', 'folders', 'files'], 'tree.folders[]'); // `path` drives scoped folder ops
   const observe = runJson(['observe']); // observe is always JSON
   hasKeys(observe, ['session', 'recap', 'insights', 'suggestions', 'edits'], 'observe');
   hasKeys(observe.edits[0], ['id', 'ts', 'tool', 'file', 'status', 'summary', 'reasoning', 'flags', 'memory', 'analysis'], 'observe.edits[]');

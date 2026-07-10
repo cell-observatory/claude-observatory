@@ -153,6 +153,23 @@ object ReviewOps {
         }
     }
 
+    /** Clear resolved (kept/undone) edits scoped to a file or folder path (the folder/file Clear action). */
+    fun clearResolvedScoped(project: Project, session: String, resolvedCount: Int, scope: String, under: String) {
+        if (resolvedCount == 0) {
+            notify(project, "No resolved edits to clear in $scope")
+            return
+        }
+        val ok = Messages.showYesNoDialog(
+            project, "Clear $resolvedCount resolved edit(s) in $scope? Pending edits are kept.",
+            "Claude Observatory", "Clear", "Cancel", Messages.getQuestionIcon(),
+        )
+        if (ok != Messages.YES) return
+        runBg(project, "Clearing resolved edits in $scope") {
+            if (ObservatoryCli.clearResolved(session, project.basePath, under)) done(project, "Cleared $resolvedCount resolved edit(s) in $scope")
+            else done(project, cliFailMsg("clear resolved edits"), NotificationType.ERROR)
+        }
+    }
+
     /** Chat about an edit: build the same before/after prompt as VS Code and copy it to the
      *  clipboard (Anthropic's JetBrains plugin exposes no public API to open its chat). */
     fun chatAbout(project: Project, session: String, id: Int) {

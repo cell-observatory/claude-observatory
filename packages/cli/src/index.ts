@@ -451,22 +451,31 @@ function cmdKeep(args: string[]): void {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const session = getSessionId(args);
   const json = args.includes('--json');
-  // Bulk: --all (every pending) or --file <substr> (pending edits in matching files).
+  // Bulk: --all (every pending), --file <substr> (pending edits in matching files), or --under <path>
+  // (pending edits at-or-beneath a file/folder path — the editors' folder/file Accept action, so
+  // file-scope and folder-scope share one exact rule).
   const fi = args.indexOf('--file');
-  if (args.includes('--all') || fi >= 0) {
+  const ui = args.indexOf('--under');
+  if (args.includes('--all') || fi >= 0 || ui >= 0) {
     const fileSub = fi >= 0 ? args[fi + 1] : undefined;
     if (fi >= 0 && !fileSub) fail('`keep --file <substr>` requires a value');
+    const under = ui >= 0 ? args[ui + 1] : undefined;
+    if (ui >= 0 && !under) fail('`keep --under <path>` requires a value');
     const targets = core
       .readLog(session)
-      .filter((r) => r.status === 'pending' && (!fileSub || r.file.includes(fileSub)));
+      .filter(
+        (r) =>
+          r.status === 'pending' &&
+          (!fileSub || r.file.includes(fileSub)) &&
+          (!under || core.isUnderPath(r.file, under))
+      );
     for (const r of targets) core.setStatus(session, r.id, 'kept');
     if (json) {
       emitJson({ kept: targets.length, ids: targets.map((r) => r.id) });
       return;
     }
-    process.stdout.write(
-      c.green('✓ ') + `kept ${targets.length} edit(s)${fileSub ? ` in files matching "${fileSub}"` : ''}\n`
-    );
+    const scope = fileSub ? ` in files matching "${fileSub}"` : under ? ` under ${relFile(under)}` : '';
+    process.stdout.write(c.green('✓ ') + `kept ${targets.length} edit(s)${scope}\n`);
     return;
   }
   const id = requireId(args);
@@ -484,6 +493,35 @@ function cmdKeep(args: string[]): void {
 function cmdUndo(args: string[]): void {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const session = getSessionId(args);
+  // Bulk: --under <path> reverts every non-undone edit at-or-beneath a file/folder path, newest-first
+  // (the editors' folder/file Revert action). Each is undone individually so all group members go.
+  const ui = args.indexOf('--under');
+  if (ui >= 0) {
+    const under = args[ui + 1];
+    if (!under) fail('`undo --under <path>` requires a value');
+    const targets = core
+      .readLog(session)
+      .filter((r) => r.status !== 'undone' && core.isUnderPath(r.file, under))
+      .sort((a, b) => b.id - a.id);
+    let undone = 0;
+    let conflicts = 0;
+    for (const t of targets) {
+      const r = core.undoEdit(session, t.id);
+      if (r.status === 'conflict') conflicts++;
+      else if (r.ok) undone++;
+    }
+    if (args.includes('--json')) {
+      emitJson({ undone, conflicts, total: targets.length });
+      return;
+    }
+    process.stdout.write(
+      (conflicts ? c.yellow('⚠ ') : c.green('✓ ')) +
+        `reverted ${undone} edit(s) under ${relFile(under)}` +
+        (conflicts ? ` · ${conflicts} conflict(s) left (undo individually with --force)` : '') +
+        '\n'
+    );
+    return;
+  }
   const id = requireId(args);
   const force = args.includes('--force');
   // Undo the whole same-code review unit (collapsed group), newest-first; --force is the per-file fallback.
@@ -533,10 +571,14 @@ function fmtBytes(b: number): string {
 
 function cmdClean(args: string[]): void {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
-  // Drop resolved (kept/undone) edits in the active session, keep pending.
+  // Drop resolved (kept/undone) edits in the active session, keep pending. --under <path> scopes it to
+  // a file/folder (the editors' folder/file Clear action).
   if (args.includes('--resolved')) {
-    const n = core.clearResolved(getSessionId(args));
-    process.stdout.write(c.green('✓ ') + `cleared ${n} resolved edit(s)\n`);
+    const ui = args.indexOf('--under');
+    const under = ui >= 0 ? args[ui + 1] : undefined;
+    if (ui >= 0 && !under) fail('`clean --resolved --under <path>` requires a value');
+    const n = core.clearResolved(getSessionId(args), under);
+    process.stdout.write(c.green('✓ ') + `cleared ${n} resolved edit(s)${under ? ` under ${relFile(under)}` : ''}\n`);
     return;
   }
   // Destructive: drop a specific session.
@@ -978,10 +1020,10 @@ function usage(): void {
       `  list [filters]       list edits (grouped by file); filters: --pending|--kept|--undone, --file <substr>\n` +
       `  timeline [--json]    edits newest-first as a chronological feed (time · id · Δ · file)\n` +
       `  diff <id>            show before/after for an edit\n` +
-      `  keep <id>            mark an edit kept\n` +
-      `  undo <id> [--force]  surgically undo an edit (--force = per-file restore)\n` +
+      `  keep <id>            mark an edit kept; bulk: --all | --file <substr> | --under <path>\n` +
+      `  undo <id> [--force]  surgically undo an edit (--force = per-file restore); bulk: --under <path>\n` +
       `  redo <id> [--force]  re-apply an undone edit\n` +
-      `  clean [opts]         GC orphaned blobs; --drop <id> | --older-than <Nd> | --all | --resolved\n` +
+      `  clean [opts]         GC orphaned blobs; --drop <id> | --older-than <Nd> | --all | --resolved [--under <path>]\n` +
       `  stats [--json]       usage stats (edits/tokens/messages/thinking/output) by session & window\n` +
       `  summary [--markdown] per-session review recap (kept/reverted per file); --markdown to export\n` +
       `  insights [--json]    Observations view: recap + per-edit reasoning/flags/file-memory + next steps\n\n` +

@@ -9,6 +9,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as cp from 'child_process';
+import * as https from 'https';
 import * as core from '@claude-observatory/core';
 
 const SCHEME = 'claude-edit'; // in-memory before/after blobs for vscode.diff
@@ -30,7 +31,7 @@ let heatmapOn = false; // "file heatmap" toggle: dim everything except Claude's 
 let inlineLens: InlineLensProvider | undefined; // clickable Keep/Undo/Diff above each pending edit
 const MAX_INLINE_LINES = 20000; // skip the overlay on very large files (perf)
 
-type FolderNode = { kind: 'folder'; label: string; folders: core.TreeFolder[]; files: core.TreeFile[] };
+type FolderNode = { kind: 'folder'; label: string; path: string; folders: core.TreeFolder[]; files: core.TreeFile[] };
 type FileNode = { kind: 'file'; file: string; edits: core.TreeEdit[]; classes: core.TreeClass[]; loose: core.TreeEdit[] };
 type ClassNode = { kind: 'class'; file: string; name: string; edits: core.TreeEdit[] };
 type EditNode = { kind: 'edit'; rec: core.EditRecord; feed?: boolean }; // feed = top-level Timeline row (show file + time)
@@ -44,7 +45,7 @@ let editFilter = '';
 // Map the shared core view-model nodes to VS Code tree nodes. The tree STRUCTURE (folder compaction,
 // class grouping, deltas, Search filtering) is computed once in core.buildEditTree — these just wrap it.
 function toFolderNode(f: core.TreeFolder): FolderNode {
-  return { kind: 'folder', label: f.label, folders: f.folders, files: f.files };
+  return { kind: 'folder', label: f.label, path: f.path, folders: f.folders, files: f.files };
 }
 function toFileNode(f: core.TreeFile): FileNode {
   return { kind: 'file', file: f.file, edits: [...f.classes.flatMap((c) => c.edits), ...f.loose], classes: f.classes, loose: f.loose };
@@ -733,6 +734,64 @@ async function undoEditsInFile(session: string, file: string, _edits: core.EditR
     `Undid ${undone} edit(s) in ${base}` +
       (conflicts ? ` · ${conflicts} conflict(s) left — undo individually to force-restore` : '') +
       '.'
+  );
+}
+
+/** Accept (keep) every pending edit at-or-beneath a file/folder path — the scoped Accept action. */
+function keepEditsUnder(session: string, scope: string, label: string): void {
+  const targets = core.readLog(session).filter((r) => r.status === 'pending' && core.isUnderPath(r.file, scope));
+  for (const r of targets) core.setStatus(session, r.id, 'kept');
+  vscode.window.showInformationMessage(
+    targets.length ? `Accepted ${targets.length} edit(s) in ${label}.` : `No pending edits to accept in ${label}.`
+  );
+}
+
+/** Revert every non-undone edit at-or-beneath a path, newest-first, after a confirm + dirty-buffer
+ *  guard (raw log, so every member of a review group in scope is undone). */
+async function undoEditsUnder(session: string, scope: string, label: string): Promise<void> {
+  const targets = core
+    .readLog(session)
+    .filter((r) => r.status !== 'undone' && core.isUnderPath(r.file, scope))
+    .sort((a, b) => b.id - a.id);
+  if (targets.length === 0) {
+    vscode.window.showInformationMessage(`Nothing to revert in ${label}.`);
+    return;
+  }
+  const dirty = [...new Set(targets.map((t) => t.file))].filter((f) =>
+    vscode.workspace.textDocuments.some((d) => d.uri.fsPath === f && d.isDirty)
+  );
+  if (dirty.length) {
+    await vscode.window.showWarningMessage(
+      `Save or revert unsaved changes first: ${dirty.map((f) => path.basename(f)).join(', ')}.`,
+      { modal: true }
+    );
+    return;
+  }
+  const choice = await vscode.window.showWarningMessage(
+    `Revert ${targets.length} edit(s) in ${label}? Overlapping edits may conflict.`,
+    { modal: true },
+    'Revert all'
+  );
+  if (choice !== 'Revert all') return;
+  let undone = 0;
+  let conflicts = 0;
+  for (const t of targets) {
+    const r = core.undoEdit(session, t.id);
+    if (r.status === 'conflict') conflicts++;
+    else if (r.ok) undone++;
+  }
+  vscode.window.showInformationMessage(
+    `Reverted ${undone} edit(s) in ${label}` +
+      (conflicts ? ` · ${conflicts} conflict(s) left (revert individually to force)` : '') +
+      '.'
+  );
+}
+
+/** Clear resolved (kept/undone) edits at-or-beneath a path — the scoped Clear action. */
+function clearResolvedUnder(session: string, scope: string, label: string): void {
+  const n = core.clearResolved(session, scope);
+  vscode.window.showInformationMessage(
+    n ? `Cleared ${n} resolved edit(s) in ${label}.` : `No resolved edits to clear in ${label}.`
   );
 }
 
@@ -1550,6 +1609,94 @@ class StatsUsageViewProvider implements vscode.WebviewViewProvider {
   }
 }
 
+// --- marketplace-free update nudge -------------------------------------------------------------
+// VS Code has no custom-repository / self-hosted auto-update mechanism (JetBrains does — this plugin
+// ships an updatePlugins.xml repo). The closest equivalent is a throttled background check of GitHub
+// Releases that points the user at the new .vsix. It never silent-installs and never nags on error.
+const RELEASE_REPO = 'cell-observatory/claude-observatory';
+const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000; // at most once a day in the background
+
+/** GET the latest-release JSON from GitHub. Rejects on any network/HTTP/parse error (no deps — the
+ *  extension host is Node). GitHub requires a User-Agent. */
+function fetchLatestRelease(): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const req = https.get(
+      `https://api.github.com/repos/${RELEASE_REPO}/releases/latest`,
+      { headers: { 'User-Agent': 'claude-observatory-vscode', Accept: 'application/vnd.github+json' } },
+      (res) => {
+        if (res.statusCode && res.statusCode >= 400) {
+          res.resume();
+          return reject(new Error(`github api ${res.statusCode}`));
+        }
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (d) => (body += d));
+        res.on('end', () => {
+          try {
+            resolve(JSON.parse(body));
+          } catch (e) {
+            reject(e);
+          }
+        });
+      }
+    );
+    req.on('error', reject);
+    req.setTimeout(8000, () => req.destroy(new Error('timeout')));
+  });
+}
+
+/** Compare the running extension version against the newest GitHub Release; if newer, offer the
+ *  .vsix. `manual` = triggered from the command palette (report up-to-date / errors; ignore throttle
+ *  + "skip this version"). */
+async function checkForUpdate(context: vscode.ExtensionContext, manual: boolean): Promise<void> {
+  // `context.extension` is only present in a real extension host (absent under the smoke-test mock) —
+  // bail before any network call if we can't read our own version.
+  const current = context.extension?.packageJSON?.version ? String(context.extension.packageJSON.version) : undefined;
+  if (!current) {
+    if (manual) vscode.window.showWarningMessage('Claude Observatory: cannot determine the installed version.');
+    return;
+  }
+  if (!manual) {
+    const last = context.globalState.get<number>('updateCheck.lastMs') || 0;
+    if (Date.now() - last < UPDATE_CHECK_INTERVAL_MS) return;
+  }
+  let release: any;
+  try {
+    release = await fetchLatestRelease();
+  } catch (e) {
+    if (manual)
+      vscode.window.showWarningMessage(
+        `Claude Observatory: couldn't check for updates (${String((e as Error)?.message || e)}).`
+      );
+    return;
+  }
+  context.globalState.update('updateCheck.lastMs', Date.now());
+  const latest = String(release?.tag_name || '').replace(/^v/i, '');
+  if (!latest || !core.isNewer(latest, current)) {
+    if (manual) vscode.window.showInformationMessage(`Claude Observatory is up to date (${current}).`);
+    return;
+  }
+  if (!manual && context.globalState.get<string>('updateCheck.skip') === latest) return; // dismissed
+  const vsix = (release.assets || []).find((a: any) => /\.vsix$/i.test(a.name));
+  const downloadUrl = vsix?.browser_download_url || release.html_url;
+  const choice = await vscode.window.showInformationMessage(
+    `Claude Observatory ${latest} is available (you have ${current}).`,
+    'Download .vsix',
+    'Release notes',
+    'Skip this version'
+  );
+  if (choice === 'Download .vsix') {
+    vscode.env.openExternal(vscode.Uri.parse(downloadUrl));
+    vscode.window.showInformationMessage(
+      'After it downloads: Extensions view → ⋯ → “Install from VSIX…”, then pick the file (reload when prompted).'
+    );
+  } else if (choice === 'Release notes') {
+    vscode.env.openExternal(vscode.Uri.parse(release.html_url));
+  } else if (choice === 'Skip this version') {
+    context.globalState.update('updateCheck.skip', latest);
+  }
+}
+
 export function activate(context: vscode.ExtensionContext): void {
   const editsProvider = new EditsProvider('edits');
   const diffsProvider = new EditsProvider('diffs');
@@ -2035,6 +2182,20 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('claudeObservatory.undoFile', (n: FileNode) =>
       withSession((s) => undoEditsInFile(s, n.file, n.edits))()
     ),
+    // Clear the resolved (kept/reverted) edits for one file — the file-row inline broom.
+    vscode.commands.registerCommand('claudeObservatory.clearFile', (n: FileNode) =>
+      withSession((s) => clearResolvedUnder(s, n.file, path.basename(n.file)))()
+    ),
+    // Folder-row inline actions: accept / revert / clear every edit at-or-beneath the folder.
+    vscode.commands.registerCommand('claudeObservatory.keepFolder', (n: FolderNode) =>
+      withSession((s) => keepEditsUnder(s, n.path, n.label))()
+    ),
+    vscode.commands.registerCommand('claudeObservatory.undoFolder', (n: FolderNode) =>
+      withSession((s) => undoEditsUnder(s, n.path, n.label))()
+    ),
+    vscode.commands.registerCommand('claudeObservatory.clearFolder', (n: FolderNode) =>
+      withSession((s) => clearResolvedUnder(s, n.path, n.label))()
+    ),
     // Accept / revert every pending edit in the ACTIVE editor's file — what the per-file surfaces use.
     vscode.commands.registerCommand('claudeObservatory.keepOpenFile', () =>
       withSession((s) => {
@@ -2079,6 +2240,12 @@ export function activate(context: vscode.ExtensionContext): void {
     context.globalState.update('setupNudged', true);
     showSetup();
   }
+
+  // Marketplace-free update nudge: a manual command + a throttled background check on activation.
+  context.subscriptions.push(
+    vscode.commands.registerCommand('claudeObservatory.checkForUpdates', () => checkForUpdate(context, true))
+  );
+  void checkForUpdate(context, false);
 }
 
 export function deactivate(): void {

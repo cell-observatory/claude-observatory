@@ -2,7 +2,7 @@
   "name": "claude-observatory-vscode",
   "displayName": "Claude Observatory",
   "description": "A running list of every file change Claude Code makes, each with its own Keep / Undo (surgical, git-free).",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "publisher": "claude-observatory",
   "private": true,
   "engines": {
@@ -363,6 +363,36 @@
         "command": "claudeObservatory.undoAtCursor",
         "title": "Undo pending edit at cursor",
         "category": "Claude Observatory"
+      },
+      {
+        "command": "claudeObservatory.checkForUpdates",
+        "title": "Check for updates",
+        "category": "Claude Observatory",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "claudeObservatory.clearFile",
+        "title": "Clear resolved edits in file",
+        "category": "Claude Observatory",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "claudeObservatory.keepFolder",
+        "title": "Accept all edits in folder",
+        "category": "Claude Observatory",
+        "icon": "$(check-all)"
+      },
+      {
+        "command": "claudeObservatory.undoFolder",
+        "title": "Revert all edits in folder",
+        "category": "Claude Observatory",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "claudeObservatory.clearFolder",
+        "title": "Clear resolved edits in folder",
+        "category": "Claude Observatory",
+        "icon": "$(clear-all)"
       }
     ],
     "keybindings": [
@@ -657,6 +687,26 @@
           "group": "inline@2"
         },
         {
+          "command": "claudeObservatory.clearFile",
+          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline) && viewItem == file",
+          "group": "inline@3"
+        },
+        {
+          "command": "claudeObservatory.keepFolder",
+          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs) && viewItem == folder",
+          "group": "inline@1"
+        },
+        {
+          "command": "claudeObservatory.undoFolder",
+          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs) && viewItem == folder",
+          "group": "inline@2"
+        },
+        {
+          "command": "claudeObservatory.clearFolder",
+          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs) && viewItem == folder",
+          "group": "inline@3"
+        },
+        {
           "command": "claudeObservatory.chatEdit",
           "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline || view == claudeObservatory.fileHistory) && (viewItem == edit || viewItem == editUndone)",
           "group": "navigation@2"
@@ -696,7 +746,7 @@
     "package": "vsce package --no-dependencies -o claude-observatory.vsix"
   },
   "devDependencies": {
-    "@claude-observatory/core": "0.5.0",
+    "@claude-observatory/core": "0.5.1",
     "@types/node": "^22.0.0",
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^3.0.0",

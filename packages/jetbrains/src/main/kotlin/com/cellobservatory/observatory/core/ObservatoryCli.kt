@@ -128,8 +128,11 @@ object ObservatoryCli {
             add("--session"); add(session); add("--json")
         }, workDir))
 
-    fun clearResolved(session: String, workDir: String?): Boolean =
-        run(listOf("clean", "--resolved", "--session", session), workDir).ok
+    fun clearResolved(session: String, workDir: String?, under: String? = null): Boolean =
+        run(
+            listOf("clean", "--resolved", "--session", session) + (under?.let { listOf("--under", it) } ?: emptyList()),
+            workDir,
+        ).ok
 
     /** Per-pending-edit current line indices in the LIVE buffer text (may be unsaved). */
     fun locate(session: String, file: String, currentText: String, workDir: String?): List<Placement> {
