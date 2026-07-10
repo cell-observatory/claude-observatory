@@ -159,9 +159,18 @@ class ObservatoryStartup : ProjectActivity {
         com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater {
             if (!project.isDisposed) {
                 com.cellobservatory.observatory.ui.inline.InlineOverlay.getInstance(project).install()
+                val svc = ObservatoryService.getInstance(project)
                 // Keep the editor-top review banner live: re-run the notification provider on every store change.
                 val notifications = com.intellij.ui.EditorNotifications.getInstance(project)
-                ObservatoryService.getInstance(project).addListener { notifications.updateAllNotifications() }
+                svc.addListener { notifications.updateAllNotifications() }
+                // Tool-window stripe badge: overlay a dot while edits are pending (parity with VS Code's title count).
+                val updateBadge = Runnable {
+                    com.intellij.openapi.wm.ToolWindowManager.getInstance(project)
+                        .getToolWindow("Claude Observatory")
+                        ?.setIcon(com.cellobservatory.observatory.ui.Icons.toolWindowIcon(svc.counts().pending))
+                }
+                svc.addListener(updateBadge)
+                updateBadge.run()
             }
         }
     }

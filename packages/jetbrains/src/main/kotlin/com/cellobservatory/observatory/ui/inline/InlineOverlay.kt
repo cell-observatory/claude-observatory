@@ -47,7 +47,7 @@ private val CLAUDE_MARK = JBColor(Color(0xCC785C), Color(0xE0906F))
 private val ADDED_LINE_BG = JBColor(Color(0xE7, 0xF3, 0xEA), Color(0x24, 0x36, 0x2A))
 
 /**
- * The inline review overlay: per pending edit, a clickable "✓ Keep #N · ↩ Undo · ⇄ Diff" lens
+ * The inline review overlay: per pending edit, a clickable "✓ Keep #N · ↩ Undo · 💬 Chat · ⧉ View diff" lens
  * above its first line (block inlay — the stable API, chosen over experimental Code Vision),
  * a changed-line background + gutter action icon, and a dim " ✨ #N" end-of-line marker.
  * Placement geometry comes from PlacementsCache (CLI locate); re-renders on store changes,

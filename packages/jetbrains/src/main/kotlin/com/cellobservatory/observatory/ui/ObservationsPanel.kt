@@ -169,7 +169,16 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
     private fun buildToolbar(): JComponent {
         val group = DefaultActionGroup(
             action("Refresh Recap with Claude (spends tokens)", AllIcons.Actions.ForceRefresh) { refreshRecap() },
+            action("Clear Resolved Edits", AllIcons.Actions.GC) {
+                val service = ObservatoryService.getInstance(project)
+                val session = service.currentSession()
+                    ?: return@action ReviewOps.notify(project, "No active Claude Code session for this project", NotificationType.WARNING)
+                val resolved = service.log().count { !it.pending }
+                if (resolved > 0) ReviewOps.clearResolved(project, session, resolved) else ReviewOps.notify(project, "No resolved edits to clear")
+            },
+            action("Switch Session", AllIcons.Vcs.Branch) { ReviewOps.chooseSession(project, tree) },
             action("Refresh", AllIcons.Actions.Refresh) { ObservatoryService.getInstance(project).refresh() },
+            action("Setup Check (doctor)", AllIcons.General.Information) { ReviewOps.openDoctor(project) },
         )
         val tb = ActionManager.getInstance().createActionToolbar("ClaudeObservatoryObs", group, true)
         tb.targetComponent = tree

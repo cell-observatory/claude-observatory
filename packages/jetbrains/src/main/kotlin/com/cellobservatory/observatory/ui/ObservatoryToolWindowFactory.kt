@@ -1,25 +1,33 @@
 package com.cellobservatory.observatory.ui
 
+import com.intellij.icons.AllIcons
 import com.intellij.openapi.project.DumbAware
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.wm.ToolWindow
 import com.intellij.openapi.wm.ToolWindowFactory
+import com.intellij.ui.content.Content
 import com.intellij.ui.content.ContentFactory
+import javax.swing.Icon
+import javax.swing.JComponent
 
 /** Sidebar review window (VS Code activity-bar analog): Edits + Diffs + File History. */
 class ObservatoryToolWindowFactory : ToolWindowFactory, DumbAware {
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
         val factory = ContentFactory.getInstance()
-        toolWindow.contentManager.addContent(
-            factory.createContent(EditsTreePanel(project, EditsTreePanel.Mode.EDITS), "Edits", false)
-        )
-        toolWindow.contentManager.addContent(
-            factory.createContent(EditsTreePanel(project, EditsTreePanel.Mode.DIFFS), "Diffs", false)
-        )
-        toolWindow.contentManager.addContent(
-            factory.createContent(FileHistoryPanel(project), "File History", false)
-        )
+        val cm = toolWindow.contentManager
+        cm.addContent(iconTab(factory, EditsTreePanel(project, EditsTreePanel.Mode.EDITS), "Edits", Icons.Microscope))
+        cm.addContent(iconTab(factory, EditsTreePanel(project, EditsTreePanel.Mode.DIFFS), "Diffs", AllIcons.Actions.Diff))
+        cm.addContent(iconTab(factory, FileHistoryPanel(project), "File History", AllIcons.Vcs.History))
     }
+
+    /** An icon-only tab: the glyph is the tab, its name rides in the hover tooltip + overflow chooser. */
+    private fun iconTab(factory: ContentFactory, component: JComponent, label: String, icon: Icon): Content =
+        factory.createContent(component, "", false).apply {
+            this.icon = icon          // Content.setIcon — the tab glyph
+            description = label        // Content.setDescription — the hover tooltip
+            popupIcon = icon           // shown in the tab-overflow chooser
+            isCloseable = false
+        }
 }
 
 /** Bottom dashboards window (VS Code panel analog, next to Terminal/Problems): Observations,

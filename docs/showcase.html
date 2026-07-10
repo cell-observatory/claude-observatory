@@ -3,710 +3,423 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="Per-edit Keep/Undo for Claude Code — surgical, git-free review in the terminal, VS Code, and PyCharm/JetBrains, with live dashboards: a Timeline change feed and edit/token Stats + plan-usage bars. Zero extra tokens.">
-<title>Claude Observatory</title>
+<title>Claude Observatory — every edit Claude makes, under review</title>
+<meta name="description" content="Per-edit Keep / Undo for Claude Code — in the terminal, VS Code, and JetBrains, at zero extra tokens. Standalone, git-free, shareable.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%AC%3C/text%3E%3C/svg%3E">
-</head>
-<body>
 <style>
-  *, *::before, *::after { box-sizing: border-box; }
-
-  :root {
-    /* light — neutral gray surfaces, one terracotta accent */
-    --bg: #f6f6f7;
-    --surface: #ffffff;
-    --surface-2: #f1f1f3;
-    --border: rgba(22, 22, 26, 0.12);
-    --border-strong: rgba(22, 22, 26, 0.22);
-    --ink: #17181c;
-    --ink-soft: #52535b;
-    --ink-faint: #6b6c74;
-    --accent: #cf6440;
-    --accent-ink: #a8482a;
-    --accent-soft: rgba(207, 100, 64, 0.10);
-    --line: rgba(90, 92, 104, 0.42);
-    --pending: #9a6c12;
-    --kept: #2f7d4b;
-    --deleted: #c5342b;
-    --reverted: #8a8b93;
-    --nav-bg: rgba(246, 246, 247, 0.82);
-
-    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
-    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, Roboto, sans-serif;
-    --col: 1080px;
-    --navh: 60px;
+  :root{
+    --bg:#fbfaf9; --surface:#ffffff; --surface-2:#f5f3f0; --surface-3:#efece8;
+    --ink:#17171a; --ink-soft:#54545b; --ink-faint:#8b8a92;
+    --line:rgba(20,18,16,.10); --line-soft:rgba(20,18,16,.06);
+    --accent:#cf6440; --accent-ink:#a94e2c; --accent-soft:rgba(207,100,64,.10);
+    --pending:#a2711a; --kept:#2f7d4b; --deleted:#c0392b; --undone:#8b8a92;
+    --ed-bg:#ffffff; --ed-panel:#f7f6f4; --ed-line:rgba(20,18,16,.07); --ed-ink:#2b2b31;
+    --ed-gutter:#b7b5bd; --ed-add:rgba(47,125,75,.10); --ed-addln:#2f7d4b;
+    --ed-del:rgba(192,57,43,.09); --ed-delln:#c0392b; --ed-key:#a94e2c; --ed-fn:#2b6cb0; --ed-str:#2f7d4b;
+    --shadow:0 30px 70px -40px rgba(40,25,15,.40), 0 8px 22px -18px rgba(40,25,15,.25);
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,Roboto,Helvetica,sans-serif;
+    --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+    --col:1140px;
   }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #0d0d10;
-      --surface: #17171b;
-      --surface-2: #121215;
-      --border: rgba(230, 232, 240, 0.13);
-      --border-strong: rgba(230, 232, 240, 0.24);
-      --ink: #e9e9ec;
-      --ink-soft: #a1a2aa;
-      --ink-faint: #808189;
-      --accent: #e08a63;
-      --accent-ink: #ec9d79;
-      --accent-soft: rgba(224, 138, 99, 0.14);
-      --line: rgba(160, 162, 172, 0.32);
-      --pending: #e0b155;
-      --kept: #79c089;
-      --deleted: #ec8078;
-      --reverted: #808189;
-      --nav-bg: rgba(13, 13, 16, 0.82);
-    }
+  @media (prefers-color-scheme:dark){:root{
+    --bg:#0e0e11; --surface:#161619; --surface-2:#1a1a1e; --surface-3:#202024;
+    --ink:#ececef; --ink-soft:#a5a4ac; --ink-faint:#76757d;
+    --line:rgba(255,255,255,.11); --line-soft:rgba(255,255,255,.06);
+    --accent:#e08a63; --accent-ink:#ef9f7c; --accent-soft:rgba(224,138,99,.14);
+    --pending:#e0b155; --kept:#79c089; --deleted:#ec8078; --undone:#76757d;
+    --ed-bg:#1b1b1f; --ed-panel:#161619; --ed-line:rgba(255,255,255,.07); --ed-ink:#d6d6db;
+    --ed-gutter:#5b5b64; --ed-add:rgba(63,185,80,.13); --ed-addln:#79c089;
+    --ed-del:rgba(248,81,73,.13); --ed-delln:#ec8078; --ed-key:#e0a06d; --ed-fn:#6aa6f0; --ed-str:#8fc99a;
+    --shadow:0 30px 70px -40px rgba(0,0,0,.8), 0 8px 22px -18px rgba(0,0,0,.6);
+  }}
+  :root[data-theme="light"]{
+    --bg:#fbfaf9;--surface:#fff;--surface-2:#f5f3f0;--surface-3:#efece8;--ink:#17171a;--ink-soft:#54545b;--ink-faint:#8b8a92;
+    --line:rgba(20,18,16,.10);--line-soft:rgba(20,18,16,.06);--accent:#cf6440;--accent-ink:#a94e2c;--accent-soft:rgba(207,100,64,.10);
+    --pending:#a2711a;--kept:#2f7d4b;--deleted:#c0392b;--undone:#8b8a92;
+    --ed-bg:#fff;--ed-panel:#f7f6f4;--ed-line:rgba(20,18,16,.07);--ed-ink:#2b2b31;--ed-gutter:#b7b5bd;
+    --ed-add:rgba(47,125,75,.10);--ed-addln:#2f7d4b;--ed-del:rgba(192,57,43,.09);--ed-delln:#c0392b;--ed-key:#a94e2c;--ed-fn:#2b6cb0;--ed-str:#2f7d4b;
+    --shadow:0 30px 70px -40px rgba(40,25,15,.40),0 8px 22px -18px rgba(40,25,15,.25);
   }
-  /* explicit toggles win over the media query in both directions */
-  :root[data-theme="light"] {
-    --bg: #f6f6f7; --surface: #fff; --surface-2: #f1f1f3;
-    --border: rgba(22,22,26,0.12); --border-strong: rgba(22,22,26,0.22);
-    --ink: #17181c; --ink-soft: #52535b; --ink-faint: #6b6c74;
-    --accent: #cf6440; --accent-ink: #a8482a; --accent-soft: rgba(207,100,64,0.10);
-    --line: rgba(90,92,104,0.42); --pending: #9a6c12; --kept: #2f7d4b; --deleted: #c5342b; --reverted: #8a8b93;
-    --nav-bg: rgba(246,246,247,0.82);
+  :root[data-theme="dark"]{
+    --bg:#0e0e11;--surface:#161619;--surface-2:#1a1a1e;--surface-3:#202024;--ink:#ececef;--ink-soft:#a5a4ac;--ink-faint:#76757d;
+    --line:rgba(255,255,255,.11);--line-soft:rgba(255,255,255,.06);--accent:#e08a63;--accent-ink:#ef9f7c;--accent-soft:rgba(224,138,99,.14);
+    --pending:#e0b155;--kept:#79c089;--deleted:#ec8078;--undone:#76757d;
+    --ed-bg:#1b1b1f;--ed-panel:#161619;--ed-line:rgba(255,255,255,.07);--ed-ink:#d6d6db;--ed-gutter:#5b5b64;
+    --ed-add:rgba(63,185,80,.13);--ed-addln:#79c089;--ed-del:rgba(248,81,73,.13);--ed-delln:#ec8078;--ed-key:#e0a06d;--ed-fn:#6aa6f0;--ed-str:#8fc99a;
+    --shadow:0 30px 70px -40px rgba(0,0,0,.8),0 8px 22px -18px rgba(0,0,0,.6);
   }
-  :root[data-theme="dark"] {
-    --bg: #0d0d10; --surface: #17171b; --surface-2: #121215;
-    --border: rgba(230,232,240,0.13); --border-strong: rgba(230,232,240,0.24);
-    --ink: #e9e9ec; --ink-soft: #a1a2aa; --ink-faint: #808189;
-    --accent: #e08a63; --accent-ink: #ec9d79; --accent-soft: rgba(224,138,99,0.14);
-    --line: rgba(160,162,172,0.32); --pending: #e0b155; --kept: #79c089; --deleted: #ec8078; --reverted: #808189;
-    --nav-bg: rgba(13,13,16,0.82);
-  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth;scroll-padding-top:80px;-webkit-text-size-adjust:100%}
+  body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:17px;line-height:1.62;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+  .wrap{width:min(var(--col),100% - 48px);margin-inline:auto}
+  a{color:inherit;text-decoration:none}
+  h1,h2,h3{font-weight:640;letter-spacing:-.021em;line-height:1.08;text-wrap:balance}
+  .hl{color:var(--accent)}
+  .eyebrow{font-family:var(--mono);font-size:.72rem;text-transform:uppercase;letter-spacing:.2em;color:var(--accent-ink);font-weight:600}
+  .lede{color:var(--ink-soft);font-size:clamp(1.05rem,2vw,1.28rem);line-height:1.55;max-width:34ch;text-wrap:pretty}
+  code,kbd{font-family:var(--mono);font-size:.86em}
 
-  html { scroll-behavior: smooth; scroll-padding-top: calc(var(--navh) + 16px); }
-  body {
-    margin: 0;
-    background: var(--bg);
-    color: var(--ink);
-    font-family: var(--sans);
-    font-size: 17px;
-    line-height: 1.6;
-    -webkit-font-smoothing: antialiased;
-    text-rendering: optimizeLegibility;
-    overflow-x: hidden;
-  }
-  img { max-width: 100%; height: auto; display: block; }
+  /* nav */
+  .nav{position:sticky;top:0;z-index:60;background:transparent;transition:background .25s,border-color .25s}
+  .nav.condensed{background:color-mix(in srgb,var(--bg) 80%,transparent);backdrop-filter:saturate(1.5) blur(14px);-webkit-backdrop-filter:saturate(1.5) blur(14px);border-bottom:1px solid var(--line-soft)}
+  .nav .row{display:flex;align-items:center;gap:20px;height:60px}
+  .brand{display:flex;align-items:center;gap:9px;font-weight:640;letter-spacing:-.02em;font-size:1.02rem}
+  .brand .m{font-size:1.2rem}
+  .nav .links{display:flex;gap:26px;margin-inline:auto;font-size:.95rem;color:var(--ink-soft)}
+  .nav .links a{transition:color .15s}
+  .nav .links a:hover{color:var(--ink)}
+  .nav .links a.more{color:var(--accent-ink)}
+  .nav .right{display:flex;align-items:center;gap:10px}
+  .icon-btn,.ghost{border:1px solid var(--line);background:var(--surface);color:var(--ink-soft);border-radius:999px;padding:7px 13px;font-size:.85rem;font-family:var(--mono);cursor:pointer;transition:.15s}
+  .icon-btn:hover,.ghost:hover{color:var(--ink);border-color:var(--ink-faint)}
+  .btn{display:inline-flex;align-items:center;gap:8px;border-radius:999px;padding:11px 20px;font-weight:560;font-size:.95rem;border:1px solid transparent;cursor:pointer;transition:.15s;white-space:nowrap}
+  .btn.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+  .btn.primary:hover{background:var(--accent-ink);border-color:var(--accent-ink)}
+  .btn.line{background:transparent;color:var(--ink);border-color:var(--line)}
+  .btn.line:hover{border-color:var(--ink-faint)}
+  @media (max-width:720px){.nav .links a:not(.more){display:none}}
 
-  .wrap { width: min(var(--col), 100% - 44px); margin-inline: auto; }
-  section { padding: clamp(52px, 8vw, 104px) 0; scroll-margin-top: calc(var(--navh) + 16px); }
-  section + section { border-top: 1px solid var(--border); }
+  section{padding-block:clamp(96px,14vh,190px)}
+  .center{text-align:center;margin-inline:auto;max-width:660px}
+  .center .lede{margin-inline:auto;max-width:52ch}
+  h2{font-size:clamp(2rem,5vw,3.4rem)}
 
-  /* --- type --- */
-  h1, h2, h3 { margin: 0; text-wrap: balance; letter-spacing: -0.02em; font-weight: 640; line-height: 1.1; }
-  h1 { font-size: clamp(2.5rem, 6vw, 4.2rem); }
-  h2 { font-size: clamp(1.7rem, 3.4vw, 2.5rem); }
-  h3 { font-size: 1.04rem; letter-spacing: -0.01em; }
-  p { margin: 0; }
-  .lede { font-size: clamp(1.1rem, 1.7vw, 1.3rem); color: var(--ink-soft); line-height: 1.55; max-width: 42ch; }
-  .prose { color: var(--ink-soft); max-width: 62ch; }
-  .prose strong { color: var(--ink); font-weight: 600; }
-  a { color: var(--accent-ink); text-underline-offset: 3px; text-decoration-thickness: 1px; }
-  .kbd, code { font-family: var(--mono); font-size: 0.86em; }
+  /* hero */
+  .hero{padding-top:clamp(40px,7vw,84px);padding-bottom:clamp(60px,9vh,120px)}
+  .hero-grid{display:grid;grid-template-columns:1.02fr 1.18fr;gap:clamp(32px,5vw,64px);align-items:center}
+  .hero h1{font-size:clamp(2.6rem,7vw,5.2rem);margin:18px 0}
+  .hero .cta{display:flex;gap:12px;flex-wrap:wrap;margin-top:28px}
+  .hero .meta{margin-top:22px;font-family:var(--mono);font-size:.78rem;color:var(--ink-faint)}
+  @media (max-width:900px){.hero-grid{grid-template-columns:1fr;gap:36px}.hero .lede{max-width:46ch}}
 
-  .eyebrow {
-    font-family: var(--mono);
-    font-size: 0.72rem;
-    letter-spacing: 0.22em;
-    text-transform: uppercase;
-    color: var(--accent-ink);
-    display: inline-block;
-    margin-bottom: 14px;
-  }
+  /* editor mock (shared) */
+  .editor{background:var(--ed-bg);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);overflow:hidden;font-family:var(--mono);color:var(--ed-ink)}
+  .editor .bar{display:flex;align-items:center;gap:7px;height:38px;padding:0 14px;background:var(--ed-panel);border-bottom:1px solid var(--ed-line)}
+  .editor .bar .d{width:11px;height:11px;border-radius:50%}
+  .editor .bar .fn{margin-left:12px;font-size:.8rem;color:var(--ink-faint)}
+  .editor .code{padding:12px 0 6px}
+  .ln{display:flex;font-size:.82rem;line-height:1.85}
+  .ln .n{width:44px;text-align:right;padding-right:16px;color:var(--ed-gutter);flex:none;user-select:none}
+  .ln .t{white-space:pre}
+  .ln.add{background:var(--ed-add);box-shadow:inset 3px 0 0 var(--accent)}
+  .ln .star{color:var(--accent);margin-left:-13px;margin-right:5px}
+  .kw{color:var(--ed-key)}.fnm{color:var(--ed-fn)}.st{color:var(--ed-str)}
+  .lens{display:flex;gap:16px;flex-wrap:wrap;padding:6px 0 8px 44px;font-family:var(--sans);font-size:.78rem;color:var(--ink-faint)}
+  .lens .a{color:var(--ink-soft)}.lens .sp{color:var(--accent)}
+  .bubble{margin:2px 16px 16px 44px;border:1px solid var(--ed-line);border-radius:11px;overflow:hidden;background:var(--ed-panel)}
+  .bubble .bh{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:9px 14px;border-bottom:1px solid var(--ed-line);font-family:var(--sans);font-size:.8rem}
+  .bubble .bh .id{color:var(--accent);font-family:var(--mono)}
+  .bubble .bh .why{color:var(--ink-faint);font-style:italic}
+  .bubble .bh .tools{margin-left:auto;display:flex;gap:14px;color:var(--ink-soft)}
+  .bubble .diff{font-size:.8rem;line-height:1.75;padding:8px 0}
+  .bubble .diff .dl{display:block;padding:0 14px;white-space:pre}
+  .bubble .diff .ad{background:var(--ed-add);color:var(--ed-addln)}
+  .bubble .diff .c{color:var(--ink-faint)}
+  .bubble .diff .h{color:var(--ed-fn)}
+  @media (max-width:520px){.bubble .bh .tools{width:100%;margin-left:0}}
 
-  /* --- sticky nav --- */
-  .nav {
-    position: sticky; top: 0; z-index: 50;
-    background: var(--nav-bg);
-    -webkit-backdrop-filter: saturate(1.4) blur(12px);
-    backdrop-filter: saturate(1.4) blur(12px);
-    border-bottom: 1px solid var(--border);
-  }
-  .nav-inner { display: flex; align-items: center; gap: 20px; height: var(--navh); }
-  .wordmark { display: inline-flex; align-items: center; gap: 10px; text-decoration: none; color: var(--ink); flex: none; }
-  .wordmark .mark { font-size: 20px; line-height: 1; }
-  .wordmark b { font-weight: 600; font-size: 0.94rem; letter-spacing: 0.01em; }
-  .nav-links { flex: 1; display: flex; justify-content: center; gap: 26px; }
-  .nav-links a {
-    font-size: 0.9rem; color: var(--ink-soft); text-decoration: none; letter-spacing: 0.01em;
-  }
-  .nav-links a:hover { color: var(--ink); }
-  .nav-actions { flex: none; display: flex; align-items: center; gap: 10px; }
-  .theme-toggle {
-    font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.1em; text-transform: uppercase;
-    color: var(--ink-soft); background: var(--surface); border: 1px solid var(--border);
-    border-radius: 999px; padding: 7px 13px; cursor: pointer;
-  }
-  .theme-toggle:hover { border-color: var(--border-strong); color: var(--ink); }
-  .nav-gh {
-    font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.06em;
-    color: var(--ink-soft); text-decoration: none; border: 1px solid var(--border);
-    border-radius: 999px; padding: 7px 13px; white-space: nowrap;
-  }
-  .nav-gh:hover { border-color: var(--border-strong); color: var(--ink); }
-  @media (max-width: 760px) {
-    .nav-links { display: none; }
-    .nav-actions { margin-left: auto; }
-  }
+  /* pinned review act */
+  .act-track{position:relative;height:260vh}
+  .act-stage{position:sticky;top:0;height:100vh;display:grid;place-items:center}
+  .act-inner{display:grid;grid-template-columns:1fr 1.1fr;gap:clamp(32px,5vw,72px);align-items:center;width:100%}
+  .beats{position:relative;min-height:3.4em;margin:12px 0 20px}
+  .beat{position:absolute;inset:0;font-size:clamp(1.7rem,3.4vw,2.6rem);font-weight:640;letter-spacing:-.02em;line-height:1.1;opacity:0;transform:translateY(10px);transition:opacity .5s ease,transform .5s ease}
+  .beat .hl{color:var(--accent)}
+  .act-sub{color:var(--ink-soft);max-width:42ch}
+  .act-stage[data-beat="0"] .b1,.act-stage[data-beat="1"] .b2,.act-stage[data-beat="2"] .b3{opacity:1;transform:none}
+  .act-editor .bar .chips{margin-left:auto;position:relative;width:96px;height:20px}
+  .chip{position:absolute;right:0;top:0;display:inline-flex;align-items:center;gap:5px;font-family:var(--sans);font-size:.72rem;padding:2px 9px;border-radius:999px;border:1px solid currentColor;opacity:0;transition:opacity .45s ease}
+  .chip.pending{color:var(--pending)} .chip.kept{color:var(--kept)} .chip.undone{color:var(--undone)}
+  .chip.kept .tk{color:var(--accent)}
+  .act-stage[data-beat="0"] .chip.pending,.act-stage[data-beat="1"] .chip.kept,.act-stage[data-beat="2"] .chip.undone{opacity:1}
+  .act-editor .add{transition:opacity .5s ease}
+  .act-stage[data-beat="2"] .act-editor .add{opacity:.38;box-shadow:none;background:transparent}
+  .act-stage[data-beat="2"] .act-editor .add .t{text-decoration:line-through}
+  @media (max-width:900px){.act-inner{grid-template-columns:1fr;gap:32px}.beats{min-height:auto;margin-bottom:16px}.beat{position:static;opacity:1;transform:none;display:none}.act-stage[data-beat="0"] .b1,.act-stage[data-beat="1"] .b2,.act-stage[data-beat="2"] .b3{display:block}}
 
-  /* --- hero --- */
-  .hero-grid { display: grid; grid-template-columns: 1.05fr 0.95fr; gap: clamp(28px, 5vw, 60px); align-items: center; }
-  @media (max-width: 860px) { .hero-grid { grid-template-columns: 1fr; } }
-  .hero h1 { margin-top: 6px; }
-  .hero h1 .hl { color: var(--accent); }
-  .hero .lede { margin-top: 22px; }
-  .cta-row { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 30px; align-items: center; }
-  .cmd {
-    font-family: var(--mono); font-size: 0.9rem; color: var(--ink);
-    background: var(--surface); border: 1px solid var(--border-strong); border-radius: 10px;
-    padding: 12px 15px; display: inline-flex; align-items: center; gap: 12px;
-  }
-  .cmd .dollar { color: var(--accent); }
-  .cmd button {
-    font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase;
-    border: 1px solid var(--border); background: var(--surface-2); color: var(--ink-soft);
-    border-radius: 6px; padding: 4px 9px; cursor: pointer;
-  }
-  .cmd button:hover { color: var(--accent-ink); border-color: var(--accent); }
-  .btn-ghost {
-    font-family: var(--mono); font-size: 0.8rem; letter-spacing: 0.05em; color: var(--ink-soft);
-    padding: 12px 8px; text-decoration: none;
-  }
-  .btn-ghost:hover { color: var(--ink); }
+  /* moments */
+  .moment{text-align:center}
+  .moment .lede{margin:16px auto 0;max-width:56ch}
+  .panel{background:var(--surface);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);overflow:hidden;margin-top:clamp(36px,5vw,60px)}
+  .panel .scroll{overflow-x:auto}
+  .panel img{display:block;width:100%;height:auto}
 
-  /* --- generic panel / mock --- */
-  .panel {
-    background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
-    box-shadow: 0 1px 0 rgba(0,0,0,0.02), 0 22px 50px -32px rgba(10, 12, 20, 0.5);
-    overflow: hidden;
-  }
-  .panel-head {
-    display: flex; align-items: center; gap: 9px; padding: 11px 15px;
-    border-bottom: 1px solid var(--border); background: var(--surface-2);
-    font-family: var(--mono); font-size: 0.74rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-faint);
-  }
-  .panel-head .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border-strong); }
-  .panel-head .spacer { flex: 1; }
+  /* specs */
+  .specs{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line-soft);border:1px solid var(--line-soft);border-radius:16px;overflow:hidden;margin-top:clamp(30px,4vw,48px)}
+  .specs .s{background:var(--bg);padding:26px 22px}
+  .specs .n{font-family:var(--mono);font-size:1.7rem;color:var(--accent);font-weight:600}
+  .specs .l{font-family:var(--mono);font-size:.68rem;text-transform:uppercase;letter-spacing:.09em;color:var(--ink-faint);margin:8px 0 8px}
+  .specs .d{font-size:.9rem;color:var(--ink-soft)}
+  @media (max-width:720px){.specs{grid-template-columns:1fr 1fr}}
 
-  .dimmed { color: var(--ink-faint); }
-  .kept { color: var(--kept); }
-  .reverted { color: var(--reverted); }
-  .pending { color: var(--pending); }
-
-  /* timeline (hero mock) */
-  .timeline { padding: 14px 16px 18px; }
-  .tl-row { display: grid; grid-template-columns: 74px 1fr; align-items: center; column-gap: 16px; position: relative; }
-  .tl-row .t { font-family: var(--mono); font-size: 0.82rem; color: var(--ink-soft); font-variant-numeric: tabular-nums; text-align: right; }
-  .tl-row .body { position: relative; padding: 9px 0 9px 26px; border-left: 2px dashed var(--line); }
-  .tl-row .body::before {
-    content: ""; position: absolute; left: -6px; top: 50%; transform: translateY(-50%);
-    width: 9px; height: 9px; border-radius: 50%; background: var(--surface); border: 2px solid var(--line);
-  }
-  .tl-row.pending .body::before { border-color: var(--pending); }
-  .tl-row.kept .body::before { border-color: var(--kept); background: var(--kept); }
-  .tl-row .body .n { font-family: var(--mono); color: var(--ink); }
-  .tl-row .body .f { color: var(--ink-faint); font-size: 0.86rem; margin-left: 10px; }
-
-  /* editor / inline overlay mock */
-  .editor { font-family: var(--mono); font-size: 0.84rem; line-height: 1.75; padding: 6px 0; overflow-x: auto; }
-  .eline { display: flex; align-items: center; gap: 0; padding: 0 16px; position: relative; white-space: pre; }
-  .eline .gutn { color: var(--ink-faint); width: 2.4em; text-align: right; margin-right: 16px; user-select: none; flex: none; }
-  .eline.changed { background: color-mix(in srgb, var(--kept) 7%, transparent); box-shadow: inset 3px 0 0 var(--accent); }
-  /* deletion: subtle red line tint + bar (mirror of .changed) with the removed line as red "ghost" text */
-  .eline.deleted { background: color-mix(in srgb, var(--deleted) 7%, transparent); box-shadow: inset 3px 0 0 var(--deleted); }
-  .eline .marker { margin-left: 14px; color: var(--ink-faint); font-style: italic; }
-  .eline .marker.del { color: var(--deleted); }
-  .eline .marker .sw { font-style: normal; }
-  .tok-key { color: var(--accent-ink); }
-  .tok-str { color: var(--kept); }
-  /* inline menu (CodeLens) above an edit: ✨ #N view changes + spaced-out Keep/Undo/Chat */
-  .lens { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 4px 16px 8px 54px; }
-  .gutstar { color: var(--accent); font-size: 0.72rem; margin: 0 6px 0 2px; }
-  .id { color: var(--accent-ink); font-family: var(--mono); }
-  .actions { display: flex; flex-wrap: wrap; gap: 7px; }
-  .act {
-    font-family: var(--mono); font-size: 0.74rem; display: inline-flex; align-items: center; gap: 6px;
-    padding: 5px 11px; border-radius: 7px; border: 1px solid var(--border); color: var(--ink-soft); background: var(--surface);
-  }
-  .act .g { color: var(--accent); }
-  .act.keep:hover { color: var(--kept); border-color: var(--kept); }
-  .act.undo:hover { color: var(--accent-ink); border-color: var(--accent); }
-
-  /* diff mock */
-  .diff { font-family: var(--mono); font-size: 0.82rem; line-height: 1.7; }
-  .dside .panel-head { justify-content: flex-start; }
-  .dline { padding: 1px 14px; white-space: pre; }
-  .dline.add { background: color-mix(in srgb, var(--kept) 14%, transparent); }
-  .dline.del { background: color-mix(in srgb, var(--accent) 13%, transparent); }
-  .dline .s { display: inline-block; width: 1.4em; color: var(--ink-faint); }
-
-  /* cli */
-  .cli { font-family: var(--mono); font-size: 0.82rem; line-height: 1.7; padding: 16px 18px; overflow-x: auto; }
-  .cli .l { white-space: pre; }
-  .cli .p { color: var(--accent); }
-  .cli .c { color: var(--ink); }
-  .cli .o { color: var(--ink-soft); }
-  .cli .g { color: var(--kept); }
-  .cli .y { color: var(--pending); }
-  .cli .muted { color: var(--ink-faint); }
-
-  /* specs strip */
-  .specs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; }
-  @media (max-width: 760px) { .specs { grid-template-columns: repeat(2, 1fr); } }
-  .spec { background: var(--surface); padding: 22px 20px; }
-  .spec .k { font-family: var(--mono); font-size: 1.5rem; color: var(--accent-ink); letter-spacing: -0.02em; }
-  .spec .l { font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-faint); margin-top: 8px; }
-  .spec .d { font-size: 0.92rem; color: var(--ink-soft); margin-top: 8px; }
-
-  /* feature layout */
-  .feat { display: grid; grid-template-columns: 0.82fr 1.18fr; gap: clamp(26px, 4.5vw, 56px); align-items: start; }
-  .feat.flip { grid-template-columns: 1.18fr 0.82fr; }
-  .feat.flip .feat-copy { order: 2; }
-  @media (max-width: 860px) { .feat, .feat.flip { grid-template-columns: 1fr; } .feat.flip .feat-copy { order: 0; } }
-  .feat-copy h2 { margin-top: 0; }
-  .feat-copy .prose { margin-top: 16px; }
-  .caption { font-family: var(--mono); font-size: 0.74rem; color: var(--ink-faint); margin-top: 12px; letter-spacing: 0.01em; }
-  .caption strong { color: var(--ink-soft); font-weight: 600; }
-  .scroll-x { overflow-x: auto; }
-  .framed { margin-top: 26px; padding: 0; }
-
-  /* Anatomy of the layout — a labeled schematic (not a screenshot) naming every region */
-  .anatomy { margin-top: 30px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface);
-             overflow: hidden; }
-  .anatomy .an-body { display: flex; min-height: 300px; }
-  .anatomy .an-activity { flex: 0 0 168px; background: var(--surface-2); border-right: 1px solid var(--border);
-                          padding: 16px 14px; display: flex; flex-direction: column; gap: 6px; }
-  .anatomy .an-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-  .anatomy .an-tabbar { border-bottom: 1px solid var(--border); background: var(--surface-2); padding: 12px 20px;
-                        display: flex; flex-direction: column; gap: 8px; }
-  .anatomy .an-editor { flex: 1; padding: 18px 20px; display: flex; flex-direction: column; gap: 11px; }
-  .anatomy .an-panel { border-top: 1px solid var(--border); background: var(--surface-2); padding: 15px 20px;
-                       display: flex; flex-direction: column; gap: 9px; }
-  .anatomy .an-status { border-top: 1px solid var(--border); padding: 9px 20px; display: flex; align-items: center; gap: 10px;
-                        font-family: var(--mono); font-size: 0.72rem; color: var(--ink-faint); background: var(--surface); }
-  .anatomy .an-zone { font-family: var(--mono); font-size: 0.62rem; letter-spacing: 0.10em; text-transform: uppercase;
-                      color: var(--ink-faint); }
-  .anatomy .part { display: flex; flex-direction: column; gap: 1px; }
-  .anatomy .part b { font-size: 0.86rem; color: var(--ink); font-weight: 600; }
-  .anatomy .part span { font-size: 0.76rem; color: var(--ink-soft); }
-  .anatomy .part.row { flex-direction: row; align-items: baseline; gap: 8px; flex-wrap: wrap; }
-  .anatomy .part.row b { white-space: nowrap; }
-  .anatomy .mk { color: var(--accent); }
-  .anatomy .an-parts-inline { display: flex; flex-wrap: wrap; gap: 8px 22px; }
-  .anatomy .chip { font-family: var(--mono); font-size: 0.72rem; color: var(--ink-soft); }
-  .anatomy .chip b { color: var(--ink); font-weight: 600; }
-
-  ul.ticks { list-style: none; padding: 0; margin: 20px 0 0; display: flex; flex-direction: column; gap: 11px; }
-  ul.ticks li { position: relative; padding-left: 26px; color: var(--ink-soft); }
-  ul.ticks li::before { content: "\2192"; position: absolute; left: 0; color: var(--accent); font-family: var(--mono); }
-  ul.ticks li strong { color: var(--ink); font-weight: 600; }
-
-  /* two-up image grid */
-  .shots { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; margin-top: 30px; align-items: start; }
-  @media (max-width: 760px) { .shots { grid-template-columns: 1fr; } }
-
-  /* callout */
-  .callout {
-    display: grid; grid-template-columns: auto 1fr; gap: 16px; align-items: start;
-    background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
-    border-radius: 14px; padding: 20px 22px; margin-top: 30px;
-  }
-  .callout .mark { font-family: var(--mono); color: var(--accent-ink); font-size: 1.2rem; line-height: 1.3; }
-  .callout p { color: var(--ink-soft); }
-  .callout strong { color: var(--ink); }
-
-  /* how-it-works flow */
-  .flow { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 30px; }
-  @media (max-width: 760px) { .flow { grid-template-columns: repeat(2, 1fr); } }
-  .node { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
-  .node .s { font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent-ink); }
-  .node .t { font-weight: 600; margin-top: 9px; font-size: 0.98rem; }
-  .node .x { color: var(--ink-soft); font-size: 0.88rem; margin-top: 7px; }
-
-  /* section intro */
-  .intro { max-width: 62ch; }
-  .intro h2 { margin-top: 0; }
-  .intro .prose { margin-top: 16px; }
+  /* install */
+  .cmd{display:flex;align-items:center;gap:12px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:13px 12px 13px 16px;font-family:var(--mono);font-size:.9rem;overflow-x:auto;max-width:640px;margin:26px auto 0}
+  .cmd .pr{color:var(--accent);flex:none}
+  .cmd code{white-space:nowrap;color:var(--ink)}
+  .cmd .copy{margin-left:auto;flex:none;border:1px solid var(--line);background:var(--surface-2);color:var(--ink-soft);border-radius:7px;padding:5px 11px;font-family:var(--mono);font-size:.74rem;cursor:pointer;transition:.15s}
+  .cmd .copy:hover{color:var(--ink);border-color:var(--ink-faint)}
+  .install-cta{display:flex;gap:12px;flex-wrap:wrap;justify-content:center;margin-top:26px}
 
   /* footer */
-  footer { padding: 46px 0 60px; border-top: 1px solid var(--border); color: var(--ink-faint); }
-  .foot-grid { display: flex; flex-wrap: wrap; gap: 28px 40px; align-items: flex-start; justify-content: space-between; }
-  .foot-grid .col { max-width: 40ch; }
-  .foot-grid .col .h { font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-faint); margin: 0 0 12px; }
-  .foot-grid .col p { color: var(--ink-soft); font-size: 0.9rem; margin: 4px 0; }
-  .foot-grid code { color: var(--ink); }
-  .foot-links { display: flex; gap: 18px; margin-top: 10px; flex-wrap: wrap; }
-  .fine { font-family: var(--mono); font-size: 0.74rem; color: var(--ink-faint); margin-top: 34px; }
+  .foot{padding:56px 0 68px;border-top:1px solid var(--line-soft);color:var(--ink-faint)}
+  .foot .row{display:flex;flex-wrap:wrap;gap:20px 30px;align-items:center;justify-content:space-between}
+  .foot .flinks{display:flex;flex-wrap:wrap;gap:20px;font-size:.92rem}
+  .foot .flinks a{color:var(--ink-soft)} .foot .flinks a:hover{color:var(--ink)}
+  .foot .fine{font-family:var(--mono);font-size:.74rem;margin-top:16px}
 
-  /* hidden state is applied by JS only (see script), so a no-JS/failed-JS render stays fully visible */
-  .reveal { transition: opacity 0.6s ease, transform 0.6s ease; }
-  :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
-  @media (prefers-reduced-motion: reduce) {
-    html { scroll-behavior: auto; }
-    .reveal { transition: none; }
+  /* gutter index (wide screens only) */
+  .gutter{position:fixed;left:26px;top:50%;transform:translateY(-50%);z-index:40;display:none;flex-direction:column;gap:15px}
+  .gutter a{font-family:var(--mono);font-size:.72rem;color:var(--ink-faint);letter-spacing:.05em;transition:color .2s;display:flex;align-items:center;gap:8px}
+  .gutter a::before{content:"";width:14px;height:1px;background:var(--line);transition:width .2s,background .2s}
+  .gutter a.is-active{color:var(--accent-ink)} .gutter a.is-active::before{width:26px;background:var(--accent)}
+  @media (min-width:1240px){.gutter{display:flex}}
+
+  /* motion */
+  .rv{opacity:0;transform:translateY(20px);transition:opacity .6s cubic-bezier(.22,.61,.36,1),transform .6s cubic-bezier(.22,.61,.36,1)}
+  .rv.in{opacity:1;transform:none}
+  .rv.scale{transform:translateY(22px) scale(.97);transition-duration:.75s}
+  .rv.scale.in{transform:none}
+  .hero-v{opacity:0;transform:translateY(40px) scale(.96);transition:opacity .9s cubic-bezier(.16,1,.3,1),transform .9s cubic-bezier(.16,1,.3,1);transition-delay:.12s}
+  .hero-v.in{opacity:1;transform:none}
+  .stagger>*{opacity:0;transform:translateY(16px);transition:opacity .6s ease,transform .6s ease;transition-delay:calc(var(--i,0)*80ms)}
+  .stagger.in>*{opacity:1;transform:none}
+  @media (prefers-reduced-motion:reduce){
+    html{scroll-behavior:auto}
+    .rv,.rv.scale,.hero-v,.stagger>*{opacity:1;transform:none;transition:opacity .2s ease}
+    .act-track{height:auto}.act-stage{position:static;height:auto;padding-block:64px}
+    .beats{min-height:auto}.beat{position:static;opacity:1;transform:none;display:block;font-size:1.4rem;margin-bottom:6px}
+    .chip{position:static;opacity:0}.chip.kept{opacity:1;display:inline-flex}.act-editor .bar .chips{width:auto}
   }
 </style>
+</head>
+<body>
 
-<header class="nav">
-  <div class="wrap nav-inner">
-    <a class="wordmark" href="#top" aria-label="Claude Observatory — top of page">
-      <span class="mark" aria-hidden="true">🔬</span>
-      <b>Claude Observatory</b>
-    </a>
-    <nav class="nav-links" aria-label="Primary">
-      <a href="#features">Features</a>
-      <a href="#editors">Editors</a>
-      <a href="#dashboards">Dashboards</a>
-      <a href="#cli">CLI</a>
+<nav class="nav" id="nav">
+  <div class="wrap row">
+    <a class="brand" href="#hero"><span class="m">🔬</span> Claude Observatory</a>
+    <div class="links">
+      <a href="#hero">Overview</a>
+      <a href="#act">Review</a>
       <a href="#install">Install</a>
-    </nav>
-    <div class="nav-actions">
-      <button class="theme-toggle" id="tt" aria-label="Switch between light and dark theme">◐ Theme</button>
-      <a class="nav-gh" href="https://github.com/cell-observatory/claude-observatory" target="_blank" rel="noopener noreferrer" aria-label="Claude Observatory on GitHub">GitHub ↗</a>
+      <a class="more" href="features.html">Features&nbsp;→</a>
+      <a href="https://github.com/cell-observatory/claude-observatory">GitHub</a>
+    </div>
+    <div class="right">
+      <button class="icon-btn" id="theme" aria-label="Toggle theme">◐</button>
+      <a class="ghost" href="https://github.com/cell-observatory/claude-observatory">GitHub&nbsp;↗</a>
+    </div>
+  </div>
+</nav>
+
+<aside class="gutter" aria-hidden="true">
+  <a href="#hero" data-spy="hero">01</a>
+  <a href="#act" data-spy="act">02</a>
+  <a href="#everywhere" data-spy="everywhere">03</a>
+  <a href="#specs" data-spy="specs">04</a>
+  <a href="#install" data-spy="install">05</a>
+</aside>
+
+<header class="hero" id="hero">
+  <div class="wrap hero-grid">
+    <div class="stagger">
+      <span class="eyebrow" style="--i:0">A review deck for Claude Code</span>
+      <h1 style="--i:1">Every edit Claude makes, <span class="hl">under review.</span></h1>
+      <p class="lede" style="--i:2">Per-edit Keep or Undo for Claude Code. Each change becomes a reviewable entry with its own surgical undo — in the terminal, VS Code, and JetBrains, at zero extra tokens.</p>
+      <div class="cta" style="--i:3">
+        <a class="btn primary" href="#install">Get started</a>
+        <a class="btn line" href="#act">See how it works</a>
+      </div>
+      <div class="meta" style="--i:4">git-free · zero extra Claude tokens · terminal + VS Code + JetBrains</div>
+    </div>
+
+    <div class="editor hero-v" aria-label="Inline review: a Claude edit with Keep / Undo and its diff">
+      <div class="bar">
+        <span class="d" style="background:#ff5f57"></span><span class="d" style="background:#febc2e"></span><span class="d" style="background:#28c840"></span>
+        <span class="fn">User.js</span>
+      </div>
+      <div class="code">
+        <div class="ln"><span class="n">5</span><span class="t">  <span class="fnm">greet</span>() {</span></div>
+        <div class="ln"><span class="n">6</span><span class="t">    <span class="kw">return</span> <span class="st">`Hello, ${this.name}!`</span>;</span></div>
+        <div class="ln"><span class="n">7</span><span class="t">  }</span></div>
+        <div class="lens"><span class="sp">✨ #2 · +4 −0 · view changes</span><span class="a">✓ Keep</span><span class="a">↩ Undo</span><span class="a">💬 Chat</span><span class="a">⧉ View diff</span></div>
+        <div class="ln add"><span class="n">8</span><span class="t"><span class="star">✨</span>  <span class="fnm">farewell</span>() {</span></div>
+        <div class="ln add"><span class="n">9</span><span class="t">    <span class="kw">return</span> <span class="st">`Goodbye from ${this.name}!`</span>;</span></div>
+        <div class="ln add"><span class="n">10</span><span class="t">  }</span></div>
+      </div>
+      <div class="bubble">
+        <div class="bh">
+          <span>✨ Claude edit <span class="id">#2</span></span>
+          <span class="id">+4 −0</span>
+          <span class="why">💭 added a farewell() to mirror greet()</span>
+          <span class="tools"><span>✓ Accept</span><span>↩ Revert</span><span>↓ Next</span></span>
+        </div>
+        <div class="diff">
+          <span class="dl h">@@ -5,3 +5,7 @@ class User</span>
+          <span class="dl c">   greet() {</span>
+          <span class="dl c">   }</span>
+          <span class="dl ad">+  farewell() {</span>
+          <span class="dl ad">+    return `Goodbye from ${this.name}!`;</span>
+          <span class="dl ad">+  }</span>
+        </div>
+      </div>
     </div>
   </div>
 </header>
 
-<main>
-  <!-- ================= HERO ================= -->
-  <section class="hero" id="top">
-    <div class="wrap">
-      <div class="hero-grid">
-        <div>
-          <span class="eyebrow">A review deck for Claude Code</span>
-          <h1>Every edit Claude makes, <span class="hl">under observation.</span></h1>
-          <p class="lede">Surgical Claude, not vibe coding: every file change lands as a reviewable edit with its own <strong>Keep</strong> or <strong>Undo</strong>. Built for critical infrastructure — you stay in the loop, Claude supplies the speed. Standalone, git-free, zero extra tokens.</p>
-          <div class="cta-row">
-            <span class="cmd"><span><span class="dollar">$</span> curl -fsSL …/bootstrap.sh | bash</span><button id="copyInstall">Copy</button></span>
-            <a class="btn-ghost" href="#install">Read the quickstart →</a>
-          </div>
-          <p class="caption">Zero extra Claude tokens · terminal · VS Code · PyCharm &amp; JetBrains IDEs · macOS / Linux / Windows</p>
+<!-- SIGNATURE: the pinned review act -->
+<section class="act-track" id="act">
+  <div class="act-stage" data-beat="0">
+    <div class="wrap act-inner">
+      <div>
+        <span class="eyebrow">Per-edit review</span>
+        <div class="beats">
+          <p class="beat b1">Claude proposes a change.</p>
+          <p class="beat b2">You <span class="hl">keep</span> what's right —</p>
+          <p class="beat b3">and undo what isn't, one edit at a time.</p>
         </div>
-
-        <!-- hero mock: the Timeline change feed -->
-        <div class="panel reveal" aria-hidden="true">
-          <div class="panel-head"><span class="dot" style="background:var(--pending)"></span> Timeline <span class="spacer"></span> session a7021c0e</div>
-          <div class="timeline">
-            <div class="tl-row pending"><div class="t">19:32</div><div class="body"><span class="n">index.js</span><span class="f">+6 −0 · created index.js</span></div></div>
-            <div class="tl-row kept"><div class="t">19:31</div><div class="body"><span class="n">User.js&nbsp;&nbsp;×2</span><span class="f">+13 −1 · added farewell() to mirror greet()</span></div></div>
-          </div>
-        </div>
+        <p class="act-sub">No end-of-session mega-diff. Every entry stands alone: accept it, revert it, or open its diff — reverting the third change never touches the other nine.</p>
       </div>
-    </div>
-  </section>
-
-  <!-- ================= SPECS ================= -->
-  <section>
-    <div class="wrap">
-      <div class="specs reveal">
-        <div class="spec"><div class="k">0</div><div class="l">Claude tokens</div><div class="d">Capture runs in local hooks, entirely outside the model loop.</div></div>
-        <div class="spec"><div class="k">1</div><div class="l">edit, 1 undo</div><div class="d">Revert a single change and keep every later edit to the same file.</div></div>
-        <div class="spec"><div class="k">3</div><div class="l">surfaces, 1 store</div><div class="d">The CLI, VS Code, and PyCharm/JetBrains read &amp; write the same log, in sync.</div></div>
-        <div class="spec"><div class="k">git</div><div class="l">not required</div><div class="d">A content-addressed snapshot store — no repo, no commits, no staging.</div></div>
-      </div>
-    </div>
-  </section>
-
-  <!-- ================= INLINE REVIEW ================= -->
-  <section id="features">
-    <div class="wrap">
-      <div class="feat">
-        <div class="feat-copy">
-          <span class="eyebrow">Inline review</span>
-          <h2>Keep or undo, right where Claude wrote it.</h2>
-          <p class="prose">Each pending edit gets a <span style="color:var(--accent)">✨</span> <strong>gutter star</strong> at its start and a <strong>subtle</strong> green/red line tint — toned down so a heavily edited file doesn't drown in color. Above it sits an <strong>inline menu</strong>: <strong>✨ #N · +A −R · view changes</strong>, then <strong>Keep</strong>, <strong>Undo</strong>, <strong>Chat</strong>, <strong>View diff</strong>. In <strong>VS Code</strong>, "view changes" opens an <strong>inline review bubble</strong> right at the edit — no tab — with the diff in <strong>git's own colors</strong> (green/red text over translucent line fills), Claude's <strong>reasoning</strong>, the <strong>+A −R</strong> counts, and <strong>Accept · Revert · Chat · Prev · Next</strong> on the bubble's toolbar; <strong>View diff</strong> opens the same edit as a <strong>full diff tab</strong> in its own tab, with Prev/Next cycling the file's edits in place. In <strong>PyCharm</strong> the lens opens the edit's unified diff. Nothing touches disk until you say so.</p>
-          <ul class="ticks">
-            <li><strong>Keep</strong> marks an edit reviewed — no file change.</li>
-            <li><strong>Undo</strong> rewrites just that change back out.</li>
-            <li>Additions highlight green; <strong>removed lines</strong> show as red ghost text where they were.</li>
-            <li>Kept edits grey out; reverted ones stay struck through.</li>
-            <li><strong>File heatmap</strong> (📄) spotlights Claude's lines; <strong>revision nav</strong> (<code>⌥⌘[</code> / <code>⌥⌘]</code>) diffs against a file's earlier edits.</li>
-            <li>A <strong>File History</strong> view follows the open file; the <strong>Stats</strong> tab shows a live review scoreboard + progress bar.</li>
-          </ul>
+      <div class="editor act-editor" aria-hidden="true">
+        <div class="bar">
+          <span class="d" style="background:#ff5f57"></span><span class="d" style="background:#febc2e"></span><span class="d" style="background:#28c840"></span>
+          <span class="fn">User.js</span>
+          <span class="chips">
+            <span class="chip pending">● pending</span>
+            <span class="chip kept"><span class="tk">✓</span> kept</span>
+            <span class="chip undone">⤺ undone</span>
+          </span>
         </div>
-        <div class="panel reveal" aria-hidden="true">
-          <div class="panel-head"><span class="dot"></span> src/models/User.js</div>
-          <div class="editor">
-            <div class="lens"><span class="act"><span class="g">✨</span> <span class="id">#5</span> +2 −4 view changes</span><span class="act"><span class="g">💭</span> dropped greet(); added a role field</span><span class="act keep"><span class="g">✓</span> Keep</span><span class="act undo"><span class="g">⤺</span> Undo</span><span class="act"><span class="g">💬</span> Chat</span></div>
-            <div class="eline"><span class="gutn">2</span>  <span class="tok-key">constructor</span>(name) {</div>
-            <div class="eline"><span class="gutn">3</span>    <span class="tok-key">this</span>.name = name;</div>
-            <div class="eline"><span class="gutn">4</span>  }</div>
-            <div class="eline deleted"><span class="gutn">5</span>}<span class="marker del">− greet() { …(+3)</span></div>
-            <div class="eline"><span class="gutn">6</span> </div>
-            <div class="eline changed"><span class="gutn">7</span><span class="gutstar">✨</span><span class="tok-key">User</span>.role = <span class="tok-str">'member'</span>;</div>
-            <div class="eline"><span class="gutn">8</span> </div>
-            <div class="eline"><span class="gutn">9</span><span class="tok-key">module</span>.exports = User;</div>
-          </div>
+        <div class="code">
+          <div class="ln"><span class="n">7</span><span class="t">  }</span></div>
+          <div class="ln add"><span class="n">8</span><span class="t"><span class="star">✨</span>  <span class="fnm">farewell</span>() {</span></div>
+          <div class="ln add"><span class="n">9</span><span class="t">    <span class="kw">return</span> <span class="st">`Goodbye from ${this.name}!`</span>;</span></div>
+          <div class="ln add"><span class="n">10</span><span class="t">  }</span></div>
+          <div class="ln"><span class="n">11</span><span class="t">}</span></div>
         </div>
       </div>
     </div>
-  </section>
+  </div>
+</section>
 
-  <!-- ================= SURGICAL UNDO ================= -->
-  <section>
-    <div class="wrap">
-      <div class="feat flip">
-        <div class="feat-copy">
-          <span class="eyebrow">Surgical undo</span>
-          <h2>Undo the middle edit. Keep the rest.</h2>
-          <p class="prose">Undo isn't a whole-file rewind. It's a <strong>position-anchored 3-way line merge</strong>: the edit is peeled out while later edits to other lines stay put. Anchoring on line position — not fuzzy text search — keeps it correct even when the same line appears twice. A genuine overlap raises a clear conflict and offers a per-file restore instead of guessing.</p>
-          <p class="caption">Three edits to one file → undo #2 only → #1 and #3 survive.</p>
-        </div>
-        <div class="scroll-x reveal" aria-hidden="true">
-          <div class="diff">
-            <div class="panel dside" style="margin-bottom:14px">
-              <div class="panel-head"><span class="dot" style="background:var(--reverted)"></span> before undo</div>
-              <div class="dline add"><span class="s">1</span>TOP        <span class="dimmed"># edit #1</span></div>
-              <div class="dline add"><span class="s">6</span>MID        <span class="dimmed"># edit #2</span></div>
-              <div class="dline add"><span class="s">12</span>BOT       <span class="dimmed"># edit #3</span></div>
-            </div>
-            <div class="panel dside">
-              <div class="panel-head"><span class="dot" style="background:var(--kept)"></span> after undo #2</div>
-              <div class="dline"><span class="s">1</span>TOP        <span class="kept" style="font-family:var(--mono)"># kept ✓</span></div>
-              <div class="dline del"><span class="s">6</span>L6         <span class="dimmed"># #2 reverted</span></div>
-              <div class="dline"><span class="s">12</span>BOT       <span class="kept" style="font-family:var(--mono)"># kept ✓</span></div>
-            </div>
-          </div>
-        </div>
-      </div>
+<!-- moments -->
+<section class="moment" id="everywhere">
+  <div class="wrap rv">
+    <span class="eyebrow">Terminal, VS Code, JetBrains</span>
+    <h2>The same review in every editor you use.</h2>
+    <p class="lede">One backend, identical decisions across the CLI, VS Code, and JetBrains. Start reviewing in the terminal, finish in your editor — nothing to reconcile.</p>
+  </div>
+  <div class="wrap"><div class="panel rv scale"><img src="media/layout.png" loading="lazy" alt="The observatory in VS Code: sidebar edits, inline review, and the bottom dashboards"></div></div>
+</section>
+
+<section class="moment" id="standalone">
+  <div class="wrap rv">
+    <span class="eyebrow">No repo required</span>
+    <h2>Standalone. Git-free. Shareable.</h2>
+    <p class="lede">A content-addressed snapshot store records every edit itself — no repo, no commits, zero extra Claude tokens. Then hand the session to a teammate.</p>
+  </div>
+  <div class="wrap"><div class="panel rv scale"><img src="media/file-history.png" loading="lazy" alt="File History: the active file's edits, newest first, following the editor"></div></div>
+</section>
+
+<section class="moment" id="specs">
+  <div class="wrap center rv">
+    <span class="eyebrow">By the numbers</span>
+    <h2>Quietly out of your way.</h2>
+  </div>
+  <div class="wrap"><div class="specs rv">
+    <div class="s"><div class="n">0</div><div class="l">extra tokens</div><div class="d">Capture runs in local hooks, outside the model loop.</div></div>
+    <div class="s"><div class="n">1</div><div class="l">edit → 1 undo</div><div class="d">Revert one change; keep every later edit to the file.</div></div>
+    <div class="s"><div class="n">3</div><div class="l">surfaces → 1 store</div><div class="d">CLI, VS Code &amp; JetBrains read the same log, in sync.</div></div>
+    <div class="s"><div class="n">git</div><div class="l">not required</div><div class="d">A content-addressed snapshot store — no repo, no commits.</div></div>
+  </div></div>
+</section>
+
+<section class="moment center" id="install">
+  <div class="wrap rv">
+    <span class="eyebrow">Install</span>
+    <h2>Get started in one command.</h2>
+    <p class="lede">Install, run Claude Code, and every edit is waiting for you.</p>
+    <div class="cmd"><span class="pr">$</span><code>curl -fsSL https://raw.githubusercontent.com/cell-observatory/claude-observatory/main/scripts/bootstrap.sh | bash</code><button class="copy" data-copy="curl -fsSL https://raw.githubusercontent.com/cell-observatory/claude-observatory/main/scripts/bootstrap.sh | bash">Copy</button></div>
+    <div class="install-cta">
+      <a class="btn primary" href="https://github.com/cell-observatory/claude-observatory#quickstart">Read the README</a>
+      <a class="btn line" href="features.html">See the full tour →</a>
     </div>
-  </section>
+  </div>
+</section>
 
-  <!-- ================= EDITORS ================= -->
-  <section id="editors">
-    <div class="wrap">
-      <div class="intro">
-        <span class="eyebrow">VS Code &amp; PyCharm</span>
-        <h2>Two editors. One observatory.</h2>
-        <p class="prose"><strong>Edits</strong> and <strong>Diffs</strong> live in the activity bar, grouping changes <strong>folder → file → class</strong>. <strong>Observations</strong>, <strong>Timeline</strong>, and <strong>Stats</strong> sit side by side in the bottom panel — a live dashboard next to your terminal, with a status-bar microscope counting pending edits in realtime.</p>
-        <p class="prose" style="margin-top:14px">The VS Code extension and the PyCharm/JetBrains plugin are <strong>full peers</strong> — the same trees, inline menus, click-to-diff review, dashboards, and keyboard loop (<code>⌥⌘N</code> next · <code>⌥⌘Y</code> keep · <code>⌥⌘U</code> undo · <code>⌥⌘[</code>/<code>⌥⌘]</code> revisions), all over one store. Keep an edit in PyCharm and it greys out in VS Code and the CLI the same instant. The JetBrains plugin uses platform-only APIs, so it runs in PyCharm CE/Pro, IntelliJ, WebStorm, GoLand — any JetBrains IDE, including on a Remote Development host.</p>
-      </div>
-
-      <div class="anatomy reveal" aria-label="Anatomy of the layout — every part named">
-        <div class="an-body">
-          <div class="an-activity">
-            <div class="an-zone">Activity bar</div>
-            <div class="part"><b>Edits</b><span>changes, folder → file → class</span></div>
-            <div class="part"><b>Diffs</b><span>same tree, click → colored diff</span></div>
-            <div class="part"><b>File History</b><span>the active file's edits, in order</span></div>
-          </div>
-          <div class="an-main">
-            <div class="an-tabbar">
-              <div class="an-zone">Tab bar</div>
-              <div class="an-parts-inline">
-                <span class="chip"><b>Per-file review toolbar</b> — shows while the file has pending edits: prev/next pending · ✓ accept all in file · ✕ revert all in file · 🔍 search edits · 📄 heatmap</span>
-              </div>
-            </div>
-            <div class="an-editor">
-              <div class="an-zone">Editor</div>
-              <div class="part"><b><span class="mk">✨</span> Gutter star</b><span>marks where each pending edit begins</span></div>
-              <div class="part"><b>Inline menu (CodeLens)</b><span>✨ #N · +A −R · view changes · Keep · Undo · Chat · View diff</span></div>
-              <div class="part"><b>Inline review bubble</b><span>"view changes" → the diff in git's colors + reasoning + counts (Accept/Revert/Chat/Prev/Next on its toolbar)</span></div>
-              <div class="part"><b>Diff tab</b><span>"View diff" → the edit as a full diff tab, in its own tab (Keep/Undo/Chat + Prev/Next cycle edits in place on its title bar)</span></div>
-              <div class="part"><b>Overview-ruler marks</b><span>Claude-coral ticks down the scrollbar</span></div>
-            </div>
-            <div class="an-panel">
-              <div class="an-zone">Bottom panel</div>
-              <div class="an-parts-inline">
-                <span class="chip"><b>Observations</b> — recap · reasoning · file memory</span>
-                <span class="chip"><b>Timeline</b> — newest-first change feed</span>
-                <span class="chip"><b>Stats</b> — review scoreboard · trends · usage</span>
-              </div>
-            </div>
-          </div>
-        </div>
-        <div class="an-status"><span class="mk">🔬</span> <b style="color:var(--ink);font-weight:600">Status-bar microscope</b> — live pending-edit count (amber while any await review); click → next pending edit</div>
-      </div>
-      <p class="caption"><strong>Anatomy of the layout</strong> — every part named. VS Code shown; PyCharm mirrors it (Activity bar → tool windows, bottom panel → the Dashboards window).</p>
-
-      <div class="panel reveal framed">
-        <img src="media/layout.png" alt="Claude Observatory in VS Code: Edits / Diffs / File History trees, the ✨ gutter stars and inline menu (✨ #N view changes · Keep · Undo · Chat), and the bottom panel with Observations, Timeline, and the review-scoreboard Stats" loading="lazy">
-      </div>
-      <p class="caption"><strong>VS Code</strong> — the Edits · Diffs · File History trees, the ✨ gutter stars + inline menu (✨ #N view changes · Keep · Undo · Chat), and the Observations · Timeline · Stats panel with the live review scoreboard.</p>
-
-      <div class="panel reveal framed">
-        <img src="media/pyc-layout.png" alt="Claude Observatory in PyCharm: Edits tool window, the ✨ gutter stars and inline lens (✨ #N view changes · Keep · Undo · Chat), and the Dashboards window with Observations, Timeline, and Stats" loading="lazy">
-      </div>
-      <p class="caption"><strong>PyCharm</strong> — the same session, same store: Edits tool window, the ✨ gutter stars + inline lens (✨ #N view changes · Keep · Undo · Chat), and the Claude Observatory Dashboards window.</p>
-    </div>
-  </section>
-
-  <!-- ================= DASHBOARDS ================= -->
-  <section id="dashboards">
-    <div class="wrap">
-      <div class="intro">
-        <span class="eyebrow">The dashboards</span>
-        <h2>A change feed and a flight recorder.</h2>
-        <p class="prose"><strong>Observations</strong> pairs a zero-token session recap with Claude's per-edit reasoning and a cross-session memory of each file (accept/revert history, revert-risk flags). <strong>Timeline</strong> is the session as a feed — newest first, consecutive edits to a file coalesced into one <code>×N</code> row. <strong>Stats</strong> is the long view: step-line trends of edits (pending / accepted / reverted) and tokens (total / input / output, log axis) over <strong>Today / 7 days / 30 days</strong>, with live usage bars — context fill plus your 5-hour and weekly plan windows.</p>
-      </div>
-
-      <div class="shots">
-        <div>
-          <div class="panel reveal" style="padding:0">
-            <img src="media/observations.png" alt="Observations panel: a session recap on top, then per-edit rows with Claude's reasoning, and a file-memory card flagging that this file's edits get reverted often" loading="lazy">
-          </div>
-          <p class="caption"><strong>Observations</strong> — session recap, per-edit reasoning, and cross-session file memory with revert-risk flags.</p>
-        </div>
-        <div>
-          <div class="panel reveal" style="padding:0">
-            <img src="media/stats.png" alt="Stats panel: a live review scoreboard (pending / accepted / reverted counts + a progress bar) over a token step-line trend with a Today / 7 days / 30 days toggle, and live usage bars for context, 5-hour, and weekly plan windows" loading="lazy">
-          </div>
-          <p class="caption"><strong>Stats</strong> — edit and token trends with a Today / 7d / 30d toggle, plus live context and plan-usage bars.</p>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <!-- ================= ZERO-TOKEN CAPTURE ================= -->
-  <section>
-    <div class="wrap">
-      <div class="intro">
-        <span class="eyebrow">Zero-token capture</span>
-        <h2>Hooks do the watching, not the model.</h2>
-        <p class="prose">Claude Code fires a hook before and after every edit. The observatory snapshots the file on each side and appends one record to an append-only log — never spending a token, never touching the model's context.</p>
-      </div>
-
-      <div class="flow reveal">
-        <div class="node"><div class="s">PreToolUse</div><div class="t">Snapshot before</div><div class="x">The file's bytes are captured the instant before Claude writes.</div></div>
-        <div class="node"><div class="s">PostToolUse</div><div class="t">Commit before + after</div><div class="x">Both sides are hashed into the content-addressed blob store.</div></div>
-        <div class="node"><div class="s">Store</div><div class="t">Append to log</div><div class="x"><code>~/.claude/claude-observatory/&lt;session&gt;/</code> — one JSONL line per edit.</div></div>
-        <div class="node"><div class="s">Review</div><div class="t">Keep · Undo · Diff</div><div class="x">CLI and sidebar fold status changes on read — nothing rewritten.</div></div>
-      </div>
-      <p class="caption">Captures Edit · Write · MultiEdit · NotebookEdit. Binary and &gt;5&nbsp;MB files are skipped; no-op edits aren't logged.</p>
-    </div>
-  </section>
-
-  <!-- ================= CLI ================= -->
-  <section id="cli">
-    <div class="wrap">
-      <div class="feat">
-        <div class="feat-copy">
-          <span class="eyebrow">Same store, no GUI</span>
-          <h2>A full review deck in the terminal.</h2>
-          <p class="prose">Prefer the shell, or running Claude Code headless? Every action has a command. The active session is resolved from your working directory — no ids to memorize.</p>
-          <ul class="ticks">
-            <li><code>status</code> — hook health, session, counts</li>
-            <li><code>list --pending</code> — filter by state or file</li>
-            <li><code>undo 2</code> — surgical, with a <code>--force</code> restore</li>
-            <li><code>clean --resolved</code> — clear what you've reviewed</li>
-          </ul>
-        </div>
-        <div class="panel reveal" aria-hidden="true">
-          <div class="panel-head"><span class="dot" style="background:var(--kept)"></span> zsh — claude-observatory</div>
-          <div class="cli">
-            <div class="l"><span class="p">$</span> <span class="c">claude-observatory list</span></div>
-            <div class="l"><span class="muted">  src/models/User.js</span></div>
-            <div class="l"><span class="o">   </span><span class="id">#1</span><span class="o">  +9 −0  </span><span class="reverted" style="text-decoration:line-through">reverted</span></div>
-            <div class="l"><span class="o">   </span><span class="id">#2</span><span class="o">  +4 −1  </span><span class="g">kept</span></div>
-            <div class="l"><span class="muted">  src/index.js</span></div>
-            <div class="l"><span class="o">   </span><span class="id">#3</span><span class="o">  +6 −0  </span><span class="y">pending</span></div>
-            <div class="l">&nbsp;</div>
-            <div class="l"><span class="p">$</span> <span class="c">claude-observatory undo 1</span></div>
-            <div class="l"><span class="g">  ✓ reverted edit #1 in src/models/User.js</span></div>
-            <div class="l"><span class="o">    later edits (#2) preserved</span></div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <!-- ================= QUICKSTART ================= -->
-  <section id="install">
-    <div class="wrap">
-      <div class="intro">
-        <span class="eyebrow">Quickstart</span>
-        <h2>One command to first light.</h2>
-      </div>
-      <div class="panel reveal" style="margin-top:26px" aria-hidden="true">
-        <div class="cli">
-          <div class="l"><span class="muted"># one command — CLI + VS Code &amp; JetBrains extensions from the latest release, hooks wired, health-checked</span></div>
-          <div class="l"><span class="p">$</span> <span class="c">curl -fsSL https://raw.githubusercontent.com/cell-observatory/claude-observatory/main/scripts/bootstrap.sh | bash</span></div>
-          <div class="l">&nbsp;</div>
-          <div class="l"><span class="muted"># anytime</span></div>
-          <div class="l"><span class="p">$</span> <span class="c">claude-observatory doctor</span><span class="muted">   # check hooks · PATH · session · usage</span></div>
-          <div class="l"><span class="p">$</span> <span class="c">claude-observatory update</span><span class="muted">   # update to the latest release</span></div>
-        </div>
-      </div>
-
-      <div class="callout reveal">
-        <div class="mark">!</div>
-        <p><strong>Install the hooks with Claude Code closed.</strong> A running session snapshots your hooks at start and reconciles from that snapshot — so hooks added mid-session silently won't take effect. The installer prompts you to run <code>init</code>; do it from a plain terminal, then launch Claude Code. Verify anytime with <code>claude-observatory doctor</code>. To share with a team, <code>init --project</code> writes the hook into a checked-in <code>./.claude/settings.json</code>.</p>
-      </div>
-
-      <p class="caption" style="margin-top:20px">Building from a clone instead? <code>./install.sh</code> sets up the CLI + VS Code extension, and <code>./scripts/install-jetbrains.sh</code> the JetBrains plugin. Re-run the one-liner (or <code>claude-observatory update</code>) to upgrade.</p>
-    </div>
-  </section>
-</main>
-
-<!-- ================= FOOTER ================= -->
-<footer>
+<footer class="foot" id="footer">
   <div class="wrap">
-    <div class="foot-grid">
-      <div class="col">
-        <span class="wordmark" style="margin-bottom:14px">
-          <span class="mark" aria-hidden="true">🔬</span>
-          <b>Claude Observatory</b>
-        </span>
-        <p>Complements Claude Code's native <code>/rewind</code> (whole-turn) with per-edit control. Built to be owned, forked, and shared.</p>
-        <div class="foot-links">
-          <a href="https://github.com/cell-observatory/claude-observatory" target="_blank" rel="noopener noreferrer">GitHub ↗</a>
-          <a href="#install">Quickstart</a>
-        </div>
-      </div>
-      <div class="col">
-        <p class="h">Packages</p>
-        <p><code>@claude-observatory/core</code> — capture · store · undo</p>
-        <p><code>claude-observatory</code> — the CLI</p>
-        <p><code>claude-observatory-vscode</code> — the VS Code sidebar</p>
-        <p><code>claude-observatory-jetbrains</code> — PyCharm &amp; friends</p>
-      </div>
-      <div class="col">
-        <p class="h">Get started</p>
-        <p><code>curl … bootstrap.sh | bash</code> — one-command install</p>
-        <p><code>claude-observatory init</code> — hooks (Claude closed)</p>
-        <p><code>claude-observatory doctor</code> — verify setup</p>
+    <div class="row">
+      <span class="brand"><span class="m">🔬</span> Claude Observatory</span>
+      <div class="flinks">
+        <a href="features.html">Features</a>
+        <a href="https://github.com/cell-observatory/claude-observatory/blob/main/docs/DEMO.md">Demo</a>
+        <a href="https://github.com/cell-observatory/claude-observatory/blob/main/docs/ARCHITECTURE.md">How it works</a>
+        <a href="https://github.com/cell-observatory/claude-observatory/blob/main/docs/REMOTE.md">Remote</a>
+        <a href="https://github.com/cell-observatory/claude-observatory/blob/main/CONTRIBUTING.md">Contribute</a>
+        <a href="https://github.com/cell-observatory/claude-observatory">GitHub ↗</a>
       </div>
     </div>
-    <p class="fine">Apache-2.0 · git-free · zero extra Claude tokens · runs where Claude Code runs</p>
+    <div class="fine">Apache-2.0 · git-free · zero extra Claude tokens · terminal + VS Code + JetBrains</div>
   </div>
 </footer>
 
 <script>
-  (function () {
-    // theme toggle: stamp data-theme, overriding the media query in both directions
-    var root = document.documentElement, tt = document.getElementById("tt");
-    function current() {
-      var set = root.getAttribute("data-theme");
-      if (set) return set;
-      return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-    }
-    tt.addEventListener("click", function () {
-      root.setAttribute("data-theme", current() === "dark" ? "light" : "dark");
+  // theme toggle (remembers choice; defaults to system)
+  (function(){
+    var root=document.documentElement, btn=document.getElementById('theme'), KEY='co-theme';
+    try{var s=localStorage.getItem(KEY); if(s) root.setAttribute('data-theme',s);}catch(e){}
+    btn.addEventListener('click',function(){
+      var cur=root.getAttribute('data-theme')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light');
+      var next=cur==='dark'?'light':'dark';
+      root.setAttribute('data-theme',next);
+      try{localStorage.setItem(KEY,next);}catch(e){}
     });
-
-    // copy install command
-    var ci = document.getElementById("copyInstall");
-    if (ci) ci.addEventListener("click", function () {
-      try { navigator.clipboard.writeText("curl -fsSL https://raw.githubusercontent.com/cell-observatory/claude-observatory/main/scripts/bootstrap.sh | bash"); } catch (e) {}
-      var t = ci.textContent; ci.textContent = "Copied";
-      setTimeout(function () { ci.textContent = t; }, 1400);
+  })();
+  // copy buttons
+  document.querySelectorAll('[data-copy]').forEach(function(b){
+    b.addEventListener('click',function(){
+      var t=b.getAttribute('data-copy'),old=b.textContent;
+      navigator.clipboard&&navigator.clipboard.writeText(t).then(function(){b.textContent='Copied ✓';setTimeout(function(){b.textContent=old;},1400);});
     });
-
-    // scroll reveals — hidden state is applied here, so no-JS/failed-JS keeps content visible
-    var reduceR = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    if ("IntersectionObserver" in window && !reduceR) {
-      var io = new IntersectionObserver(function (es) {
-        es.forEach(function (e) {
-          if (e.isIntersecting) { e.target.style.opacity = ""; e.target.style.transform = ""; io.unobserve(e.target); }
-        });
-      }, { threshold: 0.12 });
-      document.querySelectorAll(".reveal").forEach(function (el) {
-        el.style.opacity = "0"; el.style.transform = "translateY(16px)"; io.observe(el);
-      });
+  });
+  // scroll reveal
+  (function(){
+    var els=document.querySelectorAll('.rv,.hero-v,.stagger');
+    if(!('IntersectionObserver'in window)){els.forEach(function(e){e.classList.add('in');});return;}
+    var io=new IntersectionObserver(function(en){en.forEach(function(e){if(e.isIntersecting){e.target.classList.add('in');io.unobserve(e.target);}});},{threshold:.2,rootMargin:'0px 0px -8% 0px'});
+    els.forEach(function(e){io.observe(e);});
+  })();
+  // nav condense
+  (function(){
+    var nav=document.getElementById('nav');
+    var onScroll=function(){nav.classList.toggle('condensed',window.scrollY>40);};
+    window.addEventListener('scroll',onScroll,{passive:true});onScroll();
+  })();
+  // pinned review act: scroll fraction -> 3 beats
+  (function(){
+    var track=document.getElementById('act'),stage=track&&track.querySelector('.act-stage');
+    if(!track||!stage)return;
+    var ticking=false;
+    function update(){
+      var total=track.offsetHeight-window.innerHeight;
+      var p=total>0?Math.min(1,Math.max(0,-track.getBoundingClientRect().top/total)):0;
+      var beat=p<0.34?0:(p<0.67?1:2);
+      if(stage.getAttribute('data-beat')!=beat)stage.setAttribute('data-beat',beat);
+      ticking=false;
     }
+    window.addEventListener('scroll',function(){if(!ticking){requestAnimationFrame(update);ticking=true;}},{passive:true});
+    update();
+  })();
+  // gutter index scroll-spy
+  (function(){
+    var links=document.querySelectorAll('.gutter a');if(!links.length||!('IntersectionObserver'in window))return;
+    var map={};links.forEach(function(a){map[a.getAttribute('data-spy')]=a;});
+    var io=new IntersectionObserver(function(en){en.forEach(function(e){if(e.isIntersecting){
+      links.forEach(function(a){a.classList.remove('is-active');});
+      var a=map[e.target.id];if(a)a.classList.add('is-active');
+    }});},{rootMargin:'-45% 0px -50% 0px'});
+    ['hero','act','everywhere','specs','install'].forEach(function(id){var el=document.getElementById(id);if(el)io.observe(el);});
   })();
 </script>
-
 </body>
 </html>

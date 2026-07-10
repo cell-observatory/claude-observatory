@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Features — Claude Observatory</title>
+<meta name="description" content="A detailed tour of Claude Observatory: inline review, per-edit diffs, surgical undo, timeline, observations, stats, heatmap, conflict resolution, the CLI backend, and cross-editor parity.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%AC%3C/text%3E%3C/svg%3E">
+<style>
+  :root{
+    --bg:#fbfaf9; --surface:#ffffff; --surface-2:#f5f3f0;
+    --ink:#17171a; --ink-soft:#54545b; --ink-faint:#8b8a92;
+    --line:rgba(20,18,16,.10); --line-soft:rgba(20,18,16,.06);
+    --accent:#cf6440; --accent-ink:#a94e2c; --accent-soft:rgba(207,100,64,.10);
+    --shadow:0 30px 70px -40px rgba(40,25,15,.40), 0 8px 22px -18px rgba(40,25,15,.25);
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,Roboto,Helvetica,sans-serif;
+    --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+    --col:1140px;
+  }
+  @media (prefers-color-scheme:dark){:root{
+    --bg:#0e0e11;--surface:#161619;--surface-2:#1a1a1e;--ink:#ececef;--ink-soft:#a5a4ac;--ink-faint:#76757d;
+    --line:rgba(255,255,255,.11);--line-soft:rgba(255,255,255,.06);--accent:#e08a63;--accent-ink:#ef9f7c;--accent-soft:rgba(224,138,99,.14);
+    --shadow:0 30px 70px -40px rgba(0,0,0,.8),0 8px 22px -18px rgba(0,0,0,.6);
+  }}
+  :root[data-theme="light"]{--bg:#fbfaf9;--surface:#fff;--surface-2:#f5f3f0;--ink:#17171a;--ink-soft:#54545b;--ink-faint:#8b8a92;--line:rgba(20,18,16,.10);--line-soft:rgba(20,18,16,.06);--accent:#cf6440;--accent-ink:#a94e2c;--accent-soft:rgba(207,100,64,.10);--shadow:0 30px 70px -40px rgba(40,25,15,.40),0 8px 22px -18px rgba(40,25,15,.25)}
+  :root[data-theme="dark"]{--bg:#0e0e11;--surface:#161619;--surface-2:#1a1a1e;--ink:#ececef;--ink-soft:#a5a4ac;--ink-faint:#76757d;--line:rgba(255,255,255,.11);--line-soft:rgba(255,255,255,.06);--accent:#e08a63;--accent-ink:#ef9f7c;--accent-soft:rgba(224,138,99,.14);--shadow:0 30px 70px -40px rgba(0,0,0,.8),0 8px 22px -18px rgba(0,0,0,.6)}
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth;scroll-padding-top:80px;-webkit-text-size-adjust:100%}
+  body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:17px;line-height:1.62;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+  .wrap{width:min(var(--col),100% - 48px);margin-inline:auto}
+  a{color:inherit;text-decoration:none}
+  h1,h2,h3{font-weight:640;letter-spacing:-.021em;line-height:1.1;text-wrap:balance}
+  .hl{color:var(--accent)}
+  .eyebrow{font-family:var(--mono);font-size:.72rem;text-transform:uppercase;letter-spacing:.2em;color:var(--accent-ink);font-weight:600}
+  .lede{color:var(--ink-soft);font-size:clamp(1.05rem,2vw,1.24rem);line-height:1.55;max-width:56ch;text-wrap:pretty}
+  code{font-family:var(--mono);font-size:.86em}
+
+  .nav{position:sticky;top:0;z-index:60;background:transparent;transition:background .25s,border-color .25s}
+  .nav.condensed{background:color-mix(in srgb,var(--bg) 80%,transparent);backdrop-filter:saturate(1.5) blur(14px);-webkit-backdrop-filter:saturate(1.5) blur(14px);border-bottom:1px solid var(--line-soft)}
+  .nav .row{display:flex;align-items:center;gap:20px;height:60px}
+  .brand{display:flex;align-items:center;gap:9px;font-weight:640;letter-spacing:-.02em;font-size:1.02rem}
+  .brand .m{font-size:1.2rem}
+  .nav .links{display:flex;gap:26px;margin-inline:auto;font-size:.95rem;color:var(--ink-soft)}
+  .nav .links a:hover{color:var(--ink)} .nav .links a.more{color:var(--accent-ink)}
+  .nav .right{display:flex;align-items:center;gap:10px}
+  .icon-btn,.ghost{border:1px solid var(--line);background:var(--surface);color:var(--ink-soft);border-radius:999px;padding:7px 13px;font-size:.85rem;font-family:var(--mono);cursor:pointer;transition:.15s}
+  .icon-btn:hover,.ghost:hover{color:var(--ink);border-color:var(--ink-faint)}
+  @media (max-width:720px){.nav .links a:not(.more){display:none}}
+
+  header.head{padding:clamp(56px,9vw,110px) 0 clamp(30px,5vw,56px)}
+  header.head h1{font-size:clamp(2.4rem,6vw,4rem);margin:16px 0}
+  .back{display:inline-flex;align-items:center;gap:7px;font-family:var(--mono);font-size:.8rem;color:var(--ink-soft)}
+  .back:hover{color:var(--accent-ink)}
+
+  .feature{padding-block:clamp(52px,8vh,104px);border-top:1px solid var(--line-soft)}
+  .feature .grid{display:grid;grid-template-columns:1fr 1.15fr;gap:clamp(32px,5vw,64px);align-items:center}
+  .feature.flip .grid .copy{order:2}
+  .feature h2{font-size:clamp(1.6rem,3vw,2.3rem);margin:12px 0 14px}
+  .feature p{color:var(--ink-soft);max-width:52ch}
+  .feature .num{font-family:var(--mono);font-size:.72rem;color:var(--ink-faint);letter-spacing:.12em}
+  .panel{background:var(--surface);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);overflow:hidden}
+  .panel .scroll{overflow-x:auto}
+  .panel img{display:block;width:100%;height:auto}
+  .two-up{display:flex;gap:14px;min-width:min-content}
+  .two-up figure{flex:1;min-width:320px}
+  .two-up figcaption{font-family:var(--mono);font-size:.7rem;color:var(--ink-faint);padding:8px 12px;text-align:center}
+  @media (max-width:860px){.feature .grid{grid-template-columns:1fr;gap:26px}.feature.flip .grid .copy{order:0}}
+
+  .deeper{padding-block:clamp(56px,8vh,110px);border-top:1px solid var(--line-soft);text-align:center}
+  .deeper h2{font-size:clamp(1.7rem,3.5vw,2.6rem)}
+  .doclinks{display:flex;flex-wrap:wrap;gap:12px;justify-content:center;margin-top:28px}
+  .doclinks a{border:1px solid var(--line);border-radius:999px;padding:10px 18px;font-size:.92rem;color:var(--ink-soft);transition:.15s}
+  .doclinks a:hover{color:var(--ink);border-color:var(--ink-faint)}
+  .doclinks a.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+  .doclinks a.primary:hover{background:var(--accent-ink)}
+
+  .foot{padding:48px 0 60px;border-top:1px solid var(--line-soft);color:var(--ink-faint)}
+  .foot .fine{font-family:var(--mono);font-size:.74rem}
+
+  .rv{opacity:0;transform:translateY(20px) scale(.985);transition:opacity .6s cubic-bezier(.22,.61,.36,1),transform .7s cubic-bezier(.22,.61,.36,1)}
+  .rv.in{opacity:1;transform:none}
+  @media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}.rv{opacity:1;transform:none;transition:opacity .2s}}
+</style>
+</head>
+<body>
+
+<nav class="nav" id="nav">
+  <div class="wrap row">
+    <a class="brand" href="showcase.html"><span class="m">🔬</span> Claude Observatory</a>
+    <div class="links">
+      <a href="showcase.html">← Overview</a>
+      <a href="https://github.com/cell-observatory/claude-observatory/blob/main/docs/DEMO.md">Walkthrough</a>
+      <a href="https://github.com/cell-observatory/claude-observatory/blob/main/docs/ARCHITECTURE.md">How it works</a>
+      <a class="more" href="https://github.com/cell-observatory/claude-observatory">GitHub</a>
+    </div>
+    <div class="right">
+      <button class="icon-btn" id="theme" aria-label="Toggle theme">◐</button>
+      <a class="ghost" href="showcase.html">← Overview</a>
+    </div>
+  </div>
+</nav>
+
+<header class="head">
+  <div class="wrap">
+    <a class="back" href="showcase.html">← Overview</a>
+    <h1>Every surface, in detail.</h1>
+    <p class="lede">Ten ways Claude Observatory keeps you in the loop — inline, in the sidebar, in the terminal, and across both editors. Screenshots are from the bundled demo session.</p>
+  </div>
+</header>
+
+<main>
+  <section class="feature">
+    <div class="wrap grid">
+      <div class="copy"><div class="num">01</div><span class="eyebrow">Inline review</span><h2>The change, right where it happened.</h2><p>A gutter star marks each Claude edit; a subtle tint colors what changed. Click <b>view changes</b> and the diff opens inline — in git's own colors, with Claude's reasoning and Keep / Undo / Chat / View diff on hand.</p></div>
+      <div class="panel rv"><img src="media/inline-review.png" loading="lazy" alt="Inline review bubble: gutter star, tinted lines, the inline menu, and the edit's diff with reasoning"></div>
+    </div>
+  </section>
+
+  <section class="feature flip">
+    <div class="wrap grid">
+      <div class="copy"><div class="num">02</div><span class="eyebrow">Per-edit diffs</span><h2>Any edit, as its own before and after.</h2><p>Open a single change as a dedicated diff tab and step through the file's edits with Prev / Next in the title bar — without losing your place.</p></div>
+      <div class="panel rv"><img src="media/diffs.png" loading="lazy" alt="One edit opened as its own before/after diff tab"></div>
+    </div>
+  </section>
+
+  <section class="feature">
+    <div class="wrap grid">
+      <div class="copy"><div class="num">03</div><span class="eyebrow">Surgical undo &amp; file history</span><h2>Undo one edit. Keep the rest.</h2><p>A position-anchored 3-way merge reverts a single change while later edits to the same file survive. File History lists just the active file's edits, newest first, and follows the editor as you switch tabs.</p></div>
+      <div class="panel rv"><img src="media/file-history.png" loading="lazy" alt="File History: the active file's edits, newest first, following the editor"></div>
+    </div>
+  </section>
+
+  <section class="feature flip">
+    <div class="wrap grid">
+      <div class="copy"><div class="num">04</div><span class="eyebrow">Timeline</span><h2>The session as a change feed.</h2><p>Files ordered by most-recent activity, each expanding to its edits. Adjacent edits to the same file coalesce into a single run, so a busy session stays legible.</p></div>
+      <div class="panel rv"><img src="media/timeline.png" loading="lazy" alt="Timeline: files by recent activity with edits coalesced into runs"></div>
+    </div>
+  </section>
+
+  <section class="feature">
+    <div class="wrap grid">
+      <div class="copy"><div class="num">05</div><span class="eyebrow">Observations</span><h2>What Claude was thinking.</h2><p>A zero-token session recap on top, then each edit's real reasoning parsed from the transcript. Every row carries the observatory's memory of that file — its cross-session accept/revert history, so files that get reverted often are flagged.</p></div>
+      <div class="panel rv"><img src="media/observations.png" loading="lazy" alt="Observations: session recap, per-edit reasoning, and cross-session file memory with flags"></div>
+    </div>
+  </section>
+
+  <section class="feature flip">
+    <div class="wrap grid">
+      <div class="copy"><div class="num">06</div><span class="eyebrow">Stats</span><h2>Progress, tokens, and usage.</h2><p>A live review scoreboard — pending, accepted, reverted — with a progress bar, a token step-line plot over Today / 7 days / 30 days, and context plus 5h / week plan-usage bars.</p></div>
+      <div class="panel rv"><img src="media/stats.png" loading="lazy" alt="Stats: review scoreboard, token step-line trends, and live usage bars"></div>
+    </div>
+  </section>
+
+  <section class="feature">
+    <div class="wrap grid">
+      <div class="copy"><div class="num">07</div><span class="eyebrow">Heatmap</span><h2>A spotlight on the edits.</h2><p>Dim every unmodified line so Claude's changes stand out. One toggle turns a heavily-edited file into a focused view of exactly what moved.</p></div>
+      <div class="panel rv"><img src="media/heatmap.png" loading="lazy" alt="File heatmap: every unmodified line dimmed so the edit is a spotlight"></div>
+    </div>
+  </section>
+
+  <section class="feature flip">
+    <div class="wrap grid">
+      <div class="copy"><div class="num">08</div><span class="eyebrow">Conflict resolution</span><h2>It never guesses.</h2><p>When an undo would overlap later changes, the observatory refuses rather than clobber — and offers an explicit <code>--force</code> restore. Anchored on line positions, not fuzzy text, so it stays safe against duplicated content.</p></div>
+      <div class="panel rv"><img src="media/conflict.png" loading="lazy" alt="Surgical undo: an overlap conflict is refused, with --force offered as an explicit per-file restore"></div>
+    </div>
+  </section>
+
+  <section class="feature">
+    <div class="wrap grid">
+      <div class="copy"><div class="num">09</div><span class="eyebrow">The CLI backend</span><h2>Review without leaving the shell.</h2><p>The <code>claude-observatory</code> CLI is a first-class front-end over the same store — list, diff, keep, and surgically undo from your terminal. Its <code>--json</code> surface is what both editors build on.</p></div>
+      <div class="panel rv"><img src="media/cli.png" loading="lazy" alt="The terminal front-end: status, list --pending, diff, and a surgical undo that preserves later edits"></div>
+    </div>
+  </section>
+
+  <section class="feature flip">
+    <div class="wrap grid">
+      <div class="copy"><div class="num">10</div><span class="eyebrow">Cross-editor parity</span><h2>The same tool in both editors.</h2><p>VS Code and JetBrains render the identical review surfaces over one backend — icon-only tabs, inline review, and the bottom dashboards alike. Decisions made in one show up in the other.</p></div>
+      <div class="panel rv"><div class="scroll"><div class="two-up">
+        <figure><img src="media/layout.png" loading="lazy" alt="Claude Observatory in VS Code"><figcaption>VS Code</figcaption></figure>
+        <figure><img src="media/pyc-layout.png" loading="lazy" alt="Claude Observatory in PyCharm with icon-only tool-window tabs"><figcaption>PyCharm / JetBrains</figcaption></figure>
+      </div></div></div>
+    </div>
+  </section>
+</main>
+
+<section class="deeper">
+  <div class="wrap">
+    <span class="eyebrow">Go deeper</span>
+    <h2>Read the details.</h2>
+    <div class="doclinks">
+      <a class="primary" href="showcase.html">← Back to overview</a>
+      <a href="https://github.com/cell-observatory/claude-observatory/blob/main/docs/DEMO.md">Walkthrough</a>
+      <a href="https://github.com/cell-observatory/claude-observatory/blob/main/docs/ARCHITECTURE.md">How it works</a>
+      <a href="https://github.com/cell-observatory/claude-observatory/blob/main/docs/REMOTE.md">Remote &amp; devcontainers</a>
+      <a href="https://github.com/cell-observatory/claude-observatory/blob/main/CONTRIBUTING.md">Contribute</a>
+      <a href="https://github.com/cell-observatory/claude-observatory#quickstart">Install</a>
+    </div>
+  </div>
+</section>
+
+<footer class="foot">
+  <div class="wrap"><span class="fine">Apache-2.0 · git-free · zero extra Claude tokens · terminal + VS Code + JetBrains</span></div>
+</footer>
+
+<script>
+  (function(){
+    var root=document.documentElement,btn=document.getElementById('theme'),KEY='co-theme';
+    try{var s=localStorage.getItem(KEY);if(s)root.setAttribute('data-theme',s);}catch(e){}
+    btn.addEventListener('click',function(){
+      var cur=root.getAttribute('data-theme')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light');
+      var next=cur==='dark'?'light':'dark';root.setAttribute('data-theme',next);
+      try{localStorage.setItem(KEY,next);}catch(e){}
+    });
+  })();
+  (function(){
+    var nav=document.getElementById('nav');var f=function(){nav.classList.toggle('condensed',window.scrollY>40);};
+    window.addEventListener('scroll',f,{passive:true});f();
+  })();
+  (function(){
+    var els=document.querySelectorAll('.rv');
+    if(!('IntersectionObserver'in window)){els.forEach(function(e){e.classList.add('in');});return;}
+    var io=new IntersectionObserver(function(en){en.forEach(function(e){if(e.isIntersecting){e.target.classList.add('in');io.unobserve(e.target);}});},{threshold:.18,rootMargin:'0px 0px -8% 0px'});
+    els.forEach(function(e){io.observe(e);});
+  })();
+</script>
+</body>
+</html>

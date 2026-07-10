@@ -115,6 +115,18 @@ const CSS = `
   .scl { font-size:8.5px; text-transform:uppercase; letter-spacing:.06em; color:var(--dim); margin-top:2px; }
   .scmeta { display:flex; justify-content:space-between; font-size:9px; color:var(--dim); margin:5px 16px 0;
             font-family:'SF Mono',Menlo,monospace; }
+  /* terminal (CLI + conflict scenes) — the terminal is a first-class front-end */
+  .term { font-family:'SF Mono',Menlo,monospace; font-size:13px; line-height:1.9; padding:14px 20px; background:#141414; }
+  .term .cmd { color:var(--ink); } .term .cmd .pr { color:var(--kept); margin-right:9px; } .term .cmd .fl { color:var(--blue); }
+  .term .out { color:var(--dim); white-space:pre; } .term .ok { color:var(--kept); } .term .warn { color:var(--pending); }
+  .term .id2 { color:var(--coral); } .term .add2 { color:#7ee787; } .term .rem2 { color:#ffa198; } .term .file2 { color:var(--ink); }
+  .term .cursor { background:var(--ink); color:#141414; }
+  /* file heatmap: dim every unmodified line so Claude's edits spotlight */
+  .codeline.dim { opacity:.3; }
+  .difftab { display:flex; align-items:center; background:var(--side); border-bottom:1px solid var(--border); }
+  .difftab .tab { padding:8px 16px; background:var(--bg); border-right:1px solid var(--border); font-size:12.5px; }
+  .difftab .acts { margin-left:auto; padding:0 14px; color:var(--dim); font-size:11.5px; }
+  .difftab .acts span { margin-left:15px; }
 `;
 
 const scene = (w, body) =>
@@ -249,6 +261,75 @@ const statsCol = (H1 = 52, H2 = 52) => `
   <div class="urow"><span class="lbl">5h</span><span class="track"><span class="fill" style="width:11%;background:var(--kept)"></span></span><span class="pct" style="color:var(--kept)">11%</span><span class="sub">1h30m · ~10M</span></div>
   <div class="urow"><span class="lbl">wk</span><span class="track"><span class="fill" style="width:35%;background:var(--kept)"></span></span><span class="pct" style="color:var(--kept)">35%</span><span class="sub">1d2h · ~37M</span></div>`;
 
+// the terminal front-end: status → list → surgical undo that preserves later edits
+const terminalBody = () => `
+  <div class="term">
+    <div class="cmd"><span class="pr">$</span>claude-observatory <span class="fl">status</span></div>
+    <div class="out"><span class="ok">✓</span> hooks installed · session <span class="id2">0c396c6b</span> · <span class="warn">3 pending</span> · 42 kept · 5 reverted</div>
+    <div class="cmd"><span class="pr">$</span>claude-observatory <span class="fl">list --pending</span></div>
+    <div class="out"><span class="file2">src/models/User.js</span></div>
+    <div class="out">  <span class="warn">●</span> <span class="id2">#1</span>  <span class="add2">+11</span> <span class="rem2">−0</span>   Write   created the User class</div>
+    <div class="out">  <span class="warn">●</span> <span class="id2">#2</span>  <span class="add2">+4</span>  <span class="rem2">−0</span>   Edit    added a farewell() method</div>
+    <div class="out"><span class="file2">src/index.js</span></div>
+    <div class="out">  <span class="warn">●</span> <span class="id2">#3</span>  <span class="add2">+4</span>  <span class="rem2">−0</span>   Write   import User + greet()</div>
+    <div class="cmd"><span class="pr">$</span>claude-observatory <span class="fl">diff 2</span></div>
+    <div class="out"><span style="color:var(--blue)">@@ src/models/User.js  +4 −0 @@</span></div>
+    <div class="out"><span class="add2">+  farewell() {</span></div>
+    <div class="out"><span class="add2">+    return \`Goodbye from \${this.name}!\`;</span></div>
+    <div class="out"><span class="add2">+  }</span></div>
+    <div class="cmd"><span class="pr">$</span>claude-observatory <span class="fl">undo 2</span></div>
+    <div class="out"><span class="ok">↩</span> undone <span class="id2">#2</span> · later edits to User.js preserved (surgical 3-way merge)</div>
+    <div class="cmd"><span class="pr">$</span><span class="cursor">&nbsp;</span></div>
+  </div>`;
+
+// conflict → --force fallback (position-anchored undo refuses to clobber overlapping edits)
+const conflictBody = () => `
+  <div class="term">
+    <div class="cmd"><span class="pr">$</span>claude-observatory <span class="fl">undo 1</span></div>
+    <div class="out"><span class="warn">⚠ conflict</span> — edit <span class="id2">#1</span> overlaps later changes on the same lines; won't guess.</div>
+    <div class="out">  Re-run with <span class="fl">--force</span> to restore the file to its pre-#1 state (drops the overlapping later edits).</div>
+    <div class="cmd"><span class="pr">$</span>claude-observatory <span class="fl">undo 1 --force</span></div>
+    <div class="out"><span class="ok">↩</span> restored src/models/User.js · <span class="id2">#1</span> reverted</div>
+    <div class="cmd"><span class="pr">$</span><span class="cursor">&nbsp;</span></div>
+  </div>`;
+
+// a single edit opened as its own full diff tab (the Diffs surface), git colors, title-bar Prev/Next
+const diffTabBody = () => `
+  <div class="difftab">
+    <div class="tab">User.js  ⟷  Claude #2</div>
+    <div class="acts"><span>⧉ #2 +4 −0</span><span>✓ Keep</span><span>↩ Undo</span><span>💬 Chat</span><span>↑ Prev</span><span>↓ Next</span></div>
+  </div>
+  <div class="bb-diff" style="background:var(--bg);padding:12px 0;font-size:12.5px;line-height:1.85;">
+    ${dl('hunk', '@@ -4,4 +4,8 @@ class User')}
+    ${dl('ctx', '     this.name = name;')}
+    ${dl('ctx', '   }')}
+    ${dl('add', '+  farewell() {')}
+    ${dl('add', '+    return `Goodbye from ${this.name}!`;')}
+    ${dl('add', '+  }')}
+    ${dl('add', '+')}
+    ${dl('ctx', '   greet() {')}
+  </div>`;
+
+// file heatmap — unmodified lines dimmed so the edit is a spotlight (📄 toggle)
+const heatmapEditor = () => `
+  <div style="background:var(--bg);padding:10px 0 14px;">
+    <div class="codelens"><a>✨ #2 +4 −0 view changes</a><a>✓ Keep</a><a>↩ Undo</a><a>💬 Chat</a><a>⧉ View diff</a><a style="color:var(--coral)">📄 Heatmap</a></div>
+    <div class="codeline dim"><span class="ln">1</span><span><span class="tok-k">class</span> <span class="tok-v">User</span> {</span></div>
+    <div class="codeline dim"><span class="ln">2</span><span>  <span class="tok-f">constructor</span>(<span class="tok-v">name</span>) { <span class="tok-v">this</span>.name = name; }</span></div>
+    <div class="codeline dim"><span class="ln">3</span><span>  <span class="tok-f">greet</span>() { <span class="tok-k">return</span> <span class="tok-s">\`Hi \${this.name}\`</span>; }</span></div>
+    <div class="codeline dim"><span class="ln">4</span><span></span></div>
+    <div class="codeline hl"><span class="ln">5</span><span class="gutstar">✨</span><span>  <span class="tok-f">farewell</span>() {</span></div>
+    <div class="codeline hl"><span class="ln">6</span><span>    <span class="tok-k">return</span> <span class="tok-s">\`Goodbye from \${</span><span class="tok-v">this</span><span class="tok-s">.name}!\`</span>;</span></div>
+    <div class="codeline hl"><span class="ln">7</span><span>  }</span></div>
+    <div class="codeline dim"><span class="ln">8</span><span>}</span></div>
+    <div class="codeline dim"><span class="ln">9</span><span><span class="tok-k">module</span>.exports = <span class="tok-v">User</span>;</span></div>
+  </div>`;
+
+// File History — a flat, chronological list of just the active file's edits (follows the editor)
+const fileHistoryCol = `
+  <div class="obsrow"><span class="dot" style="background:var(--pending)"></span><span class="id mono">#2</span><span class="r">14:02 · +4 −0 · <span style="color:var(--pending)">pending</span> · added a farewell() method to mirror greet()</span></div>
+  <div class="obsrow"><span class="dot" style="background:var(--kept)"></span><span class="id mono strike">#1</span><span class="r strike">14:01 · +11 −0 · kept · created the User class</span></div>`;
+
 // ---------- scenes ----------
 const scenes = {
   // A. the full observatory layout
@@ -320,9 +401,61 @@ const scenes = {
       <div class="colhead" style="padding-top:10px;">STATS</div>
       ${statsCol(56, 56)}
     </div>`),
+
+  // E. the terminal front-end — status, list, surgical undo
+  'cli': scene(900, `
+    <div class="window">
+      <div class="titlebar"><span class="tl" style="background:#ff5f57"></span><span class="tl" style="background:#febc2e"></span><span class="tl" style="background:#28c840"></span><span class="t">demo — claude-observatory</span></div>
+      ${terminalBody()}
+    </div>`),
+
+  // F. surgical-undo conflict → --force fallback
+  'conflict': scene(880, `
+    <div class="window">
+      <div class="titlebar"><span class="tl" style="background:#ff5f57"></span><span class="tl" style="background:#febc2e"></span><span class="tl" style="background:#28c840"></span><span class="t">demo — claude-observatory</span></div>
+      ${conflictBody()}
+    </div>`),
+
+  // G. one edit as its own diff tab (the Diffs surface)
+  'diffs': scene(980, `
+    <div class="window">
+      ${diffTabBody()}
+      <div class="statusbar"><span class="sb-warn">${microscope} 3</span><span style="color:var(--faint)">Diffs — click any edit in the tree for its before ⟷ after</span></div>
+    </div>`),
+
+  // H. file heatmap spotlight
+  'heatmap': scene(980, `
+    <div class="window">
+      <div style="display:flex;background:var(--side);border-bottom:1px solid var(--border);">
+        <div style="padding:8px 18px;background:var(--bg);border-right:1px solid var(--border);font-size:12.5px;">User.js</div>
+      </div>
+      ${heatmapEditor()}
+      <div class="statusbar"><span class="sb-warn">${microscope} 3</span><span style="color:var(--faint)">📄 Heatmap on — every unmodified line dimmed</span></div>
+    </div>`),
+
+  // I. File History — the active file's edits, chronological, follows the editor
+  'file-history': scene(720, `
+    <div class="window" style="padding-bottom:8px;">
+      <div class="viewhead" style="padding-top:12px;">FILE HISTORY <span style="float:right;color:var(--faint)">User.js</span></div>
+      ${fileHistoryCol}
+    </div>`),
+
+  // J. standalone Timeline — files by recent activity, runs coalesced
+  'timeline': scene(720, `
+    <div class="window" style="padding-bottom:8px;">
+      <div class="paneltabs"><span>TERMINAL</span><span class="on">CLAUDE OBSERVATORY</span></div>
+      <div class="colhead" style="padding-top:10px;">TIMELINE</div>
+      ${timelineCol}
+    </div>`),
 };
 
 // ---------- render ----------
+// per-scene capture viewport (width = sceneW + 48px body padding; height tuned to content)
+const SIZE = {
+  layout: '1568,830', stats: '808,478', 'inline-review': '1028,720', observations: '1028,344',
+  cli: '948,500', conflict: '928,290', diffs: '1028,330', heatmap: '1028,400',
+  'file-history': '768,150', timeline: '768,230',
+};
 const tmp = join(tmpdir(), 'obs-media');
 mkdirSync(tmp, { recursive: true });
 for (const [name, html] of Object.entries(scenes)) {
@@ -332,7 +465,7 @@ for (const [name, html] of Object.entries(scenes)) {
     '--headless', '--disable-gpu', '--default-background-color=00000000',
     '--force-device-scale-factor=2', '--hide-scrollbars',
     `--screenshot=${join(OUT, `${name}.png`)}`,
-    `--window-size=${name === 'layout' ? '1568,830' : name === 'stats' ? '808,478' : name === 'inline-review' ? '1028,720' : '1028,344'}`,
+    `--window-size=${SIZE[name] || '1028,344'}`,
     `file://${src}`,
   ], { stdio: 'pipe' });
   console.log('rendered', `${name}.png`);

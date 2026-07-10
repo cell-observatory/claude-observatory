@@ -5,6 +5,11 @@ WebStorm, GoLand, and every other JetBrains IDE (platform-only APIs — no langu
 The same store, engine, and review model as the CLI and the VS Code extension: all three front-ends
 stay in sync because they read and write the same `~/.claude/claude-observatory` store.
 
+![Claude Observatory in PyCharm](../../docs/media/pyc-layout.png)
+
+See the full feature tour in the [main README](../../README.md#the-observatory); the notes below are
+JetBrains-specific.
+
 ## Requirements
 
 - A JetBrains IDE **2025.2+**
@@ -48,6 +53,12 @@ found, set both explicitly in **Settings → Tools → Claude Observatory**. Ful
 | **Click → inline diff** — the edit's before ⟷ after opens **unified**, with Claude's reasoning in the title and `Keep · Undo · Chat` on the diff toolbar; **📄 file heatmap** dims unmodified lines (editor banner) | every editor |
 | **🔬 scoreboard** — pending count, accept rate, oldest pending; click = review next | status bar |
 | **Keyboard loop** — `⌥⌘N` review next · `⌥⌘Y` keep at cursor · `⌥⌘U` undo at cursor · `⌥⌘[` / `⌥⌘]` step file revisions in a diff (`Ctrl+Alt` on Windows/Linux) | global |
+
+Both tool windows now carry **icon-only tabs (hover for the label)**, matching VS Code's icon-driven
+views, and the tool-window stripe shows a **pending badge**. This release brings the plugin to full
+**feature parity** with the VS Code extension: a toggle-inline button, **Accept/Revert this file** on
+the Edits toolbar, revision-nav buttons, Timeline bulk actions, Observations clear/switch/doctor, and a
+5th **⧉ View diff** lens segment.
 
 Undo is surgical (position-anchored 3-way merge, via the CLI): reverting one edit preserves later
 edits to the same file; genuine overlaps surface a conflict dialog with a **Force-restore** option.

@@ -46,9 +46,19 @@ class TimelinePanel(private val project: Project) : SimpleToolWindowPanel(true, 
 
     init {
         setContent(JBScrollPane(tree))
-        val group = DefaultActionGroup(object : AnAction("Refresh", null, AllIcons.Actions.Refresh), DumbAware {
-            override fun actionPerformed(e: AnActionEvent) = ObservatoryService.getInstance(project).refresh()
-        })
+        val group = DefaultActionGroup(
+            action("Accept All Edits", Icons.CheckAll) { withSession { s -> ReviewOps.keepAll(project, s) } },
+            action("Revert All Edits", AllIcons.Actions.Rollback) {
+                withSession { s -> ReviewOps.undoAll(project, s, service().log(), "this session") }
+            },
+            action("Clear Resolved Edits", AllIcons.Actions.GC) {
+                withSession { s ->
+                    val resolved = service().log().count { !it.pending }
+                    if (resolved > 0) ReviewOps.clearResolved(project, s, resolved) else ReviewOps.notify(project, "No resolved edits to clear")
+                }
+            },
+            action("Refresh", AllIcons.Actions.Refresh) { service().refresh() },
+        )
         val tb = ActionManager.getInstance().createActionToolbar("ClaudeObservatoryTimeline", group, true)
         tb.targetComponent = tree
         toolbar = tb.component
@@ -85,6 +95,22 @@ class TimelinePanel(private val project: Project) : SimpleToolWindowPanel(true, 
         model.reload()
         TreeUtil.expandAll(tree)
     }
+
+    private fun service() = ObservatoryService.getInstance(project)
+
+    private fun withSession(block: (String) -> Unit) {
+        val s = service().currentSession()
+        if (s == null) {
+            ReviewOps.notify(project, "No active Claude Code session for this project", com.intellij.notification.NotificationType.WARNING)
+            return
+        }
+        block(s)
+    }
+
+    private fun action(text: String, icon: javax.swing.Icon, run: () -> Unit): AnAction =
+        object : AnAction(text, null, icon), DumbAware {
+            override fun actionPerformed(e: AnActionEvent) = run()
+        }
 
     private class Renderer(private val project: Project) : ColoredTreeCellRenderer() {
         private val hhmm = SimpleDateFormat("HH:mm")

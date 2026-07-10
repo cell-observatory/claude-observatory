@@ -8,6 +8,7 @@ import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.fileEditor.FileDocumentManager
+import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.progress.ProgressIndicator
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.progress.Task
@@ -153,6 +154,59 @@ object ReviewOps {
         com.intellij.openapi.ide.CopyPasteManager.getInstance()
             .setContents(java.awt.datatransfer.StringSelection(prompt))
         notify(project, "Prompt about edit #$id copied — paste it into your Claude Code terminal/chat.")
+    }
+
+    /** Fetch markdown off the EDT and open it in an editor tab (or notify on failure). Shared by the
+     *  Export Review Summary and Setup Check (doctor) actions across both editors' trees. */
+    fun openMarkdown(project: Project, name: String, errorMsg: String, produce: () -> String?) {
+        val app = ApplicationManager.getApplication()
+        app.executeOnPooledThread {
+            val md = produce()
+            app.invokeLater {
+                if (md.isNullOrBlank()) {
+                    notify(project, errorMsg)
+                } else {
+                    val tmp = java.io.File.createTempFile(name, ".md")
+                    tmp.writeText(md)
+                    LocalFileSystem.getInstance().refreshAndFindFileByPath(tmp.path)?.let { vf ->
+                        FileEditorManager.getInstance(project).openFile(vf, true)
+                    }
+                }
+            }
+        }
+    }
+
+    /** Run `doctor` and open the setup diagnostics (hooks, PATH, config, session, status line) in a tab. */
+    fun openDoctor(project: Project) {
+        openMarkdown(project, "claude-observatory-doctor", "Could not run doctor (is the claude-observatory CLI installed?)") {
+            ObservatoryCli.doctorMarkdown(project.basePath)
+        }
+    }
+
+    /** Pin which capture session the observatory shows (e.g. the demo-showcase fixture) instead of the
+     *  auto-resolved newest one — a chooser over every session in the store, centered on [anchor]. */
+    fun chooseSession(project: Project, anchor: javax.swing.JComponent) {
+        val settings = com.cellobservatory.observatory.settings.ObservatorySettings.instance
+        val pinned = settings.state.session?.takeIf { it.isNotBlank() }
+        val auto = project.basePath?.let { com.cellobservatory.observatory.core.SessionResolver.resolveSessionId(it) }
+        val labelToId = LinkedHashMap<String, String?>()
+        labelToId["Auto — newest for this workspace" + (auto?.let { " ($it)" } ?: "")] = null
+        for (s in com.cellobservatory.observatory.core.StoreReader.listSessions()) {
+            val mark = if (s.id == pinned) "● " else ""
+            val autoTag = if (s.id == auto) " · auto" else ""
+            labelToId["$mark${s.id}  —  ${s.pending} pending · ${com.cellobservatory.observatory.model.relTime(s.lastMs)}$autoTag"] = s.id
+        }
+        com.intellij.openapi.ui.popup.JBPopupFactory.getInstance()
+            .createPopupChooserBuilder(labelToId.keys.toList())
+            .setTitle("Review which session?")
+            .setItemChosenCallback { chosen ->
+                settings.state.session = labelToId[chosen]
+                for (p in com.intellij.openapi.project.ProjectManager.getInstance().openProjects) {
+                    ObservatoryService.getInstance(p).refresh()
+                }
+            }
+            .createPopup()
+            .showInCenterOf(anchor)
     }
 
     // --- shared plumbing ---

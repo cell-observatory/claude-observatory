@@ -36,10 +36,13 @@
       flex-direction:column;flex:none;min-height:0}
   .tw-head{height:36px;display:flex;align-items:center;padding:0 12px;gap:14px;border-bottom:1px solid var(--border);flex:none}
   .tw-head .title{font-weight:600;font-size:12.5px}
-  .tw-tabs{display:flex;gap:2px;margin-left:2px}
-  .tw-tab{padding:3px 10px;border-radius:5px;color:var(--dim);font-size:12px}
+  .tw-tabs{display:flex;gap:3px;margin-left:4px}
+  /* icon-only tabs — label shows on hover (title tooltip) */
+  .tw-tab{width:26px;height:22px;display:flex;align-items:center;justify-content:center;
+          border-radius:6px;color:var(--dim);font-size:13px;line-height:1}
   .tw-tab.on{background:var(--sel);color:var(--ink)}
-  .tw-head .tools{margin-left:auto;color:var(--faint);letter-spacing:2px}
+  .tw-head .tools{margin-left:auto;color:var(--faint);font-size:12.5px;display:flex;gap:9px}
+  .tw-head .tools .sep{color:var(--border2)}
   .tree{padding:6px 0;font-size:12.5px;overflow:hidden}
   .trow{display:flex;align-items:center;height:24px;padding:0 10px;gap:6px;white-space:nowrap}
   .trow .tw-ic{width:16px;text-align:center;color:var(--dim);font-size:11px}
@@ -132,9 +135,18 @@
     </div>
     <div class="tw">
       <div class="tw-head">
-        <span class="title">Claude Observatory</span>
-        <span class="tw-tabs"><span class="tw-tab on">Edits</span><span class="tw-tab">Diffs</span><span class="tw-tab">File History</span></span>
-        <span class="tools">⟳ ⋮</span>
+        <span class="tw-tabs">
+          <span class="tw-tab on" title="Edits">🔬</span>
+          <span class="tw-tab" title="Diffs">⇆</span>
+          <span class="tw-tab" title="File History">🕘</span>
+        </span>
+        <span class="tools">
+          <span title="Search">⌕</span><span title="Review previous">⏮</span><span title="Review next">⏭</span>
+          <span class="sep">·</span>
+          <span title="Accept all" style="color:var(--green-bright)">✓</span><span title="Revert all">↩</span><span title="Toggle inline review">👁</span>
+          <span class="sep">·</span>
+          <span title="Refresh">⟳</span><span title="More">⋮</span>
+        </span>
       </div>
       <div class="tree">
         <div class="trow"><span class="arrow">▾</span><span class="tw-ic">▦</span>src/models</div>

@@ -65,6 +65,8 @@ src/index.js
 diff <id> · keep <id> · undo <id>
 ```
 
+![the terminal front-end — the running log grouped by file, with the diff/keep/undo verbs](media/cli.png)
+
 Filter with `--pending` / `--kept` / `--undone` or `--file <substr>`. List every session in the store
 with `claude-observatory sessions` (a `●` marks the one that resolves for your current directory).
 
@@ -86,6 +88,8 @@ $ claude-observatory diff 2
  module.exports = User;
 ```
 
+![a diff tab — before ⟷ after for a single edit](media/diffs.png)
+
 ## 4 · Keep vs. Undo
 
 **Keep** marks an edit reviewed — it never touches the file:
@@ -103,6 +107,8 @@ $ claude-observatory undo 1
 ⚠ conflict: edit #1 overlaps a later change to User.js. Run `claude-observatory undo 1 --force`
   to restore the file to its pre-edit-#1 state (this also drops later edits to this file).
 ```
+
+![an undo that would strand a later edit — the observatory refuses and points to `--force`](media/conflict.png)
 
 Undoing #2, though, peels out just the `farewell()` method — `greet()` and the rest of the file
 survive untouched (a **position-anchored 3-way line merge**, not a whole-file rewind):
@@ -177,6 +183,11 @@ in the others instantly. The layout is deliberately identical; only the host chr
 | Scoreboard | status-bar `🔬 N` (amber while pending) + live bar in Stats | status-bar `🔬 N` + live bar in Stats |
 | Keyboard loop | `⌥⌘N` next · `⌥⌘Y` keep · `⌥⌘U` undo · `⌥⌘[`/`⌥⌘]` revisions (`Ctrl+Alt` on Win/Linux) | same keys |
 
+Both front-ends now drive the review surfaces from **icon-only tabs** (hover for the label), and JetBrains
+is at full **feature parity** with VS Code: the toggle-inline button, **Accept/Revert this file** on the
+Edits toolbar, revision-nav buttons, Timeline bulk actions, Observations clear/switch/doctor, a 5th
+**⧉ View diff** lens segment, and a pending badge on the tool-window stripe.
+
 The **status-bar microscope** shows the pending count in realtime — the moment Claude writes a
 change. Click it (or **Review next pending edit**) to jump straight to the oldest unreviewed edit;
 review, decide, click again. That's the surgical loop, in either editor.
@@ -220,12 +231,16 @@ GitLens-style extras, in both editors: the **file heatmap** (📄) dims every un
 edits pop; **revision navigation** (`⌥⌘[` / `⌥⌘]`) steps a file's edit history in a current-vs-revision
 diff.
 
+![the file heatmap — every unmodified line dimmed so Claude's edits stand out](media/heatmap.png)
+
 ### File History — the active file's edits, in order
 
 A flat, chronological list of just the **currently open file's** edits (id · time · status ·
 reasoning) that **follows the editor** as you switch tabs. Click a row to jump to that edit, or
 keep / undo / diff it; the toolbar steps revisions and does **Accept all in this file** /
 **Revert all in this file** — clearing one file without touching the rest of the session.
+
+![File History — the active file's edits in order, following the editor as you switch tabs](media/file-history.png)
 
 ### Timeline — a collapsed change feed
 
@@ -237,6 +252,8 @@ keep / undo / diff it; the toolbar steps revisions and does **Accept all in this
 Newest first; consecutive edits to the same file coalesce into one `×N` row with the combined delta
 and a change summary (Claude's own reasoning when available). Expand a row for the individual edits;
 pending / kept / reverted keep their color (and reverted stays struck through).
+
+![Timeline — a collapsed change feed, consecutive edits to a file coalesced into one ×N row](media/timeline.png)
 
 ### Observations — the recap, reasoning, and file memory
 
@@ -281,4 +298,3 @@ claude-observatory list                       # your three edits, captured autom
 ```
 
 Every edit is now under observation — keep the good ones, undo the rest, one at a time.
-</content>

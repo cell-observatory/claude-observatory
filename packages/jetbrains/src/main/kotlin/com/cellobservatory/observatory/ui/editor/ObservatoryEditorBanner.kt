@@ -43,40 +43,41 @@ class ObservatoryEditorBanner : EditorNotificationProvider, DumbAware {
     ): JComponent {
         val panel = EditorNotificationPanel(fileEditor, EditorNotificationPanel.Status.Info)
         panel.icon(Icons.Microscope)
-        panel.text("$count pending Claude edit(s) in this file")
-        panel.createActionLabel("⏮ Prev") {
+        panel.text("$count pending")
+        // Icon-only actions, label on hover — parity with VS Code's editor-title buttons, kept minimal.
+        panel.createActionLabel("↑") {
             val s = service.currentSession() ?: return@createActionLabel
             val prev = service.prevPendingEdit()
             if (prev == null) ReviewOps.notify(project, "No pending Claude edits — all caught up")
             else Navigate.openFileAtEdit(project, s, prev)
-        }
-        panel.createActionLabel("⏭ Next") {
+        }.toolTipText = "Previous pending edit"
+        panel.createActionLabel("↓") {
             val s = service.currentSession() ?: return@createActionLabel
             val next = service.nextPendingEdit()
             if (next == null) ReviewOps.notify(project, "No pending Claude edits — all caught up")
             else Navigate.openFileAtEdit(project, s, next)
-        }
+        }.toolTipText = "Next pending edit"
         // These act on THIS file only — the banner is per-file, so session-wide would be misleading.
-        panel.createActionLabel("✓ Accept file") {
+        panel.createActionLabel("✓") {
             service.currentSession()?.let { s ->
                 ReviewOps.keepAll(project, s, service.log().filter { it.file == file.path }, file.name)
             }
-        }
-        panel.createActionLabel("✗ Revert file") {
+        }.toolTipText = "Accept all edits in this file"
+        panel.createActionLabel("↩") {
             service.currentSession()?.let { s ->
                 ReviewOps.undoAll(project, s, service.log().filter { it.file == file.path }, file.name)
             }
-        }
-        panel.createActionLabel("🔍 Search") {
+        }.toolTipText = "Revert all edits in this file"
+        panel.createActionLabel("⌕") {
             val q = Messages.showInputDialog(
                 project, "Filter edits by file path (empty to clear):",
                 "Search Edits", null, service.filterQuery, null,
             )
             if (q != null) service.setFilter(q)
-        }
-        panel.createActionLabel("📄 Heatmap") {
+        }.toolTipText = "Search edits"
+        panel.createActionLabel("▦") {
             com.cellobservatory.observatory.ui.inline.InlineOverlay.getInstance(project).toggleHeatmap()
-        }
+        }.toolTipText = "Toggle file heatmap"
         return panel
     }
 }

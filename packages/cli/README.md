@@ -2,6 +2,8 @@
 
 Standalone, git-free, **per-edit Keep / Undo for [Claude Code](https://claude.com/claude-code)** — a running list of every file change Claude makes, each with surgical undo. Works in the terminal and (with the companion extensions) the VS Code sidebar and JetBrains IDEs. Capture runs in local hooks, so it costs **zero extra Claude tokens**.
 
+![the terminal front-end](../../docs/media/cli.png)
+
 ## Install
 
 ```bash
@@ -56,4 +58,4 @@ claude-observatory suggest             # next steps + suggestions  [--json --fre
 
 Surgical undo reverts a single edit while preserving later edits to the same file (a position-anchored 3-way merge); genuine overlaps become a clear conflict with a per-file restore fallback.
 
-See the [project README](https://github.com/cell-observatory/claude-observatory#readme) for the full design and the VS Code / JetBrains extensions.
+See the full feature tour — plus the VS Code / JetBrains extensions and the full design — in the [main README](../../README.md#the-observatory).

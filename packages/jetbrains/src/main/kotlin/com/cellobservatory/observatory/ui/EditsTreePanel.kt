@@ -5,17 +5,22 @@ import com.cellobservatory.observatory.model.TreeFileNode
 import com.cellobservatory.observatory.model.TreeFolderNode
 import com.cellobservatory.observatory.model.relTime
 import com.cellobservatory.observatory.services.ObservatoryService
+import com.cellobservatory.observatory.settings.ObservatorySettings
+import com.cellobservatory.observatory.ui.inline.InlineOverlay
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.actionSystem.ActionManager
+import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.DefaultActionGroup
+import com.intellij.openapi.actionSystem.ToggleAction
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.fileEditor.OpenFileDescriptor
 import com.intellij.openapi.project.DumbAware
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.SimpleToolWindowPanel
 import com.intellij.openapi.vfs.LocalFileSystem
+import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.ui.ColoredTreeCellRenderer
 import com.intellij.ui.PopupHandler
 import com.intellij.ui.SimpleTextAttributes
@@ -182,16 +187,29 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
             action("Revert All Edits", AllIcons.Actions.Rollback) {
                 withSession { s -> ReviewOps.undoAll(project, s, service().log(), "this session") }
             },
+            fileScopedAction("Accept All Edits in Current File", AllIcons.Actions.Checked) { s, vf ->
+                ReviewOps.keepAll(project, s, service().log().filter { it.file == vf.path }, vf.name)
+            },
+            fileScopedAction("Revert All Edits in Current File", AllIcons.Actions.Cancel) { s, vf ->
+                ReviewOps.undoAll(project, s, service().log().filter { it.file == vf.path }, vf.name)
+            },
             action("Clear Resolved Edits", AllIcons.Actions.GC) {
                 withSession { s ->
                     val resolved = service().log().count { !it.pending }
                     if (resolved > 0) ReviewOps.clearResolved(project, s, resolved)
                 }
             },
-            action("Switch Session", AllIcons.Vcs.Branch) { switchSession() },
+            action("Switch Session", AllIcons.Vcs.Branch) { ReviewOps.chooseSession(project, tree) },
             action("Refresh", AllIcons.Actions.Refresh) { service().refresh() },
+            toggle("Toggle Inline Review", AllIcons.Actions.Show,
+                { ObservatorySettings.instance.state.inlineReview },
+                { on ->
+                    ObservatorySettings.instance.state.inlineReview = on
+                    InlineOverlay.getInstance(project).refreshAll()
+                    ReviewOps.notify(project, "Inline review " + (if (on) "on" else "off"))
+                }),
             action("Export Review Summary", AllIcons.ToolbarDecorator.Export) { exportSummary() },
-            action("Setup Check (doctor)", AllIcons.General.Information) { runDoctor() },
+            action("Setup Check (doctor)", AllIcons.General.Information) { ReviewOps.openDoctor(project) },
         )
         val tb = ActionManager.getInstance().createActionToolbar("ClaudeObservatoryTree", group, true)
         tb.targetComponent = tree
@@ -235,35 +253,11 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
     /** Export a shareable markdown review summary (kept/reverted per file) and open it in an editor tab.
      *  Runs the CLI off the EDT (parity with VS Code's core-in-process export — same markdown). */
     private fun exportSummary() = withSession { s ->
-        runAndOpenMarkdown("claude-review-summary", "Could not generate a review summary (is the claude-observatory CLI installed?)") {
-            com.cellobservatory.observatory.core.ObservatoryCli.summaryMarkdown(s, project.basePath)
-        }
-    }
-
-    /** Run `doctor` and open the setup diagnostics (hooks, PATH, config, session, status line) in a tab. */
-    private fun runDoctor() {
-        runAndOpenMarkdown("claude-observatory-doctor", "Could not run doctor (is the claude-observatory CLI installed?)") {
-            com.cellobservatory.observatory.core.ObservatoryCli.doctorMarkdown(project.basePath)
-        }
-    }
-
-    /** Fetch markdown off the EDT and open it in an editor tab (or notify on failure). */
-    private fun runAndOpenMarkdown(name: String, errorMsg: String, produce: () -> String?) {
-        val app = com.intellij.openapi.application.ApplicationManager.getApplication()
-        app.executeOnPooledThread {
-            val md = produce()
-            app.invokeLater {
-                if (md.isNullOrBlank()) {
-                    ReviewOps.notify(project, errorMsg)
-                } else {
-                    val tmp = File.createTempFile(name, ".md")
-                    tmp.writeText(md)
-                    LocalFileSystem.getInstance().refreshAndFindFileByPath(tmp.path)?.let { vf ->
-                        FileEditorManager.getInstance(project).openFile(vf, true)
-                    }
-                }
-            }
-        }
+        ReviewOps.openMarkdown(
+            project,
+            "claude-review-summary",
+            "Could not generate a review summary (is the claude-observatory CLI installed?)",
+        ) { com.cellobservatory.observatory.core.ObservatoryCli.summaryMarkdown(s, project.basePath) }
     }
 
     /** Filter the Edits/Diffs trees by file path (empty clears). Shared via the service so both trees filter together. */
@@ -292,32 +286,6 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
         else Navigate.openFileAtEdit(project, s, prev)
     }
 
-    /** Pin which capture session the observatory shows (e.g. the demo-showcase fixture) instead of the
-     *  auto-resolved newest one — a chooser over every session in the store. */
-    private fun switchSession() {
-        val settings = com.cellobservatory.observatory.settings.ObservatorySettings.instance
-        val pinned = settings.state.session?.takeIf { it.isNotBlank() }
-        val auto = project.basePath?.let { com.cellobservatory.observatory.core.SessionResolver.resolveSessionId(it) }
-        val labelToId = LinkedHashMap<String, String?>()
-        labelToId["Auto — newest for this workspace" + (auto?.let { " ($it)" } ?: "")] = null
-        for (s in com.cellobservatory.observatory.core.StoreReader.listSessions()) {
-            val mark = if (s.id == pinned) "● " else ""
-            val autoTag = if (s.id == auto) " · auto" else ""
-            labelToId["$mark${s.id}  —  ${s.pending} pending · ${relTime(s.lastMs)}$autoTag"] = s.id
-        }
-        com.intellij.openapi.ui.popup.JBPopupFactory.getInstance()
-            .createPopupChooserBuilder(labelToId.keys.toList())
-            .setTitle("Review which session?")
-            .setItemChosenCallback { chosen ->
-                settings.state.session = labelToId[chosen]
-                for (p in com.intellij.openapi.project.ProjectManager.getInstance().openProjects) {
-                    ObservatoryService.getInstance(p).refresh()
-                }
-            }
-            .createPopup()
-            .showInCenterOf(tree)
-    }
-
     private fun withSession(block: (String) -> Unit) {
         val s = service().currentSession()
         if (s == null) {
@@ -330,5 +298,31 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
     private fun action(text: String, icon: javax.swing.Icon, run: () -> Unit): AnAction =
         object : AnAction(text, null, icon), DumbAware {
             override fun actionPerformed(e: AnActionEvent) = run()
+        }
+
+    private fun toggle(text: String, icon: javax.swing.Icon, isOn: () -> Boolean, set: (Boolean) -> Unit): ToggleAction =
+        object : ToggleAction(text, null, icon), DumbAware {
+            override fun getActionUpdateThread() = ActionUpdateThread.EDT
+            override fun isSelected(e: AnActionEvent) = isOn()
+            override fun setSelected(e: AnActionEvent, state: Boolean) = set(state)
+        }
+
+    private fun activeFile(): VirtualFile? = FileEditorManager.getInstance(project).selectedFiles.firstOrNull()
+
+    /** A bulk action scoped to the ACTIVE editor's file, gated (enabled+visible) on that file having
+     *  pending edits. The tree toolbar has no VIRTUAL_FILE in its data context, so we read the active
+     *  file from FileEditorManager (parity with VS Code's keepOpenFile/undoOpenFile). */
+    private fun fileScopedAction(text: String, icon: javax.swing.Icon, run: (String, VirtualFile) -> Unit): AnAction =
+        object : AnAction(text, null, icon), DumbAware {
+            override fun getActionUpdateThread() = ActionUpdateThread.EDT
+            override fun update(e: AnActionEvent) {
+                val path = activeFile()?.path
+                e.presentation.isEnabledAndVisible = path != null && service().log().any { it.pending && it.file == path }
+            }
+
+            override fun actionPerformed(e: AnActionEvent) {
+                val vf = activeFile() ?: return
+                withSession { s -> run(s, vf) }
+            }
         }
 }

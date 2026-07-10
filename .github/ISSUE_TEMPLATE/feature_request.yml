@@ -1,0 +1,97 @@
+name: Feature request
+description: Propose a feature for Claude Observatory (ships across the CLI + both editors)
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for proposing a feature! One thing to know up front: **the golden rule of this repo is
+        that every feature ships in ALL front-ends** — the terminal CLI, the VS Code extension, and
+        the JetBrains plugin — with the shared logic in `core` and exposed over the CLI `--json`
+        surface. Please keep that in mind as you describe the feature.
+
+        See [CONTRIBUTING.md](https://github.com/cell-observatory/claude-observatory/blob/main/CONTRIBUTING.md)
+        and [docs/ARCHITECTURE.md](https://github.com/cell-observatory/claude-observatory/blob/main/docs/ARCHITECTURE.md).
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What are you trying to do, and where does the observatory fall short today?
+      placeholder: "When reviewing a large session I can't … so I have to …"
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: What should happen? Describe the behaviour, not (yet) the implementation.
+      placeholder: "Add a … that …"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which surface does it affect?
+      description: The primary view or subsystem this feature touches.
+      options:
+        - Edits
+        - Diffs
+        - File History
+        - Observations
+        - Timeline
+        - Stats
+        - Inline review
+        - CLI
+        - Other
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: platforms
+    attributes:
+      label: Which platforms must it land in?
+      description: >
+        Features normally ship in ALL of them (logic in core → CLI `--json` → both editors render).
+        Only uncheck one if there's a genuine platform-specific reason — and say why in the proposed
+        solution above.
+      options:
+        - label: CLI (`claude-observatory`)
+          required: false
+        - label: VS Code extension
+          required: false
+        - label: JetBrains plugin
+          required: false
+
+  - type: textarea
+    id: json-surface
+    attributes:
+      label: Expected CLI / `--json` surface (if any)
+      description: >
+        If this needs new data, sketch the CLI command and the `--json` shape both editors would
+        consume. Field names are a stable contract.
+      placeholder: |
+        claude-observatory <command> --json
+        → { "session": "...", "things": [ { "id": 1, "field": "..." } ] }
+      render: json
+    validations:
+      required: false
+
+  - type: textarea
+    id: mockup
+    attributes:
+      label: Mockup / screenshot (optional)
+      description: Drag in an image or paste a rough sketch of the UI, if you have one.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: acknowledgement
+    attributes:
+      label: Acknowledgement
+      options:
+        - label: I understand features ship across all platforms (CLI + VS Code + JetBrains); see CONTRIBUTING.md.
+          required: true

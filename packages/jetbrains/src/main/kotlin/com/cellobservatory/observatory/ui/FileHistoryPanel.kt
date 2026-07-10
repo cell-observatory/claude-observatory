@@ -104,6 +104,8 @@ class FileHistoryPanel(private val project: Project) : SimpleToolWindowPanel(tru
         val group = DefaultActionGroup(
             action("Accept All Edits in File", AllIcons.Actions.Checked) { acceptFile() },
             action("Revert All Edits in File", AllIcons.Actions.Cancel) { revertFile() },
+            action("Diff Previous Revision", AllIcons.Actions.Diff) { stepRevision(-1) },
+            action("Diff Next Revision", AllIcons.Actions.Diff) { stepRevision(1) },
             action("Refresh", AllIcons.Actions.Refresh) { service().refresh() },
         )
         val tb = ActionManager.getInstance().createActionToolbar("ClaudeObservatoryFileHistory", group, true)
@@ -131,6 +133,14 @@ class FileHistoryPanel(private val project: Project) : SimpleToolWindowPanel(tru
             selectedEdit()?.let { rec -> withSession { s -> ReviewOps.chatAbout(project, s, rec.id) } }
         },
     )
+
+    /** Step the active editor's Claude revisions in a current-vs-revision diff (parity with the
+     *  ⌥⌘[ / ⌥⌘] editor actions). Needs a text editor — the diff pane is not one. */
+    private fun stepRevision(dir: Int) {
+        val editor = FileEditorManager.getInstance(project).selectedTextEditor
+            ?: return ReviewOps.notify(project, "Open a file to navigate its Claude revisions")
+        RevisionNav.step(project, editor, dir)
+    }
 
     private fun acceptFile() = withSession { s ->
         val file = currentFile ?: return@withSession
