@@ -6,7 +6,7 @@ import com.intellij.openapi.wm.ToolWindow
 import com.intellij.openapi.wm.ToolWindowFactory
 import com.intellij.ui.content.ContentFactory
 
-/** Sidebar review window (VS Code activity-bar analog): Edits + Diffs. */
+/** Sidebar review window (VS Code activity-bar analog): Edits + Diffs + File History. */
 class ObservatoryToolWindowFactory : ToolWindowFactory, DumbAware {
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
         val factory = ContentFactory.getInstance()
@@ -15,6 +15,9 @@ class ObservatoryToolWindowFactory : ToolWindowFactory, DumbAware {
         )
         toolWindow.contentManager.addContent(
             factory.createContent(EditsTreePanel(project, EditsTreePanel.Mode.DIFFS), "Diffs", false)
+        )
+        toolWindow.contentManager.addContent(
+            factory.createContent(FileHistoryPanel(project), "File History", false)
         )
     }
 }

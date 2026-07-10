@@ -9,7 +9,7 @@ stay in sync because they read and write the same `~/.claude/claude-observatory`
 
 - A JetBrains IDE **2025.2+**
 - The `claude-observatory` CLI on this machine (the plugin drives it for every store mutation —
-  undo/redo correctness lives there, deliberately): `npm i -g claude-observatory`
+  undo/redo correctness lives there, deliberately). Install it via the [one-command bootstrap](https://github.com/cell-observatory/claude-observatory#install), or from a release tarball: `npm i -g ./claude-observatory-<ver>.tgz`
 - Capture hooks installed: `claude-observatory init --with-statusline` (with Claude Code closed;
   `--with-statusline` also enables the 5h/week Usage bars)
 
@@ -42,12 +42,12 @@ found, set both explicitly in **Settings → Tools → Claude Observatory**. Ful
 
 | Surface | Where |
 | --- | --- |
-| **Edits / Diffs** trees (folder → file → class → edit; Keep/Undo/Redo/Diff via context menu) | "Claude Observatory" tool window, left stripe |
-| **Observations · Timeline · Stats** side-by-side panes | "Claude Observatory Dashboards" tool window, bottom stripe |
-| **Inline review** — lens (`✓ Keep · ↩ Undo · ⇄ Diff · 💬 Chat`) above each pending edit, diff-tinted lines, gutter microscope, `✨ #N` markers | every editor |
-| **Hover card** — Claude's full reasoning + actions, on hover over any edited line or the ✨ marker | every editor |
+| **Edits / Diffs / File History** trees (Edits/Diffs group folder → file → class → edit; **File History** is a flat, chronological list of just the active file's edits that follows the editor) — Keep/Undo/Redo/Diff via context menu | "Claude Observatory" tool window, left stripe |
+| **Observations · Timeline · Stats** side-by-side panes (Stats leads with a live **review scoreboard** — pending / accepted / reverted counts + a progress bar — over the tokens plot) | "Claude Observatory Dashboards" tool window, bottom stripe |
+| **Inline menu** — `✨ #N view changes` (opens the edit's inline diff) then `✓ Keep · ↩ Undo · 💬 Chat` on the lens above each pending edit; a **✨ gutter star** (click to open the diff), a subtle green/red line tint, a **Claude-coral error-stripe** marker | every editor |
+| **Click → inline diff** — the edit's before ⟷ after opens **unified**, with Claude's reasoning in the title and `Keep · Undo · Chat` on the diff toolbar; **📄 file heatmap** dims unmodified lines (editor banner) | every editor |
 | **🔬 scoreboard** — pending count, accept rate, oldest pending; click = review next | status bar |
-| **Keyboard loop** — `⌥⌘N` review next · `⌥⌘Y` keep at cursor · `⌥⌘U` undo at cursor (`Ctrl+Alt` on Windows/Linux) | global |
+| **Keyboard loop** — `⌥⌘N` review next · `⌥⌘Y` keep at cursor · `⌥⌘U` undo at cursor · `⌥⌘[` / `⌥⌘]` step file revisions in a diff (`Ctrl+Alt` on Windows/Linux) | global |
 
 Undo is surgical (position-anchored 3-way merge, via the CLI): reverting one edit preserves later
 edits to the same file; genuine overlaps surface a conflict dialog with a **Force-restore** option.
@@ -57,7 +57,8 @@ Unsaved files prompt **Save & Continue** before any disk-writing operation.
 
 **Settings → Tools → Claude Observatory**: paths for the `claude-observatory` and `claude` CLIs
 (blank = auto-detect), a `CLAUDE_CONFIG_DIR` override (for relocated config dirs, e.g. devcontainer
-volumes), and the inline-overlay toggle.
+volumes), the inline-overlay toggle, and a **unified diff** toggle (open edit diffs in the inline
+red/green viewer instead of side-by-side).
 
 ## Architecture (for contributors)
 

@@ -20,8 +20,20 @@ test('extension: three views, click commands, inline annotations, chat, status s
   // seed: projects dir so resolveSessionId(ws) === S, and a store with 2 edits on one file
   const proj = path.join(home, '.claude', 'projects', ws.replace(/[^a-zA-Z0-9]/g, '-'));
   fs.mkdirSync(proj, { recursive: true });
-  fs.writeFileSync(path.join(proj, S + '.jsonl'), JSON.stringify({ type: 'ai-title', aiTitle: 'Reviewing app.txt edits' }));
   const F = path.join(ws, 'app.txt');
+  // transcript: the ai-title recap + two assistant messages whose Edit tool_uses on F carry Claude's
+  // reasoning (correlated per-file to store edits #1/#2) — feeds the inline reasoning lens + blame.
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), [
+    JSON.stringify({ type: 'ai-title', aiTitle: 'Reviewing app.txt edits' }),
+    JSON.stringify({ message: { role: 'assistant', content: [
+      { type: 'text', text: 'Operation 1 — introduce the greeting' },
+      { type: 'tool_use', name: 'Edit', input: { file_path: F } },
+    ] } }),
+    JSON.stringify({ message: { role: 'assistant', content: [
+      { type: 'text', text: 'Operation 2 — add a farewell() method' },
+      { type: 'tool_use', name: 'Edit', input: { file_path: F } },
+    ] } }),
+  ].join('\n'));
   core.ensureStore(S);
   const b0 = core.writeBlob(S, Buffer.from('a\nb\nc\nd\n'));
   const a1 = core.writeBlob(S, Buffer.from('AAA\nb\nc\nd\n'));
@@ -40,10 +52,14 @@ test('extension: three views, click commands, inline annotations, chat, status s
   let lensProvider = null;
   let hoverProvider = null;
   let decoProvider = null;
+  let commentController = null;
+  const commentThreads = [];
   const statusBarItem = { text: '', tooltip: '', command: undefined, backgroundColor: undefined, show() {}, hide() {}, dispose() {} };
   let clipboardText = '';
   let decoCounter = 0;
   let opened = null;
+  let lastShown = null;
+  let inputBoxValue; // drives the Search edits input box
   class EventEmitter {
     constructor() { this._s = []; }
     get event() { return (cb) => { this._s.push(cb); return { dispose() {} }; }; }
@@ -69,6 +85,7 @@ test('extension: three views, click commands, inline annotations, chat, status s
   const Uri = {
     file: (p) => ({ scheme: 'file', path: p, fsPath: p }),
     from: (o) => ({ scheme: o.scheme, path: o.path, query: o.query || '' }),
+    joinPath: (base, ...parts) => ({ scheme: 'file', path: [base && base.path, ...parts].filter(Boolean).join('/'), fsPath: [base && base.fsPath, ...parts].filter(Boolean).join('/') }),
   };
   const doc = {
     uri: Uri.file(F),
@@ -76,7 +93,7 @@ test('extension: three views, click commands, inline annotations, chat, status s
     getText: () => 'AAA\nb\nc\nZZZ\n',
     lineAt: (n) => ({ range: new Range(n, 0, n, 3) }),
   };
-  const mockEditor = { document: doc, selection: null, setDecorations: (t, opts) => decoCalls.push({ typeId: t.id, opts }), revealRange() {} };
+  const mockEditor = { document: doc, selection: { active: { line: 0 } }, setDecorations: (t, opts) => decoCalls.push({ typeId: t.id, opts }), revealRange() {} };
   const vscode = {
     EventEmitter, TreeItem, ThemeIcon, Position, Range, Selection, MarkdownString, CodeLens, Hover,
     ThemeColor: class { constructor(id) { this.id = id; } },
@@ -88,6 +105,8 @@ test('extension: three views, click commands, inline annotations, chat, status s
     ProgressLocation: { Notification: 15, Window: 10, SourceControl: 1 },
     ConfigurationTarget: { Global: 1, Workspace: 2, WorkspaceFolder: 3 },
     TextEditorRevealType: { InCenter: 2 },
+    CommentMode: { Editing: 0, Preview: 1 },
+    CommentThreadCollapsibleState: { Collapsed: 0, Expanded: 1 },
     workspace: {
       workspaceFolders: [{ uri: Uri.file(ws) }],
       textDocuments: [],
@@ -95,6 +114,7 @@ test('extension: three views, click commands, inline annotations, chat, status s
       registerTextDocumentContentProvider: (s, p) => { contentProviders[s] = p; return { dispose() {} }; },
       createFileSystemWatcher: () => ({ onDidChange() {}, onDidCreate() {}, onDidDelete() {}, dispose() {} }),
       onDidChangeTextDocument: () => ({ dispose() {} }),
+      onDidChangeConfiguration: () => ({ dispose() {} }),
       getConfiguration: () => ({ get: (_k, def) => def, update: () => Promise.resolve() }),
       openTextDocument: (uri) => Promise.resolve({ uri, lineCount: 5, getText: () => 'AAA\nb\nc\nZZZ\n', lineAt: (n) => ({ range: new Range(n, 0, n, 3) }) }),
     },
@@ -111,10 +131,12 @@ test('extension: three views, click commands, inline annotations, chat, status s
       withProgress: (_o, task) => task({ report() {} }),
       onDidChangeWindowState: () => ({ dispose() {} }),
       onDidChangeActiveTextEditor: () => ({ dispose() {} }),
+      onDidChangeTextEditorSelection: () => ({ dispose() {} }),
       activeTextEditor: mockEditor,
       visibleTextEditors: [mockEditor],
-      showTextDocument: (d) => { opened = d; return Promise.resolve({ document: d, selection: null, revealRange() {} }); },
+      showTextDocument: (d) => { opened = d; lastShown = { document: d, selection: null, revealRange() {} }; return Promise.resolve(lastShown); },
       showInformationMessage: () => Promise.resolve(undefined),
+      showInputBox: () => Promise.resolve(inputBoxValue),
       showWarningMessage: (_m, _o, ...items) => Promise.resolve(items[0]),
     },
     commands: {
@@ -122,6 +144,20 @@ test('extension: three views, click commands, inline annotations, chat, status s
       executeCommand: (cmd, ...args) => {
         if (cmd === 'vscode.diff') { diffCalls.push(args); return Promise.resolve(); }
         return Promise.resolve(commands[cmd] && commands[cmd](...args));
+      },
+    },
+    comments: {
+      createCommentController: (id, label) => {
+        commentController = {
+          id, label, commentingRangeProvider: undefined,
+          createCommentThread: (uri, range, comments) => {
+            const thread = { uri, range, comments, collapsibleState: undefined, canReply: undefined, contextValue: undefined, label: undefined, disposed: false, dispose() { thread.disposed = true; } };
+            commentThreads.push(thread);
+            return thread;
+          },
+          dispose() {},
+        };
+        return commentController;
       },
     },
     languages: {
@@ -136,7 +172,7 @@ test('extension: three views, click commands, inline annotations, chat, status s
   };
   try {
     const ext = require(BUNDLE);
-    ext.activate({ subscriptions: [] });
+    ext.activate({ subscriptions: [], extensionUri: Uri.file(ws) });
 
     const editsTree = trees['claudeObservatory.edits'];
     const diffsTree = trees['claudeObservatory.diffs'];
@@ -156,27 +192,87 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.equal(editsTree.getTreeItem(edits[0]).command.command, 'claudeObservatory.openFileAtEdit', 'Edits view: edit click opens file at edit');
     assert.equal(diffsTree.getTreeItem(edits[0]).command.command, 'claudeObservatory.openDiff', 'Diffs view: edit click opens diff');
 
-    // inline overlay: right-side annotations, one per pending edit (#1 -> line 0, #2 -> line 3)
-    const annCall = decoCalls.filter((c) => c.typeId === 2).pop();
-    assert.ok(annCall, 'annotation decorations applied');
-    assert.equal(annCall.opts.length, 2, 'one annotation per pending edit');
-    const annByLine = Object.fromEntries(annCall.opts.map((o) => [o.range.start.line, o]));
-    assert.ok(annByLine[0] && /#1/.test(annByLine[0].renderOptions.after.contentText), 'edit #1 annotated at line 0');
-    assert.ok(annByLine[3] && /#2/.test(annByLine[3].renderOptions.after.contentText), 'edit #2 annotated at line 3');
-    assert.match(annByLine[0].hoverMessage.value, /command:claudeObservatory\.inline(Keep|Undo|Diff)/, 'hover carries action links');
-    assert.match(annByLine[0].hoverMessage.value, /command:claudeObservatory\.chatEdit/, 'hover carries a Chat link');
+    // File History: a flat, chronological list of just the ACTIVE file's edits (follows the editor).
+    const fileHistoryTree = trees['claudeObservatory.fileHistory'];
+    assert.ok(fileHistoryTree, 'File History view registered');
+    const fhRows = fileHistoryTree.getChildren();
+    assert.equal(fhRows.length, 2, "file history lists the active file's edits");
+    assert.equal(fhRows[0].rec.id, 1, 'file history is chronological (oldest first)');
+    const fhItem = fileHistoryTree.getTreeItem(fhRows[0]);
+    assert.match(fhItem.label, /#1/, 'file history row leads with the edit id');
+    assert.equal(fhItem.command.command, 'claudeObservatory.openFileAtEdit', 'file history row click opens file at edit');
+    assert.equal(fhItem.contextValue, 'edit', 'pending file-history row reuses the edit context menu');
 
-    // inline CodeLens: visible Keep / Undo / Diff actions above each pending edit
+    // ✨ gutter-star decorations: one at the START (first line) of each edit — #1 -> line 0, #2 -> line 3.
+    // (These ranges get the star.svg gutterIconPath; no whole-line green fill anymore.)
+    const starCall = decoCalls.filter((c) => c.typeId === 2).pop();
+    assert.ok(starCall, 'gutter star decorations applied');
+    assert.equal(starCall.opts.length, 2, 'one gutter star per edit');
+    const starLines = new Set(starCall.opts.map((o) => o.start.line));
+    assert.ok(starLines.has(0), 'edit #1 gets a gutter star at its first line (0)');
+    assert.ok(starLines.has(3), 'edit #2 gets a gutter star at its first line (3)');
+
+    // deletions render as red ghost text (decoration type 3); these edits only replace lines (even
+    // swaps), so it must stay empty — a modification must never surface removed-line ghost text.
+    const ghost = decoCalls.filter((c) => c.typeId === 3).pop();
+    assert.ok(ghost, 'deletion ghost decoration applied');
+    assert.equal(ghost.opts.length, 0, 'no ghost text for a pure modification');
+
+    // inline CodeLens = the inline menu per edit: "✨ #N +A −R view changes" (opens the review bubble)
+    // + ✓ Keep · ↩ Undo · 💬 Chat · ⧉ View diff (full diff tab). Reasoning is NOT on the CodeLens —
+    // it rides in the bubble instead.
     assert.ok(lensProvider, 'CodeLens provider registered');
     const lenses = lensProvider.provideCodeLenses(doc);
-    assert.ok(lenses.length >= 4, 'lenses provided for the pending edits');
-    assert.ok(lenses.some((l) => l.command.command === 'claudeObservatory.inlineKeep' && /Keep #\d/.test(l.command.title)), 'a Keep lens carries the id');
+    assert.ok(lenses.length >= 10, 'enriched CodeLens rows (view-changes + Keep/Undo/Chat/View-diff per edit)');
+    assert.ok(lenses.some((l) => l.command.command === 'claudeObservatory.viewChanges' && /✨ #\d\s+\+\d+\s+.\d+\s+view changes/.test(l.command.title)), 'the "✨ #N +A −R view changes" lens opens the inline review bubble');
+    assert.ok(lenses.some((l) => l.command.command === 'claudeObservatory.inlineKeep'), 'a Keep lens');
     assert.ok(lenses.some((l) => l.command.command === 'claudeObservatory.inlineUndo'), 'an Undo lens');
+    assert.ok(lenses.some((l) => l.command.command === 'claudeObservatory.chatEdit'), 'a Chat lens');
+    assert.ok(lenses.some((l) => l.command.command === 'claudeObservatory.openDiff' && /View diff/.test(l.command.title) && l.command.arguments[0].rec), 'a View-diff lens opens the full diff tab');
+    assert.ok(!lenses.some((l) => l.command.command === 'claudeObservatory.showObservation'), 'no reasoning lens on the CodeLens (reasoning lives in the bubble)');
+    // no editor hover provider (the hover card was removed earlier)
+    assert.equal(hoverProvider, null, 'no editor hover provider');
 
-    // hovering the highlighted (changed) text pops the same Keep/Undo/Diff/Chat menu
-    assert.ok(hoverProvider, 'hover provider registered');
-    const hv = hoverProvider.provideHover(doc, new Position(0, 0)); // line 0 is edit #1's changed line
-    assert.ok(hv && /command:claudeObservatory\.inline(Keep|Undo)/.test(hv.contents.value), 'hover over highlighted text shows the menu');
+    // "view changes" opens the inline review BUBBLE (Comment API) at the edit, its diff rendered in
+    // git's own theme colors via sanitizer-safe <span style> (the technique GitLens uses). Toolbar
+    // buttons (peekKeep/Undo/Chat/Prev/Next) act on the bubble; no clickable command links in the body.
+    assert.ok(commentController && commentController.id === 'claudeObservatory', 'comment controller registered');
+    for (const c of ['claudeObservatory.viewChanges', 'claudeObservatory.peekKeep', 'claudeObservatory.peekUndo',
+      'claudeObservatory.peekChat', 'claudeObservatory.peekPrev', 'claudeObservatory.peekNext',
+      'claudeObservatory.diffPrevEdit', 'claudeObservatory.diffNextEdit']) {
+      assert.ok(typeof commands[c] === 'function', `${c} registered`);
+    }
+    await commands['claudeObservatory.viewChanges'](1);
+    const peek1 = commentThreads[commentThreads.length - 1];
+    assert.ok(peek1, 'viewChanges opens a comment thread (the inline review bubble)');
+    assert.equal(peek1.contextValue, 'claudeEdit', 'thread tagged for the bubble toolbar when-clause');
+    assert.equal(peek1.collapsibleState, vscode.CommentThreadCollapsibleState.Expanded, 'bubble opens expanded');
+    assert.equal(peek1.canReply, false, 'bubble has no reply box');
+    const body1 = peek1.comments[0].body;
+    assert.equal(body1.supportHtml, true, 'body enables supportHtml (colored spans need it)');
+    assert.match(body1.value, /#1\b/, 'bubble shows the edit number');
+    assert.match(body1.value, /\+\d+ −\d+/, 'bubble shows the +A −B line counts');
+    assert.ok(body1.value.includes('<span style="color:var(--vscode-gitDecoration-addedResourceForeground);background-color:var(--vscode-diffEditor-insertedTextBackground);">'),
+      "added lines use git's green text + translucent green line fill");
+    assert.ok(body1.value.includes('<span style="color:var(--vscode-gitDecoration-deletedResourceForeground);background-color:var(--vscode-diffEditor-removedTextBackground);">'),
+      "deleted lines use git's red text + translucent red line fill");
+    assert.ok(!body1.value.includes('command:'), 'no clickable command links in the body (toolbar carries the actions)');
+    // Prev/Next is our OWN nav: peekNext steps the bubble to edit #2.
+    await commands['claudeObservatory.peekNext']();
+    const peek2 = commentThreads[commentThreads.length - 1];
+    assert.ok(peek2 !== peek1 && peek1.disposed, 'peekNext disposes the old thread and opens the next edit');
+    assert.match(peek2.comments[0].body.value, /#2\b/, 'peekNext advanced the bubble to edit #2');
+    // peekKeep marks the bubble's edit kept and closes it; restore pending for later assertions.
+    await commands['claudeObservatory.peekKeep']();
+    assert.equal(core.findRecord(S, 2).status, 'kept', 'peekKeep marks the peeked edit kept');
+    assert.ok(peek2.disposed, 'peekKeep disposes the thread');
+    core.setStatus(S, 2, 'pending'); // undo the mutation so the store stays at "2 pending" downstream
+    // Prev/Next also live on diff TABS (Diffs tree / revision nav): from #1's diff URI, Next → #2's diff.
+    await commands['claudeObservatory.openDiff'](edits[0]);
+    const dUri = diffCalls[diffCalls.length - 1][1];
+    await commands['claudeObservatory.diffNextEdit'](dUri);
+    assert.match(diffCalls[diffCalls.length - 1][2], /#2/, 'diffNextEdit opens the next pending edit in the file');
+    diffCalls.length = 0; // reset so the later openDiff test still sees exactly one diff call
 
     // Timeline: a newest-first change feed; the two same-file edits coalesce into one collapsible run.
     const feed = timelineTree.getChildren();
@@ -223,6 +319,14 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.match(stView.webview.html, /ctx/, 'usage bars present (ctx row)');
     assert.match(stView.webview.html, /5h/, 'usage bars present (5h row)');
     assert.match(stView.webview.html, />Today</, 'the Today/7d/30d range toggle is present');
+    // live review scoreboard replaced the old Edits chart: counts + a progress bar, fed via postMessage.
+    assert.match(stView.webview.html, /id="rv-pending"/, 'review scoreboard: pending count cell present');
+    assert.match(stView.webview.html, /id="rv-fill"/, 'review scoreboard: progress bar present');
+    const scMsgs = [];
+    stView.webview.postMessage = (m) => scMsgs.push(m);
+    stProvider.refresh();
+    assert.ok(scMsgs.some((m) => m.type === 'counts' && m.c.pending === 2 && m.c.kept === 0 && m.c.undone === 0),
+      'stats posts the live review counts (2 pending, 0 accepted, 0 reverted)');
     assert.match(stView.webview.html, /Gathering stats/i, 'stats placeholder present until the scan returns');
     assert.match(stView.webview.html, /id="ustale"/, 'stale-cache hint present (panel-only sessions)');
     // CLI-missing hint: a failed scan (before any data) posts statsError so the webview shows install help
@@ -236,13 +340,41 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.match(statusBarItem.text, /2/, 'status bar shows 2 pending');
     assert.match(statusBarItem.tooltip.value, /2 pending · 0 accepted · 0 reverted/, 'scoreboard lives in the microscope tooltip');
     assert.ok(typeof commands['claudeObservatory.reviewNext'] === 'function', 'reviewNext registered');
+    // reviewNext must step through EVERY pending edit, not always reopen the oldest: #1 (line 0) →
+    // #2 (line 3) → wrap back to #1.
     await commands['claudeObservatory.reviewNext']();
     assert.ok(opened && opened.uri.fsPath === F, 'reviewNext opened the file with the oldest pending edit');
+    assert.equal(lastShown.selection.active.line, 0, 'first reviewNext lands on edit #1');
+    await commands['claudeObservatory.reviewNext']();
+    assert.equal(lastShown.selection.active.line, 3, 'second reviewNext advances to edit #2');
+    await commands['claudeObservatory.reviewNext']();
+    assert.equal(lastShown.selection.active.line, 0, 'third reviewNext wraps back to edit #1');
+    // reviewPrev walks the other way: from #1 it wraps to #2, then back to #1.
+    assert.ok(typeof commands['claudeObservatory.reviewPrev'] === 'function', 'reviewPrev registered');
+    await commands['claudeObservatory.reviewPrev']();
+    assert.equal(lastShown.selection.active.line, 3, 'reviewPrev steps back to edit #2');
+    await commands['claudeObservatory.reviewPrev']();
+    assert.equal(lastShown.selection.active.line, 0, 'reviewPrev steps back to edit #1');
     opened = null;
+
+    // Search: filter the Edits tree by file path (parity: the JetBrains tree filters identically).
+    assert.ok(typeof commands['claudeObservatory.searchEdits'] === 'function', 'searchEdits registered');
+    inputBoxValue = 'zzz-nomatch';
+    await commands['claudeObservatory.searchEdits']();
+    assert.equal(editsTree.getChildren().length, 0, 'a non-matching search hides every edit');
+    inputBoxValue = 'app';
+    await commands['claudeObservatory.searchEdits']();
+    assert.ok(editsTree.getChildren().length >= 1, 'a matching search shows the file again');
+    inputBoxValue = ''; // clear so the later assertions still see all edits
+    await commands['claudeObservatory.searchEdits']();
+    assert.ok(editsTree.getChildren().length >= 1, 'clearing the search restores all edits');
 
     // new commands exist
     for (const c of ['claudeObservatory.keepAll', 'claudeObservatory.undoAll', 'claudeObservatory.chatEdit',
-      'claudeObservatory.showObservation', 'claudeObservatory.analyzeEdit', 'claudeObservatory.refreshRecap']) {
+      'claudeObservatory.showObservation', 'claudeObservatory.analyzeEdit', 'claudeObservatory.refreshRecap',
+      'claudeObservatory.switchSession', 'claudeObservatory.exportSummary', 'claudeObservatory.doctor',
+      'claudeObservatory.diffPrevRevision', 'claudeObservatory.diffNextRevision',
+      'claudeObservatory.diffKeep', 'claudeObservatory.diffUndo', 'claudeObservatory.diffChat']) {
       assert.ok(typeof commands[c] === 'function', `${c} registered`);
     }
 
@@ -262,6 +394,18 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.equal(left.scheme, 'claude-edit');
     assert.equal(contentProviders['claude-edit'].provideTextDocumentContent(left), 'a\nb\nc\nd\n');
     assert.equal(contentProviders['claude-edit'].provideTextDocumentContent(right), 'AAA\nb\nc\nd\n');
+    // the diff URIs carry the edit id so the diff's title-bar actions can resolve it
+    assert.equal(new URLSearchParams(right.query).get('e'), '1', 'diff URI carries the edit id');
+    clipboardText = '';
+    await commands['claudeObservatory.diffChat'](right); // title-bar action gets the modified URI
+    assert.match(clipboardText, /edit #1/, 'a diff title-bar action resolves the edit id from the diff URI');
+
+    // revision navigation: step to the newest revision → a current-vs-revision diff (recorded blob ⟶ live file)
+    await commands['claudeObservatory.diffNextRevision']();
+    const revCall = diffCalls.find((c) => /⟶ \(this file\)/.test(c[2]));
+    assert.ok(revCall, 'revision nav opens an "edit #N ⟶ (this file)" diff');
+    assert.equal(revCall[0].scheme, 'claude-edit', 'revision diff LEFT is the recorded blob');
+    assert.equal(revCall[1].scheme, 'file', 'revision diff RIGHT is the live current file');
 
     // keyboard review loop: keep the edit under the cursor (edit #2 lives on line 3, 'ZZZ')
     mockEditor.selection = new Selection(new Position(3, 0), new Position(3, 0));
@@ -296,6 +440,18 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.match(memTip, /🧠 2 edits across sessions · 50% accepted/, 'observation tooltip carries cross-session file memory');
     const memMd = contentProviders['claude-observation'].provideTextDocumentContent({ authority: 'obs', path: '/edit-1.md', query: 's=' + S });
     assert.match(memMd, /## File history \(all sessions\)/, 'combined report has a File history section');
+
+    // file-scoped accept: keepOpenFile (active editor = app.txt) touches ONLY that file's pending edits.
+    const G = path.join(ws, 'other.txt');
+    const fb = core.writeBlob(S, Buffer.from('p\n')), fa = core.writeBlob(S, Buffer.from('p\nq\n'));
+    core.appendLog(S, { id: 98, ts: 9800, tool: 'Edit', file: F, beforeBlob: fb, afterBlob: fa, status: 'pending' });
+    const gb = core.writeBlob(S, Buffer.from('x\n')), ga = core.writeBlob(S, Buffer.from('x\ny\n'));
+    core.appendLog(S, { id: 99, ts: 9900, tool: 'Edit', file: G, beforeBlob: gb, afterBlob: ga, status: 'pending' });
+    assert.ok(typeof commands['claudeObservatory.keepOpenFile'] === 'function', 'keepOpenFile registered');
+    await commands['claudeObservatory.keepOpenFile'](); // active editor's file is app.txt (F)
+    const flog = core.readLog(S);
+    assert.equal(flog.find((r) => r.id === 98).status, 'kept', 'keepOpenFile accepted the active file (app.txt)');
+    assert.equal(flog.find((r) => r.id === 99).status, 'pending', 'keepOpenFile left the other file (other.txt) untouched');
   } finally {
     Module._load = origLoad;
   }

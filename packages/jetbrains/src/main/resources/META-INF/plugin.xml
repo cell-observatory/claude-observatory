@@ -23,6 +23,9 @@
                 factoryClass="com.cellobservatory.observatory.ui.ObservatoryDashboardsFactory"/>
     <statusBarWidgetFactory id="claudeObservatoryStatus" order="first"
                             implementation="com.cellobservatory.observatory.ui.ObservatoryStatusBarWidgetFactory"/>
+    <statusBarWidgetFactory id="claudeObservatoryActions" order="after claudeObservatoryStatus"
+                            implementation="com.cellobservatory.observatory.ui.ObservatoryActionsWidgetFactory"/>
+    <editorNotificationProvider implementation="com.cellobservatory.observatory.ui.editor.ObservatoryEditorBanner"/>
     <applicationConfigurable parentId="tools" id="com.cell-observatory.claude-observatory.settings"
                              displayName="Claude Observatory"
                              instance="com.cellobservatory.observatory.settings.ObservatoryConfigurable"/>
@@ -39,6 +42,13 @@
         <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt N"/>
         <keyboard-shortcut keymap="Mac OS X 10.5+" first-keystroke="meta alt N" replace-all="true"/>
       </action>
+      <action id="ClaudeObservatory.ReviewPrev"
+              class="com.cellobservatory.observatory.actions.ReviewPrevAction"
+              text="Claude Observatory: Review Previous Pending Edit"
+              description="Step to the previous pending Claude edit">
+        <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt P"/>
+        <keyboard-shortcut keymap="Mac OS X 10.5+" first-keystroke="meta alt P" replace-all="true"/>
+      </action>
       <action id="ClaudeObservatory.KeepAtCursor"
               class="com.cellobservatory.observatory.actions.KeepAtCursorAction"
               text="Claude Observatory: Keep Pending Edit at Cursor"
@@ -52,6 +62,20 @@
               description="Surgically undo the pending Claude edit under the cursor">
         <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt U"/>
         <keyboard-shortcut keymap="Mac OS X 10.5+" first-keystroke="meta alt U" replace-all="true"/>
+      </action>
+      <action id="ClaudeObservatory.DiffPrevRevision"
+              class="com.cellobservatory.observatory.actions.DiffPrevRevisionAction"
+              text="Claude Observatory: Diff Previous Revision"
+              description="Diff the current file against the state produced by the previous Claude edit">
+        <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt OPEN_BRACKET"/>
+        <keyboard-shortcut keymap="Mac OS X 10.5+" first-keystroke="meta alt OPEN_BRACKET" replace-all="true"/>
+      </action>
+      <action id="ClaudeObservatory.DiffNextRevision"
+              class="com.cellobservatory.observatory.actions.DiffNextRevisionAction"
+              text="Claude Observatory: Diff Next Revision"
+              description="Diff the current file against the state produced by the next Claude edit">
+        <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt CLOSE_BRACKET"/>
+        <keyboard-shortcut keymap="Mac OS X 10.5+" first-keystroke="meta alt CLOSE_BRACKET" replace-all="true"/>
       </action>
     </group>
   </actions>

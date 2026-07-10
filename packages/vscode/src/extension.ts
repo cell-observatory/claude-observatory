@@ -8,103 +8,57 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import * as os from 'os';
 import * as cp from 'child_process';
 import * as core from '@claude-observatory/core';
 
 const SCHEME = 'claude-edit'; // in-memory before/after blobs for vscode.diff
 
+// Claude's signature marker color for the overview ruler — a distinct coral so Claude's edits are
+// recognizable at a glance and don't blend into VCS (green/blue/red) gutter markers.
+const CLAUDE_MARK_COLOR = 'rgba(204, 120, 92, 0.85)';
+// Toned-down whole-line tints for the inline overlay — low alpha so a file Claude edited heavily
+// doesn't drown in color, but the changed lines are still visible (green added, red removed).
+const ADDED_LINE_BG = 'rgba(88, 166, 100, 0.10)';
+const REMOVED_LINE_BG = 'rgba(229, 83, 75, 0.10)';
+
 // --- inline (in-editor) overlay state ---
 let inlineDecoration: vscode.TextEditorDecorationType | undefined; // gutter change-bar on changed lines
+let deletionGhostDecoration: vscode.TextEditorDecorationType | undefined; // red "ghost" text showing removed lines
 let annotationDecoration: vscode.TextEditorDecorationType | undefined; // right-side per-edit annotation
+let heatmapDecoration: vscode.TextEditorDecorationType | undefined; // dims unmodified lines (spotlight edits)
+let heatmapOn = false; // "file heatmap" toggle: dim everything except Claude's edited lines
 let inlineLens: InlineLensProvider | undefined; // clickable Keep/Undo/Diff above each pending edit
 const MAX_INLINE_LINES = 20000; // skip the overlay on very large files (perf)
 
-type FolderNode = { kind: 'folder'; prefix: string; label: string }; // prefix is a relative path ending in '/'
-type FileNode = { kind: 'file'; file: string; edits: core.EditRecord[] };
-type ClassNode = { kind: 'class'; file: string; name: string; edits: core.EditRecord[] };
+type FolderNode = { kind: 'folder'; label: string; folders: core.TreeFolder[]; files: core.TreeFile[] };
+type FileNode = { kind: 'file'; file: string; edits: core.TreeEdit[]; classes: core.TreeClass[]; loose: core.TreeEdit[] };
+type ClassNode = { kind: 'class'; file: string; name: string; edits: core.TreeEdit[] };
 type EditNode = { kind: 'edit'; rec: core.EditRecord; feed?: boolean }; // feed = top-level Timeline row (show file + time)
 type TlRunNode = { kind: 'tlrun'; file: string; edits: core.EditRecord[] }; // Timeline run: adjacent same-file edits
 type Node = FolderNode | FileNode | ClassNode | EditNode | TlRunNode;
 
-/** Group a session's edits by workspace-relative file path (posix-normalized). */
-function editsByRelFile(session: string): Map<string, { file: string; edits: core.EditRecord[] }> {
-  const byFile = new Map<string, { file: string; edits: core.EditRecord[] }>();
-  for (const rec of cachedLog(session)) {
-    const rel = vscode.workspace.asRelativePath(rec.file, false).split(path.sep).join('/');
-    if (!byFile.has(rel)) byFile.set(rel, { file: rec.file, edits: [] });
-    byFile.get(rel)!.edits.push(rec);
-  }
-  return byFile;
-}
+// Active "Search edits" filter — matches on workspace-relative path; empty = show everything.
+// Module-level so the Edits and Diffs trees filter together (parity with the JetBrains service filter).
+let editFilter = '';
 
-/** Immediate folder segments + files directly under `prefix` (no compaction). */
-function immediateSegs(rels: string[], prefix: string): { folderSegs: Set<string>; files: string[] } {
-  const folderSegs = new Set<string>();
-  const files: string[] = [];
-  for (const rel of rels) {
-    if (!rel.startsWith(prefix)) continue;
-    const rem = rel.slice(prefix.length);
-    const slash = rem.indexOf('/');
-    if (slash >= 0) folderSegs.add(rem.slice(0, slash));
-    else files.push(rel);
-  }
-  return { folderSegs, files };
+// Map the shared core view-model nodes to VS Code tree nodes. The tree STRUCTURE (folder compaction,
+// class grouping, deltas, Search filtering) is computed once in core.buildEditTree — these just wrap it.
+function toFolderNode(f: core.TreeFolder): FolderNode {
+  return { kind: 'folder', label: f.label, folders: f.folders, files: f.files };
 }
-
-/** Immediate folders + files under `prefix`, with single-child folder chains compacted (src/utils). */
-function childrenUnder(rels: string[], prefix: string): { folders: FolderNode[]; files: string[] } {
-  const { folderSegs, files } = immediateSegs(rels, prefix);
-  const folders: FolderNode[] = [...folderSegs].sort().map((seg) => {
-    let p = prefix + seg + '/';
-    let label = seg;
-    for (;;) {
-      const sub = immediateSegs(rels, p);
-      if (sub.files.length === 0 && sub.folderSegs.size === 1) {
-        const only = [...sub.folderSegs][0];
-        p = p + only + '/';
-        label = label + '/' + only;
-      } else break;
-    }
-    return { kind: 'folder', prefix: p, label };
-  });
-  return { folders, files: files.sort() };
-}
-
-/** A file's children: class groups (edits whose current line falls in a class) + loose edits. */
-function fileClassChildren(session: string, fileNode: FileNode): Node[] {
-  let text = '';
-  try {
-    text = fs.readFileSync(fileNode.file, 'utf8');
-  } catch {
-    /* file gone / unreadable */
-  }
-  const spans = text ? core.detectClasses(text) : [];
-  if (spans.length === 0) return fileNode.edits.map((rec) => ({ kind: 'edit', rec }));
-  const byClass = new Map<string, ClassNode>();
-  const loose: EditNode[] = [];
-  for (const rec of fileNode.edits) {
-    const before = cachedBlob(session, rec.beforeBlob);
-    const after = cachedBlob(session, rec.afterBlob);
-    const line = core.locateEditInCurrent(before, after, text)[0];
-    const cls = line !== undefined ? core.classAt(spans, line) : null;
-    if (cls) {
-      const key = `${cls.name}@${cls.start}`;
-      if (!byClass.has(key)) byClass.set(key, { kind: 'class', file: fileNode.file, name: cls.name, edits: [] });
-      byClass.get(key)!.edits.push(rec);
-    } else {
-      loose.push({ kind: 'edit', rec });
-    }
-  }
-  return [...byClass.values(), ...loose];
+function toFileNode(f: core.TreeFile): FileNode {
+  return { kind: 'file', file: f.file, edits: [...f.classes.flatMap((c) => c.edits), ...f.loose], classes: f.classes, loose: f.loose };
 }
 
 function workspaceRoot(): string | undefined {
   return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 }
 
-/** Newest Claude Code session for this workspace (mangled-path resolution lives in core). */
+/** The session the observatory shows: a pinned `claudeObservatory.session` override if set, else the
+ *  newest Claude Code session for this workspace (mangled-path resolution lives in core). */
 function currentSession(): string | undefined {
+  const pinned = vscode.workspace.getConfiguration('claudeObservatory').get<string>('session', '').trim();
+  if (pinned) return pinned;
   const root = workspaceRoot();
   return root ? core.resolveSessionId(root) ?? undefined : undefined;
 }
@@ -256,7 +210,10 @@ class EditsProvider implements vscode.TreeDataProvider<Node> {
     this.view.badge = pending
       ? { value: pending, tooltip: `${pending} pending Claude edit${pending === 1 ? '' : 's'} to review` }
       : undefined;
-    this.view.description = session ? `session ${shortId(session)}` : undefined;
+    const base = session ? `session ${shortId(session)}` : undefined;
+    // Timeline isn't filtered by Search, so only the Edits/Diffs views advertise the active filter.
+    const showFilter = editFilter && this.mode !== 'timeline';
+    this.view.description = showFilter ? `🔍 ${editFilter}${base ? ` · ${base}` : ''}` : base;
   }
 
   getChildren(node?: Node): Node[] {
@@ -280,15 +237,18 @@ class EditsProvider implements vscode.TreeDataProvider<Node> {
       if (node.kind === 'tlrun') return node.edits.map((rec) => ({ kind: 'edit', rec }));
       return [];
     }
-    // edits/diffs: folder → file → (class → edits) + loose edits.
-    if (!node || node.kind === 'folder') {
-      const byRel = editsByRelFile(session);
-      const { folders, files } = childrenUnder([...byRel.keys()], node ? node.prefix : '');
-      const fileNodes: FileNode[] = files.map((rel) => ({ kind: 'file', ...byRel.get(rel)! }));
-      return [...folders, ...fileNodes];
+    // edits/diffs: folder → file → (class → edits) + loose edits, from the shared core view-model.
+    if (!node) {
+      const tree = core.buildEditTree(session, { root: workspaceRoot(), filter: editFilter });
+      return [...tree.folders.map(toFolderNode), ...tree.files.map(toFileNode)];
     }
-    if (node.kind === 'file') return fileClassChildren(session, node);
-    if (node.kind === 'class') return node.edits.map((rec) => ({ kind: 'edit', rec }));
+    if (node.kind === 'folder') return [...node.folders.map(toFolderNode), ...node.files.map(toFileNode)];
+    if (node.kind === 'file')
+      return [
+        ...node.classes.map((c): ClassNode => ({ kind: 'class', file: node.file, name: c.name, edits: c.edits })),
+        ...node.loose.map((rec): EditNode => ({ kind: 'edit', rec })),
+      ];
+    if (node.kind === 'class') return node.edits.map((rec): EditNode => ({ kind: 'edit', rec }));
     return [];
   }
 
@@ -408,24 +368,238 @@ class BlobContentProvider implements vscode.TextDocumentContentProvider {
   }
 }
 
-/** URI for one side of a diff. Path carries the real basename so VS Code picks the language mode. */
-function blobUri(session: string, sha: string | null, file: string, side: string): vscode.Uri {
-  return vscode.Uri.from({
-    scheme: SCHEME,
-    path: `/${side}/${path.basename(file)}`,
-    query: `s=${encodeURIComponent(session)}&b=${encodeURIComponent(sha ?? 'empty')}`,
+// Git's own theme variables, exactly as the diff editor uses them. VS Code's markdown sanitizer allows
+// style ONLY on <span>, ONLY `color;background-color;border-radius` in that order, hex or var(--vscode-*),
+// and NO space after the colons — anything else silently strips the whole attribute (verified against the
+// shipped workbench source; GitLens colors its +/− stats with these same vars).
+const DIFF_SPAN: Record<string, string> = {
+  '+': 'color:var(--vscode-gitDecoration-addedResourceForeground);background-color:var(--vscode-diffEditor-insertedTextBackground);',
+  '-': 'color:var(--vscode-gitDecoration-deletedResourceForeground);background-color:var(--vscode-diffEditor-removedTextBackground);',
+  '@': 'color:var(--vscode-descriptionForeground);',
+};
+
+/** A unified patch as sanitizer-safe HTML with git's diff colors: green/red text on the diff editor's
+ *  translucent line fills. Lines are nbsp-padded to a common width so the fills read as full rows. */
+function diffHtml(patch: string): string {
+  const all = patch.split('\n');
+  const start = all.findIndex((l) => l.startsWith('@@'));
+  const lines = (start >= 0 ? all.slice(start) : all).join('\n').trimEnd().split('\n');
+  const width = Math.min(100, Math.max(...lines.map((l) => l.length), 0) + 2);
+  const html = lines.map((line) => {
+    const text = (line.length < width ? line + ' '.repeat(width - line.length) : line)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/ /g, ' '); // HTML collapses runs of plain spaces — keep indentation + row padding
+    const style = DIFF_SPAN[line[0] ?? ''];
+    return style ? `<span style="${style}">${text}</span>` : text;
   });
+  return `<code>${html.join('<br>')}</code>`;
+}
+
+/** An inline review bubble at an edit, built on the Comment API (the built-in dirty-diff peek is a closed
+ *  widget: no custom buttons, broken nav). The body carries the edit header + reasoning + the diff in
+ *  git's colors (see diffHtml); Accept / Revert / Chat / Prev / Next are real toolbar buttons via the
+ *  comments/commentThread/title menu. Prev/Next steps through the same file's pending edits. */
+class EditPeek implements vscode.Disposable {
+  private readonly controller = vscode.comments.createCommentController('claudeObservatory', 'Claude Observatory');
+  private thread: vscode.CommentThread | undefined;
+  private edit: { id: number; file: string } | undefined;
+
+  constructor() {
+    // No user "add comment" affordance — we only place review threads programmatically.
+    this.controller.commentingRangeProvider = { provideCommentingRanges: () => [] };
+  }
+
+  /** Open (or move) the bubble to edit `id`. */
+  async show(id: number): Promise<void> {
+    const session = currentSession();
+    const rec = session ? core.findRecord(session, id) : null;
+    if (!session || !rec) return;
+    const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(rec.file));
+    const editor = await vscode.window.showTextDocument(doc);
+    const p = cachedPlacements(session, doc).find((pl) => pl.rec.id === id);
+    const line = p ? Math.min(anchorLines(p)[0] ?? 0, Math.max(0, doc.lineCount - 1)) : 0;
+    const range = new vscode.Range(line, 0, line, 0);
+    this.closeThread();
+
+    const cwd = workspaceRoot();
+    const why = cwd ? cachedTranscript(cwd, session).reasoning.get(id)?.trim() : undefined;
+    const d = cachedDelta(session, rec);
+    const md = new vscode.MarkdownString();
+    md.supportHtml = true; // the colored <span>s below survive the sanitizer only with this on
+    md.isTrusted = true;
+    md.appendMarkdown(`**✨ Claude edit #${id}**  ·  \`+${d.added} −${d.removed}\`  ·  ${rec.tool}\n\n`);
+    if (why) md.appendMarkdown(`💭 ${firstLine(why)}\n\n`);
+    let patch = '';
+    try {
+      patch = core.coloredDiff(session, rec, false);
+    } catch {
+      patch = '';
+    }
+    md.appendMarkdown(diffHtml(patch));
+
+    const comment: vscode.Comment = { body: md, mode: vscode.CommentMode.Preview, author: { name: 'Claude Observatory' } };
+    const thread = this.controller.createCommentThread(doc.uri, range, [comment]);
+    thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
+    thread.canReply = false;
+    thread.contextValue = 'claudeEdit';
+    thread.label = `Claude edit #${id}  ·  +${d.added} −${d.removed}`;
+    this.thread = thread;
+    this.edit = { id, file: rec.file };
+    editor.revealRange(range, vscode.TextEditorRevealType.InCenter);
+  }
+
+  keep(): void {
+    const s = currentSession();
+    if (this.edit && s) {
+      core.setStatus(s, this.edit.id, 'kept');
+      this.closeThread();
+    }
+  }
+
+  async undo(): Promise<void> {
+    const s = currentSession();
+    if (this.edit && s) {
+      await undoOne(s, this.edit.id);
+      this.closeThread();
+    }
+  }
+
+  chat(): void {
+    if (this.edit) void vscode.commands.executeCommand('claudeObservatory.chatEdit', this.edit.id);
+  }
+
+  /** Step to the prev (-1) / next (+1) pending edit in the same file, wrapping at the ends. */
+  step(dir: 1 | -1): Promise<void> {
+    const s = currentSession();
+    if (!this.edit || !s) return Promise.resolve();
+    const file = this.edit.file;
+    const list = cachedLog(s).filter((r) => r.file === file && r.status === 'pending').sort((a, b) => a.id - b.id);
+    if (list.length === 0) return Promise.resolve();
+    const idx = list.findIndex((r) => r.id === this.edit!.id);
+    const target = list[((idx < 0 ? 0 : idx) + dir + list.length) % list.length];
+    return this.show(target.id);
+  }
+
+  private closeThread(): void {
+    this.thread?.dispose();
+    this.thread = undefined;
+    this.edit = undefined;
+  }
+
+  dispose(): void {
+    this.closeThread();
+    this.controller.dispose();
+  }
+}
+
+/** URI for one side of a diff. Path carries the real basename so VS Code picks the language mode;
+ *  the optional editId rides in the query so the diff's title-bar actions can resolve their edit. */
+function blobUri(session: string, sha: string | null, file: string, side: string, editId?: number): vscode.Uri {
+  const q = `s=${encodeURIComponent(session)}&b=${encodeURIComponent(sha ?? 'empty')}` + (editId != null ? `&e=${editId}` : '');
+  return vscode.Uri.from({ scheme: SCHEME, path: `/${side}/${path.basename(file)}`, query: q });
+}
+
+/** The edit id encoded in a claude-edit diff URI (the diff title-bar Keep/Undo/Chat commands get this URI). */
+function editIdFromUri(uri: vscode.Uri | undefined): number | undefined {
+  if (!uri || uri.scheme !== SCHEME) return undefined;
+  const e = new URLSearchParams(uri.query).get('e');
+  return e ? Number(e) : undefined;
 }
 
 async function openDiff(node: EditNode): Promise<void> {
   const session = currentSession();
   if (!session) return;
   const rec = node.rec;
-  const left = blobUri(session, rec.beforeBlob, rec.file, 'before');
-  const right = blobUri(session, rec.afterBlob, rec.file, 'after');
-  const title = `${path.basename(rec.file)} — edit #${rec.id} (before ⟷ after)`;
-  await vscode.commands.executeCommand('vscode.diff', left, right, title);
+  // Edit id on BOTH sides so the diff's title-bar commands resolve it whichever side VS Code hands them.
+  const left = blobUri(session, rec.beforeBlob, rec.file, 'before', rec.id);
+  const right = blobUri(session, rec.afterBlob, rec.file, 'after', rec.id);
+  // Claude's reasoning rides in the diff title (VS Code truncates long titles, but shows what fits).
+  const cwd = workspaceRoot();
+  const why = cwd ? cachedTranscript(cwd, session).reasoning.get(rec.id)?.trim() : undefined;
+  const head = why ? firstLine(why) : '';
+  const short = head.length > 80 ? head.slice(0, 79) + '…' : head;
+  const title = short ? `#${rec.id} · ${short}` : `${path.basename(rec.file)} · edit #${rec.id}`;
+  // preview:false → the diff always gets its OWN tab instead of taking over the file's preview tab.
+  await vscode.commands.executeCommand('vscode.diff', left, right, title, { preview: false });
+  await applyInlineDiff();
 }
+
+/** GitLens-style unified inline diff: when enabled and the user's diff editor defaults to side-by-side,
+ *  flip THIS freshly opened diff to the inline (red/green single-column) view. Uses VS Code's built-in
+ *  per-editor toggle — internal + best-effort, so a missing command degrades to the global setting. */
+async function applyInlineDiff(): Promise<void> {
+  const on = vscode.workspace.getConfiguration('claudeObservatory').get<boolean>('inlineDiffView', true);
+  if (!on) return;
+  const sideBySide = vscode.workspace.getConfiguration('diffEditor').get<boolean>('renderSideBySide', true);
+  if (!sideBySide) return; // already inline globally — nothing to flip
+  try {
+    await vscode.commands.executeCommand('toggle.diff.editorMode');
+  } catch {
+    /* internal command, absent on some builds — fall back to the user's global diff setting */
+  }
+}
+
+/** Diff title-bar Prev/Next: from the edit id in the active diff's URI, step to the prev (-1) / next (+1)
+ *  pending edit in the same file (wrapping at the ends). Cycles IN PLACE: opens the target's diff, then
+ *  closes the diff tab the click came from — one diff tab no matter how far you step. */
+async function stepDiffEdit(uri: vscode.Uri | undefined, dir: 1 | -1): Promise<void> {
+  const s = currentSession();
+  const id = editIdFromUri(uri);
+  const rec = s && id != null ? core.findRecord(s, id) : null;
+  if (!s || !rec) return;
+  const list = cachedLog(s).filter((r) => r.file === rec.file && r.status === 'pending').sort((a, b) => a.id - b.id);
+  if (!list.length) return;
+  const idx = list.findIndex((r) => r.id === id);
+  const prev = vscode.window.tabGroups?.activeTabGroup?.activeTab;
+  await openDiff({ kind: 'edit', rec: list[((idx < 0 ? 0 : idx) + dir + list.length) % list.length] });
+  const input = prev?.input as { modified?: vscode.Uri } | undefined;
+  if (prev && input?.modified?.scheme === SCHEME) void vscode.window.tabGroups.close(prev);
+}
+
+// --- revision navigation: step a file's edit history in a current-vs-revision diff ---
+const revisionCursor = new Map<string, number>(); // file fsPath -> edit id the current-vs-revision diff is parked on
+let revisionFile: string | undefined; // file being stepped (survives focus landing on the diff's left pane)
+
+/** LEFT = the full-file state EDIT produced (its afterBlob, served by BlobContentProvider); RIGHT = the
+ *  live editable current file. `preview:true` reuses one diff tab across steps. */
+async function openRevisionDiff(session: string, edit: core.EditRecord): Promise<void> {
+  const left = blobUri(session, edit.afterBlob, edit.file, `rev-${edit.id}`);
+  const right = vscode.Uri.file(edit.file);
+  await vscode.commands.executeCommand('vscode.diff', left, right, `edit #${edit.id} ⟶ (this file)`, { preview: true });
+}
+
+/** Step the active file's edit revisions (dir +1 newer / -1 older), parking a per-file cursor and
+ *  opening a current-vs-revision diff. Clamps at both ends — history is finite (no wrap). */
+const diffRevisionStep = async (dir: 1 | -1): Promise<void> => {
+  const s = currentSession();
+  if (!s) return;
+  const active = vscode.window.activeTextEditor?.document.uri;
+  const file = active?.scheme === 'file' ? active.fsPath : revisionFile; // keep target while the diff pane is focused
+  if (!file) {
+    vscode.window.setStatusBarMessage('Claude Observatory: open a file Claude edited to step its revisions', 3000);
+    return;
+  }
+  revisionFile = file;
+  const edits = cachedLog(s).filter((r) => r.file === file).sort((a, b) => a.id - b.id);
+  if (edits.length === 0) {
+    vscode.window.setStatusBarMessage('Claude Observatory: no Claude edits recorded for this file', 3000);
+    return;
+  }
+  const cur = revisionCursor.get(file);
+  const base = cur === undefined ? edits.length : edits.findIndex((e) => e.id === cur); // undefined = parked "at current"
+  const idx = Math.min(Math.max(base + dir, 0), edits.length - 1);
+  const target = edits[idx];
+  if (cur !== undefined && target.id === cur) {
+    vscode.window.setStatusBarMessage(
+      dir === 1 ? 'Claude Observatory: already at the latest revision' : 'Claude Observatory: already at the first revision',
+      2500
+    );
+  }
+  revisionCursor.set(file, target.id);
+  await openRevisionDiff(s, target);
+};
 
 /** Open the file and scroll to where this edit currently sits, so the inline overlay is what you see. */
 async function openFileAtEdit(node: EditNode): Promise<void> {
@@ -436,9 +610,14 @@ async function openFileAtEdit(node: EditNode): Promise<void> {
   if (!session) return;
   const before = rec.beforeBlob ? core.readBlob(session, rec.beforeBlob).toString('utf8') : '';
   const after = rec.afterBlob ? core.readBlob(session, rec.afterBlob).toString('utf8') : '';
+  // Prefer the added/changed lines; for a pure deletion (none) fall back to its deletion anchor so the
+  // cursor still lands on the ghost text (mirrors anchorLines used by the decorations/CodeLens/hover).
   const lines = core.locateEditInCurrent(before, after, doc.getText());
-  if (lines.length) {
-    const pos = new vscode.Position(Math.min(lines[0], Math.max(0, doc.lineCount - 1)), 0);
+  const targets = lines.length
+    ? lines
+    : core.locateDeletionsInCurrent(before, after, doc.getText()).map((d) => d.anchor);
+  if (targets.length) {
+    const pos = new vscode.Position(Math.min(targets[0], Math.max(0, doc.lineCount - 1)), 0);
     editor.selection = new vscode.Selection(pos, pos);
     editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
   }
@@ -508,6 +687,45 @@ async function chatAboutEdit(session: string, id: number): Promise<void> {
   }
   vscode.window.showInformationMessage(
     `Prompt about edit #${rec.id} copied — paste (⌘V) into Claude to discuss it.`
+  );
+}
+
+/** Keep every pending edit in one file (shared by keepFile and keepOpenFile). */
+function keepEditsInFile(session: string, file: string, edits: core.EditRecord[]): void {
+  let kept = 0;
+  for (const e of edits) if (e.status === 'pending') { core.setStatus(session, e.id, 'kept'); kept++; }
+  vscode.window.showInformationMessage(
+    kept ? `Kept ${kept} edit(s) in ${path.basename(file)}.` : 'No pending edits to keep in this file.'
+  );
+}
+
+/** Surgically undo every non-undone edit in one file, newest-first, after a confirm + dirty-buffer
+ *  guard (shared by undoFile and undoOpenFile). */
+async function undoEditsInFile(session: string, file: string, edits: core.EditRecord[]): Promise<void> {
+  const targets = [...edits].filter((e) => e.status !== 'undone').sort((a, b) => b.id - a.id);
+  const base = path.basename(file);
+  if (targets.length === 0) {
+    vscode.window.showInformationMessage(`Nothing to undo in ${base}.`);
+    return;
+  }
+  if (await blockedByDirtyBuffer(file)) return;
+  const choice = await vscode.window.showWarningMessage(
+    `Undo ${targets.length} edit(s) in ${base}? Later-overlapping edits may conflict.`,
+    { modal: true },
+    'Undo all'
+  );
+  if (choice !== 'Undo all') return;
+  let undone = 0;
+  let conflicts = 0;
+  for (const e of targets) {
+    const r = core.undoEdit(session, e.id);
+    if (r.status === 'conflict') conflicts++;
+    else if (r.ok) undone++;
+  }
+  vscode.window.showInformationMessage(
+    `Undid ${undone} edit(s) in ${base}` +
+      (conflicts ? ` · ${conflicts} conflict(s) left — undo individually to force-restore` : '') +
+      '.'
   );
 }
 
@@ -598,6 +816,13 @@ function inlineEnabled(): boolean {
 interface Placement {
   rec: core.EditRecord;
   lines: number[]; // current line indices this edit occupies (empty if later fully rewritten)
+  removed: core.Deletion[]; // removed hunks shown as red ghost text on their anchor line
+}
+
+/** The line to hang this edit's ✨ annotation / Keep·Undo actions on: its first changed line, or —
+ *  for a pure deletion that occupies no line — the line beside its deletion ghost text. */
+function anchorLines(p: Placement): number[] {
+  return p.lines.length ? p.lines : p.removed.map((r) => r.anchor);
 }
 
 /** Every still-PENDING edit for `file`, with the current line indices it occupies. */
@@ -607,7 +832,11 @@ function placementsFor(session: string, file: string, text: string): Placement[]
     if (rec.file !== file || rec.status !== 'pending') continue;
     const before = cachedBlob(session, rec.beforeBlob);
     const after = cachedBlob(session, rec.afterBlob);
-    out.push({ rec, lines: core.locateEditInCurrent(before, after, text) });
+    out.push({
+      rec,
+      lines: core.locateEditInCurrent(before, after, text),
+      removed: core.locateDeletionsInCurrent(before, after, text),
+    });
   }
   return out;
 }
@@ -631,43 +860,32 @@ function pendingAtCursor(session: string): core.EditRecord | undefined {
   const editor = vscode.window.activeTextEditor;
   if (!editor) return undefined;
   const line = editor.selection.active.line;
-  return cachedPlacements(session, editor.document).find((p) => p.lines.includes(line))?.rec;
+  return cachedPlacements(session, editor.document).find((p) => anchorLines(p).includes(line))?.rec;
 }
 
-/** Trusted-markdown hover: Claude's reasoning for the edit + clickable Keep/Undo/Diff/Chat links. */
-function buildHover(session: string, recs: core.EditRecord[]): vscode.MarkdownString {
-  const md = new vscode.MarkdownString();
-  md.isTrusted = true;
-  md.supportThemeIcons = true;
-  const link = (cmd: string, id: number) => `command:${cmd}?${encodeURIComponent(JSON.stringify([id]))}`;
-  const cwd = workspaceRoot();
-  const reasoning = cwd ? cachedTranscript(cwd, session).reasoning : new Map<number, string>();
-  for (const rec of recs) {
-    md.appendMarkdown(`**Claude edit #${rec.id}** · ${rec.tool}\n\n`);
-    const why = reasoning.get(rec.id)?.trim();
-    if (why) md.appendMarkdown(`💭 ${why.replace(/\n/g, '  \n')}\n\n`); // full reasoning, soft line breaks
-    md.appendMarkdown(
-      `[$(check) Keep](${link('claudeObservatory.inlineKeep', rec.id)}) &nbsp; ` +
-        `[$(discard) Undo](${link('claudeObservatory.inlineUndo', rec.id)}) &nbsp; ` +
-        `[$(diff) Diff](${link('claudeObservatory.inlineDiff', rec.id)}) &nbsp; ` +
-        `[$(comment-discussion) Chat](${link('claudeObservatory.chatEdit', rec.id)})\n\n`
-    );
-  }
-  return md;
+/** A one-line red-ghost preview of removed lines: first non-blank line (trimmed, truncated), with a
+ *  "…(+N)" tail when the hunk removed more than one line — VS Code can't render multi-line ghost text. */
+function ghostText(lines: string[]): string {
+  const head = (lines.find((l) => l.trim()) ?? '').trim();
+  const shown = head.length > 60 ? head.slice(0, 59) + '…' : head;
+  const more = lines.length - 1;
+  return more > 0 ? `− ${shown} …(+${more})` : `− ${shown}`;
 }
 
 function decorateEditor(editor: vscode.TextEditor): void {
-  if (!inlineDecoration || !annotationDecoration) return;
+  if (!inlineDecoration || !annotationDecoration || !deletionGhostDecoration) return;
   const doc = editor.document;
   const session = currentSession();
   if (!inlineEnabled() || !session || doc.lineCount > MAX_INLINE_LINES) {
     editor.setDecorations(inlineDecoration, []);
+    editor.setDecorations(deletionGhostDecoration, []);
     editor.setDecorations(annotationDecoration, []);
+    if (heatmapDecoration) editor.setDecorations(heatmapDecoration, []);
     return;
   }
   const placements = cachedPlacements(session, doc);
 
-  // gutter change-bar on every pending changed line
+  // green change-bar on every pending added/changed line
   const gutter: vscode.Range[] = [];
   const seen = new Set<number>();
   for (const p of placements) {
@@ -680,40 +898,80 @@ function decorateEditor(editor: vscode.TextEditor): void {
   }
   editor.setDecorations(inlineDecoration, gutter);
 
-  // right-side ✨ markers at BOTH the first and last line of each edit (so the hover menu is reachable
-  // from either end of a multi-line change); edits that share a line merge onto one marker.
-  const byLine = new Map<number, core.EditRecord[]>();
-  const maxLine = Math.max(0, doc.lineCount - 1);
+  // removed lines shown as red "ghost" text after the surviving line they now sit on; hunks that
+  // resolve to the same line merge onto one label.
+  const lastLine = Math.max(0, doc.lineCount - 1);
+  const ghostByLine = new Map<number, string[]>();
   for (const p of placements) {
-    if (!p.lines.length) continue;
-    const first = Math.min(p.lines[0], maxLine);
-    const last = Math.min(p.lines[p.lines.length - 1], maxLine);
-    for (const anchor of new Set([first, last])) {
-      if (!byLine.has(anchor)) byLine.set(anchor, []);
-      byLine.get(anchor)!.push(p.rec);
+    for (const del of p.removed) {
+      const line = Math.min(del.anchor, lastLine);
+      const acc = ghostByLine.get(line);
+      if (acc) acc.push(ghostText(del.lines));
+      else ghostByLine.set(line, [ghostText(del.lines)]);
     }
   }
-  const annotations: vscode.DecorationOptions[] = [];
-  for (const [line, recs] of byLine) {
+  const ghosts: vscode.DecorationOptions[] = [];
+  for (const [line, labels] of ghostByLine) {
     const eol = doc.lineAt(line).range.end;
-    annotations.push({
+    ghosts.push({
       range: new vscode.Range(eol, eol),
       renderOptions: {
         after: {
-          contentText: ` ✨ ${recs.map((r) => '#' + r.id).join(' ')}`,
-          color: new vscode.ThemeColor('descriptionForeground'),
+          contentText: labels.join('   '),
+          color: new vscode.ThemeColor('gitDecoration.deletedResourceForeground'),
           fontStyle: 'italic',
-          margin: '0 0 0 3ch',
+          margin: '0 0 0 2ch',
         },
       },
-      hoverMessage: buildHover(session, recs),
     });
   }
-  editor.setDecorations(annotationDecoration, annotations);
+  editor.setDecorations(deletionGhostDecoration, ghosts);
+
+  // ✨ gutter icon at the START (first line) of each edit — the "Claude edited here" marker.
+  const maxLine = Math.max(0, doc.lineCount - 1);
+  const starLines: vscode.Range[] = [];
+  const seenStar = new Set<number>();
+  for (const p of placements) {
+    const anchors = anchorLines(p);
+    if (!anchors.length) continue;
+    const first = Math.min(anchors[0], maxLine);
+    if (!seenStar.has(first)) {
+      seenStar.add(first);
+      starLines.push(new vscode.Range(first, 0, first, 0));
+    }
+  }
+  editor.setDecorations(annotationDecoration, starLines);
+
+  // Heatmap / spotlight: dim every unmodified line so Claude's edited lines stand out. The "changed"
+  // set is the added/changed lines (seen) plus the deletion-anchor lines.
+  if (heatmapDecoration) {
+    if (heatmapOn && (seen.size > 0 || ghostByLine.size > 0)) {
+      const changed = new Set<number>(seen);
+      for (const ln of ghostByLine.keys()) changed.add(ln);
+      const dim: vscode.Range[] = [];
+      let runStart = -1;
+      for (let ln = 0; ln < doc.lineCount; ln++) {
+        if (!changed.has(ln)) {
+          if (runStart === -1) runStart = ln;
+        } else if (runStart !== -1) {
+          dim.push(new vscode.Range(runStart, 0, ln - 1, doc.lineAt(ln - 1).range.end.character));
+          runStart = -1;
+        }
+      }
+      if (runStart !== -1) {
+        dim.push(new vscode.Range(runStart, 0, doc.lineCount - 1, doc.lineAt(doc.lineCount - 1).range.end.character));
+      }
+      editor.setDecorations(heatmapDecoration, dim);
+    } else {
+      editor.setDecorations(heatmapDecoration, []);
+    }
+  }
 }
 
-/** Clickable **Keep / Undo / Diff** actions rendered above the first line of each pending edit.
- *  Brought back as CodeLens so the actions are visible without hunting for the hover target. */
+/** The inline menu above each pending edit: "✨ #N +A −R view changes" (opens the inline review bubble) ·
+ *  ✓ Keep · ↩ Undo · 💬 Chat · ⧉ View diff (the same edit as a full diff tab). The CodeLens is the
+ *  always-visible quick surface; the bubble (EditPeek) is the on-demand review widget (git-colored diff +
+ *  reasoning, Accept/Revert/Chat/Prev/Next toolbar). */
 class InlineLensProvider implements vscode.CodeLensProvider {
   private readonly _c = new vscode.EventEmitter<void>();
   readonly onDidChangeCodeLenses = this._c.event;
@@ -726,19 +984,26 @@ class InlineLensProvider implements vscode.CodeLensProvider {
     if (!session || doc.lineCount > MAX_INLINE_LINES) return [];
     const lenses: vscode.CodeLens[] = [];
     for (const p of cachedPlacements(session, doc)) {
-      if (p.lines.length === 0) continue; // later fully rewritten — no anchor line
-      const line = Math.min(p.lines[0], Math.max(0, doc.lineCount - 1));
+      const anchors = anchorLines(p);
+      if (anchors.length === 0) continue; // later fully rewritten — no anchor line
+      const line = Math.min(anchors[0], Math.max(0, doc.lineCount - 1));
       const range = new vscode.Range(line, 0, line, 0);
       const id = p.rec.id;
-      lenses.push(new vscode.CodeLens(range, { title: `$(check) Keep #${id}`, command: 'claudeObservatory.inlineKeep', arguments: [id] }));
-      lenses.push(new vscode.CodeLens(range, { title: `$(discard) Undo`, command: 'claudeObservatory.inlineUndo', arguments: [id] }));
-      lenses.push(new vscode.CodeLens(range, { title: `$(diff) Diff`, command: 'claudeObservatory.inlineDiff', arguments: [id] }));
+      // The inline menu above each edit: id + line delta, then Keep / Undo / Chat / View diff. "view
+      // changes" opens the inline review bubble at the edit (reasoning rides in the bubble, so it's not
+      // repeated here); "View diff" opens the same edit as a full diff tab. CodeLens font can't be
+      // enlarged by an extension; per-edit keep/undo is also on ⌥⌘Y / ⌥⌘U and the Edits tree.
+      const d = cachedDelta(session, p.rec);
+      lenses.push(new vscode.CodeLens(range, { title: `✨ #${id}  +${d.added} \u2212${d.removed}  view changes`, command: 'claudeObservatory.viewChanges', arguments: [id] }));
+      lenses.push(new vscode.CodeLens(range, { title: `✓ Keep`, command: 'claudeObservatory.inlineKeep', arguments: [id] }));
+      lenses.push(new vscode.CodeLens(range, { title: `↩ Undo`, command: 'claudeObservatory.inlineUndo', arguments: [id] }));
+      lenses.push(new vscode.CodeLens(range, { title: `💬 Chat`, command: 'claudeObservatory.chatEdit', arguments: [id] }));
+      lenses.push(new vscode.CodeLens(range, { title: `⧉ View diff`, command: 'claudeObservatory.openDiff', arguments: [{ kind: 'edit', rec: p.rec }] }));
     }
     return lenses;
   }
 }
 
-/** Redraw the inline overlay (gutter bars + CodeLens actions + right-side label) on visible editors. */
 function refreshInline(): void {
   for (const ed of vscode.window.visibleTextEditors) decorateEditor(ed);
   inlineLens?.refresh();
@@ -905,37 +1170,9 @@ async function showSuggestionsDoc(): Promise<void> {
 // Scanning ~GBs of transcripts would block the UI, so the scan runs in a subprocess (the CLI `stats`
 // command, which maintains an incremental mtime cache) and this view just renders the JSON it returns.
 
-/** nvm has no stable bin dir — globals land under ~/.nvm/versions/node/<ver>/bin. */
-function nvmBins(name: string): string[] {
-  try {
-    const root = path.join(os.homedir(), '.nvm', 'versions', 'node');
-    return fs.readdirSync(root).sort().reverse().map((v) => path.join(root, v, 'bin', name));
-  } catch {
-    return [];
-  }
-}
-
-/** Locate the globally-installed `claude-observatory` bin (GUI apps and SSH-launched remote hosts
- *  often miss ~/.local/bin on PATH). */
+/** The globally-installed `claude-observatory` bin, resolved via core's shared candidate list. */
 function resolveObservatoryBin(): string {
-  const cands = [
-    process.env.CLAUDE_OBSERVATORY_BIN,
-    path.join(os.homedir(), '.local', 'bin', 'claude-observatory'),
-    '/opt/homebrew/bin/claude-observatory',
-    '/usr/local/bin/claude-observatory',
-    path.join(os.homedir(), '.npm-global', 'bin', 'claude-observatory'),
-    path.join(os.homedir(), '.volta', 'bin', 'claude-observatory'),
-    ...nvmBins('claude-observatory'),
-    process.env.APPDATA ? path.join(process.env.APPDATA, 'npm', 'claude-observatory.cmd') : undefined,
-  ].filter(Boolean) as string[];
-  for (const c of cands) {
-    try {
-      if (fs.existsSync(c)) return c;
-    } catch {
-      /* ignore */
-    }
-  }
-  return 'claude-observatory'; // fall back to PATH
+  return core.resolveBin('claude-observatory', { env: 'CLAUDE_OBSERVATORY_BIN' });
 }
 
 function getNonce(): string {
@@ -945,14 +1182,14 @@ function getNonce(): string {
   return s;
 }
 
-/** The combined Stats + Usage webview. Rendered ONCE; the provider pushes the stats series and the usage
- *  snapshot via postMessage (no reload → no flash, toggle state preserved). Layout: range toggle + the
- *  Edits & Tokens multi-series step-line plots on top, then a "Usage" section (ctx / 5h / week) below. */
+/** The combined Stats + Usage webview. Rendered ONCE; the provider pushes the review counts, the stats
+ *  series, and the usage snapshot via postMessage (no reload → no flash, toggle state preserved). Layout:
+ *  live review scoreboard (pending/accepted/reverted + progress bar) on top, then the range toggle + Tokens
+ *  step-line plot, then a "Usage" section (ctx / 5h / week) below. */
 function combinedShell(): string {
   const nonce = getNonce();
   const csp = `default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';`;
   const PLOTS = [
-    { id: 'edits', name: 'Edits', scale: 'linear', series: [['editsPending', 'pending', 'var(--c-pending)'], ['editsKept', 'accepted', 'var(--c-kept)'], ['editsUndone', 'reverted', 'var(--c-reverted)']] },
     { id: 'tokens', name: 'Tokens', scale: 'log', series: [['tokensTotal', 'total', 'var(--c-total)'], ['tokensInput', 'input', 'var(--c-input)'], ['tokensOutput', 'output', 'var(--c-output)']] },
   ];
   const style = `<style>
@@ -960,6 +1197,14 @@ function combinedShell(): string {
   body { margin:0; padding:8px 12px 12px; font-family: var(--vscode-font-family); font-size:11px; color: var(--vscode-foreground); position:relative; }
   .dim { opacity:.75; }
   .empty { padding:12px 2px; color: var(--vscode-descriptionForeground); line-height:1.5; }
+  .review { margin-bottom:14px; }
+  .rvcounts { display:flex; gap:6px; margin-bottom:9px; }
+  .rvc { flex:1; text-align:center; padding:7px 3px; border:1px solid var(--vscode-widget-border, rgba(127,127,127,0.25)); border-radius:6px; }
+  .rvn { display:block; font-size:19px; font-weight:600; font-variant-numeric:tabular-nums; line-height:1.05; }
+  .rvl { display:block; font-size:9px; text-transform:uppercase; letter-spacing:0.07em; color: var(--vscode-descriptionForeground); margin-top:3px; }
+  .rvbar { height:6px; border-radius:3px; background: var(--vscode-editorWidget-background, rgba(127,127,127,0.2)); overflow:hidden; }
+  .rvfill { display:block; height:100%; width:0; border-radius:3px; background: var(--acc); transition: width .3s ease; }
+  .rvmeta { display:flex; justify-content:space-between; font-size:9.5px; color: var(--vscode-descriptionForeground); margin-top:5px; font-variant-numeric:tabular-nums; }
   .ranges { display:flex; margin-bottom:12px; border:1px solid var(--vscode-widget-border, rgba(127,127,127,0.25)); border-radius:6px; overflow:hidden; }
   .seg { flex:1; background:transparent; color: var(--vscode-descriptionForeground); border:0; border-right:1px solid var(--vscode-widget-border, rgba(127,127,127,0.25)); padding:4px 0; font-size:10px; font-family:inherit; cursor:pointer; letter-spacing:0.03em; }
   .seg:last-child { border-right:0; }
@@ -999,7 +1244,7 @@ function combinedShell(): string {
       .map((l) => `<div class="row"><span class="lbl">${l}</span><span class="track"><span class="fill" id="uf-${l}"></span></span><span class="pct" id="up-${l}">—</span><span class="sub" id="us-${l}"></span></div>`)
       .join('') +
     `<div id="uhint" class="empty" style="display:none">5h / week plan usage needs <b>claude-statusline</b> writing on this host.<br><span class="dim">run <b>claude-observatory statusline</b> (bundled — no download), then start a Claude session.</span></div>` +
-    `<div id="ustale" class="empty" style="display:none">5h / week last refreshed <b><span id="ustale-age"></span> ago</b> — the VS Code panel doesn't run Claude's status line.<br><span class="dim">open a terminal <b>claude</b> session to refresh plan usage; ctx stays live from the transcript.</span></div>`;
+    `<div id="ustale" class="empty" style="display:none">5h / week last refreshed <b><span id="ustale-age"></span> ago</b> — keep an idle <b>claude</b> terminal open (it refreshes every ~60s).<br><span class="dim">Plan usage comes only from Claude's own status line — account-wide limits the panel can't fetch itself. ctx stays live from the transcript.</span></div>`;
   const script = `
     const vscode = acquireVsCodeApi();
     const PLOTS = ${JSON.stringify(PLOTS)};
@@ -1045,14 +1290,39 @@ function combinedShell(): string {
       if(stale){ stale.style.display = isStale ? 'block' : 'none'; if(isStale) document.getElementById('ustale-age').textContent = ago(age); }
     }
     setInterval(function(){ if(LASTU) renderUsage(LASTU); }, 60000); // the "Xm ago" stamp ticks between posts
+    function renderCounts(c){ if(!c) return;
+      document.getElementById('rv-pending').textContent=c.pending;
+      document.getElementById('rv-kept').textContent=c.kept;
+      document.getElementById('rv-undone').textContent=c.undone;
+      var reviewed=c.kept+c.undone, total=c.pending+reviewed, pct= total? Math.round(reviewed/total*100):0;
+      var fill=document.getElementById('rv-fill'); fill.style.width=pct+'%';
+      fill.style.background = pct>=100 ? 'var(--c-kept)' : 'var(--acc)';
+      document.getElementById('rv-progress').textContent = total ? (reviewed+' of '+total+' reviewed ('+pct+'%)') : 'no edits yet';
+      document.getElementById('rv-rate').textContent = reviewed ? (Math.round(c.kept/reviewed*100)+'% accepted') : '';
+    }
     window.addEventListener('message', function(e){ var m=e.data||{};
       if(m.type==='usage'){ renderUsage(m.u); }
+      else if(m.type==='counts'){ renderCounts(m.c); }
       else if(m.type==='stats'){ STATS=m.data; drawStats(); }
       else if(m.type==='statsError' && !STATS){ var g=document.getElementById('gathering'); if(g) g.innerHTML='⚠ stats need the <b>claude-observatory</b> CLI, which was not found.<br><span class="dim">install it with <b>./install.sh</b> (or <b>npm i -g ./packages/cli</b> from the repo), then reload.</span>'; }
     });
     (function(){ var segs=document.querySelectorAll('.seg'); for(var i=0;i<segs.length;i++){ segs[i].addEventListener('click',function(){ range=this.getAttribute('data-r'); vscode.setState({range:range}); drawStats(); }); } drawStats(); vscode.postMessage({type:'ready'}); })();
   `;
+  // Live review scoreboard (independent of the time range): current pending/accepted/reverted counts
+  // and a progress bar that fills as edits get reviewed — updated on every store change via postMessage.
+  const reviewHtml =
+    `<div class="review">` +
+    `<div class="rvcounts">` +
+    `<div class="rvc"><span class="rvn" id="rv-pending" style="color:var(--c-pending)">0</span><span class="rvl">pending</span></div>` +
+    `<div class="rvc"><span class="rvn" id="rv-kept" style="color:var(--c-kept)">0</span><span class="rvl">accepted</span></div>` +
+    `<div class="rvc"><span class="rvn" id="rv-undone" style="color:var(--c-reverted)">0</span><span class="rvl">reverted</span></div>` +
+    `</div>` +
+    `<div class="rvbar"><span class="rvfill" id="rv-fill"></span></div>` +
+    `<div class="rvmeta"><span id="rv-progress">no edits yet</span><span id="rv-rate"></span></div>` +
+    `</div>`;
   const body =
+    reviewHtml +
+    `<div class="divider"></div>` +
     `<div class="ranges"><button class="seg" data-r="today">Today</button><button class="seg" data-r="week">7 days</button><button class="seg" data-r="month">30 days</button></div>` +
     `<div id="gathering" class="empty">Gathering stats… <span class="dim">(first scan of your transcripts; cached after)</span></div>` +
     plotsHtml +
@@ -1085,6 +1355,58 @@ function statsData(s: core.StatsResult): unknown {
   };
 }
 
+/** File History: the ACTIVE editor's Claude edits, oldest→newest (id · time · status · reasoning).
+ *  A flat chronological list — a different data model from the folder/class Edits tree — that follows
+ *  the active editor. Reuses EditNode so every existing edit command works on its rows unchanged. */
+class FileHistoryProvider implements vscode.TreeDataProvider<EditNode> {
+  private readonly _changed = new vscode.EventEmitter<void>();
+  readonly onDidChangeTreeData = this._changed.event;
+  view?: vscode.TreeView<EditNode>;
+
+  refresh(): void {
+    this._changed.fire();
+    if (this.view) {
+      const f = vscode.window.activeTextEditor?.document.uri.fsPath;
+      this.view.description = f ? path.basename(f) : undefined; // name the file being followed
+    }
+  }
+
+  getChildren(node?: EditNode): EditNode[] {
+    if (node) return []; // flat list
+    const session = currentSession();
+    const file = vscode.window.activeTextEditor?.document.uri.fsPath;
+    if (!session || !file) return [];
+    // The store read-primitive: a file's edits = readLog filtered by absolute-path equality.
+    return cachedLog(session)
+      .filter((r) => r.file === file)
+      .sort((a, b) => a.ts - b.ts || a.id - b.id) // chronological
+      .map((rec): EditNode => ({ kind: 'edit', rec }));
+  }
+
+  getTreeItem(node: EditNode): vscode.TreeItem {
+    const rec = node.rec;
+    const session = currentSession();
+    const cwd = workspaceRoot();
+    const d = new Date(rec.ts);
+    const hhmm = [d.getHours(), d.getMinutes()].map((x) => String(x).padStart(2, '0')).join(':');
+    const reasoning = cwd && session ? cachedTranscript(cwd, session).reasoning.get(rec.id) : undefined;
+    const summary = reasoning ? firstLine(reasoning) : session ? core.summarize(session, rec) : '';
+    let label = `#${rec.id}  ${hhmm}`;
+    if (rec.status === 'undone') label = strike(label);
+    const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.None);
+    item.description = `${rec.status}${summary ? ` · ${summary}` : ''}`;
+    item.tooltip = new vscode.MarkdownString(
+      `**Edit #${rec.id}** · ${rec.tool} · ${rec.status} · ${d.toLocaleTimeString()}` +
+        (reasoning ? `\n\n💭 ${reasoning}` : '')
+    );
+    item.iconPath = statusIcon(rec.status);
+    item.contextValue = rec.status === 'undone' ? 'editUndone' : 'edit'; // reuse edit/editUndone menus
+    item.resourceUri = editItemUri(rec); // greys kept/undone via StatusDecorationProvider
+    item.command = { command: 'claudeObservatory.openFileAtEdit', title: 'Open File at Edit', arguments: [node] };
+    return item;
+  }
+}
+
 class StatsUsageViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private statsRun = 0;
@@ -1095,24 +1417,31 @@ class StatsUsageViewProvider implements vscode.WebviewViewProvider {
     view.webview.options = { enableScripts: true };
     view.webview.html = combinedShell(); // set once; both sections update via postMessage (no flash)
     view.webview.onDidReceiveMessage((m: { type?: string }) => {
-      if (m && m.type === 'ready') {
-        this.postUsage();
-        this.refreshStats();
-      }
+      if (m && m.type === 'ready') this.refresh();
     });
     view.onDidChangeVisibility(() => {
-      if (view.visible) {
-        this.postUsage();
-        this.refreshStats();
-      }
+      if (view.visible) this.refresh();
     });
   }
   refresh(): void {
+    this.postCounts();
     this.postUsage();
     this.refreshStats();
   }
-  /** Cheap + sync: post the current usage snapshot for the bars. (The review scoreboard lives in the
-   *  status-bar microscope's tooltip, not here.) */
+  /** Cheap + sync: post the live review scoreboard (pending/accepted/reverted) for the counts + progress
+   *  bar. Runs on every store change so the bar fills live as the user keeps/undoes edits. */
+  private postCounts(): void {
+    if (!this.view) return;
+    const session = currentSession();
+    const log = session ? cachedLog(session) : [];
+    const c = {
+      pending: log.filter((r) => r.status === 'pending').length,
+      kept: log.filter((r) => r.status === 'kept').length,
+      undone: log.filter((r) => r.status === 'undone').length,
+    };
+    this.view.webview.postMessage({ type: 'counts', c });
+  }
+  /** Cheap + sync: post the current usage snapshot for the bars. */
   private postUsage(): void {
     if (!this.view) return;
     const session = currentSession();
@@ -1186,26 +1515,68 @@ export function activate(context: vscode.ExtensionContext): void {
   const timelineView = vscode.window.createTreeView('claudeObservatory.timeline', { treeDataProvider: timelineProvider });
   const insightsProvider = new ObservationsProvider();
   const insightsView = vscode.window.createTreeView('claudeObservatory.observations', { treeDataProvider: insightsProvider });
+  const fileHistoryProvider = new FileHistoryProvider();
+  const fileHistoryView = vscode.window.createTreeView('claudeObservatory.fileHistory', { treeDataProvider: fileHistoryProvider });
+  fileHistoryProvider.view = fileHistoryView;
   const statsProvider = new StatsUsageViewProvider();
   editsProvider.view = editsView; // badge lives on the primary view
   editsProvider.updateBadge();
 
+
+  // A SUBTLE whole-line green tint + coral change-bar on Claude's added/changed lines — deliberately
+  // low-alpha (not the default diff green) so a file where Claude edited many lines doesn't drown in
+  // color, while still showing at a glance what changed.
   inlineDecoration = vscode.window.createTextEditorDecorationType({
     isWholeLine: true,
-    backgroundColor: new vscode.ThemeColor('diffEditor.insertedLineBackground'),
-    overviewRulerColor: new vscode.ThemeColor('editorOverviewRuler.modifiedForeground'),
+    backgroundColor: ADDED_LINE_BG,
+    overviewRulerColor: CLAUDE_MARK_COLOR,
     overviewRulerLane: vscode.OverviewRulerLane.Left,
     borderWidth: '0 0 0 2px',
     borderStyle: 'solid',
-    borderColor: new vscode.ThemeColor('editorGutter.modifiedBackground'),
+    borderColor: CLAUDE_MARK_COLOR,
   });
-  annotationDecoration = vscode.window.createTextEditorDecorationType({});
+  // ✨ gutter icon at the START of each edit — the "Claude edited here" marker; click the CodeLens
+  // above (or, in JetBrains, the gutter icon itself) to open the inline diff.
+  annotationDecoration = vscode.window.createTextEditorDecorationType({
+    gutterIconPath: vscode.Uri.joinPath(context.extensionUri, 'media', 'star.svg'),
+    gutterIconSize: 'contain',
+  });
+  // Deleted lines don't exist in the buffer, so show the removed text as red ghost text on the surviving
+  // anchor line, over a subtle red tint + red gutter bar (the toned-down mirror of the added-line fill).
+  deletionGhostDecoration = vscode.window.createTextEditorDecorationType({
+    isWholeLine: true,
+    backgroundColor: REMOVED_LINE_BG,
+    overviewRulerColor: CLAUDE_MARK_COLOR,
+    overviewRulerLane: vscode.OverviewRulerLane.Left,
+    borderWidth: '0 0 0 2px',
+    borderStyle: 'solid',
+    borderColor: new vscode.ThemeColor('editorGutter.deletedBackground'),
+  });
+  // File heatmap: fade unmodified lines to ~40% so Claude's edited lines read at full contrast.
+  heatmapDecoration = vscode.window.createTextEditorDecorationType({ opacity: '0.4' });
   inlineLens = new InlineLensProvider();
+  const editPeek = new EditPeek();
 
   // Realtime observatory readout: a status-bar microscope with the pending count — always visible,
   // amber while edits await review. Click = jump to the next pending edit.
   const statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 90);
   statusItem.command = 'claudeObservatory.reviewNext';
+  // A compact action cluster beside the microscope — shown only while edits await review so the bottom
+  // bar stays quiet when you're caught up. Same actions are mirrored in the editor's top-right toolbar.
+  const mkStatusBtn = (text: string, tooltip: string, command: string, priority: number) => {
+    const b = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, priority);
+    b.text = text;
+    b.tooltip = tooltip;
+    b.command = command;
+    return b;
+  };
+  const statusCluster = [
+    mkStatusBtn('$(debug-step-back)', 'Claude Observatory: review previous pending edit', 'claudeObservatory.reviewPrev', 89),
+    mkStatusBtn('$(debug-step-over)', 'Claude Observatory: review next pending edit', 'claudeObservatory.reviewNext', 88),
+    mkStatusBtn('$(check-all)', 'Claude Observatory: accept all edits', 'claudeObservatory.keepAll', 87),
+    mkStatusBtn('$(discard)', 'Claude Observatory: revert all edits', 'claudeObservatory.undoAll', 86),
+    mkStatusBtn('$(search)', 'Claude Observatory: search edits', 'claudeObservatory.searchEdits', 85),
+  ];
   const updateStatusItem = () => {
     const session = currentSession();
     const log = session ? cachedLog(session) : [];
@@ -1227,14 +1598,60 @@ export function activate(context: vscode.ExtensionContext): void {
     statusItem.tooltip = tip;
     statusItem.backgroundColor = pending ? new vscode.ThemeColor('statusBarItem.warningBackground') : undefined;
     statusItem.show();
+    // The action cluster + the editor-toolbar buttons only appear while there's something to review.
+    for (const b of statusCluster) pending ? b.show() : b.hide();
+    void vscode.commands.executeCommand('setContext', 'claudeObservatory.hasPending', pending > 0);
+    syncActiveFileContext();
+  };
+  // The per-file surfaces (editor tab-bar / editor banner) light up only when the ACTIVE file has a
+  // pending edit — its own context key, refreshed on store changes and on tab switches.
+  const syncActiveFileContext = () => {
+    const s = currentSession();
+    const file = vscode.window.activeTextEditor?.document.uri.fsPath;
+    const has = Boolean(s && file && cachedLog(s).some((r) => r.status === 'pending' && r.file === file));
+    void vscode.commands.executeCommand('setContext', 'claudeObservatory.activeFileHasPending', has);
   };
   updateStatusItem(); // visible from activation, not just after the first store event
+  context.subscriptions.push(...statusCluster);
+
+  // Review-loop cursor: id of the pending edit last opened, so ←/→ step backward/forward through every
+  // pending edit (wrapping at the ends) instead of always reopening the oldest.
+  let reviewCursorId: number | undefined;
+
+  // Step to the previous (dir -1) or next (dir +1) pending edit and open it, advancing the cursor.
+  const reviewStep = async (dir: 1 | -1) => {
+    const s = currentSession();
+    const pending = s ? cachedLog(s).filter((r) => r.status === 'pending').sort((a, b) => a.id - b.id) : [];
+    if (pending.length === 0) {
+      reviewCursorId = undefined;
+      vscode.window.setStatusBarMessage('Claude Observatory: no pending edits to review 🎉', 3000);
+      return;
+    }
+    const cursor = reviewCursorId;
+    const idx = cursor === undefined ? -1 : pending.findIndex((r) => r.id === cursor);
+    let next: core.EditRecord;
+    if (idx >= 0) {
+      next = pending[(idx + dir + pending.length) % pending.length]; // step ±1, wrapping at the ends
+    } else if (cursor === undefined) {
+      next = dir === 1 ? pending[0] : pending[pending.length - 1]; // first review: oldest (→) / newest (←)
+    } else {
+      // cursor's edit was resolved — resume just past it in the step direction
+      next =
+        dir === 1
+          ? pending.find((r) => r.id > cursor) ?? pending[0]
+          : [...pending].reverse().find((r) => r.id < cursor) ?? pending[pending.length - 1];
+    }
+    reviewCursorId = next.id;
+    await openFileAtEdit({ kind: 'edit', rec: next });
+  };
 
   const refreshAll = () => {
+    editsProvider.refresh();
     editsProvider.refresh();
     diffsProvider.refresh();
     timelineProvider.refresh();
     insightsProvider.refresh();
+    fileHistoryProvider.refresh();
     statsProvider.refresh();
     statusDecorations.refresh();
     updateStatusItem();
@@ -1246,28 +1663,18 @@ export function activate(context: vscode.ExtensionContext): void {
     diffsView,
     timelineView,
     insightsView,
+    fileHistoryView,
     statusItem,
     inlineDecoration,
+    deletionGhostDecoration,
     annotationDecoration,
+    heatmapDecoration,
     vscode.languages.registerCodeLensProvider({ scheme: 'file' }, inlineLens),
-    // Hovering anywhere on a highlighted (changed) line pops the same Keep/Undo/Diff/Chat menu.
-    vscode.languages.registerHoverProvider(
-      { scheme: 'file' },
-      {
-        provideHover(doc, pos) {
-          const session = currentSession();
-          if (!inlineEnabled() || !session || doc.lineCount > MAX_INLINE_LINES) return undefined;
-          const recs = cachedPlacements(session, doc)
-            .filter((p) => p.lines.includes(pos.line))
-            .map((p) => p.rec);
-          return recs.length ? new vscode.Hover(buildHover(session, recs), doc.lineAt(pos.line).range) : undefined;
-        },
-      }
-    ),
     vscode.window.registerWebviewViewProvider('claudeObservatory.stats', statsProvider),
     vscode.window.registerFileDecorationProvider(statusDecorations),
     vscode.workspace.registerTextDocumentContentProvider(SCHEME, new BlobContentProvider()),
-    vscode.workspace.registerTextDocumentContentProvider(MD_SCHEME, obsMd)
+    vscode.workspace.registerTextDocumentContentProvider(MD_SCHEME, obsMd),
+    editPeek
   );
 
   // The context bar drifts as the session grows; refresh it on a slow tick (unref'd so it never
@@ -1280,13 +1687,17 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // Refresh on panel-visible / window-focus (covers new sessions the watcher may miss), on active
   // editor change, and on buffer edits (debounced) so decorations track the live buffer.
-  for (const v of [editsView, diffsView, timelineView, insightsView]) {
+  for (const v of [editsView, diffsView, timelineView, insightsView, fileHistoryView]) {
     v.onDidChangeVisibility((e) => e.visible && refreshAll());
   }
   let debounce: ReturnType<typeof setTimeout> | undefined;
   context.subscriptions.push(
     vscode.window.onDidChangeWindowState((s) => s.focused && refreshAll()),
-    vscode.window.onDidChangeActiveTextEditor(() => refreshInline()),
+    vscode.window.onDidChangeActiveTextEditor(() => {
+      refreshInline();
+      syncActiveFileContext();
+      fileHistoryProvider.refresh(); // re-query for the newly-active file
+    }),
     vscode.workspace.onDidChangeTextDocument((e) => {
       if (!vscode.window.visibleTextEditors.some((ed) => ed.document === e.document)) return;
       if (debounce) clearTimeout(debounce);
@@ -1306,15 +1717,78 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand('claudeObservatory.refresh', () => refreshAll()),
-    // The surgical-review loop: jump to the OLDEST pending edit, review it, repeat. Keyboard-friendly.
-    vscode.commands.registerCommand('claudeObservatory.reviewNext', async () => {
+    // Step backward / forward through pending edits (⏮ prev · ⏭ next), keyboard-friendly.
+    vscode.commands.registerCommand('claudeObservatory.reviewNext', () => reviewStep(1)),
+    vscode.commands.registerCommand('claudeObservatory.reviewPrev', () => reviewStep(-1)),
+    // Revision navigation: step the active file's edit history in a current-vs-revision diff.
+    vscode.commands.registerCommand('claudeObservatory.diffPrevRevision', () => diffRevisionStep(-1)),
+    vscode.commands.registerCommand('claudeObservatory.diffNextRevision', () => diffRevisionStep(1)),
+    // Export a shareable review summary (kept/reverted per file) as markdown in a new editor tab.
+    vscode.commands.registerCommand('claudeObservatory.exportSummary', async () => {
       const s = currentSession();
-      const next = s ? cachedLog(s).filter((r) => r.status === 'pending').sort((a, b) => a.ts - b.ts)[0] : undefined;
-      if (!next) {
-        vscode.window.setStatusBarMessage('Claude Observatory: no pending edits to review 🎉', 3000);
+      if (!s) {
+        vscode.window.showWarningMessage('Claude Observatory: no active Claude Code session to summarize.');
         return;
       }
-      await openFileAtEdit({ kind: 'edit', rec: next });
+      const md = core.reviewSummaryMarkdown(core.reviewSummary(s));
+      const doc = await vscode.workspace.openTextDocument({ content: md, language: 'markdown' });
+      await vscode.window.showTextDocument(doc);
+    }),
+    // Setup check: run `doctor` and open the diagnostics (hooks, PATH, config, session, status line) in a tab.
+    vscode.commands.registerCommand('claudeObservatory.doctor', async () => {
+      // spawnSync (not execFileSync) so we still capture stdout when doctor exits non-zero on failures.
+      const res = cp.spawnSync(resolveObservatoryBin(), ['doctor', '--markdown'], { encoding: 'utf8', cwd: workspaceRoot() });
+      if (res.error || typeof res.stdout !== 'string' || !res.stdout.trim()) {
+        vscode.window.showErrorMessage('Claude Observatory: could not run doctor — is the claude-observatory CLI installed?');
+        return;
+      }
+      const doc = await vscode.workspace.openTextDocument({ content: res.stdout, language: 'markdown' });
+      await vscode.window.showTextDocument(doc);
+    }),
+    // Search: filter the Edits/Diffs trees by file path. Empty input clears the filter.
+    vscode.commands.registerCommand('claudeObservatory.searchEdits', async () => {
+      const q = await vscode.window.showInputBox({
+        title: 'Search edits',
+        prompt: 'Filter edits by file path — leave empty to clear',
+        value: editFilter,
+        placeHolder: 'e.g. src/api or User.ts',
+      });
+      if (q === undefined) return; // cancelled — leave the filter unchanged
+      editFilter = q.trim();
+      refreshAll();
+    }),
+    // Pin which session the observatory shows (e.g. the demo-showcase fixture) instead of the
+    // auto-resolved newest one — a QuickPick over every session in the store.
+    vscode.commands.registerCommand('claudeObservatory.switchSession', async () => {
+      const cfg = vscode.workspace.getConfiguration('claudeObservatory');
+      const pinned = cfg.get<string>('session', '').trim();
+      const root = workspaceRoot();
+      const auto = root ? core.resolveSessionId(root) ?? undefined : undefined;
+      type Item = vscode.QuickPickItem & { id: string };
+      const items: Item[] = [
+        { label: '$(sync) Auto — newest for this workspace', description: auto ?? 'none', id: '' },
+        ...core.listSessions().map((s) => ({
+          label: s.id,
+          description: `${s.pending} pending · ${core.relTime(s.lastMs)}` + (s.id === auto ? ' · auto' : ''),
+          picked: s.id === pinned,
+          id: s.id,
+        })),
+      ];
+      const pick = await vscode.window.showQuickPick(items, {
+        title: 'Claude Observatory — review which session?',
+        placeHolder: pinned ? `pinned: ${pinned}` : `auto: ${auto ?? 'none'}`,
+      });
+      if (!pick) return;
+      await cfg.update('session', pick.id, vscode.ConfigurationTarget.Workspace);
+      refreshAll();
+      vscode.window.setStatusBarMessage(
+        pick.id ? `Claude Observatory: showing session ${pick.id}` : 'Claude Observatory: session set to auto',
+        3000
+      );
+    }),
+    // A hand-edited `claudeObservatory.session` in settings.json should re-render immediately.
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration('claudeObservatory.session')) refreshAll();
     }),
     // Keep / undo the pending edit under the cursor — the review loop never has to leave the keyboard.
     vscode.commands.registerCommand('claudeObservatory.keepAtCursor', () =>
@@ -1436,6 +1910,18 @@ export function activate(context: vscode.ExtensionContext): void {
       const rec = s ? core.findRecord(s, id) : null;
       if (rec) openDiff({ kind: 'edit', rec });
     }),
+    // "View changes" → the inline review bubble at the edit: the diff in git's colors + reasoning +
+    // line counts, with Accept/Revert/Chat/Prev/Next as toolbar buttons (comments/commentThread/title).
+    vscode.commands.registerCommand('claudeObservatory.viewChanges', (id: number) => editPeek.show(id)),
+    vscode.commands.registerCommand('claudeObservatory.peekKeep', () => editPeek.keep()),
+    vscode.commands.registerCommand('claudeObservatory.peekUndo', () => void editPeek.undo()),
+    vscode.commands.registerCommand('claudeObservatory.peekChat', () => editPeek.chat()),
+    vscode.commands.registerCommand('claudeObservatory.peekPrev', () => editPeek.step(-1)),
+    vscode.commands.registerCommand('claudeObservatory.peekNext', () => editPeek.step(1)),
+    // Prev/Next on the diff title bar (diff tabs from the Diffs tree / revision nav): step the file's
+    // pending edits (wrapping). The command gets the diff's resource URI, which carries the edit id.
+    vscode.commands.registerCommand('claudeObservatory.diffPrevEdit', (uri?: vscode.Uri) => stepDiffEdit(uri, -1)),
+    vscode.commands.registerCommand('claudeObservatory.diffNextEdit', (uri?: vscode.Uri) => stepDiffEdit(uri, 1)),
     vscode.commands.registerCommand('claudeObservatory.inlineKeep', (id: number) =>
       withSession((s) => {
         core.setStatus(s, id, 'kept');
@@ -1444,6 +1930,20 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('claudeObservatory.inlineUndo', (id: number) =>
       withSession((s) => undoOne(s, id))()
     ),
+    // Diff title-bar actions: the editor/title command receives the diff's resource URI, which carries
+    // the edit id in its query — resolve it, then reuse the id-based keep/undo/chat commands.
+    vscode.commands.registerCommand('claudeObservatory.diffKeep', (uri?: vscode.Uri) => {
+      const id = editIdFromUri(uri);
+      if (id != null) void vscode.commands.executeCommand('claudeObservatory.inlineKeep', id);
+    }),
+    vscode.commands.registerCommand('claudeObservatory.diffUndo', (uri?: vscode.Uri) => {
+      const id = editIdFromUri(uri);
+      if (id != null) void vscode.commands.executeCommand('claudeObservatory.inlineUndo', id);
+    }),
+    vscode.commands.registerCommand('claudeObservatory.diffChat', (uri?: vscode.Uri) => {
+      const id = editIdFromUri(uri);
+      if (id != null) void vscode.commands.executeCommand('claudeObservatory.chatEdit', id);
+    }),
     vscode.commands.registerCommand('claudeObservatory.toggleInline', async () => {
       const cfg = vscode.workspace.getConfiguration('claudeObservatory');
       const next = !cfg.get<boolean>('inlineReview', true);
@@ -1451,43 +1951,31 @@ export function activate(context: vscode.ExtensionContext): void {
       refreshInline();
       vscode.window.showInformationMessage(`Claude Observatory: inline review ${next ? 'on' : 'off'}.`);
     }),
+    // File heatmap: dim every unmodified line so only Claude's edits read at full contrast.
+    vscode.commands.registerCommand('claudeObservatory.toggleHeatmap', () => {
+      heatmapOn = !heatmapOn;
+      refreshInline();
+      vscode.window.setStatusBarMessage(`Claude Observatory: file heatmap ${heatmapOn ? 'on 📄' : 'off'}`, 2500);
+    }),
     vscode.commands.registerCommand('claudeObservatory.keepFile', (n: FileNode) =>
-      withSession((s) => {
-        let kept = 0;
-        for (const e of n.edits) if (e.status === 'pending') { core.setStatus(s, e.id, 'kept'); kept++; }
-        vscode.window.showInformationMessage(
-          kept ? `Kept ${kept} edit(s) in ${path.basename(n.file)}.` : 'No pending edits to keep in this file.'
-        );
-      })()
+      withSession((s) => keepEditsInFile(s, n.file, n.edits))()
     ),
     vscode.commands.registerCommand('claudeObservatory.undoFile', (n: FileNode) =>
+      withSession((s) => undoEditsInFile(s, n.file, n.edits))()
+    ),
+    // Accept / revert every pending edit in the ACTIVE editor's file — what the per-file surfaces use.
+    vscode.commands.registerCommand('claudeObservatory.keepOpenFile', () =>
+      withSession((s) => {
+        const file = vscode.window.activeTextEditor?.document.uri.fsPath;
+        if (!file) return void vscode.window.showInformationMessage('Claude Observatory: no active file.');
+        keepEditsInFile(s, file, cachedLog(s).filter((r) => r.file === file));
+      })()
+    ),
+    vscode.commands.registerCommand('claudeObservatory.undoOpenFile', () =>
       withSession(async (s) => {
-        // newest-first minimizes surgical-undo conflicts
-        const targets = [...n.edits].filter((e) => e.status !== 'undone').sort((a, b) => b.id - a.id);
-        const base = path.basename(n.file);
-        if (targets.length === 0) {
-          vscode.window.showInformationMessage(`Nothing to undo in ${base}.`);
-          return;
-        }
-        if (await blockedByDirtyBuffer(n.file)) return;
-        const choice = await vscode.window.showWarningMessage(
-          `Undo ${targets.length} edit(s) in ${base}? Later-overlapping edits may conflict.`,
-          { modal: true },
-          'Undo all'
-        );
-        if (choice !== 'Undo all') return;
-        let undone = 0;
-        let conflicts = 0;
-        for (const e of targets) {
-          const r = core.undoEdit(s, e.id);
-          if (r.status === 'conflict') conflicts++;
-          else if (r.ok) undone++;
-        }
-        vscode.window.showInformationMessage(
-          `Undid ${undone} edit(s) in ${base}` +
-            (conflicts ? ` · ${conflicts} conflict(s) left — undo individually to force-restore` : '') +
-            '.'
-        );
+        const file = vscode.window.activeTextEditor?.document.uri.fsPath;
+        if (!file) return void vscode.window.showInformationMessage('Claude Observatory: no active file.');
+        await undoEditsInFile(s, file, cachedLog(s).filter((r) => r.file === file));
       })()
     )
   );

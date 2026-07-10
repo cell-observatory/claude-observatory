@@ -18,7 +18,17 @@
  */
 import type { EditRecord, FileMemory, InstallResult, StatMetrics } from '@claude-observatory/core';
 
-const VERSION = '0.2.0'; // keep in sync with package.json
+/** Version read from the package manifest at runtime — one source of truth, so it can never drift. */
+function version(): string {
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    // dist/index.js → ../package.json (same layout in the repo and the published tarball).
+    return JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8')).version;
+  } catch {
+    return '0.0.0';
+  }
+}
 
 function isTTY(): boolean {
   return Boolean(process.stdout.isTTY);
@@ -173,6 +183,56 @@ function cmdStatus(args: string[] = []): void {
       `last capture:    ${last}\n` +
       `edits:           ${log.length}  ${c.dim(`(${by('pending')} pending · ${by('kept')} kept · ${by('undone')} undone)`)}\n`
   );
+}
+
+/** Does `bin` resolve on PATH? Cross-platform; null if we couldn't determine it. */
+function onPath(bin: string): boolean | null {
+  const cp = require('child_process');
+  try {
+    const res =
+      process.platform === 'win32'
+        ? cp.spawnSync('where', [bin], { stdio: 'ignore' })
+        : cp.spawnSync('sh', ['-c', `command -v ${bin}`], { stdio: 'ignore' });
+    if (res.error) return null;
+    return res.status === 0;
+  } catch {
+    return null;
+  }
+}
+
+/** `doctor` — diagnose the whole setup (hooks, PATH, config dir, session, status line) with fixes. */
+function cmdDoctor(args: string[]): void {
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  const checks = core.diagnose({
+    cwd: process.cwd(),
+    binOnPath: onPath('claude-observatory'),
+    jqPresent: onPath('jq'),
+  });
+  if (args.includes('--json')) {
+    emitJson({ version: version(), checks });
+    return;
+  }
+  if (args.includes('--markdown') || args.includes('--md')) {
+    process.stdout.write(core.diagnoseMarkdown(checks));
+    return;
+  }
+  const icon = (l: string) => (l === 'ok' ? c.green('✓') : l === 'warn' ? c.yellow('!') : c.red('✗'));
+  process.stdout.write(c.bold(`claude-observatory doctor`) + c.dim(`  v${version()}\n\n`));
+  for (const ch of checks) {
+    process.stdout.write(`${icon(ch.level)} ${ch.label}\n    ${c.dim(ch.detail)}\n`);
+    if (ch.fix) process.stdout.write(`    ${c.cyan('→ ' + ch.fix)}\n`);
+  }
+  const fails = checks.filter((ch) => ch.level === 'fail').length;
+  const warns = checks.filter((ch) => ch.level === 'warn').length;
+  process.stdout.write(
+    '\n' +
+      (fails
+        ? c.red(`${fails} problem(s) to fix`) + (warns ? c.yellow(` · ${warns} warning(s)`) : '') + '\n'
+        : warns
+          ? c.yellow(`critical checks passed · ${warns} warning(s)`) + '\n'
+          : c.green('all checks passed 🎉') + '\n')
+  );
+  process.exit(fails ? 1 : 0);
 }
 
 function cmdSessions(args: string[] = []): void {
@@ -472,6 +532,38 @@ function cmdStats(args: string[]): void {
   process.stdout.write(c.dim('\nthinking tokens are estimated (~chars/4); tokens include cache.\n'));
 }
 
+/** `summary` — a per-session review recap (kept/reverted per file + acceptance rate); --markdown to export. */
+function cmdSummary(args: string[]): void {
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  const session = getSessionId(args);
+  const s = core.reviewSummary(session);
+  if (args.includes('--json')) {
+    emitJson(s);
+    return;
+  }
+  if (args.includes('--markdown') || args.includes('--md')) {
+    process.stdout.write(core.reviewSummaryMarkdown(s));
+    return;
+  }
+  const pct = s.acceptanceRate === null ? '—' : `${Math.round(s.acceptanceRate * 100)}%`;
+  process.stdout.write(
+    c.bold('Review summary') +
+      c.dim(`  session ${session}\n\n`) +
+      `${s.total} edit(s) · ${c.yellow(s.pending + ' pending')} · ${c.green(s.kept + ' kept')} · ` +
+      `${c.dim(s.undone + ' reverted')} · ${pct} accepted\n\n`
+  );
+  for (const f of s.files) {
+    process.stdout.write(
+      `  ${c.cyan(relFile(f.file))}  ${c.green('+' + f.added)} ${c.red('-' + f.removed)}  ` +
+        `${c.dim(`${f.kept} kept · ${f.undone} reverted · ${f.pending} pending`)}\n`
+    );
+  }
+  if (s.reverted.length) {
+    process.stdout.write('\n' + c.dim('reverted: ') + s.reverted.map((r) => '#' + r.id).join(' ') + '\n');
+  }
+  process.stdout.write(c.dim('\nexport:  claude-observatory summary --markdown > review.md\n'));
+}
+
 // --- machine-readable commands for non-Node front-ends (JetBrains plugin, scripts) ---
 
 /** Raw blob bytes to stdout (diff panes, chat prompts). */
@@ -513,6 +605,17 @@ function cmdLocate(args: string[]): void {
       return { id: r.id, lines: core.locateEditInCurrent(before, after, current) };
     });
   emitJson({ file: abs, placements });
+}
+
+/** The full folder→file→class→edit tree (with exact deltas) — the shared view-model for both editors. */
+function cmdTree(args: string[]): void {
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  const session = getSessionId(args);
+  const ri = args.indexOf('--root');
+  const root = ri >= 0 && args[ri + 1] ? args[ri + 1] : process.cwd();
+  const fi = args.indexOf('--filter');
+  const filter = fi >= 0 ? args[fi + 1] : undefined;
+  emitJson(core.buildEditTree(session, { root, filter }));
 }
 
 /** One JSON payload for an Observations-style view: recap + per-edit reasoning/flags/memory. */
@@ -636,6 +739,78 @@ async function cmdSuggest(args: string[]): Promise<void> {
   emitAnalysis(a, false, json);
 }
 
+// --- self-update: fetch the latest GitHub Release and reinstall the CLI (no registry, no deps) ---
+
+const RELEASE_REPO = 'cell-observatory/claude-observatory';
+
+/** GET a URL following redirects, resolving to the response body. Rejects on non-200. */
+function httpGet(url: string, redirects = 5): Promise<Buffer> {
+  const https = require('https');
+  return new Promise((resolve, reject) => {
+    const req = https.get(
+      url,
+      { headers: { 'User-Agent': 'claude-observatory', Accept: 'application/vnd.github+json' } },
+      (res: any) => {
+        const { statusCode, headers } = res;
+        if (statusCode >= 300 && statusCode < 400 && headers.location && redirects > 0) {
+          res.resume();
+          resolve(httpGet(headers.location, redirects - 1)); // asset URLs redirect to a CDN
+          return;
+        }
+        if (statusCode !== 200) {
+          res.resume();
+          reject(new Error(`HTTP ${statusCode} for ${url}`));
+          return;
+        }
+        const chunks: Buffer[] = [];
+        res.on('data', (d: Buffer) => chunks.push(d));
+        res.on('end', () => resolve(Buffer.concat(chunks)));
+      }
+    );
+    req.on('error', reject);
+    req.setTimeout(15000, () => req.destroy(new Error('request timed out')));
+  });
+}
+
+async function cmdUpdate(args: string[]): Promise<void> {
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  const current = version();
+  let release: any;
+  try {
+    release = JSON.parse((await httpGet(`https://api.github.com/repos/${RELEASE_REPO}/releases/latest`)).toString('utf8'));
+  } catch (e: any) {
+    fail(`could not check for updates (need network access to github.com): ${e?.message || e}`);
+  }
+  const latest = String(release.tag_name || '').replace(/^v/i, '');
+  if (!latest) fail('no published release found for the repository.');
+  if (!core.isNewer(latest, current)) {
+    process.stdout.write(c.green(`✓ claude-observatory is up to date (${current})\n`));
+    return;
+  }
+  if (args.includes('--check')) {
+    process.stdout.write(c.yellow(`update available: ${current} → ${latest}`) + c.dim('   run `claude-observatory update`\n'));
+    return;
+  }
+  const assets: { name: string; browser_download_url: string }[] = release.assets || [];
+  const tgz = assets.find((a) => /\.tgz$/.test(a.name));
+  if (!tgz) fail(`release v${latest} has no CLI tarball asset to install.`);
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const cp = require('child_process');
+  const dest = path.join(os.tmpdir(), tgz!.name);
+  process.stdout.write(c.dim(`downloading ${tgz!.name} …\n`));
+  fs.writeFileSync(dest, await httpGet(tgz!.browser_download_url));
+  process.stdout.write(c.dim('installing globally (npm i -g) …\n'));
+  const r = cp.spawnSync('npm', ['i', '-g', dest], { stdio: 'inherit' });
+  if (r.status !== 0) fail(`npm install failed (exit ${r.status ?? '?'}). Try: npm i -g ${dest}`);
+  process.stdout.write(
+    c.green('✓ ') +
+      `updated the CLI ${current} → ${latest}\n` +
+      c.dim(`  editor extensions: re-run the installer, or install claude-observatory-vscode-v${latest}.vsix / -jetbrains-v${latest}.zip from the release.\n`)
+  );
+}
+
 function usage(): void {
   process.stdout.write(
     `claude-observatory — per-edit Keep/Undo for Claude Code\n\n` +
@@ -645,6 +820,8 @@ function usage(): void {
       `  statusline           install/refresh the bundled claude-statusline (usage bars; needs bash+jq)\n` +
       `  uninstall [--project] remove the capture hooks\n` +
       `  status               show hooks + hook-path health + session + edit counts\n` +
+      `  doctor [--json]      diagnose setup (hooks, PATH, config dir, session, status line) with fixes\n` +
+      `  update [--check]     update the CLI to the latest GitHub Release (\`--check\` only reports)\n` +
       `  sessions             list all sessions in the store (● = current dir)\n` +
       `  list [filters]       list edits; filters: --pending|--kept|--undone, --file <substr>\n` +
       `  diff <id>            show before/after for an edit\n` +
@@ -652,9 +829,11 @@ function usage(): void {
       `  undo <id> [--force]  surgically undo an edit (--force = per-file restore)\n` +
       `  redo <id> [--force]  re-apply an undone edit\n` +
       `  clean [opts]         GC orphaned blobs; --drop <id> | --older-than <Nd> | --all | --resolved\n` +
-      `  stats [--json]       usage stats (edits/tokens/messages/thinking/output) by session & window\n\n` +
+      `  stats [--json]       usage stats (edits/tokens/messages/thinking/output) by session & window\n` +
+      `  summary [--markdown] per-session review recap (kept/reverted per file); --markdown to export\n\n` +
       `machine-readable (for front-ends/scripts; list/status/sessions/keep/undo/redo also take --json):\n` +
       `  blob <sha>           raw blob bytes to stdout\n` +
+      `  tree [--root <d>] [--filter <q>]   folder→file→class→edit view-model as JSON (both editors)\n` +
       `  locate --file <f>    per-pending-edit line indices in the live buffer (text on stdin; JSON out)\n` +
       `  observe              recap + per-edit reasoning/flags/memory as JSON\n` +
       `  usage                ctx / 5h / week usage snapshot as JSON\n\n` +
@@ -698,6 +877,9 @@ function main(): void {
     case 'status':
       cmdStatus(rest);
       break;
+    case 'doctor':
+      cmdDoctor(rest);
+      break;
     case 'sessions':
       cmdSessions(rest);
       break;
@@ -722,11 +904,17 @@ function main(): void {
     case 'stats':
       cmdStats(rest);
       break;
+    case 'summary':
+      cmdSummary(rest);
+      break;
     case 'blob':
       cmdBlob(rest);
       break;
     case 'locate':
       cmdLocate(rest);
+      break;
+    case 'tree':
+      cmdTree(rest);
       break;
     case 'observe':
       cmdObserve(rest);
@@ -740,13 +928,16 @@ function main(): void {
     case 'recap':
       cmdRecap(rest).catch((e) => fail(String(e?.message || e)));
       break;
+    case 'update':
+      cmdUpdate(rest).catch((e) => fail(String(e?.message || e)));
+      break;
     case 'suggest':
       cmdSuggest(rest).catch((e) => fail(String(e?.message || e)));
       break;
     case '--version':
     case '-v':
     case 'version':
-      process.stdout.write(`claude-observatory ${VERSION}\n`);
+      process.stdout.write(`claude-observatory ${version()}\n`);
       break;
     case undefined:
     case '-h':

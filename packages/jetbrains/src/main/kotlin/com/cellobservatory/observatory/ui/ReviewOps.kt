@@ -44,6 +44,19 @@ object ReviewOps {
         }
     }
 
+    /** Keep every pending edit in a subset (e.g. one file) — file-scoped accept. */
+    fun keepAll(project: Project, session: String, targets: List<EditRecord>, scope: String) {
+        val pending = targets.filter { it.pending }
+        if (pending.isEmpty()) {
+            notify(project, "No pending edits to accept in $scope")
+            return
+        }
+        runBg(project, "Accepting ${pending.size} edit(s) in $scope") {
+            for (r in pending) ObservatoryCli.keep(session, r.id, project.basePath)
+            done(project, "Accepted ${pending.size} edit(s) in $scope")
+        }
+    }
+
     /** Undo (or redo) one edit. IJ-idiomatic dirty handling: offer Save & Continue, never clobber. */
     fun undoOrRedo(project: Project, session: String, rec: EditRecord, redo: Boolean) {
         val verb = if (redo) "Redo" else "Undo"

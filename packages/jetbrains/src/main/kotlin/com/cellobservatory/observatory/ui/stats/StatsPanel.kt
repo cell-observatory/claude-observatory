@@ -104,12 +104,7 @@ class StatsPanel(private val project: Project) : JPanel(BorderLayout()) {
         border = JBUI.Borders.empty(8)
         toolTipText = "First scan of your transcripts; cached after"
     }
-    private val editsChart = ChartComponent(
-        "EDITS", false,
-        listOf(Triple("pending", C_PENDING) { b: Bucket -> b.editsPending },
-            Triple("accepted", C_KEPT) { b: Bucket -> b.editsKept },
-            Triple("reverted", C_REVERTED) { b: Bucket -> b.editsUndone }),
-    )
+    private val scoreboard = ReviewScoreboard()
     private val tokensChart = ChartComponent(
         "TOKENS", true,
         listOf(Triple("total", C_TOTAL) { b: Bucket -> b.tokensTotal },
@@ -137,7 +132,7 @@ class StatsPanel(private val project: Project) : JPanel(BorderLayout()) {
         val stack = ScrollableStack().apply {
             border = JBUI.Borders.empty(4, 8)
             add(gathering)
-            add(editsChart)
+            add(scoreboard)
             add(Box.createVerticalStrut(JBUI.scale(12)))
             add(tokensChart)
             add(Box.createVerticalStrut(JBUI.scale(12)))
@@ -149,6 +144,7 @@ class StatsPanel(private val project: Project) : JPanel(BorderLayout()) {
         // panel in a scroll pane lays out at preferred width and paints off-canvas when squeezed.
         add(JBScrollPane(stack, JBScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED, JBScrollPane.HORIZONTAL_SCROLLBAR_NEVER), BorderLayout.CENTER)
 
+        scoreboard.update(ObservatoryService.getInstance(project).counts()) // populate before first show
         ObservatoryService.getInstance(project).addListener { refresh() }
         // 30s tick: refresh usage + stale stamps; stats self-throttles to one subprocess per 20s.
         Timer(30_000) { if (isShowing) refresh() }.apply { isRepeats = true }.start()
@@ -157,11 +153,12 @@ class StatsPanel(private val project: Project) : JPanel(BorderLayout()) {
 
     private fun repaintCharts() {
         val buckets = series[range] ?: emptyList()
-        editsChart.update(buckets)
         tokensChart.update(buckets)
     }
 
     fun refresh() {
+        // Live review scoreboard from the in-memory folded log (cheap; cached on the log's mtime/size).
+        scoreboard.update(ObservatoryService.getInstance(project).counts())
         fetchUsage()
         fetchStats()
     }
@@ -215,8 +212,8 @@ class StatsPanel(private val project: Project) : JPanel(BorderLayout()) {
                 hint.toolTipText = "5h/week plan usage needs claude-statusline writing on this host — it's bundled with the CLI; start a Claude session after installing."
             }
             age != null && age > u.staleMs -> {
-                hint.text = "<html>5h/wk from <b>${ago(age)} ago</b> — run claude in a terminal to refresh</html>"
-                hint.toolTipText = "Only the terminal TUI runs Claude's status line, so IDE-only sessions leave the 5h/week cache stale; ctx stays live from the transcript."
+                hint.text = "<html>5h / week last refreshed <b>${ago(age)} ago</b> — keep an idle <b>claude</b> terminal open (it refreshes every ~60s).<br>Plan usage comes only from Claude's own status line; ctx stays live from the transcript.</html>"
+                hint.toolTipText = "5h/week are account-wide plan limits the IDE panel can't fetch itself — only Claude's status line has them, and it re-runs every ~60s (refreshInterval) while a claude session is open. ctx stays live from the transcript."
             }
             else -> hint.isVisible = false
         }
@@ -281,6 +278,71 @@ private class ScrollableStack : JPanel(), javax.swing.Scrollable {
     override fun getScrollableBlockIncrement(r: java.awt.Rectangle, o: Int, d: Int) = JBUI.scale(64)
     override fun getScrollableTracksViewportWidth() = true
     override fun getScrollableTracksViewportHeight() = false
+}
+
+/** Live review scoreboard: current pending / accepted / reverted counts + a progress bar that fills as
+ *  edits get reviewed. Fed from ObservatoryService.counts() on every store change — parity with the VS
+ *  Code Stats webview's review section (natively painted, consistent with the charts below). */
+private class ReviewScoreboard : JComponent() {
+    private var c: ObservatoryService.Counts? = null
+
+    init {
+        preferredSize = Dimension(JBUI.scale(200), JBUI.scale(80))
+        minimumSize = Dimension(JBUI.scale(110), JBUI.scale(80))
+        maximumSize = Dimension(Int.MAX_VALUE, JBUI.scale(86))
+    }
+
+    fun update(counts: ObservatoryService.Counts?) {
+        c = counts
+        repaint()
+    }
+
+    override fun paintComponent(g: Graphics) {
+        val g2 = g as Graphics2D
+        g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+        val grey = UIUtil.getContextHelpForeground()
+        val counts = c ?: ObservatoryService.Counts(0, 0, 0, null)
+        val cells = listOf(
+            Triple("PENDING", counts.pending, C_PENDING),
+            Triple("ACCEPTED", counts.kept, C_KEPT),
+            Triple("REVERTED", counts.undone, C_REVERTED),
+        )
+        val gap = JBUI.scale(6)
+        val cellW = (width - 2 * gap) / 3
+        val cellH = JBUI.scale(44)
+        var x = 0
+        for ((label, value, color) in cells) {
+            g2.color = JBColor.border()
+            g2.drawRoundRect(x, 0, cellW - 1, cellH, JBUI.scale(6), JBUI.scale(6))
+            g2.color = color
+            g2.font = JBUI.Fonts.label(16f).asBold()
+            val num = value.toString()
+            g2.drawString(num, x + (cellW - g2.fontMetrics.stringWidth(num)) / 2, JBUI.scale(25))
+            g2.color = grey
+            g2.font = JBUI.Fonts.miniFont()
+            g2.drawString(label, x + (cellW - g2.fontMetrics.stringWidth(label)) / 2, JBUI.scale(39))
+            x += cellW + gap
+        }
+        val reviewed = counts.kept + counts.undone
+        val total = counts.pending + reviewed
+        val pct = if (total > 0) reviewed.toDouble() / total else 0.0
+        val barY = cellH + JBUI.scale(10)
+        val barH = JBUI.scale(5)
+        g2.color = JBColor.border()
+        g2.fillRoundRect(0, barY, width, barH, 4, 4)
+        if (total > 0) {
+            g2.color = if (pct >= 1.0) C_KEPT else C_TOTAL
+            g2.fillRoundRect(0, barY, (width * pct).toInt().coerceAtLeast(2), barH, 4, 4)
+        }
+        g2.color = grey
+        g2.font = JBUI.Fonts.miniFont()
+        val progress = if (total > 0) "$reviewed of $total reviewed (${(pct * 100).toInt()}%)" else "no edits yet"
+        g2.drawString(progress, JBUI.scale(2), barY + JBUI.scale(18))
+        if (reviewed > 0) {
+            val rate = "${(counts.kept.toDouble() / reviewed * 100).toInt()}% accepted"
+            g2.drawString(rate, width - g2.fontMetrics.stringWidth(rate) - JBUI.scale(2), barY + JBUI.scale(18))
+        }
+    }
 }
 
 /** Multi-series step-line chart with y ticks (linear or log) and a crosshair tooltip. */

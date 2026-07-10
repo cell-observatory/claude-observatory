@@ -7,7 +7,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { claudeConfigDir } from './paths';
 
-export const MATCHER = 'Edit|Write|MultiEdit|NotebookEdit';
+export const MATCHER = 'Edit|Write|MultiEdit|NotebookEdit|Bash';
+
+/** Matchers shipped by earlier versions — migrated in place to MATCHER on re-init (adds Bash capture). */
+const LEGACY_MATCHERS = ['Edit|Write|MultiEdit|NotebookEdit'];
 
 /** Stable, path-independent marker appended (as a shell comment) to our hook command. */
 export const HOOK_MARKER = 'claude-observatory-hook';
@@ -96,6 +99,28 @@ function addTo(events: Record<string, HookGroup[]>, event: string, command: stri
   return true;
 }
 
+/** Upgrade a pre-existing hook group (our command, an older matcher) to the current MATCHER, so
+ *  re-running `init` extends an old install to also capture Bash — without adding a duplicate group. */
+function migrateMatchers(hooks: Record<string, HookGroup[]>): boolean {
+  let migrated = false;
+  for (const event of Object.keys(hooks)) {
+    const list = hooks[event];
+    if (!Array.isArray(list)) continue;
+    for (const g of list) {
+      if (
+        g.matcher &&
+        g.matcher !== MATCHER &&
+        LEGACY_MATCHERS.includes(g.matcher) &&
+        (Array.isArray(g.hooks) ? g.hooks : []).some((h) => isOurCommand(h.command))
+      ) {
+        g.matcher = MATCHER;
+        migrated = true;
+      }
+    }
+  }
+  return migrated;
+}
+
 export interface InstallResult {
   changed: boolean;
   settingsPath: string;
@@ -107,9 +132,10 @@ export function installHooks(command: string, file: string = settingsPath()): In
   const { path: p, exists, data } = readSettings(file);
   if (!exists) fs.mkdirSync(path.dirname(p), { recursive: true });
   const hooks = (data.hooks = data.hooks || {});
+  const migrated = migrateMatchers(hooks);
   const a = addTo(hooks, 'PreToolUse', command);
   const b = addTo(hooks, 'PostToolUse', command);
-  const changed = a || b;
+  const changed = migrated || a || b;
   let backupPath: string | undefined;
   if (changed) {
     // Back up the ORIGINAL file (only when we're actually going to modify it — a no-op re-init

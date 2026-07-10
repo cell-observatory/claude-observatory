@@ -160,6 +160,21 @@ test('undo: create WITH a later edit conflicts (never deletes); --force deletes'
   assert.ok(!fs.existsSync(F));
 });
 
+test('undo: fileBaseline reverts all pending edits (quick-diff baseline)', () => {
+  freshHome();
+  const S = 'baseline';
+  const F = path.join(tmpWork(), 'app.js');
+  seedEdit(S, F, 'a\nb\n', 'a\nX\nb\n'); // #1: insert X
+  seedEdit(S, F, 'a\nX\nb\n', 'a\nX\nb\nY\n'); // #2: append Y
+  const current = 'a\nX\nb\nY\n';
+  assert.equal(core.fileBaseline(S, F, current), 'a\nb\n', 'baseline reverts both pending edits');
+  // a kept edit stays in the baseline; only the pending one is reverted
+  core.setStatus(S, 1, 'kept');
+  assert.equal(core.fileBaseline(S, F, current), 'a\nX\nb\n', 'kept #1 stays; only pending #2 reverted');
+  // a file Claude never touched has no baseline delta
+  assert.equal(core.fileBaseline(S, '/other/none.js', 'z\n'), 'z\n', 'untouched file: baseline == current');
+});
+
 test('redo: re-applies an undone edit, preserving later edits, then noop', () => {
   freshHome();
   const S = 'redo';
@@ -238,6 +253,24 @@ test('ranges: locateEditInCurrent maps an edit to its current lines (positional)
   assert.deepEqual(L('a\nb\nc\n', 'a\nc\n', 'a\nc\n'), []);
   // multi-line insert preserved, later append below doesn't disturb it
   assert.deepEqual(L('a\nb\n', 'a\nNEW1\nNEW2\nb\n', 'a\nNEW1\nNEW2\nb\nZ\n'), [1, 2]);
+});
+
+test('ranges: locateDeletionsInCurrent surfaces removed text + its anchor (red ghost text)', () => {
+  const D = core.locateDeletionsInCurrent;
+  // pure deletion in the middle -> removed 'b', anchored on the surviving next line
+  assert.deepEqual(D('a\nb\nc\n', 'a\nc\n', 'a\nc\n'), [{ anchor: 1, lines: ['b'] }]);
+  // even swap (modification) -> no deletion; the changed line renders green instead
+  assert.deepEqual(D('a\nb\nc\n', 'a\nB\nc\n', 'a\nB\nc\n'), []);
+  // shrink (remove 2, add 1) -> net deletion; both removed lines surface, anchored after the replacement
+  assert.deepEqual(D('a\nb\nc\nd\n', 'a\nX\nd\n', 'a\nX\nd\n'), [{ anchor: 2, lines: ['b', 'c'] }]);
+  // growth (remove 1, add 2) -> not a deletion
+  assert.deepEqual(D('a\nb\nc\n', 'a\nX\nY\nc\n', 'a\nX\nY\nc\n'), []);
+  // deletion at end-of-file -> anchored on the last surviving line
+  assert.deepEqual(D('a\nb\nc\n', 'a\n', 'a\n'), [{ anchor: 0, lines: ['b', 'c'] }]);
+  // a later edit inserted a line ABOVE -> the anchor shifts down with it
+  assert.deepEqual(D('a\nb\nc\n', 'a\nc\n', 'HEADER\na\nc\n'), [{ anchor: 2, lines: ['b'] }]);
+  // the deletion's region was later rewritten -> the hunk drops out
+  assert.deepEqual(D('a\nb\nc\n', 'a\nc\n', 'a\nZZ\n'), []);
 });
 
 test('classes: detectClasses spans + classAt (brace langs + python)', () => {
@@ -1315,4 +1348,178 @@ test('memory: fileMemory aggregates a file\'s review history across sessions', (
   assert.match(s, /50% accepted/, 'summary acceptance rate');
   assert.match(s, /last reverted/, 'summary last verdict');
   assert.equal(core.memorySummary(core.fileMemory('/w/never-touched.ts')), '', 'no history -> empty summary');
+});
+
+test('diagnose: flags missing hooks and CLI-off-PATH, clears once installed', () => {
+  freshHome();
+  const work = tmpWork();
+  const byId = (checks, id) => checks.find((c) => c.id === id);
+
+  // Nothing installed yet: hooks are a hard failure with a fix hint.
+  let checks = core.diagnose({ cwd: work, binOnPath: true, jqPresent: true });
+  assert.equal(byId(checks, 'hooks').level, 'fail', 'missing hooks reported as a failure');
+  assert.ok(byId(checks, 'hooks').fix, 'missing hooks carries a fix hint');
+  assert.equal(byId(checks, 'settings-json').level, 'ok', 'absent settings.json is not "invalid"');
+
+  // Install the portable, marker-based hook: the hooks check clears.
+  core.installHooks('claude-observatory capture #' + core.HOOK_MARKER, core.settingsPath());
+  checks = core.diagnose({ cwd: work, binOnPath: true, jqPresent: true });
+  assert.equal(byId(checks, 'hooks').level, 'ok', 'hooks now ok');
+  assert.equal(byId(checks, 'hook-shape'), undefined, 'marker hook does not trip the legacy warning');
+
+  // The CLI not resolving on PATH is a hard failure (capture would silently no-op).
+  const off = core.diagnose({ cwd: work, binOnPath: false, jqPresent: true });
+  assert.equal(byId(off, 'bin-path').level, 'fail', 'bin off PATH is a failure');
+
+  // A hand-mangled settings.json is caught before anything else.
+  const fs2 = require('fs');
+  fs2.writeFileSync(core.settingsPath(), '{ not json');
+  const broken = core.diagnose({ cwd: work, binOnPath: true, jqPresent: true });
+  assert.equal(byId(broken, 'settings-json').level, 'fail', 'invalid settings.json flagged');
+});
+
+test('semver: compareVersions / isNewer order releases correctly', () => {
+  assert.equal(core.compareVersions('0.3.0', '0.3.0'), 0);
+  assert.equal(core.compareVersions('0.3.1', '0.3.0'), 1);
+  assert.equal(core.compareVersions('0.4.0', '0.3.9'), 1);
+  assert.equal(core.compareVersions('1.0.0', '0.9.9'), 1);
+  assert.equal(core.compareVersions('v0.3.0', '0.3.0'), 0, 'a leading v is ignored');
+  assert.equal(core.isNewer('0.4.0', '0.3.0'), true);
+  assert.equal(core.isNewer('0.3.0', '0.3.0'), false);
+  assert.equal(core.isNewer('0.2.0', '0.3.0'), false, 'an older release is not "newer"');
+  assert.deepEqual(core.parseVersion('v1.2.3-beta.1'), [1, 2, 3], 'prerelease suffix ignored');
+});
+
+test('review: reviewSummary aggregates per file + acceptance rate; markdown exports', () => {
+  freshHome();
+  const S = 'reviewsum';
+  const A = path.join(tmpWork(), 'a.txt');
+  const B = path.join(tmpWork(), 'b.txt');
+  seedEdit(S, A, 'x\n', 'x\ny\n');            // #1 pending
+  const i2 = seedEdit(S, A, 'x\ny\n', 'x\n');  // #2 -> keep
+  const i3 = seedEdit(S, B, 'p\n', 'q\n');     // #3 -> undo
+  core.setStatus(S, i2, 'kept');
+  core.setStatus(S, i3, 'undone');
+  const s = core.reviewSummary(S);
+  assert.equal(s.total, 3);
+  assert.equal(s.kept, 1);
+  assert.equal(s.undone, 1);
+  assert.equal(s.pending, 1);
+  assert.equal(Math.round(s.acceptanceRate * 100), 50, '1 kept of 2 reviewed = 50%');
+  assert.equal(s.files.length, 2, 'two files aggregated');
+  assert.equal(s.reverted.length, 1);
+  assert.equal(s.reverted[0].id, i3);
+  const md = core.reviewSummaryMarkdown(s);
+  assert.match(md, /review summary/i);
+  assert.match(md, /50%/, 'markdown shows the acceptance rate');
+  assert.match(md, /Reverted edits/, 'markdown lists reverted edits');
+});
+
+// Run the capture hook for a Bash tool call (no file_path — capture walks cwd).
+function runHookBash(home, session, dir, event) {
+  const payload = JSON.stringify({
+    session_id: session, cwd: dir, hook_event_name: event, tool_name: 'Bash', tool_input: { command: 'true' },
+  });
+  return cp.execFileSync('node', [CAPTURE], { input: payload, env: { ...process.env, HOME: home }, encoding: 'utf8' });
+}
+
+test('capture: Bash tool full-snapshots cwd and records modify/create/delete (undoable)', () => {
+  const home = freshHome();
+  const dir = tmpWork();
+  const A = path.join(dir, 'a.txt'); // modified
+  const B = path.join(dir, 'b.txt'); // deleted
+  const D = path.join(dir, 'd.txt'); // untouched
+  fs.writeFileSync(A, 'one\n');
+  fs.writeFileSync(B, 'gone\n');
+  fs.writeFileSync(D, 'same\n');
+  const S = 'bashSess';
+  assert.equal(runHookBash(home, S, dir, 'PreToolUse'), '', 'Pre: no stdout');
+  // simulate the Bash command's effects
+  fs.writeFileSync(A, 'ONE\n');
+  const C = path.join(dir, 'c.txt');
+  fs.writeFileSync(C, 'brand new\n'); // created
+  fs.unlinkSync(B); // deleted
+  assert.equal(runHookBash(home, S, dir, 'PostToolUse'), '', 'Post: no stdout');
+
+  const log = fs
+    .readFileSync(path.join(home, '.claude', 'claude-observatory', S, 'log.jsonl'), 'utf8')
+    .trim().split('\n').map(JSON.parse);
+  const at = (f) => log.find((r) => r.file === f);
+  assert.ok(at(A) && at(A).tool === 'Bash', 'modified file recorded as a Bash edit');
+  assert.ok(at(A).beforeBlob && at(A).afterBlob && at(A).beforeBlob !== at(A).afterBlob, 'modify: before+after present (undoable)');
+  assert.ok(at(C) && at(C).beforeBlob === null && at(C).afterBlob, 'created file: before null');
+  assert.ok(at(B) && at(B).beforeBlob && at(B).afterBlob === null, 'deleted file: after null');
+  assert.equal(at(D), undefined, 'untouched file produces no edit');
+});
+
+test('capture: CLAUDE_OBSERVATORY_NO_BASH opts out of Bash capture', () => {
+  const home = freshHome();
+  const dir = tmpWork();
+  const F = path.join(dir, 'a.txt');
+  fs.writeFileSync(F, 'one\n');
+  const S = 'bashOff';
+  const env = { ...process.env, HOME: home, CLAUDE_OBSERVATORY_NO_BASH: '1' };
+  const bash = (event) => cp.execFileSync('node', [CAPTURE], {
+    input: JSON.stringify({ session_id: S, cwd: dir, hook_event_name: event, tool_name: 'Bash', tool_input: {} }),
+    env, encoding: 'utf8',
+  });
+  bash('PreToolUse');
+  fs.writeFileSync(F, 'TWO\n');
+  bash('PostToolUse');
+  assert.equal(fs.existsSync(path.join(home, '.claude', 'claude-observatory', S, 'log.jsonl')), false, 'no log written when opted out');
+});
+
+test('install: re-init migrates a legacy matcher in place (adds Bash) without duplicating', () => {
+  const home = freshHome();
+  fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+  const sp = path.join(home, '.claude', 'settings.json');
+  const cmd = 'claude-observatory capture #claude-observatory-hook';
+  // an old install: our command under the pre-Bash matcher
+  fs.writeFileSync(sp, JSON.stringify({
+    hooks: {
+      PreToolUse: [{ matcher: 'Edit|Write|MultiEdit|NotebookEdit', hooks: [{ type: 'command', command: cmd }] }],
+      PostToolUse: [{ matcher: 'Edit|Write|MultiEdit|NotebookEdit', hooks: [{ type: 'command', command: cmd }] }],
+    },
+  }));
+  assert.ok(core.installHooks(cmd).changed, 're-init migrates the matcher');
+  const d = JSON.parse(fs.readFileSync(sp, 'utf8'));
+  assert.equal(d.hooks.PreToolUse.length, 1, 'no duplicate group');
+  assert.equal(d.hooks.PreToolUse[0].hooks.length, 1, 'no duplicate command');
+  assert.equal(d.hooks.PreToolUse[0].matcher, core.MATCHER, 'matcher upgraded to current');
+  assert.ok(core.MATCHER.includes('Bash'), 'MATCHER now includes Bash');
+  assert.equal(core.installHooks(cmd).changed, false, 'idempotent after migration');
+});
+
+test('tree: buildEditTree groups by folder/file with chain compaction + exact deltas', () => {
+  freshHome();
+  const S = 'treeview';
+  const root = tmpWork();
+  const A = path.join(root, 'src', 'a.ts');
+  const B = path.join(root, 'src', 'util', 'deep', 'b.ts');
+  fs.mkdirSync(path.dirname(A), { recursive: true });
+  fs.mkdirSync(path.dirname(B), { recursive: true });
+  fs.writeFileSync(A, 'x\ny\n');
+  fs.writeFileSync(B, 'p\nq\n');
+  seedEdit(S, A, 'x\n', 'x\ny\n');   // +1
+  seedEdit(S, B, 'p\n', 'p\nq\n');   // +1
+
+  const tree = core.buildEditTree(S, { root });
+  assert.equal(tree.files.length, 0, 'nothing directly at root');
+  assert.equal(tree.folders.length, 1, 'one top-level folder');
+  const src = tree.folders[0];
+  assert.equal(src.label, 'src', 'src not compacted (it holds a file and a subfolder)');
+  assert.ok(src.files.some((f) => f.rel === 'src/a.ts'), 'a.ts sits directly under src');
+  const util = src.folders.find((d) => d.label === 'util/deep');
+  assert.ok(util, 'single-child chain util/deep is compacted into one node');
+  assert.equal(util.files[0].rel, 'src/util/deep/b.ts');
+  const aFile = src.files.find((f) => f.rel === 'src/a.ts');
+  assert.equal(aFile.loose.length, 1, 'edit is loose (no class detected)');
+  assert.equal(aFile.loose[0].added, 1, 'exact delta carried on the edit');
+
+  // filter narrows by relative path
+  const filtered = core.buildEditTree(S, { root, filter: 'a.ts' });
+  const flatFiles = [];
+  const walk = (n) => { flatFiles.push(...n.files.map((f) => f.rel)); n.folders.forEach(walk); };
+  walk(filtered);
+  assert.deepEqual(flatFiles, ['src/a.ts'], 'filter keeps only matching files');
 });

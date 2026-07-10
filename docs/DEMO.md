@@ -129,7 +129,39 @@ $ claude-observatory clean                # GC orphaned blobs across all session
 
 ---
 
-## 6 · The editor observatories — VS Code & PyCharm/JetBrains
+## 6 · Deletions & mixed edits
+
+Claude removes and refactors code too, and the observatory captures that the same way. When an edit
+deletes lines — say Claude later drops the `farewell()` method it added — `diff` shows them with a
+leading `-`:
+
+```console
+$ claude-observatory diff 4
+@@ -5,11 +5,7 @@
+
+   greet() {
+     return `Hello, my name is ${this.name}!`;
+   }
+-
+-  farewell() {
+-    return `Goodbye from ${this.name}!`;
+-  }
+ }
+
+ module.exports = User;
+```
+
+A pure deletion lists as `+0 −4`; a refactor that both adds and removes (drop one method, add another)
+lists the combined delta, e.g. `+2 −4`. In the **inline overlay**, added lines get their usual green
+highlight — but deleted lines no longer exist in the buffer, so they can't be highlighted in place.
+Instead the removed code is shown as **red "ghost" text** on the surviving line where it used to be
+(`− farewell() { …(+2)`), over a red line highlight with a red overview-ruler tick. A **mixed edit**
+shows both at once: green where it added, red ghost text where it removed. The full removed text is
+always a click away — open the edit's inline diff from its ✨ star / lens.
+
+---
+
+## 7 · The editor observatories — VS Code & PyCharm/JetBrains
 
 Both editor front-ends read the **same store** as the CLI, so a Keep/Undo in any surface shows up
 in the others instantly. The layout is deliberately identical; only the host chrome differs:
@@ -137,18 +169,19 @@ in the others instantly. The layout is deliberately identical; only the host chr
 | Surface | VS Code | PyCharm / JetBrains |
 | --- | --- | --- |
 | Install | `code --install-extension claude-observatory.vsix` | `./scripts/install-jetbrains.sh` (or Install Plugin from Disk) |
-| **Edits · Diffs** (review) | microscope in the Activity Bar, badged with the pending count | **Claude Observatory** tool window, left stripe |
+| **Edits · Diffs · File History** (review) | microscope in the Activity Bar, badged with the pending count | **Claude Observatory** tool window, left stripe |
 | **Observations · Timeline · Stats** | bottom panel, side by side (like Terminal/Problems) | **Claude Observatory Dashboards** tool window, bottom stripe — three panes side by side |
-| Inline review | CodeLens **Keep / Undo / Diff** + gutter bar + `✨ #N` marker | lens **✓ Keep · ↩ Undo · ⇄ Diff · 💬 Chat** + gutter microscope + `✨ #N` marker |
-| Hover card (full reasoning + actions) | hover any changed line or the ✨ marker | hover any changed line or the ✨ marker |
-| Scoreboard | status-bar `🔬 N` (amber while pending) | status-bar `🔬 N` |
-| Keyboard loop | `⌥⌘N` next · `⌥⌘Y` keep · `⌥⌘U` undo (`Ctrl+Alt` on Win/Linux) | same keys |
+| Inline menu (**✨ #N · +A −R · view changes · Keep · Undo · Chat · View diff**) | CodeLens above each edit + ✨ gutter star + subtle tint + coral ruler mark | lens above each edit + clickable ✨ gutter star + subtle tint + coral stripe |
+| Click **view changes** | opens the **inline review bubble** at the edit — the diff in git's colors + reasoning + `+A −R`, Accept/Revert/Chat/Prev/Next on its toolbar (no tab) | opens the edit's unified **diff** (reasoning in title, Keep/Undo/Chat on toolbar) |
+| File heatmap | 📄 heatmap (tab-bar) | 📄 heatmap (editor banner) |
+| Scoreboard | status-bar `🔬 N` (amber while pending) + live bar in Stats | status-bar `🔬 N` + live bar in Stats |
+| Keyboard loop | `⌥⌘N` next · `⌥⌘Y` keep · `⌥⌘U` undo · `⌥⌘[`/`⌥⌘]` revisions (`Ctrl+Alt` on Win/Linux) | same keys |
 
 The **status-bar microscope** shows the pending count in realtime — the moment Claude writes a
 change. Click it (or **Review next pending edit**) to jump straight to the oldest unreviewed edit;
 review, decide, click again. That's the surgical loop, in either editor.
 
-![The observatory in PyCharm — Edits tree, inline lens + hover card, and the Dashboards window](media/pyc-layout.png)
+![The observatory in PyCharm — Edits tree, the inline lens with Claude's reasoning + actions, and the Dashboards window](media/pyc-layout.png)
 
 ### Edits — folder → file → class
 
@@ -168,11 +201,31 @@ class for **Keep all / Undo all** in that scope; click an edit to open the file 
 
 ### Inline overlay
 
-In the open file, each pending edit gets diff-tinted lines, a gutter marker, a clickable action
-lens above its first line, and a `✨ #N` marker after its last. **Hover anywhere on the edited
-text** for the hover card: Claude's full reasoning for that edit plus **Keep · Undo · Diff · Chat**
-— accept or surgically revert without leaving the editor. "Chat about this edit" copies a
-ready-made prompt (before/after included) for your Claude Code chat or terminal.
+In the open file, each pending edit gets a **✨ gutter star** at its start, a **subtle** green tint on
+added lines and a red tint (with the removed code shown as red ghost text) on deletions — toned down so
+a heavily edited file doesn't drown in color — and a distinct **Claude-coral marker** on the overview
+ruler / scrollbar. Above the edit sits the **inline menu**: **✨ #N · +A −R · view changes** then **✓
+Keep · ↩ Undo · 💬 Chat · ⧉ View diff** (the same edit as a full diff tab — its own tab, Prev/Next on the
+title bar cycling the file's edits in place). "Chat about this edit" copies a ready-made prompt (before/after included) for
+your Claude Code chat or terminal.
+
+**Click "view changes" → the changes, inline, in git's colors.** In **VS Code** it opens an **inline
+review bubble** right at the edit — no tab — with the diff in **git's own theme colors** (green/red text
+over the diff editor's translucent line fills — the same theme variables the real diff editor uses),
+Claude's reasoning, and the `+A −R` counts, plus **Accept · Revert · Chat · Prev · Next** as real toolbar
+buttons (Prev/Next step through that file's edits). In **PyCharm**, the ✨ gutter star / lens opens the
+edit's before ⟷ after as a **unified diff** (reasoning in the title, Keep/Undo/Chat on its toolbar).
+
+GitLens-style extras, in both editors: the **file heatmap** (📄) dims every unmodified line so Claude's
+edits pop; **revision navigation** (`⌥⌘[` / `⌥⌘]`) steps a file's edit history in a current-vs-revision
+diff.
+
+### File History — the active file's edits, in order
+
+A flat, chronological list of just the **currently open file's** edits (id · time · status ·
+reasoning) that **follows the editor** as you switch tabs. Click a row to jump to that edit, or
+keep / undo / diff it; the toolbar steps revisions and does **Accept all in this file** /
+**Revert all in this file** — clearing one file without touching the rest of the session.
 
 ### Timeline — a collapsed change feed
 
@@ -206,12 +259,13 @@ review, so observations get sharper the longer you use the tool. Zero tokens, ze
 
 ### Stats — trends and live usage
 
-Step-line plots of **edits** (pending / accepted / reverted) and **tokens** (total / input / output)
-with a **Today / 7 days / 30 days** toggle — Today is hourly; the token axis is logarithmic. Beneath
-them, the live **Usage** bars (context fill + 5h / week plan usage with `~token` estimates). The
-**review scoreboard** (`3 pending · 42 accepted · 5 reverted · 89% accepted · oldest 12m`) lives in
-the status-bar microscope's tooltip. The stats scan runs in a subprocess with an incremental cache, so
-the UI never blocks.
+A live **review scoreboard** leads the tab: **pending / accepted / reverted** counts and a
+**progress bar** that fills as you review — updated the instant you keep or undo an edit. Below it, a
+step-line plot of **tokens** (total / input / output, logarithmic axis) with a **Today / 7 days /
+30 days** toggle, then the live **Usage** bars (context fill + 5h / week plan usage with `~token`
+estimates). The full scoreboard (`3 pending · 42 accepted · 5 reverted · 89% accepted · oldest 12m`)
+also lives in the status-bar microscope's tooltip. The stats scan runs in a subprocess with an
+incremental cache, so the UI never blocks.
 
 ---
 

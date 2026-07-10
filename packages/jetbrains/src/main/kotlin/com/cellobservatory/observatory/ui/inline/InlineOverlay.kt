@@ -12,7 +12,6 @@ import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.DefaultActionGroup
 import com.intellij.openapi.components.Service
-import com.intellij.openapi.diff.DiffColors
 import com.intellij.openapi.editor.Document
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.editor.EditorFactory
@@ -31,11 +30,21 @@ import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.popup.JBPopupFactory
 import com.intellij.openapi.util.Disposer
+import com.intellij.ui.JBColor
 import com.intellij.util.Alarm
+import java.awt.Color
 import java.awt.Font
 import javax.swing.Icon
 
 private const val MAX_INLINE_LINES = 20_000 // same guard as the VS Code overlay
+
+// Claude's signature error-stripe color — a distinct coral so Claude's edits stand out on the overview
+// ruler instead of blending into VCS markers. Parity with the VS Code CLAUDE_MARK_COLOR.
+private val CLAUDE_MARK = JBColor(Color(0xCC785C), Color(0xE0906F))
+
+// Toned-down whole-line fill on Claude's added/changed lines — a subtle green (light/dark) so a file
+// Claude edited heavily doesn't drown in color. Parity with the VS Code ADDED_LINE_BG.
+private val ADDED_LINE_BG = JBColor(Color(0xE7, 0xF3, 0xEA), Color(0x24, 0x36, 0x2A))
 
 /**
  * The inline review overlay: per pending edit, a clickable "✓ Keep #N · ↩ Undo · ⇄ Diff" lens
@@ -55,6 +64,7 @@ class InlineOverlay(private val project: Project) : Disposable {
     private var installed = false
     private var hoverLens: LensRenderer? = null
     private var hoverInlay: Inlay<*>? = null
+    var heatmapOn = false // "file heatmap": dim unmodified lines so Claude's edits stand out
 
     fun install() {
         if (installed) return
@@ -86,6 +96,13 @@ class InlineOverlay(private val project: Project) : Disposable {
     }
 
     fun refreshAll() = projectEditors().forEach { render(it) }
+
+    /** Toggle the file heatmap (dim unmodified lines). Parity with VS Code's tab-bar 🔥 toggle. */
+    fun toggleHeatmap() {
+        heatmapOn = !heatmapOn
+        renderSig.clear() // force a rebuild so the dim appears/disappears
+        refreshAll()
+    }
 
     private fun editorsFor(document: Document) =
         EditorFactory.getInstance().getEditors(document, project).toList()
@@ -120,13 +137,12 @@ class InlineOverlay(private val project: Project) : Disposable {
             ?: return // stale — KEEP the previous artifacts (RangeMarkers track edits) until locate lands
         // Identical geometry ⇒ nothing to do. Rebuilding anyway would flicker on every keystroke.
         val sig = "$session|$file|" + placements.joinToString(";") { "${it.id}:${it.lines}" } +
-            "|" + pending.joinToString(",") { it.id.toString() }
+            "|" + pending.joinToString(",") { it.id.toString() } + "|hm=$heatmapOn"
         if (renderSig[editor] == sig) return
         clear(editor)
         renderSig[editor] = sig
 
         val markup = editor.markupModel
-        val insertedBg = editor.colorsScheme.getAttributes(DiffColors.DIFF_INSERTED)?.backgroundColor
         val hs = highlighters.getOrPut(editor) { mutableListOf() }
         val ins = inlays.getOrPut(editor) { mutableListOf() }
         val regions = mutableListOf<Pair<IntRange, EditRecord>>()
@@ -134,11 +150,14 @@ class InlineOverlay(private val project: Project) : Disposable {
             val rec = pending.find { it.id == p.id } ?: continue
             val lines = p.lines.filter { it < editor.document.lineCount }
             if (lines.isEmpty()) continue
+            // A SUBTLE green line fill (toned down, not the default diff green) + a coral error-stripe mark
+            // per changed line, so a file Claude edited heavily doesn't drown in color.
             for (line in lines) {
-                val h = markup.addLineHighlighter(line, HighlighterLayer.CARET_ROW - 1, TextAttributes(null, insertedBg, null, null, Font.PLAIN))
-                h.setErrorStripeMarkColor(insertedBg)
+                val h = markup.addLineHighlighter(line, HighlighterLayer.CARET_ROW - 1, TextAttributes(null, ADDED_LINE_BG, null, null, Font.PLAIN))
+                h.setErrorStripeMarkColor(CLAUDE_MARK)
                 hs.add(h)
             }
+            // ✨ gutter icon at the START of the edit — click it (or the lens below) to open the inline diff.
             val first = lines.min()
             val gutter = markup.addLineHighlighter(first, HighlighterLayer.CARET_ROW - 1, null)
             gutter.gutterIconRenderer = EditGutterRenderer(project, session, rec)
@@ -147,10 +166,32 @@ class InlineOverlay(private val project: Project) : Disposable {
                 editor.document.getLineStartOffset(first), false, true, 0,
                 LensRenderer(project, session, rec),
             )?.let { ins.add(it) }
-            editor.inlayModel.addAfterLineEndElement(
-                editor.document.getLineEndOffset(lines.max()), true, StarRenderer(project, session, rec),
-            )?.let { ins.add(it) }
             regions.add(lines.min()..lines.max() to rec)
+        }
+        // Heatmap: dim every UNMODIFIED line (flat grey, no syntax colors) so Claude's edits stand out.
+        // JetBrains can't alpha-blend text, so "dim" is a muted foreground (parity with VS Code's opacity).
+        if (heatmapOn) {
+            val changed = placements.flatMap { it.lines }.filter { it < editor.document.lineCount }.toHashSet()
+            val dimAttrs = TextAttributes(com.intellij.ui.JBColor.GRAY, null, null, null, Font.PLAIN)
+            var runStart = -1
+            fun flushDim(end: Int) {
+                if (runStart in 0..end) {
+                    hs.add(
+                        markup.addRangeHighlighter(
+                            editor.document.getLineStartOffset(runStart),
+                            editor.document.getLineEndOffset(end),
+                            HighlighterLayer.CARET_ROW - 2, dimAttrs,
+                            com.intellij.openapi.editor.markup.HighlighterTargetArea.EXACT_RANGE,
+                        )
+                    )
+                }
+                runStart = -1
+            }
+            for (line in 0 until editor.document.lineCount) {
+                if (line in changed) flushDim(line - 1)
+                else if (runStart < 0) runStart = line
+            }
+            flushDim(editor.document.lineCount - 1)
         }
         editRegions[editor] = regions
     }
@@ -166,24 +207,12 @@ class InlineOverlay(private val project: Project) : Disposable {
         val editor = e.editor
         if (editor.project !== project) return
         val inlay = editor.inlayModel.getElementAt(e.mouseEvent.point) ?: return
-        when (val renderer = inlay.renderer) {
-            is LensRenderer -> {
-                val bounds = inlay.bounds ?: return
-                renderer.actionAt(e.mouseEvent.x - bounds.x)?.invoke()
-                e.consume()
-            }
-            is StarRenderer -> {
-                inlay.bounds?.let { b -> EditHoverCard.show(project, renderer.session, renderer.rec, toScreen(editor, b)) }
-                e.consume()
-            }
+        val renderer = inlay.renderer
+        if (renderer is LensRenderer) {
+            val bounds = inlay.bounds ?: return
+            renderer.actionAt(e.mouseEvent.x - bounds.x)?.invoke()
+            e.consume()
         }
-    }
-
-    private fun toScreen(editor: Editor, bounds: java.awt.Rectangle): java.awt.Rectangle {
-        val screen = java.awt.Rectangle(bounds)
-        val loc = editor.contentComponent.locationOnScreen
-        screen.translate(loc.x, loc.y)
-        return screen
     }
 
     /** Hand cursor + link styling on the hovered lens action. */
@@ -205,37 +234,9 @@ class InlineOverlay(private val project: Project) : Disposable {
             hoverInlay = inlay
             if (lens.setHover(idx)) bounds?.let { editor.contentComponent.repaint(it) }
         }
-        // Hovering the ✨ marker OR any highlighted line of a pending edit shows the edit card
-        // (full reasoning + actions) — parity with the VS Code hover. Anchored to the edit's whole
-        // text region so the card stays put while the mouse moves within the edit, and the card's
-        // mouse-out callback dismisses it once the mouse leaves both the region and the card.
-        val star = inlay?.renderer as? StarRenderer
-        if (star != null) {
-            inlay.bounds?.let { b -> EditHoverCard.show(project, star.session, star.rec, toScreen(editor, b)) }
-        } else if (inlay == null && e.area == com.intellij.openapi.editor.event.EditorMouseEventArea.EDITING_AREA) {
-            hoveredEditAt(editor, e)?.let { (range, rec) ->
-                val session = ObservatoryService.getInstance(project).currentSession()
-                if (session != null) EditHoverCard.show(project, session, rec, regionScreenRect(editor, range))
-            }
-        }
         editor.contentComponent.cursor =
-            if (idx >= 0 || star != null) java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR)
+            if (idx >= 0) java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR)
             else java.awt.Cursor.getDefaultCursor()
-    }
-
-    private fun hoveredEditAt(editor: Editor, e: EditorMouseEvent): Pair<IntRange, EditRecord>? {
-        val regions = editRegions[editor] ?: return null
-        val line = editor.xyToLogicalPosition(e.mouseEvent.point).line
-        if (line >= editor.document.lineCount) return null
-        return regions.find { line in it.first }
-    }
-
-    /** Screen rectangle spanning an edit's lines — the hover card's keep-open anchor zone. */
-    private fun regionScreenRect(editor: Editor, lines: IntRange): java.awt.Rectangle {
-        val top = editor.logicalPositionToXY(com.intellij.openapi.editor.LogicalPosition(lines.first, 0)).y
-        val bottom = editor.logicalPositionToXY(com.intellij.openapi.editor.LogicalPosition(lines.last, 0)).y + editor.lineHeight
-        val rect = java.awt.Rectangle(0, top, editor.contentComponent.width, bottom - top)
-        return toScreen(editor, rect)
     }
 
     override fun dispose() {
@@ -247,14 +248,14 @@ class InlineOverlay(private val project: Project) : Disposable {
     }
 }
 
-/** Gutter icon on an edit's first line: click opens the edit card; right-click a native menu. */
+/** ✨ gutter star at an edit's first line: click opens the inline diff; right-click a native menu. */
 private class EditGutterRenderer(
     private val project: Project,
     private val session: String,
     private val rec: EditRecord,
 ) : GutterIconRenderer() {
-    override fun getIcon(): Icon = com.cellobservatory.observatory.ui.Icons.Microscope
-    override fun getTooltipText() = "Claude edit #${rec.id} · ${rec.tool} — click for actions"
+    override fun getIcon(): Icon = com.cellobservatory.observatory.ui.Icons.Star
+    override fun getTooltipText() = "Claude edit #${rec.id} · ${rec.tool} — click to see the changes"
     override fun equals(other: Any?) = (other as? EditGutterRenderer)?.rec?.id == rec.id
     override fun hashCode() = rec.id
     override fun isNavigateAction() = true
@@ -271,13 +272,9 @@ private class EditGutterRenderer(
         override fun actionPerformed(e: AnActionEvent) = run()
     }
 
-    // Left-click path: open the edit card anchored on the ACTUAL mouse location — a gutter
-    // click's data context has no usable position for showInBestPositionFor().
+    // Left-click path: show the edit's before ⟷ after diff (the reasoning + actions now live on the
+    // inline lens above the edit; right-click still opens the full Keep/Undo/Diff/Chat menu).
     override fun getClickAction(): AnAction = object : AnAction("Claude Edit #${rec.id}") {
-        override fun actionPerformed(e: AnActionEvent) {
-            val mouse = e.inputEvent as? java.awt.event.MouseEvent ?: return
-            val at = java.awt.Rectangle(mouse.locationOnScreen, java.awt.Dimension(1, 1))
-            EditHoverCard.show(project, session, rec, at)
-        }
+        override fun actionPerformed(e: AnActionEvent) = Diffs.show(project, session, rec)
     }
 }

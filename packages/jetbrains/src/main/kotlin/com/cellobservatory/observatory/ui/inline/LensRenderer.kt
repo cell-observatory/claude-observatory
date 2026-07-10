@@ -35,12 +35,14 @@ class LensRenderer(
     }
 
     private val segments: List<Seg> = buildList {
-        add(Seg("✓ Keep #${rec.id}") { ReviewOps.keep(project, session, rec.id) })
-        add(Seg("  ·  ", null))
+        // "✨ #N" opens the inline diff (mirrors the gutter star); then the spaced-out quick actions.
+        // Reasoning is NOT shown here — it lives in the diff's title. Icons/spacing match VS Code.
+        add(Seg("✨ #${rec.id}  view changes") { Diffs.show(project, session, rec) })
+        add(Seg("      ", null))
+        add(Seg("✓ Keep") { ReviewOps.keep(project, session, rec.id) })
+        add(Seg("      ", null))
         add(Seg("↩ Undo") { ReviewOps.undoOrRedo(project, session, rec, redo = false) })
-        add(Seg("  ·  ", null))
-        add(Seg("⇄ Diff") { Diffs.show(project, session, rec) })
-        add(Seg("  ·  ", null))
+        add(Seg("      ", null))
         add(Seg("💬 Chat") { ReviewOps.chatAbout(project, session, rec.id) })
     }
 
@@ -48,7 +50,7 @@ class LensRenderer(
 
     private fun font(inlay: Inlay<*>) =
         UIUtil.getFontWithFallback(inlay.editor.colorsScheme.getFont(EditorFontType.PLAIN))
-            .deriveFont((inlay.editor.colorsScheme.editorFontSize - 2).toFloat())
+            .deriveFont(inlay.editor.colorsScheme.editorFontSize.toFloat()) // full editor size — readable
 
     /** Pixel width of the anchor line's leading whitespace, so the lens aligns with the code. */
     private fun indentPx(inlay: Inlay<*>): Int {
@@ -109,28 +111,4 @@ class LensRenderer(
     }
 
     fun actionAt(xInInlay: Int): (() -> Unit)? = segments.getOrNull(segmentAt(xInInlay))?.run
-}
-
-/** The dim " ✨ #N" marker after an edit's last line — click opens the edit's actions popup. */
-class StarRenderer(
-    val project: Project,
-    val session: String,
-    val rec: EditRecord,
-) : EditorCustomElementRenderer {
-    private fun text() = " ✨ #${rec.id}"
-
-    override fun calcWidthInPixels(inlay: Inlay<*>): Int {
-        val editor = inlay.editor
-        val fm = editor.component.getFontMetrics(editor.colorsScheme.getFont(EditorFontType.PLAIN))
-        return fm.stringWidth(text())
-    }
-
-    override fun paint(inlay: Inlay<*>, g: Graphics, targetRegion: Rectangle, textAttributes: TextAttributes) {
-        val editor = inlay.editor
-        g.font = editor.colorsScheme.getFont(EditorFontType.PLAIN).deriveFont(java.awt.Font.ITALIC)
-        g.color = editor.colorsScheme.getAttributes(DefaultLanguageHighlighterColors.LINE_COMMENT)?.foregroundColor
-            ?: JBColor.GRAY
-        val fm = g.fontMetrics
-        g.drawString(text(), targetRegion.x, targetRegion.y + fm.ascent + (targetRegion.height - fm.height) / 2)
-    }
 }

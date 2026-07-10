@@ -6,4 +6,12 @@ import com.intellij.openapi.util.IconLoader
 object Icons {
     @JvmField
     val Microscope = IconLoader.getIcon("/icons/observatory13.svg", Icons::class.java)
+
+    /** Double-checkmark ("accept all"), matching VS Code's `$(check-all)`. Themed via currentColor. */
+    @JvmField
+    val CheckAll = IconLoader.getIcon("/icons/checkAll.svg", Icons::class.java)
+
+    /** Claude-coral ✨ sparkle — the "Claude edited here" gutter marker (parity with the VS Code star). */
+    @JvmField
+    val Star = IconLoader.getIcon("/icons/star.svg", Icons::class.java)
 }

@@ -20,6 +20,8 @@ class ObservatorySettings : PersistentStateComponent<ObservatorySettings.State> 
         var claudeBin: String? = null // path to the claude CLI (opt-in Analyze); empty = auto-detect
         var configDir: String? = null // CLAUDE_CONFIG_DIR override; empty = env var, then ~/.claude
         var inlineReview: Boolean = true // inline editor overlay (lenses + line highlights)
+        var unifiedDiff: Boolean = true // open edit diffs in the unified (inline) viewer, not side-by-side
+        var session: String? = null // pinned session id to show; empty/null = auto-resolve newest
     }
 
     private var myState = State()
@@ -39,6 +41,7 @@ class ObservatoryConfigurable : Configurable {
     private val claudeBin = JBTextField()
     private val configDir = JBTextField()
     private val inlineReview = JBCheckBox("Inline review overlay (lenses and line highlights in the editor)")
+    private val unifiedDiff = JBCheckBox("Show edit diffs in the unified (inline) viewer instead of side-by-side")
     private var panel: JPanel? = null
 
     override fun getDisplayName() = "Claude Observatory"
@@ -49,6 +52,7 @@ class ObservatoryConfigurable : Configurable {
             .addLabeledComponent("claude CLI path for Analyze (blank = auto-detect):", claudeBin, 1, false)
             .addLabeledComponent("Claude config dir (blank = \$CLAUDE_CONFIG_DIR, then ~/.claude):", configDir, 1, false)
             .addComponent(inlineReview)
+            .addComponent(unifiedDiff)
             .addComponentFillVertically(JPanel(), 0)
             .panel
         reset()
@@ -60,7 +64,8 @@ class ObservatoryConfigurable : Configurable {
         return observatoryBin.text != (s.observatoryBin ?: "") ||
             claudeBin.text != (s.claudeBin ?: "") ||
             configDir.text != (s.configDir ?: "") ||
-            inlineReview.isSelected != s.inlineReview
+            inlineReview.isSelected != s.inlineReview ||
+            unifiedDiff.isSelected != s.unifiedDiff
     }
 
     override fun apply() {
@@ -69,6 +74,7 @@ class ObservatoryConfigurable : Configurable {
         s.claudeBin = claudeBin.text.ifBlank { null }
         s.configDir = configDir.text.ifBlank { null }
         s.inlineReview = inlineReview.isSelected
+        s.unifiedDiff = unifiedDiff.isSelected
         // Re-render every open project so a config-dir change or overlay toggle applies immediately.
         for (p in com.intellij.openapi.project.ProjectManager.getInstance().openProjects) {
             com.cellobservatory.observatory.services.ObservatoryService.getInstance(p).refresh()
@@ -81,5 +87,6 @@ class ObservatoryConfigurable : Configurable {
         claudeBin.text = s.claudeBin ?: ""
         configDir.text = s.configDir ?: ""
         inlineReview.isSelected = s.inlineReview
+        unifiedDiff.isSelected = s.unifiedDiff
     }
 }

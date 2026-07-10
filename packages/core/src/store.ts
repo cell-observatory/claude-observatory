@@ -111,6 +111,38 @@ export function deleteStaging(sessionId: string, key: string): void {
   }
 }
 
+// --- Bash capture manifest: before-snapshots of every candidate file for one Bash command ---
+
+/** abs file path → before-blob sha (null = the file did not exist before the command). */
+export interface BashManifest {
+  files: Record<string, string | null>;
+  ts: number;
+}
+
+const BASH_MANIFEST = '__bash__.json';
+
+export function writeBashManifest(sessionId: string, m: BashManifest): void {
+  fs.writeFileSync(path.join(stagingDir(sessionId), BASH_MANIFEST), JSON.stringify(m));
+}
+
+export function readBashManifest(sessionId: string): BashManifest | null {
+  const p = path.join(stagingDir(sessionId), BASH_MANIFEST);
+  if (!fs.existsSync(p)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(p, 'utf8')) as BashManifest;
+  } catch {
+    return null;
+  }
+}
+
+export function deleteBashManifest(sessionId: string): void {
+  try {
+    fs.unlinkSync(path.join(stagingDir(sessionId), BASH_MANIFEST));
+  } catch {
+    /* already gone */
+  }
+}
+
 // --- log (append-only, source of truth) ---
 
 interface StatusOp {

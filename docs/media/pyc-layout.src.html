@@ -62,22 +62,26 @@
   .cl{display:flex;height:22px;align-items:center}
   .cl .gut{width:74px;flex:none;display:flex;align-items:center;justify-content:flex-end;gap:8px;
            padding-right:14px;color:#5a5d63;font-size:11.5px}
-  .cl .gut .tele{font-size:10px;line-height:1}
+  .cl .gut .tele{font-size:10px;line-height:1;color:#cc785c}
   .cl .code{white-space:pre}
   .cl.added{background:var(--added-line)}
-  .cl.added .gutbar{position:absolute;left:0;width:3px;height:22px;background:var(--green)}
+  .cl.added .gutbar{position:absolute;left:0;width:3px;height:22px;background:#cc785c}
   .k{color:#cf8e6d}.fn{color:#56a8f5}.str{color:#6aab73}.pn{color:#dfe1e5}.cmt{color:#7a7e85}.this{color:#c77dbb}
   .lens{color:#7a7e85;font-size:11.5px;padding-left:74px;height:22px;display:flex;align-items:center;gap:0}
   .lens .a{color:#7a7e85}
   .lens .hov{color:#548af7;text-decoration:underline}
   .marker{color:#7a7e85;font-style:italic;font-size:11.5px;margin-left:26px}
-  /* hover card */
-  .card{position:absolute;left:420px;top:224px;width:420px;background:#2b2d30;border:1px solid var(--border2);
-        border-radius:8px;box-shadow:0 10px 34px rgba(0,0,0,.55);padding:12px 14px;font-family:var(--ui);z-index:5}
-  .card .h{font-weight:600;font-size:12.5px}
-  .card .why{color:var(--dim);font-size:12px;margin-top:7px;line-height:1.5}
-  .card .links{display:flex;gap:18px;margin-top:10px;font-size:12px}
-  .card .links span{color:#548af7}
+  /* inline menu reasoning + current-line blame */
+  .lens .why{color:var(--faint);font-style:italic;margin-right:16px}
+  .blame{color:var(--faint);font-style:italic;font-size:11.5px;margin-left:26px}
+  /* review scoreboard (Stats) */
+  .board{display:flex;gap:6px;padding:4px 12px 6px}
+  .bc{flex:1;text-align:center;border:1px solid var(--border2);border-radius:6px;padding:5px 2px}
+  .bn{font-family:var(--mono);font-size:16px;font-weight:600;line-height:1.05}
+  .bl{font-size:8px;text-transform:uppercase;letter-spacing:.5px;color:var(--faint);margin-top:2px}
+  .btrack{height:5px;border-radius:3px;background:#3a3d42;margin:0 12px;overflow:hidden;position:relative}
+  .btrack i{position:absolute;left:0;top:0;bottom:0;border-radius:3px}
+  .bmeta{display:flex;justify-content:space-between;padding:4px 12px 0;font-family:var(--mono);font-size:9px;color:var(--faint)}
   /* bottom tool window */
   .bottom{height:252px;background:var(--panel2);border-top:1px solid var(--border);display:flex;flex-direction:column;flex:none}
   .bt-head{height:32px;display:flex;align-items:center;gap:14px;padding:0 12px;border-bottom:1px solid var(--border);flex:none}
@@ -129,7 +133,7 @@
     <div class="tw">
       <div class="tw-head">
         <span class="title">Claude Observatory</span>
-        <span class="tw-tabs"><span class="tw-tab on">Edits</span><span class="tw-tab">Diffs</span></span>
+        <span class="tw-tabs"><span class="tw-tab on">Edits</span><span class="tw-tab">Diffs</span><span class="tw-tab">File History</span></span>
         <span class="tools">⟳ ⋮</span>
       </div>
       <div class="tree">
@@ -149,18 +153,13 @@
         <div class="cl"><span class="gut">6</span><span class="code">    <span class="k">return</span> <span class="str">`Hello, my name is ${</span><span class="this">this</span><span class="str">.name}!`</span><span class="pn">;</span></span></div>
         <div class="cl"><span class="gut">7</span><span class="code">  <span class="pn">}</span></span></div>
         <div class="cl"><span class="gut">8</span><span class="code"></span></div>
-        <div class="lens"><span class="a">✓ Keep #2</span><span class="a">&nbsp;&nbsp;·&nbsp;&nbsp;</span><span class="hov">↩ Undo</span><span class="a">&nbsp;&nbsp;·&nbsp;&nbsp;</span><span class="a">⇄ Diff</span><span class="a">&nbsp;&nbsp;·&nbsp;&nbsp;</span><span class="a">💬 Chat</span></div>
-        <div class="cl added"><span class="gutbar"></span><span class="gut"><span class="tele">🔬</span>9</span><span class="code">  <span class="fn">farewell</span><span class="pn">() {</span></span></div>
+        <div class="lens"><span class="hov">✨ #2 view changes</span><span class="a">&nbsp;&nbsp;&nbsp;&nbsp;</span><span class="a">✓ Keep</span><span class="a">&nbsp;&nbsp;&nbsp;&nbsp;</span><span class="a">↩ Undo</span><span class="a">&nbsp;&nbsp;&nbsp;&nbsp;</span><span class="a">💬 Chat</span></div>
+        <div class="cl added"><span class="gutbar"></span><span class="gut"><span class="tele">✨</span>9</span><span class="code">  <span class="fn">farewell</span><span class="pn">() {</span></span></div>
         <div class="cl added"><span class="gutbar"></span><span class="gut">10</span><span class="code">    <span class="k">return</span> <span class="str">`Goodbye from ${</span><span class="this">this</span><span class="str">.name}!`</span><span class="pn">;</span></span></div>
-        <div class="cl added"><span class="gutbar"></span><span class="gut">11</span><span class="code">  <span class="pn">}</span><span class="marker">✨ #2</span></span></div>
+        <div class="cl added"><span class="gutbar"></span><span class="gut">11</span><span class="code">  <span class="pn">}</span></span></div>
         <div class="cl"><span class="gut">12</span><span class="code"><span class="pn">}</span></span></div>
         <div class="cl"><span class="gut">13</span><span class="code"></span></div>
         <div class="cl"><span class="gut">14</span><span class="code"><span class="pn">module</span>.<span class="pn">exports</span> = <span class="pn">User</span>;</span></div>
-        <div class="card">
-          <div class="h">Claude edit #2 · Edit</div>
-          <div class="why">💭 Adding a farewell() method to mirror greet(), so the model covers both directions.</div>
-          <div class="links"><span>✓ Keep</span><span>↩ Undo</span><span>⇄ Diff</span><span>💬 Chat</span></div>
-        </div>
       </div>
     </div>
   </div>
@@ -187,16 +186,14 @@
       </div>
       <div class="pane" style="flex:1.25">
         <div class="pane-h">Stats</div>
-        <div class="ranges"><span class="rng">Today</span><span class="rng on">7 days</span><span class="rng">30 days</span></div>
-        <div class="chart">
-          <div class="lbl"><b>EDITS</b><span class="lg"><span class="swl" style="background:#d6ae58"></span>pending</span><span class="lg"><span class="swl" style="background:#5fad65"></span>accepted</span><span class="lg"><span class="swl" style="background:#9da0a8"></span>reverted</span></div>
-          <svg width="100%" height="40" viewBox="0 0 400 40" preserveAspectRatio="none">
-            <line x1="0" y1="39" x2="400" y2="39" stroke="#393b40"/>
-            <path d="M0,30 H57 V26 H114 V28 H171 V20 H228 V22 H285 V12 H342 V16 H400" fill="none" stroke="#d6ae58" stroke-width="1.5"/>
-            <path d="M0,34 H57 V30 H114 V24 H171 V26 H228 V16 H285 V18 H342 V8 H400" fill="none" stroke="#5fad65" stroke-width="1.5"/>
-            <path d="M0,37 H57 V36 H114 V37 H171 V34 H228 V36 H285 V33 H342 V35 H400" fill="none" stroke="#9da0a8" stroke-width="1.5"/>
-          </svg>
+        <div class="board">
+          <div class="bc"><div class="bn" style="color:#d6ae58">3</div><div class="bl">pending</div></div>
+          <div class="bc"><div class="bn" style="color:#5fad65">42</div><div class="bl">accepted</div></div>
+          <div class="bc"><div class="bn" style="color:#9da0a8">5</div><div class="bl">reverted</div></div>
         </div>
+        <div class="btrack"><i style="width:94%;background:#548af7"></i></div>
+        <div class="bmeta"><span>47 of 50 reviewed (94%)</span><span>89% accepted</span></div>
+        <div class="ranges"><span class="rng">Today</span><span class="rng on">7 days</span><span class="rng">30 days</span></div>
         <div class="chart">
           <div class="lbl"><b>TOKENS</b><span class="lg"><span class="swl" style="background:#548af7"></span>total</span><span class="lg"><span class="swl" style="background:#c77dbb"></span>input</span><span class="lg"><span class="swl" style="background:#cf8e6d"></span>output</span></div>
           <svg width="100%" height="34" viewBox="0 0 400 34" preserveAspectRatio="none">

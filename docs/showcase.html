@@ -10,71 +10,72 @@
 <body>
 <style>
   *, *::before, *::after { box-sizing: border-box; }
+
   :root {
-    /* light = printed star-atlas on cool paper (not warm cream) */
-    --bg: #eef0f6;
-    --grid: rgba(58, 80, 150, 0.06);
+    /* light — neutral gray surfaces, one terracotta accent */
+    --bg: #f6f6f7;
     --surface: #ffffff;
-    --surface-2: #f6f7fc;
-    --border: rgba(26, 36, 70, 0.12);
-    --border-strong: rgba(26, 36, 70, 0.22);
-    --ink: #151a27;
-    --ink-soft: #545b70;
-    --ink-faint: #868da2;
+    --surface-2: #f1f1f3;
+    --border: rgba(22, 22, 26, 0.12);
+    --border-strong: rgba(22, 22, 26, 0.22);
+    --ink: #17181c;
+    --ink-soft: #52535b;
+    --ink-faint: #6b6c74;
     --accent: #cf6440;
-    --accent-ink: #b3502e;
+    --accent-ink: #a8482a;
     --accent-soft: rgba(207, 100, 64, 0.10);
-    --line: rgba(60, 92, 164, 0.42);
-    --pending: #a9781a;
-    --kept: #3c8b58;
-    --reverted: #868da2;
-    --glow: none;
-    --star: rgba(40, 60, 120, 0.55);
+    --line: rgba(90, 92, 104, 0.42);
+    --pending: #9a6c12;
+    --kept: #2f7d4b;
+    --deleted: #c5342b;
+    --reverted: #8a8b93;
+    --nav-bg: rgba(246, 246, 247, 0.82);
 
     --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
     --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, Roboto, sans-serif;
     --col: 1080px;
+    --navh: 60px;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #0a0d15;
-      --grid: rgba(126, 166, 224, 0.05);
-      --surface: #121826;
-      --surface-2: #0e1420;
-      --border: rgba(150, 172, 224, 0.13);
-      --border-strong: rgba(150, 172, 224, 0.24);
-      --ink: #e7e9f3;
-      --ink-soft: #9aa2ba;
-      --ink-faint: #697089;
+      --bg: #0d0d10;
+      --surface: #17171b;
+      --surface-2: #121215;
+      --border: rgba(230, 232, 240, 0.13);
+      --border-strong: rgba(230, 232, 240, 0.24);
+      --ink: #e9e9ec;
+      --ink-soft: #a1a2aa;
+      --ink-faint: #808189;
       --accent: #e08a63;
       --accent-ink: #ec9d79;
       --accent-soft: rgba(224, 138, 99, 0.14);
-      --line: rgba(126, 166, 224, 0.30);
+      --line: rgba(160, 162, 172, 0.32);
       --pending: #e0b155;
       --kept: #79c089;
-      --reverted: #697089;
-      --glow: 0 0 26px rgba(224, 138, 99, 0.22);
-      --star: rgba(200, 214, 255, 0.85);
+      --deleted: #ec8078;
+      --reverted: #808189;
+      --nav-bg: rgba(13, 13, 16, 0.82);
     }
   }
   /* explicit toggles win over the media query in both directions */
   :root[data-theme="light"] {
-    --bg: #eef0f6; --grid: rgba(58,80,150,0.06); --surface: #fff; --surface-2: #f6f7fc;
-    --border: rgba(26,36,70,0.12); --border-strong: rgba(26,36,70,0.22);
-    --ink: #151a27; --ink-soft: #545b70; --ink-faint: #868da2;
-    --accent: #cf6440; --accent-ink: #b3502e; --accent-soft: rgba(207,100,64,0.10);
-    --line: rgba(60,92,164,0.42); --pending: #a9781a; --kept: #3c8b58; --reverted: #868da2;
-    --glow: none; --star: rgba(40,60,120,0.55);
+    --bg: #f6f6f7; --surface: #fff; --surface-2: #f1f1f3;
+    --border: rgba(22,22,26,0.12); --border-strong: rgba(22,22,26,0.22);
+    --ink: #17181c; --ink-soft: #52535b; --ink-faint: #6b6c74;
+    --accent: #cf6440; --accent-ink: #a8482a; --accent-soft: rgba(207,100,64,0.10);
+    --line: rgba(90,92,104,0.42); --pending: #9a6c12; --kept: #2f7d4b; --deleted: #c5342b; --reverted: #8a8b93;
+    --nav-bg: rgba(246,246,247,0.82);
   }
   :root[data-theme="dark"] {
-    --bg: #0a0d15; --grid: rgba(126,166,224,0.05); --surface: #121826; --surface-2: #0e1420;
-    --border: rgba(150,172,224,0.13); --border-strong: rgba(150,172,224,0.24);
-    --ink: #e7e9f3; --ink-soft: #9aa2ba; --ink-faint: #697089;
+    --bg: #0d0d10; --surface: #17171b; --surface-2: #121215;
+    --border: rgba(230,232,240,0.13); --border-strong: rgba(230,232,240,0.24);
+    --ink: #e9e9ec; --ink-soft: #a1a2aa; --ink-faint: #808189;
     --accent: #e08a63; --accent-ink: #ec9d79; --accent-soft: rgba(224,138,99,0.14);
-    --line: rgba(126,166,224,0.30); --pending: #e0b155; --kept: #79c089; --reverted: #697089;
-    --glow: 0 0 26px rgba(224,138,99,0.22); --star: rgba(200,214,255,0.85);
+    --line: rgba(160,162,172,0.32); --pending: #e0b155; --kept: #79c089; --deleted: #ec8078; --reverted: #808189;
+    --nav-bg: rgba(13,13,16,0.82);
   }
 
+  html { scroll-behavior: smooth; scroll-padding-top: calc(var(--navh) + 16px); }
   body {
     margin: 0;
     background: var(--bg);
@@ -86,84 +87,90 @@
     text-rendering: optimizeLegibility;
     overflow-x: hidden;
   }
-  /* fixed star-chart grid: right-ascension + declination hairlines + vignette */
-  body::before {
-    content: "";
-    position: fixed;
-    inset: 0;
-    z-index: 0;
-    pointer-events: none;
-    background:
-      linear-gradient(var(--grid) 1px, transparent 1px) 0 0 / 100% 64px,
-      linear-gradient(90deg, var(--grid) 1px, transparent 1px) 0 0 / 64px 100%,
-      radial-gradient(120% 90% at 50% -10%, transparent 55%, color-mix(in srgb, var(--bg) 88%, #000) 100%);
-  }
-  #stars { position: fixed; inset: 0; z-index: 0; pointer-events: none; opacity: 0; transition: opacity 1.2s ease; }
-  main { position: relative; z-index: 1; }
+  img { max-width: 100%; height: auto; display: block; }
 
-  .plate { width: min(var(--col), 100% - 44px); margin-inline: auto; }
-  section { padding: clamp(56px, 9vw, 118px) 0; position: relative; }
+  .wrap { width: min(var(--col), 100% - 44px); margin-inline: auto; }
+  section { padding: clamp(52px, 8vw, 104px) 0; scroll-margin-top: calc(var(--navh) + 16px); }
   section + section { border-top: 1px solid var(--border); }
 
   /* --- type --- */
-  h1, h2, h3 { margin: 0; text-wrap: balance; letter-spacing: -0.02em; font-weight: 640; line-height: 1.08; }
-  h1 { font-size: clamp(2.6rem, 6.4vw, 4.5rem); }
-  h2 { font-size: clamp(1.8rem, 3.6vw, 2.7rem); }
-  h3 { font-size: 1.06rem; letter-spacing: -0.01em; }
+  h1, h2, h3 { margin: 0; text-wrap: balance; letter-spacing: -0.02em; font-weight: 640; line-height: 1.1; }
+  h1 { font-size: clamp(2.5rem, 6vw, 4.2rem); }
+  h2 { font-size: clamp(1.7rem, 3.4vw, 2.5rem); }
+  h3 { font-size: 1.04rem; letter-spacing: -0.01em; }
   p { margin: 0; }
-  .lede { font-size: clamp(1.12rem, 1.8vw, 1.34rem); color: var(--ink-soft); line-height: 1.55; max-width: 40ch; }
+  .lede { font-size: clamp(1.1rem, 1.7vw, 1.3rem); color: var(--ink-soft); line-height: 1.55; max-width: 42ch; }
   .prose { color: var(--ink-soft); max-width: 62ch; }
   .prose strong { color: var(--ink); font-weight: 600; }
   a { color: var(--accent-ink); text-underline-offset: 3px; text-decoration-thickness: 1px; }
+  .kbd, code { font-family: var(--mono); font-size: 0.86em; }
 
   .eyebrow {
     font-family: var(--mono);
     font-size: 0.72rem;
-    letter-spacing: 0.24em;
+    letter-spacing: 0.22em;
     text-transform: uppercase;
-    color: var(--ink-faint);
-    display: inline-flex;
-    align-items: center;
-    gap: 0.7em;
+    color: var(--accent-ink);
+    display: inline-block;
+    margin-bottom: 14px;
   }
-  .eyebrow::before { content: "✦"; color: var(--accent); font-size: 0.8em; letter-spacing: 0; }
-  .plate-no { font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.18em; color: var(--ink-faint); }
-  .kbd, code { font-family: var(--mono); font-size: 0.86em; }
 
-  /* --- hero --- */
-  .hero { padding-top: clamp(30px, 6vw, 60px); }
-  .topbar { display: flex; align-items: center; justify-content: space-between; padding: 22px 0 0; }
-  .wordmark { display: inline-flex; align-items: center; gap: 12px; font-family: var(--mono); letter-spacing: 0.02em; }
-  .wordmark .mark { font-size: 24px; line-height: 1; filter: drop-shadow(var(--glow)); }
-  .wordmark b { font-weight: 600; font-size: 1.02rem; letter-spacing: 0.06em; }
-  .wordmark span { color: var(--ink-faint); font-size: 0.82rem; }
+  /* --- sticky nav --- */
+  .nav {
+    position: sticky; top: 0; z-index: 50;
+    background: var(--nav-bg);
+    -webkit-backdrop-filter: saturate(1.4) blur(12px);
+    backdrop-filter: saturate(1.4) blur(12px);
+    border-bottom: 1px solid var(--border);
+  }
+  .nav-inner { display: flex; align-items: center; gap: 20px; height: var(--navh); }
+  .wordmark { display: inline-flex; align-items: center; gap: 10px; text-decoration: none; color: var(--ink); flex: none; }
+  .wordmark .mark { font-size: 20px; line-height: 1; }
+  .wordmark b { font-weight: 600; font-size: 0.94rem; letter-spacing: 0.01em; }
+  .nav-links { flex: 1; display: flex; justify-content: center; gap: 26px; }
+  .nav-links a {
+    font-size: 0.9rem; color: var(--ink-soft); text-decoration: none; letter-spacing: 0.01em;
+  }
+  .nav-links a:hover { color: var(--ink); }
+  .nav-actions { flex: none; display: flex; align-items: center; gap: 10px; }
   .theme-toggle {
-    font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.12em; text-transform: uppercase;
+    font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.1em; text-transform: uppercase;
     color: var(--ink-soft); background: var(--surface); border: 1px solid var(--border);
-    border-radius: 999px; padding: 7px 14px; cursor: pointer;
+    border-radius: 999px; padding: 7px 13px; cursor: pointer;
   }
   .theme-toggle:hover { border-color: var(--border-strong); color: var(--ink); }
+  .nav-gh {
+    font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.06em;
+    color: var(--ink-soft); text-decoration: none; border: 1px solid var(--border);
+    border-radius: 999px; padding: 7px 13px; white-space: nowrap;
+  }
+  .nav-gh:hover { border-color: var(--border-strong); color: var(--ink); }
+  @media (max-width: 760px) {
+    .nav-links { display: none; }
+    .nav-actions { margin-left: auto; }
+  }
 
-  .hero-grid { display: grid; grid-template-columns: 1.05fr 0.95fr; gap: clamp(28px, 5vw, 64px); align-items: center; margin-top: clamp(38px, 7vw, 74px); }
+  /* --- hero --- */
+  .hero-grid { display: grid; grid-template-columns: 1.05fr 0.95fr; gap: clamp(28px, 5vw, 60px); align-items: center; }
   @media (max-width: 860px) { .hero-grid { grid-template-columns: 1fr; } }
-  .hero h1 { margin-top: 20px; }
+  .hero h1 { margin-top: 6px; }
   .hero h1 .hl { color: var(--accent); }
   .hero .lede { margin-top: 22px; }
   .cta-row { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 30px; align-items: center; }
   .cmd {
     font-family: var(--mono); font-size: 0.9rem; color: var(--ink);
     background: var(--surface); border: 1px solid var(--border-strong); border-radius: 10px;
-    padding: 12px 15px; display: inline-flex; align-items: center; gap: 12px; box-shadow: var(--glow);
+    padding: 12px 15px; display: inline-flex; align-items: center; gap: 12px;
   }
   .cmd .dollar { color: var(--accent); }
   .cmd button {
-    font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.08em; text-transform: uppercase;
+    font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase;
     border: 1px solid var(--border); background: var(--surface-2); color: var(--ink-soft);
     border-radius: 6px; padding: 4px 9px; cursor: pointer;
   }
   .cmd button:hover { color: var(--accent-ink); border-color: var(--accent); }
   .btn-ghost {
-    font-family: var(--mono); font-size: 0.8rem; letter-spacing: 0.06em; color: var(--ink-soft);
+    font-family: var(--mono); font-size: 0.8rem; letter-spacing: 0.05em; color: var(--ink-soft);
     padding: 12px 8px; text-decoration: none;
   }
   .btn-ghost:hover { color: var(--ink); }
@@ -171,44 +178,23 @@
   /* --- generic panel / mock --- */
   .panel {
     background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
-    box-shadow: 0 1px 0 rgba(0,0,0,0.02), 0 22px 50px -30px rgba(10, 14, 30, 0.5);
+    box-shadow: 0 1px 0 rgba(0,0,0,0.02), 0 22px 50px -32px rgba(10, 12, 20, 0.5);
     overflow: hidden;
   }
   .panel-head {
     display: flex; align-items: center; gap: 9px; padding: 11px 15px;
     border-bottom: 1px solid var(--border); background: var(--surface-2);
-    font-family: var(--mono); font-size: 0.74rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-faint);
+    font-family: var(--mono); font-size: 0.74rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-faint);
   }
   .panel-head .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border-strong); }
   .panel-head .spacer { flex: 1; }
 
-  /* tree rows */
-  .tree { padding: 8px 6px; font-size: 0.9rem; }
-  .trow { display: flex; align-items: center; gap: 9px; padding: 5px 12px; border-radius: 7px; }
-  .trow .ic { font-family: var(--mono); color: var(--ink-faint); width: 1.1em; text-align: center; flex: none; }
-  .trow .nm { color: var(--ink); }
-  .trow .meta { margin-left: auto; font-family: var(--mono); font-size: 0.76rem; color: var(--ink-faint); letter-spacing: 0.02em; }
-  .trow.indent1 { padding-left: 28px; }
-  .trow.indent2 { padding-left: 46px; }
-  .trow.edit .nm { font-family: var(--mono); font-size: 0.82rem; }
-  .trow.hoverable:hover { background: var(--accent-soft); }
-  .sw { color: var(--accent); }
-  .id { color: var(--accent-ink); font-family: var(--mono); }
-
-  .pill {
-    font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.08em; text-transform: uppercase;
-    padding: 2px 8px; border-radius: 999px; border: 1px solid currentColor; line-height: 1.5; white-space: nowrap;
-  }
-  .pill.pending { color: var(--pending); }
-  .pill.kept { color: var(--kept); }
-  .pill.reverted { color: var(--reverted); }
-  .struck { text-decoration: line-through; text-decoration-color: var(--reverted); color: var(--ink-faint); }
   .dimmed { color: var(--ink-faint); }
   .kept { color: var(--kept); }
   .reverted { color: var(--reverted); }
   .pending { color: var(--pending); }
 
-  /* timeline meridian */
+  /* timeline (hero mock) */
   .timeline { padding: 14px 16px 18px; }
   .tl-row { display: grid; grid-template-columns: 74px 1fr; align-items: center; column-gap: 16px; position: relative; }
   .tl-row .t { font-family: var(--mono); font-size: 0.82rem; color: var(--ink-soft); font-variant-numeric: tabular-nums; text-align: right; }
@@ -219,26 +205,25 @@
   }
   .tl-row.pending .body::before { border-color: var(--pending); }
   .tl-row.kept .body::before { border-color: var(--kept); background: var(--kept); }
-  .tl-row.reverted .body::before { border-color: var(--reverted); }
   .tl-row .body .n { font-family: var(--mono); color: var(--ink); }
   .tl-row .body .f { color: var(--ink-faint); font-size: 0.86rem; margin-left: 10px; }
-  .tl-row.reverted .n { text-decoration: line-through; text-decoration-color: var(--reverted); color: var(--ink-faint); }
 
   /* editor / inline overlay mock */
-  .editor { font-family: var(--mono); font-size: 0.84rem; line-height: 1.75; padding: 6px 0; }
+  .editor { font-family: var(--mono); font-size: 0.84rem; line-height: 1.75; padding: 6px 0; overflow-x: auto; }
   .eline { display: flex; align-items: center; gap: 0; padding: 0 16px; position: relative; white-space: pre; }
   .eline .gutn { color: var(--ink-faint); width: 2.4em; text-align: right; margin-right: 16px; user-select: none; flex: none; }
-  .eline.changed { background: color-mix(in srgb, var(--kept) 12%, transparent); box-shadow: inset 3px 0 0 var(--kept); }
+  .eline.changed { background: color-mix(in srgb, var(--kept) 7%, transparent); box-shadow: inset 3px 0 0 var(--accent); }
+  /* deletion: subtle red line tint + bar (mirror of .changed) with the removed line as red "ghost" text */
+  .eline.deleted { background: color-mix(in srgb, var(--deleted) 7%, transparent); box-shadow: inset 3px 0 0 var(--deleted); }
   .eline .marker { margin-left: 14px; color: var(--ink-faint); font-style: italic; }
+  .eline .marker.del { color: var(--deleted); }
   .eline .marker .sw { font-style: normal; }
   .tok-key { color: var(--accent-ink); }
   .tok-str { color: var(--kept); }
-  .hovercard {
-    margin: 8px 16px 4px 54px; background: var(--surface-2); border: 1px solid var(--border);
-    border-radius: 10px; padding: 11px 13px; max-width: 420px;
-  }
-  .hovercard .h { font-family: var(--mono); font-size: 0.78rem; color: var(--ink-soft); margin-bottom: 9px; }
-  .hovercard .h .id { color: var(--accent-ink); }
+  /* inline menu (CodeLens) above an edit: ✨ #N view changes + spaced-out Keep/Undo/Chat */
+  .lens { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 4px 16px 8px 54px; }
+  .gutstar { color: var(--accent); font-size: 0.72rem; margin: 0 6px 0 2px; }
+  .id { color: var(--accent-ink); font-family: var(--mono); }
   .actions { display: flex; flex-wrap: wrap; gap: 7px; }
   .act {
     font-family: var(--mono); font-size: 0.74rem; display: inline-flex; align-items: center; gap: 6px;
@@ -256,14 +241,6 @@
   .dline.del { background: color-mix(in srgb, var(--accent) 13%, transparent); }
   .dline .s { display: inline-block; width: 1.4em; color: var(--ink-faint); }
 
-  /* insights */
-  .ins-group { font-family: var(--mono); font-size: 0.74rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-faint); padding: 12px 16px 4px; }
-  .ins-row { display: flex; align-items: baseline; gap: 10px; padding: 6px 16px 6px 26px; font-size: 0.9rem; }
-  .ins-row .ic { color: var(--accent); font-family: var(--mono); flex: none; }
-  .ins-row .r { color: var(--ink); }
-  .ins-row .r .why { color: var(--ink-faint); }
-  .ins-row.step .ic { color: var(--pending); }
-
   /* cli */
   .cli { font-family: var(--mono); font-size: 0.82rem; line-height: 1.7; padding: 16px 18px; overflow-x: auto; }
   .cli .l { white-space: pre; }
@@ -279,7 +256,7 @@
   @media (max-width: 760px) { .specs { grid-template-columns: repeat(2, 1fr); } }
   .spec { background: var(--surface); padding: 22px 20px; }
   .spec .k { font-family: var(--mono); font-size: 1.5rem; color: var(--accent-ink); letter-spacing: -0.02em; }
-  .spec .l { font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-faint); margin-top: 8px; }
+  .spec .l { font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-faint); margin-top: 8px; }
   .spec .d { font-size: 0.92rem; color: var(--ink-soft); margin-top: 8px; }
 
   /* feature layout */
@@ -287,16 +264,47 @@
   .feat.flip { grid-template-columns: 1.18fr 0.82fr; }
   .feat.flip .feat-copy { order: 2; }
   @media (max-width: 860px) { .feat, .feat.flip { grid-template-columns: 1fr; } .feat.flip .feat-copy { order: 0; } }
-  .feat-copy h2 { margin-top: 16px; }
+  .feat-copy h2 { margin-top: 0; }
   .feat-copy .prose { margin-top: 16px; }
-  .feat-head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
-  .caption { font-family: var(--mono); font-size: 0.74rem; color: var(--ink-faint); margin-top: 12px; letter-spacing: 0.02em; }
+  .caption { font-family: var(--mono); font-size: 0.74rem; color: var(--ink-faint); margin-top: 12px; letter-spacing: 0.01em; }
+  .caption strong { color: var(--ink-soft); font-weight: 600; }
   .scroll-x { overflow-x: auto; }
+  .framed { margin-top: 26px; padding: 0; }
+
+  /* Anatomy of the layout — a labeled schematic (not a screenshot) naming every region */
+  .anatomy { margin-top: 30px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface);
+             overflow: hidden; }
+  .anatomy .an-body { display: flex; min-height: 300px; }
+  .anatomy .an-activity { flex: 0 0 168px; background: var(--surface-2); border-right: 1px solid var(--border);
+                          padding: 16px 14px; display: flex; flex-direction: column; gap: 6px; }
+  .anatomy .an-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .anatomy .an-tabbar { border-bottom: 1px solid var(--border); background: var(--surface-2); padding: 12px 20px;
+                        display: flex; flex-direction: column; gap: 8px; }
+  .anatomy .an-editor { flex: 1; padding: 18px 20px; display: flex; flex-direction: column; gap: 11px; }
+  .anatomy .an-panel { border-top: 1px solid var(--border); background: var(--surface-2); padding: 15px 20px;
+                       display: flex; flex-direction: column; gap: 9px; }
+  .anatomy .an-status { border-top: 1px solid var(--border); padding: 9px 20px; display: flex; align-items: center; gap: 10px;
+                        font-family: var(--mono); font-size: 0.72rem; color: var(--ink-faint); background: var(--surface); }
+  .anatomy .an-zone { font-family: var(--mono); font-size: 0.62rem; letter-spacing: 0.10em; text-transform: uppercase;
+                      color: var(--ink-faint); }
+  .anatomy .part { display: flex; flex-direction: column; gap: 1px; }
+  .anatomy .part b { font-size: 0.86rem; color: var(--ink); font-weight: 600; }
+  .anatomy .part span { font-size: 0.76rem; color: var(--ink-soft); }
+  .anatomy .part.row { flex-direction: row; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .anatomy .part.row b { white-space: nowrap; }
+  .anatomy .mk { color: var(--accent); }
+  .anatomy .an-parts-inline { display: flex; flex-wrap: wrap; gap: 8px 22px; }
+  .anatomy .chip { font-family: var(--mono); font-size: 0.72rem; color: var(--ink-soft); }
+  .anatomy .chip b { color: var(--ink); font-weight: 600; }
 
   ul.ticks { list-style: none; padding: 0; margin: 20px 0 0; display: flex; flex-direction: column; gap: 11px; }
   ul.ticks li { position: relative; padding-left: 26px; color: var(--ink-soft); }
-  ul.ticks li::before { content: "→"; position: absolute; left: 0; color: var(--accent); font-family: var(--mono); }
+  ul.ticks li::before { content: "\2192"; position: absolute; left: 0; color: var(--accent); font-family: var(--mono); }
   ul.ticks li strong { color: var(--ink); font-weight: 600; }
+
+  /* two-up image grid */
+  .shots { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; margin-top: 30px; align-items: start; }
+  @media (max-width: 760px) { .shots { grid-template-columns: 1fr; } }
 
   /* callout */
   .callout {
@@ -309,50 +317,68 @@
   .callout strong { color: var(--ink); }
 
   /* how-it-works flow */
-  .flow { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .flow { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 30px; }
   @media (max-width: 760px) { .flow { grid-template-columns: repeat(2, 1fr); } }
-  .node { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px; position: relative; }
-  .node .s { font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent-ink); }
+  .node { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+  .node .s { font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent-ink); }
   .node .t { font-weight: 600; margin-top: 9px; font-size: 0.98rem; }
   .node .x { color: var(--ink-soft); font-size: 0.88rem; margin-top: 7px; }
+
+  /* section intro */
+  .intro { max-width: 62ch; }
+  .intro h2 { margin-top: 0; }
+  .intro .prose { margin-top: 16px; }
 
   /* footer */
   footer { padding: 46px 0 60px; border-top: 1px solid var(--border); color: var(--ink-faint); }
   .foot-grid { display: flex; flex-wrap: wrap; gap: 28px 40px; align-items: flex-start; justify-content: space-between; }
-  .foot-grid .col h4 { font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-faint); margin: 0 0 12px; font-weight: 500; }
+  .foot-grid .col { max-width: 40ch; }
+  .foot-grid .col .h { font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-faint); margin: 0 0 12px; }
   .foot-grid .col p { color: var(--ink-soft); font-size: 0.9rem; margin: 4px 0; }
   .foot-grid code { color: var(--ink); }
+  .foot-links { display: flex; gap: 18px; margin-top: 10px; flex-wrap: wrap; }
   .fine { font-family: var(--mono); font-size: 0.74rem; color: var(--ink-faint); margin-top: 34px; }
 
   /* hidden state is applied by JS only (see script), so a no-JS/failed-JS render stays fully visible */
-  .reveal { transition: opacity 0.7s ease, transform 0.7s ease; }
+  .reveal { transition: opacity 0.6s ease, transform 0.6s ease; }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
   @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
     .reveal { transition: none; }
-    #stars { display: none; }
   }
 </style>
 
-<canvas id="stars"></canvas>
+<header class="nav">
+  <div class="wrap nav-inner">
+    <a class="wordmark" href="#top" aria-label="Claude Observatory — top of page">
+      <span class="mark" aria-hidden="true">🔬</span>
+      <b>Claude Observatory</b>
+    </a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="#features">Features</a>
+      <a href="#editors">Editors</a>
+      <a href="#dashboards">Dashboards</a>
+      <a href="#cli">CLI</a>
+      <a href="#install">Install</a>
+    </nav>
+    <div class="nav-actions">
+      <button class="theme-toggle" id="tt" aria-label="Switch between light and dark theme">◐ Theme</button>
+      <a class="nav-gh" href="https://github.com/cell-observatory/claude-observatory" target="_blank" rel="noopener noreferrer" aria-label="Claude Observatory on GitHub">GitHub ↗</a>
+    </div>
+  </div>
+</header>
+
 <main>
   <!-- ================= HERO ================= -->
-  <section class="hero">
-    <div class="plate">
-      <div class="topbar">
-        <span class="wordmark">
-          <span class="mark" aria-hidden="true">🔬</span>
-          <b>CLAUDE OBSERVATORY</b>
-        </span>
-        <button class="theme-toggle" id="tt" aria-label="Switch light or dark theme">◐ Theme</button>
-      </div>
-
+  <section class="hero" id="top">
+    <div class="wrap">
       <div class="hero-grid">
         <div>
           <span class="eyebrow">A review deck for Claude Code</span>
           <h1>Every edit Claude makes, <span class="hl">under observation.</span></h1>
           <p class="lede">Surgical Claude, not vibe coding: every file change lands as a reviewable edit with its own <strong>Keep</strong> or <strong>Undo</strong>. Built for critical infrastructure — you stay in the loop, Claude supplies the speed. Standalone, git-free, zero extra tokens.</p>
           <div class="cta-row">
-            <span class="cmd"><span><span class="dollar">$</span> claude-observatory init</span><button id="copyInstall">Copy</button></span>
+            <span class="cmd"><span><span class="dollar">$</span> curl -fsSL …/bootstrap.sh | bash</span><button id="copyInstall">Copy</button></span>
             <a class="btn-ghost" href="#install">Read the quickstart →</a>
           </div>
           <p class="caption">Zero extra Claude tokens · terminal · VS Code · PyCharm &amp; JetBrains IDEs · macOS / Linux / Windows</p>
@@ -372,7 +398,7 @@
 
   <!-- ================= SPECS ================= -->
   <section>
-    <div class="plate">
+    <div class="wrap">
       <div class="specs reveal">
         <div class="spec"><div class="k">0</div><div class="l">Claude tokens</div><div class="d">Capture runs in local hooks, entirely outside the model loop.</div></div>
         <div class="spec"><div class="k">1</div><div class="l">edit, 1 undo</div><div class="d">Revert a single change and keep every later edit to the same file.</div></div>
@@ -382,48 +408,47 @@
     </div>
   </section>
 
-  <!-- ================= PLATE I — KEEP / UNDO ================= -->
-  <section>
-    <div class="plate">
+  <!-- ================= INLINE REVIEW ================= -->
+  <section id="features">
+    <div class="wrap">
       <div class="feat">
         <div class="feat-copy">
-          <div class="feat-head"><span class="eyebrow">Inline review</span><span class="plate-no">PLATE I</span></div>
+          <span class="eyebrow">Inline review</span>
           <h2>Keep or undo, right where Claude wrote it.</h2>
-          <p class="prose">Pending edits are marked in the gutter with a <span class="sw">✨</span> tag. Hover anywhere on the edited text for the card — Claude's <strong>reasoning</strong> for the change, plus <strong>Keep</strong> to accept, <strong>Undo</strong> to surgically revert, <strong>Diff</strong> to inspect, or <strong>Chat</strong> to ask about it. Identical in VS Code and PyCharm. Nothing touches disk until you say so.</p>
+          <p class="prose">Each pending edit gets a <span style="color:var(--accent)">✨</span> <strong>gutter star</strong> at its start and a <strong>subtle</strong> green/red line tint — toned down so a heavily edited file doesn't drown in color. Above it sits an <strong>inline menu</strong>: <strong>✨ #N · +A −R · view changes</strong>, then <strong>Keep</strong>, <strong>Undo</strong>, <strong>Chat</strong>, <strong>View diff</strong>. In <strong>VS Code</strong>, "view changes" opens an <strong>inline review bubble</strong> right at the edit — no tab — with the diff in <strong>git's own colors</strong> (green/red text over translucent line fills), Claude's <strong>reasoning</strong>, the <strong>+A −R</strong> counts, and <strong>Accept · Revert · Chat · Prev · Next</strong> on the bubble's toolbar; <strong>View diff</strong> opens the same edit as a <strong>full diff tab</strong> in its own tab, with Prev/Next cycling the file's edits in place. In <strong>PyCharm</strong> the lens opens the edit's unified diff. Nothing touches disk until you say so.</p>
           <ul class="ticks">
             <li><strong>Keep</strong> marks an edit reviewed — no file change.</li>
             <li><strong>Undo</strong> rewrites just that change back out.</li>
+            <li>Additions highlight green; <strong>removed lines</strong> show as red ghost text where they were.</li>
             <li>Kept edits grey out; reverted ones stay struck through.</li>
+            <li><strong>File heatmap</strong> (📄) spotlights Claude's lines; <strong>revision nav</strong> (<code>⌥⌘[</code> / <code>⌥⌘]</code>) diffs against a file's earlier edits.</li>
+            <li>A <strong>File History</strong> view follows the open file; the <strong>Stats</strong> tab shows a live review scoreboard + progress bar.</li>
           </ul>
         </div>
         <div class="panel reveal" aria-hidden="true">
           <div class="panel-head"><span class="dot"></span> src/models/User.js</div>
           <div class="editor">
-            <div class="eline"><span class="gutn">6</span>  <span class="tok-key">farewell</span>() {</div>
-            <div class="eline changed"><span class="gutn">7</span>    <span class="tok-key">return</span> <span class="tok-str">`Bye, ${this.name}`</span>;<span class="marker"><span class="sw">✨</span> #2</span></div>
-            <div class="eline"><span class="gutn">8</span>  }</div>
-            <div class="hovercard">
-              <div class="h">Claude edit <span class="id">#2</span> · Edit</div>
-              <div style="color:var(--ink-soft); font-size:0.85rem; margin:7px 0 2px">💭 Added a farewell() method to mirror greet()</div>
-              <div class="actions">
-                <span class="act keep"><span class="g">✓</span> Keep</span>
-                <span class="act undo"><span class="g">⤺</span> Undo</span>
-                <span class="act"><span class="g">±</span> Diff</span>
-                <span class="act"><span class="g">💬</span> Chat</span>
-              </div>
-            </div>
+            <div class="lens"><span class="act"><span class="g">✨</span> <span class="id">#5</span> +2 −4 view changes</span><span class="act"><span class="g">💭</span> dropped greet(); added a role field</span><span class="act keep"><span class="g">✓</span> Keep</span><span class="act undo"><span class="g">⤺</span> Undo</span><span class="act"><span class="g">💬</span> Chat</span></div>
+            <div class="eline"><span class="gutn">2</span>  <span class="tok-key">constructor</span>(name) {</div>
+            <div class="eline"><span class="gutn">3</span>    <span class="tok-key">this</span>.name = name;</div>
+            <div class="eline"><span class="gutn">4</span>  }</div>
+            <div class="eline deleted"><span class="gutn">5</span>}<span class="marker del">− greet() { …(+3)</span></div>
+            <div class="eline"><span class="gutn">6</span> </div>
+            <div class="eline changed"><span class="gutn">7</span><span class="gutstar">✨</span><span class="tok-key">User</span>.role = <span class="tok-str">'member'</span>;</div>
+            <div class="eline"><span class="gutn">8</span> </div>
+            <div class="eline"><span class="gutn">9</span><span class="tok-key">module</span>.exports = User;</div>
           </div>
         </div>
       </div>
     </div>
   </section>
 
-  <!-- ================= PLATE II — SURGICAL UNDO ================= -->
+  <!-- ================= SURGICAL UNDO ================= -->
   <section>
-    <div class="plate">
+    <div class="wrap">
       <div class="feat flip">
         <div class="feat-copy">
-          <div class="feat-head"><span class="eyebrow">Surgical undo</span><span class="plate-no">PLATE II</span></div>
+          <span class="eyebrow">Surgical undo</span>
           <h2>Undo the middle edit. Keep the rest.</h2>
           <p class="prose">Undo isn't a whole-file rewind. It's a <strong>position-anchored 3-way line merge</strong>: the edit is peeled out while later edits to other lines stay put. Anchoring on line position — not fuzzy text search — keeps it correct even when the same line appears twice. A genuine overlap raises a clear conflict and offers a per-file restore instead of guessing.</p>
           <p class="caption">Three edits to one file → undo #2 only → #1 and #3 survive.</p>
@@ -448,105 +473,101 @@
     </div>
   </section>
 
-  <!-- ================= PLATE III — THE OBSERVATORY ================= -->
-  <section>
-    <div class="plate">
-      <div class="feat-head" style="margin-bottom:8px"><span class="eyebrow">The observatory</span><span class="plate-no">PLATE III</span></div>
-      <h2 style="max-width:22ch">Review in the sidebar. Observe in the panel.</h2>
-      <p class="prose" style="margin-top:16px"><strong>Edits</strong> and <strong>Diffs</strong> live in the activity bar, grouping changes by <strong>folder → file → class</strong>. <strong>Observations</strong>, <strong>Timeline</strong>, and <strong>Stats</strong> sit side-by-side in the bottom panel — a live dashboard next to your terminal. A status-bar microscope counts pending edits in realtime; click it to jump to the next unreviewed change.</p>
+  <!-- ================= EDITORS ================= -->
+  <section id="editors">
+    <div class="wrap">
+      <div class="intro">
+        <span class="eyebrow">VS Code &amp; PyCharm</span>
+        <h2>Two editors. One observatory.</h2>
+        <p class="prose"><strong>Edits</strong> and <strong>Diffs</strong> live in the activity bar, grouping changes <strong>folder → file → class</strong>. <strong>Observations</strong>, <strong>Timeline</strong>, and <strong>Stats</strong> sit side by side in the bottom panel — a live dashboard next to your terminal, with a status-bar microscope counting pending edits in realtime.</p>
+        <p class="prose" style="margin-top:14px">The VS Code extension and the PyCharm/JetBrains plugin are <strong>full peers</strong> — the same trees, inline menus, click-to-diff review, dashboards, and keyboard loop (<code>⌥⌘N</code> next · <code>⌥⌘Y</code> keep · <code>⌥⌘U</code> undo · <code>⌥⌘[</code>/<code>⌥⌘]</code> revisions), all over one store. Keep an edit in PyCharm and it greys out in VS Code and the CLI the same instant. The JetBrains plugin uses platform-only APIs, so it runs in PyCharm CE/Pro, IntelliJ, WebStorm, GoLand — any JetBrains IDE, including on a Remote Development host.</p>
+      </div>
 
-      <div class="hero-grid" style="margin-top:36px; align-items:start">
-        <div class="panel reveal" aria-hidden="true">
-          <div class="panel-head"><span class="dot"></span> Edits <span class="spacer"></span> 3 edits · 1 pending</div>
-          <div class="tree">
-            <div class="trow"><span class="ic">▾</span><span class="nm">src</span></div>
-            <div class="trow indent1"><span class="ic">▾</span><span class="nm">models</span></div>
-            <div class="trow indent2"><span class="ic">📄</span><span class="nm">User.js</span><span class="meta">2 edits</span></div>
-            <div class="trow indent2 hoverable"><span class="ic">◆</span><span class="nm">class User</span><span class="meta">2 · 1 pending</span></div>
-            <div class="trow edit hoverable" style="padding-left:64px"><span class="ic id">#1</span><span class="nm struck">+9 −0</span><span class="meta"><span class="pill reverted">reverted</span></span></div>
-            <div class="trow edit hoverable" style="padding-left:64px"><span class="ic id">#2</span><span class="nm">+4 −1</span><span class="meta"><span class="pill kept">kept</span></span></div>
-            <div class="trow indent1"><span class="ic">📄</span><span class="nm">index.js</span><span class="meta">1 edit</span></div>
-            <div class="trow edit hoverable" style="padding-left:46px"><span class="ic id">#3</span><span class="nm">+6 −0</span><span class="meta"><span class="pill pending">pending</span></span></div>
+      <div class="anatomy reveal" aria-label="Anatomy of the layout — every part named">
+        <div class="an-body">
+          <div class="an-activity">
+            <div class="an-zone">Activity bar</div>
+            <div class="part"><b>Edits</b><span>changes, folder → file → class</span></div>
+            <div class="part"><b>Diffs</b><span>same tree, click → colored diff</span></div>
+            <div class="part"><b>File History</b><span>the active file's edits, in order</span></div>
+          </div>
+          <div class="an-main">
+            <div class="an-tabbar">
+              <div class="an-zone">Tab bar</div>
+              <div class="an-parts-inline">
+                <span class="chip"><b>Per-file review toolbar</b> — shows while the file has pending edits: prev/next pending · ✓ accept all in file · ✕ revert all in file · 🔍 search edits · 📄 heatmap</span>
+              </div>
+            </div>
+            <div class="an-editor">
+              <div class="an-zone">Editor</div>
+              <div class="part"><b><span class="mk">✨</span> Gutter star</b><span>marks where each pending edit begins</span></div>
+              <div class="part"><b>Inline menu (CodeLens)</b><span>✨ #N · +A −R · view changes · Keep · Undo · Chat · View diff</span></div>
+              <div class="part"><b>Inline review bubble</b><span>"view changes" → the diff in git's colors + reasoning + counts (Accept/Revert/Chat/Prev/Next on its toolbar)</span></div>
+              <div class="part"><b>Diff tab</b><span>"View diff" → the edit as a full diff tab, in its own tab (Keep/Undo/Chat + Prev/Next cycle edits in place on its title bar)</span></div>
+              <div class="part"><b>Overview-ruler marks</b><span>Claude-coral ticks down the scrollbar</span></div>
+            </div>
+            <div class="an-panel">
+              <div class="an-zone">Bottom panel</div>
+              <div class="an-parts-inline">
+                <span class="chip"><b>Observations</b> — recap · reasoning · file memory</span>
+                <span class="chip"><b>Timeline</b> — newest-first change feed</span>
+                <span class="chip"><b>Stats</b> — review scoreboard · trends · usage</span>
+              </div>
+            </div>
           </div>
         </div>
-
-        <div class="panel reveal" aria-hidden="true">
-          <div class="panel-head"><span class="dot" style="background:var(--accent)"></span> Observations</div>
-          <div class="ins-row" style="padding-top:12px"><span class="ic">🧭</span><span class="r">Building a User model with greet/farewell &nbsp;<span class="why">— session recap · ✨ refine</span></span></div>
-          <div class="ins-group" style="margin-top:6px">Per-edit reasoning</div>
-          <div class="ins-row"><span class="ic">◉</span><span class="r">#2 &nbsp;<span class="why">💭 Added a farewell() method to mirror greet()</span></span></div>
-          <div class="ins-row"><span class="ic" style="color:var(--pending)">⚠</span><span class="r">#3 &nbsp;<span class="why">new export — no caller yet</span></span></div>
-          <div class="ins-group" style="margin-top:6px">Review scoreboard</div>
-          <div class="ins-row"><span class="ic" style="color:var(--pending)">●</span><span class="r">1 pending · <span class="kept">1 accepted</span> · <span class="reverted">1 reverted</span> <span class="why">· 50% accepted · oldest 2m</span></span></div>
-        </div>
+        <div class="an-status"><span class="mk">🔬</span> <b style="color:var(--ink);font-weight:600">Status-bar microscope</b> — live pending-edit count (amber while any await review); click → next pending edit</div>
       </div>
-      <p class="caption">Diffs (before ⟷ after) opens from any edit; Stats adds edits/tokens trend plots + live usage bars.</p>
+      <p class="caption"><strong>Anatomy of the layout</strong> — every part named. VS Code shown; PyCharm mirrors it (Activity bar → tool windows, bottom panel → the Dashboards window).</p>
+
+      <div class="panel reveal framed">
+        <img src="media/layout.png" alt="Claude Observatory in VS Code: Edits / Diffs / File History trees, the ✨ gutter stars and inline menu (✨ #N view changes · Keep · Undo · Chat), and the bottom panel with Observations, Timeline, and the review-scoreboard Stats" loading="lazy">
+      </div>
+      <p class="caption"><strong>VS Code</strong> — the Edits · Diffs · File History trees, the ✨ gutter stars + inline menu (✨ #N view changes · Keep · Undo · Chat), and the Observations · Timeline · Stats panel with the live review scoreboard.</p>
+
+      <div class="panel reveal framed">
+        <img src="media/pyc-layout.png" alt="Claude Observatory in PyCharm: Edits tool window, the ✨ gutter stars and inline lens (✨ #N view changes · Keep · Undo · Chat), and the Dashboards window with Observations, Timeline, and Stats" loading="lazy">
+      </div>
+      <p class="caption"><strong>PyCharm</strong> — the same session, same store: Edits tool window, the ✨ gutter stars + inline lens (✨ #N view changes · Keep · Undo · Chat), and the Claude Observatory Dashboards window.</p>
     </div>
   </section>
 
-  <!-- ================= PLATE IV — TWO EDITORS, ONE OBSERVATORY ================= -->
-  <section>
-    <div class="plate">
-      <div class="feat-head" style="margin-bottom:8px"><span class="eyebrow">VS Code &amp; PyCharm</span><span class="plate-no">PLATE IV</span></div>
-      <h2 style="max-width:24ch">Two editors. One observatory.</h2>
-      <p class="prose" style="margin-top:16px">The <strong>VS Code extension</strong> and the <strong>PyCharm/JetBrains plugin</strong> are full peers — the same trees, inline lenses, hover cards, dashboards, stats, and keyboard loop (<code>⌥⌘N</code> next · <code>⌥⌘Y</code> keep · <code>⌥⌘U</code> undo), all over the same store. Keep an edit in PyCharm and it greys out in VS Code and the CLI the same instant. The JetBrains plugin uses platform-only APIs, so it runs in PyCharm CE/Pro, IntelliJ, WebStorm, GoLand — any JetBrains IDE, including on a Remote Development host.</p>
-
-      <div class="panel reveal" style="margin-top:36px; padding:0; overflow:hidden">
-        <img src="media/layout.png" alt="Claude Observatory in VS Code: Edits tree, inline CodeLens and hover card with Claude's reasoning, and the bottom panel with Observations, Timeline, and Stats" style="display:block; width:100%; height:auto">
+  <!-- ================= DASHBOARDS ================= -->
+  <section id="dashboards">
+    <div class="wrap">
+      <div class="intro">
+        <span class="eyebrow">The dashboards</span>
+        <h2>A change feed and a flight recorder.</h2>
+        <p class="prose"><strong>Observations</strong> pairs a zero-token session recap with Claude's per-edit reasoning and a cross-session memory of each file (accept/revert history, revert-risk flags). <strong>Timeline</strong> is the session as a feed — newest first, consecutive edits to a file coalesced into one <code>×N</code> row. <strong>Stats</strong> is the long view: step-line trends of edits (pending / accepted / reverted) and tokens (total / input / output, log axis) over <strong>Today / 7 days / 30 days</strong>, with live usage bars — context fill plus your 5-hour and weekly plan windows.</p>
       </div>
-      <p class="caption"><strong>VS Code</strong> — the Edits tree, inline review with the hover card (Claude's reasoning + Keep/Undo/Diff/Chat), and the Observations · Timeline · Stats panel.</p>
-      <div class="panel reveal" style="margin-top:26px; padding:0; overflow:hidden">
-        <img src="media/pyc-layout.png" alt="Claude Observatory in PyCharm: Edits tree, inline lens and hover card with Claude's reasoning, and the Dashboards window with Observations, Timeline, and Stats" style="display:block; width:100%; height:auto">
-      </div>
-      <p class="caption"><strong>PyCharm</strong> — the same session, same store: Edits tool window, the lens + hover card, and the Claude Observatory Dashboards window.</p>
-    </div>
-  </section>
 
-  <!-- ================= PLATE V — TIMELINE & STATS ================= -->
-  <section>
-    <div class="plate">
-      <div class="feat">
-        <div class="feat-copy">
-          <div class="feat-head"><span class="eyebrow">The dashboards</span><span class="plate-no">PLATE V</span></div>
-          <h2>A change feed and a flight recorder.</h2>
-          <p class="prose"><strong>Timeline</strong> is the session as a feed: newest first, consecutive edits to the same file coalesced into one <code>×N</code> row with the combined delta and Claude's own change summary. <strong>Stats</strong> is the long view — step-line trends of <strong>edits</strong> (pending / accepted / reverted) and <strong>tokens</strong> (total / input / output, log axis) over <strong>Today / 7 days / 30 days</strong>, with live <strong>usage bars</strong> below: context fill plus your 5-hour and weekly plan windows, reset countdowns and <code>~token</code> estimates included.</p>
-          <ul class="ticks">
-            <li>Timeline rows expand to individual edits, statuses intact.</li>
-            <li>The stats scan runs in a subprocess with an incremental cache — the UI never blocks.</li>
-            <li>Usage values are stamped with their age when the status-line cache goes stale.</li>
-          </ul>
+      <div class="shots">
+        <div>
+          <div class="panel reveal" style="padding:0">
+            <img src="media/observations.png" alt="Observations panel: a session recap on top, then per-edit rows with Claude's reasoning, and a file-memory card flagging that this file's edits get reverted often" loading="lazy">
+          </div>
+          <p class="caption"><strong>Observations</strong> — session recap, per-edit reasoning, and cross-session file memory with revert-risk flags.</p>
         </div>
-        <div class="panel reveal" aria-hidden="true">
-          <div class="panel-head"><span class="dot" style="background:var(--accent)"></span> Timeline · Stats</div>
-          <div class="timeline" style="border-bottom:1px solid var(--border)">
-            <div class="tl-row pending"><div class="t">19:32</div><div class="body"><span class="n">index.js</span><span class="f">+6 −0 · created index.js</span></div></div>
-            <div class="tl-row kept"><div class="t">19:31</div><div class="body"><span class="n">User.js&nbsp;&nbsp;×2</span><span class="f">+13 −1 · added farewell() to mirror greet()</span></div></div>
+        <div>
+          <div class="panel reveal" style="padding:0">
+            <img src="media/stats.png" alt="Stats panel: a live review scoreboard (pending / accepted / reverted counts + a progress bar) over a token step-line trend with a Today / 7 days / 30 days toggle, and live usage bars for context, 5-hour, and weekly plan windows" loading="lazy">
           </div>
-          <div style="padding:14px 16px 6px; font-family:var(--mono); font-size:0.62rem; letter-spacing:0.12em; color:var(--ink-faint)">EDITS <span style="color:var(--pending)">— pending</span> <span style="color:var(--kept)">— accepted</span> <span style="color:var(--reverted)">— reverted</span></div>
-          <svg width="100%" height="44" viewBox="0 0 400 44" preserveAspectRatio="none" style="display:block; padding:0 16px 4px; box-sizing:border-box">
-            <line x1="0" y1="43" x2="400" y2="43" stroke="var(--border)"/>
-            <path d="M0,33 H57 V28 H114 V30 H171 V21 H228 V24 H285 V12 H342 V17 H400" fill="none" stroke="var(--pending)" stroke-width="1.6"/>
-            <path d="M0,37 H57 V32 H114 V26 H171 V28 H228 V17 H285 V19 H342 V8 H400" fill="none" stroke="var(--kept)" stroke-width="1.6"/>
-            <path d="M0,41 H57 V40 H114 V41 H171 V38 H228 V40 H285 V37 H342 V39 H400" fill="none" stroke="var(--reverted)" stroke-width="1.6"/>
-          </svg>
-          <div style="padding:2px 16px 16px; font-family:var(--mono); font-size:0.72rem; color:var(--ink-soft)">
-            <div style="display:flex; align-items:center; gap:10px; margin-top:6px"><span style="width:22px">ctx</span><span style="flex:1; height:4px; border-radius:2px; background:var(--border); position:relative; overflow:hidden"><i style="position:absolute; inset:0 42% 0 0; background:var(--pending); border-radius:2px"></i></span><span style="color:var(--pending)">58%</span><span class="dimmed">575k/1M</span></div>
-            <div style="display:flex; align-items:center; gap:10px; margin-top:6px"><span style="width:22px">5h</span><span style="flex:1; height:4px; border-radius:2px; background:var(--border); position:relative; overflow:hidden"><i style="position:absolute; inset:0 67% 0 0; background:var(--kept); border-radius:2px"></i></span><span style="color:var(--kept)">33%</span><span class="dimmed">·2h10m ~31M</span></div>
-            <div style="display:flex; align-items:center; gap:10px; margin-top:6px"><span style="width:22px">wk</span><span style="flex:1; height:4px; border-radius:2px; background:var(--border); position:relative; overflow:hidden"><i style="position:absolute; inset:0 37% 0 0; background:var(--pending); border-radius:2px"></i></span><span style="color:var(--pending)">63%</span><span class="dimmed">·4d6h ~73M</span></div>
-          </div>
+          <p class="caption"><strong>Stats</strong> — edit and token trends with a Today / 7d / 30d toggle, plus live context and plan-usage bars.</p>
         </div>
       </div>
     </div>
   </section>
 
-  <!-- ================= PLATE VI — HOW CAPTURE WORKS ================= -->
+  <!-- ================= ZERO-TOKEN CAPTURE ================= -->
   <section>
-    <div class="plate">
-      <div class="feat-head" style="margin-bottom:8px"><span class="eyebrow">Zero-token capture</span><span class="plate-no">PLATE VI</span></div>
-      <h2 style="max-width:24ch">Hooks do the watching, not the model.</h2>
-      <p class="prose" style="margin-top:16px">Claude Code fires a hook before and after every edit. The observatory snapshots the file on each side and appends one record to an append-only log — never spending a token, never touching the model's context.</p>
+    <div class="wrap">
+      <div class="intro">
+        <span class="eyebrow">Zero-token capture</span>
+        <h2>Hooks do the watching, not the model.</h2>
+        <p class="prose">Claude Code fires a hook before and after every edit. The observatory snapshots the file on each side and appends one record to an append-only log — never spending a token, never touching the model's context.</p>
+      </div>
 
-      <div class="flow reveal" style="margin-top:32px">
+      <div class="flow reveal">
         <div class="node"><div class="s">PreToolUse</div><div class="t">Snapshot before</div><div class="x">The file's bytes are captured the instant before Claude writes.</div></div>
         <div class="node"><div class="s">PostToolUse</div><div class="t">Commit before + after</div><div class="x">Both sides are hashed into the content-addressed blob store.</div></div>
         <div class="node"><div class="s">Store</div><div class="t">Append to log</div><div class="x"><code>~/.claude/claude-observatory/&lt;session&gt;/</code> — one JSONL line per edit.</div></div>
@@ -556,12 +577,12 @@
     </div>
   </section>
 
-  <!-- ================= PLATE VII — TERMINAL ================= -->
-  <section>
-    <div class="plate">
+  <!-- ================= CLI ================= -->
+  <section id="cli">
+    <div class="wrap">
       <div class="feat">
         <div class="feat-copy">
-          <div class="feat-head"><span class="eyebrow">Same store, no GUI</span><span class="plate-no">PLATE VII</span></div>
+          <span class="eyebrow">Same store, no GUI</span>
           <h2>A full review deck in the terminal.</h2>
           <p class="prose">Prefer the shell, or running Claude Code headless? Every action has a command. The active session is resolved from your working directory — no ids to memorize.</p>
           <ul class="ticks">
@@ -590,60 +611,66 @@
     </div>
   </section>
 
-  <!-- ================= INSTALL ================= -->
+  <!-- ================= QUICKSTART ================= -->
   <section id="install">
-    <div class="plate">
-      <div class="feat-head" style="margin-bottom:8px"><span class="eyebrow">Quickstart</span><span class="plate-no">SETUP</span></div>
-      <h2>Three commands to first light.</h2>
+    <div class="wrap">
+      <div class="intro">
+        <span class="eyebrow">Quickstart</span>
+        <h2>One command to first light.</h2>
+      </div>
       <div class="panel reveal" style="margin-top:26px" aria-hidden="true">
         <div class="cli">
-          <div class="l"><span class="muted"># from the repo</span></div>
-          <div class="l"><span class="p">$</span> <span class="c">./install.sh</span><span class="muted">                    # deps → build → CLI → VS Code ext → status line</span></div>
-          <div class="l"><span class="p">$</span> <span class="c">./scripts/install-jetbrains.sh</span><span class="muted">  # the PyCharm/JetBrains plugin</span></div>
+          <div class="l"><span class="muted"># one command — CLI + VS Code &amp; JetBrains extensions from the latest release, hooks wired, health-checked</span></div>
+          <div class="l"><span class="p">$</span> <span class="c">curl -fsSL https://raw.githubusercontent.com/cell-observatory/claude-observatory/main/scripts/bootstrap.sh | bash</span></div>
           <div class="l">&nbsp;</div>
-          <div class="l"><span class="muted"># or by hand</span></div>
-          <div class="l"><span class="p">$</span> <span class="c">npm install &amp;&amp; npm run build</span></div>
-          <div class="l"><span class="p">$</span> <span class="c">npm i -g ./packages/cli</span><span class="muted">           # `claude-observatory` command</span></div>
-          <div class="l"><span class="p">$</span> <span class="c">claude-observatory init --with-statusline</span><span class="muted">  # hooks + usage bars (backs up settings)</span></div>
+          <div class="l"><span class="muted"># anytime</span></div>
+          <div class="l"><span class="p">$</span> <span class="c">claude-observatory doctor</span><span class="muted">   # check hooks · PATH · session · usage</span></div>
+          <div class="l"><span class="p">$</span> <span class="c">claude-observatory update</span><span class="muted">   # update to the latest release</span></div>
         </div>
       </div>
 
       <div class="callout reveal">
         <div class="mark">!</div>
-        <p><strong>Install the hooks with Claude Code closed.</strong> A running session snapshots your hooks at start and reconciles from that snapshot — so hooks added mid-session silently won't take effect. Run <code>init</code> from a plain terminal, then launch Claude Code. Verify anytime with <code>claude-observatory status</code>. To share with a team, <code>init --project</code> writes the hook into a checked-in <code>./.claude/settings.json</code>.</p>
+        <p><strong>Install the hooks with Claude Code closed.</strong> A running session snapshots your hooks at start and reconciles from that snapshot — so hooks added mid-session silently won't take effect. The installer prompts you to run <code>init</code>; do it from a plain terminal, then launch Claude Code. Verify anytime with <code>claude-observatory doctor</code>. To share with a team, <code>init --project</code> writes the hook into a checked-in <code>./.claude/settings.json</code>.</p>
       </div>
+
+      <p class="caption" style="margin-top:20px">Building from a clone instead? <code>./install.sh</code> sets up the CLI + VS Code extension, and <code>./scripts/install-jetbrains.sh</code> the JetBrains plugin. Re-run the one-liner (or <code>claude-observatory update</code>) to upgrade.</p>
     </div>
   </section>
+</main>
 
-  <!-- ================= FOOTER ================= -->
-  <footer>
-    <div class="plate">
-      <div class="foot-grid">
-        <div class="col" style="max-width:34ch">
-          <span class="wordmark" style="margin-bottom:14px">
-            <span class="mark" aria-hidden="true">🔬</span>
-            <b>CLAUDE OBSERVATORY</b>
-          </span>
-          <p>Complements Claude Code's native <code>/rewind</code> (whole-turn) with per-edit control. Built to be owned, forked, and shared.</p>
-        </div>
-        <div class="col">
-          <h4>Packages</h4>
-          <p><code>@claude-observatory/core</code> — capture · store · undo</p>
-          <p><code>claude-observatory</code> — the CLI</p>
-          <p><code>claude-observatory-vscode</code> — the VS Code sidebar</p>
-          <p><code>claude-observatory-jetbrains</code> — PyCharm &amp; friends</p>
-        </div>
-        <div class="col">
-          <h4>Install before launch</h4>
-          <p><code>claude-observatory init</code></p>
-          <p><code>claude-observatory status</code></p>
-          <p><code>./install.sh</code></p>
+<!-- ================= FOOTER ================= -->
+<footer>
+  <div class="wrap">
+    <div class="foot-grid">
+      <div class="col">
+        <span class="wordmark" style="margin-bottom:14px">
+          <span class="mark" aria-hidden="true">🔬</span>
+          <b>Claude Observatory</b>
+        </span>
+        <p>Complements Claude Code's native <code>/rewind</code> (whole-turn) with per-edit control. Built to be owned, forked, and shared.</p>
+        <div class="foot-links">
+          <a href="https://github.com/cell-observatory/claude-observatory" target="_blank" rel="noopener noreferrer">GitHub ↗</a>
+          <a href="#install">Quickstart</a>
         </div>
       </div>
-      <p class="fine">Apache-2.0 · git-free · zero extra Claude tokens · runs where Claude Code runs</p>
+      <div class="col">
+        <p class="h">Packages</p>
+        <p><code>@claude-observatory/core</code> — capture · store · undo</p>
+        <p><code>claude-observatory</code> — the CLI</p>
+        <p><code>claude-observatory-vscode</code> — the VS Code sidebar</p>
+        <p><code>claude-observatory-jetbrains</code> — PyCharm &amp; friends</p>
+      </div>
+      <div class="col">
+        <p class="h">Get started</p>
+        <p><code>curl … bootstrap.sh | bash</code> — one-command install</p>
+        <p><code>claude-observatory init</code> — hooks (Claude closed)</p>
+        <p><code>claude-observatory doctor</code> — verify setup</p>
+      </div>
     </div>
-  </footer>
-</main>
+    <p class="fine">Apache-2.0 · git-free · zero extra Claude tokens · runs where Claude Code runs</p>
+  </div>
+</footer>
 
 <script>
   (function () {
@@ -661,9 +688,8 @@
     // copy install command
     var ci = document.getElementById("copyInstall");
     if (ci) ci.addEventListener("click", function () {
-      var ok = "Copied";
-      try { navigator.clipboard.writeText("claude-observatory init"); } catch (e) {}
-      var t = ci.textContent; ci.textContent = ok;
+      try { navigator.clipboard.writeText("curl -fsSL https://raw.githubusercontent.com/cell-observatory/claude-observatory/main/scripts/bootstrap.sh | bash"); } catch (e) {}
+      var t = ci.textContent; ci.textContent = "Copied";
       setTimeout(function () { ci.textContent = t; }, 1400);
     });
 
@@ -678,56 +704,6 @@
       document.querySelectorAll(".reveal").forEach(function (el) {
         el.style.opacity = "0"; el.style.transform = "translateY(16px)"; io.observe(el);
       });
-    }
-
-    // ambient starfield — dark only, reduced-motion safe
-    var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    var cv = document.getElementById("stars"), ctx = cv.getContext("2d"), stars = [], raf = 0, w = 0, h = 0;
-    function isDark() { return current() === "dark"; }
-    function starColor() {
-      return getComputedStyle(root).getPropertyValue("--star").trim() || "rgba(200,214,255,0.85)";
-    }
-    function resize() {
-      w = cv.width = Math.floor(innerWidth * devicePixelRatio);
-      h = cv.height = Math.floor(innerHeight * devicePixelRatio);
-      cv.style.width = innerWidth + "px"; cv.style.height = innerHeight + "px";
-      var n = Math.min(150, Math.floor(innerWidth * innerHeight / 12000));
-      stars = [];
-      for (var i = 0; i < n; i++) {
-        stars.push({
-          x: Math.random() * w, y: Math.random() * h,
-          r: (Math.random() * 1.1 + 0.3) * devicePixelRatio,
-          a: Math.random() * Math.PI * 2, s: Math.random() * 0.012 + 0.003,
-          drift: (Math.random() * 0.12 + 0.02) * devicePixelRatio
-        });
-      }
-    }
-    function frame() {
-      raf = requestAnimationFrame(frame);
-      if (!isDark()) { ctx.clearRect(0, 0, w, h); cv.style.opacity = 0; return; }
-      cv.style.opacity = 1;
-      ctx.clearRect(0, 0, w, h);
-      var col = starColor();
-      for (var i = 0; i < stars.length; i++) {
-        var st = stars[i];
-        st.a += st.s; st.y += st.drift;
-        if (st.y > h + 2) st.y = -2;
-        var tw = 0.55 + 0.45 * Math.sin(st.a);
-        ctx.globalAlpha = tw;
-        ctx.fillStyle = col;
-        ctx.beginPath(); ctx.arc(st.x, st.y, st.r, 0, Math.PI * 2); ctx.fill();
-      }
-      ctx.globalAlpha = 1;
-    }
-    if (!reduce) {
-      resize(); addEventListener("resize", resize, { passive: true }); frame();
-    } else {
-      // static single paint for dark, else stays hidden
-      resize();
-      if (isDark()) {
-        cv.style.opacity = 1; var col = starColor();
-        stars.forEach(function (st) { ctx.globalAlpha = 0.7; ctx.fillStyle = col; ctx.beginPath(); ctx.arc(st.x, st.y, st.r, 0, Math.PI * 2); ctx.fill(); });
-      }
     }
   })();
 </script>

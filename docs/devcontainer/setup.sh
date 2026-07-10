@@ -39,9 +39,16 @@ else
     say "Installing CLI from checkout: $REPO"
     ( cd "$REPO" && npm install --silent && npm run build --silent && npm i -g ./packages/cli --silent )
   else
-    say "Installing CLI from npm (claude-observatory)"
-    npm i -g claude-observatory --silent \
-      || say "  CLI install failed — mount the repo and set OBSERVATORY_REPO, or install the release .tgz."
+    say "Installing CLI from the latest GitHub Release"
+    TGZ_URL="$(curl -fsSL -H 'Accept: application/vnd.github+json' \
+      https://api.github.com/repos/cell-observatory/claude-observatory/releases/latest \
+      | grep -o '"browser_download_url": *"[^"]*\.tgz"' | head -1 | sed 's/.*"\(https[^"]*\)"/\1/')"
+    if [ -n "$TGZ_URL" ]; then
+      curl -fsSL "$TGZ_URL" -o /tmp/claude-observatory.tgz && npm i -g /tmp/claude-observatory.tgz --silent \
+        || say "  CLI install failed — mount the repo and set OBSERVATORY_REPO."
+    else
+      say "  No release tarball found — mount the repo and set OBSERVATORY_REPO."
+    fi
   fi
 fi
 
