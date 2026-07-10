@@ -11,10 +11,9 @@
     "build": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "diff": "^7.0.0"
+    "diff": "^9.0.0"
   },
   "devDependencies": {
-    "@types/diff": "^7.0.0",
     "@types/node": "^22.0.0"
   },
   "license": "Apache-2.0",

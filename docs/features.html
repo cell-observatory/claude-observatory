@@ -27,9 +27,10 @@
   *{box-sizing:border-box;margin:0;padding:0}
   html{scroll-behavior:smooth;scroll-padding-top:80px;-webkit-text-size-adjust:100%}
   body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:17px;line-height:1.62;-webkit-font-smoothing:antialiased;overflow-x:hidden}
-  .wrap{width:min(var(--col),100% - 48px);margin-inline:auto}
+  .wrap{width:min(var(--col),90%);margin-inline:auto}
+  .feature .grid>*{min-width:0}
   a{color:inherit;text-decoration:none}
-  h1,h2,h3{font-weight:640;letter-spacing:-.021em;line-height:1.1;text-wrap:balance}
+  h1,h2,h3{font-weight:640;letter-spacing:-.021em;line-height:1.1;text-wrap:balance;overflow-wrap:break-word}
   .hl{color:var(--accent)}
   .eyebrow{font-family:var(--mono);font-size:.72rem;text-transform:uppercase;letter-spacing:.2em;color:var(--accent-ink);font-weight:600}
   .lede{color:var(--ink-soft);font-size:clamp(1.05rem,2vw,1.24rem);line-height:1.55;max-width:56ch;text-wrap:pretty}
