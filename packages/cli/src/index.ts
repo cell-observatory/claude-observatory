@@ -921,16 +921,33 @@ async function cmdUpdate(args: string[]): Promise<void> {
     process.stdout.write(c.yellow(`update available: ${current} → ${latest}`) + c.dim('   run `claude-observatory update`\n'));
     return;
   }
-  const assets: { name: string; browser_download_url: string }[] = release.assets || [];
+  const assets: { name: string; browser_download_url: string; digest?: string }[] = release.assets || [];
   const tgz = assets.find((a) => /\.tgz$/.test(a.name));
   if (!tgz) fail(`release v${latest} has no CLI tarball asset to install.`);
   const fs = require('fs');
   const os = require('os');
   const path = require('path');
+  const crypto = require('crypto');
   const cp = require('child_process');
-  const dest = path.join(os.tmpdir(), tgz!.name);
   process.stdout.write(c.dim(`downloading ${tgz!.name} …\n`));
-  fs.writeFileSync(dest, await httpGet(tgz!.browser_download_url));
+  const bytes = await httpGet(tgz!.browser_download_url);
+  // Integrity: `npm i -g <tgz>` runs the tarball's install lifecycle scripts as the current user, so
+  // verify the bytes against GitHub's published per-asset digest BEFORE executing anything.
+  const expected =
+    typeof tgz!.digest === 'string' && tgz!.digest.startsWith('sha256:') ? tgz!.digest.slice(7) : null;
+  if (expected) {
+    const actual = crypto.createHash('sha256').update(bytes).digest('hex');
+    if (actual !== expected) {
+      fail(`integrity check FAILED for ${tgz!.name} (sha256 ${actual} ≠ ${expected}) — refusing to install.`);
+    }
+    process.stdout.write(c.dim('  ✓ sha256 verified\n'));
+  } else {
+    process.stdout.write(c.yellow('  ! no published checksum for this asset — skipping integrity check\n'));
+  }
+  // Private 0700 temp dir + basename + exclusive create: no predictable-path symlink/TOCTOU on /tmp.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-observatory-'));
+  const dest = path.join(dir, path.basename(tgz!.name));
+  fs.writeFileSync(dest, bytes, { flag: 'wx', mode: 0o600 });
   process.stdout.write(c.dim('installing globally (npm i -g) …\n'));
   const r = cp.spawnSync('npm', ['i', '-g', dest], { stdio: 'inherit' });
   if (r.status !== 0) fail(`npm install failed (exit ${r.status ?? '?'}). Try: npm i -g ${dest}`);

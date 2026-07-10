@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write # npm publish --provenance (OIDC)
 
 jobs:
   release:
@@ -19,6 +20,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
+          registry-url: 'https://registry.npmjs.org'
       - run: npm ci
       - run: npm test
       - run: bash test/e2e.sh
@@ -43,3 +45,14 @@ jobs:
             "release/claude-observatory-jetbrains-${TAG}.zip" \
             --title "Claude Observatory ${TAG}" \
             --generate-notes
+      - name: Publish CLI to npm (provenance)
+        # Runs only if an NPM_TOKEN is configured; `npm test` above (version:check + lockfile) already
+        # gated this. Skips gracefully otherwise so the GitHub Release still succeeds.
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "${NODE_AUTH_TOKEN}" ]; then
+            echo "NPM_TOKEN not set — skipping npm publish (GitHub Release still created)."
+            exit 0
+          fi
+          ( cd packages/cli && npm publish --provenance --access public )
