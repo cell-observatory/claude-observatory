@@ -493,15 +493,16 @@ function cmdKeep(args: string[]): void {
 function cmdUndo(args: string[]): void {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const session = getSessionId(args);
-  // Bulk: --under <path> reverts every non-undone edit at-or-beneath a file/folder path, newest-first
-  // (the editors' folder/file Revert action). Each is undone individually so all group members go.
+  // Bulk: --under <path> reverts every PENDING edit at-or-beneath a file/folder path, newest-first
+  // (the editors' folder/file Revert action). Already-Accepted (kept) edits are left on disk — revert
+  // those individually. Each is undone individually so all group members go.
   const ui = args.indexOf('--under');
   if (ui >= 0) {
     const under = args[ui + 1];
     if (!under) fail('`undo --under <path>` requires a value');
     const targets = core
       .readLog(session)
-      .filter((r) => r.status !== 'undone' && core.isUnderPath(r.file, under))
+      .filter((r) => r.status === 'pending' && core.isUnderPath(r.file, under))
       .sort((a, b) => b.id - a.id);
     let undone = 0;
     let conflicts = 0;
@@ -917,6 +918,16 @@ async function cmdSuggest(args: string[]): Promise<void> {
 // --- self-update: fetch the latest GitHub Release and reinstall the CLI (no registry, no deps) ---
 
 const RELEASE_REPO = 'cell-observatory/claude-observatory';
+// The VS Code-family extension id (publisher.name) and the editor CLIs that share `code`'s
+// `--install-extension` / `--list-extensions` interface, so `update` can refresh whichever is present.
+const VSCODE_EXT_ID = 'claude-observatory.claude-observatory-vscode';
+const VSCODE_FAMILY_CLIS = ['code', 'cursor', 'codium', 'windsurf'];
+// The JetBrains plugin unzips to this dir inside each IDE's plugins/ folder; we drop a version
+// sentinel beside it so a later `update` can tell whether the installed plugin is already current.
+const JB_PLUGIN_DIRNAME = 'claude-observatory-jetbrains';
+const JB_VERSION_SENTINEL = '.observatory-version';
+
+type ReleaseAsset = { name: string; browser_download_url: string; digest?: string };
 
 /** GET a URL following redirects, resolving to the response body. Rejects on non-200. */
 function httpGet(url: string, redirects = 5): Promise<Buffer> {
@@ -947,9 +958,229 @@ function httpGet(url: string, redirects = 5): Promise<Buffer> {
   });
 }
 
+/** Verify downloaded bytes against GitHub's per-asset sha256 `digest`. Fails hard on mismatch (we're
+ *  about to execute/extract them); warns if the release published no checksum. */
+function assertDigest(bytes: Buffer, asset: ReleaseAsset): void {
+  const crypto = require('crypto');
+  const expected =
+    typeof asset.digest === 'string' && asset.digest.startsWith('sha256:') ? asset.digest.slice(7) : null;
+  if (!expected) {
+    process.stdout.write(c.yellow(`  ! no published checksum for ${asset.name} — skipping integrity check\n`));
+    return;
+  }
+  const actual = crypto.createHash('sha256').update(bytes).digest('hex');
+  if (actual !== expected) {
+    fail(`integrity check FAILED for ${asset.name} (sha256 ${actual} ≠ ${expected}) — refusing to install.`);
+  }
+  process.stdout.write(c.dim(`  ✓ sha256 verified (${asset.name})\n`));
+}
+
+/** Download a release asset to a fresh private temp file (0700 dir, 0600 file, exclusive create —
+ *  no predictable-path symlink/TOCTOU on /tmp), integrity-checked before it lands. Returns the path. */
+async function downloadAsset(asset: ReleaseAsset): Promise<string> {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  process.stdout.write(c.dim(`downloading ${asset.name} …\n`));
+  const bytes = await httpGet(asset.browser_download_url);
+  assertDigest(bytes, asset);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-observatory-'));
+  const dest = path.join(dir, path.basename(asset.name));
+  fs.writeFileSync(dest, bytes, { flag: 'wx', mode: 0o600 });
+  return dest;
+}
+
+/** Download the CLI tarball from the release and `npm i -g` it (integrity-checked first — the tarball
+ *  runs install lifecycle scripts as the current user). */
+async function updateCliBinary(assets: ReleaseAsset[], latest: string, current: string): Promise<void> {
+  const tgz = assets.find((a) => /\.tgz$/.test(a.name));
+  if (!tgz) fail(`release v${latest} has no CLI tarball asset to install.`);
+  const dest = await downloadAsset(tgz!);
+  const cp = require('child_process');
+  process.stdout.write(c.dim('installing globally (npm i -g) …\n'));
+  const r = cp.spawnSync('npm', ['i', '-g', dest], { stdio: 'inherit' });
+  if (r.status !== 0) fail(`npm install failed (exit ${r.status ?? '?'}). Try: npm i -g ${dest}`);
+  process.stdout.write(c.green('✓ ') + `updated the CLI ${current} → ${latest}\n`);
+}
+
+/** Editors in the VS Code family (code/cursor/…) on PATH that already have our extension, with the
+ *  installed version parsed from `--list-extensions --show-versions` (ids are lowercased by VS Code). */
+function vscodeHolders(): { cli: string; version: string }[] {
+  const cp = require('child_process');
+  const prefix = VSCODE_EXT_ID.toLowerCase() + '@';
+  const out: { cli: string; version: string }[] = [];
+  for (const cli of VSCODE_FAMILY_CLIS) {
+    if (!onPath(cli)) continue;
+    const r = cp.spawnSync(cli, ['--list-extensions', '--show-versions'], { encoding: 'utf8' });
+    if (r.status !== 0 || !r.stdout) continue;
+    const line = String(r.stdout).split(/\r?\n/).find((l: string) => l.toLowerCase().startsWith(prefix));
+    if (line) out.push({ cli, version: line.slice(prefix.length).trim() });
+  }
+  return out;
+}
+
+/** Refresh the VS Code-family extension in every editor that already has it (never installs into an
+ *  editor that lacks it). Downloads the .vsix once and `--install-extension --force`s it. */
+async function refreshVscodeExtension(
+  assets: ReleaseAsset[],
+  latest: string,
+  force: boolean
+): Promise<'updated' | 'current' | 'absent'> {
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  const holders = vscodeHolders();
+  if (holders.length === 0) return 'absent';
+  const stale = holders.filter((h) => force || core.isNewer(latest, h.version));
+  if (stale.length === 0) {
+    process.stdout.write(c.green('✓ ') + `VS Code extension up to date (${holders[0].version})\n`);
+    return 'current';
+  }
+  const vsix = assets.find((a) => /\.vsix$/i.test(a.name));
+  if (!vsix) {
+    process.stdout.write(c.yellow(`  ! release v${latest} has no .vsix asset — skipped the VS Code extension\n`));
+    return 'current';
+  }
+  const cp = require('child_process');
+  const dest = await downloadAsset(vsix);
+  let installed = 0;
+  for (const h of stale) {
+    const r = cp.spawnSync(h.cli, ['--install-extension', dest, '--force'], { stdio: 'inherit' });
+    if (r.status === 0) {
+      process.stdout.write(c.green('✓ ') + `VS Code extension ${h.version} → ${latest} via \`${h.cli}\`\n`);
+      installed++;
+    } else {
+      process.stdout.write(c.yellow(`  ! \`${h.cli} --install-extension\` failed — install the .vsix manually from the release\n`));
+    }
+  }
+  if (installed) process.stdout.write(c.dim('  fully quit the editor (⌘Q) once so the activity-bar icon refreshes.\n'));
+  return installed ? 'updated' : 'current';
+}
+
+/** JetBrains plugin dirs across platforms — ports the detection in scripts/install-jetbrains.sh so
+ *  `update` also works on an SSH host serving JetBrains Remote Development. */
+function jetbrainsPluginDirs(): string[] {
+  const fs = require('fs');
+  const path = require('path');
+  const os = require('os');
+  const home = os.homedir();
+  const PRODUCTS = ['PyCharm', 'IntelliJIdea', 'WebStorm', 'GoLand'];
+  const dirs: string[] = [];
+  const isDir = (p: string): boolean => {
+    try { return fs.statSync(p).isDirectory(); } catch { return false; }
+  };
+  const productDirs = (parent: string, sub: string | null): void => {
+    let entries: string[] = [];
+    try { entries = fs.readdirSync(parent); } catch { return; }
+    for (const e of entries) {
+      if (!PRODUCTS.some((p) => e.startsWith(p))) continue;
+      const target = sub ? path.join(parent, e, sub) : path.join(parent, e);
+      if (isDir(target)) dirs.push(target);
+    }
+  };
+  // macOS: ~/Library/Application Support/JetBrains/<Product>*/plugins
+  productDirs(path.join(home, 'Library', 'Application Support', 'JetBrains'), 'plugins');
+  // Linux desktop: ~/.local/share/JetBrains/<Product>*  (plugins live directly in this dir)
+  productDirs(path.join(home, '.local', 'share', 'JetBrains'), null);
+  // Remote Development backends: ~/.config/JetBrains/RemoteDev-*/<project>/plugins
+  const rd = path.join(home, '.config', 'JetBrains');
+  try {
+    for (const e of fs.readdirSync(rd)) {
+      if (!e.startsWith('RemoteDev-')) continue;
+      const projRoot = path.join(rd, e);
+      try {
+        for (const proj of fs.readdirSync(projRoot)) {
+          const t = path.join(projRoot, proj, 'plugins');
+          if (isDir(t)) dirs.push(t);
+        }
+      } catch {
+        /* not a dir */
+      }
+    }
+  } catch {
+    /* no RemoteDev root */
+  }
+  // Windows: %APPDATA%\JetBrains\<Product>*\plugins
+  if (process.env.APPDATA) productDirs(path.join(process.env.APPDATA, 'JetBrains'), 'plugins');
+  return dirs;
+}
+
+/** Extract a .zip into destDir (unzip on macOS/Linux; Expand-Archive on Windows). */
+function extractZip(zip: string, destDir: string): boolean {
+  const cp = require('child_process');
+  if (process.platform === 'win32') {
+    const r = cp.spawnSync(
+      'powershell',
+      ['-NoProfile', '-Command', `Expand-Archive -LiteralPath "${zip}" -DestinationPath "${destDir}" -Force`],
+      { stdio: 'ignore' }
+    );
+    return r.status === 0;
+  }
+  return cp.spawnSync('unzip', ['-qo', zip, '-d', destDir], { stdio: 'ignore' }).status === 0;
+}
+
+/** Refresh the JetBrains plugin in every IDE plugins dir that already has it, by unzipping the release
+ *  zip in place (the plugin can't hot-swap — the IDE must fully restart). Idempotent via a version
+ *  sentinel written beside the plugin. */
+async function refreshJetbrainsPlugin(
+  assets: ReleaseAsset[],
+  latest: string,
+  force: boolean
+): Promise<'updated' | 'current' | 'absent'> {
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  const fs = require('fs');
+  const path = require('path');
+  const sentinelVer = (d: string): string | null => {
+    try { return fs.readFileSync(path.join(d, JB_PLUGIN_DIRNAME, JB_VERSION_SENTINEL), 'utf8').trim(); } catch { return null; }
+  };
+  const holders = jetbrainsPluginDirs().filter((d) => fs.existsSync(path.join(d, JB_PLUGIN_DIRNAME)));
+  if (holders.length === 0) return 'absent';
+  const stale = holders.filter((d) => {
+    const v = sentinelVer(d);
+    return force || v === null || core.isNewer(latest, v);
+  });
+  if (stale.length === 0) {
+    process.stdout.write(c.green('✓ ') + `JetBrains plugin up to date (${latest})\n`);
+    return 'current';
+  }
+  if (process.platform !== 'win32' && !onPath('unzip')) {
+    process.stdout.write(c.yellow('  ! `unzip` not found — skipped the JetBrains plugin (install unzip, then re-run)\n'));
+    return 'current';
+  }
+  const zip = assets.find((a) => /jetbrains.*\.zip$/i.test(a.name));
+  if (!zip) {
+    process.stdout.write(c.yellow(`  ! release v${latest} has no JetBrains .zip asset — skipped the plugin\n`));
+    return 'current';
+  }
+  const dest = await downloadAsset(zip);
+  let installed = 0;
+  for (const d of stale) {
+    const pluginDir = path.join(d, JB_PLUGIN_DIRNAME);
+    try {
+      fs.rmSync(pluginDir, { recursive: true, force: true }); // drop files gone from the new build
+      if (!extractZip(dest, d)) throw new Error('extract failed');
+      fs.writeFileSync(path.join(pluginDir, JB_VERSION_SENTINEL), latest);
+      process.stdout.write(c.green('✓ ') + `JetBrains plugin → ${latest} (${d})\n`);
+      installed++;
+    } catch (e: any) {
+      process.stdout.write(c.yellow(`  ! could not install the JetBrains plugin into ${d}: ${e?.message || e}\n`));
+    }
+  }
+  if (installed) process.stdout.write(c.dim('  fully restart the IDE (⌘Q → reopen) — a running JVM can’t hot-swap plugin classes.\n'));
+  return installed ? 'updated' : 'current';
+}
+
+/**
+ * `update` — refresh the CLI AND the locally-installed editor extensions from the latest GitHub
+ * Release (marketplace-free). The CLI self-updates via `npm i -g`; the VS Code extension via
+ * `code --install-extension --force`; the JetBrains plugin by unzipping into the IDE plugin dirs.
+ * `--check` reports only; `--cli-only` is the old CLI-only behavior; `--force` reinstalls even if
+ * already current.
+ */
 async function cmdUpdate(args: string[]): Promise<void> {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const current = version();
+  const cliOnly = args.includes('--cli-only');
+  const checkOnly = args.includes('--check');
+  const force = args.includes('--force');
   let release: any;
   try {
     release = JSON.parse((await httpGet(`https://api.github.com/repos/${RELEASE_REPO}/releases/latest`)).toString('utf8'));
@@ -958,49 +1189,50 @@ async function cmdUpdate(args: string[]): Promise<void> {
   }
   const latest = String(release.tag_name || '').replace(/^v/i, '');
   if (!latest) fail('no published release found for the repository.');
-  if (!core.isNewer(latest, current)) {
-    process.stdout.write(c.green(`✓ claude-observatory is up to date (${current})\n`));
-    return;
-  }
-  if (args.includes('--check')) {
-    process.stdout.write(c.yellow(`update available: ${current} → ${latest}`) + c.dim('   run `claude-observatory update`\n'));
-    return;
-  }
-  const assets: { name: string; browser_download_url: string; digest?: string }[] = release.assets || [];
-  const tgz = assets.find((a) => /\.tgz$/.test(a.name));
-  if (!tgz) fail(`release v${latest} has no CLI tarball asset to install.`);
-  const fs = require('fs');
-  const os = require('os');
-  const path = require('path');
-  const crypto = require('crypto');
-  const cp = require('child_process');
-  process.stdout.write(c.dim(`downloading ${tgz!.name} …\n`));
-  const bytes = await httpGet(tgz!.browser_download_url);
-  // Integrity: `npm i -g <tgz>` runs the tarball's install lifecycle scripts as the current user, so
-  // verify the bytes against GitHub's published per-asset digest BEFORE executing anything.
-  const expected =
-    typeof tgz!.digest === 'string' && tgz!.digest.startsWith('sha256:') ? tgz!.digest.slice(7) : null;
-  if (expected) {
-    const actual = crypto.createHash('sha256').update(bytes).digest('hex');
-    if (actual !== expected) {
-      fail(`integrity check FAILED for ${tgz!.name} (sha256 ${actual} ≠ ${expected}) — refusing to install.`);
+  const assets: ReleaseAsset[] = release.assets || [];
+  const cliStale = core.isNewer(latest, current);
+
+  if (checkOnly) {
+    process.stdout.write(cliStale ? c.yellow(`CLI: update available ${current} → ${latest}\n`) : c.green(`CLI: up to date (${current})\n`));
+    if (!cliOnly) {
+      const vs = vscodeHolders();
+      if (vs.length === 0) process.stdout.write(c.dim('VS Code: extension not detected\n'));
+      else for (const h of vs)
+        process.stdout.write(core.isNewer(latest, h.version) ? c.yellow(`VS Code (${h.cli}): ${h.version} → ${latest}\n`) : c.green(`VS Code (${h.cli}): up to date (${h.version})\n`));
+      const fs = require('fs');
+      const path = require('path');
+      const jb = jetbrainsPluginDirs().filter((d) => fs.existsSync(path.join(d, JB_PLUGIN_DIRNAME)));
+      if (jb.length === 0) process.stdout.write(c.dim('JetBrains: plugin not detected\n'));
+      else for (const d of jb) {
+        let v: string | null = null;
+        try { v = fs.readFileSync(path.join(d, JB_PLUGIN_DIRNAME, JB_VERSION_SENTINEL), 'utf8').trim(); } catch { /* no sentinel */ }
+        process.stdout.write(v && !core.isNewer(latest, v) ? c.green(`JetBrains: up to date (${v})\n`) : c.yellow(`JetBrains: ${v || 'installed'} → ${latest} (${d})\n`));
+      }
     }
-    process.stdout.write(c.dim('  ✓ sha256 verified\n'));
-  } else {
-    process.stdout.write(c.yellow('  ! no published checksum for this asset — skipping integrity check\n'));
+    process.stdout.write(c.dim('run `claude-observatory update` to apply.\n'));
+    return;
   }
-  // Private 0700 temp dir + basename + exclusive create: no predictable-path symlink/TOCTOU on /tmp.
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-observatory-'));
-  const dest = path.join(dir, path.basename(tgz!.name));
-  fs.writeFileSync(dest, bytes, { flag: 'wx', mode: 0o600 });
-  process.stdout.write(c.dim('installing globally (npm i -g) …\n'));
-  const r = cp.spawnSync('npm', ['i', '-g', dest], { stdio: 'inherit' });
-  if (r.status !== 0) fail(`npm install failed (exit ${r.status ?? '?'}). Try: npm i -g ${dest}`);
-  process.stdout.write(
-    c.green('✓ ') +
-      `updated the CLI ${current} → ${latest}\n` +
-      c.dim(`  editor extensions: re-run the installer, or install claude-observatory-vscode-v${latest}.vsix / -jetbrains-v${latest}.zip from the release.\n`)
-  );
+
+  if (cliOnly) {
+    if (cliStale) await updateCliBinary(assets, latest, current);
+    else process.stdout.write(c.green('✓ ') + `claude-observatory CLI is up to date (${current})\n`);
+    return;
+  }
+
+  if (cliStale) await updateCliBinary(assets, latest, current);
+  const vscode = await refreshVscodeExtension(assets, latest, force);
+  const jetbrains = await refreshJetbrainsPlugin(assets, latest, force);
+  if (!(cliStale || vscode === 'updated' || jetbrains === 'updated')) {
+    if (vscode === 'absent' && jetbrains === 'absent') {
+      process.stdout.write(
+        c.green('✓ ') +
+          `CLI is up to date (${latest}); no editor extensions detected locally.\n` +
+          c.dim('  install the VS Code / JetBrains extensions via scripts/bootstrap.sh or the release assets.\n')
+      );
+    } else {
+      process.stdout.write(c.green('✓ ') + `everything is up to date (${latest})\n`);
+    }
+  }
 }
 
 function usage(): void {
@@ -1015,7 +1247,11 @@ function usage(): void {
       `                       prints teardown steps; --purge-store also deletes the stored edits)\n` +
       `  status               show hooks + hook-path health + session + edit counts\n` +
       `  doctor [--json]      diagnose setup (hooks, PATH, config dir, session, status line) with fixes\n` +
-      `  update [--check]     update the CLI to the latest GitHub Release (\`--check\` only reports)\n` +
+      `  update [--check] [--cli-only] [--force]\n` +
+      `                       update the CLI AND refresh the locally-installed editor extensions from\n` +
+      `                       the latest GitHub Release (VS Code via \`code --install-extension\`;\n` +
+      `                       JetBrains by unzip into plugin dirs). --check reports only; --cli-only\n` +
+      `                       skips the extensions; --force reinstalls even if already current\n` +
       `  sessions             list all sessions in the store (● = current dir)\n` +
       `  list [filters]       list edits (grouped by file); filters: --pending|--kept|--undone, --file <substr>\n` +
       `  timeline [--json]    edits newest-first as a chronological feed (time · id · Δ · file)\n` +

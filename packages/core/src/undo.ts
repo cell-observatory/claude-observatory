@@ -241,6 +241,18 @@ export function undoEdit(sessionId: string, id: number): UndoResult {
 }
 
 /**
+ * A wholesale per-file restore/reapply of edit `id` overwrites the file and DROPS every later edit to
+ * that same file from disk. Mark those later edits `undone` so their recorded status matches disk —
+ * otherwise the tree shows a pending/kept edit whose change is gone, and a later per-edit undo/redo
+ * computes against a file that no longer matches its blobs (a spurious conflict).
+ */
+function markLaterSameFileDropped(sessionId: string, file: string, afterId: number): void {
+  for (const r of readLog(sessionId)) {
+    if (r.file === file && r.id > afterId && r.status !== 'undone') setStatus(sessionId, r.id, 'undone');
+  }
+}
+
+/**
  * Per-file restore fallback (the `--force` path). Reverts the file to its state BEFORE edit `id`,
  * dropping any later edits to that same file. Used when undoEdit() reports a conflict.
  */
@@ -256,10 +268,12 @@ export function restoreFile(sessionId: string, id: number): UndoResult {
       return { ok: false, status: 'error', message: `could not delete ${rec.file}: ${String(e)}` };
     }
     setStatus(sessionId, id, 'undone');
+    markLaterSameFileDropped(sessionId, rec.file, id);
     return { ok: true, status: 'deleted', message: `deleted ${rec.file} (created by edit #${id})` };
   }
   writeEnsuringDir(rec.file, beforeBuf);
   setStatus(sessionId, id, 'undone');
+  markLaterSameFileDropped(sessionId, rec.file, id);
   return {
     ok: true,
     status: 'undone',
@@ -402,10 +416,12 @@ export function reapplyFile(sessionId: string, id: number): UndoResult {
       return { ok: false, status: 'error', message: `could not delete ${rec.file}: ${String(e)}` };
     }
     setStatus(sessionId, id, 'pending');
+    markLaterSameFileDropped(sessionId, rec.file, id);
     return { ok: true, status: 'deleted', message: `re-applied edit #${id} — deleted ${rec.file}` };
   }
   writeEnsuringDir(rec.file, afterBuf);
   setStatus(sessionId, id, 'pending');
+  markLaterSameFileDropped(sessionId, rec.file, id);
   return {
     ok: true,
     status: 'redone',

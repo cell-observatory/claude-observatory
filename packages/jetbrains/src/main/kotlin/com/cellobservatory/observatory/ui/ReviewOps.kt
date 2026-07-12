@@ -111,9 +111,10 @@ object ReviewOps {
         notify(project, res.message, if (res.ok) NotificationType.INFORMATION else NotificationType.ERROR)
     }
 
-    /** Undo all non-undone edits, newest-first (minimizes surgical conflicts) — with confirm. */
+    /** Undo all PENDING edits, newest-first (minimizes surgical conflicts) — with confirm. Accepted
+     *  edits are left on disk; revert those individually. */
     fun undoAll(project: Project, session: String, targets: List<EditRecord>, scope: String) {
-        val list = targets.filter { !it.undone }.sortedByDescending { it.id }
+        val list = targets.filter { it.pending }.sortedByDescending { it.id }
         if (list.isEmpty()) return
         val dirty = list.map { it.file }.distinct().filter { isDirty(it) }
         if (dirty.isNotEmpty()) {

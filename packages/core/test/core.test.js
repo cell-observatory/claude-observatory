@@ -134,6 +134,44 @@ test('undo: overlapping edit conflicts; --force per-file restore recovers', () =
   assert.equal(fs.readFileSync(F, 'utf8'), 'A\nB\nC\n', 'restored to pre-edit-1 state');
 });
 
+test('undo --force: restoreFile marks dropped later same-file edits undone; other files untouched', () => {
+  // Regression: a --force restore drops later edits to the same file from disk. Those edits must be
+  // marked `undone` so recorded status matches disk (a pending/kept edit whose change is gone lies to
+  // the tree and makes a later per-edit undo/redo compute against a mismatched file).
+  freshHome();
+  const S = 'force-status';
+  const F = path.join(tmpWork(), 'c.txt');
+  const OTHER = path.join(path.dirname(F), 'other.txt');
+  seedEdit(S, F, 'A\nB\nC\n', 'A\nX\nC\n'); // #1 F: B->X
+  seedEdit(S, OTHER, 'p\n', 'q\n'); // #2 OTHER (different file, id between #1 and #3)
+  seedEdit(S, F, 'A\nX\nC\n', 'A\nY\nC\n'); // #3 F: X->Y overlaps #1
+  core.setStatus(S, 3, 'kept'); // the later edit was accepted
+  fs.writeFileSync(F, 'A\nY\nC\n');
+  fs.writeFileSync(OTHER, 'q\n');
+  const r = core.restoreFile(S, 1); // conflict path -> drops #3 (later, same file)
+  assert.equal(r.status, 'undone');
+  assert.equal(fs.readFileSync(F, 'utf8'), 'A\nB\nC\n', 'F restored to pre-#1');
+  assert.equal(core.findRecord(S, 1).status, 'undone', '#1 undone');
+  assert.equal(core.findRecord(S, 2).status, 'pending', '#2 (other file) untouched');
+  assert.equal(core.findRecord(S, 3).status, 'undone', '#3 dropped from disk -> undone (was kept)');
+});
+
+test('redo --force: reapplyFile marks dropped later same-file edits undone', () => {
+  freshHome();
+  const S = 'force-redo-status';
+  const F = path.join(tmpWork(), 'c.txt');
+  seedEdit(S, F, 'A\nB\nC\n', 'A\nX\nC\n'); // #1 F: B->X
+  seedEdit(S, F, 'A\nX\nC\n', 'A\nY\nC\n'); // #2 F: X->Y (later)
+  core.setStatus(S, 1, 'undone'); // #1 previously undone
+  core.setStatus(S, 2, 'kept'); // #2 accepted, still on disk
+  fs.writeFileSync(F, 'A\nY\nC\n');
+  const r = core.reapplyFile(S, 1); // force redo #1 -> writes after_#1 wholesale, drops #2
+  assert.equal(r.status, 'redone');
+  assert.equal(fs.readFileSync(F, 'utf8'), 'A\nX\nC\n', 'file = after-edit-1 (later edit dropped)');
+  assert.equal(core.findRecord(S, 1).status, 'pending', '#1 re-applied -> pending');
+  assert.equal(core.findRecord(S, 2).status, 'undone', '#2 dropped from disk -> undone (was kept)');
+});
+
 test('undo: new-file create is deleted; second undo is a noop', () => {
   freshHome();
   const S = 'newfile';
