@@ -16,7 +16,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { diffArrays } from 'diff';
-import { findRecord, readBlob, readLog, setStatus } from './store';
+import { findRecord, isUnderPath, readBlob, readLog, setStatus } from './store';
 import { groupMembers } from './groups';
 
 export interface UndoResult {
@@ -241,6 +241,18 @@ export function undoEdit(sessionId: string, id: number): UndoResult {
 }
 
 /**
+ * A wholesale per-file restore/reapply of edit `id` overwrites the file and DROPS every later edit to
+ * that same file from disk. Mark those later edits `undone` so their recorded status matches disk —
+ * otherwise the tree shows a pending/kept edit whose change is gone, and a later per-edit undo/redo
+ * computes against a file that no longer matches its blobs (a spurious conflict).
+ */
+function markLaterSameFileDropped(sessionId: string, file: string, afterId: number): void {
+  for (const r of readLog(sessionId)) {
+    if (r.file === file && r.id > afterId && r.status !== 'undone') setStatus(sessionId, r.id, 'undone');
+  }
+}
+
+/**
  * Per-file restore fallback (the `--force` path). Reverts the file to its state BEFORE edit `id`,
  * dropping any later edits to that same file. Used when undoEdit() reports a conflict.
  */
@@ -256,10 +268,12 @@ export function restoreFile(sessionId: string, id: number): UndoResult {
       return { ok: false, status: 'error', message: `could not delete ${rec.file}: ${String(e)}` };
     }
     setStatus(sessionId, id, 'undone');
+    markLaterSameFileDropped(sessionId, rec.file, id);
     return { ok: true, status: 'deleted', message: `deleted ${rec.file} (created by edit #${id})` };
   }
   writeEnsuringDir(rec.file, beforeBuf);
   setStatus(sessionId, id, 'undone');
+  markLaterSameFileDropped(sessionId, rec.file, id);
   return {
     ok: true,
     status: 'undone',
@@ -402,13 +416,59 @@ export function reapplyFile(sessionId: string, id: number): UndoResult {
       return { ok: false, status: 'error', message: `could not delete ${rec.file}: ${String(e)}` };
     }
     setStatus(sessionId, id, 'pending');
+    markLaterSameFileDropped(sessionId, rec.file, id);
     return { ok: true, status: 'deleted', message: `re-applied edit #${id} — deleted ${rec.file}` };
   }
   writeEnsuringDir(rec.file, afterBuf);
   setStatus(sessionId, id, 'pending');
+  markLaterSameFileDropped(sessionId, rec.file, id);
   return {
     ok: true,
     status: 'redone',
     message: `re-applied edit #${id} to ${rec.file} (later edits to this file dropped)`,
   };
+}
+
+export interface UndoScopeResult {
+  undone: number; // edits actually reverted
+  conflicts: number; // edits left in place because a later change overlapped (offer per-edit --force)
+  total: number; // pending edits that matched the scope
+  ids: number[]; // the reverted edit ids
+}
+
+/**
+ * Revert every PENDING edit matching a scope, NEWEST-first (so each surgical undo stays on its clean
+ * path — later edits are removed before earlier ones). Already-Accepted (kept) and already-undone
+ * edits are left as-is; revert an accepted edit individually if you want it gone.
+ *
+ * This is the ONE implementation behind every scoped/bulk revert: the CLI's `undo --all|--file|--under`,
+ * VS Code's file/folder/session Revert (in-process), and — via those CLI flags — JetBrains. Keeping the
+ * enumeration here (rather than reimplementing the filter+sort+loop per surface) is what stops the three
+ * front-ends from drifting. Scope: no opts = the whole session; `under` = a file (exact) or folder
+ * (everything beneath, via isUnderPath); `fileSubstr` = a filename substring (the CLI `--file` filter).
+ */
+export function undoScope(
+  sessionId: string,
+  opts: { under?: string; fileSubstr?: string } = {}
+): UndoScopeResult {
+  const targets = readLog(sessionId)
+    .filter(
+      (r) =>
+        r.status === 'pending' &&
+        (opts.under === undefined || isUnderPath(r.file, opts.under)) &&
+        (opts.fileSubstr === undefined || r.file.includes(opts.fileSubstr))
+    )
+    .sort((a, b) => b.id - a.id);
+  let undone = 0;
+  let conflicts = 0;
+  const ids: number[] = [];
+  for (const t of targets) {
+    const r = undoEdit(sessionId, t.id);
+    if (r.status === 'conflict') conflicts++;
+    else if (r.ok) {
+      undone++;
+      ids.push(t.id);
+    }
+  }
+  return { undone, conflicts, total: targets.length, ids };
 }

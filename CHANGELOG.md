@@ -5,6 +5,51 @@ All notable changes to Claude Observatory are recorded here, following
 Per-tag release artifacts and auto-generated notes are on the
 [Releases page](https://github.com/cell-observatory/claude-observatory/releases).
 
+## [0.5.2] — 2026-07-11
+
+Streamlines the marketplace-free update path and tightens revert semantics. No breaking changes — the
+`--json` contract and on-disk store format are unchanged.
+
+### Changed — `update` refreshes the installed editor extensions, not just the CLI
+
+`claude-observatory update` previously reinstalled only the CLI (and exited early as "up to date"
+before it even mentioned the extensions). It now refreshes everything installed on the machine from
+the latest GitHub Release — no marketplace required:
+
+- **CLI** — self-updates via `npm i -g` as before (integrity-checked against the release's sha256).
+- **VS Code** — if the `code` CLI (or `cursor` / `codium` / `windsurf`) is on PATH and already has the
+  extension, downloads the `.vsix` and `code --install-extension --force`s it.
+- **JetBrains** — unzips the plugin into every detected IDE plugin dir that already has it (macOS,
+  Linux, Remote-Dev backends, Windows), then prompts for the required full IDE restart. Idempotent via
+  a `.observatory-version` sentinel written beside the plugin.
+
+New flags: `--cli-only` (old behavior) and `--force` (reinstall even if current); `--check` now
+reports the status of the CLI and both extensions and installs nothing. The VS Code update notifier
+also gains a real one-click **Update now** (download + install + reload), falling back to the browser +
+"Install from VSIX…" flow when the `code` CLI isn't available.
+
+### Changed — bulk / scoped Revert acts on pending edits only
+
+"Revert All" (session) and folder- and file-scoped Revert now revert only **pending** edits and leave
+already-**Accepted** (kept) changes on disk — revert an accepted edit individually if you want it gone.
+Applies identically across the CLI (`undo --under`), VS Code, and JetBrains.
+
+### Added — `undo` bulk flags + a palette command
+
+- `claude-observatory undo` gains `--all` (revert every pending edit in the session) and
+  `--file <substr>`, matching `keep`'s bulk surface. Every bulk/scoped revert (CLI, VS Code, and
+  JetBrains) now runs through one shared `core.undoScope` implementation, so the three front-ends
+  can't drift.
+- VS Code exposes **Claude Observatory: Show suggestions** in the command palette (previously
+  reachable only by clicking a suggestion row).
+
+### Fixed — force-restore keeps review status consistent with disk
+
+A `--force` per-file restore (and its redo mirror) drops later edits to the same file from disk, but
+those edits kept their old `pending`/`kept` status — so the tree showed a live edit whose change was
+gone, and a later per-edit undo/redo computed against a mismatched file. Those dropped later edits are
+now marked `undone`, so recorded status always matches what's on disk.
+
 ## [0.5.1] — 2026-07-10
 
 Two review-workflow additions. No breaking changes — the `--json` contract only gains a field, and the

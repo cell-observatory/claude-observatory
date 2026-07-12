@@ -111,9 +111,13 @@ object ReviewOps {
         notify(project, res.message, if (res.ok) NotificationType.INFORMATION else NotificationType.ERROR)
     }
 
-    /** Undo all non-undone edits, newest-first (minimizes surgical conflicts) — with confirm. */
-    fun undoAll(project: Project, session: String, targets: List<EditRecord>, scope: String) {
-        val list = targets.filter { !it.undone }.sortedByDescending { it.id }
+    /** Undo all PENDING edits in scope, newest-first — with a dirty-buffer guard + confirm. Accepted
+     *  edits are left on disk; revert those individually. The revert itself is ONE CLI call backed by
+     *  core.undoScope (the single scoped-revert implementation the CLI + VS Code also use), not a per-id
+     *  loop — so the three front-ends can't drift. `under` = null reverts the whole session; a path
+     *  reverts a file or folder (everything beneath). */
+    fun undoAll(project: Project, session: String, targets: List<EditRecord>, scope: String, under: String? = null) {
+        val list = targets.filter { it.pending }.sortedByDescending { it.id }
         if (list.isEmpty()) return
         val dirty = list.map { it.file }.distinct().filter { isDirty(it) }
         if (dirty.isNotEmpty()) {
@@ -126,18 +130,19 @@ object ReviewOps {
             "Undo All", "Cancel", Messages.getQuestionIcon(),
         )
         if (ok != Messages.YES) return
+        val files = list.map { it.file }.distinct()
         runBg(project, "Reverting ${list.size} edit(s)") {
-            var undone = 0
-            var conflicts = 0
-            for (r in list) {
-                val res = ObservatoryCli.undo(session, r.id, force = false, project.basePath)
-                if (res.ok) undone++ else if (res.conflict) conflicts++
+            val res = ObservatoryCli.undoScope(session, under, project.basePath)
+            files.forEach { refreshFile(it) }
+            under?.let { refreshRecursive(it) } // covers any file under a folder scope not in `list`
+            if (res == null) {
+                done(project, cliFailMsg("revert edits"), NotificationType.ERROR)
+            } else {
+                done(
+                    project,
+                    "Reverted ${res.undone} edit(s)" + if (res.conflicts > 0) " · ${res.conflicts} conflict(s) — undo those individually to force" else "",
+                )
             }
-            list.map { it.file }.distinct().forEach { refreshFile(it) }
-            done(
-                project,
-                "Reverted $undone edit(s)" + if (conflicts > 0) " · $conflicts conflict(s) — undo those individually to force" else "",
-            )
         }
     }
 
@@ -277,6 +282,15 @@ object ReviewOps {
         ApplicationManager.getApplication().invokeLater {
             LocalFileSystem.getInstance().refreshAndFindFileByPath(file)?.let {
                 VfsUtil.markDirtyAndRefresh(true, false, false, it)
+            }
+        }
+    }
+
+    /** Recursively re-sync a path from disk (a folder scope's subtree, or a single file). */
+    fun refreshRecursive(path: String) {
+        ApplicationManager.getApplication().invokeLater {
+            LocalFileSystem.getInstance().refreshAndFindFileByPath(path)?.let {
+                VfsUtil.markDirtyAndRefresh(true, true, false, it)
             }
         }
     }

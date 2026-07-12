@@ -128,6 +128,28 @@ object ObservatoryCli {
             add("--session"); add(session); add("--json")
         }, workDir))
 
+    data class UndoScopeResult(val undone: Int, val conflicts: Int, val total: Int)
+
+    /** Revert every PENDING edit in a scope in ONE call (the CLI's `undo --all` / `undo --under`, backed
+     *  by core.undoScope — the single scoped-revert implementation both editors share). `under` = null
+     *  reverts the whole session; a path reverts a file (exact) or folder (everything beneath). Accepted
+     *  edits are left on disk. Returns null if the CLI call failed. */
+    fun undoScope(session: String, under: String?, workDir: String?): UndoScopeResult? {
+        val args = buildList {
+            add("undo")
+            if (under == null) add("--all") else { add("--under"); add(under) }
+            add("--session"); add(session); add("--json")
+        }
+        val r = run(args, workDir)
+        if (!r.ok) return null
+        return try {
+            val o = JsonParser.parseString(r.stdout).asJsonObject
+            UndoScopeResult(o.get("undone").asInt, o.get("conflicts").asInt, o.get("total").asInt)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     fun clearResolved(session: String, workDir: String?, under: String? = null): Boolean =
         run(
             listOf("clean", "--resolved", "--session", session) + (under?.let { listOf("--under", it) } ?: emptyList()),

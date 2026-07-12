@@ -10,6 +10,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as cp from 'child_process';
 import * as https from 'https';
+import * as os from 'os';
 import * as core from '@claude-observatory/core';
 
 const SCHEME = 'claude-edit'; // in-memory before/after blobs for vscode.diff
@@ -706,11 +707,11 @@ function keepEditsInFile(session: string, file: string, _edits: core.EditRecord[
   );
 }
 
-/** Surgically undo every non-undone edit in one file, newest-first, after a confirm + dirty-buffer
- *  guard (shared by undoFile and undoOpenFile). */
+/** Surgically undo every PENDING edit in one file, newest-first, after a confirm + dirty-buffer
+ *  guard (shared by undoFile and undoOpenFile). Accepted edits are left on disk — revert individually. */
 async function undoEditsInFile(session: string, file: string, _edits: core.EditRecord[]): Promise<void> {
   // Raw log (not the collapsed reps) so we undo every member of a review group in the file, newest-first.
-  const targets = core.readLog(session).filter((e) => e.file === file && e.status !== 'undone').sort((a, b) => b.id - a.id);
+  const targets = core.readLog(session).filter((e) => e.file === file && e.status === 'pending').sort((a, b) => b.id - a.id);
   const base = path.basename(file);
   if (targets.length === 0) {
     vscode.window.showInformationMessage(`Nothing to undo in ${base}.`);
@@ -723,16 +724,10 @@ async function undoEditsInFile(session: string, file: string, _edits: core.EditR
     'Undo all'
   );
   if (choice !== 'Undo all') return;
-  let undone = 0;
-  let conflicts = 0;
-  for (const e of targets) {
-    const r = core.undoEdit(session, e.id);
-    if (r.status === 'conflict') conflicts++;
-    else if (r.ok) undone++;
-  }
+  const res = core.undoScope(session, { under: file });
   vscode.window.showInformationMessage(
-    `Undid ${undone} edit(s) in ${base}` +
-      (conflicts ? ` · ${conflicts} conflict(s) left — undo individually to force-restore` : '') +
+    `Undid ${res.undone} edit(s) in ${base}` +
+      (res.conflicts ? ` · ${res.conflicts} conflict(s) left — undo individually to force-restore` : '') +
       '.'
   );
 }
@@ -746,12 +741,13 @@ function keepEditsUnder(session: string, scope: string, label: string): void {
   );
 }
 
-/** Revert every non-undone edit at-or-beneath a path, newest-first, after a confirm + dirty-buffer
- *  guard (raw log, so every member of a review group in scope is undone). */
+/** Revert every PENDING edit at-or-beneath a path, newest-first, after a confirm + dirty-buffer
+ *  guard (raw log, so every member of a review group in scope is undone). Accepted edits are left on
+ *  disk — revert individually. */
 async function undoEditsUnder(session: string, scope: string, label: string): Promise<void> {
   const targets = core
     .readLog(session)
-    .filter((r) => r.status !== 'undone' && core.isUnderPath(r.file, scope))
+    .filter((r) => r.status === 'pending' && core.isUnderPath(r.file, scope))
     .sort((a, b) => b.id - a.id);
   if (targets.length === 0) {
     vscode.window.showInformationMessage(`Nothing to revert in ${label}.`);
@@ -773,16 +769,10 @@ async function undoEditsUnder(session: string, scope: string, label: string): Pr
     'Revert all'
   );
   if (choice !== 'Revert all') return;
-  let undone = 0;
-  let conflicts = 0;
-  for (const t of targets) {
-    const r = core.undoEdit(session, t.id);
-    if (r.status === 'conflict') conflicts++;
-    else if (r.ok) undone++;
-  }
+  const res = core.undoScope(session, { under: scope });
   vscode.window.showInformationMessage(
-    `Reverted ${undone} edit(s) in ${label}` +
-      (conflicts ? ` · ${conflicts} conflict(s) left (revert individually to force)` : '') +
+    `Reverted ${res.undone} edit(s) in ${label}` +
+      (res.conflicts ? ` · ${res.conflicts} conflict(s) left (revert individually to force)` : '') +
       '.'
   );
 }
@@ -802,7 +792,7 @@ function keepAllSession(session: string): void {
 }
 
 async function undoAllSession(session: string): Promise<void> {
-  const targets = core.readLog(session).filter((r) => r.status !== 'undone').sort((a, b) => b.id - a.id);
+  const targets = core.readLog(session).filter((r) => r.status === 'pending').sort((a, b) => b.id - a.id);
   if (targets.length === 0) {
     vscode.window.showInformationMessage('Nothing to revert.');
     return;
@@ -823,16 +813,10 @@ async function undoAllSession(session: string): Promise<void> {
     'Revert all'
   );
   if (choice !== 'Revert all') return;
-  let undone = 0;
-  let conflicts = 0;
-  for (const t of targets) {
-    const r = core.undoEdit(session, t.id);
-    if (r.status === 'conflict') conflicts++;
-    else if (r.ok) undone++;
-  }
+  const res = core.undoScope(session);
   vscode.window.showInformationMessage(
-    `Reverted ${undone} edit(s)` +
-      (conflicts ? ` · ${conflicts} conflict(s) left (revert individually to force)` : '') +
+    `Reverted ${res.undone} edit(s)` +
+      (res.conflicts ? ` · ${res.conflicts} conflict(s) left (revert individually to force)` : '') +
       '.'
   );
 }
@@ -1645,8 +1629,67 @@ function fetchLatestRelease(): Promise<any> {
   });
 }
 
-/** Compare the running extension version against the newest GitHub Release; if newer, offer the
- *  .vsix. `manual` = triggered from the command palette (report up-to-date / errors; ignore throttle
+/** True if `bin` resolves on PATH (decides whether we can auto-install the .vsix vs. open a browser). */
+function isOnPath(bin: string): boolean {
+  return cp.spawnSync(process.platform === 'win32' ? 'where' : 'which', [bin], { stdio: 'ignore' }).status === 0;
+}
+
+/** Download `url` (following redirects) to `dest`. Rejects on any non-200 / network error. */
+function downloadFile(url: string, dest: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const get = (u: string, redirs: number): void => {
+      https
+        .get(u, { headers: { 'User-Agent': 'claude-observatory-vscode' } }, (res) => {
+          const code = res.statusCode || 0;
+          if (code >= 300 && code < 400 && res.headers.location && redirs > 0) {
+            res.resume();
+            return get(res.headers.location, redirs - 1);
+          }
+          if (code !== 200) {
+            res.resume();
+            return reject(new Error(`http ${code}`));
+          }
+          const file = fs.createWriteStream(dest);
+          res.pipe(file);
+          file.on('finish', () => file.close(() => resolve()));
+          file.on('error', reject);
+        })
+        .on('error', reject);
+    };
+    get(url, 5);
+  });
+}
+
+/** Download the .vsix and install it via the `code` CLI (--force), then offer a window reload. Falls
+ *  back to opening the download in a browser if anything fails. */
+async function installVsixUpdate(url: string, latest: string): Promise<void> {
+  try {
+    await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: `Installing Claude Observatory ${latest}…` },
+      async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-observatory-'));
+        const dest = path.join(dir, `claude-observatory-${latest}.vsix`);
+        await downloadFile(url, dest);
+        const r = cp.spawnSync('code', ['--install-extension', dest, '--force'], { encoding: 'utf8' });
+        if (r.status !== 0) throw new Error(r.stderr?.trim() || `code --install-extension exited ${r.status}`);
+      }
+    );
+    const reload = await vscode.window.showInformationMessage(
+      `Claude Observatory ${latest} installed. Reload the window to activate it.`,
+      'Reload Window'
+    );
+    if (reload === 'Reload Window') void vscode.commands.executeCommand('workbench.action.reloadWindow');
+  } catch (e) {
+    const pick = await vscode.window.showWarningMessage(
+      `Couldn't auto-install the update (${String((e as Error)?.message || e)}). Download the .vsix instead?`,
+      'Download .vsix'
+    );
+    if (pick === 'Download .vsix') void vscode.env.openExternal(vscode.Uri.parse(url));
+  }
+}
+
+/** Compare the running extension version against the newest GitHub Release; if newer, offer to install
+ *  the .vsix. `manual` = triggered from the command palette (report up-to-date / errors; ignore throttle
  *  + "skip this version"). */
 async function checkForUpdate(context: vscode.ExtensionContext, manual: boolean): Promise<void> {
   // `context.extension` is only present in a real extension host (absent under the smoke-test mock) —
@@ -1679,13 +1722,19 @@ async function checkForUpdate(context: vscode.ExtensionContext, manual: boolean)
   if (!manual && context.globalState.get<string>('updateCheck.skip') === latest) return; // dismissed
   const vsix = (release.assets || []).find((a: any) => /\.vsix$/i.test(a.name));
   const downloadUrl = vsix?.browser_download_url || release.html_url;
+  // Prefer a real one-click install when we can drive the `code` CLI; otherwise fall back to opening
+  // the .vsix in a browser + manual "Install from VSIX…".
+  const canInstall = Boolean(vsix) && isOnPath('code');
+  const primary = canInstall ? 'Update now' : 'Download .vsix';
   const choice = await vscode.window.showInformationMessage(
     `Claude Observatory ${latest} is available (you have ${current}).`,
-    'Download .vsix',
+    primary,
     'Release notes',
     'Skip this version'
   );
-  if (choice === 'Download .vsix') {
+  if (choice === 'Update now') {
+    await installVsixUpdate(vsix.browser_download_url, latest);
+  } else if (choice === 'Download .vsix') {
     vscode.env.openExternal(vscode.Uri.parse(downloadUrl));
     vscode.window.showInformationMessage(
       'After it downloads: Extensions view → ⋯ → “Install from VSIX…”, then pick the file (reload when prompted).'
@@ -1765,7 +1814,7 @@ export function activate(context: vscode.ExtensionContext): void {
     mkStatusBtn('$(debug-step-back)', 'Claude Observatory: review previous pending edit', 'claudeObservatory.reviewPrev', 89),
     mkStatusBtn('$(debug-step-over)', 'Claude Observatory: review next pending edit', 'claudeObservatory.reviewNext', 88),
     mkStatusBtn('$(check-all)', 'Claude Observatory: accept all edits', 'claudeObservatory.keepAll', 87),
-    mkStatusBtn('$(discard)', 'Claude Observatory: revert all edits', 'claudeObservatory.undoAll', 86),
+    mkStatusBtn('$(discard)', 'Claude Observatory: revert all pending edits (accepted edits are kept)', 'claudeObservatory.undoAll', 86),
     mkStatusBtn('$(search)', 'Claude Observatory: search edits', 'claudeObservatory.searchEdits', 85),
   ];
   const updateStatusItem = () => {

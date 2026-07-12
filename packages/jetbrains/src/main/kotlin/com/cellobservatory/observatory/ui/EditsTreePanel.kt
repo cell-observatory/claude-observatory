@@ -194,7 +194,7 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
                 ReviewOps.keepAll(project, s, service().log().filter { it.file == vf.path }, vf.name)
             },
             fileScopedAction("Revert All Edits in Current File", AllIcons.Actions.Cancel) { s, vf ->
-                ReviewOps.undoAll(project, s, service().log().filter { it.file == vf.path }, vf.name)
+                ReviewOps.undoAll(project, s, service().log().filter { it.file == vf.path }, vf.name, vf.path)
             },
             action("Clear Resolved Edits", AllIcons.Actions.GC) {
                 withSession { s ->
@@ -249,7 +249,7 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
             selectedFile()?.let { f -> withSession { s -> ReviewOps.keepAll(project, s, f.edits, File(f.file).name) } }
         },
         action("Undo All in File", AllIcons.Actions.Rollback) {
-            selectedFile()?.let { f -> withSession { s -> ReviewOps.undoAll(project, s, f.edits, File(f.file).name) } }
+            selectedFile()?.let { f -> withSession { s -> ReviewOps.undoAll(project, s, f.edits, File(f.file).name, f.file) } }
         },
         action("Clear Resolved in File", AllIcons.Actions.GC) {
             selectedFile()?.let { f ->
@@ -262,7 +262,7 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
             selectedFolder()?.let { f -> withSession { s -> ReviewOps.keepAll(project, s, f.edits, f.label) } }
         },
         action("Revert All in Folder", AllIcons.Actions.Rollback) {
-            selectedFolder()?.let { f -> withSession { s -> ReviewOps.undoAll(project, s, f.edits, f.label) } }
+            selectedFolder()?.let { f -> withSession { s -> ReviewOps.undoAll(project, s, f.edits, f.label, f.path) } }
         },
         action("Clear Resolved in Folder", AllIcons.Actions.GC) {
             selectedFolder()?.let { f ->

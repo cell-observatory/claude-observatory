@@ -65,7 +65,7 @@ class ObservatoryEditorBanner : EditorNotificationProvider, DumbAware {
         }.toolTipText = "Accept all edits in this file"
         panel.createActionLabel("↩") {
             service.currentSession()?.let { s ->
-                ReviewOps.undoAll(project, s, service.log().filter { it.file == file.path }, file.name)
+                ReviewOps.undoAll(project, s, service.log().filter { it.file == file.path }, file.name, file.path)
             }
         }.toolTipText = "Revert all edits in this file"
         panel.createActionLabel("⌕") {

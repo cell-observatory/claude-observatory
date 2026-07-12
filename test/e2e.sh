@@ -224,6 +224,20 @@ ok "pkgA edits gone from the log; pkgB still present"    "cc list --json | jq -e
 UOUT=$(cc undo --under "$FBP")
 ok "undo --under file reverts that file's edit"          "echo \"\$UOUT\" | grep -qiE 'reverted 1'"
 ok "pkgB/b.txt restored to original 'b1'"                "grep -qx 'b1' '$FBP'"
+# undo --under reverts PENDING edits only — an already-Accepted (kept) edit is left on disk.
+mkdir -p "$WS/pkgC"
+FCP="$WS/pkgC/p.txt"; FCK="$WS/pkgC/k.txt"
+printf 'p1\n' > "$FCP"; printf 'k1\n' > "$FCK"
+hook PreToolUse Edit "$FCP"; node "$SETLINE" "$FCP" 0 "P2"; hook PostToolUse Edit "$FCP"   # pkgC/p (stays pending)
+hook PreToolUse Edit "$FCK"; node "$SETLINE" "$FCK" 0 "K2"; hook PostToolUse Edit "$FCK"   # pkgC/k (accepted)
+cc keep --under "$FCK" >/dev/null                                                          # accept just k.txt
+RUOUT=$(cc undo --under "$WS/pkgC")
+ok "undo --under folder reverts only the 1 pending edit"  "echo \"\$RUOUT\" | grep -qiE 'reverted 1'"
+ok "pending pkgC/p.txt restored to original 'p1'"          "grep -qx 'p1' '$FCP'"
+ok "accepted pkgC/k.txt left on disk (K2)"                 "grep -q 'K2' '$FCK'"
+ok "accepted pkgC/k.txt is still status=kept"              "cc list --json | jq -e '[.edits[]|select((.file|endswith(\"pkgC/k.txt\")) and .status==\"kept\")]|length==1' >/dev/null"
+# undo --all is the session-wide bulk revert (mirror of keep --all) — emits the same scoped shape.
+ok "undo --all --json emits {undone,conflicts,total}"      "cc undo --all --json | jq -e 'has(\"undone\") and has(\"conflicts\") and has(\"total\")' >/dev/null"
 
 echo "════════════════════════════════════════════════════════"
 echo "E2E RESULT: $pass passed, $fail failed"
