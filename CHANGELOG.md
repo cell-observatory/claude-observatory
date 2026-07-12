@@ -5,6 +5,29 @@ All notable changes to Claude Observatory are recorded here, following
 Per-tag release artifacts and auto-generated notes are on the
 [Releases page](https://github.com/cell-observatory/claude-observatory/releases).
 
+## [0.5.3] — 2026-07-12
+
+Bug-fix: `update` now actually refreshes the VS Code extension, and never skips an installed extension
+in silence.
+
+### Fixed — `update` silently skipped the installed VS Code extension
+
+`claude-observatory update` detected the VS Code extension only when the `code` CLI was on PATH — which
+on macOS it usually isn't — so it skipped VS Code entirely, and said nothing, even with the extension
+installed. It now detects the extension by its install directory (the way it already detects JetBrains
+plugin dirs) and resolves the `code` / `cursor` / `codium` / `windsurf` CLI from app-bundle locations
+when it's off PATH, so it can apply the update. If an extension is installed but no CLI can be found to
+update it, `update` prints an actionable fix (install the shell `code` command, or the `.vsix` from the
+release) and **exits non-zero** — never a silent skip. The same "surface it, don't swallow it" rule now
+applies to the JetBrains path too (missing `unzip` / asset / a failed extract is reported and non-zero,
+not a quiet success).
+
+### Changed — in-editor "Update now" no longer needs the `code` CLI
+
+The VS Code notifier's one-click **Update now** installs the downloaded `.vsix` via VS Code's own
+extension service (`workbench.extensions.installExtension`) instead of shelling out to `code`, so it
+works regardless of PATH.
+
 ## [0.5.2] — 2026-07-11
 
 Streamlines the marketplace-free update path and tightens revert semantics. No breaking changes — the

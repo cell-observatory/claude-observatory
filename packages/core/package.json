@@ -1,6 +1,6 @@
 {
   "name": "@claude-observatory/core",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "private": true,
   "description": "Capture + git-free snapshot store + surgical undo engine for Claude Observatory. No model calls.",
   "main": "dist/index.js",

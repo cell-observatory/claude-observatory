@@ -913,10 +913,18 @@ async function cmdSuggest(args: string[]): Promise<void> {
 // --- self-update: fetch the latest GitHub Release and reinstall the CLI (no registry, no deps) ---
 
 const RELEASE_REPO = 'cell-observatory/claude-observatory';
-// The VS Code-family extension id (publisher.name) and the editor CLIs that share `code`'s
-// `--install-extension` / `--list-extensions` interface, so `update` can refresh whichever is present.
+// The VS Code-family extension id (publisher.name). We detect the extension by its install DIR (like
+// the JetBrains plugin dirs) so detection never depends on the editor CLI being on PATH; the CLI is
+// only needed to APPLY the update, and is resolved from app-bundle locations when it's off PATH.
 const VSCODE_EXT_ID = 'claude-observatory.claude-observatory-vscode';
-const VSCODE_FAMILY_CLIS = ['code', 'cursor', 'codium', 'windsurf'];
+// One row per VS Code-family editor: where it keeps installed extensions (relative to $HOME), the CLI
+// that drives `--install-extension`, and the macOS .app name used to locate that CLI when off PATH.
+const VSCODE_EDITORS: { label: string; extDirs: string[]; cli: string; app: string }[] = [
+  { label: 'VS Code', extDirs: ['.vscode/extensions', '.vscode-server/extensions'], cli: 'code', app: 'Visual Studio Code' },
+  { label: 'Cursor', extDirs: ['.cursor/extensions'], cli: 'cursor', app: 'Cursor' },
+  { label: 'VSCodium', extDirs: ['.vscodium/extensions'], cli: 'codium', app: 'VSCodium' },
+  { label: 'Windsurf', extDirs: ['.windsurf/extensions'], cli: 'windsurf', app: 'Windsurf' },
+];
 // The JetBrains plugin unzips to this dir inside each IDE's plugins/ folder; we drop a version
 // sentinel beside it so a later `update` can tell whether the installed plugin is already current.
 const JB_PLUGIN_DIRNAME = 'claude-observatory-jetbrains';
@@ -1000,16 +1008,71 @@ async function updateCliBinary(assets: ReleaseAsset[], latest: string, current: 
 
 /** Editors in the VS Code family (code/cursor/…) on PATH that already have our extension, with the
  *  installed version parsed from `--list-extensions --show-versions` (ids are lowercased by VS Code). */
-function vscodeHolders(): { cli: string; version: string }[] {
-  const cp = require('child_process');
-  const prefix = VSCODE_EXT_ID.toLowerCase() + '@';
-  const out: { cli: string; version: string }[] = [];
-  for (const cli of VSCODE_FAMILY_CLIS) {
-    if (!onPath(cli)) continue;
-    const r = cp.spawnSync(cli, ['--list-extensions', '--show-versions'], { encoding: 'utf8' });
-    if (r.status !== 0 || !r.stdout) continue;
-    const line = String(r.stdout).split(/\r?\n/).find((l: string) => l.toLowerCase().startsWith(prefix));
-    if (line) out.push({ cli, version: line.slice(prefix.length).trim() });
+/** Resolve an editor's CLI to an absolute path: PATH first, else known app-bundle locations (macOS
+ *  .app bundles, Windows Programs dirs, common Linux dirs). Returns null when not found — the extension
+ *  is still DETECTED via its dir, so a null means "installed but we can't drive an update", which the
+ *  caller must SURFACE, never swallow. Mirrors core.resolveBin (candidates → PATH fallback). */
+function resolveEditorCli(cli: string, app: string): string | null {
+  if (onPath(cli)) return cli; // bare name; spawnSync resolves it via PATH
+  const fs = require('fs');
+  const path = require('path');
+  const os = require('os');
+  const home = os.homedir();
+  const cands: string[] = [];
+  if (process.platform === 'darwin') {
+    for (const root of ['/Applications', path.join(home, 'Applications')]) {
+      cands.push(path.join(root, `${app}.app`, 'Contents', 'Resources', 'app', 'bin', cli));
+    }
+  } else if (process.platform === 'win32') {
+    if (process.env.LOCALAPPDATA) cands.push(path.join(process.env.LOCALAPPDATA, 'Programs', app, 'bin', `${cli}.cmd`));
+    if (process.env.ProgramFiles) cands.push(path.join(process.env.ProgramFiles, app, 'bin', `${cli}.cmd`));
+  } else {
+    cands.push(`/usr/share/${cli}/bin/${cli}`, `/usr/bin/${cli}`, `/snap/bin/${cli}`, path.join(home, '.local', 'bin', cli));
+  }
+  for (const p of cands) {
+    try { if (fs.existsSync(p)) return p; } catch { /* ignore */ }
+  }
+  return null;
+}
+
+/** Parse the version out of a VS Code extension folder named `<id>-<version>` (fallback: its
+ *  package.json). Returns null if neither yields a semver. */
+function versionFromExtFolder(folderPath: string, folderName: string): string | null {
+  const suffix = folderName.slice(VSCODE_EXT_ID.length + 1); // drop the `<id>-` prefix
+  if (/^\d+\.\d+\.\d+/.test(suffix)) return suffix;
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    return JSON.parse(fs.readFileSync(path.join(folderPath, 'package.json'), 'utf8')).version || null;
+  } catch {
+    return null;
+  }
+}
+
+/** VS Code-family installs of our extension, detected by their extensions DIR (CLI-independent, like
+ *  the JetBrains plugin dirs). `version` = the newest install folder for that editor; `cli` = the
+ *  resolved absolute CLI path to apply an update, or null if none was found. */
+function vscodeInstalls(): { label: string; version: string; cli: string | null }[] {
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  const fs = require('fs');
+  const path = require('path');
+  const os = require('os');
+  const home = os.homedir();
+  const out: { label: string; version: string; cli: string | null }[] = [];
+  for (const ed of VSCODE_EDITORS) {
+    let best: string | null = null; // newest version across this editor's extension dirs
+    for (const rel of ed.extDirs) {
+      const dir = path.join(home, rel);
+      let entries: string[] = [];
+      try { entries = fs.readdirSync(dir); } catch { continue; }
+      for (const e of entries) {
+        // VS Code names extension folders `<publisher>.<name>-<version>` (lowercased).
+        if (!e.toLowerCase().startsWith(VSCODE_EXT_ID + '-')) continue;
+        const v = versionFromExtFolder(path.join(dir, e), e);
+        if (v && (best === null || core.isNewer(v, best))) best = v;
+      }
+    }
+    if (best !== null) out.push({ label: ed.label, version: best, cli: resolveEditorCli(ed.cli, ed.app) });
   }
   return out;
 }
@@ -1020,34 +1083,48 @@ async function refreshVscodeExtension(
   assets: ReleaseAsset[],
   latest: string,
   force: boolean
-): Promise<'updated' | 'current' | 'absent'> {
+): Promise<'updated' | 'current' | 'blocked' | 'absent'> {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
-  const holders = vscodeHolders();
-  if (holders.length === 0) return 'absent';
-  const stale = holders.filter((h) => force || core.isNewer(latest, h.version));
+  const installs = vscodeInstalls();
+  if (installs.length === 0) return 'absent'; // genuinely not installed — the only OK silent case
+  const stale = installs.filter((h) => force || core.isNewer(latest, h.version));
   if (stale.length === 0) {
-    process.stdout.write(c.green('✓ ') + `VS Code extension up to date (${holders[0].version})\n`);
+    process.stdout.write(c.green('✓ ') + `VS Code extension up to date (${installs[0].version})\n`);
     return 'current';
   }
-  const vsix = assets.find((a) => /\.vsix$/i.test(a.name));
-  if (!vsix) {
-    process.stdout.write(c.yellow(`  ! release v${latest} has no .vsix asset — skipped the VS Code extension\n`));
-    return 'current';
+  // Installed but no CLI could be located: SURFACE it loudly with a fix — never skip in silence.
+  const noCli = stale.filter((h) => !h.cli);
+  for (const h of noCli) {
+    process.stdout.write(
+      c.yellow('  ! ') +
+        `${h.label} extension ${h.version} is installed, but its CLI wasn't found on PATH or in the usual app locations — can't auto-update it.\n` +
+        c.dim(`    Fix: in ${h.label}, ⇧⌘P → "Shell Command: Install 'code' command in PATH", then re-run \`claude-observatory update\`;\n`) +
+        c.dim(`    or install claude-observatory-vscode-v${latest}.vsix from the release manually.\n`)
+    );
   }
-  const cp = require('child_process');
-  const dest = await downloadAsset(vsix);
+  const actionable = stale.filter((h) => h.cli);
   let installed = 0;
-  for (const h of stale) {
-    const r = cp.spawnSync(h.cli, ['--install-extension', dest, '--force'], { stdio: 'inherit' });
-    if (r.status === 0) {
-      process.stdout.write(c.green('✓ ') + `VS Code extension ${h.version} → ${latest} via \`${h.cli}\`\n`);
-      installed++;
+  if (actionable.length) {
+    const vsix = assets.find((a) => /\.vsix$/i.test(a.name));
+    if (!vsix) {
+      process.stdout.write(c.yellow(`  ! release v${latest} has no .vsix asset — could not update the VS Code extension\n`));
     } else {
-      process.stdout.write(c.yellow(`  ! \`${h.cli} --install-extension\` failed — install the .vsix manually from the release\n`));
+      const cp = require('child_process');
+      const dest = await downloadAsset(vsix);
+      for (const h of actionable) {
+        const r = cp.spawnSync(h.cli as string, ['--install-extension', dest, '--force'], { stdio: 'inherit' });
+        if (r.status === 0) {
+          process.stdout.write(c.green('✓ ') + `${h.label} extension ${h.version} → ${latest}\n`);
+          installed++;
+        } else {
+          process.stdout.write(c.yellow(`  ! ${h.label} --install-extension failed — install the .vsix manually from the release\n`));
+        }
+      }
+      if (installed) process.stdout.write(c.dim('  fully quit the editor (⌘Q) once so the activity-bar icon refreshes.\n'));
     }
   }
-  if (installed) process.stdout.write(c.dim('  fully quit the editor (⌘Q) once so the activity-bar icon refreshes.\n'));
-  return installed ? 'updated' : 'current';
+  // 'blocked' when any stale install couldn't be applied (no CLI, no asset, or a failed install).
+  return installed === stale.length ? 'updated' : 'blocked';
 }
 
 /** JetBrains plugin dirs across platforms — ports the detection in scripts/install-jetbrains.sh so
@@ -1119,7 +1196,7 @@ async function refreshJetbrainsPlugin(
   assets: ReleaseAsset[],
   latest: string,
   force: boolean
-): Promise<'updated' | 'current' | 'absent'> {
+): Promise<'updated' | 'current' | 'blocked' | 'absent'> {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const fs = require('fs');
   const path = require('path');
@@ -1137,13 +1214,13 @@ async function refreshJetbrainsPlugin(
     return 'current';
   }
   if (process.platform !== 'win32' && !onPath('unzip')) {
-    process.stdout.write(c.yellow('  ! `unzip` not found — skipped the JetBrains plugin (install unzip, then re-run)\n'));
-    return 'current';
+    process.stdout.write(c.yellow(`  ! JetBrains plugin is out of date but \`unzip\` was not found — can't update it (install unzip, then re-run)\n`));
+    return 'blocked';
   }
   const zip = assets.find((a) => /jetbrains.*\.zip$/i.test(a.name));
   if (!zip) {
-    process.stdout.write(c.yellow(`  ! release v${latest} has no JetBrains .zip asset — skipped the plugin\n`));
-    return 'current';
+    process.stdout.write(c.yellow(`  ! release v${latest} has no JetBrains .zip asset — could not update the plugin\n`));
+    return 'blocked';
   }
   const dest = await downloadAsset(zip);
   let installed = 0;
@@ -1160,7 +1237,7 @@ async function refreshJetbrainsPlugin(
     }
   }
   if (installed) process.stdout.write(c.dim('  fully restart the IDE (⌘Q → reopen) — a running JVM can’t hot-swap plugin classes.\n'));
-  return installed ? 'updated' : 'current';
+  return installed === stale.length ? 'updated' : 'blocked'; // any dir that failed to extract → surface it
 }
 
 /**
@@ -1190,10 +1267,12 @@ async function cmdUpdate(args: string[]): Promise<void> {
   if (checkOnly) {
     process.stdout.write(cliStale ? c.yellow(`CLI: update available ${current} → ${latest}\n`) : c.green(`CLI: up to date (${current})\n`));
     if (!cliOnly) {
-      const vs = vscodeHolders();
+      const vs = vscodeInstalls();
       if (vs.length === 0) process.stdout.write(c.dim('VS Code: extension not detected\n'));
-      else for (const h of vs)
-        process.stdout.write(core.isNewer(latest, h.version) ? c.yellow(`VS Code (${h.cli}): ${h.version} → ${latest}\n`) : c.green(`VS Code (${h.cli}): up to date (${h.version})\n`));
+      else for (const h of vs) {
+        if (!core.isNewer(latest, h.version)) process.stdout.write(c.green(`${h.label}: up to date (${h.version})\n`));
+        else process.stdout.write(c.yellow(`${h.label}: ${h.version} → ${latest}`) + (h.cli ? '\n' : c.yellow('  (installed but no CLI found to update — install the shell `code` command)\n')));
+      }
       const fs = require('fs');
       const path = require('path');
       const jb = jetbrainsPluginDirs().filter((d) => fs.existsSync(path.join(d, JB_PLUGIN_DIRNAME)));
@@ -1217,6 +1296,12 @@ async function cmdUpdate(args: string[]): Promise<void> {
   if (cliStale) await updateCliBinary(assets, latest, current);
   const vscode = await refreshVscodeExtension(assets, latest, force);
   const jetbrains = await refreshJetbrainsPlugin(assets, latest, force);
+  if (vscode === 'blocked' || jetbrains === 'blocked') {
+    // Something is installed but couldn't be updated — never let this pass as success/silence.
+    process.stdout.write(c.yellow('⚠ ') + 'an installed extension could not be updated (see the note above).\n');
+    process.exitCode = 1;
+    return;
+  }
   if (!(cliStale || vscode === 'updated' || jetbrains === 'updated')) {
     if (vscode === 'absent' && jetbrains === 'absent') {
       process.stdout.write(
