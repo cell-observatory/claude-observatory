@@ -1629,11 +1629,6 @@ function fetchLatestRelease(): Promise<any> {
   });
 }
 
-/** True if `bin` resolves on PATH (decides whether we can auto-install the .vsix vs. open a browser). */
-function isOnPath(bin: string): boolean {
-  return cp.spawnSync(process.platform === 'win32' ? 'where' : 'which', [bin], { stdio: 'ignore' }).status === 0;
-}
-
 /** Download `url` (following redirects) to `dest`. Rejects on any non-200 / network error. */
 function downloadFile(url: string, dest: string): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -1660,8 +1655,9 @@ function downloadFile(url: string, dest: string): Promise<void> {
   });
 }
 
-/** Download the .vsix and install it via the `code` CLI (--force), then offer a window reload. Falls
- *  back to opening the download in a browser if anything fails. */
+/** Download the .vsix and install it via VS Code's own extension service (no `code` CLI needed — works
+ *  regardless of PATH), then offer a window reload. Falls back to opening the download in a browser if
+ *  anything fails. */
 async function installVsixUpdate(url: string, latest: string): Promise<void> {
   try {
     await vscode.window.withProgress(
@@ -1670,8 +1666,8 @@ async function installVsixUpdate(url: string, latest: string): Promise<void> {
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-observatory-'));
         const dest = path.join(dir, `claude-observatory-${latest}.vsix`);
         await downloadFile(url, dest);
-        const r = cp.spawnSync('code', ['--install-extension', dest, '--force'], { encoding: 'utf8' });
-        if (r.status !== 0) throw new Error(r.stderr?.trim() || `code --install-extension exited ${r.status}`);
+        // VS Code's built-in installer accepts a .vsix file Uri — no dependency on the `code` CLI.
+        await vscode.commands.executeCommand('workbench.extensions.installExtension', vscode.Uri.file(dest));
       }
     );
     const reload = await vscode.window.showInformationMessage(
@@ -1724,7 +1720,7 @@ async function checkForUpdate(context: vscode.ExtensionContext, manual: boolean)
   const downloadUrl = vsix?.browser_download_url || release.html_url;
   // Prefer a real one-click install when we can drive the `code` CLI; otherwise fall back to opening
   // the .vsix in a browser + manual "Install from VSIX…".
-  const canInstall = Boolean(vsix) && isOnPath('code');
+  const canInstall = Boolean(vsix); // installed via VS Code's own service — no `code` CLI needed
   const primary = canInstall ? 'Update now' : 'Download .vsix';
   const choice = await vscode.window.showInformationMessage(
     `Claude Observatory ${latest} is available (you have ${current}).`,
