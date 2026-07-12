@@ -172,6 +172,38 @@ test('redo --force: reapplyFile marks dropped later same-file edits undone', () 
   assert.equal(core.findRecord(S, 2).status, 'undone', '#2 dropped from disk -> undone (was kept)');
 });
 
+test('undoScope: reverts pending only, honoring under / fileSubstr / whole-session', () => {
+  // The single scoped-revert implementation behind CLI `undo --all|--file|--under` and the editors'
+  // folder/file/session Revert. Accepted (kept) edits are never swept; a sibling folder is never swept.
+  freshHome();
+  const S = 'scope';
+  const dir = tmpWork();
+  const A = path.join(dir, 'pkg', 'a.txt');
+  const B = path.join(dir, 'pkg', 'sub', 'b.txt');
+  const C = path.join(dir, 'other', 'c.txt');
+  seedEdit(S, A, 'a1\n', 'a2\n'); // #1 pending, under pkg/
+  seedEdit(S, B, 'b1\n', 'b2\n'); // #2 pending, under pkg/sub/
+  seedEdit(S, C, 'c1\n', 'c2\n'); // #3 pending, under other/
+  core.setStatus(S, 2, 'kept'); // #2 accepted -> excluded from every scope
+  for (const [f, v] of [[A, 'a2\n'], [B, 'b2\n'], [C, 'c2\n']]) {
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(f, v);
+  }
+  // Folder scope pkg/: only #1 is pending under it (#2 is kept); #3 is a sibling folder.
+  const r1 = core.undoScope(S, { under: path.join(dir, 'pkg') });
+  assert.deepEqual([r1.undone, r1.total], [1, 1], 'pkg/ scope reverts only the 1 pending edit under it');
+  assert.equal(fs.readFileSync(A, 'utf8'), 'a1\n', 'A reverted');
+  assert.equal(core.findRecord(S, 2).status, 'kept', 'accepted #2 left kept + on disk');
+  assert.equal(fs.readFileSync(C, 'utf8'), 'c2\n', 'C (sibling folder) untouched');
+  // fileSubstr scope: matches c.txt only.
+  const r2 = core.undoScope(S, { fileSubstr: 'c.txt' });
+  assert.deepEqual([r2.undone, r2.total], [1, 1], 'fileSubstr reverts the matching pending edit');
+  assert.equal(fs.readFileSync(C, 'utf8'), 'c1\n', 'C reverted by fileSubstr');
+  // Whole session: nothing pending remains (#1,#3 undone; #2 kept).
+  const r3 = core.undoScope(S);
+  assert.deepEqual([r3.undone, r3.total], [0, 0], 'no pending left session-wide');
+});
+
 test('undo: new-file create is deleted; second undo is a noop', () => {
   freshHome();
   const S = 'newfile';

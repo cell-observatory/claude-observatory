@@ -149,7 +149,7 @@ class FileHistoryPanel(private val project: Project) : SimpleToolWindowPanel(tru
 
     private fun revertFile() = withSession { s ->
         val file = currentFile ?: return@withSession
-        ReviewOps.undoAll(project, s, service().log().filter { it.file == file.path }, file.name)
+        ReviewOps.undoAll(project, s, service().log().filter { it.file == file.path }, file.name, file.path)
     }
 
     private fun withSession(block: (String) -> Unit) {

@@ -34,6 +34,15 @@ also gains a real one-click **Update now** (download + install + reload), fallin
 already-**Accepted** (kept) changes on disk — revert an accepted edit individually if you want it gone.
 Applies identically across the CLI (`undo --under`), VS Code, and JetBrains.
 
+### Added — `undo` bulk flags + a palette command
+
+- `claude-observatory undo` gains `--all` (revert every pending edit in the session) and
+  `--file <substr>`, matching `keep`'s bulk surface. Every bulk/scoped revert (CLI, VS Code, and
+  JetBrains) now runs through one shared `core.undoScope` implementation, so the three front-ends
+  can't drift.
+- VS Code exposes **Claude Observatory: Show suggestions** in the command palette (previously
+  reachable only by clicking a suggestion row).
+
 ### Fixed — force-restore keeps review status consistent with disk
 
 A `--force` per-file restore (and its redo mirror) drops later edits to the same file from disk, but

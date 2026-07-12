@@ -724,16 +724,10 @@ async function undoEditsInFile(session: string, file: string, _edits: core.EditR
     'Undo all'
   );
   if (choice !== 'Undo all') return;
-  let undone = 0;
-  let conflicts = 0;
-  for (const e of targets) {
-    const r = core.undoEdit(session, e.id);
-    if (r.status === 'conflict') conflicts++;
-    else if (r.ok) undone++;
-  }
+  const res = core.undoScope(session, { under: file });
   vscode.window.showInformationMessage(
-    `Undid ${undone} edit(s) in ${base}` +
-      (conflicts ? ` · ${conflicts} conflict(s) left — undo individually to force-restore` : '') +
+    `Undid ${res.undone} edit(s) in ${base}` +
+      (res.conflicts ? ` · ${res.conflicts} conflict(s) left — undo individually to force-restore` : '') +
       '.'
   );
 }
@@ -775,16 +769,10 @@ async function undoEditsUnder(session: string, scope: string, label: string): Pr
     'Revert all'
   );
   if (choice !== 'Revert all') return;
-  let undone = 0;
-  let conflicts = 0;
-  for (const t of targets) {
-    const r = core.undoEdit(session, t.id);
-    if (r.status === 'conflict') conflicts++;
-    else if (r.ok) undone++;
-  }
+  const res = core.undoScope(session, { under: scope });
   vscode.window.showInformationMessage(
-    `Reverted ${undone} edit(s) in ${label}` +
-      (conflicts ? ` · ${conflicts} conflict(s) left (revert individually to force)` : '') +
+    `Reverted ${res.undone} edit(s) in ${label}` +
+      (res.conflicts ? ` · ${res.conflicts} conflict(s) left (revert individually to force)` : '') +
       '.'
   );
 }
@@ -825,16 +813,10 @@ async function undoAllSession(session: string): Promise<void> {
     'Revert all'
   );
   if (choice !== 'Revert all') return;
-  let undone = 0;
-  let conflicts = 0;
-  for (const t of targets) {
-    const r = core.undoEdit(session, t.id);
-    if (r.status === 'conflict') conflicts++;
-    else if (r.ok) undone++;
-  }
+  const res = core.undoScope(session);
   vscode.window.showInformationMessage(
-    `Reverted ${undone} edit(s)` +
-      (conflicts ? ` · ${conflicts} conflict(s) left (revert individually to force)` : '') +
+    `Reverted ${res.undone} edit(s)` +
+      (res.conflicts ? ` · ${res.conflicts} conflict(s) left (revert individually to force)` : '') +
       '.'
   );
 }

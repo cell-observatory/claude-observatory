@@ -301,6 +301,11 @@
         "category": "Claude Observatory"
       },
       {
+        "command": "claudeObservatory.showSuggestions",
+        "title": "Show suggestions",
+        "category": "Claude Observatory"
+      },
+      {
         "command": "claudeObservatory.analyzeEdit",
         "title": "Analyze edit with Claude",
         "category": "Claude Observatory",

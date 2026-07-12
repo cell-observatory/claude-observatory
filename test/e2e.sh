@@ -236,6 +236,8 @@ ok "undo --under folder reverts only the 1 pending edit"  "echo \"\$RUOUT\" | gr
 ok "pending pkgC/p.txt restored to original 'p1'"          "grep -qx 'p1' '$FCP'"
 ok "accepted pkgC/k.txt left on disk (K2)"                 "grep -q 'K2' '$FCK'"
 ok "accepted pkgC/k.txt is still status=kept"              "cc list --json | jq -e '[.edits[]|select((.file|endswith(\"pkgC/k.txt\")) and .status==\"kept\")]|length==1' >/dev/null"
+# undo --all is the session-wide bulk revert (mirror of keep --all) — emits the same scoped shape.
+ok "undo --all --json emits {undone,conflicts,total}"      "cc undo --all --json | jq -e 'has(\"undone\") and has(\"conflicts\") and has(\"total\")' >/dev/null"
 
 echo "════════════════════════════════════════════════════════"
 echo "E2E RESULT: $pass passed, $fail failed"

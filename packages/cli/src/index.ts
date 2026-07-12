@@ -493,32 +493,27 @@ function cmdKeep(args: string[]): void {
 function cmdUndo(args: string[]): void {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const session = getSessionId(args);
-  // Bulk: --under <path> reverts every PENDING edit at-or-beneath a file/folder path, newest-first
-  // (the editors' folder/file Revert action). Already-Accepted (kept) edits are left on disk — revert
-  // those individually. Each is undone individually so all group members go.
+  // Bulk: --all (every pending in the session), --file <substr> (pending edits in matching files), or
+  // --under <path> (pending edits at-or-beneath a file/folder path — the editors' folder/file Revert).
+  // Already-Accepted (kept) edits are left on disk — revert those individually. All share core.undoScope,
+  // the single scoped-revert implementation both editors also use.
+  const fi = args.indexOf('--file');
   const ui = args.indexOf('--under');
-  if (ui >= 0) {
-    const under = args[ui + 1];
-    if (!under) fail('`undo --under <path>` requires a value');
-    const targets = core
-      .readLog(session)
-      .filter((r) => r.status === 'pending' && core.isUnderPath(r.file, under))
-      .sort((a, b) => b.id - a.id);
-    let undone = 0;
-    let conflicts = 0;
-    for (const t of targets) {
-      const r = core.undoEdit(session, t.id);
-      if (r.status === 'conflict') conflicts++;
-      else if (r.ok) undone++;
-    }
+  if (args.includes('--all') || fi >= 0 || ui >= 0) {
+    const fileSub = fi >= 0 ? args[fi + 1] : undefined;
+    if (fi >= 0 && !fileSub) fail('`undo --file <substr>` requires a value');
+    const under = ui >= 0 ? args[ui + 1] : undefined;
+    if (ui >= 0 && !under) fail('`undo --under <path>` requires a value');
+    const res = core.undoScope(session, { under, fileSubstr: fileSub });
     if (args.includes('--json')) {
-      emitJson({ undone, conflicts, total: targets.length });
+      emitJson({ undone: res.undone, conflicts: res.conflicts, total: res.total });
       return;
     }
+    const scope = fileSub ? ` in files matching "${fileSub}"` : under ? ` under ${relFile(under)}` : '';
     process.stdout.write(
-      (conflicts ? c.yellow('⚠ ') : c.green('✓ ')) +
-        `reverted ${undone} edit(s) under ${relFile(under)}` +
-        (conflicts ? ` · ${conflicts} conflict(s) left (undo individually with --force)` : '') +
+      (res.conflicts ? c.yellow('⚠ ') : c.green('✓ ')) +
+        `reverted ${res.undone} edit(s)${scope}` +
+        (res.conflicts ? ` · ${res.conflicts} conflict(s) left (undo individually with --force)` : '') +
         '\n'
     );
     return;
@@ -1257,7 +1252,8 @@ function usage(): void {
       `  timeline [--json]    edits newest-first as a chronological feed (time · id · Δ · file)\n` +
       `  diff <id>            show before/after for an edit\n` +
       `  keep <id>            mark an edit kept; bulk: --all | --file <substr> | --under <path>\n` +
-      `  undo <id> [--force]  surgically undo an edit (--force = per-file restore); bulk: --under <path>\n` +
+      `  undo <id> [--force]  surgically undo an edit (--force = per-file restore);\n` +
+      `                       bulk (pending only): --all | --file <substr> | --under <path>\n` +
       `  redo <id> [--force]  re-apply an undone edit\n` +
       `  clean [opts]         GC orphaned blobs; --drop <id> | --older-than <Nd> | --all | --resolved [--under <path>]\n` +
       `  stats [--json]       usage stats (edits/tokens/messages/thinking/output) by session & window\n` +
