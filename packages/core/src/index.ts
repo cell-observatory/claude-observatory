@@ -17,4 +17,6 @@ export * from './review';
 export * from './tree';
 export * from './groups';
 export * from './actions';
+export * from './risk';
+export * from './egress';
 export { runCapture } from './capture';

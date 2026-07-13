@@ -1,6 +1,6 @@
 {
   "name": "claude-observatory-monorepo",
-  "version": "0.6.0",
+  "version": "0.6.5",
   "private": true,
   "description": "Standalone, git-free, per-edit Keep/Undo for Claude Code — terminal + VS Code, zero extra tokens.",
   "workspaces": [

@@ -105,15 +105,15 @@
   <div class="wrap">
     <a class="back" href="showcase.html">← Overview</a>
     <h1>Every surface, in detail.</h1>
-    <p class="lede">Twelve ways Claude Observatory keeps you in the loop — inline, in the sidebar, in the terminal, and across both editors. Screenshots are from the bundled demo session.</p>
+    <p class="lede">Thirteen ways Claude Observatory keeps you in the loop — inline, in the sidebar, in the terminal, and across both editors. Screenshots are from the bundled demo session.</p>
   </div>
 </header>
 
 <main>
   <section class="feature">
     <div class="wrap grid">
-      <div class="copy"><div class="num">01</div><span class="eyebrow">Inline review</span><h2>The change, right where it happened.</h2><p>A gutter star marks each Claude edit; a subtle tint colors what changed. Click <b>view changes</b> and the diff opens inline — in git's own colors, with Claude's reasoning and Keep / Undo / Chat / View diff on hand.</p></div>
-      <div class="panel rv"><img src="media/inline-review.png" loading="lazy" alt="Inline review bubble: gutter star, tinted lines, the inline menu, and the edit's diff with reasoning"></div>
+      <div class="copy"><div class="num">01</div><span class="eyebrow">Inline review</span><h2>The change, right where it happened.</h2><p>A gutter star marks each Claude edit; a clearly-visible whole-line highlight — green over added lines, red over removed, with a matching change-bar down the gutter — colors exactly what moved. Click <b>view changes</b> and the diff opens inline — in git's own colors, with Claude's reasoning and Keep / Undo / Chat / View diff on hand.</p></div>
+      <div class="panel rv"><img src="media/inline-review.png" loading="lazy" alt="Inline review bubble: gutter star, green/red highlighted lines, the inline menu, and the edit's diff with reasoning"></div>
     </div>
   </section>
 
@@ -147,7 +147,7 @@
 
   <section class="feature flip">
     <div class="wrap grid">
-      <div class="copy"><div class="num">06</div><span class="eyebrow">Stats</span><h2>Progress, tokens, and usage.</h2><p>A live review scoreboard — pending, accepted, reverted — with a progress bar, a token step-line plot over Today / 7 days / 30 days, and context plus 5h / week plan-usage bars.</p></div>
+      <div class="copy"><div class="num">06</div><span class="eyebrow">Stats</span><h2>Progress, tokens, and usage.</h2><p>A top bar names the active Claude Code session and carries a Search-edits box that filters the edit list. Below it, a live review scoreboard — pending (click the count to jump to the oldest edit awaiting review), accepted, reverted — with a progress bar, a token step-line plot over Today / 7 days / 30 days, and context plus 5h / week plan-usage bars.</p></div>
       <div class="panel rv"><img src="media/stats.png" loading="lazy" alt="Stats: review scoreboard, token step-line trends, and live usage bars"></div>
     </div>
   </section>
@@ -217,7 +217,28 @@
 
   <section class="feature flip">
     <div class="wrap grid">
-      <div class="copy"><div class="num">12</div><span class="eyebrow">Cross-editor parity</span><h2>The same tool in both editors.</h2><p>VS Code and JetBrains render the identical review surfaces over one backend — icon-only tabs, inline review, and the bottom dashboards alike. Decisions made in one show up in the other.</p></div>
+      <div class="copy"><div class="num">12</div><span class="eyebrow">Risk &amp; egress</span><h2>Two audits, zero tokens.</h2><p>Both mined from the same action timeline, neither costs an extra Claude token. <b>Risk</b> flags the shell commands that can bite — data loss (<code>rm -rf</code>, <code>git reset --hard</code>, force push), remote code (<code>curl | sh</code>), privilege escalation (<code>sudo</code>), or credential-file access — as ⚠ high / med badges on those rows in Actions, plus <code>claude-observatory risk</code>. <b>Egress</b> answers &ldquo;what did this session touch off-machine?&rdquo; — WebFetch hosts, MCP servers, and network shell commands, each marked remote or unknown — pinned as an <b>Egress</b> node atop the Actions view and available as <code>claude-observatory egress</code>. Both are purely additive: no change to the store or its format.</p></div>
+      <div class="panel rv">
+        <div style="padding:20px 22px;font-family:var(--mono);font-size:.82rem;line-height:1.85;color:var(--ink-soft)">
+          <div style="font-size:.68rem;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-faint);margin-bottom:12px">Actions · this session</div>
+          <div style="background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;margin-bottom:10px">
+            <div>📡 Egress <span style="color:var(--ink-faint)">— off-machine (4)</span></div>
+            <div style="padding-left:20px">api.github.com <span style="color:var(--ink-faint)">webfetch · remote</span></div>
+            <div style="padding-left:20px">mcp: postgres <span style="color:var(--ink-faint)">server · remote</span></div>
+            <div style="padding-left:20px">curl get.example.io <span style="color:var(--ink-faint)">shell · unknown</span></div>
+          </div>
+          <div>▾ Commands <span style="color:var(--ink-faint)">(8)</span></div>
+          <div style="padding-left:20px">git reset --hard <span style="border:1px solid var(--line);border-radius:999px;padding:1px 8px;font-size:.68rem;color:var(--accent-ink)">⚠ high</span></div>
+          <div style="padding-left:20px">sudo apt install <span style="border:1px solid var(--line);border-radius:999px;padding:1px 8px;font-size:.68rem;color:var(--ink-soft)">⚠ med</span></div>
+          <div>▾ Edits <span style="color:var(--ink-faint)">(12)</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="feature">
+    <div class="wrap grid">
+      <div class="copy"><div class="num">13</div><span class="eyebrow">Cross-editor parity</span><h2>The same tool in both editors.</h2><p>VS Code and JetBrains render the identical review surfaces over one backend — icon-only tabs, inline review, and the bottom dashboards alike. Decisions made in one show up in the other.</p></div>
       <div class="panel rv"><div class="scroll"><div class="two-up">
         <figure><img src="media/layout.png" loading="lazy" alt="Claude Observatory in VS Code"><figcaption>VS Code</figcaption></figure>
         <figure><img src="media/pyc-layout.png" loading="lazy" alt="Claude Observatory in PyCharm with icon-only tool-window tabs"><figcaption>PyCharm / JetBrains</figcaption></figure>

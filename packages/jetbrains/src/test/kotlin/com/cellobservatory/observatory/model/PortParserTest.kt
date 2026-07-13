@@ -86,12 +86,13 @@ class PortParserTest {
             {"session":"s1","summary":{"total":3,"errors":1,"byCategory":{"edit":2,"read":1}},
              "groups":[
                {"category":"edit","label":"Edits","count":2,"errors":0,"actions":[
-                  {"ts":1000,"tool":"Edit","category":"edit","target":"/w/a.ts","detail":null,"ok":true,"isError":false,"reasoning":"because","editId":7}
+                  {"ts":1000,"tool":"Edit","category":"edit","target":"/w/a.ts","detail":null,"ok":true,"isError":false,"reasoning":"because","editId":7,"risk":{"level":"high","reasons":["recursive delete"]}}
                ]},
                {"category":"read","label":"Reads","count":5,"errors":1,"actions":[
                   {"ts":2000,"tool":"Read","category":"read","target":"/w/b.ts","ok":false,"isError":true,"editId":null}
                ]}
-             ]}
+             ],
+             "egress":[{"kind":"web","target":"api.example.com","scope":"remote","count":2}]}
         """.trimIndent()
         val res = ActionsParser.parse(json)!!
         assertEquals("s1", res.session)
@@ -114,5 +115,13 @@ class PortParserTest {
         val err = reads.actions[0]
         assertTrue(err.isError)
         assertNull(err.editId) // non-edit action carries no store link
+        // risk + egress (0.7.0) are parsed off the same --json surface
+        assertEquals("high", a.risk?.level)
+        assertEquals("recursive delete", a.risk?.reasons?.get(0))
+        assertNull(err.risk) // absent risk -> null
+        assertEquals(1, res.egress.size)
+        assertEquals("api.example.com", res.egress[0].target)
+        assertEquals("remote", res.egress[0].scope)
+        assertEquals(2, res.egress[0].count)
     }
 }

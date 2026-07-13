@@ -42,9 +42,10 @@ private const val MAX_INLINE_LINES = 20_000 // same guard as the VS Code overlay
 // ruler instead of blending into VCS markers. Parity with the VS Code CLAUDE_MARK_COLOR.
 private val CLAUDE_MARK = JBColor(Color(0xCC785C), Color(0xE0906F))
 
-// Toned-down whole-line fill on Claude's added/changed lines — a subtle green (light/dark) so a file
-// Claude edited heavily doesn't drown in color. Parity with the VS Code ADDED_LINE_BG.
-private val ADDED_LINE_BG = JBColor(Color(0xE7, 0xF3, 0xEA), Color(0x24, 0x36, 0x2A))
+// Whole-line fill on Claude's added/changed lines — a clearly visible green (light/dark) so the edited
+// region reads at a glance. JBColor can't alpha-blend like VS Code, so these are solid tints picked to
+// match the strengthened VS Code ADDED_LINE_BG (rgba green @ 0.30, blended over the editor bg).
+private val ADDED_LINE_BG = JBColor(Color(0xCD, 0xE4, 0xD0), Color(0x2F, 0x47, 0x33))
 
 /**
  * The inline review overlay: per pending edit, a clickable "✓ Keep #N · ↩ Undo · 💬 Chat · ⧉ View diff" lens

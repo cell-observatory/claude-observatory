@@ -332,8 +332,9 @@ test('extension: three views, click commands, inline annotations, chat, status s
     // Combined Stats + Usage webview: one view — plots on top, usage bars below; both fed via postMessage.
     const stProvider = webviewProviders['claudeObservatory.stats'];
     assert.ok(stProvider && !webviewProviders['claudeObservatory.statusline'], 'single combined Stats view (Usage merged in)');
+    let stMsgHandler = null;
     const stView = {
-      webview: { options: {}, html: '', postMessage: () => {}, onDidReceiveMessage: () => ({ dispose() {} }) },
+      webview: { options: {}, html: '', postMessage: () => {}, onDidReceiveMessage: (cb) => { stMsgHandler = cb; return { dispose() {} }; } },
       onDidChangeVisibility: () => ({ dispose() {} }),
       visible: false, // no subprocess spawn while hidden
     };
@@ -356,6 +357,23 @@ test('extension: three views, click commands, inline annotations, chat, status s
     stView.webview.postMessage = (m) => stMsgs.push(m);
     stProvider.postStatsError();
     assert.ok(stMsgs.some((m) => m.type === 'statsError'), 'failed stats scan posts the CLI-missing hint');
+
+    // Stats top navbar (0.7.0): active session + edits search box + clickable pending count → first edit.
+    assert.match(stView.webview.html, /id="nb-search"/, 'stats navbar has a Search-edits box');
+    assert.match(stView.webview.html, /id="nb-session"/, 'stats navbar shows the active session');
+    assert.match(stView.webview.html, /id="rv-pending-cell"/, 'the pending count is a clickable cell');
+    assert.ok(typeof commands['claudeObservatory.reviewFirst'] === 'function' && typeof commands['claudeObservatory.searchWith'] === 'function', 'reviewFirst + searchWith commands registered');
+    // the counts post carries the session + filter the navbar renders
+    const nbMsgs = [];
+    stView.webview.postMessage = (m) => nbMsgs.push(m);
+    stProvider.refresh();
+    assert.ok(nbMsgs.some((m) => m.type === 'counts' && m.session === S && 'filter' in m), 'counts post carries the active session + filter');
+    // driving the webview: a search message filters the Edits tree via searchWith
+    assert.ok(typeof stMsgHandler === 'function', 'the stats webview registered a message handler');
+    stMsgHandler({ type: 'search', q: 'zzz-nomatch' });
+    assert.equal(editsTree.getChildren().length, 0, 'a stats-search message filters the Edits tree (no match hides all)');
+    stMsgHandler({ type: 'search', q: '' }); // clear so later assertions still see all edits
+    assert.ok(editsTree.getChildren().length >= 1, 'clearing the stats search restores the edits');
 
     // realtime observatory: status-bar microscope shows the pending count + the review scoreboard tooltip
     const microscope = statusBarItems.find((i) => /🔬/.test(i.text));
@@ -396,6 +414,11 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.equal(lastShown.selection.active.line, 3, 'reviewPrev steps back to edit #2');
     await commands['claudeObservatory.reviewPrev']();
     assert.equal(lastShown.selection.active.line, 0, 'reviewPrev steps back to edit #1');
+    // Stats "pending count" click → reviewFirst jumps to the OLDEST pending edit regardless of the cursor.
+    await commands['claudeObservatory.reviewNext'](); // move off the first edit (→ #2, line 3)
+    assert.equal(lastShown.selection.active.line, 3, 'moved to edit #2 before testing reviewFirst');
+    await commands['claudeObservatory.reviewFirst']();
+    assert.equal(lastShown.selection.active.line, 0, 'reviewFirst jumps back to the oldest pending edit (#1)');
     opened = null;
 
     // Search: filter the Edits tree by file path (parity: the JetBrains tree filters identically).

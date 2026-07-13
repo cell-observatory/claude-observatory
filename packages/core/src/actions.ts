@@ -13,6 +13,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { readLog } from './store';
 import { findTranscript } from './observe';
+import { scoreCommand, CommandRisk } from './risk';
 
 /** Coarse action kind, drives the timeline's icon + grouping + which rows the UI can dim/filter. */
 export type ActionCategory =
@@ -44,6 +45,8 @@ export interface ActionRecord {
   reasoning?: string;
   /** For file-edit actions: the store EditRecord id this call produced, so the timeline can offer diff/keep/undo. */
   editId?: number;
+  /** For shell (Bash) actions: a risk score when the command is destructive / privileged / touches secrets. */
+  risk?: CommandRisk;
   /** The tool_use id (correlates to its tool_result). */
   toolUseId?: string;
 }
@@ -186,6 +189,8 @@ export function parseActions(cwd: string, sessionId: string): ActionRecord[] {
     for (const b of msg.content) {
       if (b.type !== 'tool_use' || typeof b.name !== 'string') continue;
       const { target, detail } = targetOf(b.name, b.input);
+      // Score the FULL command (not the truncated display target) for shell actions.
+      const risk = b.name === 'Bash' && b.input && typeof b.input.command === 'string' ? scoreCommand(b.input.command) : null;
       actions.push({
         ts,
         tool: b.name,
@@ -195,6 +200,7 @@ export function parseActions(cwd: string, sessionId: string): ActionRecord[] {
         ok: true, // provisional — folded from resultErr below
         isError: false,
         reasoning: lastReasoning || undefined,
+        risk: risk ?? undefined,
         toolUseId: typeof b.id === 'string' ? b.id : undefined,
       });
     }

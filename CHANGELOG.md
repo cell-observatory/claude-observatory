@@ -5,6 +5,36 @@ All notable changes to Claude Observatory are recorded here, following
 Per-tag release artifacts and auto-generated notes are on the
 [Releases page](https://github.com/cell-observatory/claude-observatory/releases).
 
+## [0.6.5] — 2026-07-13
+
+QoL + observability polish on top of the Action Timeline. No breaking changes — the store format and
+every existing `--json` shape are unchanged (the `actions --json` payload gains an additive `egress`
+field and a per-action `risk`).
+
+### Added — Risk + Egress audit (CLI + both editors)
+
+Two zero-token audits mined from the action timeline (adapted from CortexIDE):
+
+- **Risk** — flags the shell commands Claude ran that can **destroy data** (`rm -rf`, `git reset --hard`,
+  force push), **execute remote code** (`curl | sh`), **escalate privilege** (`sudo`), or **touch
+  credentials** — as ⚠ high/med badges on those rows in the Actions view, plus `claude-observatory risk`.
+  Guarded against string/path false positives (the risky token must be a real command, not text).
+- **Egress** — "what did this session touch off-machine?": WebFetch hosts, MCP servers, and
+  network-shell commands, each marked **remote** or **unknown** — an **Egress** node pinned atop the
+  Actions view, plus `claude-observatory egress`.
+
+### Added — Stats top navbar (both editors)
+
+A bar across the top of the Stats view: the **active session**, a **Search-edits** box (drives the same
+filter as the Edits/Diffs trees), and the scoreboard's **pending count is now clickable** — click it to
+jump to the first (oldest) edit to review.
+
+### Changed — the inline edit highlight is now clearly visible
+
+The whole-line green/red background over Claude's edited section was a deliberately faint 10% tint; it's
+now **~0.30** with a bold **green** change-bar on added lines and a **red** one on removed lines, so an
+edited region reads at a glance (both editors).
+
 ## [0.6.0] — 2026-07-13
 
 Grows Claude Observatory from an *edit*-review layer into a *session* observatory: a new **Actions

@@ -2,6 +2,9 @@ package com.cellobservatory.observatory.model
 
 import com.google.gson.JsonParser
 
+/** Risk score for a shell command (mirrors core's CommandRisk). */
+data class CommandRisk(val level: String, val reasons: List<String>)
+
 /** One tool call Claude made (mirrors core's ActionRecord over the CLI `actions --json` surface). */
 data class ActionRecord(
     val ts: Long,
@@ -13,7 +16,11 @@ data class ActionRecord(
     val isError: Boolean,
     val reasoning: String?,
     val editId: Int?,
+    val risk: CommandRisk?,
 )
+
+/** One off-machine destination this session touched (mirrors core's EgressChannel). */
+data class EgressChannel(val kind: String, val target: String, val scope: String, val count: Int)
 
 /** A category group in the Actions timeline (mirrors core's ActionGroup). */
 data class ActionGroup(
@@ -24,7 +31,13 @@ data class ActionGroup(
     val actions: List<ActionRecord>,
 )
 
-data class ActionsResult(val session: String, val total: Int, val errors: Int, val groups: List<ActionGroup>)
+data class ActionsResult(
+    val session: String,
+    val total: Int,
+    val errors: Int,
+    val groups: List<ActionGroup>,
+    val egress: List<EgressChannel>,
+)
 
 /** Parse the `claude-observatory actions --json` payload (which already carries the grouped view-model). */
 object ActionsParser {
@@ -51,6 +64,9 @@ object ActionsParser {
                         isError = ao.get("isError")?.asBoolean ?: false,
                         reasoning = strOrNull("reasoning"),
                         editId = ao.get("editId")?.takeIf { !it.isJsonNull }?.asInt,
+                        risk = ao.get("risk")?.takeIf { it.isJsonObject }?.asJsonObject?.let { r ->
+                            CommandRisk(r.get("level").asString, r.getAsJsonArray("reasons").map { it.asString })
+                        },
                     )
                 },
             )
@@ -60,6 +76,10 @@ object ActionsParser {
             total = summary?.get("total")?.asInt ?: 0,
             errors = summary?.get("errors")?.asInt ?: 0,
             groups = groups,
+            egress = o.getAsJsonArray("egress")?.map { e ->
+                val eo = e.asJsonObject
+                EgressChannel(eo.get("kind").asString, eo.get("target").asString, eo.get("scope").asString, eo.get("count").asInt)
+            } ?: emptyList(),
         )
     } catch (_: Exception) {
         null
