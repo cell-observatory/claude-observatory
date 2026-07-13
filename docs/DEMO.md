@@ -233,6 +233,27 @@ diff.
 
 ![the file heatmap — every unmodified line dimmed so Claude's edits stand out](media/heatmap.png)
 
+### Navigation bar
+
+One review bar, mirrored across three surfaces so the surgical loop is always a click away: the
+**status bar** (both editors), the **editor tab bar** (VS Code's editor-title actions; a banner
+across the top of the editor in JetBrains), and a single floating **review bubble** (VS Code's
+Comments API) parked over the edit you're on.
+
+```text
+🔬 3  ▲ Diff 1/2 ▼  ◀ File 1/3 ▶  ✓ ↩ ✓✓ ✕  🧹 💡 🔍
+```
+
+The bar steps on **two axes**: the **Diff axis** (`Diff n/m`, ▲/▼) walks the open file's pending
+edits; the **File axis** (`File n/m`, ◀/▶) walks every file that still has one. On the open file it
+also carries **✓ Keep** / **↩ Undo** this edit, **✓✓ Accept File** / **✕ Reject File**, **🧹 Clear
+resolved**, a **💡 Spotlight** (heatmap) toggle, and **🔍 Search**.
+
+It's **two-tier**. The File axis plus Clear / Spotlight / Search show whenever *any* edit is pending
+anywhere; the Diff axis and the per-edit / per-file actions appear only when the **open** file has
+pending edits. The counters **track the active editor**, so `Diff 1/2` always means "this file." The
+keyboard loop is unchanged — `⌥⌘N`/`⌥⌘P`, `⌥⌘Y`/`⌥⌘U`, `⌥⌘K`/`⌥⌘R`, `⌥⌘[`/`⌥⌘]` still drive it.
+
 ### File History — the active file's edits, in order
 
 A flat, chronological list of just the **currently open file's** edits (id · time · status ·
@@ -254,6 +275,56 @@ and a change summary (Claude's own reasoning when available). Expand a row for t
 pending / kept / reverted keep their color (and reverted stays struck through).
 
 ![Timeline — a collapsed change feed, consecutive edits to a file coalesced into one ×N row](media/timeline.png)
+
+### Action Timeline — every tool call, zero tokens
+
+The Timeline above is only the *edits*. The **Action Timeline** is the whole session — a typed
+record of **every tool call Claude made**: reads, greps, shell commands, web fetches, subagent
+spawns, to-do updates, not just the file writes the store captures. Like everything else here it
+costs **zero tokens** — it's mined straight from the Claude Code transcript — and each action is
+correlated with its **result** (`ok` / `error`). File-edit actions **link back to their store
+record**, so you can jump from the trace into the review in one click.
+
+It lands as a new **Actions view** — a panel view beside Observations / Timeline / Stats in VS Code,
+a pane in the **Dashboards** window in JetBrains — **grouped by category**:
+
+```text
+▾ Edits          3
+    ✓  Write   src/models/User.js    → #1
+    ✓  Edit    src/models/User.js    → #2
+    ✓  Write   src/index.js          → #3
+▾ Commands       2
+    ✓  node src/index.js
+    ✕  npm test                        exit 1
+▾ To-dos         1
+    ✓  3 items · 2 done
+```
+
+By default the view is **curated** — high-signal categories only, though **errors always surface** —
+with a **Show all** toggle that folds in the noise (reads, searches, meta). Errored calls are
+flagged; an edit row **opens the review**, like every other surface.
+
+The same trace is one command away:
+
+```console
+$ claude-observatory actions
+9 action(s)  ·  1 error  ·  session 0c396c6b-2da9-4be2-9c6d-c8c5797de7a5
+
+Edits
+  ✓  #1  Write  src/models/User.js
+  ✓  #2  Edit   src/models/User.js
+  ✓  #3  Write  src/index.js
+Commands
+  ✓  node src/index.js
+  ✕  npm test                       exit 1
+To-dos
+  ✓  3 items · 2 done
+
+trace (alias) · --json · --category <c> · --errors · --limit <n> · --all
+```
+
+`--json` emits the structured form (`{ session, summary, actions, groups }`); `--category <c>`,
+`--errors`, `--limit <n>`, and `--all` filter the feed.
 
 ### Observations — the recap, reasoning, and file memory
 

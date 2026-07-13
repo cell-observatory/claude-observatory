@@ -105,7 +105,7 @@
   <div class="wrap">
     <a class="back" href="showcase.html">← Overview</a>
     <h1>Every surface, in detail.</h1>
-    <p class="lede">Ten ways Claude Observatory keeps you in the loop — inline, in the sidebar, in the terminal, and across both editors. Screenshots are from the bundled demo session.</p>
+    <p class="lede">Twelve ways Claude Observatory keeps you in the loop — inline, in the sidebar, in the terminal, and across both editors. Screenshots are from the bundled demo session.</p>
   </div>
 </header>
 
@@ -175,7 +175,49 @@
 
   <section class="feature flip">
     <div class="wrap grid">
-      <div class="copy"><div class="num">10</div><span class="eyebrow">Cross-editor parity</span><h2>The same tool in both editors.</h2><p>VS Code and JetBrains render the identical review surfaces over one backend — icon-only tabs, inline review, and the bottom dashboards alike. Decisions made in one show up in the other.</p></div>
+      <div class="copy"><div class="num">10</div><span class="eyebrow">Navigation bar</span><h2>Drive the review from any surface.</h2><p>One review bar on three surfaces — the status bar, the editor's title bar, and a single floating bubble over the live edit. <b>Diff n/m</b> steps the open file's pending edits while <b>File n/m</b> walks every file that has them, and the counters follow the active editor. It's two-tier — the File axis plus Clear, Spotlight, and Search show whenever anything's pending; the Diff axis and per-edit Keep / Undo / Accept File / Reject File appear only when the open file has edits — and the <code>⌥⌘</code> shortcuts still work.</p></div>
+      <div class="panel rv">
+        <div style="padding:24px 22px;display:flex;flex-direction:column;gap:14px">
+          <div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px;font-family:var(--mono);font-size:.84rem;background:var(--surface-2);border:1px solid var(--line);border-radius:10px;padding:11px 15px;color:var(--ink-soft)">
+            <span style="color:var(--accent-ink);font-weight:600">🔬 3</span>
+            <span style="color:var(--ink-faint)">·</span>
+            <span>▲ Diff 1/2 ▼</span>
+            <span style="color:var(--ink-faint)">·</span>
+            <span>◀ File 1/3 ▶</span>
+            <span style="color:var(--ink-faint)">·</span>
+            <span title="Keep · Undo · Accept File · Reject File">✓ ↩ ✓✓ ✕</span>
+            <span style="color:var(--ink-faint)">·</span>
+            <span title="Clear resolved · Spotlight · Search">🧹 💡 🔍</span>
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:8px;font-family:var(--mono);font-size:.68rem;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-faint)">
+            <span>Status bar</span><span>·</span><span>Editor title</span><span>·</span><span>Review bubble</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="feature">
+    <div class="wrap grid">
+      <div class="copy"><div class="num">11</div><span class="eyebrow">Action timeline</span><h2>Every tool call, not just the edits.</h2><p>A zero-token, typed timeline mined from the transcript — every read, grep, shell command, web fetch, subagent spawn, and to-do update Claude made this session, each correlated with its result. The new <b>Actions</b> view — a panel beside Observations, Timeline, and Stats in VS Code, a pane in the JetBrains Dashboards — groups them by category and stays curated by default, with a <b>Show all</b> toggle for reads, searches, and meta. Errors always surface; edit rows link straight to their review. From the shell: <code>claude-observatory actions</code> (alias <code>trace</code>) — a human feed or <code>--json</code>, filtered by <code>--category</code>, <code>--errors</code>, <code>--limit</code>, and <code>--all</code>.</p></div>
+      <div class="panel rv">
+        <div style="padding:20px 22px;font-family:var(--mono);font-size:.82rem;line-height:1.85;color:var(--ink-soft)">
+          <div style="font-size:.68rem;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-faint);margin-bottom:12px">Actions · this session</div>
+          <div>▾ Edits <span style="color:var(--ink-faint)">(12)</span></div>
+          <div style="padding-left:20px;color:var(--ink)">app/config.ts <span style="color:var(--accent-ink)">→ review</span></div>
+          <div>▾ Commands <span style="color:var(--ink-faint)">(8)</span></div>
+          <div style="padding-left:20px">npm test <span style="color:#d0563f">✕ error</span></div>
+          <div>▾ Web <span style="color:var(--ink-faint)">(3)</span></div>
+          <div>▾ Subagents <span style="color:var(--ink-faint)">(2)</span></div>
+          <div style="color:var(--ink-faint)">▸ Reads · Searches · To-dos <span style="border:1px solid var(--line);border-radius:999px;padding:1px 8px;font-size:.68rem">show all</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="feature flip">
+    <div class="wrap grid">
+      <div class="copy"><div class="num">12</div><span class="eyebrow">Cross-editor parity</span><h2>The same tool in both editors.</h2><p>VS Code and JetBrains render the identical review surfaces over one backend — icon-only tabs, inline review, and the bottom dashboards alike. Decisions made in one show up in the other.</p></div>
       <div class="panel rv"><div class="scroll"><div class="two-up">
         <figure><img src="media/layout.png" loading="lazy" alt="Claude Observatory in VS Code"><figcaption>VS Code</figcaption></figure>
         <figure><img src="media/pyc-layout.png" loading="lazy" alt="Claude Observatory in PyCharm with icon-only tool-window tabs"><figcaption>PyCharm / JetBrains</figcaption></figure>
