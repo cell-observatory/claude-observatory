@@ -19,4 +19,7 @@ export * from './groups';
 export * from './actions';
 export * from './risk';
 export * from './egress';
+export * from './subagents';
+export * from './fleet';
+export * from './metrics';
 export { runCapture } from './capture';

@@ -23,6 +23,7 @@ test('extension: three views, click commands, inline annotations, chat, status s
   const F = path.join(ws, 'app.txt');
   // transcript: the ai-title recap + two assistant messages whose Edit tool_uses on F carry Claude's
   // reasoning (correlated per-file to store edits #1/#2) — feeds the inline reasoning lens + blame.
+  const AG = 'sa0000000001';
   fs.writeFileSync(path.join(proj, S + '.jsonl'), [
     JSON.stringify({ type: 'ai-title', aiTitle: 'Reviewing app.txt edits' }),
     JSON.stringify({ message: { role: 'assistant', content: [
@@ -33,7 +34,28 @@ test('extension: three views, click commands, inline annotations, chat, status s
       { type: 'text', text: 'Operation 2 — add a farewell() method' },
       { type: 'tool_use', name: 'Edit', input: { file_path: F } },
     ] } }),
+    // Subagents (0.7.0): an Agent spawn + its result carrying the subagent's id + metrics.
+    JSON.stringify({ timestamp: '2026-07-13T10:00:00.000Z', message: { role: 'assistant', content: [
+      { type: 'tool_use', id: 'tuAg', name: 'Agent', input: { description: 'review the diff', subagent_type: 'code-reviewer' } },
+    ] } }),
+    JSON.stringify({ timestamp: '2026-07-13T10:05:00.000Z',
+      toolUseResult: { status: 'completed', agentId: AG, agentType: 'code-reviewer', totalDurationMs: 120000, totalTokens: 30000, totalToolUseCount: 4 },
+      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tuAg', is_error: false }] } }),
   ].join('\n'));
+  // the subagent's own transcript — its tool calls (0.7.0 nests these under the Subagents node)
+  const subDir = path.join(proj, S, 'subagents');
+  fs.mkdirSync(subDir, { recursive: true });
+  fs.writeFileSync(path.join(subDir, `agent-${AG}.jsonl`), [
+    JSON.stringify({ isSidechain: true, agentId: AG, sessionId: S, timestamp: '2026-07-13T10:01:00.000Z', message: { role: 'assistant', content: [
+      { type: 'tool_use', id: 'sa1', name: 'Read', input: { file_path: F } },
+      { type: 'tool_use', id: 'sa2', name: 'Grep', input: { pattern: 'greet' } },
+    ] } }),
+  ].join('\n'));
+  // a sibling session in the SAME project (0.7.0 fleet), backdated so resolveSessionId still returns S.
+  const SIB = 'sibSess0002';
+  fs.writeFileSync(path.join(proj, SIB + '.jsonl'), JSON.stringify({ message: { role: 'assistant', content: [] } }));
+  const old = Math.floor(Date.now() / 1000) - 3600;
+  fs.utimesSync(path.join(proj, SIB + '.jsonl'), old, old);
   core.ensureStore(S);
   const b0 = core.writeBlob(S, Buffer.from('a\nb\nc\nd\n'));
   const a1 = core.writeBlob(S, Buffer.from('AAA\nb\nc\nd\n'));
@@ -316,8 +338,8 @@ test('extension: three views, click commands, inline annotations, chat, status s
     const actionsTree = trees['claudeObservatory.actions'];
     assert.ok(actionsTree, 'Actions view registered');
     const actGroups = actionsTree.getChildren();
-    assert.ok(actGroups.length >= 1 && actGroups[0].kind === 'group', 'actions are grouped by category');
-    const editGroup = actGroups.find((g) => g.group.category === 'edit');
+    assert.ok(actGroups.some((g) => g.kind === 'group'), 'actions are grouped by category');
+    const editGroup = actGroups.find((g) => g.kind === 'group' && g.group.category === 'edit');
     assert.ok(editGroup, 'the Edits group is present (curated default shows edits)');
     const gItem = actionsTree.getTreeItem(editGroup);
     assert.equal(gItem.label, 'Edits');
@@ -328,6 +350,30 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.match(aItem.label, /Edit/, 'action row leads with the tool name');
     assert.equal(aItem.command.command, 'claudeObservatory.viewChanges', 'an edit action links to the review bubble');
     assert.ok(typeof commands['claudeObservatory.actionsShowAll'] === 'function' && typeof commands['claudeObservatory.actionsShowCurated'] === 'function', 'actions show-all/curated toggles registered');
+
+    // Subagents (0.7.0): the Agent spawn correlates to its subagents/*.jsonl; a top-level Subagents node
+    // lists each subagent (expandable → its own action timeline) with per-subagent metrics.
+    const subRoot = actGroups.find((n) => n.kind === 'subagentsRoot');
+    assert.ok(subRoot, 'a Subagents node is present when the session spawned subagents');
+    const subItem = actionsTree.getTreeItem(subRoot);
+    assert.equal(subItem.label, 'Subagents');
+    assert.match(String(subItem.description), /2m/, 'Subagents node shows the rolled-up duration');
+    const subNodes = actionsTree.getChildren(subRoot);
+    assert.equal(subNodes.length, 1, 'one subagent under the Subagents node');
+    const saItem = actionsTree.getTreeItem(subNodes[0]);
+    assert.match(saItem.label, /code-reviewer/, 'subagent labelled by its type');
+    assert.match(String(saItem.description), /30k tok|2m/, 'subagent row shows metrics (duration / tokens)');
+    const saActions = actionsTree.getChildren(subNodes[0]);
+    assert.equal(saActions.length, 2, "the subagent's own tool calls nest under it (Read + Grep)");
+    assert.ok(saActions.every((n) => n.kind === 'action'), 'nested rows are action rows');
+
+    // Fleet (0.7.0): the backdated sibling session shows up as a Fleet node (siblings in this project).
+    const fleetRoot = actGroups.find((n) => n.kind === 'fleetRoot');
+    assert.ok(fleetRoot, 'a Fleet node is present when the project has sibling sessions');
+    assert.match(String(actionsTree.getTreeItem(fleetRoot).description), /sibling/, 'Fleet node counts siblings');
+    const siblings = actionsTree.getChildren(fleetRoot);
+    assert.ok(siblings.some((n) => n.kind === 'sibling' && n.sibling.self), 'the current session is marked self');
+    assert.ok(siblings.some((n) => n.kind === 'sibling' && !n.sibling.self), 'the sibling session is listed');
 
     // Combined Stats + Usage webview: one view — plots on top, usage bars below; both fed via postMessage.
     const stProvider = webviewProviders['claudeObservatory.stats'];

@@ -5,6 +5,51 @@ All notable changes to Claude Observatory are recorded here, following
 Per-tag release artifacts and auto-generated notes are on the
 [Releases page](https://github.com/cell-observatory/claude-observatory/releases).
 
+## [0.7.0] — 2026-07-13
+
+Turns the observatory from a single-agent into a **multi-agent** view: subagents, sibling sessions,
+and a rolled-up metrics command — all zero-token, local, and cross-editor (VS Code + JetBrains + CLI),
+mined from the Claude Code transcript and the content-addressed store (no model calls, no network).
+No breaking changes — the store format is unchanged and every existing `--json` shape is unchanged; the
+`actions --json` payload gains additive `subagents` / `subagentsSummary` / `fleet` / `fleetSummary` fields.
+
+### Added — Subagent tracking (CLI + both editors)
+
+Every subagent Claude spawns (the Task / Agent tool) now gets its **own nested action timeline** plus
+**per-subagent metrics** — duration, tokens, tool-use count, status. Mined zero-token from
+`~/.claude/projects/<proj>/<session>/subagents/agent-<id>.jsonl` and correlated back to the spawning tool
+call via the transcript's `toolUseResult` (which carries `agentId` + `totalDurationMs` + `totalTokens` +
+`totalToolUseCount` + `status`).
+
+- **CLI**: `claude-observatory subagents` (alias `agents`) — a human feed or `--json`.
+- **Both editors**: a **Subagents** node in the Actions view — each subagent expands into its own
+  reads / edits / bash / web calls.
+
+### Added — Fleet / cross-agent awareness (CLI + both editors)
+
+The **other** Claude Code sessions working in the **same project**: active/idle status (from transcript
+freshness — active = touched within ~60s), pending edits, files touched, and risk-flag counts.
+**Read-only and path-only** — no file contents ever cross between agents, so it can't leak one agent's
+secrets to another.
+
+- **CLI**: `claude-observatory siblings` (alias `fleet`) — an agent-facing digest an agent can call
+  mid-run to see what its siblings are touching and adjust in real time. `--json` defaults to siblings
+  only (excludes self); `--all` includes self.
+- **Both editors**: a **Fleet** node in the Actions view.
+- An optional MCP server for the same digest is noted as future; 0.7.0 ships the CLI digest.
+
+### Added — Metrics command (CLI)
+
+`claude-observatory metrics` (`--json`) rolls up the session's numbers: per-edit diff stats
+(+added / −removed lines), action + error counts, per-subagent duration/tokens, and **tool latency**
+(median / p95 / max, computed from each `tool_use` → `tool_result` timestamp gap).
+
+### Added — governance files
+
+`CODE_OF_CONDUCT.md` (Contributor Covenant 2.1) and `SECURITY.md` (private vulnerability reporting via
+GitHub Security advisories + `cell_observatory@berkeley.edu`; latest-release-line support policy) at the
+repo root.
+
 ## [0.6.5] — 2026-07-13
 
 QoL + observability polish on top of the Action Timeline. No breaking changes — the store format and

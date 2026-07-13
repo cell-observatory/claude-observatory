@@ -431,12 +431,18 @@ function cmdActions(args: string[]): void {
     // Emit the flat actions AND the category-grouped view-model (curated unless --all) — the editors
     // render `groups` directly so the curated/ordering logic lives only in core.
     const showAll = args.includes('--all');
+    const subagents = core.parseSubagents(process.cwd(), session);
+    const fleet = core.listSiblings(process.cwd(), session);
     emitJson({
       session,
       summary: core.summarizeActions(actions),
       actions,
       groups: core.buildActionGroups(actions, { showAll }),
       egress: core.buildEgressReport(actions),
+      subagents,
+      subagentsSummary: core.summarizeSubagents(subagents),
+      fleet,
+      fleetSummary: core.summarizeFleet(fleet),
     });
     return;
   }
@@ -516,6 +522,137 @@ function cmdEgress(args: string[]): void {
     const scope = ch.scope === 'remote' ? c.red('remote ') : c.dim('unknown');
     process.stdout.write(`${scope}  ${c.cyan(ch.kind.padEnd(5))} ${ch.target}${ch.count > 1 ? c.dim(` ×${ch.count}`) : ''}\n`);
   }
+}
+
+/** ms → compact human duration (450ms / 3.2s / 2m 5s). */
+function fmtDur(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return '0ms';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  const s = ms / 1000;
+  if (s < 60) return `${s.toFixed(s < 10 ? 1 : 0).replace(/\.0$/, '')}s`;
+  const m = Math.floor(s / 60);
+  const rem = Math.round(s % 60);
+  return `${m}m${rem ? ` ${rem}s` : ''}`;
+}
+
+/** `subagents` (alias `agents`) — every subagent this session spawned, each with its own action
+ *  timeline + metrics (duration / tokens), mined zero-token from subagents/*.jsonl. */
+function cmdSubagents(args: string[]): void {
+  const core = require('@claude-observatory/core') as Core;
+  const session = getSessionId(args);
+  const subs = core.parseSubagents(process.cwd(), session);
+  const sum = core.summarizeSubagents(subs);
+  if (args.includes('--json')) {
+    emitJson({ session, summary: sum, subagents: subs });
+    return;
+  }
+  if (subs.length === 0) {
+    process.stdout.write(c.dim(`no subagents in this session (${session}).\n`));
+    return;
+  }
+  const head = [
+    `${sum.count} subagent(s)`,
+    `${sum.totalActions} action(s)`,
+    sum.totalEdits ? `${sum.totalEdits} edit(s)` : null,
+    sum.totalDurationMs ? fmtDur(sum.totalDurationMs) : null,
+    sum.totalTokens ? `${human(sum.totalTokens)} tok` : null,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  process.stdout.write(c.bold('Subagents') + c.dim(`  ${head} · session ${session}\n\n`));
+  const limit = args.includes('--all') ? Infinity : 8;
+  for (const s of subs) {
+    const title = s.agentType || s.description || s.agentId.slice(0, 12);
+    const meta = [
+      s.durationMs ? fmtDur(s.durationMs) : null,
+      s.tokens ? `${human(s.tokens)} tok` : null,
+      `${s.summary.total} action(s)`,
+      s.edits ? `${s.edits} edit(s)` : null,
+      s.summary.errors ? c.red(`${s.summary.errors} err`) : null,
+      s.status && s.status !== 'completed' ? c.yellow(s.status) : null,
+    ]
+      .filter(Boolean)
+      .join(' · ');
+    process.stdout.write(c.cyan('▸ ') + c.bold(title) + c.dim(`  ${meta}\n`));
+    if (s.description && s.agentType) process.stdout.write('   ' + c.dim(s.description.slice(0, 100)) + '\n');
+    for (const a of s.actions.slice(0, limit)) {
+      const mark = a.isError ? c.red('✗') : ' ';
+      process.stdout.write(`   ${mark} ${c.dim(`[${a.category}]`.padEnd(9))} ${c.bold(a.tool)} ${(a.target || '').slice(0, 56)}\n`);
+    }
+    if (s.actions.length > limit) process.stdout.write(c.dim(`   … ${s.actions.length - limit} more (\`--all\` to expand)\n`));
+    process.stdout.write('\n');
+  }
+}
+
+/** `siblings` (alias `fleet`) — the other Claude Code sessions in THIS project: active/idle, pending
+ *  edits, files touched, risk flags. Agent-facing digest (call it mid-run to see what siblings touch);
+ *  --json defaults to siblings only (excludes self), --all includes self. */
+function cmdSiblings(args: string[]): void {
+  const core = require('@claude-observatory/core') as Core;
+  const session = getSessionId(args);
+  const sessions = core.listSiblings(process.cwd(), session);
+  const sum = core.summarizeFleet(sessions);
+  if (args.includes('--json')) {
+    const list = args.includes('--all') ? sessions : sessions.filter((s) => !s.self);
+    emitJson({ session, summary: sum, siblings: list });
+    return;
+  }
+  if (sessions.filter((s) => !s.self).length === 0) {
+    process.stdout.write(c.dim(`no sibling sessions in this project (only ${session}).\n`));
+    return;
+  }
+  process.stdout.write(
+    c.bold('Fleet') +
+      c.dim(`  ${sum.total} session(s) · ${sum.active} active · ${sum.siblings} sibling(s) · ${sum.pending} pending across siblings\n\n`)
+  );
+  for (const s of sessions) {
+    const dot = s.active ? c.green('●') : c.dim('○');
+    const you = s.self ? c.cyan(' (you)') : '';
+    const risk = s.risk.total ? (s.risk.high ? c.red(` ⚠ ${s.risk.high} high`) : c.yellow(` ⚠ ${s.risk.total}`)) : '';
+    process.stdout.write(
+      `${dot} ${c.bold(s.id.slice(0, 8))}${you}  ${c.dim(`${s.edits} edit(s) · ${s.pending} pending · ${core.relTime(s.lastMs)}`)}${risk}\n`
+    );
+    if (s.files.length) {
+      const shown = s.files.slice(0, 5).map((f) => relFile(f));
+      process.stdout.write('   ' + c.dim(shown.join(', ') + (s.moreFiles ? ` +${s.moreFiles} more` : '')) + '\n');
+    }
+  }
+}
+
+/** `metrics` — session numbers: ±lines, action/error counts, per-subagent duration/tokens, tool latency. */
+function cmdMetrics(args: string[]): void {
+  const core = require('@claude-observatory/core') as Core;
+  const session = getSessionId(args);
+  const m = core.sessionMetrics(process.cwd(), session);
+  if (args.includes('--json')) {
+    emitJson(m);
+    return;
+  }
+  process.stdout.write(c.bold('Metrics') + c.dim(`  session ${session}\n\n`));
+  process.stdout.write(
+    `  edits         ${m.edits.count}  ${c.green('+' + m.edits.added)} ${c.red('-' + m.edits.removed)}  ` +
+      c.dim(`${m.edits.pending} pending · ${m.edits.kept} kept · ${m.edits.undone} undone`) +
+      '\n'
+  );
+  process.stdout.write(`  actions       ${m.actions.total}${m.actions.errors ? c.red(`  ${m.actions.errors} error(s)`) : ''}\n`);
+  process.stdout.write(
+    `  subagents     ${m.subagents.count}` +
+      (m.subagents.count
+        ? c.dim(
+            `  ${m.subagents.totalActions} action(s) · ${m.subagents.totalEdits} edit(s)` +
+              (m.subagents.totalDurationMs ? ` · ${fmtDur(m.subagents.totalDurationMs)}` : '') +
+              (m.subagents.totalTokens ? ` · ${human(m.subagents.totalTokens)} tok` : '')
+          )
+        : '') +
+      '\n'
+  );
+  if (m.toolLatency.count)
+    process.stdout.write(
+      `  tool latency  ` +
+        c.dim(`median ${fmtDur(m.toolLatency.medianMs)} · p95 ${fmtDur(m.toolLatency.p95Ms)} · max ${fmtDur(m.toolLatency.maxMs)} (${m.toolLatency.count} call(s))`) +
+        '\n'
+    );
+  if (m.spanMs) process.stdout.write(`  span          ${c.dim(fmtDur(m.spanMs))}\n`);
 }
 
 function requireId(args: string[]): number {
@@ -1435,6 +1572,10 @@ function usage(): void {
       `                       web, subagents, to-dos), each with its result; --category <c> | --errors | --limit <n>\n` +
       `  risk [--json]        flag shell commands that can destroy data / escalate privilege / touch secrets\n` +
       `  egress [--json]      what this session touched off-machine (web / MCP / network-shell destinations)\n` +
+      `  subagents [--json]   every subagent this session spawned, each with its own action timeline + metrics\n` +
+      `  siblings [--json]    the other Claude Code sessions in THIS project (active/idle · pending · files · risk);\n` +
+      `                       agent-facing digest for cross-agent awareness (alias: fleet); --all includes self\n` +
+      `  metrics [--json]     session numbers: ±lines, action/error counts, subagent duration/tokens, tool latency\n` +
       `  diff <id>            show before/after for an edit\n` +
       `  keep <id>            mark an edit kept; bulk: --all | --file <substr> | --under <path>\n` +
       `  undo <id> [--force]  surgically undo an edit (--force = per-file restore);\n` +
@@ -1511,6 +1652,17 @@ function main(): void {
       break;
     case 'egress':
       cmdEgress(rest);
+      break;
+    case 'subagents':
+    case 'agents':
+      cmdSubagents(rest);
+      break;
+    case 'siblings':
+    case 'fleet':
+      cmdSiblings(rest);
+      break;
+    case 'metrics':
+      cmdMetrics(rest);
       break;
     case 'diff':
       cmdDiff(rest);

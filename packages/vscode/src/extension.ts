@@ -1534,7 +1534,11 @@ type ActNode =
   | { kind: 'group'; group: core.ActionGroup }
   | { kind: 'action'; action: core.ActionRecord }
   | { kind: 'egressRoot'; channels: core.EgressChannel[] }
-  | { kind: 'egress'; channel: core.EgressChannel };
+  | { kind: 'egress'; channel: core.EgressChannel }
+  | { kind: 'fleetRoot'; siblingCount: number } // sibling sessions computed lazily on expand (see below)
+  | { kind: 'sibling'; sibling: core.SiblingSession }
+  | { kind: 'subagentsRoot'; subs: core.SubagentInfo[]; summary: core.SubagentsSummary }
+  | { kind: 'subagent'; sub: core.SubagentInfo };
 
 let actionsShowAll = false; // module-level toggle, flipped by the view-title button
 
@@ -1551,6 +1555,25 @@ const CAT_ICON: Record<string, string> = {
   other: 'circle-small-filled',
 };
 
+/** ms → compact human duration (450ms / 3.2s / 2m 5s) — matches the CLI's fmtDur. */
+function fmtDurMs(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return '0ms';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  const s = ms / 1000;
+  if (s < 60) return `${s.toFixed(s < 10 ? 1 : 0).replace(/\.0$/, '')}s`;
+  const m = Math.floor(s / 60);
+  const rem = Math.round(s % 60);
+  return `${m}m${rem ? ` ${rem}s` : ''}`;
+}
+
+/** Compact token count (47361 → 47k). */
+function humanTok(n: number): string {
+  if (!Number.isFinite(n)) return '0';
+  if (n < 1000) return String(n);
+  if (n < 1e6) return (n / 1e3).toFixed(n < 1e4 ? 1 : 0).replace(/\.0$/, '') + 'k';
+  return (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
+}
+
 class ActionsProvider implements vscode.TreeDataProvider<ActNode> {
   private readonly _c = new vscode.EventEmitter<void>();
   readonly onDidChangeTreeData = this._c.event;
@@ -1565,13 +1588,26 @@ class ActionsProvider implements vscode.TreeDataProvider<ActNode> {
       if (!session || !cwd) return [];
       const actions = core.parseActions(cwd, session);
       const channels = core.buildEgressReport(actions);
+      const subs = core.parseSubagents(cwd, session);
+      // Fleet: cheap sibling COUNT here (one readdir); the full per-sibling parse happens lazily on expand.
+      const siblingCount = core.projectSessionIds(cwd).filter((id) => id !== session).length;
       const nodes: ActNode[] = [];
-      if (channels.length) nodes.push({ kind: 'egressRoot', channels }); // "where did this session reach off-machine" on top
+      if (siblingCount > 0) nodes.push({ kind: 'fleetRoot', siblingCount }); // concurrent sibling agents in this project
+      if (channels.length) nodes.push({ kind: 'egressRoot', channels }); // "where did this session reach off-machine"
+      if (subs.length) nodes.push({ kind: 'subagentsRoot', subs, summary: core.summarizeSubagents(subs) }); // per-subagent timelines
       for (const group of core.buildActionGroups(actions, { showAll: actionsShowAll })) nodes.push({ kind: 'group', group });
       return nodes;
     }
     if (node.kind === 'group') return node.group.actions.slice().reverse().map((action) => ({ kind: 'action', action })); // newest-first within a group
     if (node.kind === 'egressRoot') return node.channels.map((channel) => ({ kind: 'egress', channel }));
+    if (node.kind === 'fleetRoot') {
+      const session = currentSession();
+      const cwd = workspaceRoot();
+      if (!session || !cwd) return [];
+      return core.listSiblings(cwd, session).map((sibling) => ({ kind: 'sibling', sibling }));
+    }
+    if (node.kind === 'subagentsRoot') return node.subs.map((sub) => ({ kind: 'subagent', sub }));
+    if (node.kind === 'subagent') return node.sub.actions.map((action) => ({ kind: 'action', action })); // chronological subagent timeline
     return [];
   }
 
@@ -1600,6 +1636,89 @@ class ActionsProvider implements vscode.TreeDataProvider<ActNode> {
       item.description = `${ch.scope}${ch.count > 1 ? ` · ×${ch.count}` : ''}`;
       item.iconPath = new vscode.ThemeIcon(ch.scope === 'remote' ? 'cloud' : 'question', ch.scope === 'remote' ? new vscode.ThemeColor('charts.yellow') : undefined);
       item.contextValue = 'egress';
+      return item;
+    }
+    if (node.kind === 'fleetRoot') {
+      const item = new vscode.TreeItem('Fleet', vscode.TreeItemCollapsibleState.Collapsed);
+      item.description = `${node.siblingCount} sibling${node.siblingCount === 1 ? '' : 's'} in this project`;
+      item.iconPath = new vscode.ThemeIcon('organization');
+      item.tooltip = 'Other Claude Code sessions working in this project — active/idle, pending edits, files touched, risk. Expand to see them.';
+      item.contextValue = 'fleetRoot';
+      return item;
+    }
+    if (node.kind === 'sibling') {
+      const s = node.sibling;
+      const item = new vscode.TreeItem((s.self ? '(you) ' : '') + s.id.slice(0, 8), vscode.TreeItemCollapsibleState.None);
+      const risk = s.risk.total ? ` · ⚠ ${s.risk.high ? `${s.risk.high} high` : s.risk.total}` : '';
+      item.description = `${s.active ? 'active' : 'idle'} · ${s.pending} pending · ${s.edits} edit${s.edits === 1 ? '' : 's'}${risk}`;
+      item.iconPath = new vscode.ThemeIcon(
+        s.active ? 'circle-filled' : 'circle-outline',
+        s.active ? new vscode.ThemeColor('charts.green') : s.risk.high ? new vscode.ThemeColor('charts.red') : undefined
+      );
+      const files = s.files.map((f) => vscode.workspace.asRelativePath(f));
+      item.tooltip = new vscode.MarkdownString(
+        [
+          `**${s.self ? 'This session' : 'Sibling'}** \`${s.id}\``,
+          `${s.active ? '🟢 active' : '⚪ idle'} · last ${core.relTime(s.lastMs)}`,
+          `${s.edits} edit(s) · ${s.pending} pending`,
+          s.risk.total ? `⚠ ${s.risk.total} risky command(s)${s.risk.high ? ` · ${s.risk.high} high` : ''}` : '',
+          files.length ? 'Files: ' + files.slice(0, 10).join(', ') + (s.moreFiles ? ` +${s.moreFiles} more` : '') : '',
+        ]
+          .filter(Boolean)
+          .join('\n\n')
+      );
+      item.contextValue = 'sibling';
+      return item;
+    }
+    if (node.kind === 'subagentsRoot') {
+      const sum = node.summary;
+      const item = new vscode.TreeItem('Subagents', vscode.TreeItemCollapsibleState.Collapsed);
+      item.description = [
+        `${sum.count}`,
+        `${sum.totalActions} action${sum.totalActions === 1 ? '' : 's'}`,
+        sum.totalDurationMs ? fmtDurMs(sum.totalDurationMs) : '',
+        sum.errors ? `${sum.errors} error${sum.errors === 1 ? '' : 's'}` : '',
+      ]
+        .filter(Boolean)
+        .join(' · ');
+      item.iconPath = new vscode.ThemeIcon('organization', sum.errors ? new vscode.ThemeColor('charts.red') : undefined);
+      item.tooltip = 'Each subagent Claude spawned this session, with its own action timeline + metrics (duration / tokens).';
+      item.contextValue = 'subagentsRoot';
+      return item;
+    }
+    if (node.kind === 'subagent') {
+      const s = node.sub;
+      const title = s.agentType || s.description || s.agentId.slice(0, 12);
+      const item = new vscode.TreeItem(
+        title,
+        s.actions.length ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None
+      );
+      item.description = [
+        s.durationMs ? fmtDurMs(s.durationMs) : '',
+        s.tokens ? `${humanTok(s.tokens)} tok` : '',
+        `${s.summary.total} action${s.summary.total === 1 ? '' : 's'}`,
+        s.edits ? `${s.edits} edit${s.edits === 1 ? '' : 's'}` : '',
+        s.summary.errors ? `${s.summary.errors} err` : '',
+      ]
+        .filter(Boolean)
+        .join(' · ');
+      item.iconPath = new vscode.ThemeIcon(
+        s.summary.errors ? 'warning' : 'organization',
+        s.summary.errors ? new vscode.ThemeColor('charts.red') : undefined
+      );
+      item.tooltip = new vscode.MarkdownString(
+        [
+          `**${title}**${s.status && s.status !== 'completed' ? ` · ${s.status}` : ''}`,
+          s.description && s.agentType ? `_${s.description}_` : '',
+          [s.durationMs ? `⏱ ${fmtDurMs(s.durationMs)}` : '', s.tokens ? `${humanTok(s.tokens)} tokens` : '', s.toolUseCount ? `${s.toolUseCount} tool call(s)` : '']
+            .filter(Boolean)
+            .join(' · '),
+          `agent \`${s.agentId}\``,
+        ]
+          .filter(Boolean)
+          .join('\n\n')
+      );
+      item.contextValue = 'subagent';
       return item;
     }
     const a = node.action;
