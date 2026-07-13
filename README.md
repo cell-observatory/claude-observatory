@@ -85,6 +85,7 @@ Built for **surgical Claude usage on critical infrastructure**: you see every ch
 | --- | --- |
 | **Observations** | A **session recap** on top (Claude Code's own title — zero token; ✨ to refine via `claude -p --resume`), then a per-edit row with Claude's actual reasoning. Each row carries the observatory's **memory of that file** — cross-session accept/revert history and prior analyses; files whose edits get reverted repeatedly are flagged. |
 | **Timeline** | Files ordered by most-recent activity, each expanding to its edits (id + a small dimmed time + delta); adjacent same-file edits coalesce into a run. |
+| **Actions** | A **zero-token action timeline** mined from the transcript: **every** tool call this session — reads, greps, shell commands, web fetches, subagent spawns, to-dos — not just the edits the store captures, each correlated with its result (ok / error). **Grouped by category** (Edits · Commands · Web · Subagents · To-dos…), **curated** by default (high-signal categories, errors always surface) with a **Show all** toggle for reads / searches / meta; errored calls are flagged and edit rows link straight to the review. |
 | **Stats** | A live **review scoreboard** (pending / accepted / reverted + a progress bar), a **tokens** step-line plot (total / input / output, log axis, Today / 7 days / 30 days), and live **Usage** bars — context fill plus 5h / week plan usage (from [claude-statusline](https://github.com/cell-observatory/claude-statusline)). |
 
 <p>
@@ -107,6 +108,13 @@ diff on the lens; reasoning in the title).
 
 **More, mirrored in both editors:**
 
+- **Navigation bar** — a review stepper on three surfaces: the **status bar** (both editors), the **editor
+  tab bar**, and a single floating **review bubble** over the current edit (VS Code). Two axes step the work
+  — **Diff n/m** across the open file's pending edits and **File n/m** across every file with edits —
+  alongside Keep / Undo, Accept / Reject File, Clear resolved, a **Spotlight** toggle, and Search. It's
+  two-tier: the File axis and Clear / Spotlight / Search show whenever anything's pending, while the Diff
+  axis and the per-edit / per-file actions appear only once the open file has edits; the counters follow the
+  active editor. **⌥⌘N/P · ⌥⌘Y/U · ⌥⌘K/R · ⌥⌘[ /]** still drive it all from the keyboard.
 - **File heatmap** — dim every unmodified line so Claude's edits stand out (a spotlight). Toggle with the
   📄 button.
 - **Revision navigation** — step a file's edit history in a *current-vs-revision* diff with **⌥⌘[** / **⌥⌘]**
@@ -147,6 +155,7 @@ claude-observatory undo <id>       # surgically undo one edit (bulk: --under <pa
 claude-observatory undo <id> --force   # per-file restore fallback (used on overlap conflicts)
 claude-observatory redo <id>       # re-apply an undone edit (--force to override later edits)
 claude-observatory insights        # Observations: recap + per-edit reasoning/flags/memory + next steps
+claude-observatory actions         # every tool call this session — typed, grouped, zero-token (alias `trace`); --json | --category <c> | --errors | --limit <n> | --all
 claude-observatory summary         # per-session review recap (kept/reverted per file); --markdown to export
 claude-observatory clean           # GC orphaned blobs; --resolved [--under <path>] | --drop <id> | --older-than 30d | --all
 claude-observatory update          # self-update the CLI to the latest release (--check to only report)
