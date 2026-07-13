@@ -85,21 +85,22 @@ Built for **surgical Claude usage on critical infrastructure**: you see every ch
 | --- | --- |
 | **Observations** | A **session recap** on top (Claude Code's own title — zero token; ✨ to refine via `claude -p --resume`), then a per-edit row with Claude's actual reasoning. Each row carries the observatory's **memory of that file** — cross-session accept/revert history and prior analyses; files whose edits get reverted repeatedly are flagged. |
 | **Timeline** | Files ordered by most-recent activity, each expanding to its edits (id + a small dimmed time + delta); adjacent same-file edits coalesce into a run. |
-| **Actions** | A **zero-token action timeline** mined from the transcript: **every** tool call this session — reads, greps, shell commands, web fetches, subagent spawns, to-dos — not just the edits the store captures, each correlated with its result (ok / error). **Grouped by category** (Edits · Commands · Web · Subagents · To-dos…), **curated** by default (high-signal categories, errors always surface) with a **Show all** toggle for reads / searches / meta; errored calls are flagged and edit rows link straight to the review. |
-| **Stats** | A live **review scoreboard** (pending / accepted / reverted + a progress bar), a **tokens** step-line plot (total / input / output, log axis, Today / 7 days / 30 days), and live **Usage** bars — context fill plus 5h / week plan usage (from [claude-statusline](https://github.com/cell-observatory/claude-statusline)). |
+| **Actions** | A **zero-token action timeline** mined from the transcript: **every** tool call this session — reads, greps, shell commands, web fetches, subagent spawns, to-dos — not just the edits the store captures, each correlated with its result (ok / error). **Grouped by category** (Edits · Commands · Web · Subagents · To-dos…), **curated** by default (high-signal categories, errors always surface) with a **Show all** toggle for reads / searches / meta; errored calls are flagged and edit rows link straight to the review. Two zero-token audits ride the same timeline: **Risk** flags shell commands that can destroy data (`rm -rf`, `git reset --hard`, force push), run remote code (`curl \| sh`), escalate privilege (`sudo`), or touch credential files — **⚠ high / med** badges on those rows; **Egress** — *what did this session touch off-machine?* — pins a node at the top listing WebFetch hosts, MCP servers, and network shell commands (each marked remote vs unknown). |
+| **Stats** | A **top navbar** — the active Claude Code session plus a **Search-edits box** that filters the edit list (the same filter the Edits / Diffs trees use) — over a live **review scoreboard** (pending / accepted / reverted + a progress bar; the **pending** count is clickable, jumping to the first / oldest edit to review), a **tokens** step-line plot (total / input / output, log axis, Today / 7 days / 30 days), and live **Usage** bars — context fill plus 5h / week plan usage (from [claude-statusline](https://github.com/cell-observatory/claude-statusline)). |
 
 <p>
   <img src="docs/media/observations.png" width="55%" alt="Observations: session recap, per-edit reasoning, and cross-session file memory with revert-risk flags">
   <img src="docs/media/stats.png" width="43.5%" alt="Stats: review scoreboard, tokens step-line trends with a Today/7d/30d toggle, plus live usage bars">
 </p>
 
-**Inline review, right in the editor.** A **✨ gutter star** at each pending edit, a subtle green tint on
-added lines and a red tint (removed text shown as red ghost text) on deletions — toned down so a
-heavily-edited file doesn't drown in color — plus a **Claude-coral marker** on the scrollbar. Above each
+**Inline review, right in the editor.** A **✨ gutter star** at each pending edit, a clearly-visible
+green whole-line highlight on added lines and a red one on deletions (removed text shown as red ghost
+text) — each carrying a **bold change-bar** in the gutter, green for added and red for removed — plus a
+**Claude-coral marker** on the scrollbar. Above each
 edit sits an **inline menu**: **✨ #N · +A −R · view changes**, then **✓ Keep · ↩ Undo · 💬 Chat · ⧉ View
 diff**. Kept edits grey out; reverted edits stay struck through everywhere.
 
-![Inline review: the ✨ gutter star, a subtle green/red line tint, the inline menu (✨ #N view changes · Keep · Undo · Chat · View diff), and the edit's before ⟷ after with the reasoning in the title](docs/media/inline-review.png)
+![Inline review: the ✨ gutter star, a clearly-visible green/red whole-line highlight with matching change-bars, the inline menu (✨ #N view changes · Keep · Undo · Chat · View diff), and the edit's before ⟷ after with the reasoning in the title](docs/media/inline-review.png)
 
 In **VS Code**, "view changes" opens an **inline review bubble** right at the edit — the diff in git's own
 colors plus Claude's reasoning, with **Accept · Revert · Chat · Prev · Next** on its toolbar. In
@@ -156,6 +157,8 @@ claude-observatory undo <id> --force   # per-file restore fallback (used on over
 claude-observatory redo <id>       # re-apply an undone edit (--force to override later edits)
 claude-observatory insights        # Observations: recap + per-edit reasoning/flags/memory + next steps
 claude-observatory actions         # every tool call this session — typed, grouped, zero-token (alias `trace`); --json | --category <c> | --errors | --limit <n> | --all
+claude-observatory risk            # audit shell commands for destructive / remote-code / privilege / credential risk — ⚠ high/med
+claude-observatory egress          # what this session touched off-machine: WebFetch hosts · MCP servers · network shell (remote vs unknown)
 claude-observatory summary         # per-session review recap (kept/reverted per file); --markdown to export
 claude-observatory clean           # GC orphaned blobs; --resolved [--under <path>] | --drop <id> | --older-than 30d | --all
 claude-observatory update          # self-update the CLI to the latest release (--check to only report)

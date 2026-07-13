@@ -431,7 +431,13 @@ function cmdActions(args: string[]): void {
     // Emit the flat actions AND the category-grouped view-model (curated unless --all) — the editors
     // render `groups` directly so the curated/ordering logic lives only in core.
     const showAll = args.includes('--all');
-    emitJson({ session, summary: core.summarizeActions(actions), actions, groups: core.buildActionGroups(actions, { showAll }) });
+    emitJson({
+      session,
+      summary: core.summarizeActions(actions),
+      actions,
+      groups: core.buildActionGroups(actions, { showAll }),
+      egress: core.buildEgressReport(actions),
+    });
     return;
   }
   if (actions.length === 0) {
@@ -462,6 +468,53 @@ function cmdActions(args: string[]): void {
     const link = a.editId != null ? c.dim(` edit#${a.editId}`) : '';
     const detail = a.detail ? c.dim(`  (${a.detail})`) : '';
     process.stdout.write(`${when} ${mark} ${tag} ${c.bold(a.tool.padEnd(10))} ${(a.target || '').slice(0, 80)}${link}${detail}\n`);
+  }
+}
+
+/** Command risk: the shell commands Claude ran that can destroy data / escalate / touch secrets. */
+function cmdRisk(args: string[]): void {
+  const core = require('@claude-observatory/core') as Core;
+  const session = getSessionId(args);
+  const risky = core
+    .parseActions(process.cwd(), session)
+    .filter((a) => a.risk)
+    .map((a) => ({ ts: a.ts, tool: a.tool, target: a.target, level: a.risk!.level, reasons: a.risk!.reasons }));
+  const high = risky.filter((r) => r.level === 'high').length;
+  if (args.includes('--json')) {
+    emitJson({ session, count: risky.length, high, risky });
+    return;
+  }
+  if (risky.length === 0) {
+    process.stdout.write(c.dim(`no risky commands flagged (session ${session}).\n`));
+    return;
+  }
+  process.stdout.write(c.bold('Risk') + c.dim(`  ${risky.length} flagged · ${high} high · session ${session}\n\n`));
+  for (const r of risky) {
+    const badge = r.level === 'high' ? c.red('● HIGH') : c.yellow('● MED ');
+    process.stdout.write(`${badge}  ${(r.target || '').slice(0, 74)}\n       ${c.dim(r.reasons.join(' · '))}\n`);
+  }
+}
+
+/** Egress: what this session touched off-machine — web / MCP / network-shell destinations. */
+function cmdEgress(args: string[]): void {
+  const core = require('@claude-observatory/core') as Core;
+  const session = getSessionId(args);
+  const channels = core.buildEgressReport(core.parseActions(process.cwd(), session));
+  const sum = core.summarizeEgress(channels);
+  if (args.includes('--json')) {
+    emitJson({ session, ...sum });
+    return;
+  }
+  if (channels.length === 0) {
+    process.stdout.write(c.dim(`no off-machine egress detected (session ${session}).\n`));
+    return;
+  }
+  process.stdout.write(
+    c.bold('Egress') + c.dim(`  ${channels.length} destination(s) · ${sum.remote} remote · session ${session}\n\n`)
+  );
+  for (const ch of channels) {
+    const scope = ch.scope === 'remote' ? c.red('remote ') : c.dim('unknown');
+    process.stdout.write(`${scope}  ${c.cyan(ch.kind.padEnd(5))} ${ch.target}${ch.count > 1 ? c.dim(` ×${ch.count}`) : ''}\n`);
   }
 }
 
@@ -1380,6 +1433,8 @@ function usage(): void {
       `  timeline [--json]    edits newest-first as a chronological feed (time · id · Δ · file)\n` +
       `  actions [--json]     the full action timeline: EVERY tool call Claude made (reads, greps, bash,\n` +
       `                       web, subagents, to-dos), each with its result; --category <c> | --errors | --limit <n>\n` +
+      `  risk [--json]        flag shell commands that can destroy data / escalate privilege / touch secrets\n` +
+      `  egress [--json]      what this session touched off-machine (web / MCP / network-shell destinations)\n` +
       `  diff <id>            show before/after for an edit\n` +
       `  keep <id>            mark an edit kept; bulk: --all | --file <substr> | --under <path>\n` +
       `  undo <id> [--force]  surgically undo an edit (--force = per-file restore);\n` +
@@ -1450,6 +1505,12 @@ function main(): void {
     case 'actions':
     case 'trace':
       cmdActions(rest);
+      break;
+    case 'risk':
+      cmdRisk(rest);
+      break;
+    case 'egress':
+      cmdEgress(rest);
       break;
     case 'diff':
       cmdDiff(rest);

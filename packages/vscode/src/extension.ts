@@ -18,10 +18,13 @@ const SCHEME = 'claude-edit'; // in-memory before/after blobs for vscode.diff
 // Claude's signature marker color for the overview ruler — a distinct coral so Claude's edits are
 // recognizable at a glance and don't blend into VCS (green/blue/red) gutter markers.
 const CLAUDE_MARK_COLOR = 'rgba(204, 120, 92, 0.85)';
-// Toned-down whole-line tints for the inline overlay — low alpha so a file Claude edited heavily
-// doesn't drown in color, but the changed lines are still visible (green added, red removed).
-const ADDED_LINE_BG = 'rgba(88, 166, 100, 0.10)';
-const REMOVED_LINE_BG = 'rgba(229, 83, 75, 0.10)';
+// Whole-line tints for the inline overlay — strong enough to spot Claude's edits at a glance (green
+// added, red removed), each backed by a bold matching change-bar so added vs removed read distinctly.
+const ADDED_LINE_BG = 'rgba(88, 166, 100, 0.30)';
+const REMOVED_LINE_BG = 'rgba(229, 83, 75, 0.30)';
+// The left change-bar colors — near-opaque green/red so the edited region's edge is unmistakable.
+const ADDED_BAR = 'rgba(88, 166, 100, 0.9)';
+const REMOVED_BAR = 'rgba(229, 83, 75, 0.9)';
 
 // --- inline (in-editor) overlay state ---
 let inlineDecoration: vscode.TextEditorDecorationType | undefined; // gutter change-bar on changed lines
@@ -1342,6 +1345,14 @@ function combinedShell(): string {
   .dim { opacity:.75; }
   .empty { padding:12px 2px; color: var(--vscode-descriptionForeground); line-height:1.5; }
   .review { margin-bottom:14px; }
+  .navbar { display:flex; align-items:center; gap:8px; padding:5px 0 9px; margin-bottom:9px; border-bottom:1px solid var(--vscode-widget-border, rgba(127,127,127,0.25)); }
+  .nb-session { display:inline-flex; align-items:center; gap:4px; font-family: var(--vscode-editor-font-family, monospace); font-size:9.5px; color: var(--vscode-descriptionForeground); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:42%; }
+  .nb-session::before { content:"🔬"; font-size:10px; }
+  .nb-search { flex:1; min-width:0; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border:1px solid var(--vscode-input-border, var(--vscode-widget-border, rgba(127,127,127,0.3))); border-radius:4px; padding:3px 7px; font-size:10.5px; font-family:inherit; outline:none; }
+  .nb-search::placeholder { color: var(--vscode-input-placeholderForeground, var(--vscode-descriptionForeground)); }
+  .nb-search:focus { border-color: var(--vscode-focusBorder, var(--acc)); }
+  .rvc-click { cursor:pointer; }
+  .rvc-click:hover { border-color: var(--c-pending); background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.08)); }
   .rvcounts { display:flex; gap:6px; margin-bottom:9px; }
   .rvc { flex:1; text-align:center; padding:7px 3px; border:1px solid var(--vscode-widget-border, rgba(127,127,127,0.25)); border-radius:6px; }
   .rvn { display:block; font-size:19px; font-weight:600; font-variant-numeric:tabular-nums; line-height:1.05; }
@@ -1446,25 +1457,40 @@ function combinedShell(): string {
     }
     window.addEventListener('message', function(e){ var m=e.data||{};
       if(m.type==='usage'){ renderUsage(m.u); }
-      else if(m.type==='counts'){ renderCounts(m.c); }
+      else if(m.type==='counts'){ renderCounts(m.c);
+        var se=document.getElementById('nb-session'); if(se && m.session!==undefined){ se.textContent = m.session || '—'; se.title = m.session ? ('Active session: '+m.session) : 'No active Claude Code session'; }
+        var sb=document.getElementById('nb-search'); if(sb && m.filter!==undefined && document.activeElement!==sb){ sb.value = m.filter || ''; }
+      }
       else if(m.type==='stats'){ STATS=m.data; drawStats(); }
       else if(m.type==='statsError' && !STATS){ var g=document.getElementById('gathering'); if(g) g.innerHTML='⚠ stats need the <b>claude-observatory</b> CLI, which was not found.<br><span class="dim">install it with <b>./install.sh</b> (or <b>npm i -g ./packages/cli</b> from the repo), then reload.</span>'; }
     });
-    (function(){ var segs=document.querySelectorAll('.seg'); for(var i=0;i<segs.length;i++){ segs[i].addEventListener('click',function(){ range=this.getAttribute('data-r'); vscode.setState({range:range}); drawStats(); }); } drawStats(); vscode.postMessage({type:'ready'}); })();
+    (function(){ var segs=document.querySelectorAll('.seg'); for(var i=0;i<segs.length;i++){ segs[i].addEventListener('click',function(){ range=this.getAttribute('data-r'); vscode.setState({range:range}); drawStats(); }); }
+      var pc=document.getElementById('rv-pending-cell'); if(pc){ pc.addEventListener('click',function(){ vscode.postMessage({type:'reviewFirst'}); }); }
+      var sb=document.getElementById('nb-search'), st; if(sb){
+        sb.addEventListener('input',function(){ clearTimeout(st); var v=sb.value; st=setTimeout(function(){ vscode.postMessage({type:'search',q:v}); },300); });
+        sb.addEventListener('keydown',function(e){ if(e.key==='Enter'){ clearTimeout(st); vscode.postMessage({type:'search',q:sb.value}); } });
+      }
+      drawStats(); vscode.postMessage({type:'ready'}); })();
   `;
   // Live review scoreboard (independent of the time range): current pending/accepted/reverted counts
   // and a progress bar that fills as edits get reviewed — updated on every store change via postMessage.
   const reviewHtml =
     `<div class="review">` +
     `<div class="rvcounts">` +
-    `<div class="rvc"><span class="rvn" id="rv-pending" style="color:var(--c-pending)">0</span><span class="rvl">pending</span></div>` +
+    `<div class="rvc rvc-click" id="rv-pending-cell" title="Jump to the first edit to review"><span class="rvn" id="rv-pending" style="color:var(--c-pending)">0</span><span class="rvl">pending</span></div>` +
     `<div class="rvc"><span class="rvn" id="rv-kept" style="color:var(--c-kept)">0</span><span class="rvl">accepted</span></div>` +
     `<div class="rvc"><span class="rvn" id="rv-undone" style="color:var(--c-reverted)">0</span><span class="rvl">reverted</span></div>` +
     `</div>` +
     `<div class="rvbar"><span class="rvfill" id="rv-fill"></span></div>` +
     `<div class="rvmeta"><span id="rv-progress">no edits yet</span><span id="rv-rate"></span></div>` +
     `</div>`;
+  const navbarHtml =
+    `<div class="navbar">` +
+    `<span class="nb-session" id="nb-session" title="Active Claude Code session">—</span>` +
+    `<input class="nb-search" id="nb-search" type="text" placeholder="Search edits…" spellcheck="false" aria-label="Search edits" />` +
+    `</div>`;
   const body =
+    navbarHtml +
     reviewHtml +
     `<div class="divider"></div>` +
     `<div class="ranges"><button class="seg" data-r="today">Today</button><button class="seg" data-r="week">7 days</button><button class="seg" data-r="month">30 days</button></div>` +
@@ -1504,7 +1530,11 @@ function statsData(s: core.StatsResult): unknown {
  *  the active editor. Reuses EditNode so every existing edit command works on its rows unchanged. */
 // --- Actions timeline: EVERY tool call Claude made this session, grouped by category (0.6.0) ---
 // Curated by default (high-signal categories; errors always surface); a title-bar toggle shows all.
-type ActNode = { kind: 'group'; group: core.ActionGroup } | { kind: 'action'; action: core.ActionRecord };
+type ActNode =
+  | { kind: 'group'; group: core.ActionGroup }
+  | { kind: 'action'; action: core.ActionRecord }
+  | { kind: 'egressRoot'; channels: core.EgressChannel[] }
+  | { kind: 'egress'; channel: core.EgressChannel };
 
 let actionsShowAll = false; // module-level toggle, flipped by the view-title button
 
@@ -1528,16 +1558,20 @@ class ActionsProvider implements vscode.TreeDataProvider<ActNode> {
     this._c.fire();
   }
 
-  private groups(): core.ActionGroup[] {
-    const session = currentSession();
-    const cwd = workspaceRoot();
-    if (!session || !cwd) return [];
-    return core.buildActionGroups(core.parseActions(cwd, session), { showAll: actionsShowAll });
-  }
-
   getChildren(node?: ActNode): ActNode[] {
-    if (!node) return this.groups().map((group) => ({ kind: 'group', group }));
+    if (!node) {
+      const session = currentSession();
+      const cwd = workspaceRoot();
+      if (!session || !cwd) return [];
+      const actions = core.parseActions(cwd, session);
+      const channels = core.buildEgressReport(actions);
+      const nodes: ActNode[] = [];
+      if (channels.length) nodes.push({ kind: 'egressRoot', channels }); // "where did this session reach off-machine" on top
+      for (const group of core.buildActionGroups(actions, { showAll: actionsShowAll })) nodes.push({ kind: 'group', group });
+      return nodes;
+    }
     if (node.kind === 'group') return node.group.actions.slice().reverse().map((action) => ({ kind: 'action', action })); // newest-first within a group
+    if (node.kind === 'egressRoot') return node.channels.map((channel) => ({ kind: 'egress', channel }));
     return [];
   }
 
@@ -1551,14 +1585,37 @@ class ActionsProvider implements vscode.TreeDataProvider<ActNode> {
       item.contextValue = 'actionGroup';
       return item;
     }
+    if (node.kind === 'egressRoot') {
+      const remote = node.channels.filter((c) => c.scope === 'remote').length;
+      const item = new vscode.TreeItem('Egress', vscode.TreeItemCollapsibleState.Collapsed);
+      item.description = `${node.channels.length} destination${node.channels.length === 1 ? '' : 's'}${remote ? ` · ${remote} remote` : ''}`;
+      item.iconPath = new vscode.ThemeIcon('globe', remote ? new vscode.ThemeColor('charts.yellow') : undefined);
+      item.tooltip = 'What this session touched off-machine — web fetches, MCP servers, and network-shell commands.';
+      item.contextValue = 'egressRoot';
+      return item;
+    }
+    if (node.kind === 'egress') {
+      const ch = node.channel;
+      const item = new vscode.TreeItem(`${ch.kind}  ${ch.target}`, vscode.TreeItemCollapsibleState.None);
+      item.description = `${ch.scope}${ch.count > 1 ? ` · ×${ch.count}` : ''}`;
+      item.iconPath = new vscode.ThemeIcon(ch.scope === 'remote' ? 'cloud' : 'question', ch.scope === 'remote' ? new vscode.ThemeColor('charts.yellow') : undefined);
+      item.contextValue = 'egress';
+      return item;
+    }
     const a = node.action;
     const item = new vscode.TreeItem(`${a.tool}  ${(a.target || '').replace(/\s+/g, ' ')}`, vscode.TreeItemCollapsibleState.None);
-    item.description = [a.ts ? core.relTime(a.ts) : '', a.detail].filter(Boolean).join(' · ');
-    item.iconPath = new vscode.ThemeIcon(a.isError ? 'error' : CAT_ICON[a.category] ?? 'circle-small-filled', a.isError ? new vscode.ThemeColor('charts.red') : undefined);
+    const riskTag = a.risk ? (a.risk.level === 'high' ? '⚠ HIGH' : '⚠ med') : '';
+    item.description = [riskTag, a.ts ? core.relTime(a.ts) : '', a.detail].filter(Boolean).join(' · ');
+    const riskColor = a.risk ? new vscode.ThemeColor(a.risk.level === 'high' ? 'charts.red' : 'charts.yellow') : undefined;
+    item.iconPath = new vscode.ThemeIcon(
+      a.isError ? 'error' : a.risk ? 'warning' : CAT_ICON[a.category] ?? 'circle-small-filled',
+      a.isError ? new vscode.ThemeColor('charts.red') : riskColor
+    );
     item.tooltip = new vscode.MarkdownString(
       [
-        `**${a.tool}**${a.isError ? ' · ⚠ error' : ''}`,
+        `**${a.tool}**${a.isError ? ' · ⚠ error' : ''}${a.risk ? ` · ⚠ ${a.risk.level} risk` : ''}`,
         a.target ? '`' + a.target.replace(/`/g, '') + '`' : '',
+        a.risk ? `⚠ ${a.risk.reasons.join(' · ')}` : '',
         a.detail ? `_${a.detail}_` : '',
         a.reasoning ? `💭 ${firstLine(a.reasoning)}` : '',
         a.editId != null ? `edit #${a.editId} — click to review this edit` : '',
@@ -1635,8 +1692,11 @@ class StatsUsageViewProvider implements vscode.WebviewViewProvider {
     this.view = view;
     view.webview.options = { enableScripts: true };
     view.webview.html = combinedShell(); // set once; both sections update via postMessage (no flash)
-    view.webview.onDidReceiveMessage((m: { type?: string }) => {
-      if (m && m.type === 'ready') this.refresh();
+    view.webview.onDidReceiveMessage((m: { type?: string; q?: string }) => {
+      if (!m) return;
+      if (m.type === 'ready') this.refresh();
+      else if (m.type === 'reviewFirst') void vscode.commands.executeCommand('claudeObservatory.reviewFirst');
+      else if (m.type === 'search') void vscode.commands.executeCommand('claudeObservatory.searchWith', m.q ?? '');
     });
     view.onDidChangeVisibility(() => {
       if (view.visible) this.refresh();
@@ -1658,7 +1718,7 @@ class StatsUsageViewProvider implements vscode.WebviewViewProvider {
       kept: log.filter((r) => r.status === 'kept').length,
       undone: log.filter((r) => r.status === 'undone').length,
     };
-    this.view.webview.postMessage({ type: 'counts', c });
+    this.view.webview.postMessage({ type: 'counts', c, session: session ?? '', filter: editFilter });
   }
   /** Cheap + sync: post the current usage snapshot for the bars. */
   private postUsage(): void {
@@ -1901,9 +1961,9 @@ export function activate(context: vscode.ExtensionContext): void {
     backgroundColor: ADDED_LINE_BG,
     overviewRulerColor: CLAUDE_MARK_COLOR,
     overviewRulerLane: vscode.OverviewRulerLane.Left,
-    borderWidth: '0 0 0 2px',
+    borderWidth: '0 0 0 3px',
     borderStyle: 'solid',
-    borderColor: CLAUDE_MARK_COLOR,
+    borderColor: ADDED_BAR,
   });
   // ✨ gutter icon at the START of each edit — the "Claude edited here" marker; click the CodeLens
   // above (or, in JetBrains, the gutter icon itself) to open the inline diff.
@@ -1918,9 +1978,9 @@ export function activate(context: vscode.ExtensionContext): void {
     backgroundColor: REMOVED_LINE_BG,
     overviewRulerColor: CLAUDE_MARK_COLOR,
     overviewRulerLane: vscode.OverviewRulerLane.Left,
-    borderWidth: '0 0 0 2px',
+    borderWidth: '0 0 0 3px',
     borderStyle: 'solid',
-    borderColor: new vscode.ThemeColor('editorGutter.deletedBackground'),
+    borderColor: REMOVED_BAR,
   });
   // File heatmap: fade unmodified lines to ~40% so Claude's edited lines read at full contrast.
   heatmapDecoration = vscode.window.createTextEditorDecorationType({ opacity: '0.4' });
@@ -2180,6 +2240,21 @@ export function activate(context: vscode.ExtensionContext): void {
     // Step backward / forward through pending edits (⏮ prev · ⏭ next), keyboard-friendly.
     vscode.commands.registerCommand('claudeObservatory.reviewNext', () => reviewStep(1)),
     vscode.commands.registerCommand('claudeObservatory.reviewPrev', () => reviewStep(-1)),
+    // Stats navbar: jump to the FIRST (oldest) pending edit, and filter edits from the Stats search box.
+    vscode.commands.registerCommand('claudeObservatory.reviewFirst', async () => {
+      const s = currentSession();
+      const pending = s ? cachedLog(s).filter((r) => r.status === 'pending').sort((a, b) => a.id - b.id) : [];
+      if (!pending.length) {
+        vscode.window.setStatusBarMessage('Claude Observatory: no pending edits to review 🎉', 3000);
+        return;
+      }
+      reviewCursorId = pending[0].id; // so a subsequent review-next continues from here
+      await openFileAtEdit({ kind: 'edit', rec: pending[0] });
+    }),
+    vscode.commands.registerCommand('claudeObservatory.searchWith', (q?: string) => {
+      editFilter = (q ?? '').trim();
+      refreshAll();
+    }),
     // Nav bar: Diff axis (within the open file), File axis (across pending files), and per-edit actions.
     vscode.commands.registerCommand('claudeObservatory.navDiffPrev', () => navDiff(-1)),
     vscode.commands.registerCommand('claudeObservatory.navDiffNext', () => navDiff(1)),

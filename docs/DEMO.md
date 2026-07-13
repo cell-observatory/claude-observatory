@@ -177,7 +177,7 @@ in the others instantly. The layout is deliberately identical; only the host chr
 | Install | `code --install-extension claude-observatory.vsix` | `./scripts/install-jetbrains.sh` (or Install Plugin from Disk) |
 | **Edits · Diffs · File History** (review) | microscope in the Activity Bar, badged with the pending count | **Claude Observatory** tool window, left stripe |
 | **Observations · Timeline · Stats** | bottom panel, side by side (like Terminal/Problems) | **Claude Observatory Dashboards** tool window, bottom stripe — three panes side by side |
-| Inline menu (**✨ #N · +A −R · view changes · Keep · Undo · Chat · View diff**) | CodeLens above each edit + ✨ gutter star + subtle tint + coral ruler mark | lens above each edit + clickable ✨ gutter star + subtle tint + coral stripe |
+| Inline menu (**✨ #N · +A −R · view changes · Keep · Undo · Chat · View diff**) | CodeLens above each edit + ✨ gutter star + bold green/red highlight + coral ruler mark | lens above each edit + clickable ✨ gutter star + bold green/red highlight + coral stripe |
 | Click **view changes** | opens the **inline review bubble** at the edit — the diff in git's colors + reasoning + `+A −R`, Accept/Revert/Chat/Prev/Next on its toolbar (no tab) | opens the edit's unified **diff** (reasoning in title, Keep/Undo/Chat on toolbar) |
 | File heatmap | 📄 heatmap (tab-bar) | 📄 heatmap (editor banner) |
 | Scoreboard | status-bar `🔬 N` (amber while pending) + live bar in Stats | status-bar `🔬 N` + live bar in Stats |
@@ -212,10 +212,12 @@ class for **Keep all / Undo all** in that scope; click an edit to open the file 
 
 ### Inline overlay
 
-In the open file, each pending edit gets a **✨ gutter star** at its start, a **subtle** green tint on
-added lines and a red tint (with the removed code shown as red ghost text) on deletions — toned down so
-a heavily edited file doesn't drown in color — and a distinct **Claude-coral marker** on the overview
-ruler / scrollbar. Above the edit sits the **inline menu**: **✨ #N · +A −R · view changes** then **✓
+In the open file, each pending edit gets a **✨ gutter star** at its start and a **clearly-visible
+whole-line highlight** over Claude's edited section — a **green** fill with a **bold green change-bar**
+on added lines, and a **red** fill with a **red change-bar** on deletions (the removed code shown as red
+ghost text) — plus a distinct **Claude-coral marker** on the overview ruler / scrollbar. The line fills
+were once a deliberately faint ~10% tint; they now sit near **30%**, so a Claude-edited section stands
+out at a glance instead of blending in. Above the edit sits the **inline menu**: **✨ #N · +A −R · view changes** then **✓
 Keep · ↩ Undo · 💬 Chat · ⧉ View diff** (the same edit as a full diff tab — its own tab, Prev/Next on the
 title bar cycling the file's edits in place). "Chat about this edit" copies a ready-made prompt (before/after included) for
 your Claude Code chat or terminal.
@@ -347,13 +349,58 @@ review, so observations get sharper the longer you use the tool. Zero tokens, ze
 
 ### Stats — trends and live usage
 
-A live **review scoreboard** leads the tab: **pending / accepted / reverted** counts and a
-**progress bar** that fills as you review — updated the instant you keep or undo an edit. Below it, a
-step-line plot of **tokens** (total / input / output, logarithmic axis) with a **Today / 7 days /
+A **top navbar** now runs across the very top of the Stats view (both editors): the **active Claude
+Code session** on the left and a **Search edits** box that filters the edit list live — the **same
+filter** the **Edits** and **Diffs** trees use. Below it, a live **review scoreboard** leads the tab:
+**pending / accepted / reverted** counts and a **progress bar** that fills as you review — updated the
+instant you keep or undo an edit, and the **pending** count is now **clickable**: click it to jump
+straight to the first (oldest) edit awaiting review. Then a step-line plot of **tokens** (total / input / output, logarithmic axis) with a **Today / 7 days /
 30 days** toggle, then the live **Usage** bars (context fill + 5h / week plan usage with `~token`
 estimates). The full scoreboard (`3 pending · 42 accepted · 5 reverted · 89% accepted · oldest 12m`)
 also lives in the status-bar microscope's tooltip. The stats scan runs in a subprocess with an
 incremental cache, so the UI never blocks.
+
+### Risk & Egress — two zero-token audits
+
+The Action Timeline already knows every command Claude ran and every host it reached, so two safety
+audits fall straight out of it — **zero tokens, no new store or format**. Both live in the **Actions
+view** (a pane in the Dashboards window / a panel beside the others in VS Code) and each gets its own
+CLI verb.
+
+**Risk** flags the shell commands that can bite: data-destroying (`rm -rf`, `git reset --hard`, force
+push), remote code execution (`curl … | sh`), privilege escalation (`sudo`), or reads/writes of
+credential files. Flagged rows wear a ⚠ **high** / **med** badge in place. **Egress** answers *"what did
+this session touch off-machine?"* — every **WebFetch** host, **MCP server**, and network-shell command,
+each tagged **remote** or **unknown** — pinned as an **Egress** node at the very top of the view:
+
+```text
+▾ ⚠ Egress                3 off-machine
+    remote   WebFetch  raw.githubusercontent.com
+    remote   Command   curl https://sh.rustup.rs | sh
+    unknown  MCP       localhost:7331 (fs)
+▾ Commands                2
+    ⚠ high  ✓  rm -rf build/
+    ✓  node src/index.js
+```
+
+Each audit is also one command away:
+
+```console
+$ claude-observatory risk
+1 flagged  ·  1 high · 0 med  ·  session 0c396c6b-2da9-4be2-9c6d-c8c5797de7a5
+
+⚠ high  rm -rf build/                    data-loss
+
+$ claude-observatory egress
+3 off-machine  ·  session 0c396c6b-2da9-4be2-9c6d-c8c5797de7a5
+
+remote   WebFetch  raw.githubusercontent.com
+remote   Command   curl https://sh.rustup.rs | sh
+unknown  MCP       localhost:7331 (fs)
+```
+
+Both are **additive** — mined from the transcript's action trace, they add nothing to the store and
+change no on-disk format.
 
 ---
 

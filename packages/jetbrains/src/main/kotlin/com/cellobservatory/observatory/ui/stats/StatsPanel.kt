@@ -121,6 +121,12 @@ class StatsPanel(private val project: Project) : JPanel(BorderLayout()), com.int
         border = JBUI.Borders.empty(4, 8)
         isVisible = false
     }
+    // Stats top navbar (parity with the VS Code Stats navbar): the active session + a Search-edits box.
+    private val sessionLabel = JBLabel().apply {
+        foreground = UIUtil.getContextHelpForeground()
+        toolTipText = "Active Claude Code session"
+    }
+    private val searchField = com.intellij.ui.components.JBTextField().apply { emptyText.text = "Search edits…" }
 
     init {
         val ranges = JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(4), JBUI.scale(4)))
@@ -131,7 +137,33 @@ class StatsPanel(private val project: Project) : JPanel(BorderLayout()), com.int
             group.add(b)
             ranges.add(b)
         }
-        add(ranges, BorderLayout.NORTH)
+        // Top navbar: active session + a Search-edits box (debounced → the shared edit filter), above
+        // the range toggle. Clicking the scoreboard's PENDING column jumps to the first edit to review.
+        val filterAlarm = com.intellij.util.Alarm(com.intellij.util.Alarm.ThreadToUse.SWING_THREAD, this)
+        searchField.document.addDocumentListener(object : javax.swing.event.DocumentListener {
+            private fun changed() {
+                filterAlarm.cancelAllRequests()
+                filterAlarm.addRequest({ ObservatoryService.getInstance(project).setFilter(searchField.text) }, 300)
+            }
+            override fun insertUpdate(e: javax.swing.event.DocumentEvent) = changed()
+            override fun removeUpdate(e: javax.swing.event.DocumentEvent) = changed()
+            override fun changedUpdate(e: javax.swing.event.DocumentEvent) = changed()
+        })
+        val navbar = JPanel(BorderLayout(JBUI.scale(8), 0)).apply {
+            border = JBUI.Borders.empty(4, 8, 3, 8)
+            add(sessionLabel, BorderLayout.WEST)
+            add(searchField, BorderLayout.CENTER)
+        }
+        add(JPanel().apply { layout = javax.swing.BoxLayout(this, javax.swing.BoxLayout.Y_AXIS); add(navbar); add(ranges) }, BorderLayout.NORTH)
+        scoreboard.toolTipText = "Click the PENDING count to jump to the first edit to review"
+        scoreboard.addMouseListener(object : java.awt.event.MouseAdapter() {
+            override fun mouseClicked(e: java.awt.event.MouseEvent) { if (e.x < scoreboard.width / 3) reviewFirst() }
+        })
+        scoreboard.addMouseMotionListener(object : java.awt.event.MouseMotionAdapter() {
+            override fun mouseMoved(e: java.awt.event.MouseEvent) {
+                scoreboard.cursor = if (e.x < scoreboard.width / 3) java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR) else java.awt.Cursor.getDefaultCursor()
+            }
+        })
 
         val stack = ScrollableStack().apply {
             border = JBUI.Borders.empty(4, 8)
@@ -166,7 +198,18 @@ class StatsPanel(private val project: Project) : JPanel(BorderLayout()), com.int
         tokensChart.update(buckets)
     }
 
+    /** Jump to the first (oldest) pending edit — the scoreboard PENDING-count click target. */
+    private fun reviewFirst() {
+        val service = ObservatoryService.getInstance(project)
+        val session = service.currentSession() ?: return
+        val first = service.log().filter { it.pending }.minByOrNull { it.id } ?: return
+        com.cellobservatory.observatory.ui.Navigate.openFileAtEdit(project, session, first)
+    }
+
     fun refresh() {
+        val session = ObservatoryService.getInstance(project).currentSession()
+        sessionLabel.text = "🔬 " + (session?.take(8) ?: "—")
+        sessionLabel.toolTipText = session?.let { "Active session: $it" } ?: "No active Claude Code session"
         // Live review scoreboard from the in-memory folded log (cheap; cached on the log's mtime/size).
         scoreboard.update(ObservatoryService.getInstance(project).counts())
         fetchUsage()

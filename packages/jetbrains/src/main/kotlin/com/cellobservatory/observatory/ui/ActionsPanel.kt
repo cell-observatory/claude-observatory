@@ -5,6 +5,7 @@ import com.cellobservatory.observatory.core.StoreReader
 import com.cellobservatory.observatory.model.ActionGroup
 import com.cellobservatory.observatory.model.ActionRecord
 import com.cellobservatory.observatory.model.ActionsParser
+import com.cellobservatory.observatory.model.EgressChannel
 import com.cellobservatory.observatory.model.relTime
 import com.cellobservatory.observatory.services.ObservatoryService
 import com.intellij.icons.AllIcons
@@ -96,6 +97,11 @@ class ActionsPanel(private val project: Project) : SimpleToolWindowPanel(true, t
             ApplicationManager.getApplication().invokeLater {
                 if (project.isDisposed) return@invokeLater
                 root.removeAllChildren()
+                if (res != null && res.egress.isNotEmpty()) { // "where did this session reach off-machine" on top
+                    val egNode = DefaultMutableTreeNode(EgressRoot(res.egress))
+                    res.egress.forEach { egNode.add(DefaultMutableTreeNode(it)) }
+                    root.add(egNode)
+                }
                 res?.groups?.forEach { g ->
                     val gNode = DefaultMutableTreeNode(g)
                     g.actions.forEach { gNode.add(DefaultMutableTreeNode(it)) }
@@ -112,12 +118,30 @@ class ActionsPanel(private val project: Project) : SimpleToolWindowPanel(true, t
             override fun actionPerformed(e: AnActionEvent) = run()
         }
 
+    /** Marker userObject for the "Egress" root node — carries the channels rendered under it. */
+    private class EgressRoot(val channels: List<EgressChannel>)
+
     private class Renderer : ColoredTreeCellRenderer() {
+        private val AMBER = SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, com.intellij.ui.JBColor.ORANGE)
+
         override fun customizeCellRenderer(
             tree: JTree, value: Any?, selected: Boolean, expanded: Boolean,
             leaf: Boolean, row: Int, hasFocus: Boolean,
         ) {
             when (val node = (value as? DefaultMutableTreeNode)?.userObject) {
+                is EgressRoot -> {
+                    icon = AllIcons.General.Web
+                    append("Egress")
+                    val remote = node.channels.count { it.scope == "remote" }
+                    append("  ${node.channels.size} destination${if (node.channels.size == 1) "" else "s"}" + if (remote > 0) " · $remote remote" else "", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                    toolTipText = "What this session touched off-machine — web, MCP, and network-shell destinations"
+                }
+                is EgressChannel -> {
+                    icon = if (node.scope == "remote") AllIcons.General.Web else AllIcons.General.Information
+                    append("${node.kind}  ")
+                    append(node.target, SimpleTextAttributes.REGULAR_ATTRIBUTES)
+                    append("  ${node.scope}" + if (node.count > 1) " ×${node.count}" else "", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                }
                 is ActionGroup -> {
                     icon = catIcon(node.category)
                     append(node.label)
@@ -126,13 +150,19 @@ class ActionsPanel(private val project: Project) : SimpleToolWindowPanel(true, t
                     if (node.errors > 0) append("  · ${node.errors} error${if (node.errors == 1) "" else "s"}", SimpleTextAttributes.ERROR_ATTRIBUTES)
                 }
                 is ActionRecord -> {
-                    icon = if (node.isError) AllIcons.Actions.Cancel else catIcon(node.category)
+                    val risk = node.risk
+                    icon = when {
+                        node.isError -> AllIcons.Actions.Cancel
+                        risk != null -> AllIcons.General.Warning
+                        else -> catIcon(node.category)
+                    }
                     val style = if (node.isError) SimpleTextAttributes.ERROR_ATTRIBUTES else SimpleTextAttributes.REGULAR_ATTRIBUTES
                     append("${node.tool}  ", if (node.isError) SimpleTextAttributes.ERROR_ATTRIBUTES else SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES)
                     append(node.target.replace(Regex("\\s+"), " "), style)
+                    if (risk != null) append("  ⚠ ${risk.level}", if (risk.level == "high") SimpleTextAttributes.ERROR_ATTRIBUTES else AMBER)
                     val meta = listOfNotNull(node.ts.takeIf { it > 0 }?.let { relTime(it) }, node.detail).joinToString(" · ")
                     if (meta.isNotEmpty()) append("  $meta", SimpleTextAttributes.GRAYED_ATTRIBUTES)
-                    toolTipText = listOfNotNull(node.target, node.reasoning?.lineSequence()?.firstOrNull()?.let { "💭 $it" }).joinToString("\n")
+                    toolTipText = listOfNotNull(node.target, risk?.let { "⚠ ${it.reasons.joinToString(" · ")}" }, node.reasoning?.lineSequence()?.firstOrNull()?.let { "💭 $it" }).joinToString("\n")
                 }
             }
         }
