@@ -5,6 +5,49 @@ All notable changes to Claude Observatory are recorded here, following
 Per-tag release artifacts and auto-generated notes are on the
 [Releases page](https://github.com/cell-observatory/claude-observatory/releases).
 
+## [0.5.5] — 2026-07-13
+
+Adds a review **navigation bar** to the status bar in both editors — adopted from the review toolbar in
+the [Void](https://github.com/voideditor/void) / [CortexIDE](https://github.com/OpenCortexIDE/cortexide)
+editors. No breaking changes — the `--json` contract and on-disk store format are unchanged.
+
+### Added — status-bar navigation bar (VS Code + JetBrains)
+
+Beside the 🔬 scoreboard, a compact review toolbar now appears while edits await review, with two
+stepping axes and inline actions:
+
+- **Diff axis** — `▲ Diff n/m ▼` steps through the open file's pending edits (the counter opens the
+  current edit's diff).
+- **File axis** — `◀ File n/m ▶` steps across every file with pending edits (the counter opens the
+  Edits view).
+- **Keep** / **Undo** the current edit (surgical, per-edit), **Accept File** / **Reject File** (the
+  whole open file), **Clear resolved**, a **Spotlight** toggle (dims unedited lines so Claude's changes
+  stand out), and **Search edits**.
+
+The bar is two-tier: the File axis, Clear, Spotlight, and Search show whenever anything is pending; the
+Diff axis and per-edit / per-file actions show only when the open file has pending edits. Every button
+reuses existing commands, so behavior matches the tree views and keybindings exactly. The counters track
+the active editor, updating as you switch tabs or resolve edits.
+
+### Added — the floating review bubble is now the full nav bar
+
+The inline review bubble (opened from the ✨ marker, or by clicking the status bar's `Diff n/m`) carries
+the Diff/File counters in its header and a complete toolbar: **Diff axis**, **File axis**, **Keep/Undo**
+this edit, **Accept/Reject File**, and **Chat**. There is only ever one bubble — stepping an axis moves
+it in place (it never spawns a second).
+
+### Added — nav bar in the editor tab bar
+
+The editor's top-right action row (VS Code `editor/title`) and the top-of-editor banner (JetBrains) now
+surface the nav bar for the open file — Diff axis, File axis, Keep/Undo, Accept/Reject File, Clear, and
+Spotlight — so the review controls are reachable without leaving the editor.
+
+### Changed — one "spotlight" (heatmap) icon everywhere
+
+The dim-unedited-lines toggle now uses a single lightbulb icon across every surface (status bar, editor
+toolbar, and the JetBrains banner). Accept/Reject **File** use the `check-all` / `close-all` icons so
+they read distinctly from the single-edit Keep/Undo.
+
 ## [0.5.3] — 2026-07-12
 
 Bug-fix: `update` now actually refreshes the VS Code extension, and never skips an installed extension

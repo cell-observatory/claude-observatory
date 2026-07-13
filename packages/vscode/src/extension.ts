@@ -428,10 +428,23 @@ class EditPeek implements vscode.Disposable {
     const cwd = workspaceRoot();
     const why = cwd ? cachedTranscript(cwd, session).reasoning.get(id)?.trim() : undefined;
     const d = cachedDelta(session, rec);
+    // Nav-bar counters in the bubble header: position among this file's pending edits (Diff axis) and
+    // among all files with pending edits (File axis) — the same two axes the status-bar bar shows.
+    const filePending = cachedLog(session).filter((r) => r.file === rec.file && r.status === 'pending').sort((a, b) => a.id - b.id);
+    const diffIdx = filePending.findIndex((r) => r.id === id);
+    const files = pendingFilesOf(session);
+    const fileIdx = files.indexOf(rec.file);
+    const diffPos = diffIdx >= 0 ? `Diff ${diffIdx + 1}/${filePending.length}` : '';
+    const filePos = fileIdx >= 0 ? `File ${fileIdx + 1}/${files.length}` : '';
     const md = new vscode.MarkdownString();
     md.supportHtml = true; // the colored <span>s below survive the sanitizer only with this on
     md.isTrusted = true;
-    md.appendMarkdown(`**✨ Claude edit #${id}**  ·  \`+${d.added} −${d.removed}\`  ·  ${rec.tool}\n\n`);
+    md.appendMarkdown(
+      `**✨ Claude edit #${id}**  ·  \`+${d.added} −${d.removed}\`  ·  ${rec.tool}` +
+        (diffPos ? `  ·  ${diffPos}` : '') +
+        (filePos ? `  ·  ${filePos}` : '') +
+        `\n\n`
+    );
     if (why) md.appendMarkdown(`💭 ${firstLine(why)}\n\n`);
     let patch = '';
     try {
@@ -446,7 +459,7 @@ class EditPeek implements vscode.Disposable {
     thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
     thread.canReply = false;
     thread.contextValue = 'claudeEdit';
-    thread.label = `Claude edit #${id}  ·  +${d.added} −${d.removed}`;
+    thread.label = `Claude edit #${id}  ·  +${d.added} −${d.removed}` + (diffPos ? `  ·  ${diffPos}` : '');
     this.thread = thread;
     this.edit = { id, file: rec.file };
     editor.revealRange(range, vscode.TextEditorRevealType.InCenter);
@@ -472,7 +485,7 @@ class EditPeek implements vscode.Disposable {
     if (this.edit) void vscode.commands.executeCommand('claudeObservatory.chatEdit', this.edit.id);
   }
 
-  /** Step to the prev (-1) / next (+1) pending edit in the same file, wrapping at the ends. */
+  /** Step to the prev (-1) / next (+1) pending edit in the same file, wrapping at the ends (Diff axis). */
   step(dir: 1 | -1): Promise<void> {
     const s = currentSession();
     if (!this.edit || !s) return Promise.resolve();
@@ -482,6 +495,36 @@ class EditPeek implements vscode.Disposable {
     const idx = list.findIndex((r) => r.id === this.edit!.id);
     const target = list[((idx < 0 ? 0 : idx) + dir + list.length) % list.length];
     return this.show(target.id);
+  }
+
+  /** Step to the prev (-1) / next (+1) file with pending edits, opening its first pending edit (File axis). */
+  stepFile(dir: 1 | -1): Promise<void> {
+    const s = currentSession();
+    if (!this.edit || !s) return Promise.resolve();
+    const files = pendingFilesOf(s);
+    if (files.length === 0) return Promise.resolve();
+    const idx = files.indexOf(this.edit.file);
+    const target = files[((idx < 0 ? 0 : idx) + dir + files.length) % files.length];
+    const first = pendingEditsInFile(s, target)[0];
+    return first ? this.show(first.id) : Promise.resolve();
+  }
+
+  /** Accept every pending edit in the bubble's file, then close it (Accept File). */
+  acceptFile(): void {
+    const s = currentSession();
+    if (this.edit && s) {
+      keepEditsInFile(s, this.edit.file, []);
+      this.closeThread();
+    }
+  }
+
+  /** Revert every pending edit in the bubble's file (dirty-guard + confirm inside), then close it. */
+  async rejectFile(): Promise<void> {
+    const s = currentSession();
+    if (this.edit && s) {
+      await undoEditsInFile(s, this.edit.file, []);
+      this.closeThread();
+    }
   }
 
   private closeThread(): void {
@@ -911,6 +954,20 @@ function pendingAtCursor(session: string): core.EditRecord | undefined {
   if (!editor) return undefined;
   const line = editor.selection.active.line;
   return cachedPlacements(session, editor.document).find((p) => anchorLines(p).includes(line))?.rec;
+}
+
+/** Files with at least one pending edit, sorted by path — the nav bar's File axis (matches the Edits tree). */
+function pendingFilesOf(session: string): string[] {
+  const files = new Set<string>();
+  for (const r of cachedLog(session)) if (r.status === 'pending') files.add(r.file);
+  return [...files].sort();
+}
+
+/** One file's pending edits, oldest→newest — the nav bar's Diff axis. */
+function pendingEditsInFile(session: string, file: string): core.EditRecord[] {
+  return cachedLog(session)
+    .filter((r) => r.file === file && r.status === 'pending')
+    .sort((a, b) => a.id - b.id);
 }
 
 /** A one-line red-ghost preview of removed lines: first non-blank line (trimmed, truncated), with a
@@ -1797,8 +1854,13 @@ export function activate(context: vscode.ExtensionContext): void {
   // amber while edits await review. Click = jump to the next pending edit.
   const statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 90);
   statusItem.command = 'claudeObservatory.reviewNext';
-  // A compact action cluster beside the microscope — shown only while edits await review so the bottom
-  // bar stays quiet when you're caught up. Same actions are mirrored in the editor's top-right toolbar.
+  // The nav bar: a compact review toolbar beside the microscope, shown only while edits await review so
+  // the bottom bar stays quiet when you're caught up. Two tiers (adopted from Void's editor review bar):
+  //   • session tier  — File axis (← n/m →), Clear resolved, Spotlight, Search — whenever ANY edit is pending
+  //   • active-file tier — Diff axis (↑ n/m ↓), Keep/Undo this edit, Accept/Reject File — when the OPEN file
+  //     has pending edits (mirrors the per-file bar Void pins at the bottom of the editor).
+  // navEditId is the pending edit the Diff axis is parked on within the open file.
+  let navEditId: number | undefined;
   const mkStatusBtn = (text: string, tooltip: string, command: string, priority: number) => {
     const b = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, priority);
     b.text = text;
@@ -1806,13 +1868,27 @@ export function activate(context: vscode.ExtensionContext): void {
     b.command = command;
     return b;
   };
-  const statusCluster = [
-    mkStatusBtn('$(debug-step-back)', 'Claude Observatory: review previous pending edit', 'claudeObservatory.reviewPrev', 89),
-    mkStatusBtn('$(debug-step-over)', 'Claude Observatory: review next pending edit', 'claudeObservatory.reviewNext', 88),
-    mkStatusBtn('$(check-all)', 'Claude Observatory: accept all edits', 'claudeObservatory.keepAll', 87),
-    mkStatusBtn('$(discard)', 'Claude Observatory: revert all pending edits (accepted edits are kept)', 'claudeObservatory.undoAll', 86),
-    mkStatusBtn('$(search)', 'Claude Observatory: search edits', 'claudeObservatory.searchEdits', 85),
-  ];
+  // Diff axis — steps the OPEN file's pending edits; the counter opens the current edit's diff.
+  const diffPrevBtn = mkStatusBtn('$(chevron-up)', 'Claude Observatory: previous edit in this file', 'claudeObservatory.navDiffPrev', 89);
+  const diffCountBtn = mkStatusBtn('', 'Claude Observatory: this file’s pending edits — click to open the floating review bubble', 'claudeObservatory.navViewDiff', 88);
+  const diffNextBtn = mkStatusBtn('$(chevron-down)', 'Claude Observatory: next edit in this file', 'claudeObservatory.navDiffNext', 87);
+  // File axis — steps across every file with pending edits; the counter opens the Edits view.
+  const filePrevBtn = mkStatusBtn('$(chevron-left)', 'Claude Observatory: previous changed file', 'claudeObservatory.navFilePrev', 86);
+  const fileCountBtn = mkStatusBtn('', 'Claude Observatory: files with pending edits — click to open the Edits view', 'claudeObservatory.edits.focus', 85);
+  const fileNextBtn = mkStatusBtn('$(chevron-right)', 'Claude Observatory: next changed file', 'claudeObservatory.navFileNext', 84);
+  // Per-edit + per-file actions on the OPEN file.
+  const keepEditBtn = mkStatusBtn('$(check)', 'Claude Observatory: keep this edit', 'claudeObservatory.navKeep', 83);
+  const undoEditBtn = mkStatusBtn('$(discard)', 'Claude Observatory: undo this edit', 'claudeObservatory.navUndo', 82);
+  const acceptFileBtn = mkStatusBtn('$(check-all)', 'Claude Observatory: accept every pending edit in this file', 'claudeObservatory.keepOpenFile', 81);
+  const rejectFileBtn = mkStatusBtn('$(close-all)', 'Claude Observatory: reject (revert) every pending edit in this file', 'claudeObservatory.undoOpenFile', 80);
+  // Session-wide utilities.
+  const clearBtn = mkStatusBtn('$(clear-all)', 'Claude Observatory: clear resolved (kept/reverted) edits', 'claudeObservatory.clearResolved', 79);
+  const spotlightBtn = mkStatusBtn('$(lightbulb)', 'Claude Observatory: toggle spotlight — dim unedited lines to highlight Claude’s changes', 'claudeObservatory.toggleHeatmap', 78);
+  const searchBtn = mkStatusBtn('$(search)', 'Claude Observatory: search edits', 'claudeObservatory.searchEdits', 77);
+  const activeFileBtns = [diffPrevBtn, diffCountBtn, diffNextBtn, keepEditBtn, undoEditBtn, acceptFileBtn, rejectFileBtn];
+  const sessionBtns = [filePrevBtn, fileCountBtn, fileNextBtn, clearBtn, spotlightBtn, searchBtn];
+  const navCluster = [...activeFileBtns, ...sessionBtns];
+
   const updateStatusItem = () => {
     const session = currentSession();
     const log = session ? cachedLog(session) : [];
@@ -1834,8 +1910,30 @@ export function activate(context: vscode.ExtensionContext): void {
     statusItem.tooltip = tip;
     statusItem.backgroundColor = pending ? new vscode.ThemeColor('statusBarItem.warningBackground') : undefined;
     statusItem.show();
-    // The action cluster + the editor-toolbar buttons only appear while there's something to review.
-    for (const b of statusCluster) pending ? b.show() : b.hide();
+
+    // Nav-bar counters: the File axis spans every pending file; the Diff axis spans the OPEN file's edits.
+    const activeFile = vscode.window.activeTextEditor?.document.uri.fsPath;
+    const files = session ? pendingFilesOf(session) : [];
+    const inFile = session && activeFile ? pendingEditsInFile(session, activeFile) : [];
+    const activeHasPending = inFile.length > 0;
+    // Anchor navEditId to a still-pending edit in the OPEN file (default: the edit under the cursor, else
+    // the file's first pending edit); cleared when the open file has nothing to review.
+    if (activeHasPending) {
+      if (navEditId === undefined || !inFile.some((r) => r.id === navEditId)) {
+        const atCursor = session ? pendingAtCursor(session)?.id : undefined;
+        navEditId = atCursor !== undefined && inFile.some((r) => r.id === atCursor) ? atCursor : inFile[0].id;
+      }
+    } else {
+      navEditId = undefined;
+    }
+    const diffIdx = activeHasPending ? inFile.findIndex((r) => r.id === navEditId) : -1;
+    diffCountBtn.text = activeHasPending ? `Diff ${diffIdx + 1}/${inFile.length}` : '';
+    const fileIdx = activeFile ? files.indexOf(activeFile) : -1;
+    fileCountBtn.text = files.length ? `File ${fileIdx >= 0 ? fileIdx + 1 : '–'}/${files.length}` : '';
+
+    // Session-tier buttons show whenever anything is pending; active-file-tier only inside a changed file.
+    for (const b of sessionBtns) pending ? b.show() : b.hide();
+    for (const b of activeFileBtns) activeHasPending ? b.show() : b.hide();
     void vscode.commands.executeCommand('setContext', 'claudeObservatory.hasPending', pending > 0);
     syncActiveFileContext();
   };
@@ -1848,7 +1946,7 @@ export function activate(context: vscode.ExtensionContext): void {
     void vscode.commands.executeCommand('setContext', 'claudeObservatory.activeFileHasPending', has);
   };
   updateStatusItem(); // visible from activation, not just after the first store event
-  context.subscriptions.push(...statusCluster);
+  context.subscriptions.push(...navCluster);
 
   // Review-loop cursor: id of the pending edit last opened, so ←/→ step backward/forward through every
   // pending edit (wrapping at the ends) instead of always reopening the oldest.
@@ -1894,6 +1992,43 @@ export function activate(context: vscode.ExtensionContext): void {
     refreshInline();
   };
 
+  // --- nav bar handlers (drive the status-bar review toolbar built above) ---
+  // The pending edit the Diff axis is parked on, resolved to a live (still-pending) record.
+  const navCurrentRec = (): { s: string; rec: core.EditRecord } | undefined => {
+    const s = currentSession();
+    if (!s || navEditId === undefined) return undefined;
+    const rec = core.findRecord(s, navEditId);
+    return rec && rec.status === 'pending' ? { s, rec } : undefined;
+  };
+  // Diff axis: step the OPEN file's pending edits (wrapping) and reveal the target in the editor.
+  const navDiff = async (dir: 1 | -1) => {
+    const s = currentSession();
+    const file = vscode.window.activeTextEditor?.document.uri.fsPath;
+    if (!s || !file) return;
+    const list = pendingEditsInFile(s, file);
+    if (!list.length) return;
+    const idx = navEditId !== undefined ? list.findIndex((r) => r.id === navEditId) : -1;
+    const target = list[((idx < 0 ? 0 : idx) + dir + list.length) % list.length];
+    navEditId = target.id;
+    await openFileAtEdit({ kind: 'edit', rec: target });
+    updateStatusItem();
+  };
+  // File axis: step across files with pending edits (wrapping), opening the target's first pending edit.
+  const navFile = async (dir: 1 | -1) => {
+    const s = currentSession();
+    if (!s) return;
+    const files = pendingFilesOf(s);
+    if (!files.length) return;
+    const active = vscode.window.activeTextEditor?.document.uri.fsPath;
+    const idx = active ? files.indexOf(active) : -1;
+    const target = files[((idx < 0 ? 0 : idx) + dir + files.length) % files.length];
+    const first = pendingEditsInFile(s, target)[0];
+    if (!first) return;
+    navEditId = first.id;
+    await openFileAtEdit({ kind: 'edit', rec: first });
+    updateStatusItem();
+  };
+
   context.subscriptions.push(
     editsView,
     diffsView,
@@ -1931,7 +2066,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.window.onDidChangeWindowState((s) => s.focused && refreshAll()),
     vscode.window.onDidChangeActiveTextEditor(() => {
       refreshInline();
-      syncActiveFileContext();
+      updateStatusItem(); // recompute nav-bar counters + active-file context for the newly-active file
       fileHistoryProvider.refresh(); // re-query for the newly-active file
     }),
     vscode.workspace.onDidChangeTextDocument((e) => {
@@ -1956,6 +2091,27 @@ export function activate(context: vscode.ExtensionContext): void {
     // Step backward / forward through pending edits (⏮ prev · ⏭ next), keyboard-friendly.
     vscode.commands.registerCommand('claudeObservatory.reviewNext', () => reviewStep(1)),
     vscode.commands.registerCommand('claudeObservatory.reviewPrev', () => reviewStep(-1)),
+    // Nav bar: Diff axis (within the open file), File axis (across pending files), and per-edit actions.
+    vscode.commands.registerCommand('claudeObservatory.navDiffPrev', () => navDiff(-1)),
+    vscode.commands.registerCommand('claudeObservatory.navDiffNext', () => navDiff(1)),
+    vscode.commands.registerCommand('claudeObservatory.navFilePrev', () => navFile(-1)),
+    vscode.commands.registerCommand('claudeObservatory.navFileNext', () => navFile(1)),
+    vscode.commands.registerCommand('claudeObservatory.navViewDiff', () => {
+      const cur = navCurrentRec();
+      if (cur) void editPeek.show(cur.rec.id); // open the floating review bubble at the current edit
+    }),
+    vscode.commands.registerCommand('claudeObservatory.navKeep', () => {
+      const cur = navCurrentRec();
+      if (!cur) return;
+      core.keepGroup(cur.s, cur.rec.id);
+      refreshAll();
+    }),
+    vscode.commands.registerCommand('claudeObservatory.navUndo', async () => {
+      const cur = navCurrentRec();
+      if (!cur) return;
+      await undoOne(cur.s, cur.rec.id);
+      refreshAll();
+    }),
     // Revision navigation: step the active file's edit history in a current-vs-revision diff.
     vscode.commands.registerCommand('claudeObservatory.diffPrevRevision', () => diffRevisionStep(-1)),
     vscode.commands.registerCommand('claudeObservatory.diffNextRevision', () => diffRevisionStep(1)),
@@ -2182,6 +2338,11 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('claudeObservatory.peekChat', () => editPeek.chat()),
     vscode.commands.registerCommand('claudeObservatory.peekPrev', () => editPeek.step(-1)),
     vscode.commands.registerCommand('claudeObservatory.peekNext', () => editPeek.step(1)),
+    // Floating bubble = the full nav bar: File axis + per-file Accept/Reject alongside the Diff axis above.
+    vscode.commands.registerCommand('claudeObservatory.peekPrevFile', () => void editPeek.stepFile(-1)),
+    vscode.commands.registerCommand('claudeObservatory.peekNextFile', () => void editPeek.stepFile(1)),
+    vscode.commands.registerCommand('claudeObservatory.peekAcceptFile', () => editPeek.acceptFile()),
+    vscode.commands.registerCommand('claudeObservatory.peekRejectFile', () => void editPeek.rejectFile()),
     // Prev/Next on the diff title bar (diff tabs from the Diffs tree / revision nav): step the file's
     // pending edits (wrapping). The command gets the diff's resource URI, which carries the edit id.
     vscode.commands.registerCommand('claudeObservatory.diffPrevEdit', (uri?: vscode.Uri) => stepDiffEdit(uri, -1)),
