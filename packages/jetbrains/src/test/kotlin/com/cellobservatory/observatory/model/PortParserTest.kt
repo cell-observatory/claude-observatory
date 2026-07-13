@@ -124,4 +124,54 @@ class PortParserTest {
         assertEquals("remote", res.egress[0].scope)
         assertEquals(2, res.egress[0].count)
     }
+
+    @Test
+    fun `ActionsParser extracts subagents (with metrics) and fleet siblings, defaulting empty when absent`() {
+        val json = """
+            {"session":"s1","summary":{"total":0,"errors":0,"byCategory":{}},"groups":[],"egress":[],
+             "subagents":[
+               {"agentId":"a1","agentType":"code-reviewer","description":"review diff","status":"completed",
+                "ts":1000,"durationMs":300000,"tokens":45000,"toolUseCount":12,
+                "actions":[{"ts":1100,"tool":"Read","category":"read","target":"/x.ts","ok":true,"isError":false,"editId":null},
+                           {"ts":1200,"tool":"Grep","category":"search","target":"foo","ok":false,"isError":true,"editId":null}],
+                "edits":0,"summary":{"total":2,"errors":1,"byCategory":{"read":1,"search":1},"firstTs":1100,"lastTs":1200}}],
+             "subagentsSummary":{"count":1,"totalActions":2,"totalEdits":0,"totalDurationMs":300000,"totalTokens":45000,"errors":1},
+             "fleet":[
+               {"id":"self1","self":true,"active":true,"lastMs":2000,"edits":3,"pending":1,"files":["/a.ts"],"moreFiles":0,"risk":{"total":0,"high":0}},
+               {"id":"sib1","self":false,"active":false,"lastMs":1500,"edits":2,"pending":2,"files":["/b.ts","/c.ts"],"moreFiles":1,"risk":{"total":2,"high":1}}],
+             "fleetSummary":{"total":2,"active":1,"siblings":1,"pending":2}}
+        """.trimIndent()
+        val res = ActionsParser.parse(json)!!
+        // subagents: metadata + metrics + nested action timeline
+        assertEquals(1, res.subagents.size)
+        val sa = res.subagents[0]
+        assertEquals("a1", sa.agentId)
+        assertEquals("code-reviewer", sa.agentType)
+        assertEquals("review diff", sa.description)
+        assertEquals(300000L, sa.durationMs) // per-subagent metrics from toolUseResult
+        assertEquals(45000L, sa.tokens)
+        assertEquals(12, sa.toolUseCount)
+        assertEquals(2, sa.actions.size)
+        assertEquals("Read", sa.actions[0].tool) // the subagent's own tool calls, nested
+        assertTrue(sa.actions[1].isError)
+        assertEquals(2, sa.totalActions)
+        assertEquals(1, sa.errors)
+        assertEquals(1, res.subagentsSummary?.count)
+        assertEquals(300000L, res.subagentsSummary?.totalDurationMs)
+        // fleet: sibling sessions with status / pending / files / risk
+        assertEquals(2, res.fleet.size)
+        val self = res.fleet.first { it.self }
+        val sib = res.fleet.first { !it.self }
+        assertTrue(self.active)
+        assertEquals(2, sib.pending)
+        assertEquals(listOf("/b.ts", "/c.ts"), sib.files)
+        assertEquals(1, sib.moreFiles)
+        assertEquals(2, sib.riskTotal)
+        assertEquals(1, sib.riskHigh)
+        assertEquals(1, res.fleetSummary?.siblings)
+        // back-compat: a 0.6.x payload with no subagents/fleet keys still parses (empty, not a crash)
+        val legacy = ActionsParser.parse("""{"session":"s","summary":{"total":0,"errors":0,"byCategory":{}},"groups":[],"egress":[]}""")!!
+        assertTrue(legacy.subagents.isEmpty() && legacy.fleet.isEmpty())
+        assertNull(legacy.subagentsSummary)
+    }
 }

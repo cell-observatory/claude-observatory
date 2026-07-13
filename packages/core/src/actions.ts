@@ -131,15 +131,18 @@ function toMs(v: unknown): number {
 }
 
 /**
- * Every tool call Claude made this session, in transcript (chronological) order, each correlated with
- * its result (ok/isError) and — for file-edit tools — the store EditRecord it produced. Zero token.
+ * Parse ONE transcript file (main session OR a subagent's subagents/*.jsonl) into its typed action
+ * stream, in chronological order, each correlated with its tool_result (ok/isError). No store linkage
+ * here — that's the caller's job (only the main session's edits map to store EditRecords). Zero token.
+ *
+ * `includeSidechain`: the main session skips inlined sidechain (subagent) turns so they don't
+ * double-count; a subagent file is ENTIRELY sidechain records, so parsing it passes `true`.
  */
-export function parseActions(cwd: string, sessionId: string): ActionRecord[] {
-  const transcript = findTranscript(cwd, sessionId);
-  if (!transcript) return [];
+export function parseTranscriptActions(transcriptPath: string, opts?: { includeSidechain?: boolean }): ActionRecord[] {
+  const includeSidechain = opts?.includeSidechain ?? false;
   let lines: string[];
   try {
-    lines = fs.readFileSync(transcript, 'utf8').split('\n');
+    lines = fs.readFileSync(transcriptPath, 'utf8').split('\n');
   } catch {
     return [];
   }
@@ -161,8 +164,9 @@ export function parseActions(cwd: string, sessionId: string): ActionRecord[] {
     if (!msg || !Array.isArray(msg.content)) continue;
 
     // A subagent's own tool calls live in separate subagents/*.jsonl files (0.7.0); a legacy transcript
-    // that inlines them (isSidechain) would double-count, so skip those here.
-    if (o.isSidechain === true) continue;
+    // that inlines them (isSidechain) would double-count, so skip those unless we're parsing the
+    // subagent file itself.
+    if (o.isSidechain === true && !includeSidechain) continue;
 
     if (msg.role === 'user') {
       for (const b of msg.content) {
@@ -213,7 +217,17 @@ export function parseActions(cwd: string, sessionId: string): ActionRecord[] {
       a.ok = !a.isError;
     }
   }
+  return actions;
+}
 
+/**
+ * Every tool call Claude made this session, in transcript (chronological) order, each correlated with
+ * its result (ok/isError) and — for file-edit tools — the store EditRecord it produced. Zero token.
+ */
+export function parseActions(cwd: string, sessionId: string): ActionRecord[] {
+  const transcript = findTranscript(cwd, sessionId);
+  if (!transcript) return [];
+  const actions = parseTranscriptActions(transcript, { includeSidechain: false });
   linkEditIds(sessionId, actions);
   return actions;
 }

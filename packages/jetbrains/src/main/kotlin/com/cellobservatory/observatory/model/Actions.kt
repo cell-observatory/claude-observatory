@@ -1,5 +1,6 @@
 package com.cellobservatory.observatory.model
 
+import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 
 /** Risk score for a shell command (mirrors core's CommandRisk). */
@@ -31,16 +32,82 @@ data class ActionGroup(
     val actions: List<ActionRecord>,
 )
 
+/** One subagent this session spawned, with its own action timeline + metrics (mirrors core's SubagentInfo). */
+data class SubagentInfo(
+    val agentId: String,
+    val agentType: String?,
+    val description: String?,
+    val status: String?,
+    val ts: Long,
+    val durationMs: Long?,
+    val tokens: Long?,
+    val toolUseCount: Int?,
+    val actions: List<ActionRecord>,
+    val edits: Int,
+    val totalActions: Int,
+    val errors: Int,
+)
+
+/** Rollup across all subagents (mirrors core's SubagentsSummary). */
+data class SubagentsSummary(
+    val count: Int,
+    val totalActions: Int,
+    val totalEdits: Int,
+    val totalDurationMs: Long,
+    val totalTokens: Long,
+    val errors: Int,
+)
+
+/** A sibling Claude Code session in the same project (mirrors core's SiblingSession). */
+data class SiblingSession(
+    val id: String,
+    val self: Boolean,
+    val active: Boolean,
+    val lastMs: Long,
+    val edits: Int,
+    val pending: Int,
+    val files: List<String>,
+    val moreFiles: Int,
+    val riskTotal: Int,
+    val riskHigh: Int,
+)
+
+/** Rollup across the project's sessions (mirrors core's FleetSummary). */
+data class FleetSummary(val total: Int, val active: Int, val siblings: Int, val pending: Int)
+
 data class ActionsResult(
     val session: String,
     val total: Int,
     val errors: Int,
     val groups: List<ActionGroup>,
     val egress: List<EgressChannel>,
+    val subagents: List<SubagentInfo>,
+    val subagentsSummary: SubagentsSummary?,
+    val fleet: List<SiblingSession>,
+    val fleetSummary: FleetSummary?,
 )
 
 /** Parse the `claude-observatory actions --json` payload (which already carries the grouped view-model). */
 object ActionsParser {
+    private fun strOrNull(o: JsonObject, k: String) = o.get(k)?.takeIf { !it.isJsonNull }?.asString
+    private fun longOrNull(o: JsonObject, k: String) = o.get(k)?.takeIf { !it.isJsonNull }?.asLong
+    private fun intOrNull(o: JsonObject, k: String) = o.get(k)?.takeIf { !it.isJsonNull }?.asInt
+
+    private fun parseAction(ao: JsonObject): ActionRecord = ActionRecord(
+        ts = ao.get("ts")?.takeIf { !it.isJsonNull }?.asLong ?: 0L,
+        tool = ao.get("tool")?.asString ?: "",
+        category = ao.get("category")?.asString ?: "other",
+        target = ao.get("target")?.asString ?: "",
+        detail = strOrNull(ao, "detail"),
+        ok = ao.get("ok")?.asBoolean ?: true,
+        isError = ao.get("isError")?.asBoolean ?: false,
+        reasoning = strOrNull(ao, "reasoning"),
+        editId = ao.get("editId")?.takeIf { !it.isJsonNull }?.asInt,
+        risk = ao.get("risk")?.takeIf { it.isJsonObject }?.asJsonObject?.let { r ->
+            CommandRisk(r.get("level").asString, r.getAsJsonArray("reasons").map { it.asString })
+        },
+    )
+
     fun parse(json: String): ActionsResult? = try {
         val o = JsonParser.parseString(json).asJsonObject
         val summary = o.getAsJsonObject("summary")
@@ -51,24 +118,59 @@ object ActionsParser {
                 label = go.get("label").asString,
                 count = go.get("count").asInt,
                 errors = go.get("errors").asInt,
-                actions = go.getAsJsonArray("actions").map { a ->
-                    val ao = a.asJsonObject
-                    fun strOrNull(k: String) = ao.get(k)?.takeIf { !it.isJsonNull }?.asString
-                    ActionRecord(
-                        ts = ao.get("ts")?.takeIf { !it.isJsonNull }?.asLong ?: 0L,
-                        tool = ao.get("tool")?.asString ?: "",
-                        category = ao.get("category")?.asString ?: "other",
-                        target = ao.get("target")?.asString ?: "",
-                        detail = strOrNull("detail"),
-                        ok = ao.get("ok")?.asBoolean ?: true,
-                        isError = ao.get("isError")?.asBoolean ?: false,
-                        reasoning = strOrNull("reasoning"),
-                        editId = ao.get("editId")?.takeIf { !it.isJsonNull }?.asInt,
-                        risk = ao.get("risk")?.takeIf { it.isJsonObject }?.asJsonObject?.let { r ->
-                            CommandRisk(r.get("level").asString, r.getAsJsonArray("reasons").map { it.asString })
-                        },
-                    )
-                },
+                actions = go.getAsJsonArray("actions").map { parseAction(it.asJsonObject) },
+            )
+        }
+        val subagents = o.get("subagents")?.takeIf { it.isJsonArray }?.asJsonArray?.map { s ->
+            val so = s.asJsonObject
+            val sum = so.getAsJsonObject("summary")
+            SubagentInfo(
+                agentId = so.get("agentId")?.asString ?: "",
+                agentType = strOrNull(so, "agentType"),
+                description = strOrNull(so, "description"),
+                status = strOrNull(so, "status"),
+                ts = so.get("ts")?.takeIf { !it.isJsonNull }?.asLong ?: 0L,
+                durationMs = longOrNull(so, "durationMs"),
+                tokens = longOrNull(so, "tokens"),
+                toolUseCount = intOrNull(so, "toolUseCount"),
+                actions = so.get("actions")?.takeIf { it.isJsonArray }?.asJsonArray?.map { parseAction(it.asJsonObject) } ?: emptyList(),
+                edits = so.get("edits")?.takeIf { !it.isJsonNull }?.asInt ?: 0,
+                totalActions = sum?.get("total")?.asInt ?: 0,
+                errors = sum?.get("errors")?.asInt ?: 0,
+            )
+        } ?: emptyList()
+        val subagentsSummary = o.getAsJsonObject("subagentsSummary")?.let { s ->
+            SubagentsSummary(
+                count = s.get("count")?.asInt ?: 0,
+                totalActions = s.get("totalActions")?.asInt ?: 0,
+                totalEdits = s.get("totalEdits")?.asInt ?: 0,
+                totalDurationMs = s.get("totalDurationMs")?.asLong ?: 0L,
+                totalTokens = s.get("totalTokens")?.asLong ?: 0L,
+                errors = s.get("errors")?.asInt ?: 0,
+            )
+        }
+        val fleet = o.get("fleet")?.takeIf { it.isJsonArray }?.asJsonArray?.map { f ->
+            val fo = f.asJsonObject
+            val risk = fo.getAsJsonObject("risk")
+            SiblingSession(
+                id = fo.get("id")?.asString ?: "",
+                self = fo.get("self")?.asBoolean ?: false,
+                active = fo.get("active")?.asBoolean ?: false,
+                lastMs = fo.get("lastMs")?.takeIf { !it.isJsonNull }?.asLong ?: 0L,
+                edits = fo.get("edits")?.asInt ?: 0,
+                pending = fo.get("pending")?.asInt ?: 0,
+                files = fo.get("files")?.takeIf { it.isJsonArray }?.asJsonArray?.map { it.asString } ?: emptyList(),
+                moreFiles = fo.get("moreFiles")?.asInt ?: 0,
+                riskTotal = risk?.get("total")?.asInt ?: 0,
+                riskHigh = risk?.get("high")?.asInt ?: 0,
+            )
+        } ?: emptyList()
+        val fleetSummary = o.getAsJsonObject("fleetSummary")?.let { s ->
+            FleetSummary(
+                total = s.get("total")?.asInt ?: 0,
+                active = s.get("active")?.asInt ?: 0,
+                siblings = s.get("siblings")?.asInt ?: 0,
+                pending = s.get("pending")?.asInt ?: 0,
             )
         }
         ActionsResult(
@@ -80,6 +182,10 @@ object ActionsParser {
                 val eo = e.asJsonObject
                 EgressChannel(eo.get("kind").asString, eo.get("target").asString, eo.get("scope").asString, eo.get("count").asInt)
             } ?: emptyList(),
+            subagents = subagents,
+            subagentsSummary = subagentsSummary,
+            fleet = fleet,
+            fleetSummary = fleetSummary,
         )
     } catch (_: Exception) {
         null

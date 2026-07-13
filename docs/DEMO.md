@@ -402,6 +402,101 @@ unknown  MCP       localhost:7331 (fs)
 Both are **additive** — mined from the transcript's action trace, they add nothing to the store and
 change no on-disk format.
 
+### Subagents — every spawned agent, its own timeline
+
+The Action Timeline already records that Claude **spawned a subagent** (the Task / Agent tool); 0.7.0
+opens each one up. Every subagent now gets its **own nested action timeline** and **per-subagent
+metrics** — duration, tokens, tool-use count, status — turning the observatory from a single-agent into
+a **multi-agent view**. Like everything else here it costs **zero tokens**: it's mined from
+`~/.claude/projects/<proj>/<session>/subagents/agent-<id>.jsonl` and correlated back to the spawning
+Task call via the transcript's `toolUseResult` block (which conveniently carries the `agentId`,
+`totalDurationMs`, `totalTokens`, `totalToolUseCount`, and `status`).
+
+It lands as a **Subagents** node in the Actions view of both editors — each subagent expands into its
+own reads / edits / bash / web calls:
+
+```text
+▾ Subagents               2
+  ▾ ✓  general-purpose    8.4s · 12.1k tok · 9 tools
+        ✓  Read   src/models/User.js
+        ✓  Grep   "greet"  (4 files)
+        ✕  Bash   npm test               exit 1
+  ▾ ✓  general-purpose    5.1s ·  6.3k tok · 4 tools
+        ✓  Read   src/index.js
+        ✓  WebFetch  nodejs.org/api/modules.html
+```
+
+The same view is one command away:
+
+```console
+$ claude-observatory subagents
+2 subagent(s)  ·  session 0c396c6b-2da9-4be2-9c6d-c8c5797de7a5
+
+✓  general-purpose   8.4s · 12.1k tok · 9 tools
+✓  general-purpose   5.1s ·  6.3k tok · 4 tools
+
+agents (alias) · --json
+```
+
+Expand a subagent to see exactly which files it read, what it ran, and where it errored — the same
+`ok` / `error` correlation and edit-row links as the top-level trace.
+
+### Fleet — the other agents in this project
+
+The observatory can also see the **other Claude Code sessions** working in the **same project**, so
+0.7.0 surfaces them. For each sibling: **active / idle** status (from transcript freshness — *active*
+means touched within ~60s), **pending edits**, **files touched**, and **risk-flag counts**. It is
+strictly **read-only and path-only** — filenames, never contents — so nothing one agent is editing can
+leak into another.
+
+It lands as a **Fleet** node in the Actions view of both editors:
+
+```text
+▾ Fleet                   2 other agents
+    ● active   a1b2c3d4   2 pending · 5 files · 1 ⚠
+    ○ idle     e5f6a7b8   0 pending · 3 files · 0 ⚠
+```
+
+The CLI form is an **agent-facing digest** — an agent can call it mid-run to see what its siblings are
+touching and adjust in real time:
+
+```console
+$ claude-observatory siblings
+2 sibling(s)  ·  1 active · 1 idle  ·  project claude-observatory
+
+● active   a1b2c3d4   2 pending · 5 files · 1 ⚠   12s ago
+○ idle     e5f6a7b8   0 pending · 3 files · 0 ⚠   8m ago
+
+fleet (alias) · --json (siblings only, excludes self) · --all (include self)
+```
+
+`--json` defaults to **siblings only** (excludes the calling session); `--all` folds self back in. (An
+optional MCP server exposing the same digest is planned; 0.7.0 ships the CLI digest.)
+
+### Metrics — the session by the numbers
+
+`claude-observatory metrics [--json]` rolls up the session's numbers — all mined from the transcript
+and store, **zero tokens**: per-edit diff stats (**+added / −removed** lines), **action + error**
+counts, **per-subagent** duration / tokens, and **tool latency** (median / p95 / max, computed from
+each `tool_use → tool_result` timestamp gap):
+
+```console
+$ claude-observatory metrics
+session 0c396c6b-2da9-4be2-9c6d-c8c5797de7a5
+
+edits         3   +19 −1
+actions       9   1 error
+subagents     2   13.5s · 18.4k tok
+tool latency  median 0.4s · p95 2.1s · max 8.4s
+
+--json
+```
+
+All three are **additive** — like the Action Timeline they're mined from the transcript, add nothing
+to the store, and change no on-disk format. The existing `actions --json` payload simply gains four new
+fields — **`subagents`**, **`subagentsSummary`**, **`fleet`**, **`fleetSummary`** — alongside its
+unchanged `{ session, summary, actions, groups }`; every existing shape stays as it was.
+
 ---
 
 ## Reproduce it yourself

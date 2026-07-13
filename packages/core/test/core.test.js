@@ -2299,3 +2299,121 @@ test('egress: buildEgressReport lists off-machine destinations (web / mcp / netw
   assert.ok(!ch.some((c) => c.target === 'ls' || /x\.ts/.test(c.target)), 'benign shell / reads excluded');
   assert.ok(core.summarizeEgress(ch).remote >= 3, 'summary counts remote channels');
 });
+
+test('subagents: parseSubagents mines each spawned subagent + metrics from subagents/*.jsonl (0.7.0)', () => {
+  freshHome();
+  const S = 'subs';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const AG = 'a1b2c3d4e5f6';
+  // main transcript: an Agent spawn (tu1); its tool_result record carries the toolUseResult naming the
+  // agentId + Claude Code's per-subagent metrics (duration / tokens / tool-use count).
+  const main = [
+    { timestamp: '2026-07-13T10:00:00.000Z', message: { role: 'assistant', content: [
+      { type: 'tool_use', id: 'tu1', name: 'Agent', input: { description: 'review the diff', subagent_type: 'code-reviewer' } },
+    ] } },
+    { timestamp: '2026-07-13T10:05:00.000Z',
+      toolUseResult: { status: 'completed', agentId: AG, agentType: 'code-reviewer', totalDurationMs: 300000, totalTokens: 45000, totalToolUseCount: 12 },
+      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu1', is_error: false, content: 'done' }] } },
+  ].map((o) => JSON.stringify(o)).join('\n');
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), main);
+  // the subagent's own transcript (all isSidechain) — its tool calls live here, not in the main file.
+  const subDir = path.join(proj, S, 'subagents');
+  fs.mkdirSync(subDir, { recursive: true });
+  const subtx = [
+    { isSidechain: true, agentId: AG, sessionId: S, timestamp: '2026-07-13T10:01:00.000Z', message: { role: 'assistant', content: [
+      { type: 'tool_use', id: 'st1', name: 'Read', input: { file_path: '/x.ts' } },
+      { type: 'tool_use', id: 'st2', name: 'Grep', input: { pattern: 'foo' } },
+    ] } },
+    { isSidechain: true, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'st2', is_error: true }] } },
+    { isSidechain: true, timestamp: '2026-07-13T10:02:00.000Z', message: { role: 'assistant', content: [
+      { type: 'tool_use', id: 'st3', name: 'Edit', input: { file_path: '/x.ts' } },
+    ] } },
+  ].map((o) => JSON.stringify(o)).join('\n');
+  fs.writeFileSync(path.join(subDir, `agent-${AG}.jsonl`), subtx);
+
+  const subs = core.parseSubagents(cwd, S);
+  assert.equal(subs.length, 1, 'one subagent found');
+  const s = subs[0];
+  assert.equal(s.agentId, AG);
+  assert.equal(s.agentType, 'code-reviewer', 'agentType from toolUseResult');
+  assert.equal(s.description, 'review the diff', 'description correlated from the spawn input');
+  assert.equal(s.status, 'completed');
+  assert.equal(s.durationMs, 300000, 'duration from toolUseResult');
+  assert.equal(s.tokens, 45000);
+  assert.equal(s.toolUseCount, 12);
+  assert.equal(s.actions.length, 3, "subagent's own tool calls parsed (sidechain kept for its OWN file)");
+  assert.equal(s.edits, 1, 'one edit action attributed to the subagent');
+  assert.equal(s.summary.errors, 1, 'the errored grep folds onto the subagent summary');
+  const rollup = core.summarizeSubagents(subs);
+  assert.deepEqual(
+    [rollup.count, rollup.totalActions, rollup.totalEdits, rollup.totalDurationMs, rollup.totalTokens, rollup.errors],
+    [1, 3, 1, 300000, 45000, 1]
+  );
+  // The main transcript's Agent spawn is NOT double-counted as a subagent action.
+  assert.ok(core.parseActions(cwd, S).every((a) => a.tool !== 'Read'), "subagent's Read stays out of the main action timeline");
+});
+
+test('fleet: listSiblings lists project sessions with status/pending/files/risk (read-only, path-only) (0.7.0)', () => {
+  freshHome();
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const SELF = 'self1', SIB = 'sib1';
+  fs.writeFileSync(path.join(proj, SELF + '.jsonl'), JSON.stringify({ message: { role: 'assistant', content: [] } }));
+  // sibling ran a destructive Bash command (for the risk flag) — lives in its transcript, not the store.
+  fs.writeFileSync(
+    path.join(proj, SIB + '.jsonl'),
+    JSON.stringify({ timestamp: '2026-07-13T10:00:00.000Z', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'b1', name: 'Bash', input: { command: 'rm -rf build' } }] } })
+  );
+  const F1 = path.join(cwd, 'a.ts'), F2 = path.join(cwd, 'b.ts');
+  seedEdit(SIB, F1, null, 'x\n'); // sibling store edits (both pending)
+  seedEdit(SIB, F2, null, 'y\n');
+
+  const list = core.listSiblings(cwd, SELF);
+  assert.equal(list.length, 2, 'both project sessions listed');
+  const self = list.find((s) => s.id === SELF);
+  const sib = list.find((s) => s.id === SIB);
+  assert.ok(self.self && !sib.self, 'self flagged; sibling not');
+  assert.equal(sib.pending, 2, 'sibling pending count from the store');
+  assert.equal(sib.edits, 2);
+  assert.ok(sib.files.includes(F1) && sib.files.includes(F2), 'files touched listed');
+  assert.ok(sib.risk.total >= 1 && sib.risk.high >= 1, "sibling's rm -rf flagged as high risk");
+  assert.ok(sib.active, 'a just-written transcript is active');
+  const sum = core.summarizeFleet(list);
+  assert.equal(sum.total, 2);
+  assert.equal(sum.siblings, 1);
+  assert.equal(sum.pending, 2, 'pending counts siblings only (excludes self)');
+  const ids = core.projectSessionIds(cwd);
+  assert.ok(ids.includes(SELF) && ids.includes(SIB), 'cheap sibling-id enumeration finds both');
+});
+
+test('metrics: sessionMetrics rolls up ±lines, actions, subagents, and tool latency (0.7.0)', () => {
+  freshHome();
+  const S = 'met';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const F = path.join(cwd, 'm.ts');
+  seedEdit(S, F, null, 'a\nb\nc\n'); // #1 create: +3
+  seedEdit(S, F, 'a\nb\nc\n', 'a\n'); // #2: −2
+  const main = [
+    { timestamp: '2026-07-13T10:00:00.000Z', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'tu1', name: 'Read', input: { file_path: F } }] } },
+    { timestamp: '2026-07-13T10:00:02.000Z', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu1', is_error: false }] } }, // 2s
+    { timestamp: '2026-07-13T10:00:10.000Z', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'tu2', name: 'Write', input: { file_path: F } }] } },
+    { timestamp: '2026-07-13T10:00:14.000Z', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu2', is_error: false }] } }, // 4s
+  ].map((o) => JSON.stringify(o)).join('\n');
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), main);
+
+  const m = core.sessionMetrics(cwd, S);
+  assert.equal(m.edits.count, 2);
+  assert.equal(m.edits.added, 3, 'added lines summed across edits');
+  assert.equal(m.edits.removed, 2, 'removed lines summed');
+  assert.equal(m.edits.pending, 2);
+  assert.equal(m.actions.total, 2, 'two tool calls in the main transcript');
+  assert.equal(m.subagents.count, 0, 'no subagents in this session');
+  assert.equal(m.toolLatency.count, 2, 'two measurable tool latencies');
+  assert.equal(m.toolLatency.medianMs, 2000, 'median of the 2s/4s gaps');
+  assert.equal(m.toolLatency.maxMs, 4000, 'max latency = the 4s gap');
+});

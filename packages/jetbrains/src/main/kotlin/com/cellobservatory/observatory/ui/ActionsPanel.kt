@@ -6,6 +6,10 @@ import com.cellobservatory.observatory.model.ActionGroup
 import com.cellobservatory.observatory.model.ActionRecord
 import com.cellobservatory.observatory.model.ActionsParser
 import com.cellobservatory.observatory.model.EgressChannel
+import com.cellobservatory.observatory.model.FleetSummary
+import com.cellobservatory.observatory.model.SiblingSession
+import com.cellobservatory.observatory.model.SubagentInfo
+import com.cellobservatory.observatory.model.SubagentsSummary
 import com.cellobservatory.observatory.model.relTime
 import com.cellobservatory.observatory.services.ObservatoryService
 import com.intellij.icons.AllIcons
@@ -28,6 +32,7 @@ import javax.swing.Icon
 import javax.swing.JTree
 import javax.swing.tree.DefaultMutableTreeNode
 import javax.swing.tree.DefaultTreeModel
+import javax.swing.tree.TreePath
 import javax.swing.tree.TreeSelectionModel
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
@@ -97,10 +102,24 @@ class ActionsPanel(private val project: Project) : SimpleToolWindowPanel(true, t
             ApplicationManager.getApplication().invokeLater {
                 if (project.isDisposed) return@invokeLater
                 root.removeAllChildren()
-                if (res != null && res.egress.isNotEmpty()) { // "where did this session reach off-machine" on top
+                if (res != null && res.fleet.any { !it.self }) { // concurrent sibling agents in this project, on top
+                    val fNode = DefaultMutableTreeNode(FleetRoot(res.fleet, res.fleetSummary))
+                    res.fleet.forEach { fNode.add(DefaultMutableTreeNode(it)) }
+                    root.add(fNode)
+                }
+                if (res != null && res.egress.isNotEmpty()) { // "where did this session reach off-machine"
                     val egNode = DefaultMutableTreeNode(EgressRoot(res.egress))
                     res.egress.forEach { egNode.add(DefaultMutableTreeNode(it)) }
                     root.add(egNode)
+                }
+                if (res != null && res.subagents.isNotEmpty()) { // each subagent's own timeline + metrics
+                    val sNode = DefaultMutableTreeNode(SubagentsRoot(res.subagents, res.subagentsSummary))
+                    res.subagents.forEach { sub ->
+                        val subNode = DefaultMutableTreeNode(sub)
+                        sub.actions.forEach { subNode.add(DefaultMutableTreeNode(it)) }
+                        sNode.add(subNode)
+                    }
+                    root.add(sNode)
                 }
                 res?.groups?.forEach { g ->
                     val gNode = DefaultMutableTreeNode(g)
@@ -109,6 +128,16 @@ class ActionsPanel(private val project: Project) : SimpleToolWindowPanel(true, t
                 }
                 model.reload()
                 TreeUtil.expandAll(tree)
+                // A subagent can have dozens of actions — keep each subagent collapsed (its parent
+                // "Subagents" node stays open) so the tree isn't flooded; the user expands on demand.
+                for (i in 0 until root.childCount) {
+                    val child = root.getChildAt(i) as DefaultMutableTreeNode
+                    if (child.userObject is SubagentsRoot) {
+                        for (j in 0 until child.childCount) {
+                            tree.collapsePath(TreePath((child.getChildAt(j) as DefaultMutableTreeNode).path))
+                        }
+                    }
+                }
             }
         }
     }
@@ -120,6 +149,12 @@ class ActionsPanel(private val project: Project) : SimpleToolWindowPanel(true, t
 
     /** Marker userObject for the "Egress" root node — carries the channels rendered under it. */
     private class EgressRoot(val channels: List<EgressChannel>)
+
+    /** Marker userObject for the "Fleet" root node — the sibling sessions in this project. */
+    private class FleetRoot(val sessions: List<SiblingSession>, val summary: FleetSummary?)
+
+    /** Marker userObject for the "Subagents" root node — carries the subagents rendered under it. */
+    private class SubagentsRoot(val subs: List<SubagentInfo>, val summary: SubagentsSummary?)
 
     private class Renderer : ColoredTreeCellRenderer() {
         private val AMBER = SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, com.intellij.ui.JBColor.ORANGE)
@@ -141,6 +176,57 @@ class ActionsPanel(private val project: Project) : SimpleToolWindowPanel(true, t
                     append("${node.kind}  ")
                     append(node.target, SimpleTextAttributes.REGULAR_ATTRIBUTES)
                     append("  ${node.scope}" + if (node.count > 1) " ×${node.count}" else "", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                }
+                is FleetRoot -> {
+                    icon = AllIcons.Nodes.ModuleGroup
+                    append("Fleet")
+                    val s = node.summary
+                    if (s != null) {
+                        append("  ${s.siblings} sibling${if (s.siblings == 1) "" else "s"}" + if (s.active > 0) " · ${s.active} active" else "", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                    }
+                    toolTipText = "Other Claude Code sessions working in this project — active/idle, pending edits, files touched, risk"
+                }
+                is SiblingSession -> {
+                    icon = AllIcons.Nodes.Module
+                    append(if (node.self) "(you) ${node.id.take(8)}" else node.id.take(8),
+                        if (node.active) SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, com.intellij.ui.JBColor.GREEN) else SimpleTextAttributes.REGULAR_ATTRIBUTES)
+                    append("  ${if (node.active) "active" else "idle"} · ${node.pending} pending · ${node.edits} edit${if (node.edits == 1) "" else "s"}", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                    if (node.riskTotal > 0) append("  ⚠ ${if (node.riskHigh > 0) "${node.riskHigh} high" else "${node.riskTotal}"}", if (node.riskHigh > 0) SimpleTextAttributes.ERROR_ATTRIBUTES else AMBER)
+                    toolTipText = buildString {
+                        append(if (node.self) "This session" else "Sibling").append(": ${node.id}\n")
+                        append(if (node.active) "active" else "idle").append(" · last ${relTime(node.lastMs)}\n")
+                        append("${node.edits} edit(s) · ${node.pending} pending")
+                        if (node.riskTotal > 0) append("\n⚠ ${node.riskTotal} risky command(s)" + if (node.riskHigh > 0) " (${node.riskHigh} high)" else "")
+                        if (node.files.isNotEmpty()) append("\nFiles: " + node.files.take(10).joinToString(", ") + if (node.moreFiles > 0) " +${node.moreFiles} more" else "")
+                    }
+                }
+                is SubagentsRoot -> {
+                    icon = AllIcons.Actions.RunAll
+                    append("Subagents")
+                    val s = node.summary
+                    if (s != null) {
+                        append("  ${s.count} · ${s.totalActions} action${if (s.totalActions == 1) "" else "s"}" + if (s.totalDurationMs > 0) " · ${fmtDur(s.totalDurationMs)}" else "", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                        if (s.errors > 0) append("  · ${s.errors} error${if (s.errors == 1) "" else "s"}", SimpleTextAttributes.ERROR_ATTRIBUTES)
+                    }
+                    toolTipText = "Each subagent Claude spawned this session, with its own action timeline + metrics (duration / tokens)"
+                }
+                is SubagentInfo -> {
+                    icon = if (node.errors > 0) AllIcons.General.Warning else AllIcons.Actions.RunAll
+                    val title = node.agentType ?: node.description ?: node.agentId.take(12)
+                    append(title, SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES)
+                    val parts = mutableListOf<String>()
+                    node.durationMs?.let { parts.add(fmtDur(it)) }
+                    node.tokens?.let { parts.add("${humanTok(it)} tok") }
+                    parts.add("${node.totalActions} action${if (node.totalActions == 1) "" else "s"}")
+                    if (node.edits > 0) parts.add("${node.edits} edit${if (node.edits == 1) "" else "s"}")
+                    append("  " + parts.joinToString(" · "), SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                    if (node.errors > 0) append("  · ${node.errors} err", SimpleTextAttributes.ERROR_ATTRIBUTES)
+                    toolTipText = buildString {
+                        append(title)
+                        if (node.status != null && node.status != "completed") append(" · ${node.status}")
+                        if (node.description != null && node.agentType != null) append("\n${node.description}")
+                        append("\nagent ${node.agentId}")
+                    }
                 }
                 is ActionGroup -> {
                     icon = catIcon(node.category)
@@ -180,4 +266,22 @@ class ActionsPanel(private val project: Project) : SimpleToolWindowPanel(true, t
             else -> AllIcons.General.Information
         }
     }
+}
+
+/** ms → compact human duration (450ms / 3.2s / 2m 5s) — mirrors the CLI's fmtDur. */
+private fun fmtDur(ms: Long): String {
+    if (ms <= 0) return "0ms"
+    if (ms < 1000) return "${ms}ms"
+    val s = ms / 1000.0
+    if (s < 60) return if (s < 10) String.format("%.1fs", s) else "${s.toInt()}s"
+    val m = (s / 60).toInt()
+    val rem = (s % 60).toInt()
+    return if (rem > 0) "${m}m ${rem}s" else "${m}m"
+}
+
+/** Compact token count (47361 → 47k). */
+private fun humanTok(n: Long): String {
+    if (n < 1000) return n.toString()
+    if (n < 1_000_000) return if (n < 10_000) String.format("%.1fk", n / 1000.0) else "${n / 1000}k"
+    return String.format("%.1fM", n / 1_000_000.0)
 }

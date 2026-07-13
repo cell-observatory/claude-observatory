@@ -164,7 +164,10 @@ VS Code renderers key on them by name. Add fields; don't rename them. (`emitJson
 | `sessions --json` | `{ active, sessions: [{ id, edits, pending, lastMs }] }` | Switch-session pickers |
 | `tree [--root <d>] [--filter <q>]` | `EditTree` (`{ folders[], files[] }` → folder → file → class → edit w/ `added`/`removed`) | **both editors** — VS Code via in-process `buildEditTree`, JetBrains via `ObservatoryCli.treeJson` → `TreeParser` → `EditsTreePanel` |
 | `observe` | `{ session, recap, insights, suggestions, edits: [{ id, ts, tool, file, status, summary, reasoning, flags, memory, analysis }] }` | Observations panel (JetBrains `ObserveParser`; VS Code builds the equivalent in-process) |
-| `actions [--all]` | `{ session, summary{ total, byCategory, errors, firstTs, lastTs }, actions: [{ ts, tool, category, target, detail, ok, isError, reasoning, editId }], groups: [{ category, label, count, errors, actions[] }] }` | Actions timeline — **both editors** — VS Code in-process `parseActions`/`buildActionGroups`; JetBrains `ObservatoryCli.actionsJson` → `ActionsParser` → `ActionsPanel`. `groups` is curated by default; `--all` includes reads/searches/meta |
+| `actions [--all]` | `{ session, summary{ total, byCategory, errors, firstTs, lastTs }, actions: [{ ts, tool, category, target, detail, ok, isError, reasoning, editId }], groups: [{ category, label, count, errors, actions[] }], subagents, subagentsSummary, fleet, fleetSummary }` | Actions timeline — **both editors** — VS Code in-process `parseActions`/`buildActionGroups`; JetBrains `ObservatoryCli.actionsJson` → `ActionsParser` → `ActionsPanel`. `groups` is curated by default; `--all` includes reads/searches/meta. `subagents`/`subagentsSummary`/`fleet`/`fleetSummary` are additive 0.7.0 fields (same shapes as the `subagents`/`siblings` commands); existing parsers ignore them |
+| `subagents [--json]` (alias `agents`) | `{ session, summary, subagents: [{ agentId, agentType, description, status, ts, durationMs, tokens, toolUseCount, actions[], edits, summary }] }` | Subagents node in the Actions view — **both editors**; each subagent's nested timeline is mined zero-token from `subagents/agent-<id>.jsonl` and correlated via the spawning tool call's `toolUseResult` |
+| `siblings [--json]` (alias `fleet`) | `{ session, summary, siblings: [{ id, self, active, lastMs, edits, pending, files[], moreFiles, risk{ total, high } }] }` | Fleet node in the Actions view — **both editors** — plus an agent-facing digest a run can poll mid-flight; READ-ONLY / PATH-ONLY (no file contents cross agents). `--json` = siblings only; `--all` includes self |
+| `metrics [--json]` | `{ session, spanMs, actions{ total, errors, byCategory }, edits{ count, added, removed, pending, kept, undone }, subagents{…}, toolLatency{ count, medianMs, p95Ms, maxMs } }` | Session metrics roll-up — diff stats, action/error counts, per-subagent duration/tokens, and tool latency (from each `tool_use`→`tool_result` timestamp gap) |
 | `locate --file <f>` (buffer on stdin) | `{ file, placements: [{ id, lines: [int] }] }` | inline overlays — JetBrains `ObservatoryCli.locate`; VS Code computes in-process via `core.locateEditInCurrent` |
 | `usage` | `{ ...UsageLine, staleMs }` (`staleMs` = `USAGE_STALE_MS`, 300000) | the 5h/week Usage bars |
 | `stats --json` | `StatsResult` (`{ daily[30], hourly[24], windows{session,day,week,month}, generatedAt }`) | Stats panel (both spawn a subprocess) |
@@ -176,6 +179,12 @@ The undo/redo `--json` exit codes mirror the human path exactly: `conflict` → 
 front-end branches on the structured `status` to, e.g., offer `--force` on a conflict instead of
 string-matching the message. The e2e harness (`test/e2e.sh`, section 14) asserts each of these shapes
 with `jq`.
+
+The three 0.7.0 commands are backed by new `core` modules — `subagents.ts`, `fleet.ts`, and
+`metrics.ts` — each deriving purely from the Claude Code transcript + the content-addressed store
+(no model calls, no network). `parseActions` was refactored to share `parseTranscriptActions`, so
+every subagent's `subagents/agent-<id>.jsonl` transcript parses through exactly the same code as the
+main session's action timeline.
 
 ## See also
 
