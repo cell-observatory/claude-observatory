@@ -54,7 +54,7 @@ test('extension: three views, click commands, inline annotations, chat, status s
   let decoProvider = null;
   let commentController = null;
   const commentThreads = [];
-  const statusBarItem = { text: '', tooltip: '', command: undefined, backgroundColor: undefined, show() {}, hide() {}, dispose() {} };
+  const statusBarItems = []; // every createStatusBarItem() returns a distinct item (the nav bar has many)
   let clipboardText = '';
   let decoCounter = 0;
   let opened = null;
@@ -123,7 +123,7 @@ test('extension: three views, click commands, inline annotations, chat, status s
         trees[id] = opts.treeDataProvider;
         return { badge: undefined, description: undefined, onDidChangeVisibility: () => ({ dispose() {} }), dispose() {} };
       },
-      createStatusBarItem: () => statusBarItem,
+      createStatusBarItem: () => { const it = { text: '', tooltip: '', command: undefined, backgroundColor: undefined, show() {}, hide() {}, dispose() {} }; statusBarItems.push(it); return it; },
       setStatusBarMessage: () => ({ dispose() {} }),
       createTextEditorDecorationType: () => ({ id: ++decoCounter, dispose() {} }),
       registerFileDecorationProvider: (p) => { decoProvider = p; return { dispose() {} }; },
@@ -239,7 +239,8 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.ok(commentController && commentController.id === 'claudeObservatory', 'comment controller registered');
     for (const c of ['claudeObservatory.viewChanges', 'claudeObservatory.peekKeep', 'claudeObservatory.peekUndo',
       'claudeObservatory.peekChat', 'claudeObservatory.peekPrev', 'claudeObservatory.peekNext',
-      'claudeObservatory.diffPrevEdit', 'claudeObservatory.diffNextEdit']) {
+      'claudeObservatory.peekPrevFile', 'claudeObservatory.peekNextFile', 'claudeObservatory.peekAcceptFile',
+      'claudeObservatory.peekRejectFile', 'claudeObservatory.diffPrevEdit', 'claudeObservatory.diffNextEdit']) {
       assert.ok(typeof commands[c] === 'function', `${c} registered`);
     }
     await commands['claudeObservatory.viewChanges'](1);
@@ -252,6 +253,9 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.equal(body1.supportHtml, true, 'body enables supportHtml (colored spans need it)');
     assert.match(body1.value, /#1\b/, 'bubble shows the edit number');
     assert.match(body1.value, /\+\d+ −\d+/, 'bubble shows the +A −B line counts');
+    // the floating bubble is the full nav bar: its header carries the Diff-axis + File-axis counters
+    assert.match(body1.value, /Diff 1\/2/, 'bubble header shows the Diff-axis counter (edit 1 of 2 in the file)');
+    assert.match(body1.value, /File 1\/1/, 'bubble header shows the File-axis counter (file 1 of 1 pending)');
     assert.ok(body1.value.includes('<span style="color:var(--vscode-gitDecoration-addedResourceForeground);background-color:var(--vscode-diffEditor-insertedTextBackground);">'),
       "added lines use git's green text + translucent green line fill");
     assert.ok(body1.value.includes('<span style="color:var(--vscode-gitDecoration-deletedResourceForeground);background-color:var(--vscode-diffEditor-removedTextBackground);">'),
@@ -336,9 +340,28 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.ok(stMsgs.some((m) => m.type === 'statsError'), 'failed stats scan posts the CLI-missing hint');
 
     // realtime observatory: status-bar microscope shows the pending count + the review scoreboard tooltip
-    assert.match(statusBarItem.text, /🔬/, 'status bar microscope present');
-    assert.match(statusBarItem.text, /2/, 'status bar shows 2 pending');
-    assert.match(statusBarItem.tooltip.value, /2 pending · 0 accepted · 0 reverted/, 'scoreboard lives in the microscope tooltip');
+    const microscope = statusBarItems.find((i) => /🔬/.test(i.text));
+    assert.ok(microscope, 'status bar microscope present');
+    assert.match(microscope.text, /2/, 'status bar shows 2 pending');
+    assert.match(microscope.tooltip.value, /2 pending · 0 accepted · 0 reverted/, 'scoreboard lives in the microscope tooltip');
+
+    // --- nav bar: the two-tier review toolbar (Diff axis + File axis + per-edit / per-file actions) ---
+    for (const c of ['claudeObservatory.navDiffPrev', 'claudeObservatory.navDiffNext',
+      'claudeObservatory.navFilePrev', 'claudeObservatory.navFileNext',
+      'claudeObservatory.navViewDiff', 'claudeObservatory.navKeep', 'claudeObservatory.navUndo']) {
+      assert.ok(typeof commands[c] === 'function', `${c} registered`);
+    }
+    const diffCounter = statusBarItems.find((i) => /^Diff /.test(i.text));
+    const fileCounter = statusBarItems.find((i) => /^File /.test(i.text));
+    assert.equal(diffCounter && diffCounter.text, 'Diff 1/2', 'Diff axis: edit 1 of 2 in the active file');
+    assert.equal(fileCounter && fileCounter.text, 'File 1/1', 'File axis: file 1 of 1 with pending edits');
+    // Diff axis steps within the open file: #1 (line 0) → #2 (line 3) → back to #1.
+    await commands['claudeObservatory.navDiffNext']();
+    assert.equal(lastShown.selection.active.line, 3, 'navDiffNext reveals edit #2');
+    assert.equal(diffCounter.text, 'Diff 2/2', 'Diff counter advanced to 2/2');
+    await commands['claudeObservatory.navDiffPrev']();
+    assert.equal(lastShown.selection.active.line, 0, 'navDiffPrev returns to edit #1');
+    assert.equal(diffCounter.text, 'Diff 1/2', 'Diff counter back to 1/2');
     assert.ok(typeof commands['claudeObservatory.reviewNext'] === 'function', 'reviewNext registered');
     // reviewNext must step through EVERY pending edit, not always reopen the oldest: #1 (line 0) →
     // #2 (line 3) → wrap back to #1.

@@ -2,7 +2,7 @@
   "name": "claude-observatory-vscode",
   "displayName": "Claude Observatory",
   "description": "A running list of every file change Claude Code makes, each with its own Keep / Undo (surgical, git-free).",
-  "version": "0.5.3",
+  "version": "0.5.5",
   "publisher": "claude-observatory",
   "private": true,
   "engines": {
@@ -149,13 +149,13 @@
         "command": "claudeObservatory.keepOpenFile",
         "title": "Accept all edits in this file",
         "category": "Claude Observatory",
-        "icon": "$(check)"
+        "icon": "$(check-all)"
       },
       {
         "command": "claudeObservatory.undoOpenFile",
         "title": "Revert all edits in this file",
         "category": "Claude Observatory",
-        "icon": "$(close)"
+        "icon": "$(close-all)"
       },
       {
         "command": "claudeObservatory.setup",
@@ -208,6 +208,30 @@
         "icon": "$(arrow-down)"
       },
       {
+        "command": "claudeObservatory.peekPrevFile",
+        "title": "Previous changed file",
+        "category": "Claude Observatory",
+        "icon": "$(arrow-left)"
+      },
+      {
+        "command": "claudeObservatory.peekNextFile",
+        "title": "Next changed file",
+        "category": "Claude Observatory",
+        "icon": "$(arrow-right)"
+      },
+      {
+        "command": "claudeObservatory.peekAcceptFile",
+        "title": "Accept file (all pending edits)",
+        "category": "Claude Observatory",
+        "icon": "$(check-all)"
+      },
+      {
+        "command": "claudeObservatory.peekRejectFile",
+        "title": "Reject file (revert all pending edits)",
+        "category": "Claude Observatory",
+        "icon": "$(close-all)"
+      },
+      {
         "command": "claudeObservatory.inlineKeep",
         "title": "Keep Claude edit",
         "category": "Claude Observatory"
@@ -257,7 +281,7 @@
         "command": "claudeObservatory.toggleHeatmap",
         "title": "Toggle file heatmap (dim unmodified lines)",
         "category": "Claude Observatory",
-        "icon": "$(file-text)"
+        "icon": "$(lightbulb)"
       },
       {
         "command": "claudeObservatory.switchSession",
@@ -328,6 +352,48 @@
         "title": "Review next pending edit",
         "category": "Claude Observatory",
         "icon": "$(debug-step-over)"
+      },
+      {
+        "command": "claudeObservatory.navDiffPrev",
+        "title": "Nav bar: previous edit in this file",
+        "category": "Claude Observatory",
+        "icon": "$(chevron-up)"
+      },
+      {
+        "command": "claudeObservatory.navDiffNext",
+        "title": "Nav bar: next edit in this file",
+        "category": "Claude Observatory",
+        "icon": "$(chevron-down)"
+      },
+      {
+        "command": "claudeObservatory.navFilePrev",
+        "title": "Nav bar: previous changed file",
+        "category": "Claude Observatory",
+        "icon": "$(chevron-left)"
+      },
+      {
+        "command": "claudeObservatory.navFileNext",
+        "title": "Nav bar: next changed file",
+        "category": "Claude Observatory",
+        "icon": "$(chevron-right)"
+      },
+      {
+        "command": "claudeObservatory.navViewDiff",
+        "title": "Nav bar: view current edit diff",
+        "category": "Claude Observatory",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "claudeObservatory.navKeep",
+        "title": "Nav bar: keep this edit",
+        "category": "Claude Observatory",
+        "icon": "$(check)"
+      },
+      {
+        "command": "claudeObservatory.navUndo",
+        "title": "Nav bar: undo this edit",
+        "category": "Claude Observatory",
+        "icon": "$(discard)"
       },
       {
         "command": "claudeObservatory.diffPrevRevision",
@@ -451,29 +517,49 @@
     "menus": {
       "comments/commentThread/title": [
         {
-          "command": "claudeObservatory.peekKeep",
+          "command": "claudeObservatory.peekPrev",
           "when": "commentController == claudeObservatory && commentThread == claudeEdit",
           "group": "inline@1"
         },
         {
-          "command": "claudeObservatory.peekUndo",
+          "command": "claudeObservatory.peekNext",
           "when": "commentController == claudeObservatory && commentThread == claudeEdit",
           "group": "inline@2"
         },
         {
-          "command": "claudeObservatory.peekChat",
+          "command": "claudeObservatory.peekPrevFile",
           "when": "commentController == claudeObservatory && commentThread == claudeEdit",
           "group": "inline@3"
         },
         {
-          "command": "claudeObservatory.peekPrev",
+          "command": "claudeObservatory.peekNextFile",
           "when": "commentController == claudeObservatory && commentThread == claudeEdit",
           "group": "inline@4"
         },
         {
-          "command": "claudeObservatory.peekNext",
+          "command": "claudeObservatory.peekKeep",
           "when": "commentController == claudeObservatory && commentThread == claudeEdit",
           "group": "inline@5"
+        },
+        {
+          "command": "claudeObservatory.peekUndo",
+          "when": "commentController == claudeObservatory && commentThread == claudeEdit",
+          "group": "inline@6"
+        },
+        {
+          "command": "claudeObservatory.peekAcceptFile",
+          "when": "commentController == claudeObservatory && commentThread == claudeEdit",
+          "group": "inline@7"
+        },
+        {
+          "command": "claudeObservatory.peekRejectFile",
+          "when": "commentController == claudeObservatory && commentThread == claudeEdit",
+          "group": "inline@8"
+        },
+        {
+          "command": "claudeObservatory.peekChat",
+          "when": "commentController == claudeObservatory && commentThread == claudeEdit",
+          "group": "inline@9"
         }
       ],
       "view/title": [
@@ -580,34 +666,59 @@
       ],
       "editor/title": [
         {
-          "command": "claudeObservatory.reviewPrev",
+          "command": "claudeObservatory.navDiffPrev",
           "when": "claudeObservatory.activeFileHasPending",
           "group": "navigation@1"
         },
         {
-          "command": "claudeObservatory.reviewNext",
+          "command": "claudeObservatory.navDiffNext",
           "when": "claudeObservatory.activeFileHasPending",
           "group": "navigation@2"
         },
         {
-          "command": "claudeObservatory.keepOpenFile",
+          "command": "claudeObservatory.navFilePrev",
           "when": "claudeObservatory.activeFileHasPending",
           "group": "navigation@3"
         },
         {
-          "command": "claudeObservatory.undoOpenFile",
+          "command": "claudeObservatory.navFileNext",
           "when": "claudeObservatory.activeFileHasPending",
           "group": "navigation@4"
         },
         {
-          "command": "claudeObservatory.searchEdits",
+          "command": "claudeObservatory.navKeep",
           "when": "claudeObservatory.activeFileHasPending",
           "group": "navigation@5"
         },
         {
-          "command": "claudeObservatory.toggleHeatmap",
+          "command": "claudeObservatory.navUndo",
           "when": "claudeObservatory.activeFileHasPending",
           "group": "navigation@6"
+        },
+        {
+          "command": "claudeObservatory.keepOpenFile",
+          "when": "claudeObservatory.activeFileHasPending",
+          "group": "navigation@7"
+        },
+        {
+          "command": "claudeObservatory.undoOpenFile",
+          "when": "claudeObservatory.activeFileHasPending",
+          "group": "navigation@8"
+        },
+        {
+          "command": "claudeObservatory.clearResolved",
+          "when": "claudeObservatory.activeFileHasPending",
+          "group": "navigation@9"
+        },
+        {
+          "command": "claudeObservatory.toggleHeatmap",
+          "when": "claudeObservatory.activeFileHasPending",
+          "group": "navigation@10"
+        },
+        {
+          "command": "claudeObservatory.searchEdits",
+          "when": "claudeObservatory.activeFileHasPending",
+          "group": "navigation@11"
         },
         {
           "command": "claudeObservatory.diffKeep",
@@ -751,7 +862,7 @@
     "package": "vsce package --no-dependencies -o claude-observatory.vsix"
   },
   "devDependencies": {
-    "@claude-observatory/core": "0.5.3",
+    "@claude-observatory/core": "0.5.5",
     "@types/node": "^22.0.0",
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^3.0.0",

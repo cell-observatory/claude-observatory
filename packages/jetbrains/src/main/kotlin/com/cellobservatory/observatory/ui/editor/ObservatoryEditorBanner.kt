@@ -57,6 +57,9 @@ class ObservatoryEditorBanner : EditorNotificationProvider, DumbAware {
             if (next == null) ReviewOps.notify(project, "No pending Claude edits — all caught up")
             else Navigate.openFileAtEdit(project, s, next)
         }.toolTipText = "Next pending edit"
+        // File axis — jump across every file with pending edits (parity with the nav bar's ◀ ▶).
+        panel.createActionLabel("◀") { stepFile(project, service, file.path, -1) }.toolTipText = "Previous changed file"
+        panel.createActionLabel("▶") { stepFile(project, service, file.path, 1) }.toolTipText = "Next changed file"
         // These act on THIS file only — the banner is per-file, so session-wide would be misleading.
         panel.createActionLabel("✓") {
             service.currentSession()?.let { s ->
@@ -68,6 +71,16 @@ class ObservatoryEditorBanner : EditorNotificationProvider, DumbAware {
                 ReviewOps.undoAll(project, s, service.log().filter { it.file == file.path }, file.name, file.path)
             }
         }.toolTipText = "Revert all edits in this file"
+        // Clear resolved (kept/reverted) edits — parity with the nav bar's clear button.
+        panel.createActionLabel("") {
+            service.currentSession()?.let { s ->
+                val resolved = service.log().count { !it.pending }
+                if (resolved > 0) ReviewOps.clearResolved(project, s, resolved) else ReviewOps.notify(project, "No resolved edits to clear")
+            }
+        }.apply {
+            setIcon(com.intellij.icons.AllIcons.Actions.GC)
+            toolTipText = "Clear resolved (kept/reverted) edits"
+        }
         panel.createActionLabel("⌕") {
             val q = Messages.showInputDialog(
                 project, "Filter edits by file path (empty to clear):",
@@ -75,9 +88,25 @@ class ObservatoryEditorBanner : EditorNotificationProvider, DumbAware {
             )
             if (q != null) service.setFilter(q)
         }.toolTipText = "Search edits"
-        panel.createActionLabel("▦") {
+        // Spotlight/heatmap toggle — the same lightbulb icon the nav bar uses, so it reads identically
+        // across every surface (status-bar nav bar + this editor banner).
+        panel.createActionLabel("") {
             com.cellobservatory.observatory.ui.inline.InlineOverlay.getInstance(project).toggleHeatmap()
-        }.toolTipText = "Toggle file heatmap"
+        }.apply {
+            setIcon(com.intellij.icons.AllIcons.Actions.IntentionBulb)
+            toolTipText = "Toggle file heatmap (spotlight Claude's edits)"
+        }
         return panel
+    }
+
+    /** Open the first pending edit of the prev (-1) / next (+1) file with pending edits, wrapping. */
+    private fun stepFile(project: Project, service: ObservatoryService, current: String, dir: Int) {
+        val s = service.currentSession() ?: return
+        val files = service.log().filter { it.pending }.map { it.file }.distinct().sorted()
+        if (files.isEmpty()) return
+        val idx = files.indexOf(current)
+        val target = files[((if (idx < 0) 0 else idx) + dir + files.size) % files.size]
+        val first = service.log().filter { it.pending && it.file == target }.minByOrNull { it.id } ?: return
+        Navigate.openFileAtEdit(project, s, first)
     }
 }
