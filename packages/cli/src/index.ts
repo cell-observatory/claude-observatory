@@ -422,6 +422,49 @@ function cmdTimeline(args: string[]): void {
   }
 }
 
+/** The full, typed action timeline (every tool call Claude made) — zero-token, mined from the transcript. */
+function cmdActions(args: string[]): void {
+  const core = require('@claude-observatory/core') as Core;
+  const session = getSessionId(args);
+  const actions = core.parseActions(process.cwd(), session);
+  if (args.includes('--json')) {
+    // Emit the flat actions AND the category-grouped view-model (curated unless --all) — the editors
+    // render `groups` directly so the curated/ordering logic lives only in core.
+    const showAll = args.includes('--all');
+    emitJson({ session, summary: core.summarizeActions(actions), actions, groups: core.buildActionGroups(actions, { showAll }) });
+    return;
+  }
+  if (actions.length === 0) {
+    process.stdout.write(c.dim(`no actions (no transcript found for session ${session}).\n`));
+    return;
+  }
+  const sum = core.summarizeActions(actions);
+  const cats = Object.entries(sum.byCategory)
+    .sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `${v} ${k}`)
+    .join(' · ');
+  process.stdout.write(
+    c.bold('Actions') +
+      c.dim(`  ${sum.total} total · ${cats}${sum.errors ? ` · ${sum.errors} error(s)` : ''} · session ${session}\n\n`)
+  );
+  const ci = args.indexOf('--category');
+  const catFilter = ci >= 0 ? args[ci + 1] : '';
+  const li = args.indexOf('--limit');
+  const limit = li >= 0 && args[li + 1] ? parseInt(args[li + 1], 10) : 0;
+  let rows = actions;
+  if (catFilter) rows = rows.filter((a) => a.category === catFilter);
+  if (args.includes('--errors')) rows = rows.filter((a) => a.isError);
+  if (limit > 0) rows = rows.slice(-limit);
+  for (const a of rows) {
+    const when = c.dim(core.relTime(a.ts).padEnd(11));
+    const mark = a.isError ? c.red('✗') : ' ';
+    const tag = c.cyan(`[${a.category}]`.padEnd(9));
+    const link = a.editId != null ? c.dim(` edit#${a.editId}`) : '';
+    const detail = a.detail ? c.dim(`  (${a.detail})`) : '';
+    process.stdout.write(`${when} ${mark} ${tag} ${c.bold(a.tool.padEnd(10))} ${(a.target || '').slice(0, 80)}${link}${detail}\n`);
+  }
+}
+
 function requireId(args: string[]): number {
   let raw: string | undefined;
   for (let i = 0; i < args.length; i++) {
@@ -1335,6 +1378,8 @@ function usage(): void {
       `  sessions             list all sessions in the store (● = current dir)\n` +
       `  list [filters]       list edits (grouped by file); filters: --pending|--kept|--undone, --file <substr>\n` +
       `  timeline [--json]    edits newest-first as a chronological feed (time · id · Δ · file)\n` +
+      `  actions [--json]     the full action timeline: EVERY tool call Claude made (reads, greps, bash,\n` +
+      `                       web, subagents, to-dos), each with its result; --category <c> | --errors | --limit <n>\n` +
       `  diff <id>            show before/after for an edit\n` +
       `  keep <id>            mark an edit kept; bulk: --all | --file <substr> | --under <path>\n` +
       `  undo <id> [--force]  surgically undo an edit (--force = per-file restore);\n` +
@@ -1401,6 +1446,10 @@ function main(): void {
       break;
     case 'timeline':
       cmdTimeline(rest);
+      break;
+    case 'actions':
+    case 'trace':
+      cmdActions(rest);
       break;
     case 'diff':
       cmdDiff(rest);

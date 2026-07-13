@@ -2149,3 +2149,118 @@ test('tree: buildEditTree groups by folder/file with chain compaction + exact de
   walk(filtered);
   assert.deepEqual(flatFiles, ['src/a.ts'], 'filter keeps only matching files');
 });
+
+test('actions: parseActions builds a typed timeline of every tool call, with results + edit links', () => {
+  freshHome();
+  const S = 'acts';
+  const cwd = tmpWork();
+  const F = path.join(cwd, 'app.ts');
+  // store: two edits to F so the edit-category actions link to records #1 / #2 positionally.
+  seedEdit(S, F, null, 'export const a = 1\n'); // #1
+  seedEdit(S, F, 'export const a = 1\n', 'export const a = 2\n'); // #2
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const tx = [
+    { timestamp: '2026-07-13T10:00:00.000Z', message: { role: 'assistant', content: [
+      { type: 'text', text: 'Exploring the code.' },
+      { type: 'tool_use', id: 'tu1', name: 'Read', input: { file_path: F } },
+      { type: 'tool_use', id: 'tu2', name: 'Grep', input: { pattern: 'const a', path: cwd } },
+    ] } },
+    { message: { role: 'user', content: [
+      { type: 'tool_result', tool_use_id: 'tu1', is_error: false, content: 'ok' },
+      { type: 'tool_result', tool_use_id: 'tu2', is_error: true, content: 'grep failed' },
+    ] } },
+    { timestamp: '2026-07-13T10:01:00.000Z', message: { role: 'assistant', content: [
+      { type: 'text', text: 'Creating app.ts.' },
+      { type: 'tool_use', id: 'tu3', name: 'Write', input: { file_path: F, content: '...' } },
+    ] } },
+    { message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'Now run checks.' }] } }, // reasoning, no tool
+    { timestamp: '2026-07-13T10:02:00.000Z', message: { role: 'assistant', content: [
+      { type: 'tool_use', id: 'tu4', name: 'Bash', input: { command: 'npm test\n--silent', description: 'run tests' } },
+      { type: 'tool_use', id: 'tu5', name: 'WebFetch', input: { url: 'https://example.com/docs' } },
+      { type: 'tool_use', id: 'tu6', name: 'Agent', input: { description: 'audit deps', subagent_type: 'Explore' } },
+      { type: 'tool_use', id: 'tu7', name: 'TodoWrite', input: { todos: [{ content: 'ship it', status: 'in_progress' }, { content: 'done', status: 'completed' }] } },
+    ] } },
+    { timestamp: '2026-07-13T10:03:00.000Z', message: { role: 'assistant', content: [
+      { type: 'text', text: 'Bump to 2.' },
+      { type: 'tool_use', id: 'tu8', name: 'Edit', input: { file_path: F } },
+    ] } },
+    // a subagent (sidechain) line — must be IGNORED (its calls live in subagents/*.jsonl).
+    { isSidechain: true, message: { role: 'assistant', content: [{ type: 'tool_use', id: 'sx1', name: 'Read', input: { file_path: '/secret' } }] } },
+  ].map((o) => JSON.stringify(o)).join('\n');
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), tx);
+
+  const acts = core.parseActions(cwd, S);
+  const byTool = (t) => acts.find((a) => a.tool === t);
+  assert.equal(acts.length, 8, 'every main-chain tool call captured; the sidechain call excluded');
+
+  // categories
+  assert.equal(byTool('Read').category, 'read');
+  assert.equal(byTool('Grep').category, 'search');
+  assert.equal(byTool('Write').category, 'edit');
+  assert.equal(byTool('Bash').category, 'exec');
+  assert.equal(byTool('WebFetch').category, 'web');
+  assert.equal(byTool('Agent').category, 'agent');
+  assert.equal(byTool('TodoWrite').category, 'todo');
+
+  // targets (one-line, tool-specific)
+  assert.equal(byTool('Read').target, F);
+  assert.equal(byTool('Grep').target, 'const a');
+  assert.equal(byTool('Bash').target, 'npm test --silent', 'multiline command collapsed to one line');
+  assert.equal(byTool('Bash').detail, 'run tests');
+  assert.equal(byTool('WebFetch').target, 'https://example.com/docs');
+  assert.equal(byTool('Agent').target, 'audit deps');
+  assert.equal(byTool('Agent').detail, 'Explore');
+  assert.match(byTool('TodoWrite').target, /ship it/, 'todo target surfaces the in-progress item');
+
+  // result folding (ok / isError from the correlated tool_result)
+  assert.equal(byTool('Read').ok, true);
+  assert.equal(byTool('Grep').ok, false);
+  assert.equal(byTool('Grep').isError, true, 'an errored tool_result folds onto its action');
+
+  // reasoning carry-forward (same-message text, and a thinking-only preceding message)
+  assert.equal(byTool('Read').reasoning, 'Exploring the code.');
+  assert.equal(byTool('Bash').reasoning, 'Now run checks.', 'thinking-only message carries forward to the next call');
+
+  // edit linking: Write -> store #1, Edit -> store #2 (positional per file); Bash is not edit-linked
+  assert.equal(byTool('Write').editId, 1, 'Write links to store edit #1');
+  assert.equal(byTool('Edit').editId, 2, 'Edit links to store edit #2');
+  assert.equal(byTool('Bash').editId, undefined, 'a Bash action carries no single editId');
+
+  // chronological + summary
+  assert.ok(acts[0].ts > 0 && acts[0].ts <= acts[acts.length - 1].ts, 'actions are in chronological order with parsed timestamps');
+  const sum = core.summarizeActions(acts);
+  assert.equal(sum.total, 8);
+  assert.equal(sum.errors, 1);
+  assert.equal(sum.byCategory.edit, 2);
+});
+
+test('actions: silent when there is no transcript', () => {
+  freshHome();
+  assert.deepEqual(core.parseActions(tmpWork(), 'nope'), [], 'no transcript -> no actions');
+});
+
+test('actions: buildActionGroups groups by category, curated by default (errors always surface)', () => {
+  const acts = [
+    { category: 'edit', tool: 'Edit', isError: false }, { category: 'edit', tool: 'Write', isError: false },
+    { category: 'exec', tool: 'Bash', isError: false },
+    { category: 'read', tool: 'Read', isError: false }, { category: 'read', tool: 'Read', isError: true }, // one errored read
+    { category: 'search', tool: 'Grep', isError: false },
+    { category: 'meta', tool: 'Skill', isError: false },
+    { category: 'web', tool: 'WebFetch', isError: false },
+  ];
+  const curated = core.buildActionGroups(acts);
+  const cats = curated.map((g) => g.category);
+  assert.ok(cats.includes('edit') && cats.includes('exec') && cats.includes('web'), 'curated categories shown');
+  assert.ok(!cats.includes('search') && !cats.includes('meta'), 'noisy no-error categories hidden by default');
+  const read = curated.find((g) => g.category === 'read');
+  assert.ok(read, 'a read WITH an error still surfaces in curated mode');
+  assert.equal(read.count, 2, 'group count reflects the whole category');
+  assert.equal(read.actions.length, 1, 'only the errored read row is shown in curated mode');
+  assert.equal(read.errors, 1);
+  assert.deepEqual(cats.filter((c) => ['edit', 'exec', 'web'].includes(c)), ['edit', 'exec', 'web'], 'display order: edit, exec, web');
+
+  const all = core.buildActionGroups(acts, { showAll: true });
+  assert.ok(all.some((g) => g.category === 'search') && all.some((g) => g.category === 'meta'), 'show-all reveals noisy categories');
+  assert.equal(all.find((g) => g.category === 'read').actions.length, 2, 'show-all shows all read rows');
+});

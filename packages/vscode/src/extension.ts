@@ -1502,6 +1502,81 @@ function statsData(s: core.StatsResult): unknown {
 /** File History: the ACTIVE editor's Claude edits, oldest→newest (id · time · status · reasoning).
  *  A flat chronological list — a different data model from the folder/class Edits tree — that follows
  *  the active editor. Reuses EditNode so every existing edit command works on its rows unchanged. */
+// --- Actions timeline: EVERY tool call Claude made this session, grouped by category (0.6.0) ---
+// Curated by default (high-signal categories; errors always surface); a title-bar toggle shows all.
+type ActNode = { kind: 'group'; group: core.ActionGroup } | { kind: 'action'; action: core.ActionRecord };
+
+let actionsShowAll = false; // module-level toggle, flipped by the view-title button
+
+const CAT_ICON: Record<string, string> = {
+  edit: 'edit',
+  exec: 'terminal',
+  read: 'file',
+  search: 'search',
+  web: 'globe',
+  agent: 'organization',
+  todo: 'checklist',
+  mcp: 'plug',
+  meta: 'settings-gear',
+  other: 'circle-small-filled',
+};
+
+class ActionsProvider implements vscode.TreeDataProvider<ActNode> {
+  private readonly _c = new vscode.EventEmitter<void>();
+  readonly onDidChangeTreeData = this._c.event;
+  refresh(): void {
+    this._c.fire();
+  }
+
+  private groups(): core.ActionGroup[] {
+    const session = currentSession();
+    const cwd = workspaceRoot();
+    if (!session || !cwd) return [];
+    return core.buildActionGroups(core.parseActions(cwd, session), { showAll: actionsShowAll });
+  }
+
+  getChildren(node?: ActNode): ActNode[] {
+    if (!node) return this.groups().map((group) => ({ kind: 'group', group }));
+    if (node.kind === 'group') return node.group.actions.slice().reverse().map((action) => ({ kind: 'action', action })); // newest-first within a group
+    return [];
+  }
+
+  getTreeItem(node: ActNode): vscode.TreeItem {
+    if (node.kind === 'group') {
+      const g = node.group;
+      const item = new vscode.TreeItem(g.label, vscode.TreeItemCollapsibleState.Collapsed);
+      const shownNote = g.actions.length < g.count ? `${g.actions.length} of ${g.count}` : `${g.count}`;
+      item.description = `${shownNote}${g.errors ? ` · ${g.errors} error${g.errors === 1 ? '' : 's'}` : ''}`;
+      item.iconPath = new vscode.ThemeIcon(CAT_ICON[g.category] ?? 'circle-small-filled', g.errors ? new vscode.ThemeColor('charts.red') : undefined);
+      item.contextValue = 'actionGroup';
+      return item;
+    }
+    const a = node.action;
+    const item = new vscode.TreeItem(`${a.tool}  ${(a.target || '').replace(/\s+/g, ' ')}`, vscode.TreeItemCollapsibleState.None);
+    item.description = [a.ts ? core.relTime(a.ts) : '', a.detail].filter(Boolean).join(' · ');
+    item.iconPath = new vscode.ThemeIcon(a.isError ? 'error' : CAT_ICON[a.category] ?? 'circle-small-filled', a.isError ? new vscode.ThemeColor('charts.red') : undefined);
+    item.tooltip = new vscode.MarkdownString(
+      [
+        `**${a.tool}**${a.isError ? ' · ⚠ error' : ''}`,
+        a.target ? '`' + a.target.replace(/`/g, '') + '`' : '',
+        a.detail ? `_${a.detail}_` : '',
+        a.reasoning ? `💭 ${firstLine(a.reasoning)}` : '',
+        a.editId != null ? `edit #${a.editId} — click to review this edit` : '',
+      ]
+        .filter(Boolean)
+        .join('\n\n')
+    );
+    // Edit actions link to a store record → clicking opens the review bubble at that edit; others are read-only.
+    if (a.editId != null) {
+      item.command = { command: 'claudeObservatory.viewChanges', title: 'View changes', arguments: [a.editId] };
+      item.contextValue = 'actionEdit';
+    } else {
+      item.contextValue = 'action';
+    }
+    return item;
+  }
+}
+
 class FileHistoryProvider implements vscode.TreeDataProvider<EditNode> {
   private readonly _changed = new vscode.EventEmitter<void>();
   readonly onDidChangeTreeData = this._changed.event;
@@ -1808,6 +1883,8 @@ export function activate(context: vscode.ExtensionContext): void {
   const timelineView = vscode.window.createTreeView('claudeObservatory.timeline', { treeDataProvider: timelineProvider });
   const insightsProvider = new ObservationsProvider();
   const insightsView = vscode.window.createTreeView('claudeObservatory.observations', { treeDataProvider: insightsProvider });
+  const actionsProvider = new ActionsProvider();
+  const actionsView = vscode.window.createTreeView('claudeObservatory.actions', { treeDataProvider: actionsProvider });
   const fileHistoryProvider = new FileHistoryProvider();
   const fileHistoryView = vscode.window.createTreeView('claudeObservatory.fileHistory', { treeDataProvider: fileHistoryProvider });
   fileHistoryProvider.view = fileHistoryView;
@@ -1985,12 +2062,21 @@ export function activate(context: vscode.ExtensionContext): void {
     diffsProvider.refresh();
     timelineProvider.refresh();
     insightsProvider.refresh();
+    actionsProvider.refresh();
     fileHistoryProvider.refresh();
     statsProvider.refresh();
     statusDecorations.refresh();
     updateStatusItem();
     refreshInline();
   };
+
+  // Actions view: flip between the curated default and every action; drives the title-bar toggle button.
+  const setActionsShowAll = (v: boolean) => {
+    actionsShowAll = v;
+    void vscode.commands.executeCommand('setContext', 'claudeObservatory.actionsShowAll', v);
+    actionsProvider.refresh();
+  };
+  setActionsShowAll(false); // establish the context key from activation
 
   // --- nav bar handlers (drive the status-bar review toolbar built above) ---
   // The pending edit the Diff axis is parked on, resolved to a live (still-pending) record.
@@ -2034,6 +2120,7 @@ export function activate(context: vscode.ExtensionContext): void {
     diffsView,
     timelineView,
     insightsView,
+    actionsView,
     fileHistoryView,
     statusItem,
     inlineDecoration,
@@ -2058,7 +2145,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // Refresh on panel-visible / window-focus (covers new sessions the watcher may miss), on active
   // editor change, and on buffer edits (debounced) so decorations track the live buffer.
-  for (const v of [editsView, diffsView, timelineView, insightsView, fileHistoryView]) {
+  for (const v of [editsView, diffsView, timelineView, insightsView, actionsView, fileHistoryView]) {
     v.onDidChangeVisibility((e) => e.visible && refreshAll());
   }
   let debounce: ReturnType<typeof setTimeout> | undefined;
@@ -2088,6 +2175,8 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand('claudeObservatory.refresh', () => refreshAll()),
+    vscode.commands.registerCommand('claudeObservatory.actionsShowAll', () => setActionsShowAll(true)),
+    vscode.commands.registerCommand('claudeObservatory.actionsShowCurated', () => setActionsShowAll(false)),
     // Step backward / forward through pending edits (⏮ prev · ⏭ next), keyboard-friendly.
     vscode.commands.registerCommand('claudeObservatory.reviewNext', () => reviewStep(1)),
     vscode.commands.registerCommand('claudeObservatory.reviewPrev', () => reviewStep(-1)),

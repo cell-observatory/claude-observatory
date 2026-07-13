@@ -186,6 +186,15 @@ object ObservatoryCli {
         return if (r.ok) r.stdout else null
     }
 
+    /** The action timeline (every tool call, grouped by category) — `--all` shows the noisy categories too. */
+    fun actionsJson(session: String, workDir: String?, all: Boolean): String? {
+        val args = buildList {
+            add("actions"); add("--session"); add(session); add("--json"); if (all) add("--all")
+        }
+        val r = run(args, workDir)
+        return if (r.ok) r.stdout else null
+    }
+
     /** The folder→file→class→edit view-model (with exact deltas) — the single source both editors render. */
     fun treeJson(session: String, workDir: String?, filter: String?): String? {
         val args = buildList {

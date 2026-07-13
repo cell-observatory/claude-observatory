@@ -5,6 +5,25 @@ All notable changes to Claude Observatory are recorded here, following
 Per-tag release artifacts and auto-generated notes are on the
 [Releases page](https://github.com/cell-observatory/claude-observatory/releases).
 
+## [0.6.0] — 2026-07-13
+
+Grows Claude Observatory from an *edit*-review layer into a *session* observatory: a new **Actions
+timeline** surfaces every tool call Claude made — not just the file edits the store captures. No
+breaking changes — the store format and every existing `--json` shape are unchanged; `actions` is additive.
+
+### Added — Actions timeline (CLI + VS Code + JetBrains)
+
+A zero-token, typed timeline of every tool call in the session — reads, greps, shell commands, web
+fetches, subagent spawns, and to-do updates — mined from the Claude Code transcript and correlated with
+each call's result (ok / error). File-edit actions link to their store record, so you can jump straight
+to the review from the timeline.
+
+- **CLI**: `claude-observatory actions` (alias `trace`) — a human feed or `--json`
+  (`{ session, summary, actions, groups }`); filters `--category <c>`, `--errors`, `--limit <n>`, `--all`.
+- **Both editors**: a new **Actions** view/panel, grouped by category (Edits, Commands, Web, Subagents,
+  To-dos…). Curated by default — high-signal categories plus any errors — with a toggle to show all
+  (reads/searches/meta). Errored calls are flagged; edit rows open the review.
+
 ## [0.5.5] — 2026-07-13
 
 Adds a review **navigation bar** to the status bar in both editors — adopted from the review toolbar in

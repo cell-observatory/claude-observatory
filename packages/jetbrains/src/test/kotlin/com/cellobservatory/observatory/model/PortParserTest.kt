@@ -79,4 +79,40 @@ class PortParserTest {
         assertTrue(p.suggestions.isEmpty())
         assertTrue(p.edits.isEmpty())
     }
+
+    @Test
+    fun `ActionsParser extracts category groups + action fields incl editId link and error`() {
+        val json = """
+            {"session":"s1","summary":{"total":3,"errors":1,"byCategory":{"edit":2,"read":1}},
+             "groups":[
+               {"category":"edit","label":"Edits","count":2,"errors":0,"actions":[
+                  {"ts":1000,"tool":"Edit","category":"edit","target":"/w/a.ts","detail":null,"ok":true,"isError":false,"reasoning":"because","editId":7}
+               ]},
+               {"category":"read","label":"Reads","count":5,"errors":1,"actions":[
+                  {"ts":2000,"tool":"Read","category":"read","target":"/w/b.ts","ok":false,"isError":true,"editId":null}
+               ]}
+             ]}
+        """.trimIndent()
+        val res = ActionsParser.parse(json)!!
+        assertEquals("s1", res.session)
+        assertEquals(3, res.total)
+        assertEquals(1, res.errors)
+        assertEquals(2, res.groups.size)
+        val edits = res.groups[0]
+        assertEquals("edit", edits.category)
+        assertEquals("Edits", edits.label)
+        assertEquals(2, edits.count)
+        val a = edits.actions[0]
+        assertEquals("Edit", a.tool)
+        assertEquals("/w/a.ts", a.target)
+        assertEquals("because", a.reasoning)
+        assertTrue(a.editId == 7) // links to a store record → double-click reviews it in the panel
+        assertTrue(a.ok)
+        // The "Reads" group leaked into curated output because it has an error; the errored row is flagged.
+        val reads = res.groups[1]
+        assertEquals(1, reads.errors)
+        val err = reads.actions[0]
+        assertTrue(err.isError)
+        assertNull(err.editId) // non-edit action carries no store link
+    }
 }
