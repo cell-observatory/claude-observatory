@@ -311,6 +311,24 @@ test('extension: three views, click commands, inline annotations, chat, status s
     const obsMd = contentProviders['claude-observation'].provideTextDocumentContent({ authority: 'obs', path: '/edit-1.md', query: 's=' + S });
     assert.match(obsMd, /\*\*Summary:\*\*/, 'observation markdown has a summary');
 
+    // Actions view (0.6.0): the session's tool calls grouped by category. This transcript has two Edit
+    // tool_uses on app.txt → one "Edits" group with 2 rows, each linked to its store edit (curated default).
+    const actionsTree = trees['claudeObservatory.actions'];
+    assert.ok(actionsTree, 'Actions view registered');
+    const actGroups = actionsTree.getChildren();
+    assert.ok(actGroups.length >= 1 && actGroups[0].kind === 'group', 'actions are grouped by category');
+    const editGroup = actGroups.find((g) => g.group.category === 'edit');
+    assert.ok(editGroup, 'the Edits group is present (curated default shows edits)');
+    const gItem = actionsTree.getTreeItem(editGroup);
+    assert.equal(gItem.label, 'Edits');
+    assert.match(String(gItem.description), /2/, 'Edits group shows its count');
+    const actRows = actionsTree.getChildren(editGroup);
+    assert.equal(actRows.length, 2, 'two Edit actions in the Edits group');
+    const aItem = actionsTree.getTreeItem(actRows[0]);
+    assert.match(aItem.label, /Edit/, 'action row leads with the tool name');
+    assert.equal(aItem.command.command, 'claudeObservatory.viewChanges', 'an edit action links to the review bubble');
+    assert.ok(typeof commands['claudeObservatory.actionsShowAll'] === 'function' && typeof commands['claudeObservatory.actionsShowCurated'] === 'function', 'actions show-all/curated toggles registered');
+
     // Combined Stats + Usage webview: one view — plots on top, usage bars below; both fed via postMessage.
     const stProvider = webviewProviders['claudeObservatory.stats'];
     assert.ok(stProvider && !webviewProviders['claudeObservatory.statusline'], 'single combined Stats view (Usage merged in)');

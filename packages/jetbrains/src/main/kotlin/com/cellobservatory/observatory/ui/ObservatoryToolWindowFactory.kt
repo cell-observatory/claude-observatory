@@ -36,13 +36,17 @@ class ObservatoryToolWindowFactory : ToolWindowFactory, DumbAware {
 class ObservatoryDashboardsFactory : ToolWindowFactory, DumbAware {
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
         val stats = com.cellobservatory.observatory.ui.stats.StatsPanel(project)
-        val right = com.intellij.ui.OnePixelSplitter(false, 0.55f).apply {
+        val right = com.intellij.ui.OnePixelSplitter(false, 0.5f).apply {
             firstComponent = titled("Timeline", TimelinePanel(project))
             secondComponent = titled("Stats", stats)
         }
-        val split = com.intellij.ui.OnePixelSplitter(false, 0.4f).apply {
-            firstComponent = titled("Observations", ObservationsPanel(project))
+        val mid = com.intellij.ui.OnePixelSplitter(false, 0.5f).apply {
+            firstComponent = titled("Actions", ActionsPanel(project))
             secondComponent = right
+        }
+        val split = com.intellij.ui.OnePixelSplitter(false, 0.3f).apply {
+            firstComponent = titled("Observations", ObservationsPanel(project))
+            secondComponent = mid
         }
         val content = ContentFactory.getInstance().createContent(split, "", false)
         // Tie the StatsPanel's Timer + service listener to the content's lifecycle (stopped on close).

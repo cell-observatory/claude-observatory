@@ -16,4 +16,5 @@ export * from './semver';
 export * from './review';
 export * from './tree';
 export * from './groups';
+export * from './actions';
 export { runCapture } from './capture';
