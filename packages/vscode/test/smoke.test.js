@@ -404,22 +404,54 @@ test('extension: three views, click commands, inline annotations, chat, status s
     stProvider.postStatsError();
     assert.ok(stMsgs.some((m) => m.type === 'statsError'), 'failed stats scan posts the CLI-missing hint');
 
-    // Stats top navbar (0.7.0): active session + edits search box + clickable pending count → first edit.
-    assert.match(stView.webview.html, /id="nb-search"/, 'stats navbar has a Search-edits box');
+    // Change Map webview (0.7.5): chapters on top, a module proportion strip, and a churn-ranked file
+    // ledger — all rendered from the CLI's changemap --json rollups (no aggregation in the client).
+    const cmProvider = webviewProviders['claudeObservatory.changemap'];
+    assert.ok(cmProvider, 'Change Map view registered in the panel');
+    let cmMsgHandler = null;
+    const cmView = {
+      webview: { options: {}, html: '', postMessage: () => {}, onDidReceiveMessage: (cb) => { cmMsgHandler = cb; return { dispose() {} }; } },
+      onDidChangeVisibility: () => ({ dispose() {} }),
+      visible: false, // no subprocess spawn while hidden
+    };
+    cmProvider.resolveWebviewView(cmView);
+    assert.match(cmView.webview.html, /id="cm-chaps"/, 'change map: chapters row present (on top)');
+    assert.match(cmView.webview.html, /id="cm-strip"/, 'change map: module proportion strip present');
+    assert.match(cmView.webview.html, /id="cm-ledger"/, 'change map: ranked file ledger present');
+    assert.match(cmView.webview.html, /id="cm-readout"/, 'change map: footer readout present');
+    assert.ok(!/buildFiles|buildModules/.test(cmView.webview.html), 'the client must not re-aggregate — core ships files[]/modules[]');
+    // A hidden view must not shell out; and a failed scan (before any data) posts the CLI-missing hint.
+    const cmMsgs = [];
+    cmView.webview.postMessage = (m) => cmMsgs.push(m);
+    cmProvider.refresh();
+    assert.equal(cmMsgs.length, 0, 'a hidden Change Map does not spawn the CLI or post');
+    cmProvider.postError();
+    assert.ok(cmMsgs.some((m) => m.type === 'error'), 'a failed change-map scan posts the CLI-missing hint');
+    assert.ok(typeof cmMsgHandler === 'function', 'the change map registered a message handler');
+    // clicking a ledger row drills to the real edit review via the existing command (spy on the
+    // registered callback — executeCommand resolves commands[id] at call time)
+    const cmOpened = [];
+    const realViewChanges = commands['claudeObservatory.viewChanges'];
+    commands['claudeObservatory.viewChanges'] = (id) => { cmOpened.push(id); };
+    cmMsgHandler({ type: 'openEdit', id: 1 });
+    commands['claudeObservatory.viewChanges'] = realViewChanges;
+    assert.deepEqual(cmOpened, [1], 'a ledger row click opens that edit for review');
+
+    // Stats top navbar: active session + clickable pending count → first edit. (The Search-edits box
+    // was removed in 0.7.5 — the Edits/Diffs title-bar `searchEdits` action is the one search entry.)
+    assert.ok(!/id="nb-search"/.test(stView.webview.html), 'no search box in the Stats navbar');
     assert.match(stView.webview.html, /id="nb-session"/, 'stats navbar shows the active session');
     assert.match(stView.webview.html, /id="rv-pending-cell"/, 'the pending count is a clickable cell');
-    assert.ok(typeof commands['claudeObservatory.reviewFirst'] === 'function' && typeof commands['claudeObservatory.searchWith'] === 'function', 'reviewFirst + searchWith commands registered');
-    // the counts post carries the session + filter the navbar renders
+    assert.ok(typeof commands['claudeObservatory.reviewFirst'] === 'function', 'reviewFirst command registered');
+    assert.ok(!commands['claudeObservatory.searchWith'], 'searchWith is gone — it existed only to drive the removed search box');
+    // the counts post carries the session the navbar renders
     const nbMsgs = [];
     stView.webview.postMessage = (m) => nbMsgs.push(m);
     stProvider.refresh();
-    assert.ok(nbMsgs.some((m) => m.type === 'counts' && m.session === S && 'filter' in m), 'counts post carries the active session + filter');
-    // driving the webview: a search message filters the Edits tree via searchWith
+    assert.ok(nbMsgs.some((m) => m.type === 'counts' && m.session === S), 'counts post carries the active session');
+    // The webview registers a handler for the one message it still sends (the pending cell → reviewFirst).
+    // Deliberately not driven here: reviewFirst moves the review cursor, which later assertions depend on.
     assert.ok(typeof stMsgHandler === 'function', 'the stats webview registered a message handler');
-    stMsgHandler({ type: 'search', q: 'zzz-nomatch' });
-    assert.equal(editsTree.getChildren().length, 0, 'a stats-search message filters the Edits tree (no match hides all)');
-    stMsgHandler({ type: 'search', q: '' }); // clear so later assertions still see all edits
-    assert.ok(editsTree.getChildren().length >= 1, 'clearing the stats search restores the edits');
 
     // realtime observatory: status-bar microscope shows the pending count + the review scoreboard tooltip
     const microscope = statusBarItems.find((i) => /🔬/.test(i.text));

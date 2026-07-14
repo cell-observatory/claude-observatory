@@ -22,4 +22,5 @@ export * from './egress';
 export * from './subagents';
 export * from './fleet';
 export * from './metrics';
+export * from './changemap';
 export { runCapture } from './capture';

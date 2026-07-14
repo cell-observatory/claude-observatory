@@ -27,7 +27,7 @@ contract the machine-readable surface guarantees. Every claim below is grounded 
 - **`cli` → `vscode` (in-process).** `packages/vscode/src/extension.ts` does
   `import * as core from '@claude-observatory/core'` and calls `core.buildEditTree`,
   `core.undoEdit`, `core.setStatus`, `core.readLog`, `core.fileMemory`, … directly. It only *spawns*
-  the CLI for `stats --json` (potentially GBs of transcripts — kept off the UI thread).
+  the CLI for `stats --json` and `changemap --json` (potentially GBs of transcripts — kept off the UI thread).
 - **`cli` → `jetbrains` (over the CLI).** The Kotlin plugin never links `core`. It shells out to
   `claude-observatory … --json` via `core/ObservatoryCli.kt` for every **mutation**
   (`keep`/`undo`/`redo`/`clean`) and every **diff-dependent read** (`locate`, `tree`, `observe`,
@@ -151,6 +151,42 @@ they must never drift. The mirrors:
 
 If you change a store or session read, update the port **and** these tests in the same PR.
 
+### `ChangeMap` — the session's changes, rolled up (`changemap.ts`)
+
+`buildChangeMap(cwd, session, { root })` places every review-unit edit as `module → file → class`, then
+rolls it up **once** so no front-end re-aggregates: `files[]` and `modules[]` arrive churn-sorted, each
+with a pre-rendered `moduleLabel`, a worst-unreviewed-wins `status`, and `maxId` — the drill-through
+target a click opens. Chapters come from Claude's own `TodoWrite` checkpoints: a to-do flipping to
+`in_progress` opens a window that runs until the next one does, and an edit falling outside every
+window stays honestly unattributed (`chapter: null`) rather than being mis-filed.
+
+```ts
+interface ChangeMap {
+  summary: ChangeMapSummary; edits: ChangeMapEdit[]; chapters: ChangeMapChapter[];
+  files: ChangeMapFile[]; modules: ChangeMapModule[];
+}
+interface ChangeMapFile {
+  rel: string; module: string; moduleLabel: string; file: string;
+  churn: number; cnt: number; added: number; removed: number;
+  kept: number; pending: number; undone: number;
+  status: EditStatus;        // worst-unreviewed-wins: pending > undone > kept
+  maxId: number;             // newest edit id — what a click on this row opens
+  classes: string[]; chapters: string[];
+  agent: boolean; risk: string | null; reason: string | null;
+}
+interface ChangeMapModule {
+  module: string; label: string; churn: number; cnt: number;
+  kept: number; pending: number; undone: number;
+  status: EditStatus; files: number; chapters: string[];
+}
+interface ChangeMapChapter {
+  id: string; index: number; title: string;
+  status: 'done' | 'wip' | 'todo';   // from Claude's own to-do status
+  startTs: number; endTs: number;
+  edits: number; kept: number; pending: number; undone: number; agent: boolean;
+}
+```
+
 ## The CLI `--json` contract
 
 The machine-readable surface. Field names are a **stable contract** — the JetBrains parsers and the
@@ -168,6 +204,7 @@ VS Code renderers key on them by name. Add fields; don't rename them. (`emitJson
 | `subagents [--json]` (alias `agents`) | `{ session, summary, subagents: [{ agentId, agentType, description, status, ts, durationMs, tokens, toolUseCount, actions[], edits, summary }] }` | Subagents node in the Actions view — **both editors**; each subagent's nested timeline is mined zero-token from `subagents/agent-<id>.jsonl` and correlated via the spawning tool call's `toolUseResult` |
 | `siblings [--json]` (alias `fleet`) | `{ session, summary, siblings: [{ id, self, active, lastMs, edits, pending, files[], moreFiles, risk{ total, high } }] }` | Fleet node in the Actions view — **both editors** — plus an agent-facing digest a run can poll mid-flight; READ-ONLY / PATH-ONLY (no file contents cross agents). `--json` = siblings only; `--all` includes self |
 | `metrics [--json]` | `{ session, spanMs, actions{ total, errors, byCategory }, edits{ count, added, removed, pending, kept, undone }, subagents{…}, toolLatency{ count, medianMs, p95Ms, maxMs } }` | Session metrics roll-up — diff stats, action/error counts, per-subagent duration/tokens, and tool latency (from each `tool_use`→`tool_result` timestamp gap) |
+| `changemap [--root <d>] [--json]` | `{ summary, edits[], chapters[], files[], modules[] }` — `files`/`modules` are the churn + worst-unreviewed-wins rollups, pre-labelled and churn-sorted | Change Map panel — VS Code webview + JetBrains `ChangeMapPanel` (both render as-given) |
 | `locate --file <f>` (buffer on stdin) | `{ file, placements: [{ id, lines: [int] }] }` | inline overlays — JetBrains `ObservatoryCli.locate`; VS Code computes in-process via `core.locateEditInCurrent` |
 | `usage` | `{ ...UsageLine, staleMs }` (`staleMs` = `USAGE_STALE_MS`, 300000) | the 5h/week Usage bars |
 | `stats --json` | `StatsResult` (`{ daily[30], hourly[24], windows{session,day,week,month}, generatedAt }`) | Stats panel (both spawn a subprocess) |
@@ -182,7 +219,9 @@ with `jq`.
 
 The three 0.7.0 commands are backed by new `core` modules — `subagents.ts`, `fleet.ts`, and
 `metrics.ts` — each deriving purely from the Claude Code transcript + the content-addressed store
-(no model calls, no network). `parseActions` was refactored to share `parseTranscriptActions`, so
+(no model calls, no network). 0.7.5 adds `changemap.ts` on the same terms, and takes the rule one step
+further: it ships the *rendered* rollups (`files[]` / `modules[]`), so the VS Code webview and the
+JetBrains Swing panel are both pure renderers with no aggregation logic of their own to drift. `parseActions` was refactored to share `parseTranscriptActions`, so
 every subagent's `subagents/agent-<id>.jsonl` transcript parses through exactly the same code as the
 main session's action timeline.
 

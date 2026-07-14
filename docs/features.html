@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Features — Claude Observatory</title>
-<meta name="description" content="A detailed tour of Claude Observatory: inline review, per-edit diffs, surgical undo, timeline, observations, stats, heatmap, conflict resolution, the CLI backend, the action timeline with risk & egress audits, subagent tracking, cross-agent fleet awareness, session metrics, and cross-editor parity.">
+<meta name="description" content="A detailed tour of Claude Observatory: inline review, per-edit diffs, surgical undo, timeline, observations, change map, stats, heatmap, conflict resolution, the CLI backend, the action timeline with risk & egress audits, subagent tracking, cross-agent fleet awareness, session metrics, and cross-editor parity.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%AC%3C/text%3E%3C/svg%3E">
 <style>
   :root{
@@ -105,7 +105,7 @@
   <div class="wrap">
     <a class="back" href="showcase.html">← Overview</a>
     <h1>Every surface, in detail.</h1>
-    <p class="lede">Sixteen ways Claude Observatory keeps you in the loop — inline, in the sidebar, in the terminal, and across both editors. Screenshots are from the bundled demo session.</p>
+    <p class="lede">Seventeen ways Claude Observatory keeps you in the loop — inline, in the sidebar, in the terminal, and across both editors. Screenshots are from the bundled demo session.</p>
   </div>
 </header>
 
@@ -199,7 +199,7 @@
 
   <section class="feature">
     <div class="wrap grid">
-      <div class="copy"><div class="num">11</div><span class="eyebrow">Action timeline</span><h2>Every tool call, not just the edits.</h2><p>A zero-token, typed timeline mined from the transcript — every read, grep, shell command, web fetch, subagent spawn, and to-do update Claude made this session, each correlated with its result. The new <b>Actions</b> view — a panel beside Observations, Timeline, and Stats in VS Code, a pane in the JetBrains Dashboards — groups them by category and stays curated by default, with a <b>Show all</b> toggle for reads, searches, and meta. Errors always surface; edit rows link straight to their review. From the shell: <code>claude-observatory actions</code> (alias <code>trace</code>) — a human feed or <code>--json</code>, filtered by <code>--category</code>, <code>--errors</code>, <code>--limit</code>, and <code>--all</code>.</p></div>
+      <div class="copy"><div class="num">11</div><span class="eyebrow">Action timeline</span><h2>Every tool call, not just the edits.</h2><p>A zero-token, typed timeline mined from the transcript — every read, grep, shell command, web fetch, subagent spawn, and to-do update Claude made this session, each correlated with its result. The new <b>Actions</b> view — a panel beside Observations, Timeline, Change Map, and Stats in VS Code, a pane in the JetBrains Dashboards — groups them by category and stays curated by default, with a <b>Show all</b> toggle for reads, searches, and meta. Errors always surface; edit rows link straight to their review. From the shell: <code>claude-observatory actions</code> (alias <code>trace</code>) — a human feed or <code>--json</code>, filtered by <code>--category</code>, <code>--errors</code>, <code>--limit</code>, and <code>--all</code>.</p></div>
       <div class="panel rv">
         <div style="padding:20px 22px;font-family:var(--mono);font-size:.82rem;line-height:1.85;color:var(--ink-soft)">
           <div style="font-size:.68rem;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-faint);margin-bottom:12px">Actions · this session</div>
@@ -289,6 +289,22 @@
         <figure><img src="media/layout.png" loading="lazy" alt="Claude Observatory in VS Code"><figcaption>VS Code</figcaption></figure>
         <figure><img src="media/pyc-layout.png" loading="lazy" alt="Claude Observatory in PyCharm with icon-only tool-window tabs"><figcaption>PyCharm / JetBrains</figcaption></figure>
       </div></div></div>
+    </div>
+  </section>
+
+  <section class="feature">
+    <div class="wrap grid">
+      <div class="copy"><div class="num">17</div><span class="eyebrow">Change map</span><h2>The session's changes at a glance.</h2><p>A bird's-eye read of everything Claude touched, in one panel. Claude's own to-dos become <b>chapters</b> across the top — click one to brush the map down to just the files that goal produced. A one-row <b>proportion strip</b> shows where the work landed by module; click a segment to filter. Below, every file is <b>ranked by churn</b> with a bar, coloured by review status (worst-unreviewed-wins, so a module never reads reviewed while something under it is still pending). Hover a row for the class it touched and Claude's reasoning; click to open the real diff. Every rollup is computed once in core and rendered as-given by both editors — from the shell: <code>claude-observatory changemap --json</code>.</p></div>
+      <div class="panel rv">
+        <div style="padding:20px 22px;font-family:var(--mono);font-size:.82rem;line-height:1.85;color:var(--ink-soft)">
+          <div style="font-size:.68rem;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-faint);margin-bottom:12px">Change Map · this session</div>
+          <div><span style="color:var(--kept)">●</span> 1. Scaffold tracking &nbsp; <span style="color:var(--pending)">◐</span> 2. Risk audit &nbsp; <span style="color:var(--ink-faint)">○ 3. Update docs</span></div>
+          <div style="color:var(--ink-faint);margin:4px 0 8px">[<span style="color:var(--kept)">██████</span><span style="color:var(--pending)">█████</span><span style="color:var(--ink-faint)">██</span>] &nbsp;core · vscode · docs</div>
+          <div><b style="color:var(--ink)">extension.ts</b> <span style="color:var(--ink-faint)">vscode</span> <span style="color:var(--pending)">████████</span> +751 <span style="color:var(--pending)">6⏳</span></div>
+          <div><b style="color:var(--ink)">changemap.ts</b> <span style="color:var(--ink-faint)">core</span> &nbsp;<span style="color:var(--kept)">████</span> +285 <span style="color:var(--kept)">✓</span></div>
+          <div><b style="color:var(--ink)">README.md</b> <span style="color:var(--ink-faint)">docs</span> &nbsp;&nbsp;<span style="color:var(--pending)">█</span> +44 <span style="color:var(--pending)">2⏳</span></div>
+        </div>
+      </div>
     </div>
   </section>
 </main>

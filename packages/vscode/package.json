@@ -2,7 +2,7 @@
   "name": "claude-observatory-vscode",
   "displayName": "Claude Observatory",
   "description": "A running list of every file change Claude Code makes, each with its own Keep / Undo (surgical, git-free).",
-  "version": "0.7.0",
+  "version": "0.7.5",
   "publisher": "claude-observatory",
   "private": true,
   "engines": {
@@ -22,7 +22,7 @@
       "activitybar": [
         {
           "id": "claudeObservatory",
-          "title": "Claude Observatory",
+          "title": "Claude Edits",
           "icon": "media/icon.svg"
         }
       ],
@@ -54,24 +54,34 @@
       ],
       "claudeObservatoryPanel": [
         {
+          "id": "claudeObservatory.actions",
+          "name": "Actions",
+          "icon": "$(list-tree)",
+          "initialSize": 2
+        },
+        {
           "id": "claudeObservatory.observations",
           "name": "Observations",
-          "icon": "media/icon.svg"
+          "icon": "media/icon.svg",
+          "initialSize": 5
         },
         {
           "id": "claudeObservatory.timeline",
           "name": "Timeline",
-          "icon": "media/icon.svg"
+          "icon": "media/icon.svg",
+          "initialSize": 5
         },
         {
-          "id": "claudeObservatory.actions",
-          "name": "Actions",
-          "icon": "$(list-tree)"
+          "id": "claudeObservatory.changemap",
+          "name": "Change Map",
+          "type": "webview",
+          "initialSize": 6
         },
         {
           "id": "claudeObservatory.stats",
           "name": "Stats",
-          "type": "webview"
+          "type": "webview",
+          "initialSize": 3
         }
       ]
     },
@@ -898,7 +908,7 @@
     "package": "vsce package --no-dependencies -o claude-observatory.vsix"
   },
   "devDependencies": {
-    "@claude-observatory/core": "0.7.0",
+    "@claude-observatory/core": "0.7.5",
     "@types/node": "^22.0.0",
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^3.0.0",
