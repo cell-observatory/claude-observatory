@@ -5,6 +5,60 @@ All notable changes to Claude Observatory are recorded here, following
 Per-tag release artifacts and auto-generated notes are on the
 [Releases page](https://github.com/cell-observatory/claude-observatory/releases).
 
+## [0.7.5] — 2026-07-14
+
+Adds the **Change Map** — a new bottom-panel view that answers the one question the flat lists can't:
+*where did this session's work land, and what still needs my eyes?* Zero-token and local like the rest,
+and cross-editor from day one (CLI + VS Code + JetBrains). No breaking changes — the store format is
+unchanged and every existing `--json` shape is unchanged; `changemap --json` is a new command.
+
+### Added — Change Map (CLI + both editors)
+
+The whole session as one picture, drilling to the same per-edit review as everywhere else. Three layers:
+**chapters** (Claude's own to-dos — click one to brush the map down to just the files that goal produced),
+a one-row **module proportion strip** (click a segment to filter), and every file **ranked by churn**
+with a bar. Colour is **worst-unreviewed-wins**, so a module never reads reviewed while something under
+it is still pending. Hover a row for the class touched and Claude's reasoning; click to open the real diff.
+
+Chapter attribution is an honest heuristic, not a guess: a to-do flipping to `in_progress` opens a window
+that runs until the next one does, and an edit falling outside every window is left **unassigned** rather
+than mis-filed onto the wrong goal.
+
+- **CLI**: `claude-observatory changemap [--root <d>] [--json]` — backed by a new `core` module,
+  `changemap.ts`, deriving purely from the transcript + the content-addressed store.
+- **Both editors**: a **Change Map** pane beside Observations / Timeline / Actions / Stats — a webview in
+  VS Code, a natively-painted Swing pane in the JetBrains Dashboards window.
+- **One implementation, two renderers**: `changemap --json` ships the *rendered* rollups
+  (`files[]` / `modules[]` — churn-sorted, pre-labelled, status already resolved), so neither editor
+  aggregates anything of its own. There is no second implementation to drift.
+
+### Changed — the sidebar container is now "Claude Edits"
+
+The activity-bar container and the bottom panel were **both** titled "Claude Observatory", so docking them
+together showed two identically-named tabs with no way to tell them apart. The review sidebar
+(Edits / Diffs / File History) is now **Claude Edits**; the bottom panel keeps **Claude Observatory**.
+
+### Changed — the Stats view drops its Search box
+
+Search now has one home: the **Search edits** action in the Edits / Diffs title bar (unchanged). The
+duplicate box in the Stats navbar is gone, along with the internal `searchWith` command that only existed
+to drive it. The Stats navbar keeps the active session and the clickable pending count.
+
+### Added — a feature tour on the showcase page
+
+`docs/showcase.html` gains a slideshow over all seventeen features — keyboard- and swipe-navigable,
+autoplaying only while on screen and never when the visitor prefers reduced motion.
+
+### Tests
+
+- `changemap:` core test — file/module rollups, the pending > undone > kept precedence, module labels,
+  chapter windows, and the unassigned-edit case.
+- `ChangeMapParser` port-fidelity test (JetBrains), pinning every field the Kotlin panel reads.
+- A Change Map webview block in the VS Code smoke test — asserts a hidden view spawns no subprocess and
+  that a ledger row drills via `viewChanges`.
+- Five `changemap --json` shape assertions in `test/e2e.sh`, including churn conservation
+  (`files[].churn` sums to `modules[].churn`) and churn-desc ranking.
+
 ## [0.7.0] — 2026-07-13
 
 Turns the observatory from a single-agent into a **multi-agent** view: subagents, sibling sessions,

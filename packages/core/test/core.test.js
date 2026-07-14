@@ -2417,3 +2417,95 @@ test('metrics: sessionMetrics rolls up ±lines, actions, subagents, and tool lat
   assert.equal(m.toolLatency.medianMs, 2000, 'median of the 2s/4s gaps');
   assert.equal(m.toolLatency.maxMs, 4000, 'max latency = the 4s gap');
 });
+
+test('changemap: rolls edits into per-file/per-module rows + chapters from Claude’s to-dos (0.7.5)', () => {
+  freshHome();
+  const S = 'cmap';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+
+  const A = path.join(cwd, 'packages', 'core', 'src', 'a.ts');
+  const B = path.join(cwd, 'packages', 'core', 'src', 'b.ts');
+  const C = path.join(cwd, 'packages', 'core', 'src', 'c.ts');
+  const D = path.join(cwd, 'docs', 'x.md');
+  fs.mkdirSync(path.dirname(A), { recursive: true });
+  fs.mkdirSync(path.dirname(D), { recursive: true });
+  fs.writeFileSync(A, 'class Foo {\n  go() {}\n}\n');
+  fs.writeFileSync(B, 'p\nq\n');
+  fs.writeFileSync(C, 'z\nw\n');
+  fs.writeFileSync(D, 'hi\nthere\n');
+  const id1 = seedEdit(S, A, null, 'class Foo {\n  go() {}\n}\n'); // #1 ts=1000 create: +3, stays pending
+  const id2 = seedEdit(S, B, 'p\n', 'p\nq\n'); // #2 ts=2000: +1
+  const id3 = seedEdit(S, D, 'hi\n', 'hi\nthere\n'); // #3 ts=3000: +1
+  const id4 = seedEdit(S, C, 'z\n', 'z\nw\n'); // #4 ts=4000: +1
+  core.setStatus(S, id2, 'kept');
+  core.setStatus(S, id3, 'kept');
+  core.setStatus(S, id4, 'undone');
+
+  // Two TodoWrite checkpoints. A to-do flipping to in_progress opens a chapter window that runs until
+  // the next one does — so edit #1 (ts 1000) lands BEFORE any window and must stay unattributed.
+  const main = [
+    { timestamp: new Date(1500).toISOString(), message: { role: 'assistant', content: [
+      { type: 'tool_use', id: 't1', name: 'TodoWrite', input: { todos: [
+        { content: 'Scaffold the map', status: 'in_progress' },
+        { content: 'Ship it', status: 'pending' }] } }] } },
+    { timestamp: new Date(3500).toISOString(), message: { role: 'assistant', content: [
+      { type: 'tool_use', id: 't2', name: 'TodoWrite', input: { todos: [
+        { content: 'Scaffold the map', status: 'completed' },
+        { content: 'Ship it', status: 'in_progress' }] } }] } },
+  ].map((o) => JSON.stringify(o)).join('\n');
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), main);
+
+  const m = core.buildChangeMap(cwd, S, { root: cwd });
+
+  // --- per-file rollup (churn-desc, ties broken by path so the order is deterministic) ---
+  assert.equal(m.files.length, 4, 'one row per touched file');
+  assert.deepEqual(m.files.map((f) => f.file), ['a.ts', 'x.md', 'b.ts', 'c.ts'], 'churn-desc, then rel');
+  const a = m.files[0];
+  assert.equal(a.churn, 3, 'churn = added+removed (a 3-line create)');
+  assert.equal(a.maxId, id1, 'maxId is the drill-through target — what a click opens');
+  assert.equal(a.moduleLabel, 'core', 'core pre-renders the label so no front-end re-derives it');
+  assert.deepEqual(a.classes, ['Foo'], 'the edit is attributed to the class it landed in');
+
+  // --- worst-unreviewed-wins status precedence (pending > undone > kept) ---
+  assert.equal(a.status, 'pending', 'a pending edit makes its file read pending');
+  assert.equal(m.files.find((f) => f.file === 'b.ts').status, 'kept', 'all-kept file reads kept');
+  assert.equal(m.files.find((f) => f.file === 'c.ts').status, 'undone', 'undone outranks kept, loses to pending');
+  assert.equal(core.fileStatus({ pending: 1, undone: 9 }), 'pending', 'pending outranks undone');
+  assert.equal(core.fileStatus({ pending: 0, undone: 1 }), 'undone', 'undone outranks kept');
+  assert.equal(core.fileStatus({ pending: 0, undone: 0 }), 'kept', 'nothing outstanding reads kept');
+
+  // --- per-module rollup ---
+  assert.equal(m.modules.length, 2, 'two module buckets (immediate parent dir)');
+  const core_ = m.modules[0];
+  assert.equal(core_.label, 'core', 'packages/ prefix and /src suffix stripped');
+  assert.equal(core_.churn, 5, 'module churn sums its files (3+1+1)');
+  assert.equal(core_.files, 3, 'three files under packages/core/src');
+  assert.equal(core_.status, 'pending', 'a pending descendant makes the module read pending');
+  assert.equal(m.modules[1].label, 'docs', 'a root-level dir keeps its own name');
+  assert.equal(m.modules[1].status, 'kept', 'docs is fully reviewed');
+  const sum = (rows) => rows.reduce((n, r) => n + r.churn, 0);
+  assert.equal(sum(m.files), sum(m.modules), 'churn is conserved from files up to modules');
+
+  // --- chapters, mined from Claude's own to-dos ---
+  assert.deepEqual(m.chapters.map((c) => c.title), ['Scaffold the map', 'Ship it'], 'the final to-do list, in order');
+  assert.equal(m.chapters[0].status, 'done', 'completed -> done');
+  assert.equal(m.chapters[1].status, 'wip', 'in_progress -> wip');
+  assert.equal(m.chapters[0].edits, 2, 'edits #2/#3 fall inside the first chapter window');
+  assert.equal(m.chapters[0].kept, 2, 'both of them were kept');
+  assert.equal(m.chapters[1].edits, 1, 'edit #4 falls in the second window');
+  assert.equal(m.chapters[1].undone, 1, 'and it was reverted');
+
+  // --- honest attribution: an edit outside every window is unassigned, never mis-filed ---
+  const e1 = m.edits.find((e) => e.id === id1);
+  assert.equal(e1.chapter, null, 'an edit before the first in_progress flip is NOT attributed to a chapter');
+  assert.deepEqual(a.chapters, [], 'so its file carries no chapter and a brush will not light it');
+  assert.deepEqual(m.files.find((f) => f.file === 'b.ts').chapters, ['ch0'], 'attributed files carry the brush key');
+
+  // --- module labels ---
+  assert.equal(core.moduleLabel(''), '(root)', 'a root-level file');
+  assert.equal(core.moduleLabel('../elsewhere'), '(external)', 'edited outside the workspace');
+  assert.equal(core.moduleLabel('packages/vscode/src'), 'vscode', 'monorepo noise stripped');
+  assert.equal(core.moduleLabel('test'), 'test', 'an ordinary dir is left alone');
+});

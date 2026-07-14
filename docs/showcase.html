@@ -187,6 +187,34 @@
   /* motion */
   .rv{opacity:0;transform:translateY(20px);transition:opacity .6s cubic-bezier(.22,.61,.36,1),transform .6s cubic-bezier(.22,.61,.36,1)}
   .rv.in{opacity:1;transform:none}
+  /* ---- feature tour (slideshow) ---- */
+  .tour{margin-top:clamp(28px,4vw,44px)}
+  .tour-view{overflow:hidden;border-radius:16px}
+  .slides{display:flex;transition:transform .5s cubic-bezier(.22,.61,.36,1);will-change:transform}
+  .slide{flex:0 0 100%;min-width:0;padding:0 1px}
+  .slide-in{display:grid;grid-template-columns:minmax(0,.8fr) minmax(0,1.2fr);gap:clamp(18px,3vw,30px);align-items:center;text-align:left}
+  @media(max-width:880px){.slide-in{grid-template-columns:1fr;gap:16px}}
+  .slide h3{font-size:clamp(1.15rem,2.1vw,1.55rem);margin:.4em 0 .35em}
+  .slide p{color:var(--ink-soft);font-size:.96rem;line-height:1.5;text-wrap:pretty}
+  .slide .panel{margin-top:0}
+  .tour-ui{display:flex;align-items:center;justify-content:center;gap:14px;margin-top:20px;flex-wrap:wrap}
+  .tbtn{width:36px;height:36px;border-radius:999px;border:1px solid var(--line);background:var(--surface);color:var(--ink-soft);cursor:pointer;font-size:16px;line-height:1;display:grid;place-items:center;transition:border-color .15s,color .15s}
+  .tbtn:hover{border-color:var(--accent);color:var(--accent-ink)}
+  .tbtn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .dots{display:flex;gap:7px;flex-wrap:wrap;justify-content:center;max-width:min(420px,60vw)}
+  .dot{width:8px;height:8px;border-radius:999px;border:0;padding:0;background:var(--line);cursor:pointer;transition:background .2s,transform .2s}
+  .dot[aria-current="true"]{background:var(--accent);transform:scale(1.4)}
+  .dot:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+  .tcount{font-family:var(--mono);font-size:.74rem;color:var(--ink-faint);letter-spacing:.1em;min-width:64px;text-align:center;font-variant-numeric:tabular-nums}
+  .mock{padding:clamp(16px,2.4vw,22px);font-family:var(--mono);font-size:.78rem;line-height:1.85;color:var(--ink-soft);background:var(--surface-2);overflow-x:auto}
+  .mock .mh{font-size:.63rem;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-faint);margin-bottom:10px}
+  .mock b{color:var(--ink);font-weight:600}
+  .mock .a{color:var(--accent-ink)}
+  .mock .k{color:var(--kept)}
+  .mock .p{color:var(--pending)}
+  .mock .r{color:var(--deleted)}
+  .mock .d{color:var(--ink-faint)}
+  @media(prefers-reduced-motion:reduce){.slides{transition:none}}
   .rv.scale{transform:translateY(22px) scale(.97);transition-duration:.75s}
   .rv.scale.in{transform:none}
   .hero-v{opacity:0;transform:translateY(40px) scale(.96);transition:opacity .9s cubic-bezier(.16,1,.3,1),transform .9s cubic-bezier(.16,1,.3,1);transition-delay:.12s}
@@ -210,6 +238,7 @@
     <div class="links">
       <a href="#hero">Overview</a>
       <a href="#act">Review</a>
+      <a href="#tour">Tour</a>
       <a href="#install">Install</a>
       <a class="more" href="features.html">Features&nbsp;→</a>
       <a href="https://github.com/cell-observatory/claude-observatory">GitHub</a>
@@ -321,6 +350,205 @@
   <div class="wrap"><div class="panel rv scale"><img src="media/layout.png" loading="lazy" alt="The observatory in VS Code: sidebar edits, inline review, and the bottom dashboards"></div></div>
 </section>
 
+<!-- FEATURE TOUR: every surface, one slide at a time -->
+<section class="moment" id="tour">
+  <div class="wrap rv">
+    <span class="eyebrow">The full tour</span>
+    <h2>Seventeen ways to stay in the loop.</h2>
+    <p class="lede" style="margin-inline:auto">Inline, in the panel, in the terminal, and across both editors — every surface, one at a time.</p>
+  </div>
+  <div class="wrap">
+    <div class="tour rv" role="region" aria-roledescription="carousel" aria-label="Feature tour">
+      <div class="tour-view">
+        <div class="slides" id="slides">
+
+          <article class="slide" role="group" aria-roledescription="slide" aria-label="Inline review">
+            <div class="slide-in">
+              <div><span class="eyebrow">Inline review</span><h3>The change, right where it happened.</h3>
+                <p>Claude's pending edits sit in the editor itself — a tinted line, a ✨ marker, and Keep / Undo / Diff / Chat on hover.</p></div>
+              <div class="panel"><img src="media/inline-review.png" loading="lazy" alt="Inline review: a tinted pending edit with a ✨ marker and Keep/Undo actions"></div>
+            </div>
+          </article>
+
+          <article class="slide" role="group" aria-roledescription="slide" aria-label="Per-edit diffs">
+            <div class="slide-in">
+              <div><span class="eyebrow">Per-edit diffs</span><h3>Any edit, as its own before and after.</h3>
+                <p>Every entry opens its own diff — not a session-wide mega-diff you have to untangle.</p></div>
+              <div class="panel"><img src="media/diffs.png" loading="lazy" alt="Per-edit diff: one edit's before and after, side by side"></div>
+            </div>
+          </article>
+
+          <article class="slide" role="group" aria-roledescription="slide" aria-label="Surgical undo and file history">
+            <div class="slide-in">
+              <div><span class="eyebrow">Surgical undo &amp; file history</span><h3>Undo one edit. Keep the rest.</h3>
+                <p>Revert the third change without touching the other nine — and see every revision a file has been through.</p></div>
+              <div class="panel"><img src="media/file-history.png" loading="lazy" alt="File History: the active file's edits, newest first"></div>
+            </div>
+          </article>
+
+          <article class="slide" role="group" aria-roledescription="slide" aria-label="Timeline">
+            <div class="slide-in">
+              <div><span class="eyebrow">Timeline</span><h3>The session as a change feed.</h3>
+                <p>Files by most-recent activity; adjacent edits to the same file coalesce into one ×N run, so a busy session stays legible.</p></div>
+              <div class="panel"><img src="media/timeline.png" loading="lazy" alt="Timeline: files by recent activity, edits coalesced into runs"></div>
+            </div>
+          </article>
+
+          <article class="slide" role="group" aria-roledescription="slide" aria-label="Observations">
+            <div class="slide-in">
+              <div><span class="eyebrow">Observations</span><h3>What Claude was thinking.</h3>
+                <p>Each edit paired with Claude's actual reasoning, lifted from the transcript it already wrote. Zero extra tokens.</p></div>
+              <div class="panel"><img src="media/observations.png" loading="lazy" alt="Observations: each edit with Claude's own reasoning"></div>
+            </div>
+          </article>
+
+          <article class="slide" role="group" aria-roledescription="slide" aria-label="Change Map">
+            <div class="slide-in">
+              <div><span class="eyebrow">Change Map</span><h3>The session's changes at a glance.</h3>
+                <p>Claude's own to-dos become chapters across the top; a strip shows where the work landed; every file ranked by churn. Click a row to open its diff.</p></div>
+              <div class="panel"><div class="mock">
+                <div class="mh">Change Map · this session</div>
+                <div><span class="k">●</span> 1. Scaffold tracking &nbsp; <span class="p">◐</span> 2. Risk audit &nbsp; <span class="d">○ 3. Update docs</span></div>
+                <div class="d">[<span class="k">██████</span><span class="p">█████</span><span class="d">██</span>] &nbsp;core · vscode · docs</div>
+                <div><b>extension.ts</b> <span class="d">vscode</span> <span class="p">████████</span> +751 <span class="p">6⏳</span></div>
+                <div><b>changemap.ts</b> <span class="d">core</span> &nbsp;<span class="k">████</span> +285 <span class="k">✓</span></div>
+                <div><b>README.md</b> <span class="d">docs</span> &nbsp;&nbsp;<span class="p">█</span> +44 <span class="p">2⏳</span></div>
+              </div></div>
+            </div>
+          </article>
+
+          <article class="slide" role="group" aria-roledescription="slide" aria-label="Stats">
+            <div class="slide-in">
+              <div><span class="eyebrow">Stats</span><h3>Progress, tokens, and usage.</h3>
+                <p>A live scoreboard of pending / accepted / reverted, token plots by session and window, and your context + plan usage.</p></div>
+              <div class="panel"><img src="media/stats.png" loading="lazy" alt="Stats: review scoreboard, token plots, and usage bars"></div>
+            </div>
+          </article>
+
+          <article class="slide" role="group" aria-roledescription="slide" aria-label="Heatmap">
+            <div class="slide-in">
+              <div><span class="eyebrow">Heatmap</span><h3>A spotlight on the edits.</h3>
+                <p>Dim every line Claude didn't touch, so what changed reads at full contrast.</p></div>
+              <div class="panel"><img src="media/heatmap.png" loading="lazy" alt="Heatmap: unmodified lines dimmed so Claude's edits stand out"></div>
+            </div>
+          </article>
+
+          <article class="slide" role="group" aria-roledescription="slide" aria-label="Conflict resolution">
+            <div class="slide-in">
+              <div><span class="eyebrow">Conflict resolution</span><h3>It never guesses.</h3>
+                <p>If you edited the same lines, the undo stops and shows you the conflict instead of silently clobbering your work.</p></div>
+              <div class="panel"><img src="media/conflict.png" loading="lazy" alt="Conflict: undo halts and surfaces the clash rather than guessing"></div>
+            </div>
+          </article>
+
+          <article class="slide" role="group" aria-roledescription="slide" aria-label="The CLI backend">
+            <div class="slide-in">
+              <div><span class="eyebrow">The CLI backend</span><h3>Review without leaving the shell.</h3>
+                <p>One backend behind every surface. Same decisions in the terminal as in either editor — and every view is a <code>--json</code> command.</p></div>
+              <div class="panel"><img src="media/cli.png" loading="lazy" alt="The CLI: reviewing Claude's edits from the terminal"></div>
+            </div>
+          </article>
+
+          <article class="slide" role="group" aria-roledescription="slide" aria-label="Navigation bar">
+            <div class="slide-in">
+              <div><span class="eyebrow">Navigation bar</span><h3>Drive the review from any surface.</h3>
+                <p>One review bar on three surfaces — the status bar, the editor's title bar, and a floating bubble over the live edit.</p></div>
+              <div class="panel"><div class="mock">
+                <div class="mh">Review bar · three surfaces</div>
+                <div><span class="a">🔬 3</span> <span class="d">·</span> ▲ Diff 1/2 ▼ <span class="d">·</span> ◀ File 1/3 ▶ <span class="d">·</span> ✓ ↩ ✓✓ ✕ <span class="d">·</span> 🧹 💡 🔍</div>
+                <div class="d" style="margin-top:6px">Status bar · Editor title · Review bubble</div>
+              </div></div>
+            </div>
+          </article>
+
+          <article class="slide" role="group" aria-roledescription="slide" aria-label="Action timeline">
+            <div class="slide-in">
+              <div><span class="eyebrow">Action timeline</span><h3>Every tool call, not just the edits.</h3>
+                <p>Every read, grep, shell command, web fetch, and subagent spawn — grouped by kind, curated by default, errors always surfaced.</p></div>
+              <div class="panel"><div class="mock">
+                <div class="mh">Actions · this session</div>
+                <div>▾ Edits <span class="d">(185)</span></div>
+                <div>&nbsp;&nbsp;extension.ts <span class="a">→ review</span></div>
+                <div>▾ Commands <span class="d">(229) ·</span> <span class="r">2 errors</span></div>
+                <div>▾ To-dos <span class="d">(30)</span></div>
+              </div></div>
+            </div>
+          </article>
+
+          <article class="slide" role="group" aria-roledescription="slide" aria-label="Risk and egress">
+            <div class="slide-in">
+              <div><span class="eyebrow">Risk &amp; egress</span><h3>Two audits, zero tokens.</h3>
+                <p>Which shell commands were destructive or privileged — and everywhere the session reached off-machine.</p></div>
+              <div class="panel"><div class="mock">
+                <div class="mh">Risk · Egress</div>
+                <div><span class="r">⚠ HIGH</span> &nbsp;rm -rf build/ <span class="d">recursive delete</span></div>
+                <div><span class="p">⚠ med</span> &nbsp;&nbsp;curl api.example.com <span class="d">network</span></div>
+                <div style="margin-top:6px">⇅ 3 destinations <span class="d">· 3 remote</span></div>
+              </div></div>
+            </div>
+          </article>
+
+          <article class="slide" role="group" aria-roledescription="slide" aria-label="Subagent tracking">
+            <div class="slide-in">
+              <div><span class="eyebrow">Subagent tracking</span><h3>Every subagent, its own timeline.</h3>
+                <p>Each agent Claude spawned, nested with its own actions and per-agent metrics — duration, tokens, tool calls.</p></div>
+              <div class="panel"><div class="mock">
+                <div class="mh">Subagents</div>
+                <div>▾ <b>code-reviewer</b> <span class="d">68 actions · 12m47s · 45k tok</span></div>
+                <div>&nbsp;&nbsp;Read /x.ts</div>
+                <div>&nbsp;&nbsp;Grep foo <span class="r">✕ error</span></div>
+                <div>▸ <b>doc-writer</b> <span class="d">21 actions · 3m02s</span></div>
+              </div></div>
+            </div>
+          </article>
+
+          <article class="slide" role="group" aria-roledescription="slide" aria-label="Fleet and cross-agent awareness">
+            <div class="slide-in">
+              <div><span class="eyebrow">Fleet &amp; cross-agent awareness</span><h3>See what the other agents are doing.</h3>
+                <p>Other Claude sessions working the same project — active or idle, what's pending, which files they hold, and their risk.</p></div>
+              <div class="panel"><div class="mock">
+                <div class="mh">Fleet · this project</div>
+                <div><span class="k">●</span> a1b2c3d4 <span class="d">active · 2 pending · 5 edits</span></div>
+                <div><span class="d">○ e5f6a7b8 &nbsp;idle · 0 pending</span> <span class="r">⚠ 1 high</span></div>
+                <div><span class="d">○ 9c8d7e6f &nbsp;idle · 3 pending</span></div>
+              </div></div>
+            </div>
+          </article>
+
+          <article class="slide" role="group" aria-roledescription="slide" aria-label="Metrics">
+            <div class="slide-in">
+              <div><span class="eyebrow">Metrics</span><h3>The session by the numbers.</h3>
+                <p>Line deltas, action and error counts, per-subagent duration and tokens, and how long Claude's tools actually took.</p></div>
+              <div class="panel"><div class="mock">
+                <div class="mh">Metrics</div>
+                <div>edits &nbsp;&nbsp;&nbsp;&nbsp;<b>185</b> &nbsp;<span class="k">+1220</span> <span class="r">−40</span> <span class="d">· 20 pending</span></div>
+                <div>actions &nbsp;&nbsp;<b>229</b> &nbsp;<span class="r">2 errors</span></div>
+                <div>latency &nbsp;&nbsp;<span class="d">median</span> <b>214ms</b> <span class="d">· p95</span> <b>1.2s</b></div>
+                <div>subagents <b>3</b> <span class="d">· 68 actions · 12m47s</span></div>
+              </div></div>
+            </div>
+          </article>
+
+          <article class="slide" role="group" aria-roledescription="slide" aria-label="Cross-editor parity">
+            <div class="slide-in">
+              <div><span class="eyebrow">Cross-editor parity</span><h3>The same tool in both editors.</h3>
+                <p>VS Code and JetBrains render the identical model from the identical backend. Start in one, finish in the other.</p></div>
+              <div class="panel"><img src="media/layout.png" loading="lazy" alt="The observatory in VS Code: sidebar edits, inline review, and the bottom dashboards"></div>
+            </div>
+          </article>
+
+        </div>
+      </div>
+      <div class="tour-ui">
+        <button class="tbtn" id="tprev" type="button" aria-label="Previous feature">‹</button>
+        <div class="dots" id="tdots" role="tablist" aria-label="Choose a feature"></div>
+        <span class="tcount" id="tcount" aria-live="polite">01 / 17</span>
+        <button class="tbtn" id="tnext" type="button" aria-label="Next feature">›</button>
+      </div>
+    </div>
+  </div>
+</section>
+
 <section class="moment" id="standalone">
   <div class="wrap rv">
     <span class="eyebrow">No repo required</span>
@@ -401,6 +629,59 @@
       navigator.clipboard&&navigator.clipboard.writeText(t).then(function(){b.textContent='Copied ✓';setTimeout(function(){b.textContent=old;},1400);});
     });
   });
+  // feature tour: a slideshow over every feature. Autoplays only while on screen and only if the
+  // visitor hasn't asked for reduced motion; any interaction stops it for good.
+  (function(){
+    var track=document.getElementById('slides'); if(!track) return;
+    var slides=[].slice.call(track.children), n=slides.length;
+    var dots=document.getElementById('tdots'), count=document.getElementById('tcount');
+    var i=0, timer=null, stopped=false;
+    var reduce=window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    var pad=function(x){return (x<10?'0':'')+x;};
+    slides.forEach(function(s,k){
+      var d=document.createElement('button');
+      d.className='dot'; d.type='button'; d.setAttribute('role','tab');
+      d.setAttribute('aria-label',(s.getAttribute('aria-label')||('Slide '+(k+1))));
+      d.addEventListener('click',function(){stop();go(k);});
+      dots.appendChild(d);
+    });
+    function go(k){
+      i=(k+n)%n;
+      track.style.transform='translateX('+(-i*100)+'%)';
+      count.textContent=pad(i+1)+' / '+pad(n);
+      [].slice.call(dots.children).forEach(function(d,j){
+        d.setAttribute('aria-current', j===i?'true':'false');
+      });
+      // keep offscreen slides out of the tab order + a11y tree
+      slides.forEach(function(s,j){ s.setAttribute('aria-hidden', j===i?'false':'true'); });
+    }
+    function stop(){ stopped=true; if(timer){clearInterval(timer);timer=null;} }
+    function play(){ if(stopped||reduce||timer) return; timer=setInterval(function(){go(i+1);},5200); }
+    document.getElementById('tprev').addEventListener('click',function(){stop();go(i-1);});
+    document.getElementById('tnext').addEventListener('click',function(){stop();go(i+1);});
+    var tour=track.closest('.tour');
+    tour.addEventListener('mouseenter',function(){ if(timer){clearInterval(timer);timer=null;} });
+    tour.addEventListener('mouseleave',play);
+    tour.addEventListener('focusin',stop);
+    tour.addEventListener('keydown',function(e){
+      if(e.key==='ArrowLeft'){stop();go(i-1);e.preventDefault();}
+      if(e.key==='ArrowRight'){stop();go(i+1);e.preventDefault();}
+    });
+    // touch swipe
+    var x0=null;
+    tour.addEventListener('touchstart',function(e){x0=e.touches[0].clientX;},{passive:true});
+    tour.addEventListener('touchend',function(e){
+      if(x0===null) return; var dx=e.changedTouches[0].clientX-x0; x0=null;
+      if(Math.abs(dx)>40){stop();go(dx<0?i+1:i-1);}
+    },{passive:true});
+    // only autoplay while the tour is actually on screen
+    if('IntersectionObserver'in window){
+      new IntersectionObserver(function(en){
+        en.forEach(function(e){ e.isIntersecting?play():(timer&&(clearInterval(timer),timer=null)); });
+      },{threshold:.35}).observe(tour);
+    }
+    go(0);
+  })();
   // scroll reveal
   (function(){
     var els=document.querySelectorAll('.rv,.hero-v,.stagger');

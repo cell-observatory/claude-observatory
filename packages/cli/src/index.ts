@@ -983,6 +983,15 @@ function cmdTree(args: string[]): void {
   emitJson(core.buildEditTree(session, { root, filter }));
 }
 
+/** The session change-map: edits placed as module→file→class + to-do chapters, for the map webview. */
+function cmdChangeMap(args: string[]): void {
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  const session = getSessionId(args);
+  const ri = args.indexOf('--root');
+  const root = ri >= 0 && args[ri + 1] ? args[ri + 1] : process.cwd();
+  emitJson(core.buildChangeMap(process.cwd(), session, { root }));
+}
+
 type Core = typeof import('@claude-observatory/core');
 
 /** Build the Observations payload (recap + per-edit reasoning/flags/memory) once — shared by the
@@ -1588,6 +1597,7 @@ function usage(): void {
       `machine-readable (for front-ends/scripts; list/status/sessions/keep/undo/redo also take --json):\n` +
       `  blob <sha>           raw blob bytes to stdout\n` +
       `  tree [--root <d>] [--filter <q>]   folder→file→class→edit view-model as JSON (both editors)\n` +
+      `  changemap [--root <d>]             session change-map (edits + to-do chapters) as JSON (map webview)\n` +
       `  locate --file <f>    per-pending-edit line indices in the live buffer (text on stdin; JSON out)\n` +
       `  observe              recap + per-edit reasoning/flags/memory as JSON\n` +
       `  usage                ctx / 5h / week usage snapshot as JSON\n\n` +
@@ -1693,6 +1703,9 @@ function main(): void {
       break;
     case 'tree':
       cmdTree(rest);
+      break;
+    case 'changemap':
+      cmdChangeMap(rest);
       break;
     case 'observe':
       cmdObserve(rest);

@@ -175,8 +175,8 @@ in the others instantly. The layout is deliberately identical; only the host chr
 | Surface | VS Code | PyCharm / JetBrains |
 | --- | --- | --- |
 | Install | `code --install-extension claude-observatory.vsix` | `./scripts/install-jetbrains.sh` (or Install Plugin from Disk) |
-| **Edits · Diffs · File History** (review) | microscope in the Activity Bar, badged with the pending count | **Claude Observatory** tool window, left stripe |
-| **Observations · Timeline · Stats** | bottom panel, side by side (like Terminal/Problems) | **Claude Observatory Dashboards** tool window, bottom stripe — three panes side by side |
+| **Edits · Diffs · File History** (review) | **Claude Edits** — microscope in the Activity Bar, badged with the pending count | **Claude Observatory** tool window, left stripe |
+| **Actions · Observations · Timeline · Change Map · Stats** | **Claude Observatory** bottom panel, side by side (like Terminal/Problems) | **Claude Observatory Dashboards** tool window, bottom stripe — the same five panes side by side |
 | Inline menu (**✨ #N · +A −R · view changes · Keep · Undo · Chat · View diff**) | CodeLens above each edit + ✨ gutter star + bold green/red highlight + coral ruler mark | lens above each edit + clickable ✨ gutter star + bold green/red highlight + coral stripe |
 | Click **view changes** | opens the **inline review bubble** at the edit — the diff in git's colors + reasoning + `+A −R`, Accept/Revert/Chat/Prev/Next on its toolbar (no tab) | opens the edit's unified **diff** (reasoning in title, Keep/Undo/Chat on toolbar) |
 | File heatmap | 📄 heatmap (tab-bar) | 📄 heatmap (editor banner) |
@@ -350,8 +350,8 @@ review, so observations get sharper the longer you use the tool. Zero tokens, ze
 ### Stats — trends and live usage
 
 A **top navbar** now runs across the very top of the Stats view (both editors): the **active Claude
-Code session** on the left and a **Search edits** box that filters the edit list live — the **same
-filter** the **Edits** and **Diffs** trees use. Below it, a live **review scoreboard** leads the tab:
+Code session**. (The Search-edits box moved out in 0.7.5 — the **Edits** / **Diffs** title-bar search
+is the single entry point.) Below it, a live **review scoreboard** leads the tab:
 **pending / accepted / reverted** counts and a **progress bar** that fills as you review — updated the
 instant you keep or undo an edit, and the **pending** count is now **clickable**: click it to jump
 straight to the first (oldest) edit awaiting review. Then a step-line plot of **tokens** (total / input / output, logarithmic axis) with a **Today / 7 days /
@@ -359,6 +359,43 @@ straight to the first (oldest) edit awaiting review. Then a step-line plot of **
 estimates). The full scoreboard (`3 pending · 42 accepted · 5 reverted · 89% accepted · oldest 12m`)
 also lives in the status-bar microscope's tooltip. The stats scan runs in a subprocess with an
 incremental cache, so the UI never blocks.
+
+### Change Map — the session's changes at a glance
+
+The other views answer *what happened, in order*. This one answers **where did the work land, and what
+still needs my eyes** — the whole session as one picture, in the **Change Map** pane (both editors).
+
+```text
+🔬 ad93a29f   185 edits · 20 pending · 27 kept · 57% reviewed · 3 agents · 2 err · 🛰 13 · ⇅ 3
+● 1. Scaffold subagent tracking   ◐ 2. Risk + Egress audit   ○ 3. Update docs + showcase
+[██████████ core ██████████|████ vscode ████|██ docs ██|cli]
+extension.ts    vscode   ████████████  +751   6⏳
+changemap.ts    core     █████         +285   ✓
+README.md       docs     █              +44   2⏳
+```
+
+Three layers, top to bottom:
+
+- **Chapters** — Claude's own to-dos, mined from its `TodoWrite` checkpoints. A filled ● is done, a
+  half ◐ is in progress, a hollow ○ is still planned. **Click one to brush the map**: everything that
+  chapter didn't produce fades to context. Attribution is a time-window heuristic and says so — an
+  edit made outside every window is left **unassigned** rather than mis-filed onto the wrong goal.
+- **The proportion strip** — one row, width by churn, colour by review status. It answers "where did
+  this session actually land" before you read a single row. **Click a segment** to filter to a module.
+- **The ranked ledger** — every file by churn, with a bar. Colour is **worst-unreviewed-wins**: a
+  module never reads green while something under it is still pending. Hover for the class touched and
+  Claude's own reasoning; **click to open the real diff** — the same review surface as everywhere else.
+
+Toggle **± lines ⇄ count** to re-weight by edit count instead of churn.
+
+From the shell, the same model both editors render:
+
+```bash
+claude-observatory changemap --json | jq '.modules[] | {label, churn, status, files}'
+```
+
+Every rollup — churn, status precedence, module labels, the drill-through target — is computed once in
+`core`, so the VS Code webview and the JetBrains panel show identical numbers by construction.
 
 ### Risk & Egress — two zero-token audits
 

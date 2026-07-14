@@ -1346,11 +1346,8 @@ function combinedShell(): string {
   .empty { padding:12px 2px; color: var(--vscode-descriptionForeground); line-height:1.5; }
   .review { margin-bottom:14px; }
   .navbar { display:flex; align-items:center; gap:8px; padding:5px 0 9px; margin-bottom:9px; border-bottom:1px solid var(--vscode-widget-border, rgba(127,127,127,0.25)); }
-  .nb-session { display:inline-flex; align-items:center; gap:4px; font-family: var(--vscode-editor-font-family, monospace); font-size:9.5px; color: var(--vscode-descriptionForeground); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:42%; }
+  .nb-session { display:inline-flex; align-items:center; gap:4px; font-family: var(--vscode-editor-font-family, monospace); font-size:9.5px; color: var(--vscode-descriptionForeground); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .nb-session::before { content:"🔬"; font-size:10px; }
-  .nb-search { flex:1; min-width:0; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border:1px solid var(--vscode-input-border, var(--vscode-widget-border, rgba(127,127,127,0.3))); border-radius:4px; padding:3px 7px; font-size:10.5px; font-family:inherit; outline:none; }
-  .nb-search::placeholder { color: var(--vscode-input-placeholderForeground, var(--vscode-descriptionForeground)); }
-  .nb-search:focus { border-color: var(--vscode-focusBorder, var(--acc)); }
   .rvc-click { cursor:pointer; }
   .rvc-click:hover { border-color: var(--c-pending); background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.08)); }
   .rvcounts { display:flex; gap:6px; margin-bottom:9px; }
@@ -1459,17 +1456,12 @@ function combinedShell(): string {
       if(m.type==='usage'){ renderUsage(m.u); }
       else if(m.type==='counts'){ renderCounts(m.c);
         var se=document.getElementById('nb-session'); if(se && m.session!==undefined){ se.textContent = m.session || '—'; se.title = m.session ? ('Active session: '+m.session) : 'No active Claude Code session'; }
-        var sb=document.getElementById('nb-search'); if(sb && m.filter!==undefined && document.activeElement!==sb){ sb.value = m.filter || ''; }
       }
       else if(m.type==='stats'){ STATS=m.data; drawStats(); }
       else if(m.type==='statsError' && !STATS){ var g=document.getElementById('gathering'); if(g) g.innerHTML='⚠ stats need the <b>claude-observatory</b> CLI, which was not found.<br><span class="dim">install it with <b>./install.sh</b> (or <b>npm i -g ./packages/cli</b> from the repo), then reload.</span>'; }
     });
     (function(){ var segs=document.querySelectorAll('.seg'); for(var i=0;i<segs.length;i++){ segs[i].addEventListener('click',function(){ range=this.getAttribute('data-r'); vscode.setState({range:range}); drawStats(); }); }
       var pc=document.getElementById('rv-pending-cell'); if(pc){ pc.addEventListener('click',function(){ vscode.postMessage({type:'reviewFirst'}); }); }
-      var sb=document.getElementById('nb-search'), st; if(sb){
-        sb.addEventListener('input',function(){ clearTimeout(st); var v=sb.value; st=setTimeout(function(){ vscode.postMessage({type:'search',q:v}); },300); });
-        sb.addEventListener('keydown',function(e){ if(e.key==='Enter'){ clearTimeout(st); vscode.postMessage({type:'search',q:sb.value}); } });
-      }
       drawStats(); vscode.postMessage({type:'ready'}); })();
   `;
   // Live review scoreboard (independent of the time range): current pending/accepted/reverted counts
@@ -1487,7 +1479,6 @@ function combinedShell(): string {
   const navbarHtml =
     `<div class="navbar">` +
     `<span class="nb-session" id="nb-session" title="Active Claude Code session">—</span>` +
-    `<input class="nb-search" id="nb-search" type="text" placeholder="Search edits…" spellcheck="false" aria-label="Search edits" />` +
     `</div>`;
   const body =
     navbarHtml +
@@ -1523,6 +1514,255 @@ function statsData(s: core.StatsResult): unknown {
     week: s.daily.slice(-7).map((d) => bucket(dt(d.day), d)),
     month: s.daily.map((d) => bucket(dt(d.day), d)),
   };
+}
+
+// --- Change Map webview (0.7.5): the session as one compact, ranked read -------------------------
+// Chapters (Claude's own to-dos) across the top, a one-row proportion strip for "where did the work
+// land", then every touched file ranked by churn with a bar each. Deliberately NOT a treemap: 2-D
+// tiles degenerate the moment one file dwarfs the rest (a +921 write next to a +1 tweak), and their
+// geometry fights a short panel column — clipped labels, stretched aspect. A sorted bar list reads at
+// any width and never clips. Every row drills to the real edit review via viewChanges. Data comes from
+// the CLI `changemap --json` (the single backend, so JetBrains renders the identical model), pushed in
+// via postMessage; the shell HTML is set once.
+
+// The webview client. Plain ES5 concatenation on purpose (no template literals / no ${…}) so this can
+// live inside a TS template literal without escaping — the only interpolation is the script nonce.
+const CHANGEMAP_SCRIPT = `
+(function(){
+  "use strict";
+  var vscode=acquireVsCodeApi();
+  var DATA=null, AREA='churn', BRUSH=null, MOD=null, ROWS=[], PAL={};
+  var tip=document.getElementById('cm-tip');
+
+  function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+  function readPal(){ var cs=getComputedStyle(document.documentElement); function v(n,d){ return (cs.getPropertyValue(n)||'').trim()||d; }
+    PAL={ pending:v('--cm-pending','#d9a441'), kept:v('--cm-kept','#3fb950'), reverted:v('--cm-reverted','#9aa0aa'), risk:v('--cm-risk','#e5534b'), agent:v('--cm-agent','#9a6ac2'), accent:v('--cm-accent','#4c8bf5') }; }
+  // Rollups (per-file / per-module), the worst-unreviewed-wins status precedence, and module labels
+  // are all computed ONCE in core and arrive on the payload — this client only renders them, exactly
+  // like the JetBrains panel does. See core/changemap.ts. Do not re-aggregate here.
+  function colorOf(st){ return st==='pending'?PAL.pending:(st==='undone'?PAL.reverted:PAL.kept); }
+  // Area weight is the one legitimately render-time choice (the ± lines / count toggle).
+  function weight(o){ return AREA==='churn' ? Math.max(1,o.churn) : o.cnt; }
+  function modLabel(m){ var ms=DATA.modules; for(var i=0;i<ms.length;i++) if(ms[i].module===m) return ms[i].label; return m; }
+  function inChapter(o){ return !BRUSH || o.chapters.indexOf(BRUSH)>=0; }
+  // core sorts churn-desc; only re-sort when the toggle switches the metric.
+  function rankedFiles(){ var fs=DATA.files.slice(); if(AREA!=='churn') fs.sort(function(a,b){ return weight(b)-weight(a) || a.rel.localeCompare(b.rel); }); return fs; }
+  function rankedModules(){ var ms=DATA.modules.slice(); if(AREA!=='churn') ms.sort(function(a,b){ return weight(b)-weight(a) || a.module.localeCompare(b.module); }); return ms; }
+
+  function visible(f){ if(!inChapter(f)) return false; if(MOD!==null && f.module!==MOD) return false; return true; }
+
+  function renderChips(){ var s=DATA.summary, reviewed=s.kept+s.undone, total=s.pending+reviewed, pct=total?Math.round(reviewed/total*100):0;
+    document.getElementById('cm-chips').innerHTML=
+      '<span class="cm-chip"><b>'+s.units+'</b> edits</span>'+
+      (s.pending?'<span class="cm-chip"><b style="color:'+PAL.pending+'">'+s.pending+'</b>⏳</span>':'')+
+      (s.kept?'<span class="cm-chip"><b style="color:'+PAL.kept+'">'+s.kept+'</b>✓</span>':'')+
+      (s.undone?'<span class="cm-chip"><b>'+s.undone+'</b>↩</span>':'')+
+      '<span class="cm-chip"><b>'+pct+'%</b></span>'+
+      (s.subagents?'<span class="cm-chip"><b style="color:'+PAL.agent+'">'+s.subagents+'</b>ag</span>':'')+
+      (s.errors?'<span class="cm-chip"><b style="color:'+PAL.risk+'">'+s.errors+'</b>err</span>':'');
+    var se=document.getElementById('cm-session'); se.textContent=(s.session||'—').slice(0,8); se.title='Session '+(s.session||'');
+  }
+
+  function renderChaps(){ var host=document.getElementById('cm-chaps');
+    if(!DATA.chapters||!DATA.chapters.length){ host.style.display='none'; host.innerHTML=''; return; }
+    host.style.display='flex'; var h='';
+    for(var i=0;i<DATA.chapters.length;i++){ var c=DATA.chapters[i];
+      h+='<button class="cm-chap'+(BRUSH===c.id?' on':'')+'" data-ch="'+c.id+'" title="'+esc(c.title)+' — '+(c.edits||0)+' edit(s) · '+c.status+'">'+
+        '<span class="cm-cr"><span class="cm-cg '+c.status+'"></span><span class="cm-ci">'+(c.index+1)+'</span>'+
+        (c.agent?'<span class="cm-ca">●</span>':'')+
+        '<span class="cm-ce">'+(c.edits?c.edits+'e':'')+'</span></span>'+
+        '<span class="cm-ct">'+esc(c.title)+'</span>'+
+        '</button>';
+    }
+    host.innerHTML=h;
+    var bs=host.querySelectorAll('.cm-chap');
+    for(var b=0;b<bs.length;b++) bs[b].addEventListener('click', function(){ var id=this.getAttribute('data-ch'); BRUSH=(BRUSH===id)?null:id; paint(); });
+  }
+
+  function renderStrip(){ var mods=rankedModules(), total=0;
+    for(var i=0;i<mods.length;i++) total+=weight(mods[i]); if(!total) total=1;
+    var h='';
+    for(var j=0;j<mods.length;j++){ var m=mods[j], pct=weight(m)/total*100;
+      var dim=!inChapter(m), sel=(MOD===m.module), op=dim?0.15:((MOD!==null&&!sel)?0.3:0.9);
+      h+='<button class="cm-sg'+(sel?' sel':'')+'" data-mod="'+esc(m.module)+'" style="width:'+pct+'%;background:'+colorOf(m.status)+';opacity:'+op+'" title="'+esc(m.label)+' · '+weight(m)+(AREA==='churn'?' lines':' edits')+' · '+m.files+' file(s)">'+
+        (pct>14?'<span class="cm-sl">'+esc(m.label)+'</span>':'')+'</button>';
+    }
+    var host=document.getElementById('cm-strip'); host.innerHTML=h;
+    var bs=host.querySelectorAll('.cm-sg');
+    for(var b=0;b<bs.length;b++) bs[b].addEventListener('click', function(){ var m=this.getAttribute('data-mod'); MOD=(MOD===m)?null:m; paint(); });
+  }
+
+  function renderLedger(){
+    var files=rankedFiles(), shown=[];
+    for(var i=0;i<files.length;i++) if(visible(files[i])) shown.push(files[i]);
+    ROWS=shown;
+    var max=0; for(var j=0;j<shown.length;j++){ var wj=weight(shown[j]); if(wj>max) max=wj; } if(!max) max=1;
+    var h='';
+    for(var k=0;k<shown.length;k++){ var f=shown[k], w=Math.max(2, weight(f)/max*100);
+      h+='<button class="cm-row" data-idx="'+k+'">'+
+        '<span class="cm-dot" style="background:'+colorOf(f.status)+'"></span>'+
+        '<span class="cm-fn">'+esc(f.file)+(f.agent?'<span class="cm-ag">●</span>':'')+(f.risk?'<span class="cm-rk">⌐</span>':'')+'</span>'+
+        '<span class="cm-md">'+esc(f.moduleLabel)+'</span>'+
+        '<span class="cm-bar"><span class="cm-fill" style="width:'+w+'%;background:'+colorOf(f.status)+'"></span></span>'+
+        '<span class="cm-n">'+(AREA==='churn'?('+'+f.churn):(f.cnt+'e'))+'</span>'+
+        '<span class="cm-pd">'+(f.pending?('<span style="color:'+PAL.pending+'">'+f.pending+'⏳</span>'):('<span style="color:'+PAL.kept+'">✓</span>'))+'</span>'+
+        '</button>';
+    }
+    var host=document.getElementById('cm-ledger');
+    host.innerHTML=h||'<div class="cm-none">nothing matches this filter</div>';
+    var rs=host.querySelectorAll('.cm-row');
+    for(var r=0;r<rs.length;r++){
+      rs[r].addEventListener('click', function(){ var f=ROWS[+this.getAttribute('data-idx')]; if(f&&f.maxId>=0){ vscode.postMessage({type:'openEdit', id:f.maxId}); document.getElementById('cm-readout').innerHTML='→ <b>open diff</b> · '+esc(f.file)+' (edit #'+f.maxId+')'; } });
+      rs[r].addEventListener('mousemove', function(ev){ showTip(ev, ROWS[+this.getAttribute('data-idx')]); });
+      rs[r].addEventListener('mouseleave', hideTip);
+    }
+  }
+
+  function tipHtml(f){ var cls=f.classes||[];
+    var clsline=cls.length? cls.slice(0,4).join(', ')+(cls.length>4?' +'+(cls.length-4):'') : 'file scope';
+    return '<div class="tf">'+(f.agent?'<span class="ag">●</span> ':'')+esc(f.file)+(f.risk?' <span class="rk">⌐risk</span>':'')+'</div>'+
+      '<div class="tm">'+esc(f.rel)+'</div>'+
+      '<div class="tm">+'+f.churn+' · '+f.cnt+' unit'+(f.cnt===1?'':'s')+' · '+f.kept+'✓ '+f.pending+'⏳ '+f.undone+'↩</div>'+
+      '<div class="tc">'+esc(clsline)+'</div>'+
+      (f.reason?'<div class="tw">“'+esc(f.reason)+'”</div>':'')+
+      (f.risk?'<div class="trk">⚠ '+esc(f.risk)+'</div>':'')+
+      '<div class="ta">click → open the real diff</div>';
+  }
+  function showTip(ev,f){ if(!f) return; tip.innerHTML=tipHtml(f); tip.style.opacity='1';
+    var pad=12, tw=tip.offsetWidth, th=tip.offsetHeight, x=ev.clientX+pad, y=ev.clientY+pad;
+    if(x+tw>window.innerWidth) x=ev.clientX-tw-pad; if(y+th>window.innerHeight) y=ev.clientY-th-pad;
+    tip.style.left=x+'px'; tip.style.top=y+'px'; }
+  function hideTip(){ tip.style.opacity='0'; }
+
+  function updateReadout(){ var ro=document.getElementById('cm-readout'), bits=[];
+    if(BRUSH){ var c=null; for(var i=0;i<DATA.chapters.length;i++) if(DATA.chapters[i].id===BRUSH) c=DATA.chapters[i];
+      if(c) bits.push('chapter <b>'+esc((c.index+1)+' · '+c.title)+'</b>'); }
+    if(MOD!==null) bits.push('module <b>'+esc(modLabel(MOD))+'</b>');
+    ro.innerHTML = bits.length? ('filtered by '+bits.join(' + ')+' — click again to clear') : '';
+  }
+
+  function paint(){ var empty=document.getElementById('cm-empty');
+    if(!DATA||!DATA.files||!DATA.files.length){
+      empty.style.display='block'; empty.innerHTML='No edits in this session yet. <span style="opacity:.75">This fills in as Claude edits files.</span>';
+      document.getElementById('cm-chaps').style.display='none'; document.getElementById('cm-strip').innerHTML=''; document.getElementById('cm-ledger').innerHTML=''; return;
+    }
+    empty.style.display='none';
+    renderChips(); renderChaps(); renderStrip(); renderLedger(); updateReadout();
+  }
+
+  window.addEventListener('message', function(ev){ var m=ev.data||{};
+    if(m.type==='changemap'){ DATA=m.data; readPal(); paint(); }
+    else if(m.type==='error'){ DATA=null; var em=document.getElementById('cm-empty'); em.style.display='block';
+      em.innerHTML='Needs the <b>claude-observatory</b> CLI, which was not found. <span style="opacity:.75">Install it (./install.sh), then reload.</span>';
+      document.getElementById('cm-chaps').style.display='none'; document.getElementById('cm-strip').innerHTML=''; document.getElementById('cm-ledger').innerHTML=''; document.getElementById('cm-chips').innerHTML=''; }
+  });
+  document.getElementById('cm-area').addEventListener('click', function(ev){ var b=ev.target.closest?ev.target.closest('button'):null; if(!b) return;
+    var bs=this.querySelectorAll('button'); for(var i=0;i<bs.length;i++) bs[i].className=(bs[i]===b?'on':'');
+    AREA=b.getAttribute('data-area'); if(DATA) paint(); });
+
+  readPal();
+  vscode.postMessage({type:'ready'});
+})();
+`;
+
+function changeMapShell(): string {
+  const nonce = getNonce();
+  const csp = `default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';`;
+  const style = `<style>
+  :root {
+    --cm-pending: var(--vscode-charts-yellow, #d9a441);
+    --cm-kept: var(--vscode-charts-green, #3fb950);
+    --cm-reverted: var(--vscode-descriptionForeground, #9aa0aa);
+    --cm-risk: var(--vscode-charts-red, #e5534b);
+    --cm-agent: var(--vscode-charts-purple, #9a6ac2);
+    --cm-accent: var(--vscode-charts-blue, #4c8bf5);
+    --cm-border: var(--vscode-widget-border, rgba(127,127,127,0.28));
+    --cm-mono: var(--vscode-editor-font-family, monospace);
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:6px 8px 7px; font-family: var(--vscode-font-family); font-size:11px; color: var(--vscode-foreground); display:flex; flex-direction:column; height:100vh; }
+  .cm-top { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:6px; flex:none; }
+  .cm-session { font-family: var(--cm-mono); font-size:10.5px; color: var(--vscode-descriptionForeground); white-space:nowrap; flex:none; }
+  .cm-session::before { content:"🔬 "; }
+  /* the headline chips get room to breathe rather than bunching at the left edge */
+  .cm-chips { display:flex; flex:1; gap:16px; flex-wrap:wrap; font-family: var(--cm-mono); font-size:11px; color: var(--vscode-descriptionForeground); font-variant-numeric:tabular-nums; }
+  .cm-chip { white-space:nowrap; }
+  .cm-chip b { color: var(--vscode-foreground); font-weight:600; }
+  .cm-seg { display:inline-flex; border:1px solid var(--cm-border); border-radius:5px; overflow:hidden; margin-left:auto; flex:none; }
+  .cm-seg button { background:transparent; color: var(--vscode-descriptionForeground); border:0; border-right:1px solid var(--cm-border); padding:3px 8px; font-size:10.5px; font-family:inherit; cursor:pointer; }
+  .cm-seg button:last-child { border-right:0; }
+  .cm-seg button.on { background: var(--cm-accent); color: var(--vscode-editor-background, #1e1e1e); font-weight:600; }
+
+  /* chapters — Claude's own to-dos, on top */
+  .cm-chaps { display:flex; flex:none; border:1px solid var(--cm-border); border-radius:5px; overflow:hidden; margin-bottom:6px; }
+  .cm-chap { flex:1; min-width:0; display:flex; flex-direction:column; gap:5px; background:transparent; border:0; border-left:1px solid var(--cm-border); color:inherit; font:inherit; padding:8px 10px 9px; cursor:pointer; text-align:left; }
+  .cm-chap:first-child { border-left:0; }
+  .cm-chap:hover { background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.12)); }
+  .cm-chap:hover .cm-ct { color: var(--vscode-foreground); }
+  .cm-chap.on { background: var(--vscode-list-activeSelectionBackground, rgba(80,120,200,0.3)); }
+  .cm-chap.on .cm-ct { color: var(--vscode-foreground); }
+  .cm-cr { display:flex; align-items:center; gap:5px; flex:none; }
+  .cm-cg { width:10px; height:10px; border-radius:99px; flex:none; border:1.5px solid var(--vscode-descriptionForeground); }
+  .cm-cg.done { background: var(--cm-kept); border-color: var(--cm-kept); }
+  .cm-cg.wip { border-color: var(--cm-pending); box-shadow: inset 0 -4px 0 var(--cm-pending); }
+  .cm-cg.todo { border-style:dashed; }
+  .cm-ci { font-family: var(--cm-mono); font-size:11.5px; font-weight:600; color: var(--vscode-foreground); flex:none; }
+  /* two-line clamp: the whole point is readability — an ellipsised single line was unreadable */
+  .cm-ct { font-size:12.5px; line-height:1.35; color: var(--vscode-descriptionForeground); white-space:normal; overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; line-clamp:2; -webkit-box-orient:vertical; }
+  .cm-ca { color: var(--cm-agent); font-size:8px; flex:none; }
+  .cm-ce { margin-left:auto; font-family: var(--cm-mono); font-size:10px; color: var(--vscode-descriptionForeground); flex:none; }
+
+  /* one-row proportion strip — where the work landed */
+  .cm-strip { display:flex; height:12px; border-radius:3px; overflow:hidden; flex:none; margin-bottom:6px; background: var(--vscode-editorWidget-background, rgba(127,127,127,0.15)); }
+  .cm-sg { border:0; padding:0; cursor:pointer; height:100%; display:flex; align-items:center; justify-content:center; overflow:hidden; min-width:2px; }
+  .cm-sg.sel { outline:1px solid var(--vscode-foreground); outline-offset:-1px; }
+  .cm-sl { font-size:8px; color:rgba(0,0,0,.72); font-family: var(--cm-mono); white-space:nowrap; font-weight:600; }
+
+  /* ranked ledger */
+  .cm-ledger { flex:1; overflow-y:auto; min-height:0; }
+  .cm-row { display:flex; align-items:center; gap:6px; width:100%; background:transparent; border:0; color:inherit; font:inherit; padding:2px 3px; cursor:pointer; text-align:left; border-radius:3px; }
+  .cm-row:hover { background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.12)); }
+  .cm-dot { width:6px; height:6px; border-radius:2px; flex:none; }
+  .cm-fn { font-family: var(--cm-mono); font-size:10px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:0 1 auto; min-width:54px; max-width:42%; }
+  .cm-ag { color: var(--cm-agent); font-size:7px; margin-left:3px; }
+  .cm-rk { color: var(--cm-risk); font-size:9px; margin-left:3px; }
+  .cm-md { font-size:8.5px; color: var(--vscode-descriptionForeground); white-space:nowrap; flex:none; }
+  .cm-bar { flex:1; height:5px; border-radius:2px; background: var(--vscode-editorWidget-background, rgba(127,127,127,0.18)); overflow:hidden; min-width:20px; }
+  .cm-fill { display:block; height:100%; border-radius:2px; }
+  .cm-n { font-family: var(--cm-mono); font-size:9px; width:44px; text-align:right; flex:none; font-variant-numeric:tabular-nums; color: var(--vscode-descriptionForeground); }
+  .cm-pd { font-family: var(--cm-mono); font-size:9px; width:28px; text-align:right; flex:none; }
+  .cm-none { padding:10px 4px; color: var(--vscode-descriptionForeground); }
+
+  .cm-empty { padding:14px 4px; color: var(--vscode-descriptionForeground); line-height:1.5; }
+  .cm-empty b { color: var(--vscode-foreground); }
+  /* the footer carries live feedback (filter state / "→ open diff"), not chrome — so it reads at
+     full foreground contrast, not the muted description grey it started at. */
+  .cm-readout { font-family: var(--cm-mono); font-size:12px; color: var(--vscode-foreground); margin-top:6px; min-height:16px; flex:none; }
+  .cm-readout b { color: var(--vscode-foreground); }
+  .cm-tip { position:fixed; pointer-events:none; opacity:0; z-index:9; max-width:300px; background: var(--vscode-editorHoverWidget-background, #252526); color: var(--vscode-editorHoverWidget-foreground, #ccc); border:1px solid var(--vscode-editorHoverWidget-border, rgba(127,127,127,0.3)); border-radius:5px; padding:7px 9px; font-size:10px; box-shadow:0 6px 20px -8px rgba(0,0,0,.6); }
+  .cm-tip .tf { font-family: var(--cm-mono); font-weight:600; margin-bottom:2px; }
+  .cm-tip .tf .ag { color: var(--cm-agent); }
+  .cm-tip .tf .rk { color: var(--cm-risk); }
+  .cm-tip .tm { font-family: var(--cm-mono); font-size:9px; color: var(--vscode-descriptionForeground); font-variant-numeric:tabular-nums; word-break:break-all; }
+  .cm-tip .tc { font-size:9.5px; color: var(--vscode-descriptionForeground); margin:3px 0 4px; }
+  .cm-tip .tw { font-style:italic; border-top:1px solid var(--cm-border); padding-top:4px; }
+  .cm-tip .trk { color: var(--cm-risk); margin-top:3px; }
+  .cm-tip .ta { color: var(--cm-accent); font-family: var(--cm-mono); font-size:8.5px; margin-top:5px; }
+</style>`;
+  const body =
+    `<div class="cm-top">` +
+    `<span class="cm-session" id="cm-session" title="Active Claude Code session">—</span>` +
+    `<span class="cm-chips" id="cm-chips"></span>` +
+    `<span class="cm-seg" id="cm-area"><button data-area="churn" class="on">± lines</button><button data-area="count">count</button></span>` +
+    `</div>` +
+    `<div class="cm-chaps" id="cm-chaps" style="display:none"></div>` +
+    `<div class="cm-strip" id="cm-strip"></div>` +
+    `<div class="cm-empty" id="cm-empty" style="display:none"></div>` +
+    `<div class="cm-ledger" id="cm-ledger"></div>` +
+    `<div class="cm-readout" id="cm-readout"></div>` +
+    `<div class="cm-tip" id="cm-tip"></div>` +
+    `<script nonce="${nonce}">${CHANGEMAP_SCRIPT}</script>`;
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}">${style}</head><body>${body}</body></html>`;
 }
 
 /** File History: the ACTIVE editor's Claude edits, oldest→newest (id · time · status · reasoning).
@@ -1811,11 +2051,10 @@ class StatsUsageViewProvider implements vscode.WebviewViewProvider {
     this.view = view;
     view.webview.options = { enableScripts: true };
     view.webview.html = combinedShell(); // set once; both sections update via postMessage (no flash)
-    view.webview.onDidReceiveMessage((m: { type?: string; q?: string }) => {
+    view.webview.onDidReceiveMessage((m: { type?: string }) => {
       if (!m) return;
       if (m.type === 'ready') this.refresh();
       else if (m.type === 'reviewFirst') void vscode.commands.executeCommand('claudeObservatory.reviewFirst');
-      else if (m.type === 'search') void vscode.commands.executeCommand('claudeObservatory.searchWith', m.q ?? '');
     });
     view.onDidChangeVisibility(() => {
       if (view.visible) this.refresh();
@@ -1837,7 +2076,7 @@ class StatsUsageViewProvider implements vscode.WebviewViewProvider {
       kept: log.filter((r) => r.status === 'kept').length,
       undone: log.filter((r) => r.status === 'undone').length,
     };
-    this.view.webview.postMessage({ type: 'counts', c, session: session ?? '', filter: editFilter });
+    this.view.webview.postMessage({ type: 'counts', c, session: session ?? '' });
   }
   /** Cheap + sync: post the current usage snapshot for the bars. */
   private postUsage(): void {
@@ -1901,6 +2140,80 @@ class StatsUsageViewProvider implements vscode.WebviewViewProvider {
    *  say "Gathering stats…" forever. Surface an actionable hint instead (only before first data). */
   private postStatsError(): void {
     if (!this.statsEverLoaded) this.view?.webview.postMessage({ type: 'statsError' });
+  }
+}
+
+/** The Change Map panel: shells out to `changemap --json` (throttled, visible-only) and pushes the
+ *  model to the webview. Clicks come back as {openEdit,id} → the existing edit-review command, so the
+ *  bird's-eye diagram drills into the same review surface as every other view. */
+class ChangeMapViewProvider implements vscode.WebviewViewProvider {
+  private view?: vscode.WebviewView;
+  private run = 0;
+  private running = false;
+  private everLoaded = false;
+  resolveWebviewView(view: vscode.WebviewView): void {
+    this.view = view;
+    view.webview.options = { enableScripts: true };
+    view.webview.html = changeMapShell(); // set once; data arrives via postMessage (no reload flash)
+    view.webview.onDidReceiveMessage((m: { type?: string; id?: number }) => {
+      if (!m) return;
+      if (m.type === 'ready') this.refresh(true);
+      else if (m.type === 'openEdit' && typeof m.id === 'number')
+        void vscode.commands.executeCommand('claudeObservatory.viewChanges', m.id);
+      else if (m.type === 'showReason' && typeof m.id === 'number')
+        void vscode.commands.executeCommand('claudeObservatory.showObservation', m.id);
+    });
+    view.onDidChangeVisibility(() => {
+      if (view.visible) this.refresh(true);
+    });
+  }
+  /** `force` bypasses the coalescing throttle (used on first-open / became-visible). */
+  refresh(force = false): void {
+    if (!this.view?.visible) return;
+    const now = Date.now();
+    if (this.running || (!force && now - this.run < 3000)) return;
+    const session = currentSession();
+    const cwd = workspaceRoot();
+    if (!session || !cwd) return;
+    this.running = true;
+    this.run = now;
+    const args = ['changemap', '--json', '--root', cwd, '--session', session];
+    let child: cp.ChildProcess;
+    try {
+      const bin = resolveObservatoryBin();
+      const winShell = process.platform === 'win32'; // .cmd shim needs a shell on Windows
+      child = cp.spawn(winShell ? `"${bin}"` : bin, args, { cwd, stdio: ['ignore', 'pipe', 'ignore'], shell: winShell });
+    } catch {
+      this.running = false;
+      this.postError();
+      return;
+    }
+    let out = '';
+    child.stdout?.on('data', (d) => (out += d));
+    child.on('error', () => {
+      this.running = false;
+      this.postError();
+    });
+    child.on('close', () => {
+      this.running = false;
+      let data: core.ChangeMap;
+      try {
+        const parsed = JSON.parse(out) as core.ChangeMap;
+        // Guard against a foreign `claude-observatory` on PATH answering with valid-but-wrong JSON —
+        // and against an OLDER CLI that predates the files[]/modules[] rollups this renderer needs.
+        if (!parsed || !parsed.summary || !Array.isArray(parsed.edits) || !Array.isArray(parsed.files) || !Array.isArray(parsed.modules))
+          throw new Error('not a ChangeMap');
+        data = parsed;
+      } catch {
+        this.postError();
+        return;
+      }
+      this.everLoaded = true;
+      this.view?.webview.postMessage({ type: 'changemap', data });
+    });
+  }
+  private postError(): void {
+    if (!this.everLoaded) this.view?.webview.postMessage({ type: 'error' });
   }
 }
 
@@ -2068,6 +2381,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const fileHistoryView = vscode.window.createTreeView('claudeObservatory.fileHistory', { treeDataProvider: fileHistoryProvider });
   fileHistoryProvider.view = fileHistoryView;
   const statsProvider = new StatsUsageViewProvider();
+  const changeMapProvider = new ChangeMapViewProvider();
   editsProvider.view = editsView; // badge lives on the primary view
   editsProvider.updateBadge();
 
@@ -2244,6 +2558,7 @@ export function activate(context: vscode.ExtensionContext): void {
     actionsProvider.refresh();
     fileHistoryProvider.refresh();
     statsProvider.refresh();
+    changeMapProvider.refresh();
     statusDecorations.refresh();
     updateStatusItem();
     refreshInline();
@@ -2308,6 +2623,7 @@ export function activate(context: vscode.ExtensionContext): void {
     heatmapDecoration,
     vscode.languages.registerCodeLensProvider({ scheme: 'file' }, inlineLens),
     vscode.window.registerWebviewViewProvider('claudeObservatory.stats', statsProvider),
+    vscode.window.registerWebviewViewProvider('claudeObservatory.changemap', changeMapProvider),
     vscode.window.registerFileDecorationProvider(statusDecorations),
     vscode.workspace.registerTextDocumentContentProvider(SCHEME, new BlobContentProvider()),
     vscode.workspace.registerTextDocumentContentProvider(MD_SCHEME, obsMd),
@@ -2369,10 +2685,6 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       reviewCursorId = pending[0].id; // so a subsequent review-next continues from here
       await openFileAtEdit({ kind: 'edit', rec: pending[0] });
-    }),
-    vscode.commands.registerCommand('claudeObservatory.searchWith', (q?: string) => {
-      editFilter = (q ?? '').trim();
-      refreshAll();
     }),
     // Nav bar: Diff axis (within the open file), File axis (across pending files), and per-edit actions.
     vscode.commands.registerCommand('claudeObservatory.navDiffPrev', () => navDiff(-1)),

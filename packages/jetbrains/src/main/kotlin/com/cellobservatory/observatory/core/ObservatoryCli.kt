@@ -206,6 +206,19 @@ object ObservatoryCli {
         return if (r.ok) r.stdout else null
     }
 
+    /** The session change-map: to-do chapters + per-file / per-module rollups of everything Claude
+     *  touched. Every number (churn, status precedence, module labels) is computed by core — this
+     *  plugin only renders the result, exactly like the VS Code webview. */
+    fun changemapJson(session: String, workDir: String?): String? {
+        val args = buildList {
+            add("changemap"); add("--session"); add(session)
+            workDir?.let { add("--root"); add(it) }
+            add("--json")
+        }
+        val r = run(args, workDir)
+        return if (r.ok) r.stdout else null
+    }
+
     /** Portable markdown review summary (kept/reverted per file) for export. */
     fun summaryMarkdown(session: String, workDir: String?): String? {
         val r = run(listOf("summary", "--markdown", "--session", session), workDir)

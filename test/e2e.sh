@@ -193,6 +193,13 @@ ok "locate maps the edit to its current line"     "printf '%s' \"\$LOC\" | jq -e
 OBS=$(cc observe)
 ok "observe emits per-edit summaries"        "printf '%s' \"\$OBS\" | jq -e '.edits[0].summary | length > 0' >/dev/null"
 ok "observe carries memory + flags fields"   "printf '%s' \"\$OBS\" | jq -e '.edits[0] | has(\"memory\") and has(\"flags\")' >/dev/null"
+# changemap: the Change Map view-model — core does every rollup so both editors render it as given
+CM=$(cc changemap)
+ok "changemap emits summary/edits/chapters/files/modules" "printf '%s' \"\$CM\" | jq -e 'has(\"summary\") and has(\"edits\") and has(\"chapters\") and has(\"files\") and has(\"modules\")' >/dev/null"
+ok "changemap file rows carry the core-computed rollup"   "printf '%s' \"\$CM\" | jq -e '.files[0] | has(\"churn\") and has(\"status\") and has(\"maxId\") and has(\"moduleLabel\")' >/dev/null"
+ok "changemap module rows carry a label + churn"          "printf '%s' \"\$CM\" | jq -e '.modules[0] | has(\"label\") and has(\"churn\") and has(\"status\")' >/dev/null"
+ok "changemap churn is conserved from files up to modules" "printf '%s' \"\$CM\" | jq -e '([.files[].churn]|add) == ([.modules[].churn]|add)' >/dev/null"
+ok "changemap files are ranked churn-desc"                "printf '%s' \"\$CM\" | jq -e '[.files[].churn] == ([.files[].churn]|sort|reverse)' >/dev/null"
 # usage: no statusline cache in this HOME -> statuslineCache false + shared staleness threshold
 ok "usage reports cache-missing + staleMs"   "cc usage | jq -e '.statuslineCache == false and .staleMs == 300000' >/dev/null"
 

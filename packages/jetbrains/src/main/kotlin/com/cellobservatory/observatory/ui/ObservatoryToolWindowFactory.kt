@@ -30,23 +30,28 @@ class ObservatoryToolWindowFactory : ToolWindowFactory, DumbAware {
         }
 }
 
-/** Bottom dashboards window (VS Code panel analog, next to Terminal/Problems): Observations,
- *  Timeline, and Stats side by side in one three-pane split — all visible at once, dividers
- *  draggable, each pane carrying its name in a header. */
+/** Bottom dashboards window (VS Code panel analog, next to Terminal/Problems): Actions, Observations,
+ *  Timeline, Change Map, and Stats side by side in one split — all visible at once, dividers
+ *  draggable, each pane carrying its name in a header. Pane order mirrors the VS Code panel's
+ *  default so the two editors read the same left-to-right. */
 class ObservatoryDashboardsFactory : ToolWindowFactory, DumbAware {
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
         val stats = com.cellobservatory.observatory.ui.stats.StatsPanel(project)
-        val right = com.intellij.ui.OnePixelSplitter(false, 0.5f).apply {
-            firstComponent = titled("Timeline", TimelinePanel(project))
+        val right = com.intellij.ui.OnePixelSplitter(false, 0.62f).apply {
+            firstComponent = titled("Change Map", ChangeMapPanel(project))
             secondComponent = titled("Stats", stats)
         }
-        val mid = com.intellij.ui.OnePixelSplitter(false, 0.5f).apply {
-            firstComponent = titled("Actions", ActionsPanel(project))
+        val mid = com.intellij.ui.OnePixelSplitter(false, 0.42f).apply {
+            firstComponent = titled("Timeline", TimelinePanel(project))
             secondComponent = right
         }
-        val split = com.intellij.ui.OnePixelSplitter(false, 0.3f).apply {
+        val obs = com.intellij.ui.OnePixelSplitter(false, 0.38f).apply {
             firstComponent = titled("Observations", ObservationsPanel(project))
             secondComponent = mid
+        }
+        val split = com.intellij.ui.OnePixelSplitter(false, 0.16f).apply {
+            firstComponent = titled("Actions", ActionsPanel(project))
+            secondComponent = obs
         }
         val content = ContentFactory.getInstance().createContent(split, "", false)
         // Tie the StatsPanel's Timer + service listener to the content's lifecycle (stopped on close).
