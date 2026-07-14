@@ -176,10 +176,10 @@ in the others instantly. The layout is deliberately identical; only the host chr
 | --- | --- | --- |
 | Install | `code --install-extension claude-observatory.vsix` | `./scripts/install-jetbrains.sh` (or Install Plugin from Disk) |
 | **Edits · Diffs · File History** (review) | **Claude Edits** — microscope in the Activity Bar, badged with the pending count | **Claude Observatory** tool window, left stripe |
-| **Actions · Observations · Timeline · Change Map · Stats** | **Claude Observatory** bottom panel, side by side (like Terminal/Problems) | **Claude Observatory Dashboards** tool window, bottom stripe — the same five panes side by side |
+| **Actions · Observations · Timeline · Overview · Stats** | **Claude Observatory** bottom panel, side by side (like Terminal/Problems) | **Claude Observatory Dashboards** tool window, bottom stripe — the same five panes side by side |
 | Inline menu (**✨ #N · +A −R · view changes · Keep · Undo · Chat · View diff**) | CodeLens above each edit + ✨ gutter star + bold green/red highlight + coral ruler mark | lens above each edit + clickable ✨ gutter star + bold green/red highlight + coral stripe |
 | Click **view changes** | opens the **inline review bubble** at the edit — the diff in git's colors + reasoning + `+A −R`, Accept/Revert/Chat/Prev/Next on its toolbar (no tab) | opens the edit's unified **diff** (reasoning in title, Keep/Undo/Chat on toolbar) |
-| File heatmap | 📄 heatmap (tab-bar) | 📄 heatmap (editor banner) |
+| File spotlight | 📄 spotlight (tab-bar) | 📄 spotlight (editor banner) |
 | Scoreboard | status-bar `🔬 N` (amber while pending) + live bar in Stats | status-bar `🔬 N` + live bar in Stats |
 | Keyboard loop | `⌥⌘N` next · `⌥⌘Y` keep · `⌥⌘U` undo · `⌥⌘[`/`⌥⌘]` revisions (`Ctrl+Alt` on Win/Linux) | same keys |
 
@@ -229,11 +229,11 @@ Claude's reasoning, and the `+A −R` counts, plus **Accept · Revert · Chat ·
 buttons (Prev/Next step through that file's edits). In **PyCharm**, the ✨ gutter star / lens opens the
 edit's before ⟷ after as a **unified diff** (reasoning in the title, Keep/Undo/Chat on its toolbar).
 
-GitLens-style extras, in both editors: the **file heatmap** (📄) dims every unmodified line so Claude's
+GitLens-style extras, in both editors: the **file spotlight** (📄) dims every unmodified line so Claude's
 edits pop; **revision navigation** (`⌥⌘[` / `⌥⌘]`) steps a file's edit history in a current-vs-revision
 diff.
 
-![the file heatmap — every unmodified line dimmed so Claude's edits stand out](media/heatmap.png)
+![the file spotlight — every unmodified line dimmed so Claude's edits stand out](media/heatmap.png)
 
 ### Navigation bar
 
@@ -249,7 +249,7 @@ Comments API) parked over the edit you're on.
 The bar steps on **two axes**: the **Diff axis** (`Diff n/m`, ▲/▼) walks the open file's pending
 edits; the **File axis** (`File n/m`, ◀/▶) walks every file that still has one. On the open file it
 also carries **✓ Keep** / **↩ Undo** this edit, **✓✓ Accept File** / **✕ Reject File**, **🧹 Clear
-resolved**, a **💡 Spotlight** (heatmap) toggle, and **🔍 Search**.
+resolved**, a **💡 Spotlight** (spotlight) toggle, and **🔍 Search**.
 
 It's **two-tier**. The File axis plus Clear / Spotlight / Search show whenever *any* edit is pending
 anywhere; the Diff axis and the per-edit / per-file actions appear only when the **open** file has
@@ -360,10 +360,10 @@ estimates). The full scoreboard (`3 pending · 42 accepted · 5 reverted · 89% 
 also lives in the status-bar microscope's tooltip. The stats scan runs in a subprocess with an
 incremental cache, so the UI never blocks.
 
-### Change Map — the session's changes at a glance
+### Overview — the session's changes at a glance
 
 The other views answer *what happened, in order*. This one answers **where did the work land, and what
-still needs my eyes** — the whole session as one picture, in the **Change Map** pane (both editors).
+still needs my eyes** — the whole session as one picture, in the **Overview** pane (both editors).
 
 ```text
 🔬 ad93a29f   185 edits · 20 pending · 27 kept · 57% reviewed · 3 agents · 2 err · 🛰 13 · ⇅ 3

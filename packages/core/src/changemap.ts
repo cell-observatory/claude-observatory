@@ -75,10 +75,10 @@ export interface ChangeMapFile {
   reason: string | null; // first line of Claude's reasoning for this file
 }
 
-/** One module bucket, rolled up from its files — the segment a "proportion strip" renders. */
+/** One module bucket (keyed by display LABEL) — the segment a "proportion strip" renders. */
 export interface ChangeMapModule {
-  module: string; // raw bucket (the filter key)
-  label: string; // display label (see `moduleLabel`)
+  module: string; // the bucket's identity — equals `label` (a renderer filters files by `f.moduleLabel`)
+  label: string; // display label (see `moduleLabel`); one row per distinct label
   churn: number;
   cnt: number;
   added: number;
@@ -191,19 +191,26 @@ function rollupFiles(edits: ChangeMapEdit[]): ChangeMapFile[] {
   return out;
 }
 
-/** Roll the per-file rows up into module buckets (churn-desc). */
+/**
+ * Roll the per-file rows up into module buckets (churn-desc). Keyed by the DISPLAY LABEL, not the raw
+ * parent dir — so a package edited both at its root and under `src/` (`packages/vscode/package.json`
+ * → `packages/vscode` and `packages/vscode/src/extension.ts` → `packages/vscode/src`) folds into ONE
+ * `vscode` bucket instead of two same-named strip segments. On a module row `module === label` (the
+ * bucket's identity); files keep their raw `module`, so a renderer filters by `f.moduleLabel`.
+ */
 function rollupModules(files: ChangeMapFile[]): ChangeMapModule[] {
   const by = new Map<string, ChangeMapModule>();
   const chapters = new Map<string, Set<string>>();
   for (const f of files) {
-    let m = by.get(f.module);
+    const key = f.moduleLabel;
+    let m = by.get(key);
     if (!m) {
       m = {
-        module: f.module, label: moduleLabel(f.module), churn: 0, cnt: 0, added: 0, removed: 0,
+        module: key, label: key, churn: 0, cnt: 0, added: 0, removed: 0,
         kept: 0, pending: 0, undone: 0, status: 'kept', files: 0, chapters: [],
       };
-      by.set(f.module, m);
-      chapters.set(f.module, new Set());
+      by.set(key, m);
+      chapters.set(key, new Set());
     }
     m.churn += f.churn;
     m.cnt += f.cnt;
@@ -213,11 +220,11 @@ function rollupModules(files: ChangeMapFile[]): ChangeMapModule[] {
     m.pending += f.pending;
     m.undone += f.undone;
     m.files++;
-    for (const c of f.chapters) chapters.get(f.module)!.add(c);
+    for (const c of f.chapters) chapters.get(key)!.add(c);
   }
   const out = [...by.values()];
   for (const m of out) {
-    m.chapters = [...chapters.get(m.module)!];
+    m.chapters = [...chapters.get(m.label)!];
     m.status = fileStatus(m);
   }
   out.sort((a, b) => b.churn - a.churn || a.module.localeCompare(b.module));
@@ -293,30 +300,37 @@ function toMs(v: unknown): number {
   return 0;
 }
 
-/** Map a to-do's content → its [start,end) window, from the times it was the in-progress item.
- *  A chapter boundary = a to-do flips to in_progress; its window runs until the next one does. */
-function todoWindows(snaps: TodoSnap[]): Map<string, { start: number; end: number }> {
-  const transitions: { ts: number; content: string }[] = [];
-  let last: string | null = null;
+interface Span {
+  content: string;
+  start: number;
+  end: number;
+}
+
+/**
+ * The disjoint timeline of "which to-do was in_progress, and when" — one span per contiguous run.
+ * A span closes the instant a DIFFERENT to-do becomes in_progress (or none is), so spans never
+ * overlap: a to-do revisited later gets a second, separate span instead of one that swallows the
+ * work done in between (the bug in the old window model). Two adjustments make attribution generous
+ * at the edges rather than dropping edits:
+ *   - the FIRST span extends back to the session start, so edits made before the first `in_progress`
+ *     flip attribute to the opening chapter instead of falling through as unassigned;
+ *   - the LAST (still-open) span runs to +∞, so trailing edits attribute to whatever is in progress now.
+ * A stretch where nothing is in_progress stays a genuine gap → those edits are honestly unassigned.
+ */
+function inProgressSpans(snaps: TodoSnap[]): Span[] {
+  const spans: Span[] = [];
+  let cur: Span | null = null;
   for (const s of snaps) {
     if (!s.ts) continue;
     const ip = s.todos.find((t) => t.status === 'in_progress');
-    if (ip && ip.content !== last) {
-      transitions.push({ ts: s.ts, content: ip.content });
-      last = ip.content;
-    }
+    const content = ip ? ip.content : null;
+    if (content === (cur ? cur.content : null)) continue; // nothing changed about what's in progress
+    if (cur) cur.end = s.ts; // close the running span at this checkpoint
+    cur = content ? { content, start: s.ts, end: Number.MAX_SAFE_INTEGER } : null;
+    if (cur) spans.push(cur);
   }
-  const win = new Map<string, { start: number; end: number }>();
-  for (let i = 0; i < transitions.length; i++) {
-    const cur = transitions[i];
-    const end = i + 1 < transitions.length ? transitions[i + 1].ts : Number.MAX_SAFE_INTEGER;
-    // First writer wins the window start; a later re-visit of the same to-do extends the end implicitly
-    // via the next-transition boundary, so we keep the earliest start.
-    const prev = win.get(cur.content);
-    if (!prev) win.set(cur.content, { start: cur.ts, end });
-    else prev.end = end;
-  }
-  return win;
+  if (spans.length) spans[0].start = 0; // opening work counts toward the first chapter, not nothing
+  return spans;
 }
 
 /** Build the change-map for a session. `root` sets display-relative paths (defaults to cwd). */
@@ -335,18 +349,20 @@ export function buildChangeMap(cwd: string, session: string, opts: { root?: stri
 
   const insights = transcriptInsights(cwd, session);
   const transcript = findTranscript(cwd, session);
-  const windows = transcript ? todoWindows(todoSnaps(transcript)) : new Map<string, { start: number; end: number }>();
+  const spans = transcript ? inProgressSpans(todoSnaps(transcript)) : [];
+  const firstSpan = new Map<string, Span>(); // a chapter's display start/end = its first in_progress span
+  for (const sp of spans) if (!firstSpan.has(sp.content)) firstSpan.set(sp.content, sp);
 
-  // Chapters from the FINAL to-do list (the full plan, in order); windows attach by content match.
+  // Chapters from the FINAL to-do list (the full plan, in order); spans attach by content match.
   const chapters: ChangeMapChapter[] = insights.todos.map((td, i) => {
-    const w = windows.get(td.content);
+    const sp = firstSpan.get(td.content);
     return {
       id: `ch${i}`,
       index: i,
       title: td.content,
       status: td.status === 'completed' ? 'done' : td.status === 'in_progress' ? 'wip' : 'todo',
-      startTs: w?.start ?? 0,
-      endTs: w && w.end !== Number.MAX_SAFE_INTEGER ? w.end : 0,
+      startTs: sp ? sp.start : 0,
+      endTs: sp && sp.end !== Number.MAX_SAFE_INTEGER ? sp.end : 0,
       edits: 0,
       added: 0,
       removed: 0,
@@ -356,14 +372,12 @@ export function buildChangeMap(cwd: string, session: string, opts: { root?: stri
       agent: false,
     };
   });
-  // Sorted windows for O(edits · chapters) attribution (chapter count is tiny).
-  const windowed = chapters
-    .filter((c) => c.startTs > 0)
-    .map((c) => ({ c, start: c.startTs, end: windows.get(c.title)!.end }))
-    .sort((a, b) => a.start - b.start);
+  const chapterByContent = new Map<string, ChangeMapChapter>();
+  for (const c of chapters) chapterByContent.set(c.title, c); // last wins if two to-dos share text (rare)
   const chapterForTs = (ts: number): ChangeMapChapter | null => {
     if (!ts) return null;
-    for (const w of windowed) if (ts >= w.start && ts < w.end) return w.c;
+    // spans are disjoint + in order → at most one contains ts (no overlap ambiguity)
+    for (const sp of spans) if (ts >= sp.start && ts < sp.end) return chapterByContent.get(sp.content) ?? null;
     return null;
   };
 

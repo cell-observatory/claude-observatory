@@ -38,7 +38,7 @@ class ObservatoryDashboardsFactory : ToolWindowFactory, DumbAware {
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
         val stats = com.cellobservatory.observatory.ui.stats.StatsPanel(project)
         val right = com.intellij.ui.OnePixelSplitter(false, 0.62f).apply {
-            firstComponent = titled("Change Map", ChangeMapPanel(project))
+            firstComponent = titled("Overview", ChangeMapPanel(project))
             secondComponent = titled("Stats", stats)
         }
         val mid = com.intellij.ui.OnePixelSplitter(false, 0.42f).apply {

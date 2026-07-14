@@ -11,7 +11,7 @@
     --ui:-apple-system,"SF Pro Text","Segoe UI",sans-serif;
   }
   *{box-sizing:border-box;margin:0;padding:0}
-  html,body{background:#000;width:1568px;height:830px;overflow:hidden}
+  html,body{background:#000;width:1860px;height:830px;overflow:hidden}
   body{font-family:var(--ui);color:var(--ink);font-size:12.5px;-webkit-font-smoothing:antialiased}
   .win{position:absolute;inset:14px;background:var(--bg);border-radius:11px;overflow:hidden;
        display:flex;flex-direction:column;border:1px solid #000}
@@ -181,7 +181,16 @@
       <span class="others">Terminal &nbsp; Problems &nbsp; Services</span>
     </div>
     <div class="panes">
-      <div class="pane" style="flex:1.15">
+      <div class="pane" style="flex:.92">
+        <div class="pane-h">Actions</div>
+        <div class="prow"><span class="pic">🛰</span>Fleet <span class="dim2">&nbsp;13 siblings</span></div>
+        <div class="prow"><span class="pic">⇅</span>Egress <span class="dim2">&nbsp;3 destinations · 3 remote</span></div>
+        <div class="prow"><span class="pic" style="color:var(--green-bright)">▾</span>Subagents <span class="dim2">&nbsp;3 · 68 actions · 12m47s</span></div>
+        <div class="prow"><span class="pic">▸</span>Edits <span class="dim2">&nbsp;185</span></div>
+        <div class="prow"><span class="pic">▸</span>Commands <span class="dim2" style="color:var(--yellow)">&nbsp;229 · 2 errors</span></div>
+        <div class="prow"><span class="pic">▸</span>To-dos <span class="dim2">&nbsp;30</span></div>
+      </div>
+      <div class="pane" style="flex:1.05">
         <div class="pane-h">Observations</div>
         <div class="prow"><span class="pic">🔬</span>Create User class and test imports <span class="dim2">&nbsp;session recap</span></div>
         <div class="grp">PER-EDIT REASONING</div>
@@ -196,7 +205,27 @@
         <div class="prow" style="padding-left:34px"><span class="pic" style="color:var(--yellow)">●</span><span class="id">#2</span> <span class="dim2">💭 Adding a farewell() method…</span></div>
         <div class="prow" style="padding-left:34px"><span class="pic" style="color:var(--green-bright)">✓</span><span class="id grey">#1</span> <span class="dim2">💭 Creating the User model…</span></div>
       </div>
-      <div class="pane" style="flex:1.25">
+      <div class="pane" style="flex:1.2">
+        <div class="pane-h">Overview</div>
+        <div style="padding:2px 12px 8px">
+          <div style="display:flex;gap:9px;font-size:9.5px;color:var(--dim);margin-bottom:8px;flex-wrap:wrap">
+            <span style="white-space:nowrap"><span style="color:var(--green-bright)">●</span> 1 Subagents</span>
+            <span style="white-space:nowrap"><span style="color:var(--yellow)">◐</span> 2 Risk audit</span>
+            <span style="white-space:nowrap;color:var(--faint)">○ 3 Docs</span>
+          </div>
+          <div style="display:flex;height:16px;border-radius:3px;overflow:hidden;margin-bottom:9px">
+            <span style="flex:1;background:var(--yellow);box-shadow:inset 1px 0 0 var(--panel2);display:flex;align-items:center;justify-content:center;font-size:8.5px;color:rgba(0,0,0,.8);font-weight:600">vscode</span>
+            <span style="flex:1;background:var(--green-bright);box-shadow:inset 1px 0 0 var(--panel2);display:flex;align-items:center;justify-content:center;font-size:8.5px;color:rgba(0,0,0,.8);font-weight:600">core</span>
+            <span style="flex:1;background:var(--yellow);box-shadow:inset 1px 0 0 var(--panel2);display:flex;align-items:center;justify-content:center;font-size:8.5px;color:rgba(0,0,0,.8);font-weight:600">docs</span>
+            <span style="flex:1;background:var(--green-bright);box-shadow:inset 1px 0 0 var(--panel2);display:flex;align-items:center;justify-content:center;font-size:8.5px;color:rgba(0,0,0,.8);font-weight:600">cli</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:7px;font-size:11px;padding:2.5px 0"><span style="width:6px;height:6px;border-radius:2px;background:var(--yellow);flex:none"></span><span class="mono" style="color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto;max-width:44%">extension.ts</span><span style="font-size:8.5px;color:var(--faint)">vscode</span><span style="flex:1;height:5px;border-radius:2px;background:var(--panel);overflow:hidden;min-width:14px"><span style="display:block;height:100%;width:100%;background:var(--yellow)"></span></span><span class="mono" style="font-size:9.5px;color:var(--faint);width:36px;text-align:right">+751</span><span class="mono" style="font-size:9.5px;width:24px;text-align:right;color:var(--yellow)">6⏳</span></div>
+          <div style="display:flex;align-items:center;gap:7px;font-size:11px;padding:2.5px 0"><span style="width:6px;height:6px;border-radius:2px;background:var(--green-bright);flex:none"></span><span class="mono" style="color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto;max-width:44%">changemap.ts</span><span style="font-size:8.5px;color:var(--faint)">core</span><span style="flex:1;height:5px;border-radius:2px;background:var(--panel);overflow:hidden;min-width:14px"><span style="display:block;height:100%;width:38%;background:var(--green-bright)"></span></span><span class="mono" style="font-size:9.5px;color:var(--faint);width:36px;text-align:right">+285</span><span class="mono" style="font-size:9.5px;width:24px;text-align:right;color:var(--green-bright)">✓</span></div>
+          <div style="display:flex;align-items:center;gap:7px;font-size:11px;padding:2.5px 0"><span style="width:6px;height:6px;border-radius:2px;background:var(--yellow);flex:none"></span><span class="mono" style="color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto;max-width:44%">README.md</span><span style="font-size:8.5px;color:var(--faint)">docs</span><span style="flex:1;height:5px;border-radius:2px;background:var(--panel);overflow:hidden;min-width:14px"><span style="display:block;height:100%;width:14%;background:var(--yellow)"></span></span><span class="mono" style="font-size:9.5px;color:var(--faint);width:36px;text-align:right">+44</span><span class="mono" style="font-size:9.5px;width:24px;text-align:right;color:var(--yellow)">2⏳</span></div>
+          <div style="display:flex;align-items:center;gap:7px;font-size:11px;padding:2.5px 0"><span style="width:6px;height:6px;border-radius:2px;background:var(--green-bright);flex:none"></span><span class="mono" style="color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto;max-width:44%">index.ts</span><span style="font-size:8.5px;color:var(--faint)">cli</span><span style="flex:1;height:5px;border-radius:2px;background:var(--panel);overflow:hidden;min-width:14px"><span style="display:block;height:100%;width:6%;background:var(--green-bright)"></span></span><span class="mono" style="font-size:9.5px;color:var(--faint);width:36px;text-align:right">+13</span><span class="mono" style="font-size:9.5px;width:24px;text-align:right;color:var(--green-bright)">✓</span></div>
+        </div>
+      </div>
+      <div class="pane" style="flex:1.1">
         <div class="pane-h">Stats</div>
         <div class="board">
           <div class="bc"><div class="bn" style="color:#d6ae58">3</div><div class="bl">pending</div></div>

@@ -246,7 +246,9 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.ok(lensProvider, 'CodeLens provider registered');
     const lenses = lensProvider.provideCodeLenses(doc);
     assert.ok(lenses.length >= 10, 'enriched CodeLens rows (view-changes + Keep/Undo/Chat/View-diff per edit)');
-    assert.ok(lenses.some((l) => l.command.command === 'claudeObservatory.viewChanges' && /✨ #\d\s+\+\d+\s+.\d+\s+view changes/.test(l.command.title)), 'the "✨ #N +A −R view changes" lens opens the inline review bubble');
+    assert.ok(lenses.some((l) => l.command.command === 'claudeObservatory.viewChanges' && /✨ #\d\s+\+\d+\s+.\d+.*view changes/.test(l.command.title)), 'the "✨ #N +A −R … view changes" lens opens the inline review bubble');
+    // the Diff-axis position now rides on the lens (the editor tab bar can't render live text)
+    assert.ok(lenses.some((l) => /edit \d+\/\d+ in file/.test(l.command.title || '')), 'the lens shows the Diff-axis position (edit n/m in file)');
     assert.ok(lenses.some((l) => l.command.command === 'claudeObservatory.inlineKeep'), 'a Keep lens');
     assert.ok(lenses.some((l) => l.command.command === 'claudeObservatory.inlineUndo'), 'an Undo lens');
     assert.ok(lenses.some((l) => l.command.command === 'claudeObservatory.chatEdit'), 'a Chat lens');

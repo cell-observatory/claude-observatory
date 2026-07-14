@@ -1,5 +1,6 @@
 package com.cellobservatory.observatory.ui.inline
 
+import com.cellobservatory.observatory.core.StoreReader
 import com.cellobservatory.observatory.model.EditRecord
 import com.cellobservatory.observatory.ui.Diffs
 import com.cellobservatory.observatory.ui.ReviewOps
@@ -34,10 +35,23 @@ class LensRenderer(
         var x1 = 0
     }
 
+    // Position counters, mirroring the status-bar nav bar (computed once): "edit n/m in file" is the
+    // Diff axis, "file i/k" the File axis (shown only when more than one file has pending edits).
+    private val posLabel: String = run {
+        val log = StoreReader.readLog(session)
+        val filePending = log.filter { it.file == rec.file && it.status == "pending" }.sortedBy { it.id }
+        val editIdx = filePending.indexOfFirst { it.id == rec.id }
+        val files = log.filter { it.status == "pending" }.map { it.file }.distinct().sorted()
+        val fileIdx = files.indexOf(rec.file)
+        val edit = if (editIdx >= 0) "  ·  edit ${editIdx + 1}/${filePending.size} in file" else ""
+        val file = if (fileIdx >= 0 && files.size > 1) "  ·  file ${fileIdx + 1}/${files.size}" else ""
+        edit + file
+    }
+
     private val segments: List<Seg> = buildList {
         // "✨ #N" opens the inline diff (mirrors the gutter star); then the spaced-out quick actions.
         // Reasoning is NOT shown here — it lives in the diff's title. Icons/spacing match VS Code.
-        add(Seg("✨ #${rec.id}  view changes") { Diffs.show(project, session, rec) })
+        add(Seg("✨ #${rec.id}$posLabel  view changes") { Diffs.show(project, session, rec) })
         add(Seg("      ", null))
         add(Seg("✓ Keep") { ReviewOps.keep(project, session, rec.id) })
         add(Seg("      ", null))

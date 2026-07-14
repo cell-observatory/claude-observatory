@@ -212,7 +212,7 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
 
         strip.update(m.modules, modFilter, brush, byCount)
 
-        val shown = m.files.filter { inChapter(it.chapters) && (modFilter == null || it.module == modFilter) }
+        val shown = m.files.filter { inChapter(it.chapters) && (modFilter == null || it.moduleLabel == modFilter) }
         val ranked = if (byCount) shown.sortedWith(compareByDescending<ChangeMapFile> { it.cnt }.thenBy { it.rel }) else shown
         listModel.clear()
         val max = ranked.maxOfOrNull { weight(it.churn, it.cnt) } ?: 1
@@ -249,9 +249,9 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         var onClick: ((String) -> Unit)? = null
 
         init {
-            preferredSize = Dimension(JBUI.scale(200), JBUI.scale(14))
-            maximumSize = Dimension(Int.MAX_VALUE, JBUI.scale(14))
-            minimumSize = Dimension(JBUI.scale(60), JBUI.scale(14))
+            preferredSize = Dimension(JBUI.scale(200), JBUI.scale(18))
+            maximumSize = Dimension(Int.MAX_VALUE, JBUI.scale(18))
+            minimumSize = Dimension(JBUI.scale(60), JBUI.scale(18))
             toolTipText = "" // registers the component with ToolTipManager
             addMouseListener(object : MouseAdapter() {
                 override fun mouseClicked(e: MouseEvent) {
@@ -277,12 +277,17 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             val g2 = g as Graphics2D
             g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
             val ordered = if (count) mods.sortedWith(compareByDescending<ChangeMapModule> { it.cnt }.thenBy { it.module }) else mods
-            val total = ordered.sumOf { if (count) it.cnt else maxOf(1, it.churn) }.coerceAtLeast(1)
+            if (ordered.isEmpty()) return
             val h = height
-            var x = 0
+            val n = ordered.size
+            g2.font = JBUI.Fonts.miniFont()
             val acc = mutableListOf<Triple<Int, Int, ChangeMapModule>>()
-            for (m in ordered) {
-                val w = ((if (count) m.cnt else maxOf(1, m.churn)).toDouble() / total * width).toInt().coerceAtLeast(2)
+            // Equal-width segments — one readable, clickable chip per module (proportion-by-churn shrank
+            // small modules to invisible slivers; magnitude still lives in the ledger + the tooltip).
+            for ((i, m) in ordered.withIndex()) {
+                val x0 = i * width / n
+                val x1 = (i + 1) * width / n // last segment reaches `width` exactly (no rounding gap)
+                val w = x1 - x0
                 val dim = brushed != null && !m.chapters.contains(brushed)
                 val isSel = sel == m.module
                 val base = statusColor(m.status)
@@ -291,15 +296,32 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
                     sel != null && !isSel -> UIUtil.toAlpha(base, 90)
                     else -> base
                 }
-                g2.fillRect(x, 0, w, h)
+                g2.fillRect(x0, 0, w, h)
+                if (i > 0) { // a thin separator so adjacent same-status segments stay distinct
+                    g2.color = UIUtil.getPanelBackground()
+                    g2.fillRect(x0, 0, JBUI.scale(1), h)
+                }
+                val lbl = clip(g2, m.label, w - JBUI.scale(4))
+                if (lbl.isNotEmpty()) {
+                    g2.color = JBColor(Color(0x22, 0x22, 0x22), Color(0x1a, 0x1a, 0x1a)) // dark on the status colour
+                    val tw = g2.fontMetrics.stringWidth(lbl)
+                    g2.drawString(lbl, x0 + (w - tw) / 2, h / 2 + g2.fontMetrics.ascent / 2 - JBUI.scale(1))
+                }
                 if (isSel) {
                     g2.color = UIUtil.getLabelForeground()
-                    g2.drawRect(x, 0, w - 1, h - 1)
+                    g2.drawRect(x0, 0, w - 1, h - 1)
                 }
-                acc.add(Triple(x, x + w, m))
-                x += w
+                acc.add(Triple(x0, x1, m))
             }
             hit = acc
+        }
+
+        private fun clip(g2: Graphics2D, s: String, w: Int): String {
+            if (w <= 0) return ""
+            if (g2.fontMetrics.stringWidth(s) <= w) return s
+            var t = s
+            while (t.length > 1 && g2.fontMetrics.stringWidth("$t…") > w) t = t.dropLast(1)
+            return if (g2.fontMetrics.stringWidth("$t…") > w) "" else "$t…"
         }
     }
 

@@ -2418,7 +2418,7 @@ test('metrics: sessionMetrics rolls up ±lines, actions, subagents, and tool lat
   assert.equal(m.toolLatency.maxMs, 4000, 'max latency = the 4s gap');
 });
 
-test('changemap: rolls edits into per-file/per-module rows + chapters from Claude’s to-dos (0.7.5)', () => {
+test('changemap: rolls edits into per-file/per-module rows + chapters from Claude’s to-dos (0.7.6)', () => {
   freshHome();
   const S = 'cmap';
   const cwd = tmpWork();
@@ -2428,23 +2428,32 @@ test('changemap: rolls edits into per-file/per-module rows + chapters from Claud
   const A = path.join(cwd, 'packages', 'core', 'src', 'a.ts');
   const B = path.join(cwd, 'packages', 'core', 'src', 'b.ts');
   const C = path.join(cwd, 'packages', 'core', 'src', 'c.ts');
+  const PKG = path.join(cwd, 'packages', 'core', 'pkg.json'); // parent `packages/core` — same label as /src
   const D = path.join(cwd, 'docs', 'x.md');
+  const E = path.join(cwd, 'docs', 'y.md');
   fs.mkdirSync(path.dirname(A), { recursive: true });
   fs.mkdirSync(path.dirname(D), { recursive: true });
   fs.writeFileSync(A, 'class Foo {\n  go() {}\n}\n');
   fs.writeFileSync(B, 'p\nq\n');
   fs.writeFileSync(C, 'z\nw\n');
+  fs.writeFileSync(PKG, '{\n  "x": 1\n}\n');
   fs.writeFileSync(D, 'hi\nthere\n');
+  fs.writeFileSync(E, 'yo\nmore\n');
   const id1 = seedEdit(S, A, null, 'class Foo {\n  go() {}\n}\n'); // #1 ts=1000 create: +3, stays pending
   const id2 = seedEdit(S, B, 'p\n', 'p\nq\n'); // #2 ts=2000: +1
   const id3 = seedEdit(S, D, 'hi\n', 'hi\nthere\n'); // #3 ts=3000: +1
   const id4 = seedEdit(S, C, 'z\n', 'z\nw\n'); // #4 ts=4000: +1
+  const id5 = seedEdit(S, PKG, 'a\n', 'a\nb\nc\n'); // #5 ts=5000: +2 (packages/core root, no /src)
+  const id6 = seedEdit(S, E, 'yo\n', 'yo\nmore\n'); // #6 ts=6000: +1
   core.setStatus(S, id2, 'kept');
   core.setStatus(S, id3, 'kept');
   core.setStatus(S, id4, 'undone');
+  // id1, id5, id6 stay pending
 
-  // Two TodoWrite checkpoints. A to-do flipping to in_progress opens a chapter window that runs until
-  // the next one does — so edit #1 (ts 1000) lands BEFORE any window and must stay unattributed.
+  // Three TodoWrite checkpoints define the in_progress timeline:
+  //   [0..3500)  "Scaffold" — the first span is extended back to the session start
+  //   [3500..5500) "Ship it"
+  //   [5500..∞)  nothing in progress — a genuine gap
   const main = [
     { timestamp: new Date(1500).toISOString(), message: { role: 'assistant', content: [
       { type: 'tool_use', id: 't1', name: 'TodoWrite', input: { todos: [
@@ -2454,14 +2463,18 @@ test('changemap: rolls edits into per-file/per-module rows + chapters from Claud
       { type: 'tool_use', id: 't2', name: 'TodoWrite', input: { todos: [
         { content: 'Scaffold the map', status: 'completed' },
         { content: 'Ship it', status: 'in_progress' }] } }] } },
+    { timestamp: new Date(5500).toISOString(), message: { role: 'assistant', content: [
+      { type: 'tool_use', id: 't3', name: 'TodoWrite', input: { todos: [
+        { content: 'Scaffold the map', status: 'completed' },
+        { content: 'Ship it', status: 'completed' }] } }] } },
   ].map((o) => JSON.stringify(o)).join('\n');
   fs.writeFileSync(path.join(proj, S + '.jsonl'), main);
 
   const m = core.buildChangeMap(cwd, S, { root: cwd });
 
   // --- per-file rollup (churn-desc, ties broken by path so the order is deterministic) ---
-  assert.equal(m.files.length, 4, 'one row per touched file');
-  assert.deepEqual(m.files.map((f) => f.file), ['a.ts', 'x.md', 'b.ts', 'c.ts'], 'churn-desc, then rel');
+  assert.equal(m.files.length, 6, 'one row per touched file');
+  assert.deepEqual(m.files.map((f) => f.file), ['a.ts', 'pkg.json', 'x.md', 'y.md', 'b.ts', 'c.ts'], 'churn-desc, then rel');
   const a = m.files[0];
   assert.equal(a.churn, 3, 'churn = added+removed (a 3-line create)');
   assert.equal(a.maxId, id1, 'maxId is the drill-through target — what a click opens');
@@ -2476,36 +2489,44 @@ test('changemap: rolls edits into per-file/per-module rows + chapters from Claud
   assert.equal(core.fileStatus({ pending: 0, undone: 1 }), 'undone', 'undone outranks kept');
   assert.equal(core.fileStatus({ pending: 0, undone: 0 }), 'kept', 'nothing outstanding reads kept');
 
-  // --- per-module rollup ---
-  assert.equal(m.modules.length, 2, 'two module buckets (immediate parent dir)');
+  // --- per-module rollup: buckets group by LABEL, so packages/core/src + packages/core MERGE (0.7.6) ---
+  assert.equal(m.modules.length, 2, 'two module labels (core, docs) — NOT one row per raw parent dir');
+  assert.equal(m.modules.filter((x) => x.label === 'core').length, 1, 'packages/core/src and packages/core fold into ONE core segment');
   const core_ = m.modules[0];
   assert.equal(core_.label, 'core', 'packages/ prefix and /src suffix stripped');
-  assert.equal(core_.churn, 5, 'module churn sums its files (3+1+1)');
-  assert.equal(core_.files, 3, 'three files under packages/core/src');
+  assert.equal(core_.module, 'core', 'a module row is identified by its label (module === label)');
+  assert.equal(core_.churn, 7, 'core churn sums a.ts(3)+b.ts(1)+c.ts(1)+pkg.json(2)');
+  assert.equal(core_.files, 4, 'all four core files (incl. the packages/core root file) roll into one segment');
   assert.equal(core_.status, 'pending', 'a pending descendant makes the module read pending');
   assert.equal(m.modules[1].label, 'docs', 'a root-level dir keeps its own name');
-  assert.equal(m.modules[1].status, 'kept', 'docs is fully reviewed');
   const sum = (rows) => rows.reduce((n, r) => n + r.churn, 0);
   assert.equal(sum(m.files), sum(m.modules), 'churn is conserved from files up to modules');
 
   // --- chapters, mined from Claude's own to-dos ---
+  // Status comes from the FINAL to-do list; the last snapshot marks both completed, so both read 'done'.
   assert.deepEqual(m.chapters.map((c) => c.title), ['Scaffold the map', 'Ship it'], 'the final to-do list, in order');
   assert.equal(m.chapters[0].status, 'done', 'completed -> done');
-  assert.equal(m.chapters[1].status, 'wip', 'in_progress -> wip');
-  assert.equal(m.chapters[0].edits, 2, 'edits #2/#3 fall inside the first chapter window');
-  assert.equal(m.chapters[0].kept, 2, 'both of them were kept');
-  assert.equal(m.chapters[1].edits, 1, 'edit #4 falls in the second window');
-  assert.equal(m.chapters[1].undone, 1, 'and it was reverted');
+  assert.equal(m.chapters[1].status, 'done', 'completed -> done');
 
-  // --- honest attribution: an edit outside every window is unassigned, never mis-filed ---
+  // --- attribution: the first span is extended back to the session start (0.7.6) ---
+  assert.equal(m.chapters[0].edits, 3, 'edits #1/#2/#3 fall in the first span (extended back to session start)');
+  assert.equal(m.chapters[0].pending, 1, 'edit #1 is pending');
+  assert.equal(m.chapters[0].kept, 2, 'edits #2/#3 were kept');
+  assert.equal(m.chapters[1].edits, 2, 'edits #4/#5 fall in the second span');
+  assert.equal(m.chapters[1].undone, 1, 'edit #4 was reverted');
   const e1 = m.edits.find((e) => e.id === id1);
-  assert.equal(e1.chapter, null, 'an edit before the first in_progress flip is NOT attributed to a chapter');
-  assert.deepEqual(a.chapters, [], 'so its file carries no chapter and a brush will not light it');
+  assert.equal(e1.chapter, 'ch0', 'a pre-first-flip edit now attributes to the opening chapter, not nothing');
+
+  // --- honest attribution: an edit in a genuine gap (nothing in_progress) stays unassigned (0.7.6) ---
+  const e6 = m.edits.find((e) => e.id === id6);
+  assert.equal(e6.chapter, null, 'edit #6 lands after everything is completed — a real gap, never mis-filed');
+  assert.deepEqual(m.files.find((f) => f.file === 'y.md').chapters, [], 'so a brush will not light its file');
   assert.deepEqual(m.files.find((f) => f.file === 'b.ts').chapters, ['ch0'], 'attributed files carry the brush key');
 
   // --- module labels ---
   assert.equal(core.moduleLabel(''), '(root)', 'a root-level file');
   assert.equal(core.moduleLabel('../elsewhere'), '(external)', 'edited outside the workspace');
   assert.equal(core.moduleLabel('packages/vscode/src'), 'vscode', 'monorepo noise stripped');
+  assert.equal(core.moduleLabel('packages/vscode'), 'vscode', 'the src-less sibling shares the label (why they merge)');
   assert.equal(core.moduleLabel('test'), 'test', 'an ordinary dir is left alone');
 });
