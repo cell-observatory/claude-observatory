@@ -6,3 +6,4 @@ packages/*/dist/
 demo/
 release/
 .idea/
+*.code-workspace

@@ -9,7 +9,14 @@ becomes a reviewable entry with its own surgical undo — in your **terminal**, 
 IDEs** — at **zero extra Claude tokens**. Like Cursor's "keep/undo each change," but standalone, shareable,
 and git-free.
 
-![The observatory in VS Code: Edits/Diffs in the sidebar, inline review in the editor, Actions · Observations · Timeline · Change Map · Stats in the bottom panel, and the microscope scoreboard in the status bar](docs/media/layout.png)
+![The observatory in VS Code: Edits/Diffs in the sidebar, inline review in the editor, Actions · Observations · Timeline · Overview · Stats in the bottom panel, and the microscope scoreboard in the status bar](docs/media/layout.png)
+
+<details>
+<summary><b>Anatomy</b> — every surface, named</summary>
+
+![Anatomy of the workspace: the Claude Edits activity bar and sidebar, the editor with inline review and its tab-bar toolbar, the bottom panel (Actions · Observations · Timeline · Overview · Stats, with the Overview's chapters / module strip / file ledger called out), and the status-bar microscope + navigation bar](docs/media/anatomy.png)
+
+</details>
 
 ## Why use it?
 
@@ -86,7 +93,7 @@ Built for **surgical Claude usage on critical infrastructure**: you see every ch
 | **Actions** | A **zero-token action timeline** mined from the transcript: **every** tool call this session — reads, greps, shell commands, web fetches, subagent spawns, to-dos — not just the edits the store captures, each correlated with its result (ok / error). **Grouped by category** (Edits · Commands · Web · Subagents · To-dos…), **curated** by default (high-signal categories, errors always surface) with a **Show all** toggle for reads / searches / meta; errored calls are flagged and edit rows link straight to the review. Two zero-token audits ride the same timeline: **Risk** flags shell commands that can destroy data (`rm -rf`, `git reset --hard`, force push), run remote code (`curl \| sh`), escalate privilege (`sudo`), or touch credential files — **⚠ high / med** badges on those rows; **Egress** — *what did this session touch off-machine?* — pins a node at the top listing WebFetch hosts, MCP servers, and network shell commands (each marked remote vs unknown). Two more zero-token nodes join them: **Subagents** — every subagent Claude spawned (the Task tool), each expandable into its **own** nested action timeline (reads · edits · bash · web) with per-subagent metrics (duration · tokens · tool-uses · status), turning the single-agent view into a multi-agent one; and **Fleet** — the *other* Claude sessions working this same project (active/idle · pending edits · files touched · risk-flag counts), **read-only and path-only** so no file contents ever cross between agents. |
 | **Observations** | A **session recap** on top (Claude Code's own title — zero token; ✨ to refine via `claude -p --resume`), then a per-edit row with Claude's actual reasoning. Each row carries the observatory's **memory of that file** — cross-session accept/revert history and prior analyses; files whose edits get reverted repeatedly are flagged. |
 | **Timeline** | Files ordered by most-recent activity, each expanding to its edits (id + a small dimmed time + delta); adjacent same-file edits coalesce into a run. |
-| **Change Map** | The session's changes at a glance. Claude's own to-dos become **chapters** across the top — click one to brush the map to just that goal's files. A one-row **proportion strip** shows where the work landed by module (click to filter). Below, every file **ranked by churn** with a bar, coloured by review status (worst-unreviewed-wins). Hover for the class touched + Claude's reasoning; click to open the real diff. |
+| **Overview** | The session's changes at a glance. Claude's own to-dos become **chapters** across the top — click one to brush the map to just that goal's files. A one-row **proportion strip** shows where the work landed by module (click to filter). Below, every file **ranked by churn** with a bar, coloured by review status (worst-unreviewed-wins). Hover for the class touched + Claude's reasoning; click to open the real diff. |
 | **Stats** | A **top navbar** — the active Claude Code session; a **clickable pending count** that jumps to the first edit list (the same filter the Edits / Diffs trees use) — over a live **review scoreboard** (pending / accepted / reverted + a progress bar; the **pending** count is clickable, jumping to the first / oldest edit to review), a **tokens** step-line plot (total / input / output, log axis, Today / 7 days / 30 days), and live **Usage** bars — context fill plus 5h / week plan usage (from [claude-statusline](https://github.com/cell-observatory/claude-statusline)). |
 
 <p>
@@ -117,7 +124,7 @@ diff on the lens; reasoning in the title).
   two-tier: the File axis and Clear / Spotlight / Search show whenever anything's pending, while the Diff
   axis and the per-edit / per-file actions appear only once the open file has edits; the counters follow the
   active editor. **⌥⌘N/P · ⌥⌘Y/U · ⌥⌘K/R · ⌥⌘[ /]** still drive it all from the keyboard.
-- **File heatmap** — dim every unmodified line so Claude's edits stand out (a spotlight). Toggle with the
+- **File spotlight** — dim every unmodified line so Claude's edits stand out (a spotlight). Toggle with the
   📄 button.
 - **Revision navigation** — step a file's edit history in a *current-vs-revision* diff with **⌥⌘[** / **⌥⌘]**
   or the buttons atop **File History**.
@@ -126,7 +133,7 @@ diff on the lens; reasoning in the title).
 - **Toggle inline review** — hide/show the whole overlay with one button (👁).
 
 <p>
-  <img src="docs/media/heatmap.png" width="57%" alt="File heatmap: every unmodified line dimmed so the edit is a spotlight">
+  <img src="docs/media/heatmap.png" width="57%" alt="File spotlight: every unmodified line dimmed so the edit is a spotlight">
   <img src="docs/media/conflict.png" width="41%" alt="Surgical undo: a genuine overlap conflict is refused, with --force offered as an explicit per-file restore">
 </p>
 
@@ -162,7 +169,7 @@ claude-observatory risk            # audit shell commands for destructive / remo
 claude-observatory egress          # what this session touched off-machine: WebFetch hosts · MCP servers · network shell (remote vs unknown)
 claude-observatory subagents       # per-subagent action timeline + metrics (duration · tokens · tool-uses · status), zero-token (alias `agents`); --json
 claude-observatory siblings        # other Claude sessions in this project: active/idle · pending edits · files · risk flags — read-only, path-only (alias `fleet`); --json | --all
-claude-observatory changemap       # the Change Map view-model: to-do chapters + per-file/per-module churn rollups, zero-token; --json
+claude-observatory changemap       # the Overview view-model: to-do chapters + per-file/per-module churn rollups, zero-token; --json
 claude-observatory metrics         # session rollup: per-edit diff stats · action/error counts · per-subagent duration/tokens · tool latency (median/p95/max); --json
 claude-observatory summary         # per-session review recap (kept/reverted per file); --markdown to export
 claude-observatory clean           # GC orphaned blobs; --resolved [--under <path>] | --drop <id> | --older-than 30d | --all

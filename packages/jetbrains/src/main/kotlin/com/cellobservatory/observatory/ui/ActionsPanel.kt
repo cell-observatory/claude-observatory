@@ -121,7 +121,11 @@ class ActionsPanel(private val project: Project) : SimpleToolWindowPanel(true, t
                     }
                     root.add(sNode)
                 }
+                val hasSubs = res != null && res.subagents.isNotEmpty()
                 res?.groups?.forEach { g ->
+                    // With the rich "Subagents" root shown, drop the raw "Subagents" category group so
+                    // there aren't two identically-named top-level sections.
+                    if (hasSubs && g.category == "agent") return@forEach
                     val gNode = DefaultMutableTreeNode(g)
                     g.actions.forEach { gNode.add(DefaultMutableTreeNode(it)) }
                     root.add(gNode)

@@ -462,7 +462,12 @@ class EditPeek implements vscode.Disposable {
     thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
     thread.canReply = false;
     thread.contextValue = 'claudeEdit';
-    thread.label = `Claude edit #${id}  ·  +${d.added} −${d.removed}` + (diffPos ? `  ·  ${diffPos}` : '');
+    // Show BOTH axes in the title (Diff n/m · File i/k), like the status-bar nav bar — File only when
+    // more than one file has pending edits.
+    thread.label =
+      `Claude edit #${id}  ·  +${d.added} −${d.removed}` +
+      (diffPos ? `  ·  ${diffPos}` : '') +
+      (filePos && files.length > 1 ? `  ·  ${filePos}` : '');
     this.thread = thread;
     this.edit = { id, file: rec.file };
     editor.revealRange(range, vscode.TextEditorRevealType.InCenter);
@@ -1107,13 +1112,22 @@ class InlineLensProvider implements vscode.CodeLensProvider {
         byLine.set(line, { rec: p.rec, added: d.added, removed: d.removed });
       }
     }
+    // Position counters — the same Diff-axis / File-axis numbers the status-bar nav bar shows, but
+    // folded into the lens next to the edit (the editor title bar can't render live text). "edit n/m
+    // in file" mirrors the Diff axis; "file i/k" mirrors the File axis (shown only when >1 file pending).
+    const filePending = pendingEditsInFile(session, doc.uri.fsPath);
+    const files = pendingFilesOf(session);
+    const fileIdx = files.indexOf(doc.uri.fsPath);
+    const filePos = fileIdx >= 0 && files.length > 1 ? `  ·  file ${fileIdx + 1}/${files.length}` : '';
     const lenses: vscode.CodeLens[] = [];
     for (const [line, g] of byLine) {
       const range = new vscode.Range(line, 0, line, 0);
       const id = g.rec.id;
+      const editIdx = filePending.findIndex((r) => r.id === id);
+      const editPos = editIdx >= 0 ? `  ·  edit ${editIdx + 1}/${filePending.length} in file` : '';
       // "view changes" opens the review bubble (reasoning rides there); per-edit keep/undo is also on
       // ⌥⌘Y / ⌥⌘U and the Edits tree.
-      lenses.push(new vscode.CodeLens(range, { title: `✨ #${id}  +${g.added} −${g.removed}  view changes`, command: 'claudeObservatory.viewChanges', arguments: [id] }));
+      lenses.push(new vscode.CodeLens(range, { title: `✨ #${id}  +${g.added} −${g.removed}${editPos}${filePos}  view changes`, command: 'claudeObservatory.viewChanges', arguments: [id] }));
       lenses.push(new vscode.CodeLens(range, { title: `✓ Keep`, command: 'claudeObservatory.inlineKeep', arguments: [id] }));
       lenses.push(new vscode.CodeLens(range, { title: `↩ Undo`, command: 'claudeObservatory.inlineUndo', arguments: [id] }));
       lenses.push(new vscode.CodeLens(range, { title: `💬 Chat`, command: 'claudeObservatory.chatEdit', arguments: [id] }));
@@ -1549,7 +1563,7 @@ const CHANGEMAP_SCRIPT = `
   function rankedFiles(){ var fs=DATA.files.slice(); if(AREA!=='churn') fs.sort(function(a,b){ return weight(b)-weight(a) || a.rel.localeCompare(b.rel); }); return fs; }
   function rankedModules(){ var ms=DATA.modules.slice(); if(AREA!=='churn') ms.sort(function(a,b){ return weight(b)-weight(a) || a.module.localeCompare(b.module); }); return ms; }
 
-  function visible(f){ if(!inChapter(f)) return false; if(MOD!==null && f.module!==MOD) return false; return true; }
+  function visible(f){ if(!inChapter(f)) return false; if(MOD!==null && f.moduleLabel!==MOD) return false; return true; }
 
   function renderChips(){ var s=DATA.summary, reviewed=s.kept+s.undone, total=s.pending+reviewed, pct=total?Math.round(reviewed/total*100):0;
     document.getElementById('cm-chips').innerHTML=
@@ -1579,13 +1593,16 @@ const CHANGEMAP_SCRIPT = `
     for(var b=0;b<bs.length;b++) bs[b].addEventListener('click', function(){ var id=this.getAttribute('data-ch'); BRUSH=(BRUSH===id)?null:id; paint(); });
   }
 
-  function renderStrip(){ var mods=rankedModules(), total=0;
-    for(var i=0;i<mods.length;i++) total+=weight(mods[i]); if(!total) total=1;
+  function renderStrip(){ var mods=rankedModules();
+    // Equal-width segments — one readable, clickable chip per module. (Proportion-by-churn made a
+    // dominant file's module swallow the strip and shrink the rest to invisible slivers; the per-file
+    // magnitude still lives in the ledger below.) The tooltip keeps the exact churn/edits/files.
+    var pct = mods.length ? 100/mods.length : 100;
     var h='';
-    for(var j=0;j<mods.length;j++){ var m=mods[j], pct=weight(m)/total*100;
+    for(var j=0;j<mods.length;j++){ var m=mods[j];
       var dim=!inChapter(m), sel=(MOD===m.module), op=dim?0.15:((MOD!==null&&!sel)?0.3:0.9);
       h+='<button class="cm-sg'+(sel?' sel':'')+'" data-mod="'+esc(m.module)+'" style="width:'+pct+'%;background:'+colorOf(m.status)+';opacity:'+op+'" title="'+esc(m.label)+' · '+weight(m)+(AREA==='churn'?' lines':' edits')+' · '+m.files+' file(s)">'+
-        (pct>14?'<span class="cm-sl">'+esc(m.label)+'</span>':'')+'</button>';
+        '<span class="cm-sl">'+esc(m.label)+'</span></button>';
     }
     var host=document.getElementById('cm-strip'); host.innerHTML=h;
     var bs=host.querySelectorAll('.cm-sg');
@@ -1713,10 +1730,11 @@ function changeMapShell(): string {
   .cm-ce { margin-left:auto; font-family: var(--cm-mono); font-size:10px; color: var(--vscode-descriptionForeground); flex:none; }
 
   /* one-row proportion strip — where the work landed */
-  .cm-strip { display:flex; height:12px; border-radius:3px; overflow:hidden; flex:none; margin-bottom:6px; background: var(--vscode-editorWidget-background, rgba(127,127,127,0.15)); }
-  .cm-sg { border:0; padding:0; cursor:pointer; height:100%; display:flex; align-items:center; justify-content:center; overflow:hidden; min-width:2px; }
+  .cm-strip { display:flex; height:17px; border-radius:3px; overflow:hidden; flex:none; margin-bottom:6px; background: var(--vscode-editorWidget-background, rgba(127,127,127,0.15)); }
+  .cm-sg { border:0; padding:0 4px; cursor:pointer; height:100%; display:flex; align-items:center; justify-content:center; overflow:hidden; min-width:0; }
+  .cm-sg + .cm-sg { box-shadow: inset 1px 0 0 var(--vscode-editor-background, #1e1e1e); } /* separate adjacent segments */
   .cm-sg.sel { outline:1px solid var(--vscode-foreground); outline-offset:-1px; }
-  .cm-sl { font-size:8px; color:rgba(0,0,0,.72); font-family: var(--cm-mono); white-space:nowrap; font-weight:600; }
+  .cm-sl { font-size:9px; color:rgba(0,0,0,.78); font-family: var(--cm-mono); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-weight:600; }
 
   /* ranked ledger */
   .cm-ledger { flex:1; overflow-y:auto; min-height:0; }
@@ -1835,7 +1853,12 @@ class ActionsProvider implements vscode.TreeDataProvider<ActNode> {
       if (siblingCount > 0) nodes.push({ kind: 'fleetRoot', siblingCount }); // concurrent sibling agents in this project
       if (channels.length) nodes.push({ kind: 'egressRoot', channels }); // "where did this session reach off-machine"
       if (subs.length) nodes.push({ kind: 'subagentsRoot', subs, summary: core.summarizeSubagents(subs) }); // per-subagent timelines
-      for (const group of core.buildActionGroups(actions, { showAll: actionsShowAll })) nodes.push({ kind: 'group', group });
+      for (const group of core.buildActionGroups(actions, { showAll: actionsShowAll })) {
+        // When the rich per-subagent "Subagents" root is shown, drop the raw "Subagents" category group
+        // (the Agent/Task spawn rows) so there aren't two identically-named sections at the top level.
+        if (subs.length && group.category === 'agent') continue;
+        nodes.push({ kind: 'group', group });
+      }
       return nodes;
     }
     if (node.kind === 'group') return node.group.actions.slice().reverse().map((action) => ({ kind: 'action', action })); // newest-first within a group
@@ -2971,11 +2994,11 @@ export function activate(context: vscode.ExtensionContext): void {
       refreshInline();
       vscode.window.showInformationMessage(`Claude Observatory: inline review ${next ? 'on' : 'off'}.`);
     }),
-    // File heatmap: dim every unmodified line so only Claude's edits read at full contrast.
+    // Spotlight: dim every unmodified line so only Claude's edits read at full contrast.
     vscode.commands.registerCommand('claudeObservatory.toggleHeatmap', () => {
       heatmapOn = !heatmapOn;
       refreshInline();
-      vscode.window.setStatusBarMessage(`Claude Observatory: file heatmap ${heatmapOn ? 'on 📄' : 'off'}`, 2500);
+      vscode.window.setStatusBarMessage(`Claude Observatory: spotlight ${heatmapOn ? 'on 💡' : 'off'}`, 2500);
     }),
     vscode.commands.registerCommand('claudeObservatory.keepFile', (n: FileNode) =>
       withSession((s) => keepEditsInFile(s, n.file, n.edits))()
@@ -3030,6 +3053,22 @@ export function activate(context: vscode.ExtensionContext): void {
   watcher.onDidCreate(scheduleRefresh);
   watcher.onDidDelete(scheduleRefresh);
   context.subscriptions.push(watcher);
+
+  // The store only changes on EDITS, but Actions / Observations / Timeline / Overview are mined from
+  // the session TRANSCRIPT, which grows on every read / command / subagent / to-do. Watch it too so
+  // those views update in real time as Claude works — not just when it happens to edit a file. A
+  // gentler debounce (the transcript is rewritten far more often than the store) coalesces the churn.
+  const transcriptWatcher = vscode.workspace.createFileSystemWatcher(
+    new vscode.RelativePattern(base, 'projects/**/*.jsonl')
+  );
+  let txDebounce: ReturnType<typeof setTimeout> | undefined;
+  const scheduleTxRefresh = () => {
+    if (txDebounce) clearTimeout(txDebounce);
+    txDebounce = setTimeout(refreshAll, 700);
+  };
+  transcriptWatcher.onDidChange(scheduleTxRefresh);
+  transcriptWatcher.onDidCreate(scheduleTxRefresh);
+  context.subscriptions.push(transcriptWatcher);
 
   refreshInline(); // paint the currently-open editor on activation
 

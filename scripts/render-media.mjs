@@ -261,6 +261,41 @@ const statsCol = (H1 = 52, H2 = 52) => `
   <div class="urow"><span class="lbl">5h</span><span class="track"><span class="fill" style="width:11%;background:var(--kept)"></span></span><span class="pct" style="color:var(--kept)">11%</span><span class="sub">1h30m · ~10M</span></div>
   <div class="urow"><span class="lbl">wk</span><span class="track"><span class="fill" style="width:35%;background:var(--kept)"></span></span><span class="pct" style="color:var(--kept)">35%</span><span class="sub">1d2h · ~37M</span></div>`;
 
+// Actions — every tool call this session, grouped by kind (Fleet / Egress on top, then the categories)
+const actionsCol = `
+  <div class="obsrow"><span>🛰</span><span class="id">Fleet</span><span class="r">13 siblings in this project</span></div>
+  <div class="obsrow"><span>⇅</span><span class="id">Egress</span><span class="r">3 destinations · 3 remote</span></div>
+  <div class="obsrow"><span style="color:var(--purple)">▾</span><span class="id">Subagents</span><span class="r">3 · 68 actions · 12m47s</span></div>
+  <div class="obsrow"><span>▸</span><span class="id">Edits</span><span class="r">185</span></div>
+  <div class="obsrow"><span>▸</span><span class="id">Commands</span><span class="r"><span style="color:var(--pending)">229 · 2 errors</span></span></div>
+  <div class="obsrow"><span>▸</span><span class="id">To-dos</span><span class="r">30</span></div>`;
+
+// Change Map — chapters on top, an equal-width module strip, then files ranked by churn
+const cmChapter = (glyph, color, name) => `<span style="white-space:nowrap"><span style="color:${color}">${glyph}</span> ${name}</span>`;
+const cmSeg = (color, name) => `<span style="flex:1;min-width:0;background:${color};box-shadow:inset 1px 0 0 var(--panel);display:flex;align-items:center;justify-content:center;font-size:9px;color:rgba(0,0,0,.78);font-weight:600;overflow:hidden">${name}</span>`;
+const cmRow = (color, file, mod, barPct, num, pend) => `
+  <div style="display:flex;align-items:center;gap:8px;font-size:11.5px;padding:2.5px 0">
+    <span style="width:6px;height:6px;border-radius:2px;background:${color};flex:none"></span>
+    <span class="mono" style="color:var(--ink);flex:0 1 auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:60px;max-width:44%">${file}</span>
+    <span style="font-size:9px;color:var(--faint);flex:none">${mod}</span>
+    <span style="flex:1;height:5px;border-radius:2px;background:var(--panel);overflow:hidden;min-width:16px"><span style="display:block;height:100%;width:${barPct}%;background:${color}"></span></span>
+    <span class="mono" style="font-size:10px;color:var(--faint);width:40px;text-align:right;flex:none">${num}</span>
+    <span class="mono" style="font-size:10px;width:26px;text-align:right;flex:none;color:${pend ? 'var(--pending)' : 'var(--kept)'}">${pend || '✓'}</span>
+  </div>`;
+const changeMapCol = `
+  <div style="padding:2px 16px 8px">
+    <div style="display:flex;gap:9px;font-size:10px;color:var(--dim);margin-bottom:8px;flex-wrap:wrap">
+      ${cmChapter('●', 'var(--kept)', '1 Subagent tracking')}${cmChapter('◐', 'var(--pending)', '2 Risk audit')}${cmChapter('○', 'var(--faint)', '3 Update docs')}
+    </div>
+    <div style="display:flex;height:16px;border-radius:3px;overflow:hidden;margin-bottom:9px">
+      ${cmSeg('var(--pending)', 'vscode')}${cmSeg('var(--kept)', 'core')}${cmSeg('var(--pending)', 'docs')}${cmSeg('var(--kept)', 'cli')}
+    </div>
+    ${cmRow('var(--pending)', 'extension.ts', 'vscode', 100, '+751', '6⏳')}
+    ${cmRow('var(--kept)', 'changemap.ts', 'core', 38, '+285', '')}
+    ${cmRow('var(--pending)', 'README.md', 'docs', 14, '+44', '2⏳')}
+    ${cmRow('var(--kept)', 'index.ts', 'cli', 6, '+13', '')}
+  </div>`;
+
 // the terminal front-end: status → list → surgical undo that preserves later edits
 const terminalBody = () => `
   <div class="term">
@@ -330,10 +365,182 @@ const fileHistoryCol = `
   <div class="obsrow"><span class="dot" style="background:var(--pending)"></span><span class="id mono">#2</span><span class="r">14:02 · +4 −0 · <span style="color:var(--pending)">pending</span> · added a farewell() method to mirror greet()</span></div>
   <div class="obsrow"><span class="dot" style="background:var(--kept)"></span><span class="id mono strike">#1</span><span class="r strike">14:01 · +11 −0 · kept · created the User class</span></div>`;
 
+// A numbered annotation pin (a coral circle) + a callout label, absolutely placed over a mockup.
+const pin = (n, x, y) => `<span style="position:absolute;left:${x};top:${y};width:20px;height:20px;border-radius:50%;background:var(--coral);color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;font-family:-apple-system,sans-serif;box-shadow:0 1px 4px rgba(0,0,0,.5);z-index:3">${n}</span>`;
+const note = (n, name, desc) => `<div style="display:flex;gap:9px;align-items:flex-start"><span style="flex:none;width:19px;height:19px;border-radius:50%;background:var(--coral);color:#fff;font-size:10.5px;font-weight:700;display:flex;align-items:center;justify-content:center">${n}</span><div style="font-size:12.5px;line-height:1.45"><b style="color:var(--ink)">${name}</b> <span style="color:var(--dim)">— ${desc}</span></div></div>`;
+// A coral corner-label for the master map — outlines a region without shifting layout (inset shadow).
+const clabel = (text) => `<span style="position:absolute;top:-8px;left:9px;background:var(--coral);color:#fff;font-size:9px;font-weight:700;letter-spacing:.04em;padding:1.5px 7px;border-radius:4px;z-index:5;white-space:nowrap;">${text}</span>`;
+// A pane header chip — sits fully INSIDE the pane (the tab row is directly above, so it can't straddle
+// upward like clabel does). Doubles as the pane's name, replacing the gray colhead.
+const plabel = (text) => `<span style="position:absolute;top:7px;left:12px;background:var(--coral);color:#fff;font-size:9px;font-weight:700;letter-spacing:.05em;padding:2px 8px;border-radius:4px;z-index:5;white-space:nowrap;">${text}</span>`;
+// One labelled panel-pane for the master map: coral outline + inside header chip + clipped content.
+const mapPane = (flex, name, content, last) => `<div class="col" style="position:relative;flex:${flex};${last ? '' : 'border-right:1px solid var(--border);'}box-shadow:inset 0 0 0 2px var(--coral);padding-top:32px;">${plabel(name)}${content}</div>`;
+// A per-window diagram: the real panel mockup in a titled frame (left) + a numbered legend (right).
+const winDiag = (title, mock, notes) => `
+  <div style="display:grid;grid-template-columns:1.5fr 1fr;gap:26px;align-items:start;font-family:-apple-system,'Segoe UI',sans-serif;">
+    <div style="border:1px solid var(--border2);border-radius:10px;overflow:hidden;background:var(--bg);box-shadow:0 12px 40px -18px rgba(0,0,0,.6);">
+      <div style="background:var(--panel);border-bottom:1px solid var(--border);padding:8px 15px;font-size:10.5px;letter-spacing:.09em;color:var(--coral);font-weight:700;">${title}</div>
+      <div style="padding:8px 0;">${mock}</div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:13px;padding-top:4px;">${notes}</div>
+  </div>`;
+
 // ---------- scenes ----------
 const scenes = {
+  // The inline review bubble — faithful to the real widget, every area numbered + named alongside.
+  'bubble': scene(1200, `
+    <div style="display:grid;grid-template-columns:1.55fr 1fr;gap:26px;align-items:start;font-family:-apple-system,'Segoe UI',sans-serif;">
+      <div style="position:relative;">
+        ${pin('1', '2px', '9px')}${pin('2', '452px', '9px')}${pin('3', '10px', '150px')}${pin('4', '10px', '206px')}
+        <div style="border:1px solid var(--border2);border-radius:8px;background:#252526;overflow:hidden;box-shadow:0 12px 40px -18px rgba(0,0,0,.7);margin-left:26px;">
+          <div style="display:flex;align-items:center;gap:12px;padding:9px 14px;background:var(--side);border-bottom:1px solid var(--border);">
+            <span style="color:var(--coral);font-family:'SF Mono',Menlo,monospace;font-size:12.5px;">Claude edit #1</span>
+            <span style="color:var(--dim);font-family:'SF Mono',Menlo,monospace;font-size:12px;">·  +6 −1  ·  <b style="color:var(--ink)">Diff 1/1</b>  ·  <b style="color:var(--ink)">File 4/5</b></span>
+            <span style="margin-left:auto;display:flex;gap:12px;font-size:13px;color:var(--dim);white-space:nowrap;">
+              <span>↑</span><span>↓</span><span>←</span><span>→</span><span style="color:var(--kept)">✓</span><span style="color:var(--pending)">↩</span><span style="color:var(--kept)">✓✓</span><span style="color:#f85149">✕</span><span>💬</span><span>🧹</span><span>💡</span><span>🔍</span>
+            </span>
+          </div>
+          <div style="padding:12px 16px;">
+            <div style="font-weight:600;margin-bottom:7px;font-size:13px;">Claude Observatory</div>
+            <div style="font-family:'SF Mono',Menlo,monospace;font-size:12.5px;color:var(--ink);margin-bottom:8px;">✨ <b>Claude edit #1</b>  ·  +6 −1  ·  Edit  ·  <b>Diff 1/1</b>  ·  <b>File 4/5</b></div>
+            <div style="color:var(--faint);font-style:italic;font-size:12.5px;margin-bottom:11px;">💭 I'm positioning the changeMapShell function to insert after the statsData closing brace at line 152…</div>
+            <div style="font-family:'SF Mono',Menlo,monospace;font-size:12px;line-height:1.75;">
+              ${dl('hunk', '@@ −461,9 +461,14 @@')}
+              ${dl('ctx', '    const thread = this.controller.createCommentThread(doc.uri, range, [comment]);')}
+              ${dl('ctx', '    thread.canReply = false;')}
+              ${dl('rem', '−    thread.label = `Claude edit #${id}  ·  +${d.added} −${d.removed}` + (diffPos ? …')}
+              ${dl('add', '+    // Show BOTH axes in the title (Diff n/m · File i/k), like the status-bar nav bar')}
+              ${dl('add', '+    thread.label =')}
+            </div>
+          </div>
+        </div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:13px;padding-top:6px;">
+        <div style="font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--coral);font-weight:700;">Inline review bubble</div>
+        ${note('1', 'Title', 'The edit id, its ± delta, and the live <b style="color:var(--ink)">Diff&nbsp;n/m · File&nbsp;i/k</b> position.')}
+        ${note('2', 'Toolbar', 'Mirrors the status-bar nav bar: ↑↓ prev/next&nbsp;edit · ←→ prev/next&nbsp;file · <span style="color:#3fb950">✓</span>&nbsp;Keep · <span style="color:#d9a441">↩</span>&nbsp;Undo · <span style="color:#3fb950">✓✓</span>&nbsp;Accept&nbsp;File · <span style="color:#f85149">✕</span>&nbsp;Reject&nbsp;File · 💬&nbsp;Chat · 🧹&nbsp;Clear · 💡&nbsp;Spotlight · 🔍&nbsp;Search.')}
+        ${note('3', 'Reasoning', 'Claude&rsquo;s own words for this edit, mined from the transcript (💭).')}
+        ${note('4', 'Diff', 'The edit&rsquo;s before ⟷ after, in git&rsquo;s red/green.')}
+      </div>
+    </div>`),
+  // Anatomy — a labelled outline of every surface, so each section can be referred to by name.
+  // Per-window diagrams — the real panel mockup + a numbered legend of its parts.
+  'win-overview': scene(1200, winDiag('OVERVIEW', changeMapCol, [
+    note('1', 'Chapters', 'Claude&rsquo;s to-dos across the top (● done · ◐ in progress · ○ planned). Click one to <b style="color:var(--ink)">brush</b> the map to just its files.'),
+    note('2', 'Module strip', 'One equal-width segment per module Claude touched, coloured by review status. Click to filter the ledger to that module.'),
+    note('3', 'File ledger', 'Every file ranked by churn, with a bar. Hover for the class touched + reasoning; click to open the diff. Toggle <b style="color:var(--ink)">± lines / count</b>.'),
+  ].join(''))),
+  'win-actions': scene(1200, winDiag('ACTIONS', actionsCol, [
+    note('1', 'Fleet', 'Other Claude sessions in this project — active/idle, pending, files, risk.'),
+    note('2', 'Egress', 'Everywhere the session reached off-machine — web · MCP · network shell.'),
+    note('3', 'Subagents', 'Each subagent Claude spawned, with its own action timeline + metrics.'),
+    note('4', 'Category groups', 'The rest, grouped by kind — Edits · Commands · To-dos (curated; errors always surface). A row with an edit links to its review.'),
+  ].join(''))),
+  'win-observations': scene(1180, winDiag('OBSERVATIONS', observationsCol, [
+    note('1', 'Session recap', 'Claude Code&rsquo;s own title for the session (zero-token; ✨ to refine).'),
+    note('2', 'Per-edit reasoning', 'One row per edit with Claude&rsquo;s actual words for it, plus file-memory (🧠) across sessions. Click → the combined report.'),
+  ].join(''))),
+  'win-timeline': scene(1180, winDiag('TIMELINE', timelineCol, [
+    note('1', 'Coalesced run', 'Files by most-recent activity; adjacent edits to one file collapse into a single <b style="color:var(--ink)">×N</b> row with the combined delta.'),
+    note('2', 'Per-edit rows', 'Expand a run to its individual edits (id · time · delta), each with Keep / Undo.'),
+  ].join(''))),
+  'win-stats': scene(1120, winDiag('STATS', statsCol(40, 40), [
+    note('1', 'Review scoreboard', 'Live pending / accepted / reverted counts + a progress bar that fills as you review.'),
+    note('2', 'Range toggle', 'Today · 7&nbsp;days · 30&nbsp;days for the plots below.'),
+    note('3', 'Token plot', 'Total / input / output tokens over the window (log scale, crosshair tooltip).'),
+    note('4', 'Usage bars', 'Context fill + 5-hour / weekly plan usage, with reset countdowns.'),
+  ].join(''))),
+  // Anatomy — the SAME spatial layout as layout.png, every region labelled in place.
+  'anatomy': scene(1760, `
+    <div class="window">
+      <div class="titlebar"><span class="tl" style="background:#ff5f57"></span><span class="tl" style="background:#febc2e"></span><span class="tl" style="background:#28c840"></span><span class="t">demo — Visual Studio Code</span></div>
+      <div class="row" style="align-items:stretch;height:300px;">
+        <div style="width:126px;background:var(--side);border-right:1px solid var(--border);padding:12px 11px;display:flex;flex-direction:column;gap:9px;">
+          <div style="font-size:9.5px;font-weight:700;color:var(--coral);letter-spacing:.05em;">① ACTIVITY BAR</div>
+          <div style="font-size:20px;position:relative;width:26px;">${microscope}<span style="position:absolute;right:-6px;bottom:-4px;background:var(--accent);color:#fff;border-radius:8px;font-size:9px;padding:0 4px;">3</span></div>
+          <div style="font-size:11px;color:var(--dim);line-height:1.45;">The <b style="color:var(--ink)">Claude&nbsp;Edits</b> container, badged with the pending count.</div>
+        </div>
+        <div style="width:320px;background:var(--side);border-right:1px solid var(--border);padding:12px 14px;">
+          <div style="font-size:9.5px;font-weight:700;color:var(--coral);letter-spacing:.05em;margin-bottom:7px;">② SIDEBAR · Claude Edits</div>
+          <div style="font-size:12px;color:var(--dim);line-height:1.55;"><b style="color:var(--ink)">Edits</b> (folder → file → class) · <b style="color:var(--ink)">Diffs</b> · <b style="color:var(--ink)">File&nbsp;History</b>.<br>Per-row Keep&nbsp;/&nbsp;Undo. Title bar: Search · Review&nbsp;◄► · Accept/Revert&nbsp;All · Clear · Switch&nbsp;session.</div>
+        </div>
+        <div style="flex:1;padding:12px 16px;">
+          <div style="font-size:9.5px;font-weight:700;color:var(--coral);letter-spacing:.05em;margin-bottom:7px;">③ EDITOR</div>
+          <div style="font-size:12px;color:var(--dim);line-height:1.6;"><b style="color:var(--ink)">Inline review</b> — ✨ markers + tinted lines on Claude&rsquo;s edits, with a <b style="color:var(--ink)">CodeLens</b> per edit (Keep&nbsp;/&nbsp;Undo&nbsp;/&nbsp;Chat&nbsp;/&nbsp;diff, showing the Diff&nbsp;·&nbsp;File position).<br><br><b style="color:var(--ink)">Tab-bar toolbar</b> (on a file with pending edits): ◄►&nbsp;Diff · Keep · Undo · Clear · 💡&nbsp;Spotlight · 🔍&nbsp;Search · ⇄&nbsp;Session.</div>
+        </div>
+      </div>
+      <div style="border-top:1px solid var(--border);background:var(--panel);">
+        <div class="paneltabs"><span>PROBLEMS</span><span>OUTPUT</span><span>TERMINAL</span><span class="on">④ CLAUDE OBSERVATORY</span></div>
+        <div class="row" style="align-items:stretch;height:168px;">
+          ${['ACTIONS|Every tool call, grouped by kind — Fleet · Egress · Subagents · Edits · Commands · To-dos.',
+             'OBSERVATIONS|Each edit paired with Claude&rsquo;s own reasoning, under a session recap.',
+             'TIMELINE|Files by most-recent activity; same-file edits coalesce into ×N runs.'].map(c => {
+            const [h, d] = c.split('|');
+            return `<div class="col" style="flex:1;border-right:1px solid var(--border);"><div class="colhead" style="color:var(--coral)">${h}</div><div style="font-size:11px;color:var(--dim);padding:2px 16px;line-height:1.5;">${d}</div></div>`;
+          }).join('')}
+          <div class="col" style="flex:1.15;border-right:1px solid var(--border);">
+            <div class="colhead" style="color:var(--coral)">OVERVIEW</div>
+            <div style="font-size:11px;color:var(--dim);padding:2px 16px;line-height:1.55;">The session&rsquo;s changes at a glance:
+              <div style="margin-top:5px;"><b style="color:var(--kept)">ⓐ chapters</b> — Claude&rsquo;s to-dos; click to brush</div>
+              <div><b style="color:var(--pending)">ⓑ module strip</b> — equal-width, one per module</div>
+              <div><b style="color:var(--blue)">ⓒ file ledger</b> — files ranked by churn</div>
+            </div>
+          </div>
+          <div class="col" style="flex:1;"><div class="colhead" style="color:var(--coral)">STATS</div><div style="font-size:11px;color:var(--dim);padding:2px 16px;line-height:1.5;">Review scoreboard · token plots · context&nbsp;/&nbsp;plan usage bars.</div></div>
+        </div>
+      </div>
+      <div class="statusbar">
+        <span class="sb-warn">${microscope} 3</span>
+        <span style="color:var(--coral);font-size:10px;font-weight:700;letter-spacing:.05em;">⑤ STATUS BAR</span>
+        <span style="color:var(--dim);font-size:11px;">navigation bar: File&nbsp;◄► · Diff&nbsp;◄► · Keep · Undo · Accept&nbsp;/&nbsp;Reject&nbsp;File · Clear · 💡&nbsp;Spotlight · 🔍&nbsp;Search</span>
+      </div>
+    </div>`),
   // A. the full observatory layout
-  'layout': scene(1520, `
+  // The master map — the real workspace mockup with a coral callout box + label on every region.
+  'map': scene(1760, `
+    <div class="window">
+      <div class="titlebar"><span class="tl" style="background:#ff5f57"></span><span class="tl" style="background:#febc2e"></span><span class="tl" style="background:#28c840"></span><span class="t">demo — Visual Studio Code</span></div>
+      <div class="row" style="align-items:stretch; height:392px;">
+        <div style="position:relative;width:60px;background:var(--side);border-right:1px solid var(--border);display:flex;flex-direction:column;align-items:center;padding-top:20px;gap:20px;box-shadow:inset 0 0 0 2px var(--coral);">
+          <span style="position:absolute;top:-8px;left:6px;background:var(--coral);color:#fff;font-size:10px;font-weight:700;padding:1.5px 6px;border-radius:4px;z-index:5;">①</span>
+          <span style="opacity:.4">🗎</span><span style="opacity:.4">🔍</span>
+          <span style="position:relative;font-size:18px">${microscope}<span style="position:absolute;right:-7px;bottom:-5px;background:var(--accent);color:#fff;border-radius:8px;font-size:9px;padding:0 4px;">3</span></span>
+          <span style="opacity:.4">⚙</span>
+        </div>
+        <div style="position:relative;width:300px;background:var(--side);border-right:1px solid var(--border);box-shadow:inset 0 0 0 2px var(--coral);">
+          <span style="position:absolute;top:-8px;left:9px;background:var(--coral);color:#fff;font-size:9px;font-weight:700;letter-spacing:.04em;padding:1.5px 7px;border-radius:4px;z-index:5;white-space:nowrap;">① Activity bar · ② Sidebar (Claude Edits)</span>
+          <div style="padding:10px 14px 2px;font-size:11px;color:var(--dim);letter-spacing:.06em;">CLAUDE EDITS</div>
+          ${editsTree}
+          <div class="viewhead" style="border-top:1px solid var(--border);margin-top:8px;">DIFFS</div>
+          <div class="viewhead" style="border-top:1px solid var(--border);">FILE HISTORY <span style="float:right;color:var(--faint)">User.js</span></div>
+        </div>
+        <div style="flex:1;display:flex;flex-direction:column;">
+          <div style="position:relative;display:flex;align-items:center;background:var(--side);border-bottom:1px solid var(--border);box-shadow:inset 0 0 0 2px var(--coral);">
+            ${clabel('③ EDITOR TAB BAR')}
+            <div style="padding:8px 18px;background:var(--bg);border-right:1px solid var(--border);font-size:12.5px;">User.js</div>
+            <span style="margin-left:auto;display:flex;gap:12px;padding-right:14px;color:var(--dim);font-size:13px;">‹ › <span style="color:var(--kept)">✓</span> <span style="color:var(--pending)">↩</span> 🧹 💡 🔍 ⇄</span>
+          </div>
+          ${editorCode()}
+        </div>
+      </div>
+      <div style="border-top:1px solid var(--border);background:var(--panel);">
+        <div class="paneltabs"><span>PROBLEMS</span><span>OUTPUT</span><span>TERMINAL</span><span class="on">④ CLAUDE OBSERVATORY</span></div>
+        <div class="row" style="align-items:stretch;height:184px;">
+          ${mapPane('.95', 'ACTIONS', actionsCol)}
+          ${mapPane('1.15', 'OBSERVATIONS', observationsCol)}
+          ${mapPane('1.05', 'TIMELINE', timelineCol)}
+          ${mapPane('1.25', 'OVERVIEW', changeMapCol)}
+          ${mapPane('1.1', 'STATS', statsCol(30, 30).replace(/<div class="uhead">USAGE<\/div>[\\s\\S]*$/, '<div class="urow"><span class="lbl">ctx</span><span class="track"><span class="fill" style="width:39%;background:var(--kept)"></span></span><span class="pct" style="color:var(--kept)">39%</span><span class="sub">390k/1M</span></div>'), true)}
+        </div>
+      </div>
+      <div class="statusbar" style="position:relative;box-shadow:inset 0 0 0 2px var(--coral);">
+        ${clabel('⑤ STATUS BAR · navigation bar')}
+        <span class="sb-warn">${microscope} 3</span>
+        <span style="display:flex;gap:9px;color:var(--dim);font-size:11px;font-family:'SF Mono',Menlo,monospace;">⌃ 2/3 ⌄ · ‹ 1/3 › · <span style="color:#3fb950">✓</span> <span style="color:#d9a441">↩</span> <span style="color:#3fb950">✓✓</span> <span style="color:#f85149">✕</span> · 🧹 💡 🔍</span>
+        <span style="margin-left:auto">⎇ main</span>
+      </div>
+    </div>`),
+  'layout': scene(1760, `
     <div class="window">
       <div class="titlebar"><span class="tl" style="background:#ff5f57"></span><span class="tl" style="background:#febc2e"></span><span class="tl" style="background:#28c840"></span><span class="t">demo — Visual Studio Code</span></div>
       <div class="row" style="align-items:stretch; height:472px;">
@@ -343,7 +550,7 @@ const scenes = {
           <span style="opacity:.4">⚙</span>
         </div>
         <div style="width:300px;background:var(--side);border-right:1px solid var(--border);">
-          <div style="padding:10px 14px 2px;font-size:11px;color:var(--dim);letter-spacing:.06em;">CLAUDE OBSERVATORY</div>
+          <div style="padding:10px 14px 2px;font-size:11px;color:var(--dim);letter-spacing:.06em;">CLAUDE EDITS</div>
           ${editsTree}
           <div class="viewhead" style="border-top:1px solid var(--border);margin-top:8px;">DIFFS</div>
           <div class="viewhead" style="border-top:1px solid var(--border);">FILE HISTORY <span style="float:right;color:var(--faint)">User.js</span></div>
@@ -358,9 +565,11 @@ const scenes = {
       <div style="border-top:1px solid var(--border);background:var(--panel);">
         <div class="paneltabs"><span>PROBLEMS</span><span>OUTPUT</span><span>TERMINAL</span><span class="on">CLAUDE OBSERVATORY</span></div>
         <div class="row" style="align-items:stretch;height:212px;">
-          <div class="col" style="flex:1.2;border-right:1px solid var(--border);"><div class="colhead">OBSERVATIONS</div>${observationsCol}</div>
-          <div class="col" style="flex:1.1;border-right:1px solid var(--border);"><div class="colhead">TIMELINE</div>${timelineCol}</div>
-          <div class="col" style="flex:1;"><div class="colhead">STATS</div>${statsCol(34, 34).replace(/<div class="uhead">USAGE<\/div>[\s\S]*$/, '<div class="urow"><span class="lbl">ctx</span><span class="track"><span class="fill" style="width:39%;background:var(--kept)"></span></span><span class="pct" style="color:var(--kept)">39%</span><span class="sub">390k/1M</span></div>')}</div>
+          <div class="col" style="flex:.95;border-right:1px solid var(--border);"><div class="colhead">ACTIONS</div>${actionsCol}</div>
+          <div class="col" style="flex:1.15;border-right:1px solid var(--border);"><div class="colhead">OBSERVATIONS</div>${observationsCol}</div>
+          <div class="col" style="flex:1.05;border-right:1px solid var(--border);"><div class="colhead">TIMELINE</div>${timelineCol}</div>
+          <div class="col" style="flex:1.25;border-right:1px solid var(--border);"><div class="colhead">OVERVIEW</div>${changeMapCol}</div>
+          <div class="col" style="flex:1.1;"><div class="colhead">STATS</div>${statsCol(34, 34).replace(/<div class="uhead">USAGE<\/div>[\s\S]*$/, '<div class="urow"><span class="lbl">ctx</span><span class="track"><span class="fill" style="width:39%;background:var(--kept)"></span></span><span class="pct" style="color:var(--kept)">39%</span><span class="sub">390k/1M</span></div>')}</div>
         </div>
       </div>
       <div class="statusbar">
@@ -452,7 +661,9 @@ const scenes = {
 // ---------- render ----------
 // per-scene capture viewport (width = sceneW + 48px body padding; height tuned to content)
 const SIZE = {
-  layout: '1568,830', stats: '808,478', 'inline-review': '1028,720', observations: '1028,344',
+  layout: '1808,860', anatomy: '1808,700', map: '1808,706', bubble: '1248,368',
+  'win-overview': '1248,300', 'win-actions': '1248,300', 'win-observations': '1228,264', 'win-timeline': '1228,264', 'win-stats': '1168,420',
+  stats: '808,478', 'inline-review': '1028,720', observations: '1028,344',
   cli: '948,500', conflict: '928,290', diffs: '1028,330', heatmap: '1028,400',
   'file-history': '768,150', timeline: '768,230',
 };
@@ -478,7 +689,7 @@ for (const name of ['pyc-layout']) {
     '--headless', '--disable-gpu', '--default-background-color=00000000',
     '--force-device-scale-factor=2', '--hide-scrollbars',
     `--screenshot=${join(OUT, `${name}.png`)}`,
-    '--window-size=1568,830',
+    '--window-size=1900,860',
     `file://${join(OUT, `${name}.src.html`)}`,
   ], { stdio: 'pipe' });
   console.log('rendered', `${name}.png`);

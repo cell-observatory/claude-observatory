@@ -192,11 +192,12 @@
   .tour-view{overflow:hidden;border-radius:16px}
   .slides{display:flex;transition:transform .5s cubic-bezier(.22,.61,.36,1);will-change:transform}
   .slide{flex:0 0 100%;min-width:0;padding:0 1px}
-  .slide-in{display:grid;grid-template-columns:minmax(0,.8fr) minmax(0,1.2fr);gap:clamp(18px,3vw,30px);align-items:center;text-align:left}
-  @media(max-width:880px){.slide-in{grid-template-columns:1fr;gap:16px}}
-  .slide h3{font-size:clamp(1.15rem,2.1vw,1.55rem);margin:.4em 0 .35em}
-  .slide p{color:var(--ink-soft);font-size:.96rem;line-height:1.5;text-wrap:pretty}
-  .slide .panel{margin-top:0}
+  /* image on top, caption below (centred) */
+  .slide-in{display:flex;flex-direction:column;align-items:center;text-align:center;gap:clamp(14px,2vw,22px)}
+  .slide-in>.panel{order:-1;width:100%;margin-top:0}
+  .slide-in>div:not(.panel){max-width:64ch}
+  .slide h3{font-size:clamp(1.15rem,2.1vw,1.55rem);margin:.1em 0 .35em}
+  .slide p{color:var(--ink-soft);font-size:.98rem;line-height:1.55;text-wrap:pretty}
   .tour-ui{display:flex;align-items:center;justify-content:center;gap:14px;margin-top:20px;flex-wrap:wrap}
   .tbtn{width:36px;height:36px;border-radius:999px;border:1px solid var(--line);background:var(--surface);color:var(--ink-soft);cursor:pointer;font-size:16px;line-height:1;display:grid;place-items:center;transition:border-color .15s,color .15s}
   .tbtn:hover{border-color:var(--accent);color:var(--accent-ink)}
@@ -240,6 +241,7 @@
       <a href="#act">Review</a>
       <a href="#tour">Tour</a>
       <a href="#install">Install</a>
+      <a href="panels.html">Panels</a>
       <a class="more" href="features.html">Features&nbsp;→</a>
       <a href="https://github.com/cell-observatory/claude-observatory">GitHub</a>
     </div>
@@ -348,6 +350,8 @@
     <p class="lede">One backend, identical decisions across the CLI, VS Code, and JetBrains. Start reviewing in the terminal, finish in your editor — nothing to reconcile. A navigation bar rides along as you work — step through pending edits from the status bar, the editor tab, or a bubble over the change. And an Action Timeline surfaces every tool call Claude made, not just the edits — flagging the risky commands it ran, mapping where a session reached off-machine, nesting each subagent's own timeline with per-agent metrics, and showing the fleet of other agents at work in the same project — all at zero extra tokens.</p>
   </div>
   <div class="wrap"><div class="panel rv scale"><img src="media/layout.png" loading="lazy" alt="The observatory in VS Code: sidebar edits, inline review, and the bottom dashboards"></div></div>
+  <div class="wrap rv" style="margin-top:clamp(20px,3vw,34px)"><span class="eyebrow">Anatomy</span><h3 style="font-size:clamp(1.1rem,2vw,1.4rem);margin:.3em 0 .1em">Every surface, named.</h3></div>
+  <div class="wrap"><div class="panel rv"><img src="media/anatomy.png" loading="lazy" alt="Anatomy of the workspace: the Claude Edits activity bar and sidebar; the editor with inline review and its tab-bar toolbar; the bottom panel — Actions, Observations, Timeline, Overview (chapters, module strip, file ledger), Stats; and the status-bar microscope plus navigation bar"></div></div>
 </section>
 
 <!-- FEATURE TOUR: every surface, one slide at a time -->
@@ -402,14 +406,14 @@
             </div>
           </article>
 
-          <article class="slide" role="group" aria-roledescription="slide" aria-label="Change Map">
+          <article class="slide" role="group" aria-roledescription="slide" aria-label="Overview">
             <div class="slide-in">
-              <div><span class="eyebrow">Change Map</span><h3>The session's changes at a glance.</h3>
-                <p>Claude's own to-dos become chapters across the top; a strip shows where the work landed; every file ranked by churn. Click a row to open its diff.</p></div>
+              <div><span class="eyebrow">Overview</span><h3>The session's changes at a glance.</h3>
+                <p>Claude's own to-dos become chapters across the top; an equal-width strip names each module Claude touched; every file ranked by churn. Click a row to open its diff.</p></div>
               <div class="panel"><div class="mock">
-                <div class="mh">Change Map · this session</div>
+                <div class="mh">Overview · this session</div>
                 <div><span class="k">●</span> 1. Scaffold tracking &nbsp; <span class="p">◐</span> 2. Risk audit &nbsp; <span class="d">○ 3. Update docs</span></div>
-                <div class="d">[<span class="k">██████</span><span class="p">█████</span><span class="d">██</span>] &nbsp;core · vscode · docs</div>
+                <div class="d">▏<span class="p">&nbsp;vscode&nbsp;</span>▏<span class="k">&nbsp;core&nbsp;</span>▏<span class="p">&nbsp;docs&nbsp;</span>▏<span class="k">&nbsp;cli&nbsp;</span>▏</div>
                 <div><b>extension.ts</b> <span class="d">vscode</span> <span class="p">████████</span> +751 <span class="p">6⏳</span></div>
                 <div><b>changemap.ts</b> <span class="d">core</span> &nbsp;<span class="k">████</span> +285 <span class="k">✓</span></div>
                 <div><b>README.md</b> <span class="d">docs</span> &nbsp;&nbsp;<span class="p">█</span> +44 <span class="p">2⏳</span></div>
@@ -425,9 +429,9 @@
             </div>
           </article>
 
-          <article class="slide" role="group" aria-roledescription="slide" aria-label="Heatmap">
+          <article class="slide" role="group" aria-roledescription="slide" aria-label="Spotlight">
             <div class="slide-in">
-              <div><span class="eyebrow">Heatmap</span><h3>A spotlight on the edits.</h3>
+              <div><span class="eyebrow">Spotlight</span><h3>Dim everything but the edits.</h3>
                 <p>Dim every line Claude didn't touch, so what changed reads at full contrast.</p></div>
               <div class="panel"><img src="media/heatmap.png" loading="lazy" alt="Heatmap: unmodified lines dimmed so Claude's edits stand out"></div>
             </div>

@@ -5,6 +5,77 @@ All notable changes to Claude Observatory are recorded here, following
 Per-tag release artifacts and auto-generated notes are on the
 [Releases page](https://github.com/cell-observatory/claude-observatory/releases).
 
+## [0.7.6] — 2026-07-14
+
+A polish pass over the 0.7.5 Change Map and the review toolbars: the view is renamed **Overview**, its
+module strip is honest and clickable, Actions updates live, and the same **Diff n/m · File i/k** position
+now shows everywhere you review — plus a new **Panels** interface reference. No breaking changes; the store
+format is unchanged. `changemap --json` keeps the same command and `files[]` shape; only `modules[]` changes
+— it is now grouped by module **label** (one row per label, `module === label`), which both editors already
+read.
+
+### Renamed — Change Map is now "Overview"
+
+The bottom-panel view reads **Overview** in both editors. The `claudeObservatory.changemap` view id, the
+command ids, and the `changemap --json` command are all unchanged, so nothing scripted or docked breaks.
+
+### Changed — the Overview module strip
+
+- **Equal-width segments.** Every module Claude touched gets the same slice, so a low-churn module is a
+  clickable segment instead of an unhittable sliver. (It was churn-proportional.)
+- **One segment per module label.** `packages/vscode` and `packages/vscode/src` used to render as two
+  identically-named `vscode` segments; the rollup now groups by label **in `core`**, so they merge into
+  one. Both renderers stay dumb — each changed a single file filter (raw path → label).
+
+### Fixed — chapter attribution
+
+The `in_progress` windows are now disjoint and the first extends back to the session start, so an edit is
+no longer double-counted across a revisited to-do, and edits made before the first to-do are attributed
+instead of dropped. An edit outside every window is still left **unassigned** rather than mis-filed.
+
+### Changed — Actions
+
+- **Live updates on every tool call.** A transcript watcher refreshes the Actions tree whenever Claude
+  does anything — not only on edits — so Reads, Bash runs, and searches appear as they happen (VS Code).
+- **No more doubled Subagents.** The raw Subagents category is dropped when the subagent submenu is
+  present, so subagents live in exactly one place (both editors).
+
+### Renamed — Spotlight (was Heatmap)
+
+The dim-unmodified-lines toggle is now **Spotlight** in its command title, the tab-bar toolbar, and the
+status message (both editors).
+
+### Added — the review position, everywhere you review
+
+The **Diff n/m · File i/k** counters from the status-bar navigation bar now also appear in the **inline
+CodeLens** on each edit and in the **inline review bubble** title (both editors). The editor tab bar and
+comment-thread toolbars can only render icon buttons, so the counters live where text is allowed — and
+they now agree across every surface.
+
+### Changed — the review toolbars
+
+**Switch session** is on every review bar. The Overview toolbar icons are spread out. Per-file
+**Accept / Revert all** moved off the Claude Edits sidebar's top bar (too easy to hit by accident) onto the
+tab bar and status bar; **Clear resolved** and **Spotlight** join the tab-bar toolbar.
+
+### Added — the Panels interface reference
+
+`docs/panels.html` — a named map of every window, tab, and toolbar button: a master annotated workspace
+mockup, a per-pane diagram for each of the five Overview panels, an annotated inline-review bubble, and the
+three review toolbars, each control numbered and named. Linked from the showcase nav.
+
+### Docs
+
+Regenerated the VS Code + JetBrains hero screenshots for the five-pane panel and added the annotated
+mockups above; the showcase slideshow gains Overview / Spotlight frames with the caption below each image.
+
+### Tests
+
+- Core `changemap (0.7.6)` test — the module-label merge (two `packages/vscode*` files collapse to one
+  `vscode` row) and the disjoint-span attribution, including extend-to-start and the gap → unassigned case.
+- VS Code smoke test — the CodeLens position counter, the bubble's dual-axis label, and an Overview
+  webview block that asserts a hidden view spawns no subprocess.
+
 ## [0.7.5] — 2026-07-14
 
 Adds the **Change Map** — a new bottom-panel view that answers the one question the flat lists can't:
