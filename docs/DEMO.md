@@ -290,13 +290,22 @@ Comments API) parked over the edit you're on, and — new in 0.8.0 — the **Ove
 it rides alongside the session selector and the bulk actions.
 
 ```text
-🔬 3  ▲ Diff 1/2 ▼  ◀ File 1/3 ▶  ✓ ↩ ✓✓ ✕  🧹 💡 🔍
+🔬 3  Search  ▲ Diff 1/2 ▼  ◀ File 1/3 ▶  ✓ Keep  ↩ Undo  ✓✓ Accept File  ✕ Reject File  Clear Resolved  Spotlight
 ```
 
 The bar steps on **two axes**: the **Diff axis** (`Diff n/m`, ▲/▼) walks the open file's pending
 edits; the **File axis** (`File n/m`, ◀/▶) walks every file that still has one. On the open file it
-also carries **✓ Keep** / **↩ Undo** this edit, **✓✓ Accept File** / **✕ Reject File**, **🧹 Clear
-resolved**, a **💡 Spotlight** (spotlight) toggle, and **🔍 Search**.
+also carries **✓ Keep** / **↩ Undo** this edit, **✓✓ Accept File** / **✕ Reject File**, the
+session-wide **Clear Resolved** (status bar), a **Spotlight** toggle, and **Search**.
+
+The buttons are **color-coded by what they do** (0.8.3, both editors): keep/accept **green**,
+undo/reject **red**, the nav chevrons **blue**, clear **orange**, search/spotlight **purple** — the
+same chart palette the Overview uses, so the destructive half of the bar never reads like the safe half.
+No icon serves two actions: the session-wide bulk pair get their own glyphs (Accept All a checklist,
+Revert All a history-rewind), distinct from the file-scoped double-check / ✕ and the per-edit ✓ / ↩.
+On the **Overview title bar** the same controls arrange into **five spaced groups**: Search · session ·
+Active only | Diff ◄► · Keep · Undo | File ◄► · Accept/Reject File | Accept All · Revert All · Clear
+Resolved | Spotlight · Refresh.
 
 It's **two-tier**. The File axis plus Clear / Spotlight / Search show whenever *any* edit is pending
 anywhere; the Diff axis and the per-edit / per-file actions appear only when the **open** file has

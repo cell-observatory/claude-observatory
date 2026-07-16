@@ -168,12 +168,6 @@
         "icon": "$(close-all)"
       },
       {
-        "command": "claudeObservatory.clearOpenFile",
-        "title": "Clear resolved (kept/reverted) edits in this file",
-        "category": "Claude Observatory",
-        "icon": "$(clear-all)"
-      },
-      {
         "command": "claudeObservatory.setup",
         "title": "Show setup instructions",
         "category": "Claude Observatory"
@@ -309,13 +303,13 @@
         "command": "claudeObservatory.keepAll",
         "title": "Accept all edits",
         "category": "Claude Observatory",
-        "icon": "$(check-all)"
+        "icon": "$(checklist)"
       },
       {
         "command": "claudeObservatory.undoAll",
         "title": "Revert all edits",
         "category": "Claude Observatory",
-        "icon": "$(discard)"
+        "icon": "$(timeline-view-icon)"
       },
       {
         "command": "claudeObservatory.clearResolved",

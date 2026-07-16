@@ -263,7 +263,7 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.ok(lensProvider, 'CodeLens provider registered');
     const lenses = lensProvider.provideCodeLenses(doc);
     assert.ok(lenses.length >= 10, 'enriched CodeLens rows (view-changes + Keep/Undo/Chat/View-diff per edit)');
-    assert.ok(lenses.some((l) => l.command.command === 'claudeObservatory.viewChanges' && /✨ #\d\s+\+\d+\s+.\d+.*view changes/.test(l.command.title)), 'the "✨ #N +A −R … view changes" lens opens the inline review bubble');
+    assert.ok(lenses.some((l) => l.command.command === 'claudeObservatory.viewChanges' && /✦ #\d\s+\+\d+\s+.\d+.*view changes/.test(l.command.title)), 'the "✦ #N +A −R … view changes" lens opens the inline review bubble');
     // the Diff-axis position now rides on the lens (the editor tab bar can't render live text)
     assert.ok(lenses.some((l) => /edit \d+\/\d+ in file/.test(l.command.title || '')), 'the lens shows the Diff-axis position (edit n/m in file)');
     assert.ok(lenses.some((l) => l.command.command === 'claudeObservatory.inlineKeep'), 'a Keep lens');
@@ -560,7 +560,7 @@ test('extension: three views, click commands, inline annotations, chat, status s
     // Keep, Undo, Accept File, Reject File, Spotlight, Search — the compact step-through controls, next to
     // the session selector, each posting to the existing nav commands.
     for (const id of ['ov-fileprev', 'ov-filecount', 'ov-filenext', 'ov-diffprev', 'ov-diffcount', 'ov-diffnext',
-      'ov-navkeep', 'ov-navundo', 'ov-acceptfile', 'ov-rejectfile', 'ov-clearfile', 'ov-spotlight', 'ov-search']) {
+      'ov-navkeep', 'ov-navundo', 'ov-acceptfile', 'ov-rejectfile', 'ov-spotlight', 'ov-search']) {
       assert.ok(cmView.webview.html.includes(`id="${id}"`), `Overview title bar carries the nav-bar control ${id}`);
     }
     assert.ok(/renderNavPos/.test(cmView.webview.html), 'the Diff n/m · File i/k position counters render from the pushed NAVPOS');
@@ -574,7 +574,6 @@ test('extension: three views, click commands, inline annotations, chat, status s
       ['navUndo', 'claudeObservatory.navUndo'],
       ['keepOpenFile', 'claudeObservatory.keepOpenFile'],
       ['undoOpenFile', 'claudeObservatory.undoOpenFile'],
-      ['clearOpenFile', 'claudeObservatory.clearOpenFile'],
       ['toggleHeatmap', 'claudeObservatory.toggleHeatmap'],
       ['searchEdits', 'claudeObservatory.searchEdits'],
     ]) {

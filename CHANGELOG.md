@@ -33,6 +33,33 @@ Per-tag release artifacts and auto-generated notes are on the
 - **Revert All warns like it means it** (both editors): the confirmation is now a warning-grade
   dialog stating the full blast radius — "Revert N edit(s) across M file(s)… this rewrites the files
   on disk" — with an explicit count-bearing button, replacing the softer question-style prompt.
+- **Nav-bar overhaul** (both editors — the review nav bar on every surface, the Overview toolbar,
+  and every panel toolbar/context menu):
+  - **Color-coded by action**: keep/accept green · undo/reject red · nav chevrons blue · clear
+    orange · search/spotlight/chat purple (the shared chart palette), applied consistently wherever
+    an action icon appears — toolbars, chapter chips, context menus, the editor banner, the floating
+    lens.
+  - **Labeled status bar**: every action button in the bottom status bar carries its short label
+    beside its tinted icon; the chevrons stay arrow-only, framing the live File n/m / Diff n/m
+    counters.
+  - **One icon per action, no glyph reuse**: the session-wide bulk pair got their own glyphs —
+    Accept All is now a checklist (VS Code `checklist`, JetBrains commit-check) and Revert All a
+    history-rewind (`timeline-view-icon` / VCS history) — so they no longer share icons with the
+    file-scoped Accept File (double-check) / Reject File (✕) or the per-edit Keep (✓) / Undo (↩).
+    Chapter chips use the bulk glyphs (they ARE the bulk actions scoped to a chapter).
+  - **Chat has a real icon**: `comment-discussion` in VS Code (chips, subagent rows, the CodeLens)
+    and a speech balloon in JetBrains — replacing the 💬 emoji and JetBrains' lightbulb collision
+    with Spotlight. Action icons no longer use emoji anywhere (the 🔬 brand mark stays).
+  - **Clear File removed** everywhere: the session-wide Clear Resolved covers it (it was the only
+    duplicate-icon action left, and redundant — kept/undone rows clear regardless of file).
+  - **The Overview toolbar arranges into five spaced groups** (both editors): Search · session ·
+    Active only | Diff axis · Keep · Undo | File axis · Accept/Reject File | Accept All · Revert All ·
+    Clear Resolved | Spotlight · Refresh. The JetBrains status bar adopts VS Code's Diff-before-File
+    order, and its toolbar-only fleet filters (Clear Completed · Show Hidden · Clear Done Chapters)
+    are gone — Active only already hides completed rows, and chapter clearing lives in the chapter
+    context menu.
+  - **The Panels reference page shows panels only**: the status-bar / tab-bar / bubble glyph legends
+    came off `panels.html` — the workspace map and the per-panel gallery remain.
 
 ## [0.8.2] — 2026-07-16
 

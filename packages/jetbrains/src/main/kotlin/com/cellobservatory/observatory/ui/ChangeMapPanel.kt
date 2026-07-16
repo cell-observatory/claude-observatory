@@ -212,50 +212,46 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         }
         setContent(split)
 
-        // Top navbar — VS Code Overview toolbar order (parity): session · Active only | the step-through
-        // review nav bar | bulk Accept/Revert/Clear · Refresh | the JetBrains-only fleet filters last.
-        // showText: this toolbar renders each button's label beside its icon, like VS Code's Overview.
+        // Top navbar — FIVE spaced groups (user layout 2026-07-16, VS Code Overview parity):
+        // Search · session · Active only | Diff axis · Keep · Undo | File axis · Accept/Reject File |
+        // bulk Accept All · Revert All · Clear Resolved | Spotlight · Refresh. The nav-bar actions come
+        // from the shared ReviewNavBar (labels shown, like VS Code); the toolbar-only fleet filters
+        // (Clear Completed / Show Hidden / Clear Done Chapters) were REMOVED 2026-07-16 — Active only
+        // already hides completed rows, and chapter clearing lives in the chapter context menu.
         val group = DefaultActionGroup(
+            reviewNavBar.searchAction(),
             action("Switch Session", AllIcons.Vcs.Branch) { ReviewOps.chooseSession(project, fleetTree) },
             activeOnlyToggle(),
             Separator.getInstance(),
-            // The compact step-through review nav bar (File/Diff axes + counters, Keep/Undo, Accept/Reject/
-            // Clear File, Spotlight, Search) — the same controls the status-bar nav bar shows.
-            reviewNavBar.buildGroup(showText = true),
-            Separator.getInstance(),
+        ).apply {
+            reviewNavBar.diffAxis().forEach(::add)
+            add(reviewNavBar.keepAction())
+            add(reviewNavBar.undoAction())
+            addSeparator()
+            reviewNavBar.fileAxis().forEach(::add)
+            add(reviewNavBar.acceptFileAction())
+            add(reviewNavBar.rejectFileAction())
+            addSeparator()
             // Bulk actions RETARGET to the picked ribbon chapter when one is selected (task-keep/undo/clear
             // on chapter.id), else run session-wide; the presentation text reflects the scope.
-            bulkAction("Accept All", Icons.CheckAll, { "Accept All in “$it”" },
+            add(bulkAction("Accept All", NavTint.ACCEPT_ALL, { "Accept All in “$it”" },
                 { withSession { s -> ReviewOps.keepAll(project, s) } },
-                { p -> ReviewOps.keepTask(project, p.session, p.id, p.title) }),
-            bulkAction("Revert All", AllIcons.Actions.Rollback, { "Revert All in “$it”" },
+                { p -> ReviewOps.keepTask(project, p.session, p.id, p.title) }))
+            add(bulkAction("Revert All", NavTint.REVERT_ALL, { "Revert All in “$it”" },
                 { withSession { s -> ReviewOps.undoAll(project, s, service().log(), "this session") } },
-                { p -> ReviewOps.undoTask(project, p.session, p.id, p.title) }),
-            bulkAction("Clear Resolved", AllIcons.Actions.GC, { "Clear in “$it”" },
+                { p -> ReviewOps.undoTask(project, p.session, p.id, p.title) }))
+            add(bulkAction("Clear Resolved", NavTint.CLEAR, { "Clear in “$it”" },
                 {
                     withSession { s ->
                         val resolved = service().log().count { !it.pending }
                         if (resolved > 0) ReviewOps.clearResolved(project, s, resolved) else ReviewOps.notify(project, "No resolved edits to clear")
                     }
                 },
-                { p -> ReviewOps.clearTask(project, p.session, p.id, p.title) }),
-            action("Refresh", AllIcons.Actions.Refresh) { rebuild(force = true) },
-            Separator.getInstance(),
-            clearCompletedAction(),
-            showHiddenAction(),
-            action("Clear Done Chapters", AllIcons.Vcs.Remove, "Clear reviewed edits in completed chapters") {
-                // Scope to the session whose change-map the detail is showing — an Agent tab targets that
-                // agent, Main/Workflow fall back to the orchestrator. (Distinct from the nav "Clear Completed"
-                // above, which only DISMISSES rows from the fleet list.)
-                val session = (selected as? NavSel.Agent)?.session
-                    ?: ObservatoryService.getInstance(project).currentSession()
-                if (session == null) {
-                    ReviewOps.notify(project, "No active Claude Code session for this project", com.intellij.notification.NotificationType.WARNING)
-                } else {
-                    ReviewOps.clearCompletedChapters(project, session)
-                }
-            },
-        )
+                { p -> ReviewOps.clearTask(project, p.session, p.id, p.title) }))
+            addSeparator()
+            add(reviewNavBar.spotlightAction())
+            add(action("Refresh", AllIcons.Actions.Refresh) { rebuild(force = true) })
+        }
         val tb = ActionManager.getInstance().createActionToolbar("ClaudeObservatoryOverview", group, true)
         tb.targetComponent = fleetTree
         overviewToolbar = tb
@@ -576,9 +572,6 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
     // Kotlin port of VS Code's canonical multitaskFilter (pinned by MultitaskFilterTest, no drift).
     private fun agentActive(a: RunningAgent) = MultitaskFilter.agentActive(a)
 
-    private fun hiddenCount(res: MultitaskResult?): Int =
-        MultitaskFilter.hiddenCount(res, dismissedAgents, dismissedWorkflows)
-
     private fun activeOnlyToggle(): ToggleAction = object : ToggleAction(
         "Active Only",
         "Show only active agents (working / awaiting input / awaiting permission, or with an active subagent) and running workflows",
@@ -590,44 +583,6 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         override fun isSelected(e: AnActionEvent) = activeOnly
         override fun setSelected(e: AnActionEvent, state: Boolean) {
             activeOnly = state
-            repaintNav(lastResult)
-        }
-    }
-
-    private fun clearCompletedAction(): AnAction = object : AnAction(
-        "Clear Completed",
-        "Hide completed agents (idle / done / errored, no active subagent) and finished workflows — a dismiss, never a delete",
-        AllIcons.Actions.GC,
-    ), DumbAware {
-        override fun getActionUpdateThread() = ActionUpdateThread.EDT
-        override fun update(e: AnActionEvent) {
-            val res = lastResult
-            e.presentation.isEnabled = res != null && (
-                res.agents.any { !agentActive(it) && it.session !in dismissedAgents } ||
-                    res.workflows.any { !it.running && it.id !in dismissedWorkflows })
-        }
-
-        override fun actionPerformed(e: AnActionEvent) {
-            val res = lastResult ?: return
-            res.agents.filter { !agentActive(it) }.forEach { dismissedAgents.add(it.session) }
-            res.workflows.filter { !it.running }.forEach { dismissedWorkflows.add(it.id) }
-            repaintNav(res)
-        }
-    }
-
-    private fun showHiddenAction(): AnAction = object : AnAction(
-        "Show Hidden", "Un-dismiss everything cleared with Clear Completed", AllIcons.Actions.Show,
-    ), DumbAware {
-        override fun getActionUpdateThread() = ActionUpdateThread.EDT
-        override fun update(e: AnActionEvent) {
-            val n = hiddenCount(lastResult)
-            e.presentation.isEnabledAndVisible = n > 0
-            e.presentation.text = "Show Hidden ($n)"
-        }
-
-        override fun actionPerformed(e: AnActionEvent) {
-            dismissedAgents.clear()
-            dismissedWorkflows.clear()
             repaintNav(lastResult)
         }
     }

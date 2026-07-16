@@ -167,6 +167,8 @@
   .ovbar .g{display:flex;gap:7px;align-items:center;white-space:nowrap}
   .ovbar .sep{width:1px;height:12px;background:var(--line)}
   .ovbar .on{color:var(--ink-soft)}
+  /* semantic tints, matching the editors' color-coded nav bars: keep/accept green, undo/reject red, nav chevrons blue */
+  .ovbar .tk{color:var(--kept)} .ovbar .tu{color:var(--deleted)} .ovbar .nvb{color:#4c8bf5} .ovbar .ts{color:#9a6ac2}
   .ovbar button{border:1px solid var(--accent);background:var(--surface);color:var(--ink);border-radius:999px;padding:1px 10px;font-family:var(--sans);font-size:.72rem;cursor:pointer}
   .ovbar button.hint{animation:pulse 1.6s ease-in-out infinite}
   .ovwrap{display:grid;grid-template-columns:170px 1fr;flex:1}
@@ -630,7 +632,7 @@
             else html+='<span class="a">✓ Keep</span><button id="lens-undo" class="hint">↩ Undo</button>';
             html+='<span class="a">💬 Chat</span><span class="a">⧉ View diff</span>';
           }else{
-            html+='<span class="a">✓ Keep</span><span class="a">↩ Undo</span><span class="a">💬 Chat</span><span class="a">⧉ View diff</span>';
+            html+='<span class="a">✓ Keep</span><span class="a">↩ Undo</span><span class="a">Chat</span><span class="a">⧉ View diff</span>';
           }
           html+='</div>';
         }
@@ -683,10 +685,10 @@
       var fIdx=pendingFiles.indexOf(curFile);
       var fileCounter=pendingFiles.length?('File '+(fIdx>=0?fIdx+1:'–')+'/'+pendingFiles.length):'';
       var diffCounter=(ed!=='seed'&&statusOf(EDITS[ed-1].id,step,res)==='pending')?'Diff 1/1':'';
-      var bar='<span class="g">🔬 demo-session</span><span class="sep"></span>';
-      if(fileCounter) bar+='<span class="g">◀ <span class="on">'+fileCounter+'</span> ▶</span><span class="sep"></span>';
-      if(diffCounter) bar+='<span class="g">▲ <span class="on">'+diffCounter+'</span> ▼</span><span class="sep"></span>';
-      bar+='<span class="g">✓ ↩ · ✓✓ ✗ 🧹 · 💡 🔍</span>';
+      var bar='<span class="g"><span class="ts">Search</span> · 🔬 demo-session</span><span class="sep"></span>';
+      if(diffCounter) bar+='<span class="g"><span class="nvb">▲</span> <span class="on">'+diffCounter+'</span> <span class="nvb">▼</span> <span class="tk">✓ Keep</span> <span class="tu">↩ Undo</span></span><span class="sep"></span>';
+      if(fileCounter) bar+='<span class="g"><span class="nvb">◀</span> <span class="on">'+fileCounter+'</span> <span class="nvb">▶</span> <span class="tk">✓✓ Accept File</span> <span class="tu">✗ Reject File</span></span><span class="sep"></span>';
+      bar+='<span class="g ts">Spotlight</span>';
       if(st.gate==='acceptall'&&!res[step]) bar+='<span class="sep"></span><button id="ov-acceptall" class="hint">✓ Accept all</button>';
       el('ovbar').innerHTML=bar;
       var ab=el('ov-acceptall');

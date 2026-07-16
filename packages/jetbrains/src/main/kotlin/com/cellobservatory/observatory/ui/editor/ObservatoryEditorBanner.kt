@@ -2,6 +2,7 @@ package com.cellobservatory.observatory.ui.editor
 
 import com.cellobservatory.observatory.services.ObservatoryService
 import com.cellobservatory.observatory.ui.Icons
+import com.cellobservatory.observatory.ui.NavTint
 import com.cellobservatory.observatory.ui.Navigate
 import com.cellobservatory.observatory.ui.ReviewOps
 import com.intellij.openapi.fileEditor.FileEditor
@@ -54,7 +55,7 @@ class ObservatoryEditorBanner : EditorNotificationProvider, DumbAware {
             )
             if (q != null) service.setFilter(q)
         }.apply {
-            setIcon(com.intellij.icons.AllIcons.Actions.Find)
+            setIcon(NavTint.SEARCH)
             toolTipText = "Search edits"
         }
         panel.createActionLabel("↑") {
@@ -90,7 +91,7 @@ class ObservatoryEditorBanner : EditorNotificationProvider, DumbAware {
                 if (resolved > 0) ReviewOps.clearResolved(project, s, resolved) else ReviewOps.notify(project, "No resolved edits to clear")
             }
         }.apply {
-            setIcon(com.intellij.icons.AllIcons.Actions.GC)
+            setIcon(NavTint.CLEAR)
             toolTipText = "Clear resolved (kept/reverted) edits"
         }
         // Spotlight/heatmap toggle — the same lightbulb icon the nav bar uses, so it reads identically
@@ -98,7 +99,7 @@ class ObservatoryEditorBanner : EditorNotificationProvider, DumbAware {
         panel.createActionLabel("Spotlight") {
             com.cellobservatory.observatory.ui.inline.InlineOverlay.getInstance(project).toggleHeatmap()
         }.apply {
-            setIcon(com.intellij.icons.AllIcons.Actions.IntentionBulb)
+            setIcon(NavTint.SPOTLIGHT)
             toolTipText = "Toggle file heatmap (spotlight Claude's edits)"
         }
         return panel

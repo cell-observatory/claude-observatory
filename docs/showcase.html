@@ -593,7 +593,7 @@
                 <p>One review bar appears on four surfaces: the status bar, the editor's title bar, a floating bubble over the live edit, and the Overview panel's title bar.</p></div>
               <div class="panel"><div class="mock">
                 <div class="mh">Review bar · four surfaces</div>
-                <div><span class="a">🔬 3</span> <span class="d">·</span> ▲ Diff 1/2 ▼ <span class="d">·</span> ◀ File 1/3 ▶ <span class="d">·</span> ✓ ↩ ✓✓ ✕ <span class="d">·</span> 🧹 💡 🔍</div>
+                <div><span class="a">🔬 3</span> <span class="d">·</span> Search <span class="d">·</span> ▲ Diff 1/2 ▼ <span class="d">·</span> ◀ File 1/3 ▶ <span class="d">·</span> ✓ Keep ↩ Undo ✓✓ Accept File ✕ Reject File <span class="d">·</span> Clear Resolved · Spotlight</div>
                 <div class="d" style="margin-top:6px">Status bar · Editor title · Review bubble · Overview title bar</div>
               </div></div>
             </div>
@@ -1020,9 +1020,9 @@
             // Self-running: the scripted action renders as a control the DEMO presses, not the visitor.
             if(STEPS[step].gate==='keep') html+='<span class="fakebtn" id="sd-lens-keep">✓ Keep</span><span class="a">↩ Undo</span>';
             else html+='<span class="a">✓ Keep</span><span class="fakebtn" id="sd-lens-undo">↩ Undo</span>';
-            html+='<span class="a">💬 Chat</span><span class="a">⧉ View diff</span>';
+            html+='<span class="a">Chat</span><span class="a">⧉ View diff</span>';
           }else{
-            html+='<span class="a">✓ Keep</span><span class="a">↩ Undo</span><span class="a">💬 Chat</span><span class="a">⧉ View diff</span>';
+            html+='<span class="a">✓ Keep</span><span class="a">↩ Undo</span><span class="a">Chat</span><span class="a">⧉ View diff</span>';
           }
           html+='</div>';
         }

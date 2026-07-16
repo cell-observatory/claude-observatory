@@ -63,8 +63,8 @@ object Diffs {
                 request.putUserData(
                     DiffUserDataKeys.CONTEXT_ACTIONS,
                     listOf(
-                        action("Keep #${rec.id}", AllIcons.Actions.Checked) { ReviewOps.keep(project, session, rec.id) },
-                        action("Undo #${rec.id}", AllIcons.Actions.Rollback) { ReviewOps.undoOrRedo(project, session, rec, redo = false) },
+                        action("Keep #${rec.id}", NavTint.KEEP) { ReviewOps.keep(project, session, rec.id) },
+                        action("Undo #${rec.id}", NavTint.UNDO) { ReviewOps.undoOrRedo(project, session, rec, redo = false) },
                         action("Chat About #${rec.id}", AllIcons.General.Balloon) { ReviewOps.chatAbout(project, session, rec.id) },
                     ),
                 )

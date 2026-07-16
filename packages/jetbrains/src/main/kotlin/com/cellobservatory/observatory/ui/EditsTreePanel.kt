@@ -160,7 +160,7 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
                 is NodeData.Edit -> {
                     val r = node.rec
                     icon = when {
-                        r.kept -> AllIcons.Actions.Checked
+                        r.kept -> NavTint.KEEP
                         r.undone -> AllIcons.Actions.Cancel
                         else -> AllIcons.General.Modified
                     }
@@ -181,22 +181,22 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
 
     private fun buildToolbar(): javax.swing.JComponent {
         val group = DefaultActionGroup(
-            action("Search Edits", AllIcons.Actions.Find) { searchEdits() },
+            action("Search Edits", NavTint.SEARCH) { searchEdits() },
             action("Review Previous Pending Edit", AllIcons.Actions.Back) { reviewPrev() },
             action("Review Next Pending Edit", AllIcons.Actions.Forward) { reviewNext() },
-            action("Accept All Edits", Icons.CheckAll) {
+            action("Accept All Edits", NavTint.ACCEPT_ALL) {
                 withSession { s -> ReviewOps.keepAll(project, s) }
             },
-            action("Revert All Edits", AllIcons.Actions.Rollback) {
+            action("Revert All Edits", NavTint.REVERT_ALL) {
                 withSession { s -> ReviewOps.undoAll(project, s, service().log(), "this session") }
             },
-            fileScopedAction("Accept All Edits in Current File", AllIcons.Actions.Checked) { s, vf ->
+            fileScopedAction("Accept All Edits in Current File", NavTint.ACCEPT_FILE) { s, vf ->
                 ReviewOps.keepAll(project, s, service().log().filter { it.file == vf.path }, vf.name)
             },
-            fileScopedAction("Revert All Edits in Current File", AllIcons.Actions.Cancel) { s, vf ->
+            fileScopedAction("Revert All Edits in Current File", NavTint.REJECT) { s, vf ->
                 ReviewOps.undoAll(project, s, service().log().filter { it.file == vf.path }, vf.name, vf.path)
             },
-            action("Clear Resolved Edits", AllIcons.Actions.GC) {
+            action("Clear Resolved Edits", NavTint.CLEAR) {
                 withSession { s ->
                     val resolved = service().log().count { !it.pending }
                     if (resolved > 0) ReviewOps.clearResolved(project, s, resolved)
@@ -228,10 +228,10 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
         action("Show Diff", AllIcons.Actions.Diff) {
             selectedEdit()?.let { rec -> withSession { s -> Diffs.show(project, s, rec) } }
         },
-        action("Keep", AllIcons.Actions.Checked) {
+        action("Keep", NavTint.KEEP) {
             selectedEdit()?.takeIf { it.pending }?.let { rec -> withSession { s -> ReviewOps.keep(project, s, rec.id) } }
         },
-        action("Undo", AllIcons.Actions.Rollback) {
+        action("Undo", NavTint.UNDO) {
             selectedEdit()?.takeIf { !it.undone }?.let { rec -> withSession { s -> ReviewOps.undoOrRedo(project, s, rec, redo = false) } }
         },
         action("Redo", AllIcons.Actions.Redo) {
@@ -245,26 +245,26 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
                 }
             }
         },
-        action("Keep All in File", Icons.CheckAll) {
+        action("Keep All in File", NavTint.ACCEPT_FILE) {
             selectedFile()?.let { f -> withSession { s -> ReviewOps.keepAll(project, s, f.edits, File(f.file).name) } }
         },
-        action("Undo All in File", AllIcons.Actions.Rollback) {
+        action("Undo All in File", NavTint.REJECT) {
             selectedFile()?.let { f -> withSession { s -> ReviewOps.undoAll(project, s, f.edits, File(f.file).name, f.file) } }
         },
-        action("Clear Resolved in File", AllIcons.Actions.GC) {
+        action("Clear Resolved in File", NavTint.CLEAR) {
             selectedFile()?.let { f ->
                 withSession { s -> ReviewOps.clearResolvedScoped(project, s, f.edits.count { !it.pending }, File(f.file).name, f.file) }
             }
         },
         // Folder-scoped: accept / revert / clear every edit at-or-beneath the selected folder (parity
         // with VS Code's folder-row inline actions; reuses the file-scoped keep/undo plumbing).
-        action("Accept All in Folder", Icons.CheckAll) {
+        action("Accept All in Folder", NavTint.ACCEPT_FILE) {
             selectedFolder()?.let { f -> withSession { s -> ReviewOps.keepAll(project, s, f.edits, f.label) } }
         },
-        action("Revert All in Folder", AllIcons.Actions.Rollback) {
+        action("Revert All in Folder", NavTint.REJECT) {
             selectedFolder()?.let { f -> withSession { s -> ReviewOps.undoAll(project, s, f.edits, f.label, f.path) } }
         },
-        action("Clear Resolved in Folder", AllIcons.Actions.GC) {
+        action("Clear Resolved in Folder", NavTint.CLEAR) {
             selectedFolder()?.let { f ->
                 withSession { s -> ReviewOps.clearResolvedScoped(project, s, f.edits.count { !it.pending }, f.label, f.path) }
             }

@@ -102,8 +102,8 @@ class FileHistoryPanel(private val project: Project) : SimpleToolWindowPanel(tru
 
     private fun buildToolbar(): JComponent {
         val group = DefaultActionGroup(
-            action("Accept All Edits in File", AllIcons.Actions.Checked) { acceptFile() },
-            action("Revert All Edits in File", AllIcons.Actions.Cancel) { revertFile() },
+            action("Accept All Edits in File", NavTint.ACCEPT_FILE) { acceptFile() },
+            action("Revert All Edits in File", NavTint.REJECT) { revertFile() },
             action("Diff Previous Revision", AllIcons.Actions.Diff) { stepRevision(-1) },
             action("Diff Next Revision", AllIcons.Actions.Diff) { stepRevision(1) },
             action("Refresh", AllIcons.Actions.Refresh) { service().refresh() },
@@ -120,16 +120,16 @@ class FileHistoryPanel(private val project: Project) : SimpleToolWindowPanel(tru
         action("Show Diff", AllIcons.Actions.Diff) {
             selectedEdit()?.let { rec -> withSession { s -> Diffs.show(project, s, rec) } }
         },
-        action("Keep", AllIcons.Actions.Checked) {
+        action("Keep", NavTint.KEEP) {
             selectedEdit()?.takeIf { it.pending }?.let { rec -> withSession { s -> ReviewOps.keep(project, s, rec.id) } }
         },
-        action("Undo", AllIcons.Actions.Rollback) {
+        action("Undo", NavTint.UNDO) {
             selectedEdit()?.takeIf { !it.undone }?.let { rec -> withSession { s -> ReviewOps.undoOrRedo(project, s, rec, redo = false) } }
         },
         action("Redo", AllIcons.Actions.Redo) {
             selectedEdit()?.takeIf { it.undone }?.let { rec -> withSession { s -> ReviewOps.undoOrRedo(project, s, rec, redo = true) } }
         },
-        action("Chat About Edit", AllIcons.Actions.IntentionBulb) {
+        action("Chat About Edit", NavTint.CHAT) {
             selectedEdit()?.let { rec -> withSession { s -> ReviewOps.chatAbout(project, s, rec.id) } }
         },
     )
@@ -180,7 +180,7 @@ class FileHistoryPanel(private val project: Project) : SimpleToolWindowPanel(tru
         ) {
             val rec = (value as? DefaultMutableTreeNode)?.userObject as? EditRecord ?: return
             icon = when {
-                rec.kept -> AllIcons.Actions.Checked
+                rec.kept -> NavTint.KEEP
                 rec.undone -> AllIcons.Actions.Cancel
                 else -> AllIcons.General.Modified
             }

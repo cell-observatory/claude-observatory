@@ -5,6 +5,7 @@ import com.cellobservatory.observatory.services.ObservatoryService
 import com.cellobservatory.observatory.services.PlacementsCache
 import com.cellobservatory.observatory.settings.ObservatorySettings
 import com.cellobservatory.observatory.ui.Diffs
+import com.cellobservatory.observatory.ui.NavTint
 import com.cellobservatory.observatory.ui.ReviewOps
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.Disposable
@@ -284,8 +285,8 @@ private class EditGutterRenderer(
 
     // Right-click path: the platform renders this menu natively (reasoning lives on the card).
     override fun getPopupMenuActions(): DefaultActionGroup = DefaultActionGroup(
-        simple("Keep #${rec.id}", AllIcons.Actions.Checked) { ReviewOps.keep(project, session, rec.id) },
-        simple("Undo #${rec.id}", AllIcons.Actions.Rollback) { ReviewOps.undoOrRedo(project, session, rec, redo = false) },
+        simple("Keep #${rec.id}", NavTint.KEEP) { ReviewOps.keep(project, session, rec.id) },
+        simple("Undo #${rec.id}", NavTint.UNDO) { ReviewOps.undoOrRedo(project, session, rec, redo = false) },
         simple("Diff #${rec.id}", AllIcons.Actions.Diff) { Diffs.show(project, session, rec) },
         simple("Chat About #${rec.id}", AllIcons.General.Balloon) { ReviewOps.chatAbout(project, session, rec.id) },
     )

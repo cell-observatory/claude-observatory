@@ -229,11 +229,11 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
 
     private fun buildToolbar(): JComponent {
         val group = DefaultActionGroup(
-            action("Accept All Edits", Icons.CheckAll) { withSession { s -> ReviewOps.keepAll(project, s) } },
-            action("Revert All Edits", AllIcons.Actions.Rollback) {
+            action("Accept All Edits", NavTint.ACCEPT_ALL) { withSession { s -> ReviewOps.keepAll(project, s) } },
+            action("Revert All Edits", NavTint.REVERT_ALL) {
                 withSession { s -> ReviewOps.undoAll(project, s, service().log(), "this session") }
             },
-            action("Clear Resolved Edits", AllIcons.Actions.GC) {
+            action("Clear Resolved Edits", NavTint.CLEAR) {
                 withSession { s ->
                     val resolved = service().log().count { !it.pending }
                     if (resolved > 0) ReviewOps.clearResolved(project, s, resolved) else ReviewOps.notify(project, "No resolved edits to clear")
@@ -251,8 +251,8 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
     }
 
     private fun buildPopupGroup() = DefaultActionGroup(
-        action("Keep", AllIcons.Actions.Checked) { keepSelected() },
-        action("Undo", AllIcons.Actions.Rollback) { undoSelected() },
+        action("Keep", NavTint.KEEP) { keepSelected() },
+        action("Undo", NavTint.UNDO) { undoSelected() },
         action("Open File at Edit", AllIcons.Actions.EditSource) { selectedEdit()?.let { openEdit(it.id) } },
         action("Show Diff", AllIcons.Actions.Diff) { selectedEdit()?.let { diffEdit(it.id) } },
         action("Chat About This Edit", AllIcons.General.Balloon) { selectedEdit()?.let { chatEdit(it.id) } },
@@ -290,7 +290,7 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
                     icon = when (node.status) {
                         "pending" -> AllIcons.General.Modified
                         "undone" -> AllIcons.Actions.Cancel
-                        else -> AllIcons.Actions.Checked
+                        else -> NavTint.KEEP
                     }
                     val ts = node.edits.lastOrNull()?.ts ?: 0L
                     append((if (ts > 0) "${hhmm.format(Date(ts))}  " else "") + File(node.file).name)
@@ -306,7 +306,7 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
                 }
                 is ObservationEdit -> {
                     icon = when (node.status) {
-                        "kept" -> AllIcons.Actions.Checked
+                        "kept" -> NavTint.KEEP
                         "undone" -> AllIcons.Actions.Cancel
                         else -> AllIcons.General.Modified
                     }
