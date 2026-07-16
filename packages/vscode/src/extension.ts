@@ -12,6 +12,7 @@ import * as cp from 'child_process';
 import * as https from 'https';
 import * as os from 'os';
 import * as core from '@claude-observatory/core';
+import { CODICON_STYLE } from './codicon';
 
 const SCHEME = 'claude-edit'; // in-memory before/after blobs for vscode.diff
 
@@ -743,6 +744,59 @@ async function chatAboutEdit(session: string, id: number): Promise<void> {
   );
 }
 
+/** Coerce a chatAction argument into a ChatContextRef. Accepts a bare ref (from the webview messages),
+ *  an Actions action row (→ toolUseId, else its store editId), or a subagent row (→ its agentId). */
+function refFromArg(arg: unknown): core.ChatContextRef | undefined {
+  if (!arg || typeof arg !== 'object') return undefined;
+  const a = arg as {
+    kind?: string;
+    action?: core.ActionRecord;
+    sub?: core.SubagentInfo;
+    toolUseId?: string;
+    editId?: number;
+    agentId?: string;
+    taskId?: string;
+  };
+  if (a.kind === 'action' && a.action)
+    return a.action.toolUseId ? { toolUseId: a.action.toolUseId } : a.action.editId != null ? { editId: a.action.editId } : undefined;
+  if (a.kind === 'subagent' && a.sub) return { agentId: a.sub.agentId };
+  const ref: core.ChatContextRef = {};
+  if (a.toolUseId) ref.toolUseId = a.toolUseId;
+  if (typeof a.editId === 'number') ref.editId = a.editId;
+  if (a.agentId) ref.agentId = a.agentId;
+  if (a.taskId) ref.taskId = a.taskId;
+  return ref.toolUseId || ref.editId != null || ref.agentId || ref.taskId ? ref : undefined;
+}
+
+/** Zero-token chat handoff for ANY action / edit / subagent / task (0.8.0): assemble the ready-to-paste
+ *  prompt in-process via core's `assembleChatContext` (the SAME single-backend function the CLI's
+ *  `chat-context --json` wraps — VS Code calls it directly, JetBrains shells to the CLI), copy it to the
+ *  clipboard, then open the user's Claude sidebar. NEVER calls a model. */
+async function chatAction(ref: core.ChatContextRef): Promise<void> {
+  const session = currentSession();
+  const cwd = workspaceRoot();
+  if (!session || !cwd) return;
+  let prompt = '';
+  try {
+    prompt = core.assembleChatContext(cwd, session, ref);
+  } catch {
+    prompt = '';
+  }
+  if (!prompt.trim()) {
+    vscode.window.showWarningMessage('Claude Observatory: no chat context for that item.');
+    return;
+  }
+  await vscode.env.clipboard.writeText(prompt);
+  for (const cmd of ['claude-vscode.sidebar.open', 'claude-vscode.focus']) {
+    try {
+      await vscode.commands.executeCommand(cmd);
+    } catch {
+      /* Claude Code extension not present — the prompt is still on the clipboard */
+    }
+  }
+  vscode.window.showInformationMessage('Prompt copied — paste (⌘V) into Claude to discuss it.');
+}
+
 /** Keep every pending edit in one file (shared by keepFile and keepOpenFile). Reads the RAW log so it
  *  covers every member of a collapsed review group, not just the reps the tree renders. */
 function keepEditsInFile(session: string, file: string, _edits: core.EditRecord[]): void {
@@ -869,6 +923,88 @@ async function undoAllSession(session: string): Promise<void> {
     `Reverted ${res.undone} edit(s)` +
       (res.conflicts ? ` · ${res.conflicts} conflict(s) left (revert individually to force)` : '') +
       '.'
+  );
+}
+
+// --- Chapter review actions (0.8.0) — the Overview ribbon's per-chip Accept / Reject / Clear.
+// Each resolves the chapter's DISPLAYED edit set (core.reviewEditIds via keepTask/undoTask) — WYSIWYG:
+// the buttons act on exactly the edits the chapter row shows (incl. gap-filled members and the
+// synthetic session chapter), so a partial accept never strands leftovers the buttons can't reach.
+
+/** Accept — keep every PENDING edit displayed under a chapter (task-keep). */
+function keepChapter(session: string, taskId: string): void {
+  const cwd = workspaceRoot();
+  if (!cwd) return;
+  const res = core.keepTask(cwd, session, taskId);
+  vscode.window.showInformationMessage(
+    res.kept ? `Accepted ${res.kept} edit(s) in this chapter.` : 'No pending edits to accept in this chapter.'
+  );
+}
+
+/** Reject — revert every PENDING edit displayed under a chapter, after a confirm + dirty-buffer
+ *  guard (task-undo). Accepted edits are left on disk — revert individually. */
+async function undoChapter(session: string, taskId: string): Promise<void> {
+  const cwd = workspaceRoot();
+  if (!cwd) return;
+  const ids = new Set(core.reviewEditIds(cwd, session, taskId));
+  const targets = core.readLog(session).filter((r) => ids.has(r.id) && r.status === 'pending');
+  if (targets.length === 0) {
+    vscode.window.showInformationMessage('Nothing to reject in this chapter.');
+    return;
+  }
+  const dirty = [...new Set(targets.map((t) => t.file))].filter((f) =>
+    vscode.workspace.textDocuments.some((d) => d.uri.fsPath === f && d.isDirty)
+  );
+  if (dirty.length) {
+    await vscode.window.showWarningMessage(
+      `Save or revert unsaved changes first: ${dirty.map((f) => path.basename(f)).join(', ')}.`,
+      { modal: true }
+    );
+    return;
+  }
+  const choice = await vscode.window.showWarningMessage(
+    `Reject ${targets.length} edit(s) in this chapter? Overlapping edits may conflict.`,
+    { modal: true },
+    'Reject all'
+  );
+  if (choice !== 'Reject all') return;
+  const res = core.undoTask(cwd, session, taskId);
+  vscode.window.showInformationMessage(
+    `Reverted ${res.undone} edit(s) in this chapter` +
+      (res.conflicts ? ` · ${res.conflicts} conflict(s) left (revert individually to force)` : '') +
+      '.'
+  );
+}
+
+/** Clear — drop the RESOLVED (kept/undone) edits displayed under a chapter (task-clear). */
+function clearChapter(session: string, taskId: string): void {
+  const cwd = workspaceRoot();
+  if (!cwd) return;
+  const res = core.clearResolvedIds(session, core.reviewEditIds(cwd, session, taskId));
+  vscode.window.showInformationMessage(
+    res.cleared ? `Cleared ${res.cleared} resolved edit(s) in this chapter.` : 'No resolved edits to clear in this chapter.'
+  );
+}
+
+/** Clear the resolved edits of EVERY settled chapter (all kept — none pending, none undone), the
+ *  ribbon's "Clear completed chapters" affordance (task-clear --completed). */
+function clearCompletedChapters(session: string): void {
+  const cwd = workspaceRoot();
+  if (!cwd) return;
+  const map = core.buildChangeMap(cwd, session, { root: cwd });
+  // Chapters are total — iterating them (not the strict rollup) covers gap-filled members and the
+  // synthetic session chapter once every displayed edit is kept.
+  const settled = map.chapters.filter((ch) => ch.edits > 0 && ch.pending === 0 && ch.undone === 0);
+  if (settled.length === 0) {
+    vscode.window.showInformationMessage('No completed chapters to clear.');
+    return;
+  }
+  let cleared = 0;
+  for (const ch of settled) cleared += core.clearResolvedIds(session, core.reviewEditIds(cwd, session, ch.id)).cleared;
+  vscode.window.showInformationMessage(
+    cleared
+      ? `Cleared ${cleared} resolved edit(s) across ${settled.length} completed chapter(s).`
+      : 'No resolved edits to clear.'
   );
 }
 
@@ -1148,11 +1284,15 @@ const MD_SCHEME = 'claude-observation'; // virtual markdown docs
 
 // One "Insights" view (was two): a "Next steps" group (heuristic suggestions + opt-in Claude) and an
 // "Observations" group (one row per edit — reasoning surfaced inline, click opens the combined report).
+// Observations (0.8.0, Timeline folded in) is timeline-STYLE: a recap on top, then the edit feed with
+// adjacent same-file edits coalesced into ×N runs (reusing the Timeline's EditNode/TlRunNode so every
+// shared Keep/Undo/Open command Just Works), then the Next-steps group at the end.
 type ObsNode =
   | { kind: 'recap' }
-  | { kind: 'obs'; rec: core.EditRecord }
   | { kind: 'steps' }
-  | { kind: 'suggestion'; text: string };
+  | { kind: 'suggestion'; text: string }
+  | EditNode
+  | TlRunNode;
 
 function firstLine(s: string): string {
   const l = s.split('\n').find((x) => x.trim()) ?? '';
@@ -1177,22 +1317,35 @@ class ObservationsProvider implements vscode.TreeDataProvider<ObsNode> {
   }
   getChildren(node?: ObsNode): ObsNode[] {
     const session = currentSession();
-    if (!session || node) return [];
+    if (!session) return [];
+    // A run expands to its per-edit rows (each with Keep/Undo + reasoning), like the Timeline did.
+    if (node) {
+      if (node.kind === 'tlrun') return node.edits.map((rec): EditNode => ({ kind: 'edit', rec }));
+      return [];
+    }
     this.memo.clear(); // one memory computation per file per render cycle
-    // A one-line "what were you doing" recap on top, then one observation row per edit (newest first),
-    // then a "Next steps" group (Claude's open to-dos + heuristics) — parity with the CLI `insights`
-    // view and the JetBrains Observations panel.
+    // Timeline-STYLE Observations (0.8.0): a one-line recap on top, then the edit feed newest-first with
+    // adjacent same-file edits coalesced into ×N runs (each edit carrying Claude's reasoning inline),
+    // then the still-open "Next steps" at the end — parity with `observations --json` and the JetBrains
+    // Observations panel. The coalescing mirrors the (now folded-in) Timeline view exactly.
     const cwd = workspaceRoot();
+    const log = cachedLog(session).slice().sort((a, b) => b.ts - a.ts); // newest first
+    const feed: ObsNode[] = [{ kind: 'recap' }];
+    for (let i = 0; i < log.length; ) {
+      let j = i + 1;
+      while (j < log.length && log[j].file === log[i].file) j++; // maximal same-file run
+      const run = log.slice(i, j);
+      feed.push(run.length === 1 ? { kind: 'edit', rec: run[0], feed: true } : { kind: 'tlrun', file: run[0].file, edits: run });
+      i = j;
+    }
     const suggestions = [
       ...new Set([...(cwd ? core.transcriptSuggestions(cwd, session) : []), ...core.heuristicSuggestions(session)]),
     ];
-    return [
-      { kind: 'recap' },
-      ...cachedLog(session).slice().sort((a, b) => b.ts - a.ts).map((rec) => ({ kind: 'obs' as const, rec })),
-      ...(suggestions.length
-        ? [{ kind: 'steps' as const }, ...suggestions.map((text) => ({ kind: 'suggestion' as const, text }))]
-        : []),
-    ];
+    if (suggestions.length) {
+      feed.push({ kind: 'steps' });
+      for (const text of suggestions) feed.push({ kind: 'suggestion', text });
+    }
+    return feed;
   }
   /** Zero-token: Claude Code's own session title, or a Claude-refined recap once generated. */
   private recapText(): string {
@@ -1233,30 +1386,176 @@ class ObservationsProvider implements vscode.TreeDataProvider<ObsNode> {
       item.command = { command: 'claudeObservatory.showSuggestions', title: 'Suggestions' };
       return item;
     }
-    // One row per edit; click opens the single combined report (summary + reasoning + flags + analysis).
+    // Coalesced ×N run: adjacent same-file edits as one row (combined delta + the newest edit's reasoning).
+    // Reuses the `file` context value so the run gets Keep-all / Undo-all / Clear / Open-file, like a file.
+    if (node.kind === 'tlrun') {
+      const newest = node.edits[0];
+      const d = new Date(newest.ts);
+      const hhmm = [d.getHours(), d.getMinutes()].map((x) => String(x).padStart(2, '0')).join(':');
+      let added = 0;
+      let removed = 0;
+      if (session)
+        for (const e of node.edits) {
+          const dd = cachedDelta(session, e);
+          added += dd.added;
+          removed += dd.removed;
+        }
+      const reasoning = cwd && session ? cachedTranscript(cwd, session).reasoning.get(newest.id) : undefined;
+      const summary = reasoning ? firstLine(reasoning) : session ? core.summarize(session, newest) : '';
+      const item = new vscode.TreeItem(`${hhmm}  ${path.basename(node.file)}  ×${node.edits.length}`, vscode.TreeItemCollapsibleState.Collapsed);
+      item.description = `+${added} −${removed}${summary ? ` · ${summary}` : ''}`;
+      item.tooltip = `${node.file}\n${node.edits.length} edits · +${added} −${removed}${reasoning ? `\n\n${reasoning}` : ''}`;
+      item.iconPath = aggregateIcon(node.edits);
+      item.contextValue = 'file';
+      item.resourceUri = vscode.Uri.file(node.file);
+      return item;
+    }
+    // One observation row per edit — Claude's reasoning inline, cross-session file memory + flags on
+    // hover. Click opens the single combined report (summary + reasoning + flags + analysis).
     const rec = node.rec;
+    const { added, removed } = session ? cachedDelta(session, rec) : { added: 0, removed: 0 };
+    const d = new Date(rec.ts);
+    const hhmm = [d.getHours(), d.getMinutes()].map((n) => String(n).padStart(2, '0')).join(':');
     const flags = session ? core.flagsFor(session, rec, cachedLog(session)) : [];
     const reasoning = cwd && session ? cachedTranscript(cwd, session).reasoning.get(rec.id) : undefined;
+    const summary = reasoning ? firstLine(reasoning) : session ? core.summarize(session, rec) : '';
     // Cross-session memory: this file's review track record sharpens the observation over time.
     const mem = this.mem(rec.file);
     const risky = core.isRiskyFile(mem);
     const history = core.memorySummary(mem);
     const warn = risky || flags.some((f) => f.level === 'warn');
-    const item = new vscode.TreeItem(`#${rec.id}  ${session ? core.summarize(session, rec) : ''}`, vscode.TreeItemCollapsibleState.None);
-    item.description = reasoning ? firstLine(reasoning) : flags.length ? `${flags.length} flag${flags.length === 1 ? '' : 's'}` : '';
-    item.iconPath = new vscode.ThemeIcon(warn ? 'warning' : 'eye', warn ? new vscode.ThemeColor('charts.yellow') : undefined);
+    // Top-level (single-edit run) rows lead with `HH:MM file`; run children lead with `#id` (time in desc).
+    const isFeed = node.feed === true;
+    let label = isFeed ? `${hhmm}  ${path.basename(rec.file)}` : `#${rec.id}`;
+    if (rec.status === 'undone') label = strike(label);
+    const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.None);
+    const timePart = isFeed ? '' : `${hhmm} · `;
+    item.description = `${timePart}+${added} −${removed}${summary ? ` · ${summary}` : ''}`;
+    item.iconPath = warn ? new vscode.ThemeIcon('warning', new vscode.ThemeColor('charts.yellow')) : statusIcon(rec.status);
     item.tooltip = [
       reasoning ? `💭 ${reasoning}` : '',
       ...flags.map((f) => `${f.level === 'warn' ? '⚠' : 'ℹ'} ${f.message}`),
       risky ? `⚠ history: edits to this file get reverted often (${mem.undone} of ${mem.kept + mem.undone} verdicts) — review carefully` : '',
       history ? `🧠 ${history}` : '',
+      `${rec.tool} · ${rec.status} · ${d.toLocaleTimeString()}`,
       'Click to open the full report.',
     ]
       .filter(Boolean)
       .join('\n');
     item.command = { command: 'claudeObservatory.showObservation', title: 'Observation', arguments: [rec.id] };
-    item.contextValue = 'observation';
+    // Reuse the shared edit/editUndone context menus (Keep / Undo / Redo / Chat / Open file).
+    item.contextValue = rec.status === 'undone' ? 'editUndone' : 'edit';
     item.resourceUri = editItemUri(rec); // grey kept/undone observations, matching the other views
+    return item;
+  }
+}
+
+// --- Actions timeline (0.8.0 round 3) — the session's tool-call feed, MOVED out of Multitasking into
+// the Observations panel as its second tab. Timeline-STYLE like Observations: collapsible category
+// subsections (Edits · Commands · Reads · Searches · Egress · To-dos), each action TIMESTAMPED; an
+// edit-action drills into its review. Backed by the SAME core aggregation the CLI's multitask uses
+// (buildActionGroups minus the Subagents category — those are the Overview fleet's rows — + egress).
+type ActNode =
+  | { kind: 'agroup'; label: string; count: number; errors: number; icon: string; actions: core.ActionRecord[] }
+  | { kind: 'egroup'; channels: core.EgressChannel[] }
+  | { kind: 'arow'; rec: core.ActionRecord }
+  | { kind: 'erow'; ch: core.EgressChannel };
+
+/** Category → codicon for the timeline's collapsible subsection headers + rows. */
+const ACTION_ICON: Record<string, string> = {
+  edit: 'edit', exec: 'terminal', read: 'file', search: 'search', web: 'globe',
+  agent: 'organization', todo: 'checklist', mcp: 'plug', meta: 'gear', other: 'circle-small',
+};
+
+class ActionsProvider implements vscode.TreeDataProvider<ActNode> {
+  private readonly _c = new vscode.EventEmitter<void>();
+  readonly onDidChangeTreeData = this._c.event;
+  view?: vscode.TreeView<ActNode>;
+  refresh(): void {
+    this._c.fire();
+    if (this.view) {
+      const session = currentSession();
+      this.view.description = session ? `session ${shortId(session)}` : undefined;
+    }
+  }
+  /** Curated groups (Subagents dropped — they're the Overview fleet) + the egress sub-report, from core. */
+  private groups(): { groups: core.ActionGroup[]; egress: core.EgressChannel[] } {
+    const session = currentSession();
+    const cwd = workspaceRoot();
+    if (!session || !cwd) return { groups: [], egress: [] };
+    const actions = core.parseActions(cwd, session);
+    return {
+      groups: core.buildActionGroups(actions).filter((g) => g.category !== 'agent'),
+      egress: core.buildEgressReport(actions),
+    };
+  }
+  getChildren(node?: ActNode): ActNode[] {
+    if (!node) {
+      const { groups, egress } = this.groups();
+      const feed: ActNode[] = groups.map((g): ActNode => ({
+        kind: 'agroup', label: g.label, count: g.count, errors: g.errors,
+        icon: ACTION_ICON[g.category] ?? 'circle-small', actions: g.actions,
+      }));
+      if (egress.length) feed.push({ kind: 'egroup', channels: egress });
+      return feed;
+    }
+    if (node.kind === 'agroup') return node.actions.slice().reverse().map((rec): ActNode => ({ kind: 'arow', rec })); // newest-first
+    if (node.kind === 'egroup') return node.channels.map((ch): ActNode => ({ kind: 'erow', ch }));
+    return [];
+  }
+  getTreeItem(node: ActNode): vscode.TreeItem {
+    if (node.kind === 'agroup') {
+      // Collapsed by default — the panel opens as a compact list of category headers; expand on demand.
+      const item = new vscode.TreeItem(node.label, vscode.TreeItemCollapsibleState.Collapsed);
+      const shown = node.actions.length < node.count ? `${node.actions.length} of ${node.count}` : `${node.count}`;
+      item.description = `${shown}${node.errors ? ` · ${node.errors} err` : ''}`;
+      item.iconPath = new vscode.ThemeIcon(node.icon);
+      item.contextValue = 'actionGroup';
+      return item;
+    }
+    if (node.kind === 'egroup') {
+      const item = new vscode.TreeItem('Egress', vscode.TreeItemCollapsibleState.Collapsed);
+      item.description = `${node.channels.length}`;
+      item.iconPath = new vscode.ThemeIcon('radio-tower');
+      item.contextValue = 'actionGroup';
+      return item;
+    }
+    if (node.kind === 'erow') {
+      const ch = node.ch;
+      const item = new vscode.TreeItem(ch.target, vscode.TreeItemCollapsibleState.None);
+      item.description = `${ch.kind} · ${ch.scope}${ch.count > 1 ? ` ×${ch.count}` : ''}`;
+      item.iconPath = new vscode.ThemeIcon(
+        ch.scope === 'remote' ? 'radio-tower' : 'plug',
+        ch.scope === 'remote' ? new vscode.ThemeColor('charts.red') : undefined
+      );
+      item.tooltip = `${ch.kind} egress → ${ch.target} (${ch.scope})`;
+      return item;
+    }
+    // One action row — timestamped, timeline-style; an edit-action drills into its review (viewChanges).
+    const rec = node.rec;
+    const d = new Date(rec.ts);
+    const hhmm = rec.ts ? [d.getHours(), d.getMinutes()].map((x) => String(x).padStart(2, '0')).join(':') : '--:--';
+    const edit = rec.editId != null;
+    const item = new vscode.TreeItem(`${hhmm}  ${rec.tool}`, vscode.TreeItemCollapsibleState.None);
+    const risk = rec.risk ? (rec.risk.level === 'high' ? ' · ⚠ HIGH' : ' · ⚠ med') : '';
+    item.description = `${rec.target}${rec.isError ? ' · error' : ''}${risk}`;
+    item.tooltip = [
+      `${rec.tool}${rec.detail ? ` · ${rec.detail}` : ''}`,
+      rec.target,
+      rec.reasoning ? `💭 ${rec.reasoning}` : '',
+      rec.isError ? '⚠ errored' : '',
+      edit ? 'Click to review this edit.' : '',
+      rec.ts ? d.toLocaleTimeString() : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
+    item.iconPath = rec.isError
+      ? new vscode.ThemeIcon('error', new vscode.ThemeColor('charts.red'))
+      : new vscode.ThemeIcon(edit ? 'edit' : ACTION_ICON[rec.category] ?? 'circle-small');
+    if (edit) {
+      item.command = { command: 'claudeObservatory.viewChanges', title: 'Review edit', arguments: [rec.editId] };
+      item.contextValue = 'actionEdit';
+    }
     return item;
   }
 }
@@ -1541,151 +1840,19 @@ function statsData(s: core.StatsResult): unknown {
 
 // The webview client. Plain ES5 concatenation on purpose (no template literals / no ${…}) so this can
 // live inside a TS template literal without escaping — the only interpolation is the script nonce.
-const CHANGEMAP_SCRIPT = `
-(function(){
-  "use strict";
-  var vscode=acquireVsCodeApi();
-  var DATA=null, AREA='churn', BRUSH=null, MOD=null, ROWS=[], PAL={};
-  var tip=document.getElementById('cm-tip');
 
-  function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-  function readPal(){ var cs=getComputedStyle(document.documentElement); function v(n,d){ return (cs.getPropertyValue(n)||'').trim()||d; }
-    PAL={ pending:v('--cm-pending','#d9a441'), kept:v('--cm-kept','#3fb950'), reverted:v('--cm-reverted','#9aa0aa'), risk:v('--cm-risk','#e5534b'), agent:v('--cm-agent','#9a6ac2'), accent:v('--cm-accent','#4c8bf5') }; }
-  // Rollups (per-file / per-module), the worst-unreviewed-wins status precedence, and module labels
-  // are all computed ONCE in core and arrive on the payload — this client only renders them, exactly
-  // like the JetBrains panel does. See core/changemap.ts. Do not re-aggregate here.
-  function colorOf(st){ return st==='pending'?PAL.pending:(st==='undone'?PAL.reverted:PAL.kept); }
-  // Area weight is the one legitimately render-time choice (the ± lines / count toggle).
-  function weight(o){ return AREA==='churn' ? Math.max(1,o.churn) : o.cnt; }
-  function modLabel(m){ var ms=DATA.modules; for(var i=0;i<ms.length;i++) if(ms[i].module===m) return ms[i].label; return m; }
-  function inChapter(o){ return !BRUSH || o.chapters.indexOf(BRUSH)>=0; }
-  // core sorts churn-desc; only re-sort when the toggle switches the metric.
-  function rankedFiles(){ var fs=DATA.files.slice(); if(AREA!=='churn') fs.sort(function(a,b){ return weight(b)-weight(a) || a.rel.localeCompare(b.rel); }); return fs; }
-  function rankedModules(){ var ms=DATA.modules.slice(); if(AREA!=='churn') ms.sort(function(a,b){ return weight(b)-weight(a) || a.module.localeCompare(b.module); }); return ms; }
-
-  function visible(f){ if(!inChapter(f)) return false; if(MOD!==null && f.moduleLabel!==MOD) return false; return true; }
-
-  function renderChips(){ var s=DATA.summary, reviewed=s.kept+s.undone, total=s.pending+reviewed, pct=total?Math.round(reviewed/total*100):0;
-    document.getElementById('cm-chips').innerHTML=
-      '<span class="cm-chip"><b>'+s.units+'</b> edits</span>'+
-      (s.pending?'<span class="cm-chip"><b style="color:'+PAL.pending+'">'+s.pending+'</b>⏳</span>':'')+
-      (s.kept?'<span class="cm-chip"><b style="color:'+PAL.kept+'">'+s.kept+'</b>✓</span>':'')+
-      (s.undone?'<span class="cm-chip"><b>'+s.undone+'</b>↩</span>':'')+
-      '<span class="cm-chip"><b>'+pct+'%</b></span>'+
-      (s.subagents?'<span class="cm-chip"><b style="color:'+PAL.agent+'">'+s.subagents+'</b>ag</span>':'')+
-      (s.errors?'<span class="cm-chip"><b style="color:'+PAL.risk+'">'+s.errors+'</b>err</span>':'');
-    var se=document.getElementById('cm-session'); se.textContent=(s.session||'—').slice(0,8); se.title='Session '+(s.session||'');
-  }
-
-  function renderChaps(){ var host=document.getElementById('cm-chaps');
-    if(!DATA.chapters||!DATA.chapters.length){ host.style.display='none'; host.innerHTML=''; return; }
-    host.style.display='flex'; var h='';
-    for(var i=0;i<DATA.chapters.length;i++){ var c=DATA.chapters[i];
-      h+='<button class="cm-chap'+(BRUSH===c.id?' on':'')+'" data-ch="'+c.id+'" title="'+esc(c.title)+' — '+(c.edits||0)+' edit(s) · '+c.status+'">'+
-        '<span class="cm-cr"><span class="cm-cg '+c.status+'"></span><span class="cm-ci">'+(c.index+1)+'</span>'+
-        (c.agent?'<span class="cm-ca">●</span>':'')+
-        '<span class="cm-ce">'+(c.edits?c.edits+'e':'')+'</span></span>'+
-        '<span class="cm-ct">'+esc(c.title)+'</span>'+
-        '</button>';
-    }
-    host.innerHTML=h;
-    var bs=host.querySelectorAll('.cm-chap');
-    for(var b=0;b<bs.length;b++) bs[b].addEventListener('click', function(){ var id=this.getAttribute('data-ch'); BRUSH=(BRUSH===id)?null:id; paint(); });
-  }
-
-  function renderStrip(){ var mods=rankedModules();
-    // Equal-width segments — one readable, clickable chip per module. (Proportion-by-churn made a
-    // dominant file's module swallow the strip and shrink the rest to invisible slivers; the per-file
-    // magnitude still lives in the ledger below.) The tooltip keeps the exact churn/edits/files.
-    var pct = mods.length ? 100/mods.length : 100;
-    var h='';
-    for(var j=0;j<mods.length;j++){ var m=mods[j];
-      var dim=!inChapter(m), sel=(MOD===m.module), op=dim?0.15:((MOD!==null&&!sel)?0.3:0.9);
-      h+='<button class="cm-sg'+(sel?' sel':'')+'" data-mod="'+esc(m.module)+'" style="width:'+pct+'%;background:'+colorOf(m.status)+';opacity:'+op+'" title="'+esc(m.label)+' · '+weight(m)+(AREA==='churn'?' lines':' edits')+' · '+m.files+' file(s)">'+
-        '<span class="cm-sl">'+esc(m.label)+'</span></button>';
-    }
-    var host=document.getElementById('cm-strip'); host.innerHTML=h;
-    var bs=host.querySelectorAll('.cm-sg');
-    for(var b=0;b<bs.length;b++) bs[b].addEventListener('click', function(){ var m=this.getAttribute('data-mod'); MOD=(MOD===m)?null:m; paint(); });
-  }
-
-  function renderLedger(){
-    var files=rankedFiles(), shown=[];
-    for(var i=0;i<files.length;i++) if(visible(files[i])) shown.push(files[i]);
-    ROWS=shown;
-    var max=0; for(var j=0;j<shown.length;j++){ var wj=weight(shown[j]); if(wj>max) max=wj; } if(!max) max=1;
-    var h='';
-    for(var k=0;k<shown.length;k++){ var f=shown[k], w=Math.max(2, weight(f)/max*100);
-      h+='<button class="cm-row" data-idx="'+k+'">'+
-        '<span class="cm-dot" style="background:'+colorOf(f.status)+'"></span>'+
-        '<span class="cm-fn">'+esc(f.file)+(f.agent?'<span class="cm-ag">●</span>':'')+(f.risk?'<span class="cm-rk">⌐</span>':'')+'</span>'+
-        '<span class="cm-md">'+esc(f.moduleLabel)+'</span>'+
-        '<span class="cm-bar"><span class="cm-fill" style="width:'+w+'%;background:'+colorOf(f.status)+'"></span></span>'+
-        '<span class="cm-n">'+(AREA==='churn'?('+'+f.churn):(f.cnt+'e'))+'</span>'+
-        '<span class="cm-pd">'+(f.pending?('<span style="color:'+PAL.pending+'">'+f.pending+'⏳</span>'):('<span style="color:'+PAL.kept+'">✓</span>'))+'</span>'+
-        '</button>';
-    }
-    var host=document.getElementById('cm-ledger');
-    host.innerHTML=h||'<div class="cm-none">nothing matches this filter</div>';
-    var rs=host.querySelectorAll('.cm-row');
-    for(var r=0;r<rs.length;r++){
-      rs[r].addEventListener('click', function(){ var f=ROWS[+this.getAttribute('data-idx')]; if(f&&f.maxId>=0){ vscode.postMessage({type:'openEdit', id:f.maxId}); document.getElementById('cm-readout').innerHTML='→ <b>open diff</b> · '+esc(f.file)+' (edit #'+f.maxId+')'; } });
-      rs[r].addEventListener('mousemove', function(ev){ showTip(ev, ROWS[+this.getAttribute('data-idx')]); });
-      rs[r].addEventListener('mouseleave', hideTip);
-    }
-  }
-
-  function tipHtml(f){ var cls=f.classes||[];
-    var clsline=cls.length? cls.slice(0,4).join(', ')+(cls.length>4?' +'+(cls.length-4):'') : 'file scope';
-    return '<div class="tf">'+(f.agent?'<span class="ag">●</span> ':'')+esc(f.file)+(f.risk?' <span class="rk">⌐risk</span>':'')+'</div>'+
-      '<div class="tm">'+esc(f.rel)+'</div>'+
-      '<div class="tm">+'+f.churn+' · '+f.cnt+' unit'+(f.cnt===1?'':'s')+' · '+f.kept+'✓ '+f.pending+'⏳ '+f.undone+'↩</div>'+
-      '<div class="tc">'+esc(clsline)+'</div>'+
-      (f.reason?'<div class="tw">“'+esc(f.reason)+'”</div>':'')+
-      (f.risk?'<div class="trk">⚠ '+esc(f.risk)+'</div>':'')+
-      '<div class="ta">click → open the real diff</div>';
-  }
-  function showTip(ev,f){ if(!f) return; tip.innerHTML=tipHtml(f); tip.style.opacity='1';
-    var pad=12, tw=tip.offsetWidth, th=tip.offsetHeight, x=ev.clientX+pad, y=ev.clientY+pad;
-    if(x+tw>window.innerWidth) x=ev.clientX-tw-pad; if(y+th>window.innerHeight) y=ev.clientY-th-pad;
-    tip.style.left=x+'px'; tip.style.top=y+'px'; }
-  function hideTip(){ tip.style.opacity='0'; }
-
-  function updateReadout(){ var ro=document.getElementById('cm-readout'), bits=[];
-    if(BRUSH){ var c=null; for(var i=0;i<DATA.chapters.length;i++) if(DATA.chapters[i].id===BRUSH) c=DATA.chapters[i];
-      if(c) bits.push('chapter <b>'+esc((c.index+1)+' · '+c.title)+'</b>'); }
-    if(MOD!==null) bits.push('module <b>'+esc(modLabel(MOD))+'</b>');
-    ro.innerHTML = bits.length? ('filtered by '+bits.join(' + ')+' — click again to clear') : '';
-  }
-
-  function paint(){ var empty=document.getElementById('cm-empty');
-    if(!DATA||!DATA.files||!DATA.files.length){
-      empty.style.display='block'; empty.innerHTML='No edits in this session yet. <span style="opacity:.75">This fills in as Claude edits files.</span>';
-      document.getElementById('cm-chaps').style.display='none'; document.getElementById('cm-strip').innerHTML=''; document.getElementById('cm-ledger').innerHTML=''; return;
-    }
-    empty.style.display='none';
-    renderChips(); renderChaps(); renderStrip(); renderLedger(); updateReadout();
-  }
-
-  window.addEventListener('message', function(ev){ var m=ev.data||{};
-    if(m.type==='changemap'){ DATA=m.data; readPal(); paint(); }
-    else if(m.type==='error'){ DATA=null; var em=document.getElementById('cm-empty'); em.style.display='block';
-      em.innerHTML='Needs the <b>claude-observatory</b> CLI, which was not found. <span style="opacity:.75">Install it (./install.sh), then reload.</span>';
-      document.getElementById('cm-chaps').style.display='none'; document.getElementById('cm-strip').innerHTML=''; document.getElementById('cm-ledger').innerHTML=''; document.getElementById('cm-chips').innerHTML=''; }
-  });
-  document.getElementById('cm-area').addEventListener('click', function(ev){ var b=ev.target.closest?ev.target.closest('button'):null; if(!b) return;
-    var bs=this.querySelectorAll('button'); for(var i=0;i<bs.length;i++) bs[i].className=(bs[i]===b?'on':'');
-    AREA=b.getAttribute('data-area'); if(DATA) paint(); });
-
-  readPal();
-  vscode.postMessage({type:'ready'});
-})();
-`;
-
+/** The combined Overview webview (0.8.0 round 3): MASTER–DETAIL. LEFT NAV = two sub-tabs, Fleet
+ *  (running agents + nested subagents) · Workflows (runs), rendered from the `multitask --json` payload
+ *  (live phase, sparkline, ±lines, tokens, time, risk, collisions) with an Active-only toggle +
+ *  Clear-completed. RIGHT DETAIL = the change-map (named-chapter ribbon · module strip · churn ledger)
+ *  for the SELECTED nav item, from `changemap --json` — CM.agents[] joined by session, CM.workflows[] by
+ *  id. Rendered ONCE; both payloads arrive via postMessage (no reload flash). */
 function changeMapShell(): string {
   const nonce = getNonce();
-  const csp = `default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';`;
-  const style = `<style>
+  // font-src data: — the review nav bar renders VS Code codicons via a base64 data-URI @font-face (CODICON_STYLE),
+  // matching the status-bar nav bar's glyphs. Self-contained; no localResourceRoots needed.
+  const csp = `default-src 'none'; style-src 'unsafe-inline'; font-src data:; script-src 'nonce-${nonce}';`;
+  const style = `<style>${CODICON_STYLE}
   :root {
     --cm-pending: var(--vscode-charts-yellow, #d9a441);
     --cm-kept: var(--vscode-charts-green, #3fb950);
@@ -1695,47 +1862,158 @@ function changeMapShell(): string {
     --cm-accent: var(--vscode-charts-blue, #4c8bf5);
     --cm-border: var(--vscode-widget-border, rgba(127,127,127,0.28));
     --cm-mono: var(--vscode-editor-font-family, monospace);
+    --mt-working: var(--vscode-charts-blue, #4c8bf5);
+    --mt-attn: var(--vscode-charts-orange, #d9822b);
+    --mt-warn: var(--vscode-charts-red, #e5534b);
+    --mt-idle: var(--vscode-descriptionForeground, #9aa0aa);
+    --mt-done: var(--vscode-charts-green, #3fb950);
+    --mt-agent: var(--vscode-charts-purple, #9a6ac2);
+    --mt-spark: var(--vscode-charts-blue, #4c8bf5);
   }
   * { box-sizing: border-box; }
-  body { margin:0; padding:6px 8px 7px; font-family: var(--vscode-font-family); font-size:11px; color: var(--vscode-foreground); display:flex; flex-direction:column; height:100vh; }
-  .cm-top { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:6px; flex:none; }
-  .cm-session { font-family: var(--cm-mono); font-size:10.5px; color: var(--vscode-descriptionForeground); white-space:nowrap; flex:none; }
-  .cm-session::before { content:"🔬 "; }
-  /* the headline chips get room to breathe rather than bunching at the left edge */
-  .cm-chips { display:flex; flex:1; gap:16px; flex-wrap:wrap; font-family: var(--cm-mono); font-size:11px; color: var(--vscode-descriptionForeground); font-variant-numeric:tabular-nums; }
-  .cm-chip { white-space:nowrap; }
-  .cm-chip b { color: var(--vscode-foreground); font-weight:600; }
-  .cm-seg { display:inline-flex; border:1px solid var(--cm-border); border-radius:5px; overflow:hidden; margin-left:auto; flex:none; }
-  .cm-seg button { background:transparent; color: var(--vscode-descriptionForeground); border:0; border-right:1px solid var(--cm-border); padding:3px 8px; font-size:10.5px; font-family:inherit; cursor:pointer; }
-  .cm-seg button:last-child { border-right:0; }
-  .cm-seg button.on { background: var(--cm-accent); color: var(--vscode-editor-background, #1e1e1e); font-weight:600; }
+  body { margin:0; padding:0; font-family: var(--vscode-font-family); font-size:11px; color: var(--vscode-foreground); height:100vh; display:flex; flex-direction:column; }
+  /* top navbar — session selector + session-wide review actions (mirrors the Observations toolbar) */
+  .ov-toolbar { flex:none; display:flex; align-items:center; gap:6px; padding:5px 8px; border-bottom:1px solid var(--cm-border); flex-wrap:wrap; }
+  .ov-tb { display:inline-flex; align-items:center; gap:5px; background:transparent; border:1px solid var(--cm-border); border-radius:5px; color: var(--vscode-descriptionForeground); font:inherit; font-size:11px; padding:3px 9px; cursor:pointer; white-space:nowrap; }
+  .ov-tb:hover { background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.12)); color: var(--vscode-foreground); }
+  .ov-tb.sess { font-family: var(--cm-mono); color: var(--vscode-foreground); }
+  /* Active-only toggle: dim + hollow when off, accent-outlined with a green check when on. */
+  .ov-toggle .codicon { opacity:0.3; }
+  .ov-toggle.on { color: var(--vscode-foreground); border-color: var(--cm-accent); background: var(--vscode-list-activeSelectionBackground, rgba(80,120,200,0.14)); }
+  .ov-toggle.on .codicon { opacity:1; color: var(--cm-kept); }
+  .ov-tb .cm-caret { font-size:9px; opacity:0.8; }
+  /* compact step-through review nav bar (mirrors the status-bar nav bar) — File/Diff axes + per-edit/file actions */
+  /* codicons (status-bar-matched glyphs) in the toolbar buttons — sized down to sit with the 11px labels */
+  .ov-toolbar .codicon { font-size:14px; line-height:1; }
+  .ov-navgrp { display:inline-flex; align-items:center; gap:5px; flex-wrap:wrap; }
+  .ov-nb { display:inline-flex; align-items:center; justify-content:center; gap:4px; background:transparent; border:1px solid var(--cm-border); border-radius:4px; color: var(--vscode-descriptionForeground); font:inherit; font-size:11px; line-height:1; padding:3px 9px; cursor:pointer; white-space:nowrap; }
+  .ov-nb:hover { background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.12)); color: var(--vscode-foreground); }
+  .ov-nc { font-family: var(--cm-mono); font-size:10px; color: var(--vscode-descriptionForeground); font-variant-numeric:tabular-nums; white-space:nowrap; padding:0 3px; }
+  .ov-nbsep { width:1px; align-self:stretch; background: var(--cm-border); margin:1px 5px; }
+  /* master–detail: left NAV (Fleet · Workflows) | right change-map DETAIL for the selected nav item */
+  .ov { display:flex; flex:1; min-height:0; align-items:stretch; }
+  .ov-nav { flex:0 0 25%; min-width:180px; max-width:40%; display:flex; flex-direction:column; border-right:1px solid var(--cm-border); padding:6px 8px 7px; overflow:hidden; }
+  .ov-detail { flex:1; min-width:0; display:flex; flex-direction:column; padding:6px 8px 7px; overflow:hidden; }
+  /* left-nav sub-tabs (Fleet · Workflows) */
+  .ov-navtabs { display:flex; flex:none; gap:4px; margin-bottom:6px; }
+  .ov-tab { flex:none; display:flex; align-items:center; gap:6px; background:transparent; border:1px solid var(--cm-border); border-radius:5px 5px 0 0; border-bottom:2px solid transparent; color: var(--vscode-descriptionForeground); font:inherit; font-size:11px; padding:4px 12px; cursor:pointer; white-space:nowrap; }
+  .ov-tab:hover { background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.12)); }
+  .ov-tab.on { color: var(--vscode-foreground); border-bottom-color: var(--mt-working); background: var(--vscode-list-activeSelectionBackground, rgba(80,120,200,0.18)); }
+  .ov-tn { font-family: var(--cm-mono); font-size:9px; opacity:0.72; font-variant-numeric:tabular-nums; }
+  .ov-ctl { display:flex; align-items:center; gap:8px; margin-bottom:5px; flex:none; flex-wrap:wrap; }
+  .ov-pane { flex:1; min-height:0; display:flex; flex-direction:column; }
+  .ov-list { flex:1; overflow-y:auto; min-height:0; }
+  .ov-empty { padding:12px 2px; color: var(--vscode-descriptionForeground); line-height:1.5; }
+  .ov-empty b { color: var(--vscode-foreground); }
+  /* display-filter controls (shared by Fleet + Workflows): Active-only toggle + Clear-completed */
+  .mt-toggle { display:flex; align-items:center; gap:4px; font-size:10px; color: var(--vscode-descriptionForeground); cursor:pointer; white-space:nowrap; }
+  .mt-toggle input { margin:0; cursor:pointer; }
+  .mt-clear { background:transparent; border:1px solid var(--cm-border); border-radius:4px; color: var(--vscode-descriptionForeground); font:inherit; font-size:10px; padding:2px 8px; cursor:pointer; white-space:nowrap; }
+  .mt-clear:hover:not(:disabled) { background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.12)); color: var(--vscode-foreground); }
+  .mt-clear:disabled { opacity:0.45; cursor:default; }
+  .mt-fbar { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:0 0 5px; font-family: var(--cm-mono); font-size:9.5px; color: var(--vscode-descriptionForeground); }
+  .mt-fon { color: var(--mt-working); font-variant-numeric:tabular-nums; }
+  .mt-fhide { cursor:pointer; text-decoration:underline; text-underline-offset:2px; }
+  .mt-fhide:hover { color: var(--vscode-foreground); }
+  /* Fleet: one row per running agent (worktree-sibling) + nested subagents; selected row is outlined */
+  .mt-agent { border:1px solid var(--cm-border); border-radius:5px; margin-bottom:5px; padding:5px 7px; cursor:pointer; }
+  .mt-agent:hover { background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.08)); }
+  .mt-agent.sel { border-color: var(--cm-accent); background: var(--vscode-list-activeSelectionBackground, rgba(80,120,200,0.14)); }
+  .mt-arow { display:flex; align-items:center; gap:7px; }
+  .mt-badge { color:#fff; font-size:9px; font-weight:600; padding:1px 6px; border-radius:99px; white-space:nowrap; flex:none; }
+  .mt-badge.sm { font-size:8px; padding:0 5px; }
+  .mt-badge.xs { padding:0; width:8px; height:8px; border-radius:99px; }
+  .mt-wt { font-family: var(--cm-mono); font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:0 1 auto; min-width:40px; }
+  .mt-self { font-size:8px; color: var(--vscode-editor-background,#1e1e1e); background: var(--mt-idle); border-radius:3px; padding:0 3px; margin-left:5px; }
+  .mt-br { font-size:9px; color: var(--vscode-descriptionForeground); margin-left:5px; }
+  .mt-spark { width:60px; height:16px; flex:none; margin-left:auto; }
+  .mt-spark rect { fill: var(--mt-spark); }
+  .mt-diff { font-family: var(--cm-mono); font-size:9.5px; flex:none; font-variant-numeric:tabular-nums; }
+  .mt-diff.sm { font-size:9px; }
+  .mt-add { color: var(--mt-done); }
+  .mt-rem { color: var(--mt-warn); }
+  .mt-meta { font-family: var(--cm-mono); font-size:9px; color: var(--vscode-descriptionForeground); flex:none; white-space:nowrap; }
+  .mt-risk { font-size:9px; color: var(--mt-attn); flex:none; }
+  .mt-risk[data-high] { color: var(--mt-warn); font-weight:600; }
+  .mt-col { font-size:9px; color: var(--mt-warn); flex:none; }
+  .mt-sub { display:flex; align-items:center; gap:6px; padding:3px 0 0 10px; margin-top:3px; border-top:1px dashed var(--cm-border); }
+  .mt-st { font-size:10px; color: var(--mt-agent); white-space:nowrap; flex:none; }
+  .mt-sd { color: var(--vscode-descriptionForeground); margin-left:5px; font-style:italic; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .mt-cur { font-size:9px; color: var(--vscode-foreground); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:0 1 auto; min-width:30px; }
+  .mt-todo { font-size:9px; color: var(--vscode-descriptionForeground); flex:none; }
+  .mt-chat { margin-left:auto; background:transparent; border:0; cursor:pointer; font-size:11px; padding:0 2px; flex:none; opacity:0.75; }
+  .mt-chat:hover { opacity:1; }
+  .mt-collisions { flex:none; margin-top:6px; border-top:1px solid var(--cm-border); padding-top:5px; max-height:32%; overflow-y:auto; }
+  .mt-chead { font-family: var(--cm-mono); text-transform:uppercase; letter-spacing:0.08em; font-size:9px; color: var(--vscode-descriptionForeground); margin-bottom:4px; }
+  .mt-crow { display:flex; align-items:center; gap:8px; font-size:10px; padding:1px 0; }
+  .mt-cf { font-family: var(--cm-mono); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:0 1 auto; }
+  .mt-ca { color: var(--vscode-descriptionForeground); flex:none; }
+  .mt-cp { color: var(--mt-attn); flex:none; margin-left:auto; }
+  .mt-none { padding:10px 2px; color: var(--vscode-descriptionForeground); font-size:11px; }
+  /* Workflows: one row per run — informative name, per-phase progress, tokens/time/edits; selected outlined */
+  .mt-wf { border:1px solid var(--cm-border); border-radius:5px; margin-bottom:5px; padding:5px 7px; cursor:pointer; }
+  .mt-wf:hover { background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.08)); }
+  .mt-wf.sel { border-color: var(--cm-accent); background: var(--vscode-list-activeSelectionBackground, rgba(80,120,200,0.14)); }
+  /* A NEWLY-started run pulses twice as the nav auto-focuses it (class dropped after ~3s). */
+  .mt-wf.flash { animation: ovwfpulse 1.3s ease-in-out 2; }
+  @keyframes ovwfpulse { 50% { box-shadow: 0 0 0 2px var(--cm-accent) inset; } }
+  .mt-wrow { display:flex; align-items:flex-start; gap:7px; padding:0; cursor:pointer; }
+  .mt-wcar { background:transparent; border:0; color: var(--vscode-descriptionForeground); font:inherit; font-size:13px; line-height:1.25; width:18px; flex:none; cursor:pointer; padding:0; }
+  /* The workflow name/description WRAPS to its full text (never clipped) — it's the run's identity and can be
+     long; the metrics ride the .mt-wmet line below so nothing competes with it for width. */
+  .mt-wname { font-weight:600; color: var(--vscode-foreground); white-space:normal; overflow-wrap:anywhere; flex:1 1 auto; min-width:0; line-height:1.3; }
+  /* metrics line under the name: sparkline · ±diff · N ag · tokens · time · edits (indented past the caret) */
+  .mt-wmet { display:flex; align-items:center; gap:7px; flex-wrap:wrap; padding:3px 3px 1px 22px; }
+  .mt-wmet .mt-spark { margin-left:0; }
+  .mt-wmeta { font-family: var(--cm-mono); font-size:10px; color: var(--vscode-descriptionForeground); white-space:nowrap; flex:none; }
+  .mt-wsub { padding:0 3px 1px 21px; font-family: var(--cm-mono); font-size:9px; color: var(--vscode-descriptionForeground); opacity:0.8; }
+  .mt-wphs { padding:1px 3px 2px 21px; font-size:9.5px; color: var(--vscode-descriptionForeground); font-variant-numeric:tabular-nums; }
+  .mt-wphg { padding:3px 3px 1px 20px; font-size:9px; text-transform:uppercase; letter-spacing:0.05em; color: var(--vscode-foreground); }
+  .mt-wpn { font-family: var(--cm-mono); opacity:0.75; text-transform:none; letter-spacing:0; }
+  .mt-wag { display:flex; align-items:center; gap:6px; padding:1px 3px 1px 28px; font-size:11px; }
+  .mt-wat { color: var(--vscode-foreground); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:0 1 auto; min-width:64px; }
 
-  /* chapters — Claude's own to-dos, on top */
-  .cm-chaps { display:flex; flex:none; border:1px solid var(--cm-border); border-radius:5px; overflow:hidden; margin-bottom:6px; }
-  .cm-chap { flex:1; min-width:0; display:flex; flex-direction:column; gap:5px; background:transparent; border:0; border-left:1px solid var(--cm-border); color:inherit; font:inherit; padding:8px 10px 9px; cursor:pointer; text-align:left; }
-  .cm-chap:first-child { border-left:0; }
-  .cm-chap:hover { background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.12)); }
-  .cm-chap:hover .cm-ct { color: var(--vscode-foreground); }
-  .cm-chap.on { background: var(--vscode-list-activeSelectionBackground, rgba(80,120,200,0.3)); }
-  .cm-chap.on .cm-ct { color: var(--vscode-foreground); }
-  .cm-cr { display:flex; align-items:center; gap:5px; flex:none; }
-  .cm-cg { width:10px; height:10px; border-radius:99px; flex:none; border:1.5px solid var(--vscode-descriptionForeground); }
-  .cm-cg.done { background: var(--cm-kept); border-color: var(--cm-kept); }
-  .cm-cg.wip { border-color: var(--cm-pending); box-shadow: inset 0 -4px 0 var(--cm-pending); }
+  /* right DETAIL — the change-map for the selected nav item */
+  /* named-chapter ribbon — a VERTICAL stacked LIST (one chapter per row: status dot · name · ±counts ·
+     Accept/Reject/Clear). Completed chapters collapse behind the "N done" toggle. */
+  .cm-ribbon { flex:none; margin-bottom:6px; max-height:34%; overflow-y:auto; }
+  .cm-rwrap { display:flex; flex-direction:column; gap:2px; }
+  .cm-done-list { margin-top:2px; }
+  .cm-done-row { display:flex; gap:6px; margin-top:3px; }
+  .cm-task { display:flex; align-items:center; gap:8px; width:100%; background: var(--vscode-editorWidget-background, rgba(127,127,127,0.10)); border:1px solid var(--cm-border); border-radius:5px; color:inherit; font:inherit; padding:3px 9px; cursor:default; text-align:left; }
+  .cm-task:hover { background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.18)); }
+  .cm-task:hover .cm-ct { color: var(--vscode-foreground); }
+  .cm-task[data-sel] { cursor:pointer; }
+  /* the chapter selected in the ribbon — scopes the top-navbar bulk actions to it */
+  .cm-task.sel { border-color: var(--cm-accent); background: var(--vscode-list-activeSelectionBackground, rgba(80,120,200,0.18)); }
+  .cm-task.sel .cm-ct { color: var(--vscode-foreground); }
+  .cm-task.syn { opacity:0.85; } /* the synthetic session chapter — dimmed, display-only */
+  .cm-task.syn .cm-cg { opacity:0.6; }
+  .cm-cg { width:9px; height:9px; border-radius:99px; flex:none; border:1.5px solid var(--vscode-descriptionForeground); }
+  .cm-cg.kept { background: var(--cm-kept); border-color: var(--cm-kept); }
+  .cm-cg.pending { border-color: var(--cm-pending); box-shadow: inset 0 -4px 0 var(--cm-pending); }
+  .cm-cg.undone { background: var(--cm-reverted); border-color: var(--cm-reverted); }
   .cm-cg.todo { border-style:dashed; }
-  .cm-ci { font-family: var(--cm-mono); font-size:11.5px; font-weight:600; color: var(--vscode-foreground); flex:none; }
-  /* two-line clamp: the whole point is readability — an ellipsised single line was unreadable */
-  .cm-ct { font-size:12.5px; line-height:1.35; color: var(--vscode-descriptionForeground); white-space:normal; overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; line-clamp:2; -webkit-box-orient:vertical; }
-  .cm-ca { color: var(--cm-agent); font-size:8px; flex:none; }
-  .cm-ce { margin-left:auto; font-family: var(--cm-mono); font-size:10px; color: var(--vscode-descriptionForeground); flex:none; }
-
+  .cm-ct { flex:1; min-width:0; font-size:12px; line-height:1.4; color: var(--vscode-descriptionForeground); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:pointer; }
+  .cm-ce { font-family: var(--cm-mono); font-size:10px; color: var(--vscode-descriptionForeground); flex:none; }
+  .cm-tbtns { display:flex; align-items:center; gap:1px; flex:none; margin-left:1px; opacity:0.55; }
+  .cm-task:hover .cm-tbtns { opacity:1; }
+  .cm-tb { background:transparent; border:0; color:inherit; font:inherit; font-size:11px; line-height:1; padding:0 2px; cursor:pointer; opacity:0.85; }
+  .cm-tb:hover { opacity:1; }
+  .cm-tb.ok:hover { color: var(--cm-kept); }
+  .cm-tb.rj:hover { color: var(--cm-risk); }
+  .cm-tb.ch:hover { color: var(--cm-accent); }
+  .cm-done-tog { display:inline-flex; align-items:center; gap:6px; background:transparent; border:1px dashed var(--cm-border); border-radius:99px; color: var(--vscode-descriptionForeground); font:inherit; font-size:12px; padding:3px 9px; cursor:pointer; }
+  .cm-done-tog:hover { background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.14)); color: var(--vscode-foreground); }
+  .cm-clear-done { display:inline-flex; align-items:center; background:transparent; border:1px dashed var(--cm-border); border-radius:99px; color: var(--vscode-descriptionForeground); font:inherit; font-size:11px; padding:3px 9px; cursor:pointer; }
+  .cm-clear-done:hover { background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.14)); color: var(--vscode-foreground); }
+  .cm-caret { font-size:9px; opacity:0.8; }
   /* one-row proportion strip — where the work landed */
   .cm-strip { display:flex; height:17px; border-radius:3px; overflow:hidden; flex:none; margin-bottom:6px; background: var(--vscode-editorWidget-background, rgba(127,127,127,0.15)); }
   .cm-sg { border:0; padding:0 4px; cursor:pointer; height:100%; display:flex; align-items:center; justify-content:center; overflow:hidden; min-width:0; }
-  .cm-sg + .cm-sg { box-shadow: inset 1px 0 0 var(--vscode-editor-background, #1e1e1e); } /* separate adjacent segments */
+  .cm-sg + .cm-sg { box-shadow: inset 1px 0 0 var(--vscode-editor-background, #1e1e1e); }
   .cm-sg.sel { outline:1px solid var(--vscode-foreground); outline-offset:-1px; }
   .cm-sl { font-size:9px; color:rgba(0,0,0,.78); font-family: var(--cm-mono); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-weight:600; }
-
   /* ranked ledger */
   .cm-ledger { flex:1; overflow-y:auto; min-height:0; }
   .cm-row { display:flex; align-items:center; gap:6px; width:100%; background:transparent; border:0; color:inherit; font:inherit; padding:2px 3px; cursor:pointer; text-align:left; border-radius:3px; }
@@ -1750,11 +2028,8 @@ function changeMapShell(): string {
   .cm-n { font-family: var(--cm-mono); font-size:9px; width:44px; text-align:right; flex:none; font-variant-numeric:tabular-nums; color: var(--vscode-descriptionForeground); }
   .cm-pd { font-family: var(--cm-mono); font-size:9px; width:28px; text-align:right; flex:none; }
   .cm-none { padding:10px 4px; color: var(--vscode-descriptionForeground); }
-
   .cm-empty { padding:14px 4px; color: var(--vscode-descriptionForeground); line-height:1.5; }
   .cm-empty b { color: var(--vscode-foreground); }
-  /* the footer carries live feedback (filter state / "→ open diff"), not chrome — so it reads at
-     full foreground contrast, not the muted description grey it started at. */
   .cm-readout { font-family: var(--cm-mono); font-size:12px; color: var(--vscode-foreground); margin-top:6px; min-height:16px; flex:none; }
   .cm-readout b { color: var(--vscode-foreground); }
   .cm-tip { position:fixed; pointer-events:none; opacity:0; z-index:9; max-width:300px; background: var(--vscode-editorHoverWidget-background, #252526); color: var(--vscode-editorHoverWidget-foreground, #ccc); border:1px solid var(--vscode-editorHoverWidget-border, rgba(127,127,127,0.3)); border-radius:5px; padding:7px 9px; font-size:10px; box-shadow:0 6px 20px -8px rgba(0,0,0,.6); }
@@ -1768,254 +2043,67 @@ function changeMapShell(): string {
   .cm-tip .ta { color: var(--cm-accent); font-family: var(--cm-mono); font-size:8.5px; margin-top:5px; }
 </style>`;
   const body =
-    `<div class="cm-top">` +
-    `<span class="cm-session" id="cm-session" title="Active Claude Code session">—</span>` +
-    `<span class="cm-chips" id="cm-chips"></span>` +
-    `<span class="cm-seg" id="cm-area"><button data-area="churn" class="on">± lines</button><button data-area="count">count</button></span>` +
+    `<div class="ov-toolbar">` +
+    `<button class="ov-tb sess" id="ov-sess" title="Switch session — choose which capture session the Overview shows">🔬 <span id="ov-sess-label">session —</span> <span class="cm-caret">▾</span></button>` +
+    // Active-only toggle — mirrors the left-nav checkbox: scopes the fleet/workflow nav AND the change-map
+    // detail to work still awaiting review (pending edits / active agents / running workflows).
+    `<button class="ov-tb ov-toggle" id="ov-activeonly" aria-pressed="false" title="Show only what's still active — agents/workflows running and edits awaiting review"><i class="codicon codicon-check"></i> Active only</button>` +
+    // The step-through review nav bar — File/Diff axes with live n/m position counters + per-edit / per-file
+    // actions, the same controls the status-bar nav bar shows. Posts to the existing nav commands.
+    `<span class="ov-navgrp">` +
+    `<button class="ov-nb" id="ov-fileprev" title="Previous changed file"><i class="codicon codicon-chevron-left"></i></button>` +
+    `<span class="ov-nc" id="ov-filecount">File –/–</span>` +
+    `<button class="ov-nb" id="ov-filenext" title="Next changed file"><i class="codicon codicon-chevron-right"></i></button>` +
+    `<span class="ov-nbsep"></span>` +
+    `<button class="ov-nb" id="ov-diffprev" title="Previous edit in this file"><i class="codicon codicon-chevron-up"></i></button>` +
+    `<span class="ov-nc" id="ov-diffcount">Diff –/–</span>` +
+    `<button class="ov-nb" id="ov-diffnext" title="Next edit in this file"><i class="codicon codicon-chevron-down"></i></button>` +
+    `<span class="ov-nbsep"></span>` +
+    `<button class="ov-nb" id="ov-navkeep" title="Keep this edit"><i class="codicon codicon-check"></i> Keep</button>` +
+    `<button class="ov-nb" id="ov-navundo" title="Undo this edit"><i class="codicon codicon-discard"></i> Undo</button>` +
+    `<button class="ov-nb" id="ov-acceptfile" title="Accept every pending edit in this file"><i class="codicon codicon-check-all"></i> Accept File</button>` +
+    `<button class="ov-nb" id="ov-rejectfile" title="Reject (revert) every pending edit in this file"><i class="codicon codicon-close-all"></i> Reject File</button>` +
+    `<button class="ov-nb" id="ov-clearfile" title="Clear resolved (kept / reverted) edits in this file"><i class="codicon codicon-clear-all"></i> Clear File</button>` +
+    `<span class="ov-nbsep"></span>` +
+    `<button class="ov-nb" id="ov-spotlight" title="Toggle spotlight — dim unedited lines to highlight Claude’s changes"><i class="codicon codicon-lightbulb"></i> Spotlight</button>` +
+    `<button class="ov-nb" id="ov-search" title="Search edits"><i class="codicon codicon-search"></i> Search</button>` +
+    `</span>` +
+    `<span class="ov-nbsep"></span>` +
+    `<button class="ov-tb" id="ov-keepall" title="Accept all edits in this session"><i class="codicon codicon-check-all"></i> Accept All</button>` +
+    `<button class="ov-tb" id="ov-undoall" title="Revert all edits in this session"><i class="codicon codicon-discard"></i> Revert All</button>` +
+    `<button class="ov-tb" id="ov-clearres" title="Clear resolved (kept / reverted) edits"><i class="codicon codicon-clear-all"></i> Clear Resolved</button>` +
+    `<button class="ov-tb" id="ov-refresh" title="Refresh the Overview"><i class="codicon codicon-refresh"></i> Refresh</button>` +
     `</div>` +
-    `<div class="cm-chaps" id="cm-chaps" style="display:none"></div>` +
+    `<div class="ov">` +
+    `<div class="ov-nav">` +
+    `<div class="ov-navtabs" id="ov-navtabs"></div>` +
+    `<div class="ov-ctl">` +
+    `<label class="mt-toggle" title="Show only active agents / running workflows"><input type="checkbox" id="mt-active"> Active only</label>` +
+    `<button class="mt-clear" id="mt-clear" title="Hide completed agents &amp; finished workflows (observe-only — never deletes anything)">Clear completed</button>` +
+    `</div>` +
+    `<div class="ov-empty" id="ov-empty" style="display:none"></div>` +
+    `<div class="ov-pane" id="ov-pane-fleet">` +
+    `<div class="ov-list" id="ov-fleet"></div>` +
+    `<div class="mt-collisions" id="ov-collisions"></div>` +
+    `</div>` +
+    `<div class="ov-pane" id="ov-pane-workflows" style="display:none"><div class="ov-list" id="ov-workflows"></div></div>` +
+    `</div>` +
+    `<div class="ov-detail">` +
+    `<div class="cm-ribbon" id="cm-ribbon" style="display:none"></div>` +
     `<div class="cm-strip" id="cm-strip"></div>` +
-    `<div class="cm-empty" id="cm-empty" style="display:none"></div>` +
+    `<div class="cm-empty" id="cm-detail-empty" style="display:none"></div>` +
     `<div class="cm-ledger" id="cm-ledger"></div>` +
     `<div class="cm-readout" id="cm-readout"></div>` +
+    `</div>` +
+    `</div>` +
     `<div class="cm-tip" id="cm-tip"></div>` +
-    `<script nonce="${nonce}">${CHANGEMAP_SCRIPT}</script>`;
+    `<script nonce="${nonce}">${OVERVIEW_SCRIPT}</script>`;
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}">${style}</head><body>${body}</body></html>`;
 }
 
 /** File History: the ACTIVE editor's Claude edits, oldest→newest (id · time · status · reasoning).
  *  A flat chronological list — a different data model from the folder/class Edits tree — that follows
  *  the active editor. Reuses EditNode so every existing edit command works on its rows unchanged. */
-// --- Actions timeline: EVERY tool call Claude made this session, grouped by category (0.6.0) ---
-// Curated by default (high-signal categories; errors always surface); a title-bar toggle shows all.
-type ActNode =
-  | { kind: 'group'; group: core.ActionGroup }
-  | { kind: 'action'; action: core.ActionRecord }
-  | { kind: 'egressRoot'; channels: core.EgressChannel[] }
-  | { kind: 'egress'; channel: core.EgressChannel }
-  | { kind: 'fleetRoot'; siblingCount: number } // sibling sessions computed lazily on expand (see below)
-  | { kind: 'sibling'; sibling: core.SiblingSession }
-  | { kind: 'subagentsRoot'; subs: core.SubagentInfo[]; summary: core.SubagentsSummary }
-  | { kind: 'subagent'; sub: core.SubagentInfo };
-
-let actionsShowAll = false; // module-level toggle, flipped by the view-title button
-
-const CAT_ICON: Record<string, string> = {
-  edit: 'edit',
-  exec: 'terminal',
-  read: 'file',
-  search: 'search',
-  web: 'globe',
-  agent: 'organization',
-  todo: 'checklist',
-  mcp: 'plug',
-  meta: 'settings-gear',
-  other: 'circle-small-filled',
-};
-
-/** ms → compact human duration (450ms / 3.2s / 2m 5s) — matches the CLI's fmtDur. */
-function fmtDurMs(ms: number): string {
-  if (!Number.isFinite(ms) || ms <= 0) return '0ms';
-  if (ms < 1000) return `${Math.round(ms)}ms`;
-  const s = ms / 1000;
-  if (s < 60) return `${s.toFixed(s < 10 ? 1 : 0).replace(/\.0$/, '')}s`;
-  const m = Math.floor(s / 60);
-  const rem = Math.round(s % 60);
-  return `${m}m${rem ? ` ${rem}s` : ''}`;
-}
-
-/** Compact token count (47361 → 47k). */
-function humanTok(n: number): string {
-  if (!Number.isFinite(n)) return '0';
-  if (n < 1000) return String(n);
-  if (n < 1e6) return (n / 1e3).toFixed(n < 1e4 ? 1 : 0).replace(/\.0$/, '') + 'k';
-  return (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
-}
-
-class ActionsProvider implements vscode.TreeDataProvider<ActNode> {
-  private readonly _c = new vscode.EventEmitter<void>();
-  readonly onDidChangeTreeData = this._c.event;
-  refresh(): void {
-    this._c.fire();
-  }
-
-  getChildren(node?: ActNode): ActNode[] {
-    if (!node) {
-      const session = currentSession();
-      const cwd = workspaceRoot();
-      if (!session || !cwd) return [];
-      const actions = core.parseActions(cwd, session);
-      const channels = core.buildEgressReport(actions);
-      const subs = core.parseSubagents(cwd, session);
-      // Fleet: cheap sibling COUNT here (one readdir); the full per-sibling parse happens lazily on expand.
-      const siblingCount = core.projectSessionIds(cwd).filter((id) => id !== session).length;
-      const nodes: ActNode[] = [];
-      if (siblingCount > 0) nodes.push({ kind: 'fleetRoot', siblingCount }); // concurrent sibling agents in this project
-      if (channels.length) nodes.push({ kind: 'egressRoot', channels }); // "where did this session reach off-machine"
-      if (subs.length) nodes.push({ kind: 'subagentsRoot', subs, summary: core.summarizeSubagents(subs) }); // per-subagent timelines
-      for (const group of core.buildActionGroups(actions, { showAll: actionsShowAll })) {
-        // When the rich per-subagent "Subagents" root is shown, drop the raw "Subagents" category group
-        // (the Agent/Task spawn rows) so there aren't two identically-named sections at the top level.
-        if (subs.length && group.category === 'agent') continue;
-        nodes.push({ kind: 'group', group });
-      }
-      return nodes;
-    }
-    if (node.kind === 'group') return node.group.actions.slice().reverse().map((action) => ({ kind: 'action', action })); // newest-first within a group
-    if (node.kind === 'egressRoot') return node.channels.map((channel) => ({ kind: 'egress', channel }));
-    if (node.kind === 'fleetRoot') {
-      const session = currentSession();
-      const cwd = workspaceRoot();
-      if (!session || !cwd) return [];
-      return core.listSiblings(cwd, session).map((sibling) => ({ kind: 'sibling', sibling }));
-    }
-    if (node.kind === 'subagentsRoot') return node.subs.map((sub) => ({ kind: 'subagent', sub }));
-    if (node.kind === 'subagent') return node.sub.actions.map((action) => ({ kind: 'action', action })); // chronological subagent timeline
-    return [];
-  }
-
-  getTreeItem(node: ActNode): vscode.TreeItem {
-    if (node.kind === 'group') {
-      const g = node.group;
-      const item = new vscode.TreeItem(g.label, vscode.TreeItemCollapsibleState.Collapsed);
-      const shownNote = g.actions.length < g.count ? `${g.actions.length} of ${g.count}` : `${g.count}`;
-      item.description = `${shownNote}${g.errors ? ` · ${g.errors} error${g.errors === 1 ? '' : 's'}` : ''}`;
-      item.iconPath = new vscode.ThemeIcon(CAT_ICON[g.category] ?? 'circle-small-filled', g.errors ? new vscode.ThemeColor('charts.red') : undefined);
-      item.contextValue = 'actionGroup';
-      return item;
-    }
-    if (node.kind === 'egressRoot') {
-      const remote = node.channels.filter((c) => c.scope === 'remote').length;
-      const item = new vscode.TreeItem('Egress', vscode.TreeItemCollapsibleState.Collapsed);
-      item.description = `${node.channels.length} destination${node.channels.length === 1 ? '' : 's'}${remote ? ` · ${remote} remote` : ''}`;
-      item.iconPath = new vscode.ThemeIcon('globe', remote ? new vscode.ThemeColor('charts.yellow') : undefined);
-      item.tooltip = 'What this session touched off-machine — web fetches, MCP servers, and network-shell commands.';
-      item.contextValue = 'egressRoot';
-      return item;
-    }
-    if (node.kind === 'egress') {
-      const ch = node.channel;
-      const item = new vscode.TreeItem(`${ch.kind}  ${ch.target}`, vscode.TreeItemCollapsibleState.None);
-      item.description = `${ch.scope}${ch.count > 1 ? ` · ×${ch.count}` : ''}`;
-      item.iconPath = new vscode.ThemeIcon(ch.scope === 'remote' ? 'cloud' : 'question', ch.scope === 'remote' ? new vscode.ThemeColor('charts.yellow') : undefined);
-      item.contextValue = 'egress';
-      return item;
-    }
-    if (node.kind === 'fleetRoot') {
-      const item = new vscode.TreeItem('Fleet', vscode.TreeItemCollapsibleState.Collapsed);
-      item.description = `${node.siblingCount} sibling${node.siblingCount === 1 ? '' : 's'} in this project`;
-      item.iconPath = new vscode.ThemeIcon('organization');
-      item.tooltip = 'Other Claude Code sessions working in this project — active/idle, pending edits, files touched, risk. Expand to see them.';
-      item.contextValue = 'fleetRoot';
-      return item;
-    }
-    if (node.kind === 'sibling') {
-      const s = node.sibling;
-      const item = new vscode.TreeItem((s.self ? '(you) ' : '') + s.id.slice(0, 8), vscode.TreeItemCollapsibleState.None);
-      const risk = s.risk.total ? ` · ⚠ ${s.risk.high ? `${s.risk.high} high` : s.risk.total}` : '';
-      item.description = `${s.active ? 'active' : 'idle'} · ${s.pending} pending · ${s.edits} edit${s.edits === 1 ? '' : 's'}${risk}`;
-      item.iconPath = new vscode.ThemeIcon(
-        s.active ? 'circle-filled' : 'circle-outline',
-        s.active ? new vscode.ThemeColor('charts.green') : s.risk.high ? new vscode.ThemeColor('charts.red') : undefined
-      );
-      const files = s.files.map((f) => vscode.workspace.asRelativePath(f));
-      item.tooltip = new vscode.MarkdownString(
-        [
-          `**${s.self ? 'This session' : 'Sibling'}** \`${s.id}\``,
-          `${s.active ? '🟢 active' : '⚪ idle'} · last ${core.relTime(s.lastMs)}`,
-          `${s.edits} edit(s) · ${s.pending} pending`,
-          s.risk.total ? `⚠ ${s.risk.total} risky command(s)${s.risk.high ? ` · ${s.risk.high} high` : ''}` : '',
-          files.length ? 'Files: ' + files.slice(0, 10).join(', ') + (s.moreFiles ? ` +${s.moreFiles} more` : '') : '',
-        ]
-          .filter(Boolean)
-          .join('\n\n')
-      );
-      item.contextValue = 'sibling';
-      return item;
-    }
-    if (node.kind === 'subagentsRoot') {
-      const sum = node.summary;
-      const item = new vscode.TreeItem('Subagents', vscode.TreeItemCollapsibleState.Collapsed);
-      item.description = [
-        `${sum.count}`,
-        `${sum.totalActions} action${sum.totalActions === 1 ? '' : 's'}`,
-        sum.totalDurationMs ? fmtDurMs(sum.totalDurationMs) : '',
-        sum.errors ? `${sum.errors} error${sum.errors === 1 ? '' : 's'}` : '',
-      ]
-        .filter(Boolean)
-        .join(' · ');
-      item.iconPath = new vscode.ThemeIcon('organization', sum.errors ? new vscode.ThemeColor('charts.red') : undefined);
-      item.tooltip = 'Each subagent Claude spawned this session, with its own action timeline + metrics (duration / tokens).';
-      item.contextValue = 'subagentsRoot';
-      return item;
-    }
-    if (node.kind === 'subagent') {
-      const s = node.sub;
-      const title = s.agentType || s.description || s.agentId.slice(0, 12);
-      const item = new vscode.TreeItem(
-        title,
-        s.actions.length ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None
-      );
-      item.description = [
-        s.durationMs ? fmtDurMs(s.durationMs) : '',
-        s.tokens ? `${humanTok(s.tokens)} tok` : '',
-        `${s.summary.total} action${s.summary.total === 1 ? '' : 's'}`,
-        s.edits ? `${s.edits} edit${s.edits === 1 ? '' : 's'}` : '',
-        s.summary.errors ? `${s.summary.errors} err` : '',
-      ]
-        .filter(Boolean)
-        .join(' · ');
-      item.iconPath = new vscode.ThemeIcon(
-        s.summary.errors ? 'warning' : 'organization',
-        s.summary.errors ? new vscode.ThemeColor('charts.red') : undefined
-      );
-      item.tooltip = new vscode.MarkdownString(
-        [
-          `**${title}**${s.status && s.status !== 'completed' ? ` · ${s.status}` : ''}`,
-          s.description && s.agentType ? `_${s.description}_` : '',
-          [s.durationMs ? `⏱ ${fmtDurMs(s.durationMs)}` : '', s.tokens ? `${humanTok(s.tokens)} tokens` : '', s.toolUseCount ? `${s.toolUseCount} tool call(s)` : '']
-            .filter(Boolean)
-            .join(' · '),
-          `agent \`${s.agentId}\``,
-        ]
-          .filter(Boolean)
-          .join('\n\n')
-      );
-      item.contextValue = 'subagent';
-      return item;
-    }
-    const a = node.action;
-    const item = new vscode.TreeItem(`${a.tool}  ${(a.target || '').replace(/\s+/g, ' ')}`, vscode.TreeItemCollapsibleState.None);
-    const riskTag = a.risk ? (a.risk.level === 'high' ? '⚠ HIGH' : '⚠ med') : '';
-    item.description = [riskTag, a.ts ? core.relTime(a.ts) : '', a.detail].filter(Boolean).join(' · ');
-    const riskColor = a.risk ? new vscode.ThemeColor(a.risk.level === 'high' ? 'charts.red' : 'charts.yellow') : undefined;
-    item.iconPath = new vscode.ThemeIcon(
-      a.isError ? 'error' : a.risk ? 'warning' : CAT_ICON[a.category] ?? 'circle-small-filled',
-      a.isError ? new vscode.ThemeColor('charts.red') : riskColor
-    );
-    item.tooltip = new vscode.MarkdownString(
-      [
-        `**${a.tool}**${a.isError ? ' · ⚠ error' : ''}${a.risk ? ` · ⚠ ${a.risk.level} risk` : ''}`,
-        a.target ? '`' + a.target.replace(/`/g, '') + '`' : '',
-        a.risk ? `⚠ ${a.risk.reasons.join(' · ')}` : '',
-        a.detail ? `_${a.detail}_` : '',
-        a.reasoning ? `💭 ${firstLine(a.reasoning)}` : '',
-        a.editId != null ? `edit #${a.editId} — click to review this edit` : '',
-      ]
-        .filter(Boolean)
-        .join('\n\n')
-    );
-    // Edit actions link to a store record → clicking opens the review bubble at that edit; others are read-only.
-    if (a.editId != null) {
-      item.command = { command: 'claudeObservatory.viewChanges', title: 'View changes', arguments: [a.editId] };
-      item.contextValue = 'actionEdit';
-    } else {
-      item.contextValue = 'action';
-    }
-    return item;
-  }
-}
-
 class FileHistoryProvider implements vscode.TreeDataProvider<EditNode> {
   private readonly _changed = new vscode.EventEmitter<void>();
   readonly onDidChangeTreeData = this._changed.event;
@@ -2166,28 +2254,105 @@ class StatsUsageViewProvider implements vscode.WebviewViewProvider {
   }
 }
 
-/** The Change Map panel: shells out to `changemap --json` (throttled, visible-only) and pushes the
- *  model to the webview. Clicks come back as {openEdit,id} → the existing edit-review command, so the
- *  bird's-eye diagram drills into the same review surface as every other view. */
+/** The combined Overview panel (0.8.0 round 3): shells out to BOTH `multitask --json` (the left-nav
+ *  Fleet/Workflows payload) AND `changemap --json` (the right-detail change-map) — throttled,
+ *  visible-only — and posts both to the master–detail webview, which joins them by session/workflowId.
+ *  Clicks come back as {openEdit,id} → the existing edit-review command, {chatAction,ref} → the
+ *  zero-token handoff, and {taskKeep|taskUndo|taskClear|clearCompletedChapters} → the chapter ops. */
+interface NavPos {
+  diff: { i: number; n: number } | null;
+  file: { i: number; n: number } | null;
+}
 class ChangeMapViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private run = 0;
   private running = false;
   private everLoaded = false;
+  // The live Diff/File step-through position, mirrored into the title-bar nav-bar counters. Set by the
+  // status bar's updateStatusItem (single source of truth); rides the next overview message + a live push.
+  private navPos: NavPos | null = null;
+  /** Push the Diff/File step-through position into the title-bar nav counters (live, visible-only). */
+  setNavPos(pos: NavPos): void {
+    this.navPos = pos;
+    if (this.view?.visible) this.view.webview.postMessage({ type: 'navpos', pos });
+  }
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
     view.webview.options = { enableScripts: true };
     view.webview.html = changeMapShell(); // set once; data arrives via postMessage (no reload flash)
-    view.webview.onDidReceiveMessage((m: { type?: string; id?: number }) => {
+    view.webview.onDidReceiveMessage((m: { type?: string; id?: number; taskId?: string; ref?: core.ChatContextRef }) => {
       if (!m) return;
       if (m.type === 'ready') this.refresh(true);
       else if (m.type === 'openEdit' && typeof m.id === 'number')
         void vscode.commands.executeCommand('claudeObservatory.viewChanges', m.id);
       else if (m.type === 'showReason' && typeof m.id === 'number')
         void vscode.commands.executeCommand('claudeObservatory.showObservation', m.id);
+      else if (m.type === 'chatAction' && m.ref)
+        void vscode.commands.executeCommand('claudeObservatory.chatAction', m.ref);
+      // Chapter (task) review actions from the task-ribbon chips.
+      else if (m.type === 'taskKeep' && typeof m.taskId === 'string')
+        void vscode.commands.executeCommand('claudeObservatory.taskKeep', m.taskId);
+      else if (m.type === 'taskUndo' && typeof m.taskId === 'string')
+        void vscode.commands.executeCommand('claudeObservatory.taskUndo', m.taskId);
+      else if (m.type === 'taskClear' && typeof m.taskId === 'string')
+        void vscode.commands.executeCommand('claudeObservatory.taskClear', m.taskId);
+      else if (m.type === 'clearCompletedChapters')
+        void vscode.commands.executeCommand('claudeObservatory.clearCompletedChapters');
+      // Top-navbar review actions — the session selector + the same bulk actions the Observations toolbar has.
+      else if (m.type === 'switchSession')
+        void vscode.commands.executeCommand('claudeObservatory.switchSession');
+      else if (m.type === 'keepAll')
+        void vscode.commands.executeCommand('claudeObservatory.keepAll');
+      else if (m.type === 'undoAll')
+        void vscode.commands.executeCommand('claudeObservatory.undoAll');
+      else if (m.type === 'clearResolved')
+        void vscode.commands.executeCommand('claudeObservatory.clearResolved');
+      else if (m.type === 'refresh')
+        void vscode.commands.executeCommand('claudeObservatory.refresh');
+      // Step-through review nav bar (mirrors the status-bar nav bar) — passthrough to the existing commands.
+      else if (m.type === 'navFilePrev') void vscode.commands.executeCommand('claudeObservatory.navFilePrev');
+      else if (m.type === 'navFileNext') void vscode.commands.executeCommand('claudeObservatory.navFileNext');
+      else if (m.type === 'navDiffPrev') void vscode.commands.executeCommand('claudeObservatory.navDiffPrev');
+      else if (m.type === 'navDiffNext') void vscode.commands.executeCommand('claudeObservatory.navDiffNext');
+      else if (m.type === 'navKeep') void vscode.commands.executeCommand('claudeObservatory.navKeep');
+      else if (m.type === 'navUndo') void vscode.commands.executeCommand('claudeObservatory.navUndo');
+      else if (m.type === 'keepOpenFile') void vscode.commands.executeCommand('claudeObservatory.keepOpenFile');
+      else if (m.type === 'undoOpenFile') void vscode.commands.executeCommand('claudeObservatory.undoOpenFile');
+      else if (m.type === 'clearOpenFile') void vscode.commands.executeCommand('claudeObservatory.clearOpenFile');
+      else if (m.type === 'toggleHeatmap') void vscode.commands.executeCommand('claudeObservatory.toggleHeatmap');
+      else if (m.type === 'searchEdits') void vscode.commands.executeCommand('claudeObservatory.searchEdits');
     });
     view.onDidChangeVisibility(() => {
       if (view.visible) this.refresh(true);
+    });
+  }
+  /** Spawn one CLI subcommand, parse its stdout as JSON, and hand the result (or null on any failure)
+   *  to `cb` exactly once. Windows: the .cmd shim needs a shell. */
+  private spawnJson(args: string[], cwd: string, cb: (data: unknown | null) => void): void {
+    let child: cp.ChildProcess;
+    let fired = false;
+    const once = (data: unknown | null) => {
+      if (fired) return;
+      fired = true;
+      cb(data);
+    };
+    try {
+      const bin = resolveObservatoryBin();
+      const winShell = process.platform === 'win32';
+      child = cp.spawn(winShell ? `"${bin}"` : bin, args, { cwd, stdio: ['ignore', 'pipe', 'ignore'], shell: winShell });
+    } catch {
+      once(null);
+      return;
+    }
+    let out = '';
+    child.stdout?.on('data', (d) => (out += d));
+    child.on('error', () => once(null));
+    child.on('close', () => {
+      try {
+        once(JSON.parse(out));
+      } catch {
+        once(null);
+      }
     });
   }
   /** `force` bypasses the coalescing throttle (used on first-open / became-visible). */
@@ -2200,45 +2365,550 @@ class ChangeMapViewProvider implements vscode.WebviewViewProvider {
     if (!session || !cwd) return;
     this.running = true;
     this.run = now;
-    const args = ['changemap', '--json', '--root', cwd, '--session', session];
-    let child: cp.ChildProcess;
-    try {
-      const bin = resolveObservatoryBin();
-      const winShell = process.platform === 'win32'; // .cmd shim needs a shell on Windows
-      child = cp.spawn(winShell ? `"${bin}"` : bin, args, { cwd, stdio: ['ignore', 'pipe', 'ignore'], shell: winShell });
-    } catch {
+    let cm: unknown = undefined;
+    let mt: unknown = undefined;
+    const done = () => {
+      if (cm === undefined || mt === undefined) return; // wait for both spawns
       this.running = false;
-      this.postError();
-      return;
-    }
-    let out = '';
-    child.stdout?.on('data', (d) => (out += d));
-    child.on('error', () => {
-      this.running = false;
-      this.postError();
-    });
-    child.on('close', () => {
-      this.running = false;
-      let data: core.ChangeMap;
-      try {
-        const parsed = JSON.parse(out) as core.ChangeMap;
-        // Guard against a foreign `claude-observatory` on PATH answering with valid-but-wrong JSON —
-        // and against an OLDER CLI that predates the files[]/modules[] rollups this renderer needs.
-        if (!parsed || !parsed.summary || !Array.isArray(parsed.edits) || !Array.isArray(parsed.files) || !Array.isArray(parsed.modules))
-          throw new Error('not a ChangeMap');
-        data = parsed;
-      } catch {
+      if (cm === null && mt === null) {
         this.postError();
         return;
       }
       this.everLoaded = true;
-      this.view?.webview.postMessage({ type: 'changemap', data });
+      // The per-agent tab model (host-derived so the webview stays a pure renderer). Both payloads ride
+      // along; the webview joins CM.agents[]/CM.workflows[] to the MT nav by session/workflowId. The
+      // active session rides along too so the top navbar's session selector shows what it's viewing.
+      this.view?.webview.postMessage({ type: 'overview', cm, mt, session, navPos: this.navPos });
+    };
+    // changemap --json: the right-detail change-map (+ per-agent / per-workflow slices).
+    this.spawnJson(['changemap', '--json', '--root', cwd, '--session', session], cwd, (data) => {
+      const d = data as (core.ChangeMap & { agents?: unknown[] }) | null;
+      cm = d && d.summary && Array.isArray(d.edits) && Array.isArray(d.files) && Array.isArray(d.modules) && Array.isArray(d.agents) ? d : null;
+      done();
+    });
+    // multitask --json: the left-nav Fleet/Workflows payload (live phase, sparkline, tokens/time, risk).
+    this.spawnJson(['multitask', '--json', '--root', cwd, '--session', session], cwd, (data) => {
+      const d = data as { agents?: unknown[]; collisions?: unknown[] } | null;
+      mt = d && Array.isArray(d.agents) && Array.isArray(d.collisions) ? d : null;
+      done();
     });
   }
   private postError(): void {
     if (!this.everLoaded) this.view?.webview.postMessage({ type: 'error' });
   }
 }
+
+// --- Overview left-nav filter (0.8.0 round 3): real-time multi-agent observability --------------
+// The combined Overview panel's LEFT NAV renders `multitask --json` (the single backend): one row per
+// running agent across every worktree of this repo (live phase incl. awaiting-permission, worktree+
+// branch, a 20-bin activity sparkline, ±diff, tokens/time, risk count, a collision warning), each with
+// its nested subagents, plus the Workflows runs — a THIN renderer (no client aggregation) that rides the
+// transcript watcher's refreshAll. Subagent rows hand off a zero-token chat via claudeObservatory.chatAction.
+
+/** The Overview nav's two DISPLAY filters — Active-only + Clear-completed — as ONE pure function over
+ *  the raw `multitask --json` payload. Single source of truth for BOTH the smoke test (which drives it
+ *  off fabricated payloads) AND the webview: the client keeps the transient toggle / dismissed-set
+ *  state and calls THIS SAME function (embedded verbatim via .toString() into OVERVIEW_SCRIPT), so the
+ *  filter the test verifies is byte-for-byte the one the UI runs — no drift. Zero-token, no core/CLI
+ *  change (a thin renderer on top of agent.phase / subagent.phase / workflow.running).
+ *
+ *  Classification is PURE from the payload: an agent is "active" when its own phase is
+ *  working/awaiting-input/awaiting-permission OR any of its subagents is; a workflow is active when
+ *  `running`. `activeOnly` hides the inactive; `dismissed*` hides completed items the user cleared — but
+ *  a dismissed item REAPPEARS the moment it goes active again (dismissal only bites while inactive). */
+export interface MultitaskFilterState {
+  activeOnly?: boolean;
+  dismissedAgents?: Record<string, unknown>;
+  dismissedWorkflows?: Record<string, unknown>;
+}
+export const multitaskFilter = (
+  data:
+    | {
+        agents?: Array<{ session?: string; phase?: string | null; subagents?: Array<{ phase?: string | null }> }>;
+        workflows?: Array<{ id?: string; running?: boolean }>;
+      }
+    | null
+    | undefined,
+  state: MultitaskFilterState | null | undefined
+) => {
+  const st = state || {};
+  const activeOnly = !!st.activeOnly;
+  const dAg = st.dismissedAgents || {};
+  const dWf = st.dismissedWorkflows || {};
+  const isActive = (p: string | null | undefined) =>
+    p === "working" || p === "awaiting-input" || p === "awaiting-permission";
+  const agentActive = (a: { phase?: string | null; subagents?: Array<{ phase?: string | null }> }) => {
+    if (isActive(a && a.phase)) return true;
+    const subs = (a && a.subagents) || [];
+    for (let i = 0; i < subs.length; i++) if (isActive(subs[i] && subs[i].phase)) return true;
+    return false;
+  };
+  const allAg = (data && data.agents) || [];
+  const agents: typeof allAg = [];
+  const completedAgents: string[] = [];
+  let activeAgents = 0;
+  let hiddenAgents = 0;
+  for (let i = 0; i < allAg.length; i++) {
+    const a = allAg[i];
+    const act = agentActive(a);
+    if (act) activeAgents++;
+    else completedAgents.push(String(a && a.session));
+    if (activeOnly && !act) continue; // active-only hides the inactive outright
+    if (!act && dAg[String(a && a.session)]) {
+      hiddenAgents++;
+      continue;
+    } // dismissed — but only while still inactive (reappears when it goes active)
+    agents.push(a);
+  }
+  const allWf = (data && data.workflows) || [];
+  const workflows: typeof allWf = [];
+  const completedWorkflows: string[] = [];
+  let activeWorkflows = 0;
+  let hiddenWorkflows = 0;
+  for (let j = 0; j < allWf.length; j++) {
+    const w = allWf[j];
+    const run = !!(w && w.running);
+    if (run) activeWorkflows++;
+    else completedWorkflows.push(String(w && w.id));
+    if (activeOnly && !run) continue;
+    if (!run && dWf[String(w && w.id)]) {
+      hiddenWorkflows++;
+      continue;
+    }
+    workflows.push(w);
+  }
+  return {
+    agents,
+    workflows,
+    completedAgents,
+    completedWorkflows,
+    totalAgents: allAg.length,
+    activeAgents,
+    hiddenAgents,
+    totalWorkflows: allWf.length,
+    activeWorkflows,
+    hiddenWorkflows,
+  };
+};
+
+// Plain ES5 concatenation (no template literals / no ${…}) so this lives inside a TS template literal
+// without escaping — the only interpolation is the embedded multitaskFilter source (see below).
+const OVERVIEW_SCRIPT = `
+(function(){
+  "use strict";
+  var vscode=acquireVsCodeApi();
+  // Combined Overview (0.8.0 round 3) — MASTER–DETAIL. LEFT NAV: Fleet (running agents + subagents) ·
+  // Workflows (runs), rendered from the multitask --json payload (MT). RIGHT DETAIL: the change-map
+  // (named-chapter ribbon · module strip · churn ledger) for the SELECTED nav item, from changemap
+  // --json (CM) — CM.agents[] joined by session, CM.workflows[] by id. Default select = the orchestrator.
+  var CM=null, MT=null, SEL=null, NAV='fleet', PAL={}, WF_OPEN={}, MOD=null, ROWS=[], RIB_OPEN=false, SELF_KEY=null, SEEN_WF=null, FLASH_WF=null;
+  // SEL_CH = the chapter selected in the ribbon ({id,label}) — scopes the top-navbar bulk actions to it;
+  // null → session-wide. NAVPOS = the live Diff/File step-through position for the nav-bar counters.
+  var SEL_CH=null, NAVPOS=null;
+  var ACTIVE_ONLY=false, DISMISS_AG={}, DISMISS_WF={};
+  var tip=document.getElementById('cm-tip');
+  // The one DISPLAY filter (Active-only / Clear-completed), embedded VERBATIM from the host's exported
+  // multitaskFilter so the UI runs the exact code the smoke test verifies. Pure over the MT payload.
+  var MTFILTER = ${multitaskFilter.toString()};
+  function fstate(){ return { activeOnly:ACTIVE_ONLY, dismissedAgents:DISMISS_AG, dismissedWorkflows:DISMISS_WF }; }
+  function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+  function base(p){ if(!p) return ''; var s=String(p); var i=s.lastIndexOf('/'); return i>=0? s.slice(i+1): s; }
+  function readPal(){ var cs=getComputedStyle(document.documentElement); function v(n,d){ return (cs.getPropertyValue(n)||'').trim()||d; }
+    PAL={ pending:v('--cm-pending','#d9a441'), kept:v('--cm-kept','#3fb950'), reverted:v('--cm-reverted','#9aa0aa'), risk:v('--cm-risk','#e5534b'), agent:v('--cm-agent','#9a6ac2'), accent:v('--cm-accent','#4c8bf5'),
+      working:v('--mt-working','#4c8bf5'), attn:v('--mt-attn','#d9822b'), warn:v('--mt-warn','#e5534b'), idle:v('--mt-idle','#9aa0aa'), done:v('--mt-done','#3fb950') }; }
+  var PHASE={ 'working':'working', 'awaiting-input':'awaiting input', 'awaiting-permission':'awaiting permission', 'idle':'idle', 'errored':'errored', 'done':'done' };
+  function phaseColor(p){ if(p==='working') return PAL.working; if(p==='awaiting-input'||p==='awaiting-permission') return PAL.attn; if(p==='errored') return PAL.warn; if(p==='done') return PAL.done; return PAL.idle; }
+  function phaseLabel(p){ return PHASE[p] || (p||'—'); }
+  function fmtTok(n){ n=n||0; if(n>=1e6) return (n/1e6).toFixed(1)+'M'; if(n>=1e3) return Math.round(n/1e3)+'k'; return ''+n; }
+  function fmtDur(ms){ ms=ms||0; var s=Math.round(ms/1000); if(s<60) return s+'s'; var m=Math.round(s/60); if(m<60) return m+'m'; return (m/60).toFixed(1)+'h'; }
+  function spark(arr){ arr=arr||[]; var n=arr.length||1, max=1; for(var i=0;i<arr.length;i++) if(arr[i]>max) max=arr[i];
+    var w=100,h=16,bw=w/n,g=''; for(var j=0;j<arr.length;j++){ var bh=arr[j]>0? Math.max(1.2, arr[j]/max*h):0; g+='<rect x="'+(j*bw).toFixed(2)+'" y="'+(h-bh).toFixed(2)+'" width="'+(bw*0.72).toFixed(2)+'" height="'+bh.toFixed(2)+'"/>'; }
+    return '<svg class="mt-spark" viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none">'+g+'</svg>'; }
+  function riskCount(r){ if(r==null) return 0; if(typeof r==='number') return r; return r.total||0; }
+  function riskHigh(r){ return (r&&typeof r==='object')? (r.high||0):0; }
+  function agentCollisions(a){ var c=(MT&&MT.collisions)||[]; var hit=0; for(var i=0;i<c.length;i++){ var ags=c[i].agents||[]; if(ags.indexOf(a.session)>=0) hit++; } return hit; }
+
+  // --- selection + detail slice (join the MT nav to the CM detail by session / workflowId) -----------
+  function selfSession(){ var ag=(MT&&MT.agents)||[]; for(var i=0;i<ag.length;i++){ if(ag[i].self) return ag[i].session; } return ag.length?ag[0].session:''; }
+  function cmAgent(s){ var ag=(CM&&CM.agents)||[]; for(var i=0;i<ag.length;i++) if(ag[i].session===s) return ag[i]; return null; }
+  function wfById(id){ var ws=(CM&&CM.workflows)||[]; for(var i=0;i<ws.length;i++) if(ws[i].id===id) return ws[i]; return null; }
+  function selAgentSess(){ return SEL&&SEL.kind==='agent'?SEL.session:null; }
+  function selWf(){ return SEL&&SEL.kind==='workflow'?SEL.id:null; }
+  // Default DETAIL = the orchestrator (the self agent), else the first agent, else the first workflow.
+  function ensureSel(){
+    if(SEL){ if(SEL.kind==='agent' && cmAgent(SEL.session)) return; if(SEL.kind==='workflow' && wfById(SEL.id)) return; }
+    var s=selfSession(); if(s && cmAgent(s)){ SEL={kind:'agent', session:s}; return; }
+    var ag=(CM&&CM.agents)||[]; if(ag.length){ SEL={kind:'agent', session:ag[0].session}; return; }
+    var wf=(CM&&CM.workflows)||[]; if(wf.length){ SEL={kind:'workflow', id:wf[0].id}; return; }
+    SEL = s ? {kind:'agent', session:s} : null;
+  }
+  // A synthetic per-workflow detail slice: its rollup → chips, files → strip/ledger, and its OWN chapter
+  // ribbon (w.chapters — the run's edits regrouped by session chapter, aggregated in core). Total chapters
+  // partition the run exactly, so the old "run total minus chaptered" residual math is gone.
+  function workflowSlice(id){ var w=wfById(id); if(!w) return CM;
+    var r=w.rollup||{edits:0,added:0,removed:0,pending:0,kept:0,undone:0};
+    return { summary:{ session:w.name, units:r.edits, pending:r.pending, kept:r.kept, undone:r.undone, added:r.added, removed:r.removed, subagents:0, errors:0 }, files:w.files||[], modules:[], chapters:w.chapters||[], rollupByTask:[] }; }
+  // A not-found agent yields an EMPTY slice (not the whole self change-map) so a stale/lagging selection shows
+  // "no edits yet" rather than silently falling back to the orchestrator's chapters.
+  function detailSlice(){ if(!SEL) return CM; if(SEL.kind==='workflow') return workflowSlice(SEL.id); return cmAgent(SEL.session)||{ summary:null, files:[], modules:[], chapters:[], rollupByTask:[] }; }
+
+  // --- right DETAIL rendering (change-map for the selected nav item) ---------------------------------
+  function colorOf(st){ return st==='pending'?PAL.pending:(st==='undone'?PAL.reverted:PAL.kept); }
+  function weight(o){ return Math.max(1,o.churn); }
+  function modLabel(m){ var ms=(detailSlice()||{}).modules||[]; for(var i=0;i<ms.length;i++) if(ms[i].module===m) return ms[i].label; return m; }
+  function rankedFiles(){ return ((detailSlice()||{}).files||[]).slice(); }
+  function rankedModules(){ return ((detailSlice()||{}).modules||[]).slice(); }
+  // Active-only (shared with the fleet/workflow nav toggle) also scopes the change-map DETAIL to work still
+  // awaiting review — a file/chapter with no pending edits drops out, so a fully-reviewed slice reads empty.
+  function visible(f){ if(MOD!==null && f.moduleLabel!==MOD) return false; if(ACTIVE_ONLY && !(f.pending>0)) return false; return true; }
+  function taskChip(it){
+    // ✓/↩/🧹 act WYSIWYG on the chapter's DISPLAYED edits, keyed by chapter id (the synthetic session
+    // chapter included) — core.reviewEditIds resolves the exact set. 💬 needs the strict taskId (task
+    // framing for chat-context), so it hides on the synthetic chapter and duplicate occurrences.
+    var canAct = it.id!=null && it.r.edits>0;
+    var selectable = canAct; // any chapter with edits can scope the bulk actions
+    var cid = esc(it.id==null?'':it.id);
+    var tid = esc(it.taskId==null?'':it.taskId);
+    var isSel = selectable && SEL_CH && SEL_CH.id===String(it.id);
+    var btns = (canAct || it.taskId!=null) ? ('<span class="cm-tbtns">'+
+        (it.taskId!=null?'<button class="cm-tb ch" data-chat="'+tid+'" title="Chat about this chapter — copies context, opens your Claude">💬</button>':'')+
+        (canAct?('<button class="cm-tb ok" data-keep="'+cid+'" title="Accept — keep all pending edits shown in this chapter">✓</button>'+
+          '<button class="cm-tb rj" data-undo="'+cid+'" title="Reject — undo all pending edits shown in this chapter">↩</button>'+
+          '<button class="cm-tb cl" data-clear="'+cid+'" title="Clear — drop resolved (kept/undone) edits in this chapter">🧹</button>'):'')+
+        '</span>') : '';
+    return '<span class="cm-task'+(it.syn?' syn':'')+(isSel?' sel':'')+'"'+(selectable?' data-sel="'+cid+'"':'')+' title="'+esc(it.label)+' — '+it.r.edits+' edit(s) · '+it.st+(it.syn?' · work outside any to-do, attributed to the session':'')+(selectable?' · click to scope the bulk actions to this chapter':'')+'">'+
+      '<span class="cm-cg '+it.st+'"></span>'+
+      '<span class="cm-ct" data-task="'+cid+'">'+esc(it.label)+'</span>'+
+      (it.r.edits?'<span class="cm-ce">+'+it.r.added+' −'+it.r.removed+'</span>':'')+
+      btns+
+      '</span>';
+  }
+  // Truncate a chapter name for the scoped bulk-button labels.
+  function clipCh(s){ s=String(s==null?'':s); return s.length>16? s.slice(0,15)+'…' : s; }
+  // Relabel the top-navbar bulk buttons to reflect the current scope: a selected chapter → "…in <chapter>",
+  // else session-wide. textContent is injection-safe (no HTML), so the raw chapter name is fine here.
+  function relabelBulk(){ var nm=SEL_CH? clipCh(SEL_CH.label):'';
+    // innerHTML (not textContent) so the codicon <i> survives; esc() the label since it's user content.
+    function set(id, icon, base, scoped, tip, tipScoped){ var b=document.getElementById(id); if(!b) return; b.innerHTML='<i class="codicon codicon-'+icon+'"></i> '+esc(SEL_CH?scoped:base); b.title=SEL_CH?tipScoped:tip; }
+    set('ov-keepall','check-all','Accept All','Accept All in '+nm,'Accept all edits in this session','Accept all pending edits in the “'+nm+'” chapter');
+    set('ov-undoall','discard','Revert All','Revert All in '+nm,'Revert all edits in this session','Revert all pending edits in the “'+nm+'” chapter');
+    set('ov-clearres','clear-all','Clear Resolved','Clear in '+nm,'Clear resolved (kept / reverted) edits','Clear resolved edits in the “'+nm+'” chapter');
+  }
+  // Toggle a ribbon chip's selection: pick it (scoping the bulk actions), or deselect if already picked.
+  function toggleChapter(id, el){ if(!id) return;
+    if(SEL_CH && SEL_CH.id===id){ SEL_CH=null; }
+    else { var ct=el.querySelector('.cm-ct'); SEL_CH={ id:id, label: ct? ct.textContent : id }; }
+    renderRibbon(); // re-renders the ribbon (selected state) and relabels the bulk buttons
+  }
+  // 0.8.0: the ribbon renders the slice's NAMED CHAPTERS (chapters[]), which are TOTAL — core appends a
+  // synthetic session chapter for work outside any to-do, so every edit is under a named goal and no
+  // "unassigned" row can exist. ✓/↩/🧹 resolve WYSIWYG via chapter.id (core.reviewEditIds — exactly the
+  // edits the row shows, synthetic included); 💬 chat stays gated on the strict taskId (task framing).
+  function renderRibbon(){ var host=document.getElementById('cm-ribbon'); var a=detailSlice()||{};
+    var chs=a.chapters||[]; var items=[];
+    // Active-only: keep only chapters with pending (unreviewed) edits — drops resolved AND wip-but-idle
+    // chapters (e.g. a still-open to-do whose edits were all cleared), so clearing everything empties the ribbon.
+    for(var c=0;c<chs.length;c++){ var ch=chs[c];
+      if(ACTIVE_ONLY ? !(ch.pending>0) : !(ch.edits>0 || ch.status==='wip')) continue;
+      items.push({ id:ch.id, taskId:(ch.taskId!=null?ch.taskId:null), label:ch.title, syn:!!ch.synthetic, r:{edits:ch.edits,added:ch.added,removed:ch.removed,pending:ch.pending,kept:ch.kept,undone:ch.undone}, wip:ch.status==='wip' }); }
+    // Keep the chapter selection valid against the current slice (refresh its label; drop it if it vanished).
+    if(SEL_CH){ var f=null; for(var v=0;v<items.length;v++){ if(items[v].id!=null && String(items[v].id)===SEL_CH.id){ f=items[v]; break; } } if(f) SEL_CH.label=f.label; else SEL_CH=null; }
+    if(!items.length){ host.style.display='none'; host.innerHTML=''; relabelBulk(); return; }
+    var active=[], done=[];
+    for(var k=0;k<items.length;k++){ var it=items[k];
+      it.st = it.r.pending>0?'pending':(it.r.undone>0?'undone':(it.r.edits>0?'kept':'todo'));
+      (it.wip || it.r.pending>0 || it.r.undone>0 ? active : done).push(it);
+    }
+    host.style.display='block'; var h='<div class="cm-rwrap">';
+    for(var i=0;i<active.length;i++) h+=taskChip(active[i]);
+    if(done.length){ h+='<div class="cm-done-row">'+
+      '<button class="cm-done-tog" title="'+done.length+' completed chapter(s)"><span class="cm-cg kept"></span>'+done.length+' done <span class="cm-caret">'+(RIB_OPEN?'▾':'▸')+'</span></button>'+
+      '<button class="cm-clear-done" title="Clear resolved (kept/undone) edits of every completed chapter">🧹 clear completed</button></div>'; }
+    h+='</div>';
+    if(done.length && RIB_OPEN){ h+='<div class="cm-rwrap cm-done-list">'; for(var d=0;d<done.length;d++) h+=taskChip(done[d]); h+='</div>'; }
+    host.innerHTML=h;
+    var tog=host.querySelector('.cm-done-tog');
+    if(tog) tog.addEventListener('click', function(){ RIB_OPEN=!RIB_OPEN; renderRibbon(); });
+    var cd=host.querySelector('.cm-clear-done');
+    if(cd) cd.addEventListener('click', function(){ vscode.postMessage({type:'clearCompletedChapters'}); });
+    // click a chapter chip → toggle its selection (scopes the top-navbar bulk actions to it)
+    var sc=host.querySelectorAll('.cm-task[data-sel]');
+    for(var s2=0;s2<sc.length;s2++) sc[s2].addEventListener('click', function(){ toggleChapter(this.getAttribute('data-sel'), this); });
+    // the chip's 💬 hands off a zero-token chat about that chapter (kept from the old title click)
+    var chb=host.querySelectorAll('.cm-tb.ch');
+    for(var w2=0;w2<chb.length;w2++) chb[w2].addEventListener('click', function(ev){ ev.stopPropagation(); var id=this.getAttribute('data-chat'); if(id) vscode.postMessage({type:'chatAction', ref:{taskId:id}}); });
+    var ok=host.querySelectorAll('.cm-tb.ok');
+    for(var o=0;o<ok.length;o++) ok[o].addEventListener('click', function(ev){ ev.stopPropagation(); var id=this.getAttribute('data-keep'); if(id) vscode.postMessage({type:'taskKeep', taskId:id}); });
+    var rj=host.querySelectorAll('.cm-tb.rj');
+    for(var r=0;r<rj.length;r++) rj[r].addEventListener('click', function(ev){ ev.stopPropagation(); var id=this.getAttribute('data-undo'); if(id) vscode.postMessage({type:'taskUndo', taskId:id}); });
+    var cl=host.querySelectorAll('.cm-tb.cl');
+    for(var q=0;q<cl.length;q++) cl[q].addEventListener('click', function(ev){ ev.stopPropagation(); var id=this.getAttribute('data-clear'); if(id) vscode.postMessage({type:'taskClear', taskId:id}); });
+    relabelBulk();
+  }
+  function renderStrip(){ var mods=rankedModules();
+    var pct = mods.length ? 100/mods.length : 100;
+    var h='';
+    for(var j=0;j<mods.length;j++){ var m=mods[j];
+      var sel=(MOD===m.module), op=(MOD!==null&&!sel)?0.35:0.9;
+      h+='<button class="cm-sg'+(sel?' sel':'')+'" data-mod="'+esc(m.module)+'" style="width:'+pct+'%;background:'+colorOf(m.status)+';opacity:'+op+'" title="'+esc(m.label)+' · '+weight(m)+' lines · '+m.files+' file(s)">'+
+        '<span class="cm-sl">'+esc(m.label)+'</span></button>';
+    }
+    var host=document.getElementById('cm-strip'); host.innerHTML=h;
+    var bs=host.querySelectorAll('.cm-sg');
+    for(var b=0;b<bs.length;b++) bs[b].addEventListener('click', function(){ var m=this.getAttribute('data-mod'); MOD=(MOD===m)?null:m; paintDetail(); });
+  }
+  function renderLedger(){
+    var files=rankedFiles(), shown=[];
+    for(var i=0;i<files.length;i++) if(visible(files[i])) shown.push(files[i]);
+    ROWS=shown;
+    var max=0; for(var j=0;j<shown.length;j++){ var wj=weight(shown[j]); if(wj>max) max=wj; } if(!max) max=1;
+    var h='';
+    for(var k=0;k<shown.length;k++){ var f=shown[k], w=Math.max(2, weight(f)/max*100);
+      h+='<button class="cm-row" data-idx="'+k+'">'+
+        '<span class="cm-dot" style="background:'+colorOf(f.status)+'"></span>'+
+        '<span class="cm-fn">'+esc(f.file)+(f.agent?'<span class="cm-ag">●</span>':'')+(f.risk?'<span class="cm-rk">⌐</span>':'')+'</span>'+
+        '<span class="cm-md">'+esc(f.moduleLabel)+'</span>'+
+        '<span class="cm-bar"><span class="cm-fill" style="width:'+w+'%;background:'+colorOf(f.status)+'"></span></span>'+
+        '<span class="cm-n">+'+f.churn+'</span>'+
+        '<span class="cm-pd">'+(f.pending?('<span style="color:'+PAL.pending+'">'+f.pending+'⏳</span>'):('<span style="color:'+PAL.kept+'">✓</span>'))+'</span>'+
+        '</button>';
+    }
+    var host=document.getElementById('cm-ledger');
+    host.innerHTML=h||'<div class="cm-none">nothing matches this filter</div>';
+    var rs=host.querySelectorAll('.cm-row');
+    for(var r=0;r<rs.length;r++){
+      rs[r].addEventListener('click', function(){ var f=ROWS[+this.getAttribute('data-idx')]; if(f&&f.maxId>=0){ vscode.postMessage({type:'openEdit', id:f.maxId}); document.getElementById('cm-readout').innerHTML='→ <b>open diff</b> · '+esc(f.file)+' (edit #'+f.maxId+')'; } });
+      rs[r].addEventListener('mousemove', function(ev){ showTip(ev, ROWS[+this.getAttribute('data-idx')]); });
+      rs[r].addEventListener('mouseleave', hideTip);
+    }
+  }
+  function tipHtml(f){ var cls=f.classes||[];
+    var clsline=cls.length? cls.slice(0,4).join(', ')+(cls.length>4?' +'+(cls.length-4):'') : 'file scope';
+    return '<div class="tf">'+(f.agent?'<span class="ag">●</span> ':'')+esc(f.file)+(f.risk?' <span class="rk">⌐risk</span>':'')+'</div>'+
+      '<div class="tm">'+esc(f.rel)+'</div>'+
+      '<div class="tm">+'+f.churn+' · '+f.cnt+' unit'+(f.cnt===1?'':'s')+' · '+f.kept+'✓ '+f.pending+'⏳ '+f.undone+'↩</div>'+
+      '<div class="tc">'+esc(clsline)+'</div>'+
+      (f.reason?'<div class="tw">“'+esc(f.reason)+'”</div>':'')+
+      (f.risk?'<div class="trk">⚠ '+esc(f.risk)+'</div>':'')+
+      '<div class="ta">click → open the real diff</div>';
+  }
+  function showTip(ev,f){ if(!f) return; tip.innerHTML=tipHtml(f); tip.style.opacity='1';
+    var pad=12, tw=tip.offsetWidth, th=tip.offsetHeight, x=ev.clientX+pad, y=ev.clientY+pad;
+    if(x+tw>window.innerWidth) x=ev.clientX-tw-pad; if(y+th>window.innerHeight) y=ev.clientY-th-pad;
+    tip.style.left=x+'px'; tip.style.top=y+'px'; }
+  function hideTip(){ tip.style.opacity='0'; }
+  function updateReadout(){ var ro=document.getElementById('cm-readout'), bits=[];
+    if(MOD!==null) bits.push('module <b>'+esc(modLabel(MOD))+'</b>');
+    ro.innerHTML = bits.length? ('filtered by '+bits.join(' + ')+' — click again to clear') : '';
+  }
+  function paintDetail(){ var a=detailSlice(); var empty=document.getElementById('cm-detail-empty');
+    // Renderable if the slice has files OR any chapter with edits/wip OR an unassigned bucket — not files alone
+    // (an agent/workflow can have chapters or an unassigned rollup with no file ledger yet).
+    var hasFiles=!!(a && a.files && a.files.length);
+    var hasChapters=!!(a && a.chapters && a.chapters.some(function(ch){ return ch.edits>0 || ch.status==='wip'; }));
+    var hasUn=!!(a && a.rollupByTask && a.rollupByTask.some(function(t){ return t.taskId===null && t.edits>0; }));
+    if(!hasFiles && !hasChapters && !hasUn){ empty.style.display='block';
+      empty.innerHTML=(SEL&&SEL.kind==='workflow')? 'No attributed edits for this workflow yet.' : 'No edits for this agent yet. <span style="opacity:.75">This fills in as Claude edits files.</span>';
+      document.getElementById('cm-ribbon').style.display='none'; document.getElementById('cm-strip').innerHTML=''; document.getElementById('cm-ledger').innerHTML=''; document.getElementById('cm-readout').innerHTML='';
+      SEL_CH=null; relabelBulk(); return; }
+    empty.style.display='none';
+    renderRibbon(); renderStrip(); renderLedger(); updateReadout();
+  }
+
+  // --- left NAV: display filter (shared by Fleet + Workflows) ----------------------------------------
+  function filterBar(kind, F){
+    var wf=kind==='workflows';
+    var act=wf?F.activeWorkflows:F.activeAgents, tot=wf?F.totalWorkflows:F.totalAgents, hid=wf?F.hiddenWorkflows:F.hiddenAgents;
+    var h='';
+    if(ACTIVE_ONLY) h+='<span class="mt-fon" title="Active-only filter is on">'+(wf?'running':'active')+' only · '+act+'/'+tot+'</span>';
+    if(hid>0) h+='<span class="mt-fhide" data-tab="'+kind+'" title="Un-hide the completed items you cleared">'+hid+' hidden · show all</span>';
+    return h?('<div class="mt-fbar">'+h+'</div>'):'';
+  }
+  function wireFilterBar(host){ var hb=host.querySelectorAll('.mt-fhide');
+    for(var i=0;i<hb.length;i++) hb[i].addEventListener('click', function(){ if(this.getAttribute('data-tab')==='workflows') DISMISS_WF={}; else DISMISS_AG={}; paint(); }); }
+  function syncControls(F){
+    var cb=document.getElementById('mt-active'); if(cb) cb.checked=ACTIVE_ONLY;
+    var tg=document.getElementById('ov-activeonly'); if(tg){ tg.classList.toggle('on', ACTIVE_ONLY); tg.setAttribute('aria-pressed', ACTIVE_ONLY?'true':'false'); }
+    var btn=document.getElementById('mt-clear');
+    if(btn) btn.disabled = F.completedAgents.every(function(s){return DISMISS_AG[s];}) && F.completedWorkflows.every(function(i){return DISMISS_WF[i];});
+  }
+  function clearCompleted(){
+    var F=MTFILTER(MT, fstate());
+    for(var i=0;i<F.completedAgents.length;i++) DISMISS_AG[F.completedAgents[i]]=1;
+    for(var j=0;j<F.completedWorkflows.length;j++) DISMISS_WF[F.completedWorkflows[j]]=1;
+    paint();
+  }
+
+  // --- Fleet: running agents (worktree-siblings) + nested subagents; click selects the DETAIL ---------
+  function renderFleet(){ var host=document.getElementById('ov-fleet');
+    var F=MTFILTER(MT, fstate()); var vis=F.agents; syncControls(F);
+    var h=filterBar('fleet', F);
+    for(var i=0;i<vis.length;i++){ var a=vis[i]; var col=agentCollisions(a); var sel=(a.session===selAgentSess());
+      h+='<div class="mt-agent'+(sel?' sel':'')+'" data-sess="'+esc(a.session)+'">';
+      h+='<div class="mt-arow">';
+      h+='<span class="mt-badge" style="background:'+phaseColor(a.phase)+'"'+(a.phaseConfidence==='heuristic'?' title="inferred from inactivity — no structural marker for this state">~':'>')+esc(phaseLabel(a.phase))+'</span>';
+      h+='<span class="mt-wt">'+esc(base(a.worktree))+(a.self?'<span class="mt-self">self</span>':'')+(a.gitBranch?'<span class="mt-br">⑂'+esc(a.gitBranch)+'</span>':'')+'</span>';
+      h+=spark(a.sparkline);
+      h+='<span class="mt-diff"><span class="mt-add">+'+((a.diff&&a.diff.added)||0)+'</span> <span class="mt-rem">−'+((a.diff&&a.diff.removed)||0)+'</span></span>';
+      h+='<span class="mt-meta">'+fmtTok(a.tokens)+' tok · '+fmtDur(a.durationMs)+'</span>';
+      var rc=riskCount(a.risk); if(rc) h+='<span class="mt-risk"'+(riskHigh(a.risk)?' data-high="1"':'')+' title="'+rc+' risk flag(s)">⚠ '+rc+'</span>';
+      if(col) h+='<span class="mt-col" title="'+col+' file(s) also touched by another agent">⇄ '+col+'</span>';
+      h+='</div>';
+      var subs=a.subagents||[];
+      for(var k=0;k<subs.length;k++){ var su=subs[k];
+        h+='<div class="mt-sub">';
+        h+='<span class="mt-badge sm" style="background:'+phaseColor(su.phase)+'"'+(su.phaseConfidence==='heuristic'?' title="inferred from inactivity — no structural marker for this state">~':'>')+esc(phaseLabel(su.phase))+'</span>';
+        h+='<span class="mt-st">'+esc(su.agentType||'subagent')+(su.description?'<span class="mt-sd">'+esc(su.description)+'</span>':'')+'</span>';
+        if(su.currentTask) h+='<span class="mt-cur" title="'+esc(su.currentTask)+'">▶ '+esc(su.currentTask)+'</span>';
+        var td=su.todos||[]; if(td.length) h+='<span class="mt-todo">'+td.length+' todo'+(td.length===1?'':'s')+'</span>';
+        h+='<span class="mt-diff sm"><span class="mt-add">+'+(su.added||0)+'</span> <span class="mt-rem">−'+(su.removed||0)+'</span></span>';
+        h+='<button class="mt-chat" data-agent="'+esc(su.agentId)+'" title="Chat about this subagent — copies context, opens your Claude">💬</button>';
+        h+='</div>';
+      }
+      h+='</div>';
+    }
+    if(!vis.length) h+='<div class="mt-none">'+(ACTIVE_ONLY?'No active agents.':'No agents to show.')+'</div>';
+    host.innerHTML=h; wireFilterBar(host);
+    var c=(MT&&MT.collisions)||[], ch='';
+    for(var m=0;m<c.length;m++){ var cc=c[m];
+      ch+='<div class="mt-crow" title="'+esc(cc.file)+'"><span class="mt-cf">'+esc(base(cc.file))+'</span><span class="mt-ca">'+((cc.agents&&cc.agents.length)||0)+' agents</span>'+(cc.anyPending?'<span class="mt-cp">pending</span>':'')+'</div>';
+    }
+    document.getElementById('ov-collisions').innerHTML = c.length? ('<div class="mt-chead">Live conflicts ('+c.length+')</div>'+ch) : '';
+    var rows=host.querySelectorAll('.mt-agent');
+    for(var r=0;r<rows.length;r++) rows[r].addEventListener('click', function(ev){ if(ev.target && String(ev.target.className||'').indexOf('mt-chat')>=0) return; var s=this.getAttribute('data-sess'); SEL={kind:'agent', session:s}; paint(); });
+    var bs=host.querySelectorAll('.mt-chat');
+    for(var b=0;b<bs.length;b++) bs[b].addEventListener('click', function(ev){ ev.stopPropagation(); var id=this.getAttribute('data-agent'); vscode.postMessage({type:'chatAction', ref:{agentId:id}}); });
+  }
+
+  // --- Workflows: the runs — informative name, per-phase progress, tokens/time/edits; click selects ---
+  function phaseSummary(w){ var pg=(w&&w.phaseGroups)||[]; if(!pg.length) return '';
+    var parts=[]; for(var i=0;i<pg.length;i++) parts.push(esc(pg[i].title)+' '+pg[i].done+'/'+pg[i].total);
+    return parts.join(' · '); }
+  function wagRow(a){ var sid=String(a.agentId||'').replace(/^v\d+:/,'').slice(0,6);
+    // A running workflow has no per-agent label on disk yet — fall back to agentType + a short id so the
+    // rows are distinguishable (the real labels arrive once the run's state file is written at completion).
+    var lbl=a.label||((a.agentType||'agent')+(sid?' '+sid:''));
+    // Each agent row carries the same "extras" as the run header: activity sparkline · ±diff · model · tokens · time · edits.
+    return '<div class="mt-wag"><span class="mt-badge xs" style="background:'+(a.done?PAL.done:PAL.working)+'"></span>'+
+      '<span class="mt-wat">'+esc(lbl)+'</span>'+
+      spark(a.sparkline)+
+      '<span class="mt-diff sm"><span class="mt-add">+'+(a.added||0)+'</span> <span class="mt-rem">−'+(a.removed||0)+'</span></span>'+
+      '<span class="mt-wmeta">'+(a.model?esc(a.model)+' · ':'')+fmtTok(a.tokens)+' tok · '+fmtDur(a.durationMs)+' · '+(a.edits||0)+' edit'+(a.edits===1?'':'s')+'</span></div>'; }
+  function renderWorkflows(){ var host=document.getElementById('ov-workflows');
+    var all=(MT&&MT.workflows)||[];
+    if(!all.length){ host.innerHTML='<div class="mt-none">No workflow runs in this session yet.</div>'; return; }
+    var F=MTFILTER(MT, fstate()), wf=F.workflows;
+    var h=filterBar('workflows', F);
+    if(!wf.length){ host.innerHTML=h+'<div class="mt-none">'+(ACTIVE_ONLY?'No running workflows.':'No workflow runs to show.')+'</div>'; wireFilterBar(host); return; }
+    for(var i=0;i<wf.length;i++){ var w=wf[i]; var open=(WF_OPEN[w.id]!==false); var ps=phaseSummary(w); var sel=(w.id===selWf());
+      h+='<div class="mt-wf'+(sel?' sel':'')+(w.id===FLASH_WF?' flash':'')+'">';
+      // Header line: caret · badge · FULL name (wraps, never clipped). Metrics ride their own line below so
+      // the long workflow description stays fully readable in the narrow nav.
+      h+='<div class="mt-wrow" data-wf="'+esc(w.id)+'" title="Show this workflow’s change-map">';
+      h+='<button class="mt-wcar" data-car="'+esc(w.id)+'" title="'+(open?'collapse':'expand')+' agents">'+(open?'▾':'▸')+'</button>';
+      h+='<span class="mt-badge sm" style="background:'+(w.running?PAL.working:PAL.done)+'">'+(w.running?'running':'done')+'</span>';
+      h+='<span class="mt-wname">'+esc(w.description||w.name)+'</span>';
+      h+='</div>';
+      h+='<div class="mt-wmet">'+spark(w.sparkline)+
+        '<span class="mt-diff sm"><span class="mt-add">+'+(w.added||0)+'</span> <span class="mt-rem">−'+(w.removed||0)+'</span></span>'+
+        '<span class="mt-meta">'+(w.agentCount||(w.agents||[]).length)+' ag · '+fmtTok(w.tokens)+' tok · '+fmtDur(w.durationMs)+' · '+(w.edits||0)+' edit'+(w.edits===1?'':'s')+'</span></div>';
+      if(w.description&&w.name&&w.description!==w.name) h+='<div class="mt-wsub">'+esc(w.name)+'</div>';
+      if(ps) h+='<div class="mt-wphs">'+ps+'</div>';
+      if(open){ var ags=w.agents||[], pg=(w.phaseGroups||[]), placed={};
+        for(var g=0;g<pg.length;g++){ var title=pg[g].title;
+          h+='<div class="mt-wphg">'+esc(title)+' <span class="mt-wpn">'+pg[g].done+'/'+pg[g].total+'</span></div>';
+          for(var kk=0;kk<ags.length;kk++){ if(ags[kk].phase===title){ placed[kk]=1; h+=wagRow(ags[kk]); } }
+        }
+        var rest=''; for(var k2=0;k2<ags.length;k2++){ if(!placed[k2]) rest+=wagRow(ags[k2]); }
+        if(rest){ if(pg.length) h+='<div class="mt-wphg">other</div>'; h+=rest; }
+      }
+      h+='</div>';
+    }
+    host.innerHTML=h; wireFilterBar(host);
+    var cars=host.querySelectorAll('.mt-wcar');
+    for(var r=0;r<cars.length;r++) cars[r].addEventListener('click', function(ev){ ev.stopPropagation(); var id=this.getAttribute('data-car'); WF_OPEN[id]=(WF_OPEN[id]===false); renderWorkflows(); });
+    var wrows=host.querySelectorAll('.mt-wrow');
+    // Clicking the workflow selects it (→ change-map on the right) AND expands its per-agent list (→ left),
+    // so the agents are discoverable without hunting for the ▸ caret. The caret still toggles collapse.
+    for(var q=0;q<wrows.length;q++) wrows[q].addEventListener('click', function(){ var id=this.getAttribute('data-wf'); if(id){ SEL={kind:'workflow', id:id}; WF_OPEN[id]=true; paint(); } });
+  }
+
+  // --- nav sub-tabs (Fleet · Workflows) --------------------------------------------------------------
+  function navCounts(){ return { fleet:((MT&&MT.agents)||[]).length, workflows:((MT&&MT.workflows)||[]).length }; }
+  function applyPanes(){ document.getElementById('ov-pane-fleet').style.display=(NAV==='fleet')?'flex':'none'; document.getElementById('ov-pane-workflows').style.display=(NAV==='workflows')?'flex':'none'; }
+  function renderNavTabs(){ var c=navCounts(); var defs=[['fleet','Fleet',c.fleet],['workflows','Workflows',c.workflows]];
+    var h=''; for(var i=0;i<defs.length;i++){ var d=defs[i]; h+='<button class="ov-tab'+(d[0]===NAV?' on':'')+'" data-nav="'+d[0]+'">'+d[1]+'<span class="ov-tn">'+d[2]+'</span></button>'; }
+    var host=document.getElementById('ov-navtabs'); host.innerHTML=h;
+    var bs=host.querySelectorAll('.ov-tab'); for(var b=0;b<bs.length;b++) bs[b].addEventListener('click', function(){ NAV=this.getAttribute('data-nav'); renderNavTabs(); applyPanes(); }); }
+
+  function paint(){
+    var empty=document.getElementById('ov-empty');
+    if(MT && MT.agents){ empty.style.display='none'; renderNavTabs(); applyPanes(); renderFleet(); renderWorkflows(); }
+    else {
+      renderNavTabs(); applyPanes();
+      if(!CM){ empty.style.display='block'; empty.innerHTML='No agents yet. <span style="opacity:.75">This fills in as Claude works across your worktrees.</span>';
+        document.getElementById('ov-fleet').innerHTML=''; document.getElementById('ov-workflows').innerHTML=''; document.getElementById('ov-collisions').innerHTML=''; }
+      else empty.style.display='none';
+    }
+    ensureSel();
+    paintDetail();
+  }
+
+  function setSessLabel(s){ var el=document.getElementById('ov-sess-label'); if(el) el.textContent='session '+(s?String(s).slice(0,8):'—'); }
+  // Paint the nav-bar Diff/File position counters from the host-pushed NAVPOS (live step-through position).
+  function renderNavPos(){ var p=NAVPOS||{};
+    var d=document.getElementById('ov-diffcount'); if(d) d.textContent='Diff '+(p.diff? (p.diff.i+'/'+p.diff.n) : '–/–');
+    var f=document.getElementById('ov-filecount'); if(f) f.textContent='File '+(p.file? ((p.file.i||'–')+'/'+p.file.n) : '–/–'); }
+
+  window.addEventListener('message', function(ev){ var m=ev.data||{};
+    if(m.type==='overview'){ CM=m.cm||null; MT=m.mt||null; NAVPOS=m.navPos||null; setSessLabel(m.session);
+      // Reset dismissals only when the actual session changes — key on the stable host-provided session id,
+      // NOT selfSession() (which falls back to agents[0].session and flips whenever the fleet re-sorts,
+      // wiping the user's "clear completed" on every refresh).
+      var k=m.session||SELF_KEY; if(k!==SELF_KEY){ SELF_KEY=k; DISMISS_AG={}; DISMISS_WF={}; SEEN_WF=null; }
+      // Auto-focus a NEW workflow run: the first payload only SEEDS the seen-set (opening the panel never
+      // steals focus); after that, a newly-appeared RUNNING run switches the nav to Workflows, selects it,
+      // and pulses its row — the detail then tracks the run's agents/phases/edits live via the watchers.
+      var wfs=(MT&&MT.workflows)||[];
+      if(SEEN_WF===null){ SEEN_WF={}; for(var sw=0;sw<wfs.length;sw++) SEEN_WF[wfs[sw].id]=1; }
+      else { var freshWf=null;
+        for(var nw=0;nw<wfs.length;nw++){ if(!SEEN_WF[wfs[nw].id]){ SEEN_WF[wfs[nw].id]=1; if(wfs[nw].running) freshWf=wfs[nw].id; } }
+        if(freshWf){ NAV='workflows'; SEL={kind:'workflow', id:freshWf}; WF_OPEN[freshWf]=true; FLASH_WF=freshWf;
+          setTimeout(function(){ FLASH_WF=null; }, 3200); } }
+      ensureSel(); readPal(); paint(); renderNavPos(); }
+    else if(m.type==='navpos'){ NAVPOS=m.pos||null; renderNavPos(); }
+    else if(m.type==='error'){ CM=null; MT=null; var em=document.getElementById('ov-empty'); em.style.display='block';
+      em.innerHTML='Needs the <b>claude-observatory</b> CLI, which was not found. <span style="opacity:.75">Install it (./install.sh), then reload.</span>';
+      document.getElementById('ov-fleet').innerHTML=''; document.getElementById('ov-workflows').innerHTML=''; document.getElementById('ov-collisions').innerHTML='';
+      document.getElementById('cm-ribbon').style.display='none'; document.getElementById('cm-strip').innerHTML=''; document.getElementById('cm-ledger').innerHTML=''; document.getElementById('cm-detail-empty').style.display='none'; document.getElementById('cm-readout').innerHTML=''; }
+  });
+
+  (function wireControls(){
+    var cb=document.getElementById('mt-active'); if(cb) cb.addEventListener('change', function(){ ACTIVE_ONLY=!!cb.checked; paint(); });
+    var aotg=document.getElementById('ov-activeonly'); if(aotg) aotg.addEventListener('click', function(){ ACTIVE_ONLY=!ACTIVE_ONLY; paint(); });
+    var btn=document.getElementById('mt-clear'); if(btn) btn.addEventListener('click', function(){ clearCompleted(); });
+    // top-navbar review actions — each posts to the host, which runs the matching command (zero-token).
+    function tbtn(id, type){ var b=document.getElementById(id); if(b) b.addEventListener('click', function(){ vscode.postMessage({type:type}); }); }
+    // Bulk actions scope to the SELECTED chapter when one is picked in the ribbon, else act session-wide —
+    // the chapter path reuses the existing strict-span task ops (destructive-safe).
+    function bulk(id, sess, chap){ var b=document.getElementById(id); if(b) b.addEventListener('click', function(){ if(SEL_CH) vscode.postMessage({type:chap, taskId:SEL_CH.id}); else vscode.postMessage({type:sess}); }); }
+    tbtn('ov-sess','switchSession'); tbtn('ov-refresh','refresh');
+    bulk('ov-keepall','keepAll','taskKeep'); bulk('ov-undoall','undoAll','taskUndo'); bulk('ov-clearres','clearResolved','taskClear');
+    // the step-through review nav bar — posts to the existing nav commands the status-bar nav bar drives.
+    tbtn('ov-fileprev','navFilePrev'); tbtn('ov-filenext','navFileNext');
+    tbtn('ov-diffprev','navDiffPrev'); tbtn('ov-diffnext','navDiffNext');
+    tbtn('ov-navkeep','navKeep'); tbtn('ov-navundo','navUndo');
+    tbtn('ov-acceptfile','keepOpenFile'); tbtn('ov-rejectfile','undoOpenFile'); tbtn('ov-clearfile','clearOpenFile');
+    tbtn('ov-spotlight','toggleHeatmap'); tbtn('ov-search','searchEdits');
+    // clicking empty ribbon space clears the chapter scope (back to session-wide). Wired once (not per-render).
+    var rib=document.getElementById('cm-ribbon');
+    if(rib) rib.addEventListener('click', function(ev){ var t=ev.target; var onEmpty=(t===rib)||(t.className&&String(t.className).indexOf('cm-rwrap')>=0); if(onEmpty && SEL_CH){ SEL_CH=null; renderRibbon(); } });
+    relabelBulk(); renderNavPos();
+  })();
+  readPal();
+  vscode.postMessage({type:'ready'});
+})();
+`;
 
 // --- marketplace-free update nudge -------------------------------------------------------------
 // VS Code has no custom-repository / self-hosted auto-update mechanism (JetBrains does — this plugin
@@ -2392,14 +3062,15 @@ async function checkForUpdate(context: vscode.ExtensionContext, manual: boolean)
 export function activate(context: vscode.ExtensionContext): void {
   const editsProvider = new EditsProvider('edits');
   const diffsProvider = new EditsProvider('diffs');
-  const timelineProvider = new EditsProvider('timeline');
   const editsView = vscode.window.createTreeView('claudeObservatory.edits', { treeDataProvider: editsProvider });
   const diffsView = vscode.window.createTreeView('claudeObservatory.diffs', { treeDataProvider: diffsProvider });
-  const timelineView = vscode.window.createTreeView('claudeObservatory.timeline', { treeDataProvider: timelineProvider });
+  // 0.8.0: Timeline folded into Observations (timeline-style runs). Round 3: the Observations panel is
+  // two tabs — Observations (reasoning feed) + Actions (the tool-call timeline, moved out of Multitasking).
   const insightsProvider = new ObservationsProvider();
   const insightsView = vscode.window.createTreeView('claudeObservatory.observations', { treeDataProvider: insightsProvider });
   const actionsProvider = new ActionsProvider();
   const actionsView = vscode.window.createTreeView('claudeObservatory.actions', { treeDataProvider: actionsProvider });
+  actionsProvider.view = actionsView;
   const fileHistoryProvider = new FileHistoryProvider();
   const fileHistoryView = vscode.window.createTreeView('claudeObservatory.fileHistory', { treeDataProvider: fileHistoryProvider });
   fileHistoryProvider.view = fileHistoryView;
@@ -2523,6 +3194,11 @@ export function activate(context: vscode.ExtensionContext): void {
     diffCountBtn.text = activeHasPending ? `Diff ${diffIdx + 1}/${inFile.length}` : '';
     const fileIdx = activeFile ? files.indexOf(activeFile) : -1;
     fileCountBtn.text = files.length ? `File ${fileIdx >= 0 ? fileIdx + 1 : '–'}/${files.length}` : '';
+    // Mirror the same Diff/File position into the Overview title-bar nav-bar counters (live).
+    changeMapProvider.setNavPos({
+      diff: activeHasPending ? { i: diffIdx + 1, n: inFile.length } : null,
+      file: files.length ? { i: fileIdx >= 0 ? fileIdx + 1 : 0, n: files.length } : null,
+    });
 
     // Session-tier buttons show whenever anything is pending; active-file-tier only inside a changed file.
     for (const b of sessionBtns) pending ? b.show() : b.hide();
@@ -2573,10 +3249,13 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   const refreshAll = () => {
-    editsProvider.refresh();
+    // Demo sessions leave no residue (0.8.0): once every demo edit is reviewed (e.g. Accept All), the
+    // resolved records are dropped so the panels empty out. No-op for real sessions; the resulting
+    // store change re-enters here once and then no-ops (the log is empty).
+    const s = currentSession();
+    if (s) core.autoClearDemo(s);
     editsProvider.refresh();
     diffsProvider.refresh();
-    timelineProvider.refresh();
     insightsProvider.refresh();
     actionsProvider.refresh();
     fileHistoryProvider.refresh();
@@ -2586,14 +3265,6 @@ export function activate(context: vscode.ExtensionContext): void {
     updateStatusItem();
     refreshInline();
   };
-
-  // Actions view: flip between the curated default and every action; drives the title-bar toggle button.
-  const setActionsShowAll = (v: boolean) => {
-    actionsShowAll = v;
-    void vscode.commands.executeCommand('setContext', 'claudeObservatory.actionsShowAll', v);
-    actionsProvider.refresh();
-  };
-  setActionsShowAll(false); // establish the context key from activation
 
   // --- nav bar handlers (drive the status-bar review toolbar built above) ---
   // The pending edit the Diff axis is parked on, resolved to a live (still-pending) record.
@@ -2635,7 +3306,6 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     editsView,
     diffsView,
-    timelineView,
     insightsView,
     actionsView,
     fileHistoryView,
@@ -2663,7 +3333,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // Refresh on panel-visible / window-focus (covers new sessions the watcher may miss), on active
   // editor change, and on buffer edits (debounced) so decorations track the live buffer.
-  for (const v of [editsView, diffsView, timelineView, insightsView, actionsView, fileHistoryView]) {
+  for (const v of [editsView, diffsView, insightsView, actionsView, fileHistoryView]) {
     v.onDidChangeVisibility((e) => e.visible && refreshAll());
   }
   let debounce: ReturnType<typeof setTimeout> | undefined;
@@ -2693,8 +3363,6 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand('claudeObservatory.refresh', () => refreshAll()),
-    vscode.commands.registerCommand('claudeObservatory.actionsShowAll', () => setActionsShowAll(true)),
-    vscode.commands.registerCommand('claudeObservatory.actionsShowCurated', () => setActionsShowAll(false)),
     // Step backward / forward through pending edits (⏮ prev · ⏭ next), keyboard-friendly.
     vscode.commands.registerCommand('claudeObservatory.reviewNext', () => reviewStep(1)),
     vscode.commands.registerCommand('claudeObservatory.reviewPrev', () => reviewStep(-1)),
@@ -2838,6 +3506,12 @@ export function activate(context: vscode.ExtensionContext): void {
     // Session-wide bulk actions (view-title buttons).
     vscode.commands.registerCommand('claudeObservatory.keepAll', () => withSession((s) => keepAllSession(s))()),
     vscode.commands.registerCommand('claudeObservatory.undoAll', () => withSession((s) => undoAllSession(s))()),
+    // Chapter (task) review actions — the Overview ribbon's per-chip Accept / Reject / Clear + a
+    // "clear every completed chapter" affordance. The webview posts {taskKeep|taskUndo|taskClear,taskId}.
+    vscode.commands.registerCommand('claudeObservatory.taskKeep', (taskId: string) => withSession((s) => keepChapter(s, taskId))()),
+    vscode.commands.registerCommand('claudeObservatory.taskUndo', (taskId: string) => withSession((s) => undoChapter(s, taskId))()),
+    vscode.commands.registerCommand('claudeObservatory.taskClear', (taskId: string) => withSession((s) => clearChapter(s, taskId))()),
+    vscode.commands.registerCommand('claudeObservatory.clearCompletedChapters', () => withSession((s) => clearCompletedChapters(s))()),
     vscode.commands.registerCommand('claudeObservatory.clearResolved', () =>
       withSession(async (s) => {
         const resolved = core.readLog(s).filter((r) => r.status !== 'pending').length;
@@ -2887,6 +3561,13 @@ export function activate(context: vscode.ExtensionContext): void {
       const s = currentSession();
       if (!s) return undefined;
       return chatAboutEdit(s, typeof arg === 'number' ? arg : arg.rec.id);
+    }),
+    // Zero-token chat about ANY action / edit / subagent / task (0.8.0). Accepts a bare ChatContextRef
+    // (from the Multitasking + Overview webviews) or an Actions tree node (action / subagent row).
+    vscode.commands.registerCommand('claudeObservatory.chatAction', (arg: unknown) => {
+      const ref = refFromArg(arg);
+      if (!ref) return undefined;
+      return chatAction(ref);
     }),
     // Insights (observations + suggestions)
     vscode.commands.registerCommand('claudeObservatory.showObservation', (id: number) => showObservationDoc(id)),
@@ -3033,6 +3714,13 @@ export function activate(context: vscode.ExtensionContext): void {
         const file = vscode.window.activeTextEditor?.document.uri.fsPath;
         if (!file) return void vscode.window.showInformationMessage('Claude Observatory: no active file.');
         await undoEditsInFile(s, file, cachedLog(s).filter((r) => r.file === file));
+      })()
+    ),
+    vscode.commands.registerCommand('claudeObservatory.clearOpenFile', () =>
+      withSession((s) => {
+        const file = vscode.window.activeTextEditor?.document.uri.fsPath;
+        if (!file) return void vscode.window.showInformationMessage('Claude Observatory: no active file.');
+        clearResolvedUnder(s, file, path.basename(file));
       })()
     )
   );

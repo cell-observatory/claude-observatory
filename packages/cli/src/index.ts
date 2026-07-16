@@ -590,7 +590,12 @@ function cmdSubagents(args: string[]): void {
 function cmdSiblings(args: string[]): void {
   const core = require('@claude-observatory/core') as Core;
   const session = getSessionId(args);
-  const sessions = core.listSiblings(process.cwd(), session);
+  // --repo widens the scope from this project dir to every WORKTREE of the same git repo (§S3):
+  // each sibling then carries its worktree/gitBranch/phase, and the summary's conflicts count comes
+  // from the UNCAPPED file set. Same-dir listSiblings stays the default (cheap, no repo resolution).
+  const sessions = args.includes('--repo')
+    ? core.listRepoSiblings(process.cwd(), session)
+    : core.listSiblings(process.cwd(), session);
   const sum = core.summarizeFleet(sessions);
   if (args.includes('--json')) {
     const list = args.includes('--all') ? sessions : sessions.filter((s) => !s.self);
@@ -617,6 +622,121 @@ function cmdSiblings(args: string[]): void {
       process.stdout.write('   ' + c.dim(shown.join(', ') + (s.moreFiles ? ` +${s.moreFiles} more` : '')) + '\n');
     }
   }
+}
+
+/** Bucket a set of timestamps into a fixed-width activity sparkline (counts per bin, span-normalized). */
+function activityBins(tsList: number[], bins = 20): number[] {
+  const out = new Array(bins).fill(0);
+  const ts = tsList.filter((t) => t > 0);
+  if (ts.length === 0) return out;
+  const min = Math.min(...ts);
+  const max = Math.max(...ts);
+  if (max === min) {
+    out[bins - 1] = ts.length; // all at one instant → a single trailing spike, not a divide-by-zero
+    return out;
+  }
+  const span = max - min;
+  for (const t of ts) {
+    let i = Math.floor(((t - min) / span) * bins);
+    if (i >= bins) i = bins - 1;
+    out[i]++;
+  }
+  return out;
+}
+
+/** `multitask` (§4) — the multi-agent bottom-panel view: one row per running agent across every
+ *  worktree of this repo (live phase, sparkline, ±lines, risk), its nested subagents (phase + current
+ *  task/todos + ±lines), and the cross-agent file collisions. One JSON payload; both editors render it
+ *  thin, no client aggregation. Zero token, git-free, path-only. */
+function cmdMultitask(args: string[]): void {
+  const core = require('@claude-observatory/core') as Core;
+  const session = getSessionId(args);
+  const ri = args.indexOf('--root'); // repo-scoped: honor --root like changemap/tree (editors point it at the workspace)
+  const cwd = ri >= 0 && args[ri + 1] ? args[ri + 1] : process.cwd();
+  const siblings = core.listRepoSiblings(cwd, session);
+  const fleet = core.summarizeFleet(siblings);
+  const collisions = core.fleetConflicts(siblings); // live conflicts: a file pending in 2+ both-active siblings
+
+  const agents = siblings.map((sib) => {
+    const transcript = core.findTranscript(sib.worktree, sib.id);
+    const pd = transcript
+      ? core.agentPhaseDetail(transcript)
+      : { phase: 'idle' as const, confidence: 'heuristic' as const };
+    // Full (slow-tier) payload: whole-file builds per agent — aggregated HERE so renderers stay thin.
+    const map = core.buildChangeMap(sib.worktree, sib.id, { root: sib.worktree });
+    // Per-sibling tokens + wall-clock (one light transcript pass) — so Fleet shows the same metric style
+    // as Workflows already do. Cached on this slow tier alongside buildChangeMap.
+    const usage = core.sessionUsage(sib.worktree, sib.id);
+    const subRoll = new Map(map.rollupBySubagent.map((r) => [r.subagentId, r])); // per-subagent ±lines
+    const subagents = core.parseSubagents(sib.worktree, sib.id).map((s) => {
+      const roll = subRoll.get(s.agentId);
+      return {
+        agentId: s.agentId,
+        agentType: s.agentType ?? null,
+        description: s.description ?? null,
+        phase: s.phase,
+        phaseConfidence: s.phaseConfidence, // 'high' | 'heuristic' — renderers dim staleness-inferred phases
+        todos: s.todos,
+        currentTask: s.currentTask,
+        edits: roll ? roll.edits : 0,
+        added: roll ? roll.added : 0,
+        removed: roll ? roll.removed : 0,
+      };
+    });
+    return {
+      session: sib.id,
+      worktree: sib.worktree,
+      gitBranch: sib.gitBranch,
+      self: sib.self,
+      phase: pd.phase,
+      phaseConfidence: pd.confidence,
+      sparkline: activityBins(core.parseActions(sib.worktree, sib.id).map((a) => a.ts)),
+      todos: core.transcriptInsights(sib.worktree, sib.id).todos,
+      subagents,
+      files: sib.files,
+      diff: { added: map.summary.added, removed: map.summary.removed },
+      tokens: usage.tokens,
+      durationMs: usage.durationMs,
+      risk: sib.risk,
+    };
+  });
+
+  // The distinct worktrees in play (branch + the sessions launched in each) — a compact repo index.
+  const wtBy = new Map<string, { worktree: string; gitBranch: string | null; sessions: string[] }>();
+  for (const sib of siblings) {
+    let w = wtBy.get(sib.worktree);
+    if (!w) {
+      w = { worktree: sib.worktree, gitBranch: sib.gitBranch, sessions: [] };
+      wtBy.set(sib.worktree, w);
+    }
+    w.sessions.push(sib.id);
+  }
+
+  // The active session's curated tool-call timeline (0.8.0: Actions folded into Multitasking). Drop the
+  // `agent` (Subagents) category — those are already the fleet/subagent rows above — and pair it with the
+  // egress sub-report. Both editors render this `actions` section below the fleet; no client aggregation.
+  const sessionActions = core.parseActions(cwd, session);
+  const actions = {
+    groups: core.buildActionGroups(sessionActions).filter((g) => g.category !== 'agent'),
+    egress: core.buildEgressReport(sessionActions),
+  };
+
+  emitJson({
+    agents,
+    collisions,
+    worktrees: [...wtBy.values()],
+    // Workflow runs (one level above subagents) for the ACTIVE session — aggregated in core, rendered thin.
+    workflows: core.parseWorkflows(cwd, session),
+    actions,
+    summary: { active: fleet.active, conflicts: fleet.conflicts },
+  });
+}
+
+/** `tasklog` (§2.5) — the cross-agent task log: one row per stable taskId, unioned across every
+ *  worktree-sibling + subagent of this repo. Always JSON (TaskLogEntry[]). Zero token, git-free. */
+function cmdTaskLog(_args: string[]): void {
+  const core = require('@claude-observatory/core') as Core;
+  emitJson(core.crossAgentTaskLog(process.cwd()));
 }
 
 /** `metrics` — session numbers: ±lines, action/error counts, per-subagent duration/tokens, tool latency. */
@@ -653,6 +773,12 @@ function cmdMetrics(args: string[]): void {
         '\n'
     );
   if (m.spanMs) process.stdout.write(`  span          ${c.dim(fmtDur(m.spanMs))}\n`);
+}
+
+/** The value following a `--flag`, or undefined when the flag is absent / has no value. */
+function flagValue(args: string[], name: string): string | undefined {
+  const i = args.indexOf(name);
+  return i >= 0 && args[i + 1] ? args[i + 1] : undefined;
 }
 
 function requireId(args: string[]): number {
@@ -703,6 +829,7 @@ function cmdKeep(args: string[]): void {
           (!under || core.isUnderPath(r.file, under))
       );
     for (const r of targets) core.setStatus(session, r.id, 'kept');
+    core.autoClearDemo(session); // a fully reviewed demo session leaves no residue
     if (json) {
       emitJson({ kept: targets.length, ids: targets.map((r) => r.id) });
       return;
@@ -715,6 +842,7 @@ function cmdKeep(args: string[]): void {
   const rec = core.findRecord(session, id);
   if (!rec) fail(`no edit #${id} in session ${session}`);
   const g = core.keepGroup(session, id); // keep the whole same-code review unit (collapsed group)
+  core.autoClearDemo(session); // a fully reviewed demo session leaves no residue
   if (json) {
     emitJson({ kept: g.kept, ids: g.ids });
     return;
@@ -738,6 +866,7 @@ function cmdUndo(args: string[]): void {
     const under = ui >= 0 ? args[ui + 1] : undefined;
     if (ui >= 0 && !under) fail('`undo --under <path>` requires a value');
     const res = core.undoScope(session, { under, fileSubstr: fileSub });
+    core.autoClearDemo(session); // a fully reviewed demo session leaves no residue
     if (args.includes('--json')) {
       emitJson({ undone: res.undone, conflicts: res.conflicts, total: res.total });
       return;
@@ -755,6 +884,7 @@ function cmdUndo(args: string[]): void {
   const force = args.includes('--force');
   // Undo the whole same-code review unit (collapsed group), newest-first; --force is the per-file fallback.
   const res = force ? core.restoreFile(session, id) : core.undoGroup(session, id);
+  core.autoClearDemo(session); // a fully reviewed demo session leaves no residue
   // --json: the full structured UndoResult, so a front-end can branch conflict → offer --force
   // instead of string-matching prose. Exit codes match the human path exactly.
   if (args.includes('--json')) {
@@ -785,6 +915,142 @@ function cmdRedo(args: string[]): void {
   }
   process.stdout.write((res.ok ? c.green('✓ ') : c.red('✗ ')) + res.message + '\n');
   process.exit(res.ok ? 0 : 1);
+}
+
+/** Resolve the taskId argument: `--task <id>`, else the first positional (skipping flags + the
+ *  --session value). taskId is a content-hash slug (§2.1), never a path — no traversal to guard. */
+function requireTaskId(args: string[]): string {
+  const flag = flagValue(args, '--task');
+  if (flag) return flag;
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--session') {
+      i++; // skip the session VALUE
+      continue;
+    }
+    if (!args[i].startsWith('--')) return args[i];
+  }
+  fail('expected a taskId, e.g. `claude-observatory task-keep <taskId>` (see `changemap` rollupByTask)');
+}
+
+/** `task-keep` (§6) — mark every PENDING edit in a task's STRICT-span set kept. Destructive-safe: only
+ *  edits inside a real in_progress interval are in the set (never a head/tail edge fill). */
+function cmdTaskKeep(args: string[]): void {
+  const core = require('@claude-observatory/core') as Core;
+  const session = getSessionId(args);
+  const taskId = requireTaskId(args);
+  const res = core.keepTask(process.cwd(), session, taskId);
+  core.autoClearDemo(session); // a fully reviewed demo session leaves no residue
+  if (args.includes('--json')) {
+    emitJson({ kept: res.kept, total: res.total, ids: res.ids });
+    return;
+  }
+  process.stdout.write(
+    c.green('✓ ') +
+      `kept ${res.kept} edit(s) in task ${taskId}` +
+      (res.total !== res.kept ? c.dim(` (${res.total} in the task's strict-span set)`) : '') +
+      '\n'
+  );
+}
+
+/** `task-undo` (§6) — revert every PENDING edit in a task's STRICT-span set, newest-first. Same
+ *  destructive-safety invariant as task-keep: an edit in no real interval is never in the set. */
+function cmdTaskUndo(args: string[]): void {
+  const core = require('@claude-observatory/core') as Core;
+  const session = getSessionId(args);
+  const taskId = requireTaskId(args);
+  const res = core.undoTask(process.cwd(), session, taskId);
+  core.autoClearDemo(session); // a fully reviewed demo session leaves no residue
+  if (args.includes('--json')) {
+    emitJson({ undone: res.undone, conflicts: res.conflicts, total: res.total, ids: res.ids });
+    return;
+  }
+  process.stdout.write(
+    (res.conflicts ? c.yellow('⚠ ') : c.green('✓ ')) +
+      `reverted ${res.undone} edit(s) in task ${taskId}` +
+      (res.conflicts ? ` · ${res.conflicts} conflict(s) left (undo individually with --force)` : '') +
+      '\n'
+  );
+}
+
+/** `task-clear` (§C) — drop the RESOLVED (kept/undone) edits of a chapter's DISPLAYED edit set
+ *  (core.reviewEditIds → core.clearResolvedIds — WYSIWYG, same set task-keep/task-undo act on);
+ *  pending edits are preserved. `--completed` clears every SETTLED chapter (all edits kept — none
+ *  pending, none undone), including the synthetic session chapter once fully reviewed. */
+function cmdTaskClear(args: string[]): void {
+  const core = require('@claude-observatory/core') as Core;
+  const session = getSessionId(args);
+  const json = args.includes('--json');
+  if (args.includes('--completed')) {
+    const map = core.buildChangeMap(process.cwd(), session, { root: process.cwd() });
+    // A settled chapter: every displayed edit kept (none pending, none undone). Chapters are total,
+    // so iterating them (not the strict rollup) covers gap-filled members + the synthetic chapter.
+    const settled = map.chapters.filter((ch) => ch.edits > 0 && ch.pending === 0 && ch.undone === 0);
+    let cleared = 0;
+    const ids: number[] = [];
+    const chapters: { taskId: string; cleared: number }[] = [];
+    for (const ch of settled) {
+      const res = core.clearResolvedIds(session, core.reviewEditIds(process.cwd(), session, ch.id));
+      cleared += res.cleared;
+      ids.push(...res.ids);
+      chapters.push({ taskId: ch.id, cleared: res.cleared });
+    }
+    if (json) {
+      emitJson({ cleared, ids, chapters });
+      return;
+    }
+    process.stdout.write(
+      c.green('✓ ') + `cleared ${cleared} resolved edit(s) across ${chapters.length} completed chapter(s)\n`
+    );
+    return;
+  }
+  const taskId = requireTaskId(args);
+  const res = core.clearResolvedIds(session, core.reviewEditIds(process.cwd(), session, taskId));
+  if (json) {
+    emitJson({ cleared: res.cleared, ids: res.ids });
+    return;
+  }
+  process.stdout.write(c.green('✓ ') + `cleared ${res.cleared} resolved edit(s) in task ${taskId}\n`);
+}
+
+/** `demo` (0.8.0) — the live simulator: replays a scripted Claude session through the REAL pipeline
+ *  (transcript, captured edits, a subagent, a workflow) in an isolated demo-* session + folder, so
+ *  every panel updates live and review/undo genuinely work. `--fast` lands the whole scenario in
+ *  well under a second (the automated-test mode); `--clean` removes every trace. Zero token. */
+async function cmdDemo(args: string[]): Promise<void> {
+  const core = require('@claude-observatory/core') as Core;
+  const dir = flagValue(args, '--dir');
+  if (args.includes('--clean')) {
+    const res = core.cleanDemo({ dir: dir || undefined });
+    if (args.includes('--json')) {
+      emitJson(res);
+      return;
+    }
+    process.stdout.write(
+      c.green('✓ ') +
+        `removed ${res.sessions.length} demo session(s)` +
+        (res.workspaces.length ? ` and ${res.workspaces.map(relFile).join(', ')}` : '') +
+        '\n'
+    );
+    return;
+  }
+  const speedRaw = flagValue(args, '--speed');
+  const speed = speedRaw ? parseFloat(speedRaw) : undefined;
+  const json = args.includes('--json');
+  const res = await core.runDemo({
+    dir: dir || undefined,
+    fast: args.includes('--fast'),
+    speed,
+    log: json ? undefined : (line) => process.stdout.write(c.dim(line) + '\n'),
+  });
+  if (json) {
+    emitJson(res);
+    return;
+  }
+  process.stdout.write(
+    c.green('✓ ') +
+      `demo session ${res.session} is live — ${res.edits} pending edits in ${relFile(res.workspace)}\n` +
+      c.dim('  open the Overview / Observations panels, review the chapters, then: claude-observatory demo --clean\n')
+  );
 }
 
 function parseDuration(spec: string): number | null {
@@ -983,13 +1249,60 @@ function cmdTree(args: string[]): void {
   emitJson(core.buildEditTree(session, { root, filter }));
 }
 
-/** The session change-map: edits placed as module→file→class + to-do chapters, for the map webview. */
+/** The session change-map: edits placed as module→file→class + to-do chapters, for the map webview.
+ *  0.8.0 additive keys (removing nothing): the base build already carries per-edit `taskId` (strict
+ *  spans) + `rollupByTask`/`rollupBySubagent`; this adds `rollupByAgent`, an `agents[]` array of a
+ *  per-sibling change-map for every worktree of this repo (aggregated HERE — renderers stay thin), and
+ *  the explicit `unassigned` task bucket (§3/§5). */
 function cmdChangeMap(args: string[]): void {
-  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  const core = require('@claude-observatory/core') as Core;
   const session = getSessionId(args);
   const ri = args.indexOf('--root');
   const root = ri >= 0 && args[ri + 1] ? args[ri + 1] : process.cwd();
-  emitJson(core.buildChangeMap(process.cwd(), session, { root }));
+  const cwd = process.cwd();
+  const base = core.buildChangeMap(cwd, session, { root });
+  // One full change-map per worktree-sibling (the Overview per-agent tabs, §5). listRepoSiblings
+  // includes self; when this cwd has no resolvable repo (no .git) it returns [] → degrade to just self.
+  // Each entry carries a top-level session/worktree/gitBranch/phase so the per-agent-tab renderer has a
+  // stable identity key without digging into summary.session. The SELF entry reuses `base` instead of
+  // rebuilding the whole map a second time — half the work for the common single-agent case.
+  const sibs = core.listRepoSiblings(cwd, session);
+  const agents = (sibs.length ? sibs : [{ id: session, worktree: cwd, gitBranch: null, phase: null }]).map((sib) => ({
+    ...(sib.id === session && sib.worktree === cwd && root === cwd
+      ? base
+      : core.buildChangeMap(sib.worktree, sib.id, { root: sib.worktree })),
+    session: sib.id,
+    worktree: sib.worktree,
+    gitBranch: sib.gitBranch ?? null,
+    phase: (sib as { phase?: string | null }).phase ?? null,
+    lastMs: (sib as { lastMs?: number }).lastMs ?? 0, // transcript mtime — drives the tab order
+  }))
+    // Most-recently-active agent's tab FIRST (reverse chronological); the active session sorts to the front.
+    .sort((a, b) => b.lastMs - a.lastMs);
+  // Explicit unassigned bucket — the current session's `taskId: null` TaskRoll (edits in no strict
+  // interval), surfaced directly so a renderer never has to dig it out of rollupByTask.
+  const unassigned =
+    base.rollupByTask.find((r) => r.taskId === null) ??
+    { taskId: null, edits: 0, added: 0, removed: 0, pending: 0, kept: 0, undone: 0 };
+  emitJson({ ...base, rollupByAgent: core.rollupByAgent(agents), agents, unassigned });
+}
+
+/** `chat-context` (§2.6/§7) — the zero-token chat handoff: assemble a ready-to-paste prompt about one
+ *  action (`--tool-use-id`)/edit (`--edit`)/subagent (`--agent`)/task (`--task`), built in core (the
+ *  single backend both editors call). Always JSON `{ prompt }`. NEVER spawns a process or calls a model. */
+function cmdChatContext(args: string[]): void {
+  const core = require('@claude-observatory/core') as Core;
+  const session = getSessionId(args);
+  const ref: { toolUseId?: string; editId?: number; agentId?: string; taskId?: string } = {};
+  const tu = flagValue(args, '--tool-use-id');
+  if (tu) ref.toolUseId = tu;
+  const ed = flagValue(args, '--edit');
+  if (ed && /^\d+$/.test(ed)) ref.editId = parseInt(ed, 10);
+  const ag = flagValue(args, '--agent');
+  if (ag) ref.agentId = ag;
+  const tk = flagValue(args, '--task');
+  if (tk) ref.taskId = tk;
+  emitJson({ prompt: core.assembleChatContext(process.cwd(), session, ref) });
 }
 
 type Core = typeof import('@claude-observatory/core');
@@ -1031,6 +1344,18 @@ function buildObserve(core: Core, session: string, cwd: string) {
 function cmdObserve(args: string[]): void {
   const core = require('@claude-observatory/core') as Core;
   emitJson(buildObserve(core, getSessionId(args), process.cwd()));
+}
+
+/** `observations` (§B) — the 0.8.0 Observations view-model (Timeline folded in): a session recap on
+ *  top, the edit timeline as coalesced same-file ×N runs (most-recent first) each edit carrying
+ *  Claude's reasoning, and the still-open next steps at the end. Always JSON; both editors render it
+ *  thin (or recompute the same shape from the same core fns). Zero token. */
+function cmdObservations(args: string[]): void {
+  const core = require('@claude-observatory/core') as Core;
+  const session = getSessionId(args);
+  const ri = args.indexOf('--root'); // display-relative paths (editors point it at the workspace)
+  const root = ri >= 0 && args[ri + 1] ? args[ri + 1] : process.cwd();
+  emitJson(core.buildObservations(process.cwd(), session, { root }));
 }
 
 /** `insights` — the human-readable Observations view (recap + per-edit summary/reasoning/flags/
@@ -1583,13 +1908,26 @@ function usage(): void {
       `  egress [--json]      what this session touched off-machine (web / MCP / network-shell destinations)\n` +
       `  subagents [--json]   every subagent this session spawned, each with its own action timeline + metrics\n` +
       `  siblings [--json]    the other Claude Code sessions in THIS project (active/idle · pending · files · risk);\n` +
-      `                       agent-facing digest for cross-agent awareness (alias: fleet); --all includes self\n` +
+      `                       agent-facing digest for cross-agent awareness (alias: fleet); --all includes self;\n` +
+      `                       --repo widens to every WORKTREE of the repo (adds worktree/branch/phase + conflicts)\n` +
+      `  multitask [--json]   the multi-agent view: one row per running agent across every worktree (live phase,\n` +
+      `                       sparkline, ±lines, risk) + nested subagents (phase/current task) + file collisions\n` +
+      `  tasklog [--json]     cross-agent task log: one row per stable taskId, unioned across worktrees + subagents\n` +
       `  metrics [--json]     session numbers: ±lines, action/error counts, subagent duration/tokens, tool latency\n` +
       `  diff <id>            show before/after for an edit\n` +
       `  keep <id>            mark an edit kept; bulk: --all | --file <substr> | --under <path>\n` +
       `  undo <id> [--force]  surgically undo an edit (--force = per-file restore);\n` +
       `                       bulk (pending only): --all | --file <substr> | --under <path>\n` +
       `  redo <id> [--force]  re-apply an undone edit\n` +
+      `  task-keep <taskId>   keep every pending edit in a task's strict in_progress span (--json)\n` +
+      `  task-undo <taskId>   revert every pending edit in a task's strict in_progress span (--json)\n` +
+      `  task-clear <taskId>  drop the resolved (kept/undone) edits of a task's strict span (--json);\n` +
+      `                       --completed clears every settled chapter (all edits kept)\n` +
+      `  demo [--fast] [--speed <n>] [--dir <folder>] [--json]\n` +
+      `                       simulate a Claude session LIVE (a real transcript + captured edits + a\n` +
+      `                       subagent + a workflow in an isolated demo-* session and folder) — watch\n` +
+      `                       every panel update, then review/undo for real; --fast for scripts/tests;\n` +
+      `                       demo --clean removes every trace (sessions, store, demo folder)\n` +
       `  clean [opts]         GC orphaned blobs; --drop <id> | --older-than <Nd> | --all | --resolved [--under <path>]\n` +
       `  stats [--json]       usage stats (edits/tokens/messages/thinking/output) by session & window\n` +
       `  summary [--markdown] per-session review recap (kept/reverted per file); --markdown to export\n` +
@@ -1597,9 +1935,13 @@ function usage(): void {
       `machine-readable (for front-ends/scripts; list/status/sessions/keep/undo/redo also take --json):\n` +
       `  blob <sha>           raw blob bytes to stdout\n` +
       `  tree [--root <d>] [--filter <q>]   folder→file→class→edit view-model as JSON (both editors)\n` +
-      `  changemap [--root <d>]             session change-map (edits + to-do chapters) as JSON (map webview)\n` +
+      `  changemap [--root <d>]             session change-map (edits + total to-do chapters + per-agent slices) as JSON\n` +
+      `  chat-context [--tool-use-id <id> | --edit <n> | --agent <id> | --task <id>]\n` +
+      `                       assemble a zero-token, ready-to-paste chat prompt about an action/edit/subagent/task\n` +
       `  locate --file <f>    per-pending-edit line indices in the live buffer (text on stdin; JSON out)\n` +
       `  observe              recap + per-edit reasoning/flags/memory as JSON\n` +
+      `  observations [--root <d>]   Observations view-model: recap + timeline runs (adjacent same-file\n` +
+      `                       edits coalesced ×N, each with reasoning) + next steps, as JSON\n` +
       `  usage                ctx / 5h / week usage snapshot as JSON\n\n` +
       `opt-in, token-spending (runs \`claude -p\`; returns the cached result unless --fresh):\n` +
       `  analyze <id>         deep-analyze one edit    [--json --fresh --claude-bin <path>]\n` +
@@ -1671,6 +2013,12 @@ function main(): void {
     case 'fleet':
       cmdSiblings(rest);
       break;
+    case 'multitask':
+      cmdMultitask(rest);
+      break;
+    case 'tasklog':
+      cmdTaskLog(rest);
+      break;
     case 'metrics':
       cmdMetrics(rest);
       break;
@@ -1685,6 +2033,18 @@ function main(): void {
       break;
     case 'redo':
       cmdRedo(rest);
+      break;
+    case 'task-keep':
+      cmdTaskKeep(rest);
+      break;
+    case 'task-undo':
+      cmdTaskUndo(rest);
+      break;
+    case 'task-clear':
+      cmdTaskClear(rest);
+      break;
+    case 'demo':
+      void cmdDemo(rest);
       break;
     case 'clean':
       cmdClean(rest);
@@ -1707,8 +2067,14 @@ function main(): void {
     case 'changemap':
       cmdChangeMap(rest);
       break;
+    case 'chat-context':
+      cmdChatContext(rest);
+      break;
     case 'observe':
       cmdObserve(rest);
+      break;
+    case 'observations':
+      cmdObservations(rest);
       break;
     case 'insights':
       cmdInsights(rest);

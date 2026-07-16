@@ -20,6 +20,9 @@ in a container instead of on your laptop:
    CLI, the status line, and the capture hooks under the persistent config dir.
 4. Install the extension into the container (it's a private `.vsix`, not on the Marketplace) — the
    command is printed at the end of `setup.sh`.
+5. Smoke-test the setup without Claude: `claude-observatory demo` works inside the container (the store
+   honors `CLAUDE_CONFIG_DIR`) — watch the panels fill in live, then `claude-observatory demo --clean`
+   removes every trace.
 
 See the repo [README](../../README.md#remote-development-ssh--devcontainers) for the full remote /
 SSH story, including setups **without** a devcontainer.

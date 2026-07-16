@@ -1252,6 +1252,54 @@ test('contract: each --json command emits the documented key set (rename-guard f
   hasKeys(undo, ['ok', 'status', 'message'], 'undo');
 });
 
+test('contract 0.8.0: every machine surface the editors consume emits its documented key set (rename-guard)', async () => {
+  // The gap this closes: the fast rename-guard above predates 0.8.0 — a key rename in multitask/
+  // changemap/tasklog/chat-context/observations/metrics/siblings only failed the slow bash e2e.
+  // The demo simulator is the fixture: a real-pipeline session with chapters, a subagent, a workflow.
+  const home = freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const ws = tmpWork();
+  fs.mkdirSync(path.join(ws, '.git'), { recursive: true }); // a plain .git dir → commonDir resolves → fleet/worktree paths engage
+  const demo = await core.runDemo({ fast: true, cwd: ws });
+  const env = { ...process.env, HOME: home, USERPROFILE: home, CLAUDE_OBSERVATORY_SESSION: demo.session };
+  const runJson = (args) => JSON.parse(cp.execFileSync('node', [CLI, ...args], { env, cwd: ws, encoding: 'utf8' }));
+  const hasKeys = (obj, keys, where) => {
+    for (const k of keys) assert.ok(obj && Object.prototype.hasOwnProperty.call(obj, k), `${where}: missing key "${k}"`);
+  };
+
+  // multitask — the Overview left nav (Fleet · Workflows · curated Actions) in both editors.
+  const mt = runJson(['multitask', '--json']);
+  hasKeys(mt, ['agents', 'collisions', 'worktrees', 'workflows', 'actions', 'summary'], 'multitask');
+  hasKeys(mt.agents[0], ['session', 'worktree', 'gitBranch', 'self', 'phase', 'phaseConfidence', 'sparkline', 'todos', 'subagents', 'files', 'diff', 'tokens', 'durationMs', 'risk'], 'multitask.agents[]');
+  hasKeys(mt.agents[0].subagents[0], ['agentId', 'agentType', 'description', 'phase', 'phaseConfidence', 'todos', 'currentTask', 'edits', 'added', 'removed'], 'multitask.agents[].subagents[]');
+  hasKeys(mt.workflows[0], ['id', 'name', 'phases', 'agents', 'phaseGroups', 'running', 'lastActivityMs', 'agentCount', 'tokens', 'durationMs', 'edits', 'added', 'removed', 'sparkline'], 'multitask.workflows[]');
+  hasKeys(mt.actions, ['groups', 'egress'], 'multitask.actions');
+  hasKeys(mt.summary, ['active', 'conflicts'], 'multitask.summary');
+
+  // changemap — the Overview detail (ribbon · strip · ledger) + per-agent slices.
+  const cm = runJson(['changemap', '--json']);
+  hasKeys(cm, ['summary', 'edits', 'chapters', 'files', 'modules', 'tasks', 'rollupByTask', 'rollupBySubagent', 'rollupByWorkflow', 'workflows', 'rollupByAgent', 'agents', 'unassigned'], 'changemap');
+  hasKeys(cm.chapters[0], ['id', 'taskId', 'synthetic', 'index', 'title', 'status', 'startTs', 'endTs', 'edits', 'added', 'removed', 'pending', 'kept', 'undone', 'agent'], 'changemap.chapters[]');
+  hasKeys(cm.edits[0], ['id', 'rel', 'module', 'file', 'added', 'removed', 'status', 'ts', 'agent', 'risk', 'reasoning', 'chapter', 'taskId', 'subagentId', 'workflowId'], 'changemap.edits[]');
+  hasKeys(cm.workflows[0], ['id', 'name', 'running', 'rollup', 'files', 'taskIds', 'chapters'], 'changemap.workflows[]');
+  hasKeys(cm.agents[0], ['session', 'worktree', 'gitBranch', 'phase', 'lastMs', 'summary', 'chapters', 'files', 'modules'], 'changemap.agents[]');
+  assert.ok(cm.edits.every((e) => typeof e.chapter === 'string' && e.chapter.length > 0), 'changemap: the chapter dimension is TOTAL');
+
+  // tasklog / chat-context / observations / metrics / siblings --repo.
+  const tl = runJson(['tasklog']);
+  assert.ok(Array.isArray(tl) && tl.length >= 1, 'tasklog: one row per stable task');
+  hasKeys(tl[0], ['taskId', 'content', 'agentIds', 'subagentIds', 'firstTs', 'lastTs', 'edits', 'added', 'removed', 'status'], 'tasklog[]');
+  hasKeys(runJson(['chat-context', '--task', tl[0].taskId]), ['prompt'], 'chat-context');
+  const obs = runJson(['observations']);
+  hasKeys(obs, ['recap', 'runs', 'nextSteps'], 'observations');
+  hasKeys(obs.runs[0], ['file', 'rel', 'count', 'added', 'removed', 'status', 'edits'], 'observations.runs[]');
+  const met = runJson(['metrics', '--json']);
+  hasKeys(met, ['session', 'spanMs', 'actions', 'edits', 'subagents', 'toolLatency'], 'metrics');
+  const sib = runJson(['siblings', '--json', '--repo', '--all']);
+  hasKeys(sib, ['session', 'summary', 'siblings'], 'siblings');
+  hasKeys(sib.siblings[0], ['id', 'self', 'active', 'lastMs', 'edits', 'pending', 'files', 'pendingFiles', 'risk', 'worktree', 'gitBranch', 'phase', 'phaseConfidence'], 'siblings.siblings[]');
+});
+
 test('capture: hook subprocess records an edit and prints NOTHING to stdout', () => {
   const home = freshHome();
   const dir = tmpWork();
@@ -1494,7 +1542,8 @@ test('capture: a binary file (contains a NUL byte) is not captured', () => {
   runHook(home, S, dir, 'PreToolUse', 'Write', F);
   fs.writeFileSync(F, Buffer.from([4, 5, 0, 6]));
   runHook(home, S, dir, 'PostToolUse', 'Write', F);
-  assert.equal(readStoreLog(home, S).length, 0, 'binary edits are skipped');
+  assert.equal(readStoreLog(home, S).filter((r) => r.op !== 'skip').length, 0, 'binary edits are not captured as edit records');
+  assert.equal(core.readSkips(S).length, 1, 'but a skip marker IS left — a binary edit is not silently dropped');
 });
 
 test('capture: rapid successive edits to the same file chain before/after correctly', () => {
@@ -2355,6 +2404,359 @@ test('subagents: parseSubagents mines each spawned subagent + metrics from subag
   assert.ok(core.parseActions(cwd, S).every((a) => a.tool !== 'Read'), "subagent's Read stays out of the main action timeline");
 });
 
+test('workflows: parseWorkflows aggregates a run — name/phases from the script, per-agent + summed tokens/time/edits, running flag (0.8.0) [journal/script FALLBACK: no state file]', () => {
+  freshHome();
+  const S = 'wf';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), ''); // main transcript must exist (findTranscript/findSubagentsDir)
+  const wfDir = path.join(proj, S, 'subagents', 'workflows', 'wf_test123');
+  fs.mkdirSync(wfDir, { recursive: true });
+  // The script that names the run — name/description/phases parsed from `export const meta` WITHOUT executing it.
+  const scriptsDir = path.join(proj, S, 'workflows', 'scripts');
+  fs.mkdirSync(scriptsDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(scriptsDir, 'demo-flow-wf_test123.js'),
+    "export const meta = {\n  name: 'Demo Flow',\n  description: 'A demo workflow',\n  phases: [{ title: 'Plan' }, { title: 'Build' }],\n}\n"
+  );
+  // journal: two agents started; only agent A got a result (agent B is still running).
+  fs.writeFileSync(
+    path.join(wfDir, 'journal.jsonl'),
+    [
+      { type: 'started', key: 'phase-plan', agentId: 'a1111111' },
+      { type: 'started', key: 'phase-build', agentId: 'b2222222' },
+      { type: 'result', key: 'phase-plan', agentId: 'a1111111', result: { ok: true } },
+    ]
+      .map((o) => JSON.stringify(o))
+      .join('\n')
+  );
+  // Agent A transcript: two assistant turns (60s apart) → 400 tok, 60000ms; one Edit adding a line (+1/-0).
+  fs.writeFileSync(
+    path.join(wfDir, 'agent-a1111111.jsonl'),
+    [
+      { timestamp: '2026-07-15T10:00:00.000Z', message: { role: 'assistant', id: 'mA1', usage: { input_tokens: 100, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 200 }, content: [{ type: 'tool_use', id: 'e1', name: 'Edit', input: { file_path: '/f.ts', old_string: 'line1\nline2\n', new_string: 'line1\nline2\nline3\n' } }] } },
+      { message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'e1', is_error: false }] } },
+      { timestamp: '2026-07-15T10:01:00.000Z', message: { role: 'assistant', id: 'mA2', usage: { input_tokens: 50, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 50 }, content: [{ type: 'text', text: 'done' }] } },
+    ]
+      .map((o) => JSON.stringify(o))
+      .join('\n')
+  );
+  fs.writeFileSync(path.join(wfDir, 'agent-a1111111.meta.json'), JSON.stringify({ agentType: 'workflow-subagent', spawnDepth: 1 }));
+  // Agent B transcript: a single Read turn → 50 tok, 0ms, no edits.
+  fs.writeFileSync(
+    path.join(wfDir, 'agent-b2222222.jsonl'),
+    JSON.stringify({ timestamp: '2026-07-15T10:00:30.000Z', message: { role: 'assistant', id: 'mB1', usage: { input_tokens: 20, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 30 }, content: [{ type: 'tool_use', id: 'r1', name: 'Read', input: { file_path: '/g.ts' } }] } })
+  );
+  fs.writeFileSync(path.join(wfDir, 'agent-b2222222.meta.json'), JSON.stringify({ agentType: 'workflow-subagent', spawnDepth: 1 }));
+
+  const runs = core.parseWorkflows(cwd, S);
+  assert.equal(runs.length, 1, 'one workflow run');
+  const w = runs[0];
+  assert.equal(w.id, 'wf_test123');
+  assert.equal(w.name, 'Demo Flow', 'name from meta.name');
+  assert.equal(w.description, 'A demo workflow', 'description from meta');
+  assert.deepEqual(w.phases, ['Plan', 'Build'], 'phase titles from meta.phases');
+  assert.equal(w.agentCount, 2);
+  // Summed per-workflow — the user asked explicitly for tokens + time + edits.
+  assert.equal(w.tokens, 450, 'Σtokens = 400 + 50');
+  assert.equal(w.durationMs, 60000, 'Σtime = 60000 + 0');
+  assert.equal(w.edits, 1, 'Σedits = 1 + 0');
+  assert.equal(w.added, 1, 'Σadded from the agents own Edit inputs');
+  assert.equal(w.removed, 0);
+  assert.equal(w.running, true, 'agent B is started-without-result and the run is fresh');
+  // Fallback phaseGroups group by the journal key (no real phase names without the state file), in agent order.
+  assert.deepEqual(
+    w.phaseGroups,
+    [{ title: 'phase-plan', done: 1, total: 1 }, { title: 'phase-build', done: 0, total: 1 }],
+    'fallback phaseGroups group agents by the journal key, per-phase done/total'
+  );
+
+  const a = w.agents.find((x) => x.agentId === 'a1111111');
+  assert.deepEqual([a.tokens, a.durationMs, a.edits, a.added, a.removed], [400, 60000, 1, 1, 0], 'agent A per-agent metrics');
+  assert.equal(a.done, true, 'agent A got a journal result');
+  assert.equal(a.phase, 'phase-plan', "agent phase = the journal key that grouped it");
+  assert.equal(a.label, null, 'no per-agent label in the journal fallback');
+  assert.equal(a.agentType, 'workflow-subagent', 'agentType from the sidecar');
+  const b = w.agents.find((x) => x.agentId === 'b2222222');
+  assert.deepEqual([b.tokens, b.durationMs, b.edits], [50, 0, 0], 'agent B per-agent metrics');
+  assert.equal(b.done, false, 'agent B has no result yet');
+  assert.equal(b.phase, 'phase-build');
+});
+
+test('workflows: a RUNNING run whose journal keys are per-agent HASHES shows NO bogus phase groups (0.8.0)', () => {
+  // Regression: newer workflow runtimes write the journal `key` as a per-agent content hash ("v2:<hex>")
+  // — NOT a phase — and the rich state file (with real labels/phases) only appears at completion. The
+  // fallback must NOT turn each hash into its own "phase", else the UI shows "v2:<hash> 0/1" rows.
+  freshHome();
+  const S = 'wfhash';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), '');
+  const wfDir = path.join(proj, S, 'subagents', 'workflows', 'wf_hash1');
+  fs.mkdirSync(wfDir, { recursive: true });
+  const H1 = 'v2:dd396d39b36879c0a47ed0381448112552c76a5b6811aac8f71e44fa30f60a66';
+  const H2 = 'v2:500cbad28997de976a1956a41becf4513d2c792dabd98109340e8ef71e87face';
+  fs.writeFileSync(
+    path.join(wfDir, 'journal.jsonl'),
+    [
+      { type: 'started', key: H1, agentId: 'aca9b4b71e422a493' },
+      { type: 'started', key: H2, agentId: 'aac152dc04db93ad1' },
+    ].map((o) => JSON.stringify(o)).join('\n')
+  );
+  for (const id of ['aca9b4b71e422a493', 'aac152dc04db93ad1']) {
+    fs.writeFileSync(
+      path.join(wfDir, `agent-${id}.jsonl`),
+      JSON.stringify({ timestamp: '2026-07-15T10:00:00.000Z', message: { role: 'assistant', id: 'm' + id, usage: { input_tokens: 10, output_tokens: 10 }, content: [{ type: 'text', text: 'working' }] } })
+    );
+    fs.writeFileSync(path.join(wfDir, `agent-${id}.meta.json`), JSON.stringify({ agentType: 'general-purpose', spawnDepth: 1 }));
+  }
+  const w = core.parseWorkflows(cwd, S)[0];
+  assert.equal(w.agentCount, 2);
+  assert.deepEqual(w.phaseGroups, [], 'a hash journal key is NOT a phase — no phase groups until the state file lands');
+  for (const a of w.agents) {
+    assert.equal(a.phase, null, 'agent phase is null (the hash key is ignored, not used as a phase)');
+    assert.equal(a.label, null, 'no per-agent label on disk while running (renders as agentType + short id)');
+    assert.equal(a.agentType, 'general-purpose', 'agentType still read from the sidecar');
+  }
+});
+
+test('metrics: sessionUsage sums main-chain tokens (deduped by message id, sidechain excluded) + transcript wall-clock (0.8.0 r3 — the per-sibling Fleet metric)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'usageSess';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const T0 = '2026-07-15T10:00:00.000Z';
+  const T1 = '2026-07-15T10:05:00.000Z';
+  fs.writeFileSync(
+    path.join(proj, S + '.jsonl'),
+    [
+      { type: 'user', timestamp: T0, message: { role: 'user', content: 'go' } },
+      { timestamp: T0, message: { role: 'assistant', id: 'm1', usage: { input_tokens: 100, cache_read_input_tokens: 40000, cache_creation_input_tokens: 9000, output_tokens: 200 }, content: [{ type: 'thinking', thinking: 'x' }] } },
+      // Same message.id, second block of the SAME turn — its usage must be counted once, not doubled.
+      { timestamp: T0, message: { role: 'assistant', id: 'm1', usage: { input_tokens: 100, cache_read_input_tokens: 40000, cache_creation_input_tokens: 9000, output_tokens: 200 }, content: [{ type: 'text', text: 'hi' }] } },
+      { timestamp: T1, message: { role: 'assistant', id: 'm2', usage: { input_tokens: 50, output_tokens: 50 }, content: [] } },
+      // A sidechain (subagent) turn — huge usage that must NOT swamp the main-chain total.
+      { timestamp: T1, isSidechain: true, message: { role: 'assistant', id: 'sc', usage: { input_tokens: 999999, output_tokens: 999999 }, content: [] } },
+    ].map((o) => JSON.stringify(o)).join('\n')
+  );
+  const u = core.sessionUsage(cwd, S);
+  assert.equal(u.tokens, 49400, 'Σ = (100+40000+9000+200) + (50+50); dup id + sidechain excluded');
+  assert.equal(u.durationMs, 300000, 'wall-clock = T1 − T0 (5 min)');
+  assert.deepEqual(core.sessionUsage(cwd, 'missing'), { tokens: 0, durationMs: 0 }, 'absent transcript → zeros, never throws');
+});
+
+test('workflows: parseWorkflows reads the rich state file as PRIMARY — informative name/summary, real phaseTitles, per-agent label/phase, state-preferred tokens/time + transcript edits, phaseGroups (0.8.0 r2)', () => {
+  freshHome();
+  const S = 'wfstate';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), ''); // main transcript must exist (findTranscript/findSubagentsDir)
+  const sessDir = path.join(proj, S);
+  const wfDir = path.join(sessDir, 'subagents', 'workflows', 'wf_rich'); // transcripts live under subagents/ (for edits)
+  fs.mkdirSync(wfDir, { recursive: true });
+  // The rich per-run state file — SIBLING of subagents/ — is the PRIMARY source (no script needed).
+  const stateDir = path.join(sessDir, 'workflows');
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(stateDir, 'wf_rich.json'),
+    JSON.stringify({
+      workflowName: 'Editors R2',
+      summary: 'Ship the round-2 editor upgrade across both IDEs',
+      phases: [{ title: 'Implement', detail: 'code + model' }, { title: 'Verify', detail: 'build + tests' }],
+      workflowProgress: [
+        { type: 'workflow_phase', index: 0, title: 'Implement' },
+        { type: 'workflow_agent', label: 'S11-vscode', phaseTitle: 'Implement', phaseIndex: 0, agentId: 'imp1', tokens: 500, toolCalls: 10, state: 'completed', durationMs: 30000 },
+        { type: 'workflow_agent', label: 'S12-jetbrains', phaseTitle: 'Implement', phaseIndex: 0, agentId: 'imp2', tokens: 300, toolCalls: 5, state: 'completed', durationMs: 20000 },
+        { type: 'workflow_phase', index: 1, title: 'Verify' },
+        { type: 'workflow_agent', label: 'S21-vscode', phaseTitle: 'Verify', phaseIndex: 1, agentId: 'ver1', tokens: 200, toolCalls: 3, state: 'completed', durationMs: 10000 },
+        { type: 'workflow_agent', label: 'S22-jetbrains', phaseTitle: 'Verify', phaseIndex: 1, agentId: 'ver2', tokens: 100, toolCalls: 2, state: 'running' },
+      ],
+      totalTokens: 1100,
+      totalToolCalls: 20,
+      durationMs: 45000,
+      status: 'running',
+      startTime: '2026-07-15T12:00:00.000Z',
+      agentCount: 4,
+    })
+  );
+  // Per-agent transcripts carry the EDITS (never in the state file); their usage DIFFERS from the state
+  // tokens so we can prove the state file wins. imp1 edits +1, imp2 +1, ver1 none, ver2 +1/-1.
+  fs.writeFileSync(
+    path.join(wfDir, 'agent-imp1.jsonl'),
+    JSON.stringify({ timestamp: '2026-07-15T12:00:00.000Z', message: { role: 'assistant', id: 'i1', usage: { input_tokens: 900, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 99 }, content: [{ type: 'tool_use', id: 'ie1', name: 'Edit', input: { file_path: '/a.ts', old_string: 'a\n', new_string: 'a\nb\n' } }] } })
+  );
+  fs.writeFileSync(path.join(wfDir, 'agent-imp1.meta.json'), JSON.stringify({ agentType: 'workflow-subagent', spawnDepth: 1 }));
+  fs.writeFileSync(
+    path.join(wfDir, 'agent-imp2.jsonl'),
+    JSON.stringify({ timestamp: '2026-07-15T12:00:10.000Z', message: { role: 'assistant', id: 'i2', usage: { input_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 10 }, content: [{ type: 'tool_use', id: 'ie2', name: 'Edit', input: { file_path: '/x.ts', old_string: 'x\n', new_string: 'x\ny\n' } }] } })
+  );
+  fs.writeFileSync(
+    path.join(wfDir, 'agent-ver1.jsonl'),
+    JSON.stringify({ timestamp: '2026-07-15T12:00:20.000Z', message: { role: 'assistant', id: 'v1', usage: { input_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 5 }, content: [{ type: 'tool_use', id: 'vr1', name: 'Read', input: { file_path: '/g.ts' } }] } })
+  );
+  // ver2: two timestamps 5000ms apart → transcript durationMs 5000 (the state entry has NO durationMs → this fallback wins).
+  fs.writeFileSync(
+    path.join(wfDir, 'agent-ver2.jsonl'),
+    [
+      { timestamp: '2026-07-15T12:00:30.000Z', message: { role: 'assistant', id: 'v2a', usage: { input_tokens: 7, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 7 }, content: [{ type: 'tool_use', id: 've1', name: 'Edit', input: { file_path: '/p.ts', old_string: 'p\nq\n', new_string: 'p\nr\n' } }] } },
+      { message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 've1', is_error: false }] } },
+      { timestamp: '2026-07-15T12:00:35.000Z', message: { role: 'assistant', id: 'v2b', usage: { input_tokens: 3, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 3 }, content: [{ type: 'text', text: 'checking' }] } },
+    ]
+      .map((o) => JSON.stringify(o))
+      .join('\n')
+  );
+
+  const runs = core.parseWorkflows(cwd, S);
+  assert.equal(runs.length, 1, 'one workflow run (discovered from the state file / run dir)');
+  const w = runs[0];
+  assert.equal(w.id, 'wf_rich');
+  assert.equal(w.name, 'Editors R2', 'name from the state file workflowName');
+  assert.equal(w.description, 'Ship the round-2 editor upgrade across both IDEs', 'description from the state file summary');
+  assert.deepEqual(w.phases, ['Implement', 'Verify'], 'phase titles from state.phases[].title');
+  assert.equal(w.agentCount, 4);
+  assert.equal(w.tokens, 1100, 'run tokens PREFER the state file totalTokens');
+  assert.equal(w.durationMs, 45000, 'run durationMs PREFERS the state file (real wall-clock, not a sum of parallel agents)');
+  assert.equal(w.edits, 3, 'Σedits from the transcripts = 1 + 1 + 0 + 1');
+  assert.equal(w.added, 3, 'Σadded = 1 + 1 + 0 + 1');
+  assert.equal(w.removed, 1, 'Σremoved = 0 + 0 + 0 + 1');
+  // sparkline: a 20-bin activity histogram summing to one tick per counted assistant turn across all agents
+  // (imp1 i1, imp2 i2, ver1 v1, ver2 v2a+v2b = 5) — the same mini-chart shape the fleet rows use.
+  assert.equal(Array.isArray(w.sparkline) && w.sparkline.length, 20, 'sparkline is a 20-bin array');
+  assert.equal(w.sparkline.reduce((n, x) => n + x, 0), 5, 'sparkline tick total = assistant turns across all agents');
+  assert.equal(w.running, true, 'running = status !== completed AND fresh (agent transcripts just written)');
+  assert.deepEqual(
+    w.phaseGroups,
+    [{ title: 'Implement', done: 2, total: 2 }, { title: 'Verify', done: 1, total: 2 }],
+    'phaseGroups group agents by REAL phaseTitle, per-phase done/total, in phase order'
+  );
+
+  // Regression (0.8.0): a state file that still says status:'running' but whose run has gone STALE (an
+  // interrupted/killed run never writes 'completed') must NOT report running — else long-dead runs show
+  // "running" forever. Backdate every agent transcript + the state file well past FLEET_ACTIVE_MS.
+  const stale = Date.now() / 1000 - 3600; // 1h ago, in seconds (utimesSync takes seconds)
+  for (const f of fs.readdirSync(wfDir)) if (f.endsWith('.jsonl')) fs.utimesSync(path.join(wfDir, f), stale, stale);
+  fs.utimesSync(path.join(stateDir, 'wf_rich.json'), stale, stale);
+  const staleRuns = core.parseWorkflows(cwd, S);
+  assert.equal(staleRuns[0].running, false, 'a status:running but long-stale run is NOT reported running (killed/interrupted)');
+
+  const imp1 = w.agents.find((x) => x.agentId === 'imp1');
+  assert.equal(imp1.label, 'S11-vscode', 'per-agent label from the state file');
+  assert.equal(imp1.phase, 'Implement', 'per-agent phase is the REAL phaseTitle, not a hash');
+  assert.equal(imp1.tokens, 500, 'per-agent tokens PREFER the state file (500), not the transcript usage (999)');
+  assert.equal(imp1.durationMs, 30000, 'per-agent durationMs PREFERS the state file entry');
+  assert.deepEqual([imp1.edits, imp1.added, imp1.removed], [1, 1, 0], 'per-agent edits/±lines from the transcript');
+  assert.equal(imp1.done, true, 'state completed → done');
+  assert.equal(imp1.agentType, 'workflow-subagent', 'agentType still from the sidecar');
+
+  const ver2 = w.agents.find((x) => x.agentId === 'ver2');
+  assert.equal(ver2.label, 'S22-jetbrains');
+  assert.equal(ver2.phase, 'Verify');
+  assert.equal(ver2.tokens, 100, 'state tokens preferred');
+  assert.equal(ver2.durationMs, 5000, 'no state durationMs on this entry → the transcript wall-clock fills in');
+  assert.deepEqual([ver2.edits, ver2.added, ver2.removed], [1, 1, 1], 'ver2 edit +1/-1 from the transcript');
+  assert.equal(ver2.done, false, 'state running → not done');
+});
+
+test('subagents: editId linking attributes a within-window subagent edit, without cross-attributing the main chain (S5, §6)', () => {
+  freshHome();
+  const S = 'link-window';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const AG = 'agentwindow01';
+  const F = path.join(cwd, 'shared.ts');
+  const T_MAIN = 1_700_000_000_000; // main edits F first
+  const T_SUB = 1_700_000_060_000; // the subagent edits F a minute later — DISJOINT windows
+  // main transcript: spawns the subagent + one main-chain Edit on F (at T_MAIN).
+  const main = [
+    { timestamp: T_MAIN, message: { role: 'assistant', content: [
+      { type: 'tool_use', id: 'sp1', name: 'Agent', input: { description: 'edit shared', subagent_type: 'worker' } },
+      { type: 'tool_use', id: 'm1', name: 'Edit', input: { file_path: F } },
+    ] } },
+    { timestamp: T_SUB, toolUseResult: { status: 'completed', agentId: AG },
+      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'sp1', is_error: false }] } },
+  ].map((o) => JSON.stringify(o)).join('\n');
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), main);
+  // subagent transcript: one Edit on the SAME file, inside its own (later) window.
+  const subDir = path.join(proj, S, 'subagents');
+  fs.mkdirSync(subDir, { recursive: true });
+  const subtx = [
+    { isSidechain: true, agentId: AG, sessionId: S, timestamp: T_SUB, message: { role: 'assistant', content: [
+      { type: 'tool_use', id: 's1', name: 'Edit', input: { file_path: F } },
+    ] } },
+  ].map((o) => JSON.stringify(o)).join('\n');
+  fs.writeFileSync(path.join(subDir, `agent-${AG}.jsonl`), subtx);
+  // store: two records for F under the ONE parent session — main's at T_MAIN, the subagent's at T_SUB.
+  core.ensureStore(S);
+  const b = core.writeBlob(S, Buffer.from('v1\n'));
+  const rMain = core.appendLog(S, { ts: T_MAIN, tool: 'Edit', file: F, beforeBlob: null, afterBlob: b, status: 'pending' });
+  const rSub = core.appendLog(S, { ts: T_SUB, tool: 'Edit', file: F, beforeBlob: b, afterBlob: core.writeBlob(S, Buffer.from('v2\n')), status: 'pending' });
+
+  // main chain links only the record in its OWN window; never the subagent-window record.
+  const acts = core.parseActions(cwd, S);
+  const mainEdit = acts.find((a) => a.category === 'edit');
+  assert.equal(mainEdit.editId, rMain.id, 'main-chain edit links to the record in its window');
+  assert.ok(!acts.some((a) => a.editId === rSub.id), 'main chain never consumes the subagent-window record');
+
+  // the subagent links the within-window record; never the main-chain record (linking is no longer a no-op).
+  const subs = core.parseSubagents(cwd, S);
+  assert.equal(subs.length, 1, 'one subagent found');
+  const subEdit = subs[0].actions.find((a) => a.category === 'edit');
+  assert.equal(subEdit.editId, rSub.id, 'subagent edit links to its within-window store record');
+  assert.notEqual(subEdit.editId, rMain.id, 'subagent never cross-attributes the main-chain record');
+});
+
+test('subagents: interleaved same-file main-chain/subagent edits (overlapping windows) leave BOTH editIds null — never cross-attributed (S5, §6)', () => {
+  freshHome();
+  const S = 'link-overlap';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const AG = 'agentoverlap01';
+  const F = path.join(cwd, 'hot.ts');
+  const T1 = 1_700_000_000_000; // main edit #1
+  const T2 = 1_700_000_030_000; // subagent edit — BETWEEN the two main edits, so the windows overlap
+  const T3 = 1_700_000_060_000; // main edit #2
+  const main = [
+    { timestamp: T1, message: { role: 'assistant', content: [
+      { type: 'tool_use', id: 'sp1', name: 'Agent', input: { description: 'touch hot', subagent_type: 'worker' } },
+      { type: 'tool_use', id: 'm1', name: 'Edit', input: { file_path: F } },
+    ] } },
+    { timestamp: T3, message: { role: 'assistant', content: [
+      { type: 'tool_use', id: 'm2', name: 'Edit', input: { file_path: F } },
+    ] } },
+  ].map((o) => JSON.stringify(o)).join('\n');
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), main);
+  const subDir = path.join(proj, S, 'subagents');
+  fs.mkdirSync(subDir, { recursive: true });
+  const subtx = [
+    { isSidechain: true, agentId: AG, sessionId: S, timestamp: T2, message: { role: 'assistant', content: [
+      { type: 'tool_use', id: 's1', name: 'Edit', input: { file_path: F } },
+    ] } },
+  ].map((o) => JSON.stringify(o)).join('\n');
+  fs.writeFileSync(path.join(subDir, `agent-${AG}.jsonl`), subtx);
+  // three store records for F, interleaved main/subagent/main under the one parent session.
+  core.ensureStore(S);
+  const b0 = core.writeBlob(S, Buffer.from('a\n'));
+  const b1 = core.writeBlob(S, Buffer.from('b\n'));
+  const b2 = core.writeBlob(S, Buffer.from('c\n'));
+  core.appendLog(S, { ts: T1, tool: 'Edit', file: F, beforeBlob: null, afterBlob: b0, status: 'pending' });
+  core.appendLog(S, { ts: T2, tool: 'Edit', file: F, beforeBlob: b0, afterBlob: b1, status: 'pending' });
+  core.appendLog(S, { ts: T3, tool: 'Edit', file: F, beforeBlob: b1, afterBlob: b2, status: 'pending' });
+
+  // main's window [T1,T3] straddles the subagent's [T2,T2] → cannot partition → every side null.
+  const mainEdits = core.parseActions(cwd, S).filter((a) => a.category === 'edit');
+  assert.equal(mainEdits.length, 2, 'two interleaved main-chain edits on F');
+  assert.ok(mainEdits.every((a) => a.editId === undefined), 'ambiguous overlap → main-chain edits stay unassigned');
+  const subEdit = core.parseSubagents(cwd, S)[0].actions.find((a) => a.category === 'edit');
+  assert.equal(subEdit.editId, undefined, 'ambiguous overlap → subagent edit stays unassigned (never cross-attributed)');
+});
+
 test('fleet: listSiblings lists project sessions with status/pending/files/risk (read-only, path-only) (0.7.0)', () => {
   freshHome();
   const cwd = tmpWork();
@@ -2512,16 +2914,37 @@ test('changemap: rolls edits into per-file/per-module rows + chapters from Claud
   assert.equal(m.chapters[0].edits, 3, 'edits #1/#2/#3 fall in the first span (extended back to session start)');
   assert.equal(m.chapters[0].pending, 1, 'edit #1 is pending');
   assert.equal(m.chapters[0].kept, 2, 'edits #2/#3 were kept');
-  assert.equal(m.chapters[1].edits, 2, 'edits #4/#5 fall in the second span');
+  assert.equal(m.chapters[1].edits, 3, 'edits #4/#5 fall in the second span; #6 (trailing) fills forward onto it (0.8.0 totality)');
   assert.equal(m.chapters[1].undone, 1, 'edit #4 was reverted');
+  const ch0 = core.taskId('Scaffold the map', 0); // stable content-hash key replaced positional `ch0` (0.8.0 S6)
+  const ch1 = core.taskId('Ship it', 0);
   const e1 = m.edits.find((e) => e.id === id1);
-  assert.equal(e1.chapter, 'ch0', 'a pre-first-flip edit now attributes to the opening chapter, not nothing');
+  assert.equal(e1.chapter, ch0, 'a pre-first-flip edit still attributes to the opening chapter for the legacy brush');
+  // …but the STRICT taskId model does NOT edge-fill: edit #1 (ts 1000) precedes the first in_progress (ts 1500) → unassigned.
+  assert.equal(e1.taskId, null, 'strict spans never force-file a pre-first-flip edit onto the head task');
 
-  // --- honest attribution: an edit in a genuine gap (nothing in_progress) stays unassigned (0.7.6) ---
+  // --- total display attribution (0.8.0): a trailing edit joins the final chapter; strict stays honest ---
   const e6 = m.edits.find((e) => e.id === id6);
-  assert.equal(e6.chapter, null, 'edit #6 lands after everything is completed — a real gap, never mis-filed');
-  assert.deepEqual(m.files.find((f) => f.file === 'y.md').chapters, [], 'so a brush will not light its file');
-  assert.deepEqual(m.files.find((f) => f.file === 'b.ts').chapters, ['ch0'], 'attributed files carry the brush key');
+  assert.equal(e6.chapter, ch1, 'edit #6 lands after everything is completed — the display brush fills forward to the final chapter');
+  assert.equal(e6.taskId, null, 'but strict spans never widen — a trailing gap edit is unassigned for destructive ops');
+  assert.ok(m.chapters.every((c) => !c.synthetic), 'every edit fell in a to-do window — no synthetic chapter appended');
+  assert.deepEqual(m.files.find((f) => f.file === 'y.md').chapters, [ch1], 'the trailing edit lights its file under the final chapter');
+  assert.deepEqual(m.files.find((f) => f.file === 'b.ts').chapters, [ch0], 'attributed files carry the brush key');
+  assert.equal(m.chapters[0].taskId, ch0, 'a real chapter exposes the strict taskId its destructive ops resolve to');
+
+  // --- 0.8.0 fix: tasks[] (strict-span identities) unify the taskId space (rollupByTask + tasklog join) ---
+  // Regression for the disjoint-id-space defect: chapters (latest plan) and rollupByTask (strict spans)
+  // used to key differently, so tasklog content came up empty. tasks[] is the shared join+label source.
+  const shipId = core.taskId('Ship it', 0); // firstSeenTs is not hashed, so 0 matches the real id
+  const scaffoldId = core.taskId('Scaffold the map', 0);
+  const taskIds = new Set(m.tasks.map((t) => t.taskId));
+  assert.ok(taskIds.has(shipId) && taskIds.has(scaffoldId), 'tasks[] holds both strict-span task identities');
+  assert.equal(m.tasks.find((t) => t.taskId === shipId).content, 'Ship it', 'tasks[] carries the to-do text — the tasklog/ribbon label');
+  const attributed = m.rollupByTask.filter((r) => r.taskId !== null);
+  assert.equal(attributed.length, 2, 'edits #2/#3 → Scaffold, #4/#5 → Ship (strict intervals)');
+  for (const r of attributed) assert.ok(taskIds.has(r.taskId), `rollupByTask id ${r.taskId} joins tasks[] (unified id space)`);
+  assert.equal(m.rollupByTask.find((r) => r.taskId === shipId).edits, 2, 'Ship it rolls up its two strict-span edits');
+  assert.ok(m.rollupByTask.some((r) => r.taskId === null), 'the explicit unassigned bucket (edits #1/#6) survives');
 
   // --- module labels ---
   assert.equal(core.moduleLabel(''), '(root)', 'a root-level file');
@@ -2529,4 +2952,1285 @@ test('changemap: rolls edits into per-file/per-module rows + chapters from Claud
   assert.equal(core.moduleLabel('packages/vscode/src'), 'vscode', 'monorepo noise stripped');
   assert.equal(core.moduleLabel('packages/vscode'), 'vscode', 'the src-less sibling shares the label (why they merge)');
   assert.equal(core.moduleLabel('test'), 'test', 'an ordinary dir is left alone');
+});
+
+// --- S1: single-writer id hazard (§2.7) ---
+
+test('store: concurrent appendLog from separate processes → no duplicate EFFECTIVE ids (S1 in-lock alloc)', async () => {
+  const home = freshHome();
+  const S = 'concurrent';
+  core.ensureStore(S); // storeDir must exist before the child writers open the lock/log
+  const DIST = path.resolve(__dirname, '../dist/index.js');
+  const N = 8;
+  // Each child appends exactly one record for the SAME session, launched in parallel to contend on
+  // the append lock. In-lock id allocation (+ read-time reconciliation of any residual unlocked
+  // collision) must yield N distinct effective ids and N distinct uids.
+  const script =
+    `const c=require(${JSON.stringify(DIST)});` +
+    `c.appendLog(${JSON.stringify(S)},{ts:Date.now(),tool:'Edit',file:'/w/'+process.argv[1]+'.txt',beforeBlob:null,afterBlob:null,status:'pending'});`;
+  const env = { ...process.env, HOME: home, USERPROFILE: home };
+  const children = [];
+  for (let i = 0; i < N; i++) children.push(cp.spawn(process.execPath, ['-e', script, String(i)], { env }));
+  await Promise.all(
+    children.map(
+      (ch) =>
+        new Promise((res, rej) => {
+          let err = '';
+          ch.stderr.on('data', (d) => (err += d));
+          ch.on('error', rej);
+          ch.on('exit', (code) => (code === 0 ? res() : rej(new Error(`child exited ${code}: ${err}`))));
+        })
+    )
+  );
+  const log = core.readLog(S);
+  assert.equal(log.length, N, 'every concurrent writer landed exactly one record');
+  assert.equal(new Set(log.map((r) => r.id)).size, N, 'no duplicate EFFECTIVE ids across concurrent writers');
+  assert.equal(new Set(log.map((r) => r.uid)).size, N, 'every record carries a distinct uid');
+});
+
+test('store: a forced unlocked-append duplicate id is reconciled on read — byId/status/undo stay correct (S1)', () => {
+  freshHome();
+  const S = 'dup';
+  const W = tmpWork();
+  const Fa = path.join(W, 'a.txt');
+  const Fb = path.join(W, 'b.txt');
+  const Fc = path.join(W, 'c.txt');
+  fs.writeFileSync(Fa, 'a2\n');
+  fs.writeFileSync(Fb, 'b2\n');
+  fs.writeFileSync(Fc, 'c2\n');
+  const id1 = seedEdit(S, Fa, 'a1\n', 'a2\n'); // 1
+  const id2 = seedEdit(S, Fb, 'b1\n', 'b2\n'); // 2
+  assert.deepEqual([id1, id2], [1, 2], 'clean serial ids');
+
+  // Simulate the §2.7 residual race: a record hits disk reusing #2's display id for a DIFFERENT file —
+  // exactly what two writers that both failed the append lock would produce.
+  const bc = core.writeBlob(S, Buffer.from('c1\n'));
+  const ac = core.writeBlob(S, Buffer.from('c2\n'));
+  fs.appendFileSync(
+    core.logPath(S),
+    JSON.stringify({ id: 2, uid: 'forced-dup', ts: 9000, tool: 'Edit', file: Fc, beforeBlob: bc, afterBlob: ac, status: 'pending' }) + '\n'
+  );
+
+  // readLog reconciles: three distinct records; the LATER duplicate is re-keyed above every raw id.
+  const log = core.readLog(S);
+  assert.equal(log.length, 3, 'all three records survive');
+  assert.equal(new Set(log.map((r) => r.id)).size, 3, 'no duplicate EFFECTIVE ids after reconciliation');
+  assert.equal(log.find((r) => r.file === Fc).id, 3, 'the later duplicate was re-keyed to a fresh id above all raw ids');
+  assert.equal(log.find((r) => r.file === Fb).id, 2, 'the original #2 kept its display id');
+  assert.equal(core.nextId(S), 4, 'nextId counts the re-keyed id, so a new append cannot re-collide');
+
+  // byId + status: a status op on the re-key targets ONLY the re-keyed record, never the original #2.
+  core.setStatus(S, 3, 'kept');
+  assert.equal(core.findRecord(S, 3).status, 'kept', 're-key #3 flipped');
+  assert.equal(core.findRecord(S, 2).status, 'pending', 'original #2 untouched by a status op on the re-key');
+  core.setStatus(S, 2, 'undone');
+  assert.equal(core.findRecord(S, 2).status, 'undone', 'original #2 flipped independently');
+  assert.equal(core.findRecord(S, 3).status, 'kept', 're-key #3 unchanged by the op on #2');
+
+  // undo targeting: undo the re-keyed record → ITS file reverts; the sibling file is untouched.
+  const res = core.undoEdit(S, 3);
+  assert.ok(res.ok, 'undo #3 succeeded: ' + res.message);
+  assert.equal(fs.readFileSync(Fc, 'utf8'), 'c1\n', 'the re-keyed edit reverted its OWN file');
+  assert.equal(fs.readFileSync(Fa, 'utf8'), 'a2\n', 'sibling #1 file untouched by undo of the re-key');
+  assert.equal(core.findRecord(S, 3).status, 'undone', 'undo marked the re-key undone');
+  assert.equal(core.findRecord(S, 2).status, 'undone', 'original #2 remains undone, not double-touched');
+});
+
+// --- S2: git-free worktree resolver (session.ts) -----------------------------------------------
+// Fixtures are hand-built from git's on-disk formats (verified against real `git worktree add` /
+// `git init --bare`), so the tests stay git-free and hermetic — no git binary, no network.
+
+const BARE_FALSE = '[core]\n\tbare = false\n';
+const BARE_TRUE = '[core]\n\tbare = true\n';
+
+test('session: repoRoot walks up from a subdir launch to the nearest .git', () => {
+  const root = tmpWork();
+  fs.mkdirSync(path.join(root, '.git')); // dir-.git (a main working tree)
+  const foo = path.join(root, 'packages', 'foo');
+  fs.mkdirSync(foo, { recursive: true });
+  assert.equal(core.repoRoot(foo), root, 'walks up from packages/foo to the repo root');
+  assert.equal(core.repoRoot(root), root, 'at the root itself');
+  assert.equal(core.repoRoot(tmpWork()), null, 'no .git anywhere up the tree → null');
+});
+
+test('session: commonDir for a main working tree (dir-.git) returns realpath of .git', () => {
+  const root = tmpWork();
+  const gitDir = path.join(root, '.git');
+  fs.mkdirSync(gitDir);
+  fs.writeFileSync(path.join(gitDir, 'config'), BARE_FALSE);
+  const sub = path.join(root, 'sub', 'deep');
+  fs.mkdirSync(sub, { recursive: true });
+  const key = fs.realpathSync(gitDir);
+  assert.equal(core.commonDir(root), key, 'main tree resolves to realpath(.git)');
+  assert.equal(core.commonDir(sub), key, 'subdir launch resolves to the same key');
+});
+
+test('session: commonDir resolves a linked worktree (relative commondir) to the shared .git', () => {
+  const base = tmpWork();
+  const main = path.join(base, 'main');
+  const gitDir = path.join(main, '.git');
+  const admin = path.join(gitDir, 'worktrees', 'wtA');
+  fs.mkdirSync(admin, { recursive: true });
+  fs.writeFileSync(path.join(gitDir, 'config'), BARE_FALSE);
+  fs.writeFileSync(path.join(admin, 'commondir'), '../..\n'); // relative → resolves to main/.git
+  const wt = path.join(base, 'wtA');
+  fs.mkdirSync(wt);
+  fs.writeFileSync(path.join(wt, '.git'), `gitdir: ${admin}\n`);
+  const key = fs.realpathSync(gitDir);
+  assert.equal(core.commonDir(wt), key, 'linked worktree resolves to the shared common dir');
+  assert.equal(core.commonDir(main), key, 'main tree resolves to the SAME key (siblings group together)');
+  const wtsub = path.join(wt, 'packages', 'x');
+  fs.mkdirSync(wtsub, { recursive: true });
+  assert.equal(core.commonDir(wtsub), key, 'subdir launch inside the worktree still groups');
+});
+
+test('session: commonDir handles an absolute commondir (used as-is, not joined against admin dir)', () => {
+  const base = tmpWork();
+  const shared = path.join(base, 'shared.git');
+  fs.mkdirSync(shared, { recursive: true });
+  fs.writeFileSync(path.join(shared, 'config'), BARE_FALSE);
+  const admin = path.join(base, 'admin', 'wtB'); // admin dir NOT under `shared`, so a wrong join would miss
+  fs.mkdirSync(admin, { recursive: true });
+  fs.writeFileSync(path.join(admin, 'commondir'), shared + '\n'); // ABSOLUTE common path
+  const wt = path.join(base, 'wtB');
+  fs.mkdirSync(wt);
+  fs.writeFileSync(path.join(wt, '.git'), `gitdir: ${admin}\n`);
+  assert.equal(core.commonDir(wt), fs.realpathSync(shared), 'absolute commondir used as-is');
+});
+
+test('session: commonDir collapses symlinks via realpath (both sides match)', () => {
+  const base = tmpWork();
+  const real = path.join(base, 'real');
+  const gitDir = path.join(real, '.git');
+  fs.mkdirSync(gitDir, { recursive: true });
+  fs.writeFileSync(path.join(gitDir, 'config'), BARE_FALSE);
+  const link = path.join(base, 'link');
+  fs.symlinkSync(real, link); // link → real
+  assert.equal(core.commonDir(link), core.commonDir(real), 'symlinked cwd resolves to the same key');
+  assert.equal(core.commonDir(link), fs.realpathSync(gitDir), 'key is realpath-collapsed');
+});
+
+test('session: commonDir guards the bare-repo edge (returns null)', () => {
+  const base = tmpWork();
+  const bare = path.join(base, 'bare.git');
+  const admin = path.join(bare, 'worktrees', 'wtC');
+  fs.mkdirSync(admin, { recursive: true });
+  fs.writeFileSync(path.join(bare, 'config'), BARE_TRUE);
+  fs.writeFileSync(path.join(admin, 'commondir'), '../..\n'); // → bare dir itself
+  const wt = path.join(base, 'wtC');
+  fs.mkdirSync(wt);
+  fs.writeFileSync(path.join(wt, '.git'), `gitdir: ${admin}\n`);
+  assert.equal(core.commonDir(wt), null, 'a worktree whose common dir is bare (config bare=true) → null');
+  assert.equal(core.commonDir(bare), null, 'launching inside the bare dir (no .git child) → null');
+});
+
+test('session: commonDir returns null for a missing / pruned worktree admin dir', () => {
+  const base = tmpWork();
+  const wt = path.join(base, 'wtD');
+  fs.mkdirSync(wt);
+  fs.writeFileSync(path.join(wt, '.git'), `gitdir: ${path.join(base, 'gone', 'worktrees', 'wtD')}\n`);
+  assert.equal(core.commonDir(wt), null, 'gitdir points at a pruned admin dir → null');
+  const admin = path.join(base, 'present');
+  fs.mkdirSync(admin, { recursive: true }); // admin dir exists but has no `commondir` file
+  const wt2 = path.join(base, 'wtE');
+  fs.mkdirSync(wt2);
+  fs.writeFileSync(path.join(wt2, '.git'), `gitdir: ${admin}\n`);
+  assert.equal(core.commonDir(wt2), null, 'admin dir without a commondir file → null');
+});
+
+test('session: repoKeyForSession memoizes by sessionId (key survives worktree pruning)', () => {
+  const root = tmpWork();
+  const gitDir = path.join(root, '.git');
+  fs.mkdirSync(gitDir);
+  fs.writeFileSync(path.join(gitDir, 'config'), BARE_FALSE);
+  const key = fs.realpathSync(gitDir);
+  const sid = 'sess-cache-' + Date.now() + '-' + Math.random();
+  assert.equal(core.repoKeyForSession(sid, root), key, 'first resolve returns the key');
+  fs.rmSync(gitDir, { recursive: true, force: true }); // prune the repo on disk
+  assert.equal(core.commonDir(root), null, 'commonDir is now null after pruning');
+  assert.equal(core.repoKeyForSession(sid, root), key, 'cached key survives the pruning');
+});
+
+test('session: firstCwdLine returns the first line bearing cwd, skipping leading metadata', () => {
+  const dir = tmpWork();
+  const f = path.join(dir, 't.jsonl');
+  const lines = [
+    JSON.stringify({ type: 'queue-operation', sessionId: 'S9' }), // no cwd (line 0 is not guaranteed)
+    JSON.stringify({ type: 'queue-operation', sessionId: 'S9' }), // no cwd
+    'not json at all', // tolerated: skipped, not thrown
+    JSON.stringify({ type: 'user', cwd: '/Users/x/proj', sessionId: 'S9', gitBranch: 'feat/z' }),
+    JSON.stringify({ type: 'user', cwd: '/other', sessionId: 'S9', gitBranch: 'main' }), // must NOT win
+  ];
+  fs.writeFileSync(f, lines.join('\n') + '\n');
+  assert.deepEqual(core.firstCwdLine(f), { cwd: '/Users/x/proj', sessionId: 'S9', gitBranch: 'feat/z' });
+  assert.equal(core.firstCwdLine(path.join(dir, 'nope.jsonl')), null, 'missing file → null');
+  fs.writeFileSync(path.join(dir, 'empty.jsonl'), '');
+  assert.equal(core.firstCwdLine(path.join(dir, 'empty.jsonl')), null, 'empty file → null');
+});
+
+test('session: firstCwdLine resolves a cwd line hidden PAST 256KB behind a fat leading line (self-session regression)', () => {
+  // Real self-sessions begin with a huge queue-operation line; the first cwd line can sit ~380KB in.
+  // A fixed 256KB prefix read used to miss it → the live agent silently dropped from every repo view.
+  const dir = tmpWork();
+  const f = path.join(dir, 'big.jsonl');
+  const fat = JSON.stringify({ type: 'queue-operation', blob: 'x'.repeat(600 * 1024) }); // > 256KB, no cwd
+  const cwdLine = JSON.stringify({ type: 'user', cwd: '/Users/x/live', sessionId: 'LIVE', gitBranch: 'main' });
+  fs.writeFileSync(f, fat + '\n' + cwdLine + '\n');
+  assert.deepEqual(core.firstCwdLine(f), { cwd: '/Users/x/live', sessionId: 'LIVE', gitBranch: 'main' },
+    'cwd line past the old 256KB cap must still resolve');
+});
+
+// --- S3: repo-scoped worktree siblings + fleet conflicts (fleet.ts) -----------------------------
+// Builds on S2's git-free commonDir/firstCwdLine: unions sessions across worktree project dirs and
+// intersects the UNCAPPED file sets for cross-agent collisions. Fixtures reuse the S2 on-disk formats.
+
+test('fleet: listRepoSiblings unions two worktree dirs of one repo (excludes an unrelated repo)', () => {
+  freshHome();
+  const base = tmpWork();
+  // Main working tree (dir-.git) + a linked worktree (file-.git → shared commondir) = one repo group.
+  const main = path.join(base, 'main');
+  const gitDir = path.join(main, '.git');
+  const admin = path.join(gitDir, 'worktrees', 'wtA');
+  fs.mkdirSync(admin, { recursive: true });
+  fs.writeFileSync(path.join(gitDir, 'config'), BARE_FALSE);
+  fs.writeFileSync(path.join(admin, 'commondir'), '../..\n');
+  const wtA = path.join(base, 'wtA');
+  fs.mkdirSync(wtA);
+  fs.writeFileSync(path.join(wtA, '.git'), `gitdir: ${admin}\n`);
+  // An unrelated repo (its own .git) — must NOT be grouped with main/wtA.
+  const other = path.join(base, 'other');
+  fs.mkdirSync(path.join(other, '.git'), { recursive: true });
+  assert.equal(core.commonDir(main), core.commonDir(wtA), 'sanity: main + wtA share a commonDir');
+  assert.notEqual(core.commonDir(other), core.commonDir(main), 'sanity: other is a different repo');
+
+  // One session per cwd, each transcript in its own mangled project dir carrying a real cwd line.
+  const MAIN = 'wt-main', WTA = 'wt-a', OTHER = 'wt-other';
+  const seedSession = (cwd, id, branch) => {
+    const dir = core.projectDir(cwd);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, id + '.jsonl'), JSON.stringify({ type: 'user', cwd, sessionId: id, gitBranch: branch }) + '\n');
+  };
+  seedSession(main, MAIN, 'main');
+  seedSession(wtA, WTA, 'feat/x');
+  seedSession(other, OTHER, 'main');
+
+  const list = core.listRepoSiblings(main, MAIN);
+  assert.deepEqual(list.map((s) => s.id).sort(), [WTA, MAIN].sort(), 'both worktree sessions unioned; the unrelated repo excluded');
+  const sMain = list.find((s) => s.id === MAIN);
+  const sWta = list.find((s) => s.id === WTA);
+  assert.ok(sMain.self && !sWta.self, 'querying session flagged self; the sibling worktree is not');
+  assert.equal(sMain.worktree, main, 'worktree is the session real launch cwd (main)');
+  assert.equal(sWta.worktree, wtA, 'sibling worktree is its own cwd (wtA)');
+  assert.equal(sMain.gitBranch, 'main');
+  assert.equal(sWta.gitBranch, 'feat/x', 'branch read from the transcript, disambiguating the worktrees');
+  assert.equal(sMain.phase, 'idle', 'S4 wires agentPhase in: a session with no tool activity phases as neutral idle');
+});
+
+test('fleet: fleetConflicts intersects the UNCAPPED allFiles — catches a sibling 21st shared file', () => {
+  freshHome();
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const A = 'busy', B = 'other';
+  const emptyTranscript = JSON.stringify({ message: { role: 'assistant', content: [] } }) + '\n';
+  fs.writeFileSync(path.join(proj, A + '.jsonl'), emptyTranscript);
+  fs.writeFileSync(path.join(proj, B + '.jsonl'), emptyTranscript);
+  // Busy agent touches 21 distinct files; file #21 (index 20) is BEYOND the FILE_CAP=20 display slice.
+  const files = Array.from({ length: 21 }, (_, i) => path.join(cwd, `f${i}.ts`));
+  files.forEach((f, i) => seedEdit(A, f, null, `x${i}\n`));
+  const shared = files[20];
+  seedEdit(B, shared, null, 'y\n'); // the sibling also edits that 21st file → a real collision
+
+  const list = core.listSiblings(cwd, A);
+  const a = list.find((s) => s.id === A);
+  assert.equal(a.files.length, 20, 'display list is capped at FILE_CAP');
+  assert.equal(a.moreFiles, 1, 'one file elided from the display list');
+  assert.equal(a.allFiles.length, 21, 'the uncapped set keeps all 21');
+  assert.ok(!a.files.includes(shared), 'the 21st file is NOT in the capped display list');
+  assert.ok(a.allFiles.includes(shared), 'the 21st file IS in the uncapped intersection set');
+
+  const conflicts = core.fleetConflicts(list);
+  assert.equal(conflicts.length, 1, 'exactly one collision — the shared 21st file');
+  assert.equal(conflicts[0].file, shared, 'a capped intersection would have silently missed this');
+  assert.deepEqual(conflicts[0].agents.sort(), [A, B].sort(), 'both agents named (no winner)');
+  assert.ok(conflicts[0].anyPending, 'flagged pending — a live edit could be trampled');
+  assert.equal(core.summarizeFleet(list).conflicts, 1, 'summary carries the conflict count');
+});
+
+test('fleet: fleetConflicts on disjoint file sets reports no collisions', () => {
+  freshHome();
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const A = 'a', B = 'b';
+  const t = JSON.stringify({ message: { role: 'assistant', content: [] } }) + '\n';
+  fs.writeFileSync(path.join(proj, A + '.jsonl'), t);
+  fs.writeFileSync(path.join(proj, B + '.jsonl'), t);
+  seedEdit(A, path.join(cwd, 'a.ts'), null, '1\n');
+  seedEdit(B, path.join(cwd, 'b.ts'), null, '2\n'); // different file → no overlap
+  const list = core.listSiblings(cwd, A);
+  assert.deepEqual(core.fleetConflicts(list), [], 'disjoint file sets → no collisions');
+  assert.equal(core.summarizeFleet(list).conflicts, 0);
+});
+
+test('fleet: fleetConflicts flags a pending overlap with ≥1 ACTIVE holder (reviewed / all-idle do not) (0.8.0)', () => {
+  freshHome();
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const A = 'a', B = 'b', C = 'c';
+  const fresh = JSON.stringify({ message: { role: 'assistant', content: [] } }) + '\n';
+  fs.writeFileSync(path.join(proj, A + '.jsonl'), fresh); // active (just written)
+  fs.writeFileSync(path.join(proj, B + '.jsonl'), fresh); // active
+  fs.writeFileSync(path.join(proj, C + '.jsonl'), fresh);
+  const oldSecs = Date.now() / 1000 - 3600; // 1h ago → beyond FLEET_ACTIVE_MS
+  fs.utimesSync(path.join(proj, C + '.jsonl'), oldSecs, oldSecs); // C is INACTIVE
+
+  const live = path.join(cwd, 'live.ts'); // pending in A AND B (both active) → the ONLY live collision
+  const reviewed = path.join(cwd, 'reviewed.ts'); // shared by A+B but REVIEWED in both → no live hazard
+  const staleShare = path.join(cwd, 'stale.ts'); // pending in A (active) + C (INACTIVE) → not a live overlap
+  seedEdit(A, live, null, '1\n');
+  seedEdit(B, live, null, '2\n');
+  const ra = seedEdit(A, reviewed, null, 'x\n');
+  const rb = seedEdit(B, reviewed, null, 'y\n');
+  core.setStatus(A, ra, 'kept'); // reviewed → drops out of pendingFiles
+  core.setStatus(B, rb, 'undone');
+  seedEdit(A, staleShare, null, 'p\n');
+  seedEdit(C, staleShare, null, 'q\n');
+
+  const list = core.listSiblings(cwd, A);
+  const sa = list.find((s) => s.id === A);
+  assert.ok(sa.pendingFiles.includes(live) && sa.pendingFiles.includes(staleShare), 'pendingFiles = A\'s pending distinct files');
+  assert.ok(!sa.pendingFiles.includes(reviewed), 'a reviewed (kept) file is NOT in pendingFiles');
+  assert.ok(!list.find((s) => s.id === B).pendingFiles.includes(reviewed), 'an undone file is NOT in pendingFiles');
+
+  const conflicts = core.fleetConflicts(list);
+  // 0.8.0 stabilization: widened from "both active" — a LIVE agent can trample an idle agent's pending
+  // work (>60s without a write is routine for a long think), so active-vs-idle overlaps now flag too,
+  // with activeAgents naming the side that's moving. An all-idle overlap still does not flag.
+  assert.equal(conflicts.length, 2, 'the both-active file AND the active-vs-idle file both flag');
+  const liveC = conflicts.find((k) => k.file === live);
+  assert.deepEqual(liveC.agents.sort(), [A, B].sort(), 'both colliding agents named (no winner)');
+  assert.deepEqual(liveC.activeAgents.sort(), [A, B].sort(), 'both holders are active here');
+  const staleC = conflicts.find((k) => k.file === staleShare);
+  assert.ok(staleC, 'a live agent overlapping an IDLE agent\'s pending file is a real hazard — flagged');
+  assert.deepEqual(staleC.agents.sort(), [A, C].sort(), 'idle holders stay listed in agents');
+  assert.deepEqual(staleC.activeAgents, [A], 'activeAgents names only the moving side (renderers dim the rest)');
+  assert.ok(!conflicts.some((k) => k.file === reviewed), 'a historically-shared but REVIEWED file does NOT flag');
+  assert.equal(core.summarizeFleet(list).conflicts, 2, 'summary counts both live collisions');
+
+  // An ALL-idle overlap (nobody moving) is not a live hazard — prove it by aging A out too.
+  const idleList = list.map((s) => ({ ...s, active: false }));
+  assert.equal(core.fleetConflicts(idleList).length, 0, 'no active holder anywhere → nothing flags');
+});
+
+test('fleet: conflict detection is path-only — file contents never cross between agents', () => {
+  freshHome();
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const A = 'a', B = 'b';
+  const t = JSON.stringify({ message: { role: 'assistant', content: [] } }) + '\n';
+  fs.writeFileSync(path.join(proj, A + '.jsonl'), t);
+  fs.writeFileSync(path.join(proj, B + '.jsonl'), t);
+  const F = path.join(cwd, 'secret.ts');
+  const SECRET = 'SUPER_SECRET_TOKEN_abc123';
+  seedEdit(A, F, null, SECRET + '\n'); // A creates the file with secret content
+  seedEdit(B, F, 'stub\n', SECRET + '\n'); // B edits the same file → collision on F
+  const list = core.listSiblings(cwd, A);
+  const conflicts = core.fleetConflicts(list);
+  assert.equal(conflicts.length, 1, 'the shared file collides');
+  assert.equal(conflicts[0].file, F, 'the collision names the file PATH');
+  assert.deepEqual(Object.keys(conflicts[0]).sort(), ['activeAgents', 'agents', 'anyPending', 'file'], 'no contents field on a collision');
+  // The security boundary: nothing the fleet exposes contains any file CONTENTS.
+  const exposed = JSON.stringify(conflicts) + JSON.stringify(list);
+  assert.ok(!exposed.includes('SUPER_SECRET'), 'no file contents leak into fleet siblings or collisions');
+});
+
+// --- S4 (0.8.0): live phase + subagent todos + sidecar --------------------------------------------
+
+// A bare transcript file (no project-dir mangling), optionally mtime-backdated by `ageMs` for staleness.
+function writePhaseTranscript(dir, name, records, ageMs) {
+  const p = path.join(dir, name);
+  fs.writeFileSync(p, records.map((o) => (typeof o === 'string' ? o : JSON.stringify(o))).join('\n') + '\n');
+  if (ageMs != null) {
+    const d = new Date(Date.now() - ageMs);
+    fs.utimesSync(p, d, d);
+  }
+  return p;
+}
+const asstToolUse = (id, name, input) => ({ message: { role: 'assistant', content: [{ type: 'tool_use', id, name, input: input || {} }] } });
+const toolResult = (id, isError) => ({ message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, is_error: !!isError }] } });
+const asstEnd = (text) => ({ message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: text || 'Done.' }] } });
+
+test('actions: agentPhase classifies working / awaiting-input / awaiting-permission / errored / idle / done', () => {
+  freshHome();
+  const dir = tmpWork();
+
+  // working: a trailing tool_use awaiting its result, fresh mtime.
+  const working = writePhaseTranscript(dir, 'working.jsonl', [asstToolUse('t1', 'Bash', { command: 'npm test' })]);
+  assert.equal(core.agentPhase(working), 'working');
+  assert.equal(core.agentPhaseDetail(working).confidence, 'high', 'an active tool_use is structural');
+
+  // awaiting-input: a trailing AskUserQuestion with no result — wins even when the mtime is fresh.
+  const input = writePhaseTranscript(dir, 'input.jsonl', [asstToolUse('q1', 'AskUserQuestion', { questions: [{ question: 'which?' }] })]);
+  assert.equal(core.agentPhase(input), 'awaiting-input');
+  assert.equal(core.agentPhaseDetail(input).confidence, 'high');
+
+  // awaiting-permission: the SAME pending tool_use but stale (a harness permission prompt writes nothing).
+  const perm = writePhaseTranscript(dir, 'perm.jsonl', [asstToolUse('t1', 'Bash', { command: 'rm -rf build' })], 60_000);
+  const permDetail = core.agentPhaseDetail(perm);
+  assert.equal(permDetail.phase, 'awaiting-permission', 'pending tool_use + stale mtime => needs-attention');
+  assert.equal(permDetail.confidence, 'heuristic', 'labeled a heuristic, never asserted as certain');
+
+  // errored: the trailing event is an is_error tool_result.
+  const errored = writePhaseTranscript(dir, 'errored.jsonl', [asstToolUse('b1', 'Bash', { command: 'x' }), toolResult('b1', true)]);
+  assert.equal(core.agentPhase(errored), 'errored');
+
+  // idle: a completed end_turn, fresh mtime.
+  const idle = writePhaseTranscript(dir, 'idle.jsonl', [asstToolUse('b1', 'Bash', { command: 'x' }), toolResult('b1', false), asstEnd('All set.')]);
+  assert.equal(core.agentPhase(idle), 'idle');
+
+  // working (between steps): a trailing NON-error tool_result with no follow-up yet — the turn is unfinished
+  // (a tool_result always obligates an assistant reply), so the agent is mid-turn generating the next step,
+  // NOT idle. This is the live-session case: finished one tool, about to issue the next.
+  const midStep = writePhaseTranscript(dir, 'midstep.jsonl', [asstToolUse('b1', 'Bash', { command: 'x' }), toolResult('b1', false)]);
+  assert.equal(core.agentPhase(midStep), 'working', 'a trailing non-error tool_result is an unfinished turn => working');
+  assert.equal(core.agentPhaseDetail(midStep).confidence, 'high', 'a tool_result mandates a follow-up — structural, not a guess');
+  // …but the SAME trailing tool_result gone long-stale is an abandoned/crashed turn => done.
+  const midStepStale = writePhaseTranscript(dir, 'midstep-stale.jsonl', [asstToolUse('b1', 'Bash', { command: 'x' }), toolResult('b1', false)], 30 * 60_000);
+  assert.equal(core.agentPhase(midStepStale), 'done', 'a trailing tool_result gone long-stale => the turn was abandoned mid-flight');
+
+  // done: the same completed turn, but long-stale mtime.
+  const done = writePhaseTranscript(dir, 'done.jsonl', [asstToolUse('b1', 'Bash', { command: 'x' }), toolResult('b1', false), asstEnd('All set.')], 30 * 60_000);
+  assert.equal(core.agentPhase(done), 'done');
+
+  // A recovered error (agent spoke after the failed result) is NOT errored — only a TRAILING error is.
+  const recovered = writePhaseTranscript(dir, 'recovered.jsonl', [asstToolUse('b1', 'Bash', { command: 'x' }), toolResult('b1', true), asstEnd('Recovered.')]);
+  assert.equal(core.agentPhase(recovered), 'idle', 'a post-error end_turn recovers to idle, not errored');
+
+  // Missing transcript => neutral idle (never asserts activity for a file that is not there).
+  assert.equal(core.agentPhase(path.join(dir, 'nope.jsonl')), 'idle');
+});
+
+test('actions: agentPhase tail read is boundary-tolerant (drops a partial leading line past the tail cap)', () => {
+  freshHome();
+  const dir = tmpWork();
+  // A leading record larger than the tail window, so the last-N-bytes read STARTS mid-line; the phase
+  // must still resolve from the trailing records (the partial leading fragment is dropped, not parsed).
+  const huge = { message: { role: 'assistant', content: [{ type: 'text', text: 'X'.repeat(200000) }] } };
+  const p = writePhaseTranscript(dir, 'big.jsonl', [huge, asstToolUse('t9', 'Bash', { command: 'go' })]);
+  assert.ok(fs.statSync(p).size > 128 * 1024, 'file exceeds the tail window');
+  assert.equal(core.agentPhase(p), 'working', 'trailing tool_use classified despite a mid-file start');
+});
+
+test('subagents: subagentTodos extracts the latest TodoWrite + currentTask (in_progress) from the agent file', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'subtodos';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), JSON.stringify({ message: { role: 'assistant', content: [] } })); // main transcript must exist
+  const AG = 'abc123def456';
+  const subDir = path.join(proj, S, 'subagents');
+  fs.mkdirSync(subDir, { recursive: true });
+  const subtx = [
+    { isSidechain: true, message: { role: 'assistant', content: [{ type: 'tool_use', name: 'TodoWrite', input: { todos: [{ content: 'stale plan', status: 'pending' }] } }] } },
+    { isSidechain: true, message: { role: 'assistant', content: [{ type: 'tool_use', name: 'TodoWrite', input: { todos: [
+      { content: 'Read the parser', status: 'completed' },
+      { content: 'Wire the linker', status: 'in_progress' },
+      { content: 'Add a regression test', status: 'pending' },
+    ] } }] } },
+  ].map((o) => JSON.stringify(o)).join('\n');
+  fs.writeFileSync(path.join(subDir, `agent-${AG}.jsonl`), subtx);
+
+  const r = core.subagentTodos(cwd, S, AG);
+  assert.equal(r.todos.length, 3, 'the latest TodoWrite supersedes the earlier one');
+  assert.equal(r.currentTask, 'Wire the linker', 'currentTask = the in_progress todo');
+  assert.ok(!r.todos.some((t) => t.content === 'stale plan'), 'the superseded list is gone');
+
+  // No in_progress todo => currentTask is null (honest — never falls back to a guess).
+  const AG2 = 'noinprog99';
+  fs.writeFileSync(
+    path.join(subDir, `agent-${AG2}.jsonl`),
+    JSON.stringify({ isSidechain: true, message: { role: 'assistant', content: [{ type: 'tool_use', name: 'TodoWrite', input: { todos: [{ content: 'all done', status: 'completed' }] } }] } })
+  );
+  assert.equal(core.subagentTodos(cwd, S, AG2).currentTask, null, 'nothing in_progress => currentTask null');
+  // A subagent with no file at all => empty, not a throw.
+  assert.deepEqual(core.subagentTodos(cwd, S, 'ghost'), { todos: [], currentTask: null });
+});
+
+test('subagents: an async_launched subagent (no result/status) still reports a LIVE phase from its tail', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'asyncsub';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  // Main transcript spawns the agent but NEVER records a toolUseResult (async_launched: null metrics/status).
+  fs.writeFileSync(
+    path.join(proj, S + '.jsonl'),
+    JSON.stringify({ timestamp: '2026-07-14T10:00:00.000Z', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'tu1', name: 'Agent', input: { description: 'crunch', subagent_type: 'worker' } }] } })
+  );
+  const AG = 'live777';
+  const subDir = path.join(proj, S, 'subagents');
+  fs.mkdirSync(subDir, { recursive: true });
+  // The subagent's own file ends on a tool_use awaiting its result — freshly written => it's WORKING now.
+  fs.writeFileSync(
+    path.join(subDir, `agent-${AG}.jsonl`),
+    JSON.stringify({ isSidechain: true, agentId: AG, sessionId: S, timestamp: '2026-07-14T10:01:00.000Z', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'st1', name: 'Bash', input: { command: 'make' } }] } })
+  );
+
+  const subs = core.parseSubagents(cwd, S);
+  assert.equal(subs.length, 1, 'the async subagent is discovered from its own file');
+  const s = subs[0];
+  assert.equal(s.status, undefined, 'no parent toolUseResult => the stuck/null status');
+  assert.equal(s.phase, 'working', 'phased LIVE from the transcript tail, not the missing status');
+  assert.equal(s.running, true, 'a working subagent is running');
+});
+
+test('fleet: listSiblings wires each session\'s live phase via agentPhase (S4)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const WORK = 'wk1', WAIT = 'wt1';
+  fs.writeFileSync(path.join(proj, WORK + '.jsonl'), JSON.stringify({ message: { role: 'assistant', content: [{ type: 'tool_use', id: 'b1', name: 'Bash', input: { command: 'ls' } }] } }));
+  fs.writeFileSync(path.join(proj, WAIT + '.jsonl'), JSON.stringify({ message: { role: 'assistant', content: [{ type: 'tool_use', id: 'q1', name: 'AskUserQuestion', input: { questions: [{ question: 'go?' }] } }] } }));
+  const list = core.listSiblings(cwd, WORK);
+  assert.equal(list.find((s) => s.id === WORK).phase, 'working', 'active tool_use => working');
+  assert.equal(list.find((s) => s.id === WAIT).phase, 'awaiting-input', 'pending AskUserQuestion => awaiting-input');
+});
+
+// --- S6: stable taskId (strict spans) + three-level rollups (§2.1/§2.2) ---
+
+test('changemap: taskId is a content hash — stable across to-do reorder + identical-text collision (S6)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+
+  // Pure-function contract: content-only hash. firstSeenTs never enters the hash, so identical text is
+  // ONE id (an honest collision → one task), and reordering can't shift it (the old positional-ch bug).
+  assert.equal(core.taskId('Build the parser', 0), core.taskId('Build the parser', 999999), 'firstSeenTs is not hashed — same text, same id');
+  assert.equal(core.taskId('Build the parser', 0).length, 12, 'sha1 truncated to 12 hex chars');
+  assert.notEqual(core.taskId('Build the parser', 0), core.taskId('Ship the parser', 0), 'different text → different id');
+
+  // Build-level: the same content keeps its id no matter WHERE it sits in the final to-do list.
+  const build = (S, todos) => {
+    const cwd = tmpWork();
+    const proj = core.projectDir(cwd);
+    fs.mkdirSync(proj, { recursive: true });
+    core.ensureStore(S);
+    const snap = JSON.stringify({ timestamp: new Date(1000).toISOString(), message: { role: 'assistant', content: [
+      { type: 'tool_use', id: 't1', name: 'TodoWrite', input: { todos } }] } });
+    fs.writeFileSync(path.join(proj, S + '.jsonl'), snap);
+    return core.buildChangeMap(cwd, S, { root: cwd });
+  };
+  const m1 = build('order1', [{ content: 'Alpha', status: 'pending' }, { content: 'Beta', status: 'pending' }]);
+  const m2 = build('order2', [{ content: 'Beta', status: 'pending' }, { content: 'Alpha', status: 'pending' }]); // reordered
+  const idOf = (m, title) => m.chapters.find((c) => c.title === title).id;
+  assert.equal(idOf(m1, 'Alpha'), core.taskId('Alpha', 0), 'chapter id is the content hash, not `ch0`');
+  assert.equal(idOf(m1, 'Alpha'), idOf(m2, 'Alpha'), 'Alpha keeps its id though it moved from slot 0 to slot 1');
+  assert.equal(idOf(m1, 'Beta'), idOf(m2, 'Beta'), 'Beta keeps its id though it moved from slot 1 to slot 0');
+
+  // Duplicate-content to-dos (0.8.0): identical text is still ONE strict task, but each ribbon row now
+  // gets its OWN brush key — the first occurrence keeps the plain content hash (id stability), later
+  // occurrences are occurrence-salted and display-only (taskId null → no destructive ops offered).
+  const dup = build('dup', [{ content: 'Dup', status: 'pending' }, { content: 'Dup', status: 'pending' }]);
+  assert.equal(dup.chapters.length, 2, 'the final to-do list is preserved verbatim');
+  assert.notEqual(dup.chapters[0].id, dup.chapters[1].id, 'two ribbon rows never share a brush key (0.8.0)');
+  assert.equal(dup.chapters[0].id, core.taskId('Dup', 0), 'the FIRST occurrence keeps the plain content hash — existing ids never change');
+  assert.equal(dup.chapters[0].taskId, core.taskId('Dup', 0), 'and it owns the strict task (destructive ops resolve here)');
+  assert.equal(dup.chapters[1].taskId, null, 'the later occurrence is display-only — acting on it would silently hit the first\'s edit set');
+});
+
+test('changemap: strict spans never edge-fill — head/trailing edits are unassigned; 3-level rollups sum (S6)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'strict';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  core.ensureStore(S);
+
+  // Explicit-ts edits (seedEdit ties ts to a sequential id, so append directly to place them precisely).
+  const seedAt = (file, before, after, ts) => {
+    const b = before === null ? null : core.writeBlob(S, Buffer.from(before));
+    const a = after === null ? null : core.writeBlob(S, Buffer.from(after));
+    return core.appendLog(S, { ts, tool: 'Edit', file, beforeBlob: b, afterBlob: a, status: 'pending' }).id;
+  };
+  const F = (n) => path.join(cwd, `f${n}.ts`);
+  const id1 = seedAt(F(1), 'a\n', 'a\nb\n', 1000); // HEAD: before the first in_progress (2000) → unassigned
+  const id2 = seedAt(F(2), 'a\n', 'a\nb\nc\n', 3000); // inside Task A's strict span [2000,4000)
+  const id3 = seedAt(F(3), 'a\n', 'a\nb\n', 5000); // inside Task B's strict span [4000,6000)
+  const id4 = seedAt(F(4), 'a\n', 'a\nb\n', 7000); // TRAILING: after Task B completed (6000) → unassigned
+  core.setStatus(S, id2, 'kept');
+  core.setStatus(S, id3, 'undone');
+
+  const snap = (ts, todos) => JSON.stringify({ timestamp: new Date(ts).toISOString(), message: { role: 'assistant', content: [
+    { type: 'tool_use', id: 't' + ts, name: 'TodoWrite', input: { todos } }] } });
+  const main = [
+    snap(2000, [{ content: 'Task A', status: 'in_progress' }, { content: 'Task B', status: 'pending' }]),
+    snap(4000, [{ content: 'Task A', status: 'completed' }, { content: 'Task B', status: 'in_progress' }]),
+    snap(6000, [{ content: 'Task A', status: 'completed' }, { content: 'Task B', status: 'completed' }]),
+  ].join('\n');
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), main);
+
+  const m = core.buildChangeMap(cwd, S, { root: cwd });
+  const A = core.taskId('Task A', 0), B = core.taskId('Task B', 0);
+  const tid = (id) => m.edits.find((e) => e.id === id).taskId;
+
+  // --- strict-span attribution: NO edge fill onto the head/tail task (the BLOCKER fix) ---
+  assert.equal(tid(id1), null, 'a pre-first-in_progress edit is unassigned, not force-filed onto the opening task');
+  assert.equal(tid(id2), A, 'an edit inside Task A\'s real interval attributes to Task A');
+  assert.equal(tid(id3), B, 'an edit inside Task B\'s real interval attributes to Task B');
+  assert.equal(tid(id4), null, 'a post-last-completed edit is unassigned, not swept onto the last task');
+
+  // --- rollupByTask: two task rolls + an EXPLICIT null (unassigned) bucket, sorted null-last ---
+  const rt = m.rollupByTask;
+  const un = rt.find((r) => r.taskId === null);
+  assert.ok(un, 'the unassigned bucket is surfaced explicitly (taskId: null)');
+  assert.equal(un.edits, 2, 'both the head and trailing gap edits land in unassigned');
+  assert.equal(un.pending, 2, 'and they carry their pending status');
+  assert.equal(rt[rt.length - 1].taskId, null, 'the null bucket sorts last');
+  assert.equal(rt.find((r) => r.taskId === A).kept, 1, 'Task A\'s edit was kept');
+  assert.equal(rt.find((r) => r.taskId === B).undone, 1, 'Task B\'s edit was reverted');
+
+  // --- rollups conserve the totals (sums) across every dimension ---
+  const totAdded = m.edits.reduce((n, e) => n + e.added, 0);
+  const totRemoved = m.edits.reduce((n, e) => n + e.removed, 0);
+  const sumRoll = (rows) => ({
+    edits: rows.reduce((n, r) => n + r.edits, 0),
+    added: rows.reduce((n, r) => n + r.added, 0),
+    removed: rows.reduce((n, r) => n + r.removed, 0),
+  });
+  assert.deepEqual(sumRoll(rt), { edits: m.edits.length, added: totAdded, removed: totRemoved }, 'rollupByTask conserves edits/±lines');
+  assert.deepEqual(sumRoll(m.rollupBySubagent), { edits: m.edits.length, added: totAdded, removed: totRemoved }, 'rollupBySubagent conserves totals');
+
+  // no subagents here → every edit is main-chain (subagentId null) → one bucket
+  assert.deepEqual(m.rollupBySubagent.map((r) => r.subagentId), [null], 'all edits are main-chain (subagentId null)');
+
+  // --- rollupByAgent: one row per built map, worktree-aware when fed siblings ---
+  const byAgent = core.rollupByAgent([m, { summary: { session: 'other' }, edits: [
+    { added: 4, removed: 1, status: 'kept' }], files: [{}, {}] }]);
+  assert.equal(byAgent.length, 2, 'one row per change-map');
+  assert.deepEqual(byAgent[0], { session: S, edits: m.edits.length, added: totAdded, removed: totRemoved, pending: 2, kept: 1, undone: 1, files: m.files.length }, 'this session\'s totals');
+  assert.deepEqual(byAgent[1], { session: 'other', edits: 1, added: 4, removed: 1, pending: 0, kept: 1, undone: 0, files: 2 }, 'the sibling\'s totals, kept separate');
+});
+
+test('changemap: display chapters are TOTAL — no-todo sessions get a synthetic session chapter; strict stays honest (0.8.0)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+
+  const build = (S, transcriptLines) => {
+    const cwd = tmpWork();
+    const proj = core.projectDir(cwd);
+    fs.mkdirSync(proj, { recursive: true });
+    core.ensureStore(S);
+    const F = path.join(cwd, 'app.ts');
+    const id = seedEdit(S, F, 'a\n', 'a\nb\n');
+    fs.writeFileSync(path.join(proj, S + '.jsonl'), transcriptLines.join('\n'));
+    return { m: core.buildChangeMap(cwd, S, { root: cwd }), id };
+  };
+
+  // --- a session with NO TodoWrite at all: the historical "everything is unassigned" case ---
+  const userMsg = JSON.stringify({ timestamp: new Date(500).toISOString(), message: { role: 'user', content: 'Fix the login flow so sessions persist' } });
+  const { m: noTodo, id: e1 } = build('nt', [userMsg]);
+  assert.equal(noTodo.chapters.length, 1, 'exactly one chapter — the synthetic session chapter');
+  const syn = noTodo.chapters[0];
+  assert.equal(syn.synthetic, true, 'flagged synthetic so renderers can style it');
+  assert.equal(syn.id, 'ch:session', 'a fixed id that can never collide with a 12-hex content hash');
+  assert.equal(syn.taskId, null, 'display-only: no strict task exists → destructive ops are not offered');
+  assert.equal(syn.title, 'Fix the login flow so sessions persist', 'titled from the first user prompt — a goal, not a bucket');
+  assert.equal(syn.edits, 1, 'it claims the session\'s work');
+  assert.equal(syn.status, 'wip', 'pending edits → the session chapter reads wip');
+  assert.equal(noTodo.edits.find((e) => e.id === e1).chapter, 'ch:session', 'every edit carries a chapter — never null');
+  assert.equal(noTodo.edits.find((e) => e.id === e1).taskId, null, 'the strict dimension still reports the honest truth');
+
+  // --- ai-title outranks the first prompt; no user line at all falls back to "Session work" ---
+  const title = JSON.stringify({ type: 'ai-title', aiTitle: 'Login session persistence' });
+  const { m: titled } = build('ntt', [title, userMsg]);
+  assert.equal(titled.chapters[0].title, 'Login session persistence', 'the session title names the chapter when Claude Code has one');
+  const { m: bare } = build('ntb', ['']);
+  assert.equal(bare.chapters[0].title, 'Session work', 'last-resort name when the transcript offers nothing');
+
+  // --- command wrappers and tool_result-only user turns never become the chapter title ---
+  const wrapper = JSON.stringify({ timestamp: new Date(100).toISOString(), message: { role: 'user', content: '<command-name>/effort</command-name>' } });
+  const toolResult = JSON.stringify({ timestamp: new Date(200).toISOString(), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'x', content: 'ok' }] } });
+  const { m: filtered } = build('ntf', [wrapper, toolResult, userMsg]);
+  assert.equal(filtered.chapters[0].title, 'Fix the login flow so sessions persist', 'skips harness wrappers and tool_result turns to find the real prompt');
+
+  // --- a ts===0 edit (no timestamp) also lands in the synthetic chapter, even alongside real chapters ---
+  const cwd0 = tmpWork();
+  const proj0 = core.projectDir(cwd0);
+  fs.mkdirSync(proj0, { recursive: true });
+  core.ensureStore('nt0');
+  const b0 = core.writeBlob('nt0', Buffer.from('a\n'));
+  const a0 = core.writeBlob('nt0', Buffer.from('a\nb\n'));
+  core.appendLog('nt0', { ts: 0, tool: 'Edit', file: path.join(cwd0, 'zero.ts'), beforeBlob: b0, afterBlob: a0, status: 'pending' });
+  const snap0 = JSON.stringify({ timestamp: new Date(1000).toISOString(), message: { role: 'assistant', content: [
+    { type: 'tool_use', id: 't1', name: 'TodoWrite', input: { todos: [{ content: 'Real task', status: 'in_progress' }] } }] } });
+  fs.writeFileSync(path.join(proj0, 'nt0.jsonl'), snap0);
+  const m0 = core.buildChangeMap(cwd0, 'nt0', { root: cwd0 });
+  assert.equal(m0.edits[0].chapter, 'ch:session', 'a timestamp-less edit can\'t be placed in a window → session chapter');
+  assert.deepEqual(m0.chapters.map((c) => c.synthetic), [false, true], 'the synthetic chapter is appended AFTER the real plan');
+  assert.equal(m0.chapters[1].index, 1, 'and continues the index sequence');
+
+  // --- the totality invariant, stated once: chapters partition the edit set exactly ---
+  for (const m of [noTodo, titled, bare, filtered, m0]) {
+    assert.ok(m.edits.every((e) => typeof e.chapter === 'string' && e.chapter.length > 0), 'every edit has a chapter');
+    const claimed = m.chapters.reduce((n, c) => n + c.edits, 0);
+    assert.equal(claimed, m.edits.length, 'chapter counts sum to the edit count — nothing dropped, nothing double-counted');
+  }
+});
+
+test('observations: buildObservations coalesces 3 consecutive same-file edits into ONE ×3 run (0.8.0 r2)', () => {
+  freshHome();
+  const S = 'obs-coalesce';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), ''); // transcript must exist (findTranscript)
+  const F = path.join(cwd, 'coalesce.ts');
+  const id1 = seedEdit(S, F, 'a\n', 'a\nb\n'); // +1
+  const id2 = seedEdit(S, F, 'a\nb\n', 'a\nb\nc\n'); // +1
+  const id3 = seedEdit(S, F, 'a\nb\nc\n', 'a\nb\nc\nd\n'); // +1
+
+  const obs = core.buildObservations(cwd, S, { root: cwd });
+  const runs = obs.runs.filter((r) => r.file === F);
+  assert.equal(runs.length, 1, 'three consecutive same-file edits collapse into ONE run');
+  const run = runs[0];
+  assert.equal(run.count, 3, 'count is the ×N (=3)');
+  assert.equal(run.edits.length, 3, 'the run carries all three per-edit rows for drill-down');
+  assert.deepEqual(run.edits.map((e) => e.id).sort((a, b) => a - b), [id1, id2, id3], 'each row carries its edit id');
+  assert.equal(run.added, 3, 'combined + across the run (one added line each)');
+  assert.equal(run.removed, 0, 'combined − across the run');
+  assert.ok(run.edits.every((e) => e.status === 'pending'), 'each row carries its review status');
+  assert.ok(run.edits.every((e) => 'ts' in e && 'reasoning' in e), 'each row carries ts + reasoning for drill-down');
+});
+
+test('workflows: workflow→edit attribution by ts-window; ambiguous overlap → null (0.8.0 r2)', () => {
+  freshHome();
+  const S = 'wf-attr';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), ''); // main transcript exists
+  const T = 1_700_000_000_000; // ms epoch (toMs passes >1e12 through unchanged)
+  // Two workflow runs, each with one agent whose tool_uses bracket a ts-window:
+  //   wf_one: [T+1000, T+2000] ; wf_two: [T+1500, T+2500]  → they OVERLAP on [T+1500, T+2000].
+  const wfRoot = path.join(proj, S, 'subagents', 'workflows');
+  const mkAgent = (wfId, agentId, t0, t1) => {
+    const dir = path.join(wfRoot, wfId);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, `agent-${agentId}.jsonl`),
+      [
+        { timestamp: t0, message: { role: 'assistant', content: [{ type: 'tool_use', id: agentId + '1', name: 'Edit', input: { file_path: '/x.ts' } }] } },
+        { timestamp: t1, message: { role: 'assistant', content: [{ type: 'tool_use', id: agentId + '2', name: 'Edit', input: { file_path: '/x.ts' } }] } },
+      ].map((o) => JSON.stringify(o)).join('\n')
+    );
+  };
+  mkAgent('wf_one', 'aa', T + 1000, T + 2000);
+  mkAgent('wf_two', 'bb', T + 1500, T + 2500);
+
+  // Four distinct-file store edits at controlled timestamps (distinct files → no tree collapse).
+  core.ensureStore(S);
+  const mk = (file, ts) => {
+    const id = core.nextId(S);
+    const b = core.writeBlob(S, Buffer.from(file + '\n'));
+    core.appendLog(S, { id, ts, tool: 'Edit', file, beforeBlob: null, afterBlob: b, status: 'pending' });
+    return id;
+  };
+  const e1 = mk(path.join(cwd, 'w1.ts'), T + 1200); // wf_one only
+  const e2 = mk(path.join(cwd, 'w2.ts'), T + 2300); // wf_two only
+  const e3 = mk(path.join(cwd, 'w3.ts'), T + 1800); // in BOTH windows → ambiguous → null
+  const e4 = mk(path.join(cwd, 'w4.ts'), T + 9000); // in NO window → null
+
+  const m = core.buildChangeMap(cwd, S, { root: cwd });
+  const wid = (id) => m.edits.find((e) => e.id === id).workflowId;
+  assert.equal(m.edits.length, 4, 'four distinct edits, none collapsed');
+  assert.equal(wid(e1), 'wf_one', 'ts inside wf_one only → wf_one');
+  assert.equal(wid(e2), 'wf_two', 'ts inside wf_two only → wf_two');
+  assert.equal(wid(e3), null, 'ts inside BOTH workflows → ambiguous → null (never guessed)');
+  assert.equal(wid(e4), null, 'ts inside NO window → null');
+
+  // (D) workflows[] Overview tabs: one entry per workflow that produced attributed edits.
+  assert.deepEqual(m.workflows.map((w) => w.id).sort(), ['wf_one', 'wf_two'], 'one tab per workflow with attributed edits (ambiguous/none excluded)');
+  const one = m.workflows.find((w) => w.id === 'wf_one');
+  assert.equal(one.rollup.edits, 1, 'wf_one rolls up its single attributed edit');
+  assert.equal(one.rollup.pending, 1, 'and carries its review status');
+  assert.deepEqual(one.files.map((f) => f.file), ['w1.ts'], 'wf_one files: its touched file(s), churn-desc');
+
+  // (0.8.0 totality) each workflow tab carries its OWN chapter ribbon — the run's edits regrouped by
+  // session chapter, counts scoped to the run. Renderers draw it as-is; the residual math is gone.
+  assert.equal(one.chapters.length, 1, 'wf_one\'s single edit rolls into one chapter row');
+  assert.equal(one.chapters[0].id, 'ch:session', 'no to-dos in this session → the synthetic session chapter');
+  assert.equal(one.chapters[0].edits, 1, 'scoped to the RUN\'s edits, not the session totals');
+  assert.equal(one.chapters[0].taskId, null, 'synthetic → display-only in the workflow slice too');
+  assert.equal(one.chapters.reduce((n, c) => n + c.edits, 0), one.rollup.edits, 'the workflow ribbon partitions the run exactly');
+
+  // rollupByWorkflow: per-workflow rows + an EXPLICIT null bucket (ambiguous + unwindowed), null-last.
+  const rw = m.rollupByWorkflow;
+  assert.ok(rw.find((r) => r.workflowId === 'wf_one') && rw.find((r) => r.workflowId === 'wf_two'), 'both workflows rolled up');
+  const un = rw.find((r) => r.workflowId === null);
+  assert.ok(un && un.edits === 2, 'the ambiguous (e3) + unwindowed (e4) edits collect in the null bucket');
+  assert.equal(rw[rw.length - 1].workflowId, null, 'the null bucket sorts last');
+  assert.equal(rw.reduce((n, r) => n + r.edits, 0), m.edits.length, 'rollupByWorkflow conserves the edit count');
+});
+
+// --- S7 (0.8.0): cross-agent task log + task-scoped keep/undo (taskLog.ts, undo.ts) --------------
+// Reuses the S2/S3 git-free worktree fixtures and the S6 to-do timeline. STRICT-span attribution only:
+// an edit in no real in_progress interval is `unassigned` and is excluded from task rows / undo sets.
+
+test('taskLog: crossAgentTaskLog unions one logical task across two worktree siblings into one row', () => {
+  freshHome();
+  const base = tmpWork();
+  // Main working tree (dir-.git) + a linked worktree (file-.git → shared commondir) = ONE repo group.
+  const main = path.join(base, 'main');
+  const gitDir = path.join(main, '.git');
+  const admin = path.join(gitDir, 'worktrees', 'wtA');
+  fs.mkdirSync(admin, { recursive: true });
+  fs.writeFileSync(path.join(gitDir, 'config'), BARE_FALSE);
+  fs.writeFileSync(path.join(admin, 'commondir'), '../..\n');
+  const wtA = path.join(base, 'wtA');
+  fs.mkdirSync(wtA);
+  fs.writeFileSync(path.join(wtA, '.git'), `gitdir: ${admin}\n`);
+  assert.equal(core.commonDir(main), core.commonDir(wtA), 'sanity: main + wtA are one repo');
+
+  // Both agents work the SAME logical task — identical to-do text hashes to the SAME taskId (§S6). The
+  // to-do is in_progress across [500, 1500); an edit at ts=1000 lands inside it, one at ts=2000 does not.
+  const TASK = 'Wire the exporter';
+  const MAIN = 's7-main', WTA = 's7-wta';
+  const transcript = (cwd, id, branch) => [
+    { type: 'user', cwd, sessionId: id, gitBranch: branch }, // first cwd-bearing line (listRepoSiblings keys on it)
+    { timestamp: new Date(500).toISOString(), message: { role: 'assistant', content: [
+      { type: 'tool_use', id: 't1', name: 'TodoWrite', input: { todos: [{ content: TASK, status: 'in_progress' }] } }] } },
+    { timestamp: new Date(1500).toISOString(), message: { role: 'assistant', content: [
+      { type: 'tool_use', id: 't2', name: 'TodoWrite', input: { todos: [{ content: TASK, status: 'completed' }] } }] } },
+  ].map((o) => JSON.stringify(o)).join('\n') + '\n';
+  const seedTranscript = (cwd, id, branch) => {
+    const dir = core.projectDir(cwd);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, id + '.jsonl'), transcript(cwd, id, branch));
+  };
+  seedTranscript(main, MAIN, 'main');
+  seedTranscript(wtA, WTA, 'feat/x');
+
+  seedEdit(MAIN, path.join(main, 'a.ts'), null, 'x\n'); // #1 ts=1000 → inside the task span
+  seedEdit(MAIN, path.join(main, 'a2.ts'), null, 'z\n'); // #2 ts=2000 → AFTER the task closed → unassigned
+  seedEdit(WTA, path.join(wtA, 'b.ts'), null, 'y\n'); // #1 ts=1000 → inside the task span (the OTHER worktree)
+
+  const rows = core.crossAgentTaskLog(main);
+  assert.equal(rows.length, 1, 'one logical task across two worktrees folds into ONE row (unassigned edit excluded)');
+  const row = rows[0];
+  assert.equal(row.taskId, core.taskId(TASK, 0), 'keyed by the stable content-hash taskId');
+  assert.equal(row.content, TASK, 'the to-do text is carried from the chapters');
+  assert.deepEqual(row.agentIds, [MAIN, WTA].sort(), 'both worktree sessions contributed → both agents named');
+  assert.deepEqual(row.subagentIds, [], 'no subagents authored these edits');
+  assert.equal(row.edits, 2, 'exactly the two in-interval edits (one per worktree); the unassigned edit is NOT counted');
+  assert.equal(row.added, 2, '+1 line per contributing edit');
+  assert.equal(row.removed, 0);
+  assert.equal(row.status, 'pending', 'all contributing edits are pending → the task reads pending');
+});
+
+// A single-session fixture: transcript puts `task` in_progress across [500, 2500). Seeds three edits at
+// ts 1000/2000/3000 — the third lands AFTER the task completes, so it belongs to NO strict interval.
+function seedTaskSession(S, task) {
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const rec = [
+    { type: 'user', cwd, sessionId: S, gitBranch: 'main' },
+    { timestamp: new Date(500).toISOString(), message: { role: 'assistant', content: [
+      { type: 'tool_use', id: 't1', name: 'TodoWrite', input: { todos: [{ content: task, status: 'in_progress' }] } }] } },
+    { timestamp: new Date(2500).toISOString(), message: { role: 'assistant', content: [
+      { type: 'tool_use', id: 't2', name: 'TodoWrite', input: { todos: [{ content: task, status: 'completed' }] } }] } },
+  ].map((o) => JSON.stringify(o)).join('\n') + '\n';
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), rec);
+  const F1 = path.join(cwd, 'f1.ts'), F2 = path.join(cwd, 'f2.ts'), F3 = path.join(cwd, 'f3.ts');
+  fs.writeFileSync(F1, 'a2\n'); fs.writeFileSync(F2, 'b2\n'); fs.writeFileSync(F3, 'c2\n'); // on-disk = each edit's `after`
+  const id1 = seedEdit(S, F1, 'a1\n', 'a2\n'); // ts 1000 — inside [500,2500)
+  const id2 = seedEdit(S, F2, 'b1\n', 'b2\n'); // ts 2000 — inside
+  const id3 = seedEdit(S, F3, 'c1\n', 'c2\n'); // ts 3000 — AFTER the task completed → unassigned
+  return { cwd, S, taskId: core.taskId(task, 0), ids: [id1, id2, id3], files: [F1, F2, F3] };
+}
+
+test('undo: chapter revert is WYSIWYG — exactly the DISPLAYED set; strict analytics stay honest (0.8.0)', () => {
+  freshHome();
+  const f = seedTaskSession('s7-undo', 'Task A');
+  const [id1, id2, id3] = f.ids;
+  assert.deepEqual([id1, id2, id3], [1, 2, 3], 'serial ids, ts = id*1000');
+
+  // The STRICT analytics set is unchanged: #3 (ts 3000 > completed 2500) is outside the real interval…
+  const strict = core.taskEditIds(f.cwd, f.S, f.taskId).sort((a, b) => a - b);
+  assert.deepEqual(strict, [id1, id2], 'taskEditIds: only edits inside the real in_progress interval');
+  const m = core.buildChangeMap(f.cwd, f.S, { root: f.cwd });
+  assert.equal(m.edits.find((e) => e.id === id3).taskId, null, 'strict attribution: the trailing edit is honestly unassigned');
+  // …but the DISPLAY dimension is total: #3 fills forward onto the final chapter, and that is what the row shows.
+  assert.equal(m.edits.find((e) => e.id === id3).chapter, f.taskId, 'display: the trailing edit sits under the final chapter');
+  assert.deepEqual(core.chapterEditIds(f.cwd, f.S, f.taskId).sort((a, b) => a - b), [id1, id2, id3], 'chapterEditIds = the displayed set');
+
+  // Chapter revert acts WYSIWYG (the "accepted the chapter but edits remain" fix): everything the row
+  // shows reverts — including the gap-filled #3 — so the ribbon empties exactly as the counts promise.
+  const res = core.undoTask(f.cwd, f.S, f.taskId);
+  assert.equal(res.undone, 3, 'every displayed edit reverted');
+  assert.deepEqual(res.ids.sort((a, b) => a - b), [id1, id2, id3], 'exactly the displayed set was reverted');
+  assert.equal(fs.readFileSync(f.files[0], 'utf8'), 'a1\n', '#1 reverted to its pre-edit state');
+  assert.equal(fs.readFileSync(f.files[1], 'utf8'), 'b1\n', '#2 reverted');
+  assert.equal(fs.readFileSync(f.files[2], 'utf8'), 'c1\n', '#3 (displayed under the chapter) reverted too');
+  assert.equal(core.findRecord('s7-undo', id3).status, 'undone', 'its status matches what the row showed');
+});
+
+test('undo: keepTask accepts the whole DISPLAYED chapter — a partial accept never strands leftovers (0.8.0)', () => {
+  freshHome();
+  const f = seedTaskSession('s7-keep', 'Task K');
+  const [id1, id2, id3] = f.ids;
+  const res = core.keepTask(f.cwd, f.S, f.taskId);
+  assert.equal(res.kept, 3, 'every edit displayed under the chapter is kept — nothing left behind');
+  assert.equal(res.total, 3, 'total = the displayed set');
+  assert.deepEqual(res.ids.sort((a, b) => a - b), [id1, id2, id3], 'exactly the displayed set was kept');
+  for (const id of [id1, id2, id3]) assert.equal(core.findRecord('s7-keep', id).status, 'kept');
+  // Accepting the chapter leaves NOTHING pending under it (the bug-feel this rule fixes).
+  const m = core.buildChangeMap(f.cwd, f.S, { root: f.cwd });
+  assert.equal(m.chapters.find((c) => c.id === f.taskId).pending, 0, 'the chapter row reads fully accepted');
+});
+
+test('changemap: chapterEditIds partitions the RAW log exactly as the display attribution (drift guard)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'chpart';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  core.ensureStore(S);
+  const seedAt = (file, before, after, ts) => {
+    const b = core.writeBlob(S, Buffer.from(before));
+    const a = core.writeBlob(S, Buffer.from(after));
+    return core.appendLog(S, { ts, tool: 'Edit', file, beforeBlob: b, afterBlob: a, status: 'pending' }).id;
+  };
+  const F = (n) => path.join(cwd, `f${n}.ts`);
+  seedAt(F(1), 'a\n', 'a\nb\n', 1000); // head → back-extended onto Task A
+  seedAt(F(2), 'a\n', 'a\nc\n', 2500); // inside Task A
+  seedAt(F(3), 'a\n', 'a\nd\n', 4500); // gap → fills forward onto Task A
+  seedAt(F(4), 'a\n', 'a\ne\n', 5500); // inside Task B
+  seedAt(F(5), 'a\n', 'a\nf\n', 9000); // trailing → final chapter (Task B)
+  const zb = core.writeBlob(S, Buffer.from('z\n'));
+  core.appendLog(S, { ts: 0, tool: 'Edit', file: F(6), beforeBlob: zb, afterBlob: core.writeBlob(S, Buffer.from('z\nq\n')), status: 'pending' }); // ts-less → synthetic
+  const snap = (ts, todos) => JSON.stringify({ timestamp: new Date(ts).toISOString(), message: { role: 'assistant', content: [
+    { type: 'tool_use', id: 't' + ts, name: 'TodoWrite', input: { todos } }] } });
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), [
+    snap(2000, [{ content: 'Task A', status: 'in_progress' }, { content: 'Task B', status: 'pending' }]),
+    snap(4000, [{ content: 'Task A', status: 'completed' }, { content: 'Task B', status: 'pending' }]), // gap
+    snap(5000, [{ content: 'Task A', status: 'completed' }, { content: 'Task B', status: 'in_progress' }]),
+    snap(6000, [{ content: 'Task A', status: 'completed' }, { content: 'Task B', status: 'completed' }]),
+  ].join('\n'));
+  const A = core.taskId('Task A', 0), B = core.taskId('Task B', 0);
+  const setA = core.chapterEditIds(cwd, S, A);
+  const setB = core.chapterEditIds(cwd, S, B);
+  const setSyn = core.chapterEditIds(cwd, S, 'ch:session');
+  assert.deepEqual(setA, [1, 2, 3], 'A = head-extended + in-interval + gap-filled');
+  assert.deepEqual(setB, [4, 5], 'B = in-interval + trailing (final chapter runs to the end)');
+  assert.deepEqual(setSyn, [6], 'ts-less edit → the synthetic session chapter');
+  // The partition law: every raw id in exactly one chapter set — mirrors the map's per-unit attribution.
+  const all = [...setA, ...setB, ...setSyn].sort((a, b) => a - b);
+  assert.deepEqual(all, core.readLog(S).map((r) => r.id), 'chapter sets partition the raw log exactly');
+  // reviewEditIds: chapter ids resolve the display set; an id naming no chapter falls back to strict.
+  assert.deepEqual(core.reviewEditIds(cwd, S, A), setA, 'a chapter id resolves WYSIWYG');
+  assert.deepEqual(core.reviewEditIds(cwd, S, 'ch:session'), [6], 'the synthetic chapter is fully reviewable');
+});
+
+// --- S8: zero-token chat-context assembler (§2.6/§7) ---
+
+/** A store edit + a transcript (Edit reasoning, a Bash command+result, an in_progress TodoWrite) so one
+ *  fixture exercises every assembleChatContext ref path. Returns cwd/session + the taskId of the todo. */
+function seedChatContext(session) {
+  const cwd = tmpWork();
+  const S = session;
+  const F = path.join(cwd, 'app.ts');
+  core.ensureStore(S);
+  const before = core.writeBlob(S, Buffer.from('const a = 1\n'));
+  const after = core.writeBlob(S, Buffer.from('const a = 2\n'));
+  core.appendLog(S, { ts: 1000, tool: 'Edit', file: F, beforeBlob: before, afterBlob: after, status: 'pending' }); // #1
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const tx = [
+    { timestamp: '2026-07-13T10:00:00.000Z', message: { role: 'assistant', content: [
+      { type: 'text', text: 'Bumping the constant from 1 to 2.' },
+      { type: 'tool_use', id: 'tu-edit', name: 'Edit', input: { file_path: F } },
+    ] } },
+    { timestamp: '2026-07-13T10:01:00.000Z', message: { role: 'assistant', content: [
+      { type: 'text', text: 'Running the test suite.' },
+      { type: 'tool_use', id: 'tu-bash', name: 'Bash', input: { command: 'npm test --silent', description: 'run tests' } },
+    ] } },
+    { message: { role: 'user', content: [
+      { type: 'tool_result', tool_use_id: 'tu-bash', is_error: false, content: 'PASS 3 tests, 0 failures' },
+    ] } },
+    { timestamp: '2026-07-13T10:02:00.000Z', message: { role: 'assistant', content: [
+      { type: 'tool_use', id: 'tu-todo', name: 'TodoWrite', input: { todos: [{ content: 'Refactor the parser', status: 'in_progress' }] } },
+    ] } },
+  ].map((o) => JSON.stringify(o)).join('\n');
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), tx);
+  return { cwd, S, taskId: core.taskId('Refactor the parser', 0) };
+}
+
+test('assembleChatContext: edit ref carries the before/after blobs + Claude’s reasoning (zero token)', () => {
+  freshHome();
+  const { cwd, S } = seedChatContext('s8-edit');
+  // by editId
+  const p = core.assembleChatContext(cwd, S, { editId: 1 });
+  assert.match(p, /--- before ---/, 'has a before section');
+  assert.match(p, /--- after ---/, 'has an after section');
+  assert.match(p, /const a = 1/, 'before blob content present');
+  assert.match(p, /const a = 2/, 'after blob content present');
+  assert.match(p, /Bumping the constant from 1 to 2\./, "carries Claude's own reasoning for the edit");
+  assert.match(p, /edit #1|app\.ts/, 'names the edited file/record');
+  // the same edit, referenced by its stable toolUseId, resolves the same store record → same before/after
+  const p2 = core.assembleChatContext(cwd, S, { toolUseId: 'tu-edit' });
+  assert.match(p2, /const a = 1/, 'toolUseId path also finds the before blob');
+  assert.match(p2, /const a = 2/, 'toolUseId path also finds the after blob');
+});
+
+test('assembleChatContext: exec (action) ref carries the command + its result (zero token)', () => {
+  freshHome();
+  const { cwd, S } = seedChatContext('s8-exec');
+  const p = core.assembleChatContext(cwd, S, { toolUseId: 'tu-bash' });
+  assert.match(p, /--- command ---/, 'has a command section');
+  assert.match(p, /npm test --silent/, 'the shell command is present');
+  assert.match(p, /--- result ---/, 'has a result section');
+  assert.match(p, /PASS 3 tests, 0 failures/, 'the tool_result output is present');
+  assert.match(p, /Running the test suite\./, "carries Claude's reasoning for the command");
+  assert.doesNotMatch(p, /--- before ---/, 'an exec is not framed as an edit (no before/after)');
+});
+
+test('assembleChatContext: task ref frames the prompt with the task (resolved from its stable taskId)', () => {
+  freshHome();
+  const { cwd, S, taskId } = seedChatContext('s8-task');
+  // task ref alone → the header names the task by its resolved content, not the opaque hash
+  const solo = core.assembleChatContext(cwd, S, { taskId });
+  assert.match(solo, /task/i, 'frames the prompt as a task');
+  assert.match(solo, /Refactor the parser/, 'resolves the taskId hash back to the todo content');
+  assert.doesNotMatch(solo, new RegExp(taskId), 'shows the content, not the raw hash');
+  // task + subagent framing layered onto a primary action → "part of task X run by subagent Y"
+  const framed = core.assembleChatContext(cwd, S, { toolUseId: 'tu-edit', taskId, agentId: 'ag7' });
+  assert.match(framed, /part of task "Refactor the parser" run by subagent ag7/, 'layers task + subagent framing on the action');
+  // an unknown taskId degrades honestly to the raw ref (never invents a task name)
+  const unknown = core.assembleChatContext(cwd, S, { taskId: 'deadbeef0000' });
+  assert.match(unknown, /deadbeef0000/, 'an unresolvable taskId is surfaced verbatim, not guessed');
+});
+
+test('assembleChatContext: NEVER spawns a process or calls a model (zero-token guarantee)', () => {
+  freshHome();
+  const { cwd, S, taskId } = seedChatContext('s8-nospawn');
+  // Trip-wire every child_process entry point: assembling context must not exec/spawn anything
+  // (it must not reach analyze.ts's `claude -p`). Restored in finally so later tests are unaffected.
+  const methods = ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork'];
+  const orig = {};
+  for (const m of methods) {
+    orig[m] = cp[m];
+    cp[m] = () => {
+      throw new Error(`assembleChatContext spawned a process via child_process.${m}`);
+    };
+  }
+  try {
+    for (const ref of [{ editId: 1 }, { toolUseId: 'tu-edit' }, { toolUseId: 'tu-bash' }, { taskId }, { agentId: 'ag7' }, {}]) {
+      const out = core.assembleChatContext(cwd, S, ref);
+      assert.equal(typeof out, 'string', 'returns a prompt string');
+      assert.ok(out.length > 0, 'the prompt is non-empty');
+    }
+  } finally {
+    for (const m of methods) cp[m] = orig[m];
+  }
+});
+
+// ── S9 — core barrel: every new 0.8.0 public symbol is reachable via the single `core` backend ──
+// Guards the CLI-as-single-backend contract: the CLI + both editors consume aggregation exclusively
+// through `core.*`, so a module dropped from index.ts (or a public symbol quietly made private) is a
+// silent parity break. This test pins the reachable public surface introduced by S1-S8.
+test('barrel: index.ts re-exports every new 0.8.0 public symbol (CLI-as-single-backend)', () => {
+  // Runtime-checkable values (functions). Types (Phase, FileCollision, SiblingSession, TaskLogEntry,
+  // ChatContextRef, TaskRoll/SubagentRoll/AgentRoll, KeepScopeResult, …) are compile-time only and
+  // are surfaced by `export *` in index.d.ts — the CLI/vscode builds under `npm test` are the check
+  // that they resolve, so a missing type turns the build red rather than passing silently here.
+  const publicFns = [
+    // S2 — git-free worktree resolver (session.ts)
+    'repoRoot', 'commonDir', 'repoKeyForSession', 'firstCwdLine',
+    // S3 — repo-scoped siblings + conflicts (fleet.ts)
+    'listRepoSiblings', 'fleetConflicts',
+    // S4 — live phase + subagent todos (actions.ts / subagents.ts)
+    'agentPhase', 'agentPhaseDetail', 'subagentTodos',
+    // S5 — hardened subagent editId linker (actions.ts)
+    'attributeEditIds',
+    // S6 — stable taskId (strict spans) + three-level rollups (changemap.ts)
+    'taskId', 'rollupByTask', 'rollupBySubagent', 'rollupByAgent',
+    // S7 — cross-agent task-log + task-scoped keep/undo (taskLog.ts / changemap.ts / undo.ts)
+    'crossAgentTaskLog', 'taskEditIds', 'undoTask', 'keepTask',
+    // S8 — zero-token chat-context assembler (actions.ts)
+    'assembleChatContext',
+    // 0.8.0 — panel consolidation: Observations view-model (observe.ts) + chapter-scoped clear (store.ts)
+    'buildObservations', 'clearResolvedIds',
+    // 0.8.0 — workflow-run tracking (workflows.ts)
+    'parseWorkflows',
+    // 0.8.0 r2 — workflow→edit attribution + per-workflow rollup (workflows.ts / changemap.ts)
+    'workflowWindows', 'workflowForTs', 'rollupByWorkflow',
+  ];
+  const missing = publicFns.filter((k) => typeof core[k] !== 'function');
+  assert.deepEqual(missing, [], `barrel is missing public symbol(s): ${missing.join(', ')}`);
+
+  // The strict-span mechanics (inProgressSpansStrict / taskForTs) are INTENTIONALLY private (S6/S7):
+  // the blueprint §2.1 designates inProgressSpansStrict an internal builder, and taskForTs exists only
+  // as the module-private strictTaskForTs helper + a buildChangeMap closure. The PUBLIC strict-span
+  // contract consumers need is exposed through taskEditIds / rollupByTask / ChangeMap.rollupByTask —
+  // asserted present above. Pin the boundary so a refactor can't silently widen the public surface.
+  for (const priv of ['inProgressSpansStrict', 'taskForTs', 'strictTaskForTs']) {
+    assert.equal(core[priv], undefined, `${priv} is an internal helper — it must not leak onto the barrel`);
+  }
+});
+
+// --- 0.8.0 stabilization: tracking-fix + perf-cache regression tests ------------------------------
+
+test('fscache: a pure parse is memoized per (mtime,size) and invalidates when the file changes', () => {
+  freshHome();
+  const dir = tmpWork();
+  const p = path.join(dir, 't.jsonl');
+  fs.writeFileSync(p, JSON.stringify(asstToolUse('x1', 'Read', { file_path: '/a.ts' })) + '\n');
+  const first = core.parseTranscriptActions(p, { includeSidechain: true });
+  assert.equal(first.length, 1, 'one action parsed');
+  // Same stamp → served from cache; the returned records are per-call COPIES, so a consumer that
+  // mutates (attribution sets editId) can never poison the cached master.
+  const second = core.parseTranscriptActions(p, { includeSidechain: true });
+  second[0].editId = 999;
+  const third = core.parseTranscriptActions(p, { includeSidechain: true });
+  assert.equal(third[0].editId, undefined, 'a consumer mutation never leaks into the cached master');
+  // Append a line (size changes) → the cache revalidates and re-parses.
+  fs.appendFileSync(p, JSON.stringify(asstToolUse('x2', 'Read', { file_path: '/b.ts' })) + '\n');
+  assert.equal(core.parseTranscriptActions(p, { includeSidechain: true }).length, 2, 'file change → fresh parse');
+  core.clearFsCache(); // exported for long-lived hosts + hermetic tests
+  assert.equal(core.parseTranscriptActions(p, { includeSidechain: true }).length, 2, 'still parses after an explicit clear');
+});
+
+test('subagents/fleet: phase CONFIDENCE is propagated — heuristic staleness never asserted as truth (0.8.0)', () => {
+  freshHome();
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  const S = 'conf';
+  fs.mkdirSync(path.join(proj, S, 'subagents'), { recursive: true });
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), JSON.stringify(asstToolUse('m1', 'Read', { file_path: '/x.ts' })) + '\n');
+  // A subagent with a pending tool_use gone stale >10s → awaiting-permission, but only as a HEURISTIC.
+  writePhaseTranscript(path.join(proj, S, 'subagents'), 'agent-s1.jsonl',
+    [asstToolUse('t1', 'Bash', { command: 'sleep 99' })], 30_000);
+  const subs = core.parseSubagents(cwd, S);
+  assert.equal(subs.length, 1);
+  assert.equal(subs[0].phase, 'awaiting-permission', 'stale pending tool_use classifies as awaiting-permission');
+  assert.equal(subs[0].phaseConfidence, 'heuristic', 'and is LABELED a heuristic — renderers dim it');
+  // A sibling's phase carries its confidence too (fresh active tool_use → structural).
+  const sibs = core.listSiblings(cwd, S);
+  const self = sibs.find((s) => s.id === S);
+  assert.equal(self.phase, 'working', 'fresh pending tool_use → working');
+  assert.equal(self.phaseConfidence, 'high', 'structural classification → high confidence');
+});
+
+test('workflows: running gate uses WORKFLOW_ACTIVE_MS (5m) — a long-thinking agent no longer flaps to done (0.8.0)', () => {
+  freshHome();
+  const S = 'wffresh';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), '');
+  const wfDir = path.join(proj, S, 'subagents', 'workflows', 'wf_fresh');
+  fs.mkdirSync(wfDir, { recursive: true });
+  const mk = (ageMs) => {
+    fs.writeFileSync(path.join(wfDir, 'journal.jsonl'), JSON.stringify({ type: 'started', key: 'v2:aaaa', agentId: 'a1' }));
+    writePhaseTranscript(wfDir, 'agent-a1.jsonl', [asstToolUse('t1', 'Read', { file_path: '/x.ts' })], ageMs);
+    const d = new Date(Date.now() - ageMs);
+    fs.utimesSync(path.join(wfDir, 'journal.jsonl'), d, d);
+    return core.parseWorkflows(cwd, S)[0];
+  };
+  const thinking = mk(4 * 60_000); // 4 minutes silent — a long reasoning turn, NOT dead
+  assert.equal(thinking.running, true, 'a 4m-silent unfinished run still reads running (was: flapped at 60s)');
+  assert.ok(thinking.lastActivityMs > 0, 'lastActivityMs exposes the freshness signal for "active Nm ago"');
+  const dead = mk(6 * 60_000); // past the 5m bound — killed/abandoned runs still age out
+  assert.equal(dead.running, false, 'a 6m-silent run ages out (killed runs never write completed)');
+});
+
+test('workflows: parseScriptMeta survives braces/quotes in string fields; journal keys never fake phases (0.8.0)', () => {
+  freshHome();
+  const S = 'wfmeta';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), '');
+  const wfDir = path.join(proj, S, 'subagents', 'workflows', 'wf_meta1');
+  fs.mkdirSync(wfDir, { recursive: true });
+  const scriptsDir = path.join(proj, S, 'workflows', 'scripts');
+  fs.mkdirSync(scriptsDir, { recursive: true });
+  // Braces inside strings + comments used to mis-slice the object literal and drop every field.
+  fs.writeFileSync(path.join(scriptsDir, 'tricky-wf_meta1.js'), [
+    "export const meta = {",
+    "  name: 'tricky {run}', // a } in a comment",
+    "  description: \"notes {see: docs} and \\\"quoted\\\" bits\",",
+    "  /* block } comment */",
+    "  phases: [{ title: 'Scan' }, { title: 'Fix' }],",
+    "}",
+    "phase('Scan')",
+  ].join('\n'));
+  // Two agents whose journal keys are per-agent-unique and match NO declared phase → identifiers, not
+  // phases (the structural belt over the isHashKey regex); a slugged declared key ('phase-scan') sticks.
+  fs.writeFileSync(path.join(wfDir, 'journal.jsonl'), [
+    JSON.stringify({ type: 'started', key: 'phase-scan', agentId: 'a1' }),
+    JSON.stringify({ type: 'started', key: 'zq9x-unique-blob-77', agentId: 'b2' }),
+  ].join('\n'));
+  writePhaseTranscript(wfDir, 'agent-a1.jsonl', [asstToolUse('t1', 'Read', { file_path: '/x.ts' })]);
+  writePhaseTranscript(wfDir, 'agent-b2.jsonl', [asstToolUse('t2', 'Read', { file_path: '/y.ts' })]);
+  const w = core.parseWorkflows(cwd, S)[0];
+  assert.equal(w.name, 'tricky {run}', 'name parses despite braces in strings');
+  assert.equal(w.description, 'notes {see: docs} and "quoted" bits', 'description parses despite braces + escaped quotes');
+  assert.deepEqual(w.phases, ['Scan', 'Fix'], 'declared phases parse past the comments');
+  const a1 = w.agents.find((a) => a.agentId === 'a1');
+  assert.equal(a1.phase, 'phase-scan', 'a key slug-matching a declared phase is trusted');
+  const b2 = w.agents.find((a) => a.agentId === 'b2');
+  assert.equal(b2.phase, null, 'a per-agent-unique undeclared key is an identifier — never a bogus phase');
+});
+
+test('demo: runDemo replays a real-pipeline session — named total chapters, attributed subagent + workflow, no-residue lifecycle (0.8.0)', async () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const ws = fs.realpathSync(tmpWork()); // physical path — the demo records under the shell's getcwd()
+  const res = await core.runDemo({ fast: true, cwd: ws });
+  assert.match(res.session, /^demo-[0-9a-f]{8}$/, 'the demo- prefix gates every demo-only behavior');
+  assert.equal(res.edits, 5, 'five captured store edits (2 farewell, 1 validation, 1 tests, 1 docs)');
+  assert.ok(fs.existsSync(res.transcript), 'a real transcript in the real project dir');
+
+  // Chapters are total AND fully named — the scenario keeps a to-do in_progress for every edit.
+  const m = core.buildChangeMap(ws, res.session, { root: ws });
+  assert.ok(m.edits.every((e) => typeof e.chapter === 'string' && e.chapter.length > 0), 'no edit is chapterless');
+  assert.equal(m.chapters.filter((c) => c.synthetic).length, 0, 'every demo edit lands in a NAMED chapter');
+  assert.deepEqual(m.chapters.map((c) => c.edits), [2, 1, 2], 'the three chapters claim 2/1/2 edits');
+  assert.ok(m.rollupByTask.every((r) => r.taskId !== null), 'strict model: nothing unassigned either');
+
+  // Subagent + workflow attribution ride the real windows.
+  const subs = core.parseSubagents(ws, res.session);
+  assert.equal(subs.length, 1, 'one subagent (the test writer)');
+  assert.ok(subs[0].actions.some((a) => a.editId != null), 'its edit is window-attributed to a store record');
+  assert.ok(m.workflows.some((w) => w.id === 'wf_demo' && w.rollup.edits === 1), 'the docs workflow owns one edit');
+  assert.ok(m.workflows[0].chapters.length >= 1, 'and carries its own chapter rollup for the workflow slice');
+
+  // No-residue review: resolve everything → autoClearDemo drops the records; never for a real id.
+  for (const r of core.readLog(res.session)) core.setStatus(res.session, r.id, 'kept');
+  assert.equal(core.autoClearDemo(res.session), true, 'a fully reviewed demo session clears itself');
+  assert.equal(core.readLog(res.session).length, 0, 'store is empty — panels read empty');
+  assert.equal(core.autoClearDemo('11111111-2222-3333-4444-555555555555'), false, 'a real session id can never auto-clear');
+
+  // demo --clean removes the transcript, the session tree, the store, and the marked workspace.
+  const cleaned = core.cleanDemo({ cwd: ws });
+  assert.deepEqual(cleaned.sessions, [res.session], 'exactly the demo session is removed');
+  assert.ok(!fs.existsSync(res.transcript), 'transcript gone');
+  assert.ok(!fs.existsSync(path.join(ws, 'observatory-demo')), 'workspace gone (it carried the marker)');
+  // …and a workspace WITHOUT the marker is never deleted, even when pointed at directly.
+  const precious = path.join(ws, 'precious');
+  fs.mkdirSync(precious, { recursive: true });
+  fs.writeFileSync(path.join(precious, 'keep.txt'), 'mine');
+  core.cleanDemo({ cwd: ws, dir: precious });
+  assert.ok(fs.existsSync(path.join(precious, 'keep.txt')), 'an unmarked directory is never touched');
 });

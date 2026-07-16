@@ -202,15 +202,10 @@ const reviewBubble = () => `
 
 const observationsCol = `
   <div class="obsrow"><span>🧭</span><span class="id" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Create User class and test imports</span><span class="r" style="flex:none">session recap</span></div>
+  <div class="obsrow"><span class="dot" style="background:var(--pending)"></span><span class="id mono">User.js&nbsp;×2</span><span class="r">14:02 · +15 −0 · coalesced change-feed (Timeline folded in)</span></div>
   <div class="obsrow"><span style="color:var(--dim)">👁</span><span class="id">#3</span><span class="r">created index.js — "Operation 3 — create src/index.js that imports User…"</span></div>
   <div class="obsrow"><span style="color:var(--dim)">👁</span><span class="id">#2</span><span class="r">edited User.js (+4 −0) — "Operation 2 — add a farewell() method…"</span></div>
   <div class="obsrow"><span style="color:var(--pending)">⚠</span><span class="id">#1</span><span class="r">created User.js — 🧠 6 edits across sessions · 50% accepted</span></div>`;
-
-const timelineCol = `
-  <div class="obsrow"><span class="dot" style="background:var(--pending)"></span><span class="id mono">14:02&nbsp; User.js&nbsp; ×2</span><span class="r">+15 −0 · added farewell() to mirror greet()</span></div>
-  <div class="obsrow" style="padding-left:34px"><span class="dot" style="background:var(--pending)"></span><span class="id mono">#2</span><span class="r">14:02 · +4 −0</span></div>
-  <div class="obsrow" style="padding-left:34px"><span class="dot" style="background:var(--pending)"></span><span class="id mono">#1</span><span class="r">14:01 · +11 −0</span></div>
-  <div class="obsrow"><span class="dot" style="background:var(--pending)"></span><span class="id mono">14:02&nbsp; index.js</span><span class="r">+4 −0 · created index.js</span></div>`;
 
 const stepPlot = (name, legend, paths, yticks, H) => `
   <div class="plothead"><span class="pname">${name}</span><div class="legend">${legend}</div></div>
@@ -261,13 +256,14 @@ const statsCol = (H1 = 52, H2 = 52) => `
   <div class="urow"><span class="lbl">5h</span><span class="track"><span class="fill" style="width:11%;background:var(--kept)"></span></span><span class="pct" style="color:var(--kept)">11%</span><span class="sub">1h30m · ~10M</span></div>
   <div class="urow"><span class="lbl">wk</span><span class="track"><span class="fill" style="width:35%;background:var(--kept)"></span></span><span class="pct" style="color:var(--kept)">35%</span><span class="sub">1d2h · ~37M</span></div>`;
 
-// Actions — every tool call this session, grouped by kind (Fleet / Egress on top, then the categories)
+// Actions — every tool call this session, as collapsed category groups (moved into the sidebar in 0.8.0);
+// Fleet + Subagents graduated to Overview. Egress node + the ⚠-error styling on Commands stay.
 const actionsCol = `
-  <div class="obsrow"><span>🛰</span><span class="id">Fleet</span><span class="r">13 siblings in this project</span></div>
   <div class="obsrow"><span>⇅</span><span class="id">Egress</span><span class="r">3 destinations · 3 remote</span></div>
-  <div class="obsrow"><span style="color:var(--purple)">▾</span><span class="id">Subagents</span><span class="r">3 · 68 actions · 12m47s</span></div>
   <div class="obsrow"><span>▸</span><span class="id">Edits</span><span class="r">185</span></div>
-  <div class="obsrow"><span>▸</span><span class="id">Commands</span><span class="r"><span style="color:var(--pending)">229 · 2 errors</span></span></div>
+  <div class="obsrow"><span>▸</span><span class="id">Commands</span><span class="r"><span style="color:var(--pending)">⚠ 229 · 2 errors</span></span></div>
+  <div class="obsrow"><span>▸</span><span class="id">Reads</span><span class="r">142</span></div>
+  <div class="obsrow"><span>▸</span><span class="id">Searches</span><span class="r">57</span></div>
   <div class="obsrow"><span>▸</span><span class="id">To-dos</span><span class="r">30</span></div>`;
 
 // Change Map — chapters on top, an equal-width module strip, then files ranked by churn
@@ -281,19 +277,6 @@ const cmRow = (color, file, mod, barPct, num, pend) => `
     <span style="flex:1;height:5px;border-radius:2px;background:var(--panel);overflow:hidden;min-width:16px"><span style="display:block;height:100%;width:${barPct}%;background:${color}"></span></span>
     <span class="mono" style="font-size:10px;color:var(--faint);width:40px;text-align:right;flex:none">${num}</span>
     <span class="mono" style="font-size:10px;width:26px;text-align:right;flex:none;color:${pend ? 'var(--pending)' : 'var(--kept)'}">${pend || '✓'}</span>
-  </div>`;
-const changeMapCol = `
-  <div style="padding:2px 16px 8px">
-    <div style="display:flex;gap:9px;font-size:10px;color:var(--dim);margin-bottom:8px;flex-wrap:wrap">
-      ${cmChapter('●', 'var(--kept)', '1 Subagent tracking')}${cmChapter('◐', 'var(--pending)', '2 Risk audit')}${cmChapter('○', 'var(--faint)', '3 Update docs')}
-    </div>
-    <div style="display:flex;height:16px;border-radius:3px;overflow:hidden;margin-bottom:9px">
-      ${cmSeg('var(--pending)', 'vscode')}${cmSeg('var(--kept)', 'core')}${cmSeg('var(--pending)', 'docs')}${cmSeg('var(--kept)', 'cli')}
-    </div>
-    ${cmRow('var(--pending)', 'extension.ts', 'vscode', 100, '+751', '6⏳')}
-    ${cmRow('var(--kept)', 'changemap.ts', 'core', 38, '+285', '')}
-    ${cmRow('var(--pending)', 'README.md', 'docs', 14, '+44', '2⏳')}
-    ${cmRow('var(--kept)', 'index.ts', 'cli', 6, '+13', '')}
   </div>`;
 
 // the terminal front-end: status → list → surgical undo that preserves later edits
@@ -385,6 +368,173 @@ const winDiag = (title, mock, notes) => `
     <div style="display:flex;flex-direction:column;gap:13px;padding-top:4px;">${notes}</div>
   </div>`;
 
+// ---------- 0.8.0: multitasking + per-agent overview tabs ----------
+// Phase badge — colored by agent state (working blue · awaiting orange · errored red · done green · idle grey).
+const phase = (label, color) => `<span style="font-size:9px;font-weight:700;letter-spacing:.02em;padding:1.5px 7px;border-radius:9px;color:${color};border:1px solid ${color};white-space:nowrap;text-transform:uppercase">${label}</span>`;
+// A tiny activity sparkline (bars), like the real per-agent one.
+const spark = (bars, color) => `<span style="display:inline-flex;align-items:flex-end;gap:1.5px;height:13px">${bars.map(h => `<span style="width:2.5px;height:${Math.max(2, Math.round(h * 13))}px;background:${color};border-radius:1px"></span>`).join('')}</span>`;
+const gADD = '#7ee787', gREM = '#ffa198';
+// A compact fleet row for the Overview's LEFT master rail: phase dot · worktree ⑂branch · sparkline.
+const cmFleetRow = (dot, name, branch, bars, sel) => `
+  <div style="display:flex;align-items:center;gap:7px;font-size:11px;padding:3px 0${sel ? ';box-shadow:inset 2px 0 0 var(--accent);background:var(--hl)' : ''}">
+    <span class="dot" style="background:${dot};flex:none"></span>
+    <span class="mono" style="color:${sel ? 'var(--ink)' : 'var(--dim)'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto">${name} <span style="color:var(--faint)">⑂${branch}</span></span>
+    <span style="margin-left:auto;flex:none">${spark(bars, dot)}</span>
+  </div>`;
+// Overview (formerly Change Map) — now MASTER-DETAIL: a thin left rail (Fleet · Workflows tabs + a few
+// agent rows) feeds the right change-map detail (chapter ribbon + module strip + churn-ranked ledger).
+const changeMapCol = `
+  <div style="display:flex;align-items:stretch">
+    <div style="flex:0 0 36%;min-width:0;padding:2px 12px 8px 16px;border-right:1px solid var(--border)">
+      <div style="display:flex;gap:11px;font-size:9.5px;letter-spacing:.04em;margin-bottom:6px">
+        <span style="color:var(--ink);border-bottom:1.5px solid var(--accent);padding-bottom:3px">Fleet</span>
+        <span style="color:var(--faint)">Workflows</span>
+      </div>
+      ${cmFleetRow('var(--blue)', 'demo', 'main', [.3, .6, .4, .8, .5, .9, .7, 1], true)}
+      ${cmFleetRow('var(--pending)', 'demo', 'feat-x', [.5, .7, .3, .6, .8, .4, .6, .5], false)}
+      ${cmFleetRow('var(--kept)', 'demo', 'hotfix', [.4, .8, .6, .3, .7, .5, .2, .4], false)}
+    </div>
+    <div style="flex:1;min-width:0;padding:2px 16px 8px 14px">
+      <div style="display:flex;gap:9px;font-size:10px;color:var(--dim);margin-bottom:8px;flex-wrap:wrap">
+        ${cmChapter('●', 'var(--kept)', '1 Subagent tracking')}${cmChapter('◐', 'var(--pending)', '2 Risk audit')}${cmChapter('○', 'var(--faint)', '3 Update docs')}
+      </div>
+      <div style="display:flex;height:16px;border-radius:3px;overflow:hidden;margin-bottom:9px">
+        ${cmSeg('var(--pending)', 'vscode')}${cmSeg('var(--kept)', 'core')}${cmSeg('var(--pending)', 'docs')}${cmSeg('var(--kept)', 'cli')}
+      </div>
+      ${cmRow('var(--pending)', 'extension.ts', 'vscode', 100, '+751', '6⏳')}
+      ${cmRow('var(--kept)', 'changemap.ts', 'core', 38, '+285', '')}
+      ${cmRow('var(--pending)', 'README.md', 'docs', 14, '+44', '2⏳')}
+      ${cmRow('var(--kept)', 'index.ts', 'cli', 6, '+13', '')}
+    </div>
+  </div>`;
+// One agent (worktree) row: badge · worktree ⑂branch · self tag · sparkline · ± · ⚠risk · ⇄collisions.
+const agentRow = (badge, name, branch, self, bars, sparkColor, added, removed, risk, coll) => `
+  <div style="display:flex;align-items:center;gap:9px;padding:7px 16px;font-size:12.5px">
+    ${badge}
+    <span class="mono" style="color:var(--ink)">${name}</span>
+    <span class="mono" style="color:var(--dim);font-size:11.5px">⑂${branch}</span>
+    ${self ? `<span style="font-size:8.5px;font-weight:700;color:var(--coral);border:1px solid var(--coral);border-radius:8px;padding:0 6px">self</span>` : ''}
+    <span style="margin-left:auto;display:flex;align-items:center;gap:13px">
+      ${spark(bars, sparkColor)}
+      <span class="mono" style="font-size:11px;white-space:nowrap"><span style="color:${gADD}">+${added}</span> <span style="color:${gREM}">−${removed}</span></span>
+      ${risk != null ? `<span style="font-size:11px;color:var(--pending);white-space:nowrap">⚠ ${risk}</span>` : ''}
+      ${coll != null ? `<span style="font-size:11px;color:var(--dim);white-space:nowrap">⇄ ${coll}</span>` : ''}
+    </span>
+  </div>`;
+// A nested subagent row under an agent: badge · agentType + italic description · current task · ± · 💬.
+const subRow = (badge, type, desc, task, added, removed) => `
+  <div style="display:flex;align-items:center;gap:8px;padding:4px 16px 4px 42px;font-size:11.5px">
+    <span style="color:var(--faint)">└</span>
+    ${badge}
+    <span style="color:var(--purple);white-space:nowrap">${type}</span>
+    <span style="color:var(--faint);font-style:italic;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto">${desc}</span>
+    <span style="color:var(--dim);font-size:10.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto">${task}</span>
+    <span style="margin-left:auto;display:flex;align-items:center;gap:11px;white-space:nowrap">
+      <span class="mono" style="font-size:10.5px"><span style="color:${gADD}">+${added}</span> <span style="color:${gREM}">−${removed}</span></span>
+      <span style="color:var(--dim)">💬</span>
+    </span>
+  </div>`;
+// The FILE COLLISIONS strip — files touched by more than one agent, with agent count + pending state.
+const collisionStrip = `
+  <div style="border-top:1px solid var(--border);margin-top:6px;padding:9px 16px 5px">
+    <div style="font-size:10px;letter-spacing:.08em;color:var(--dim);font-weight:600;margin-bottom:7px">FILE COLLISIONS (1)</div>
+    <div style="display:flex;align-items:center;gap:9px;font-size:11.5px;padding:2px 0">
+      <span style="color:var(--pending)">⇄</span>
+      <span class="mono" style="color:var(--ink)">src/models/User.js</span>
+      <span style="margin-left:auto;display:flex;gap:11px;align-items:center;color:var(--dim);font-size:11px">
+        <span>2 agents</span><span class="pill p-pending">pending</span>
+      </span>
+    </div>
+  </div>`;
+// The Overview's Fleet tab — every agent (worktree) in this project, its subagents, and the collisions
+// strip (0.8.0: folded in from the old Multitasking window; header is now the Fleet · Workflows nav).
+const multitaskingBody = `
+  <div style="display:flex;align-items:center;gap:14px;padding:9px 16px 0;border-bottom:1px solid var(--border);font-size:12px">
+    <span style="color:var(--ink);border-bottom:1.5px solid var(--accent);padding-bottom:8px">Fleet</span>
+    <span style="color:var(--faint);padding-bottom:8px">Workflows</span>
+    <span style="color:var(--faint)">·</span><span style="color:var(--dim)">3 agents</span>
+    <span style="color:var(--blue)">1 active</span>
+    <span style="color:var(--pending)">1 conflict</span>
+    <span style="margin-left:auto;display:flex;gap:14px;color:var(--faint);font-size:11px;padding-bottom:8px"><span>Active only</span><span>Clear completed</span></span>
+  </div>
+  ${agentRow(phase('working', 'var(--blue)'), 'demo', 'main', true, [.3, .6, .4, .8, .5, .9, .7, 1], 'var(--blue)', 15, 0, 1, 1)}
+  ${subRow(phase('working', 'var(--blue)'), 'Explore', 'maps the models layer', 'reading src/models/*.js', 0, 0)}
+  ${subRow(phase('done', 'var(--kept)'), 'Explore', 'audits the import graph', '12 files scanned', 0, 0)}
+  ${agentRow(phase('awaiting', 'var(--pending)'), 'demo-feat-x', 'feat-x', false, [.5, .7, .3, .6, .8, .4, .6, .5], 'var(--pending)', 42, 7, 2, 1)}
+  ${agentRow(phase('done', 'var(--kept)'), 'demo-hotfix', 'hotfix', false, [.4, .8, .6, .3, .7, .5, .2, .4], 'var(--kept)', 6, 0, null, null)}
+  ${collisionStrip}`;
+
+// A task-ribbon pill — a status dot + label + ±delta (0.8.0 redesign: labelled wrapping pills, with
+// completed tasks collapsed behind a "N done" toggle, so many chapters stay readable).
+const taskPill = (label, delta, color, dashed) =>
+  `<span style="display:inline-flex;align-items:center;gap:6px;max-width:210px;background:var(--side);border:1px ${dashed ? 'dashed' : 'solid'} var(--border2);border-radius:99px;padding:3px 10px;font-size:12px;white-space:nowrap;overflow:hidden">` +
+  `<span style="width:9px;height:9px;border-radius:50%;background:${color};flex:none"></span>` +
+  `<span style="color:var(--dim);overflow:hidden;text-overflow:ellipsis">${label}</span>` +
+  (delta ? `<span class="mono" style="color:var(--faint);font-size:10px;flex:none">${delta}</span>` : '') + `</span>`;
+// One vertical chapter row (the JetBrains-style ribbon): status glyph · title · ± · pending · actions.
+// `actable` gates the ✓/↩/🧹 buttons; `synthetic` renders the dimmed display-only session chapter.
+const chapterRow = (glyph, color, title, delta, pending, actable, synthetic) => `
+  <div style="display:flex;align-items:center;gap:9px;padding:5px 16px;font-size:12px${synthetic ? ';opacity:.62' : ''}">
+    <span style="color:${color};flex:none">${glyph}</span>
+    <span style="color:var(--${synthetic ? 'faint' : 'ink'});white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${title}</span>
+    ${synthetic ? '<span style="font-size:9.5px;color:var(--faint);border:1px solid var(--border2);border-radius:8px;padding:0 6px;flex:none">session</span>' : ''}
+    <span class="mono" style="margin-left:auto;color:var(--faint);font-size:10.5px;flex:none">${delta}${pending ? ` · <span style="color:var(--pending)">${pending}</span>` : ''}</span>
+    ${actable ? `<span style="display:flex;gap:8px;font-size:11.5px;flex:none"><span style="color:var(--kept)">✓</span><span style="color:var(--pending)">↩</span><span style="color:var(--dim)">🧹</span></span>` : '<span style="width:44px;flex:none"></span>'}
+  </div>`;
+// Overview MASTER-DETAIL — a left nav (Fleet · Workflows: agent rows + workflow runs) drives the right
+// change-map detail (session chip + task ribbon + module strip + file ledger). Self/orchestrator selected.
+const ovAgentRow = (dot, branch, self, bars, added, removed, sel) => `
+  <div style="display:flex;align-items:center;gap:7px;padding:6px 12px;font-size:11.5px${sel ? ';background:var(--bg);box-shadow:inset 2px 0 0 var(--accent)' : ''}">
+    <span class="dot" style="background:${dot};flex:none"></span>
+    <span class="mono" style="color:${sel ? 'var(--ink)' : 'var(--dim)'};white-space:nowrap">demo <span style="color:var(--faint)">⑂${branch}</span></span>
+    ${self ? `<span style="font-size:8px;font-weight:700;color:var(--coral);border:1px solid var(--coral);border-radius:8px;padding:0 5px">self</span>` : ''}
+    <span style="margin-left:auto;display:flex;align-items:center;gap:7px;flex:none">${spark(bars, dot)}<span class="mono" style="font-size:9.5px"><span style="color:${gADD}">+${added}</span> <span style="color:${gREM}">−${removed}</span></span></span>
+  </div>`;
+const overviewTabsBody = `
+  <div style="display:flex;align-items:stretch">
+    <div style="flex:0 0 31%;min-width:0;background:var(--side);border-right:1px solid var(--border)">
+      <div style="display:flex;gap:12px;padding:9px 12px 7px;border-bottom:1px solid var(--border);font-size:11.5px">
+        <span style="color:var(--ink);border-bottom:1.5px solid var(--accent);padding-bottom:6px;margin-bottom:-8px">Fleet</span>
+        <span style="color:var(--faint)">Workflows</span>
+      </div>
+      ${ovAgentRow('var(--blue)', 'main', true, [.3, .6, .4, .8, .5, .9, .7, 1], 15, 0, true)}
+      ${ovAgentRow('var(--pending)', 'feat-x', false, [.5, .7, .3, .6, .8, .4, .6, .5], 42, 7, false)}
+      ${ovAgentRow('var(--kept)', 'hotfix', false, [.4, .8, .6, .3, .7, .5, .2, .4], 6, 0, false)}
+      <div style="font-size:9px;letter-spacing:.08em;color:var(--faint);font-weight:600;padding:9px 12px 2px;border-top:1px solid var(--border);margin-top:5px">WORKFLOWS</div>
+      <div style="display:flex;align-items:center;gap:7px;padding:5px 12px;font-size:11px">
+        <span class="dot" style="background:var(--blue);flex:none"></span>
+        <span style="color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">ship-release <span style="color:var(--faint)">3/5</span></span>
+        <span style="margin-left:auto;flex:none">${spark([.4, .5, .7, .6, .9, .5, .8, .6], 'var(--blue)')}</span>
+      </div>
+    </div>
+    <div style="flex:1;min-width:0">
+      <div style="display:flex;align-items:center;gap:9px;padding:10px 16px 6px;font-size:11.5px">
+        <span style="background:var(--side);border:1px solid var(--border2);border-radius:12px;padding:2px 11px;display:inline-flex;gap:9px;align-items:center;white-space:nowrap">
+          <span class="mono" style="color:var(--ink)">demo <span style="color:var(--faint)">⑂main</span></span>
+          <span style="color:var(--faint)">·</span><span>${microscope}</span><span class="mono" style="color:var(--coral)">0c396c6b</span>
+          <span style="color:var(--faint)">·</span><span style="color:var(--dim)">7 edits</span>
+          <span style="color:var(--pending)">3⏳</span><span style="color:var(--kept)">42✓</span>
+          <span style="color:var(--faint)">·</span><span style="color:var(--ink)">89%</span>
+        </span>
+      </div>
+      <div style="display:flex;align-items:center;gap:5px;padding:4px 16px 10px;flex-wrap:wrap">
+        ${taskPill('Add the greeting API', '+42 −7', 'var(--pending)', false)}
+        ${taskPill('Write the tests', '+18 −3', 'var(--pending)', false)}
+        ${taskPill('Update the docs', '+2 −0', 'var(--kept)', false)}
+        <span style="display:inline-flex;align-items:center;gap:6px;border:1px dashed var(--border2);border-radius:99px;padding:3px 10px;font-size:12px;color:var(--dim);white-space:nowrap"><span style="width:9px;height:9px;border-radius:50%;background:var(--kept)"></span>4 done ▸</span>
+      </div>
+      <div style="display:flex;height:16px;border-radius:3px;overflow:hidden;margin:0 16px 10px">
+        ${cmSeg('var(--pending)', 'vscode')}${cmSeg('var(--kept)', 'core')}${cmSeg('var(--pending)', 'docs')}${cmSeg('var(--kept)', 'cli')}
+      </div>
+      <div style="padding:0 16px 8px">
+        ${cmRow('var(--pending)', 'User.js', 'core', 100, '+15', '2⏳')}
+        ${cmRow('var(--kept)', 'index.js', 'core', 40, '+4', '')}
+        ${cmRow('var(--pending)', 'README.md', 'docs', 16, '+8', '1⏳')}
+        ${cmRow('var(--kept)', 'extension.ts', 'vscode', 26, '+9', '')}
+      </div>
+    </div>
+  </div>`;
+
 // ---------- scenes ----------
 const scenes = {
   // The inline review bubble — faithful to the real widget, every area numbered + named alongside.
@@ -426,23 +576,19 @@ const scenes = {
   // Anatomy — a labelled outline of every surface, so each section can be referred to by name.
   // Per-window diagrams — the real panel mockup + a numbered legend of its parts.
   'win-overview': scene(1200, winDiag('OVERVIEW', changeMapCol, [
-    note('1', 'Chapters', 'Claude&rsquo;s to-dos across the top (● done · ◐ in progress · ○ planned). Click one to <b style="color:var(--ink)">brush</b> the map to just its files.'),
-    note('2', 'Module strip', 'One equal-width segment per module Claude touched, coloured by review status. Click to filter the ledger to that module.'),
-    note('3', 'File ledger', 'Every file ranked by churn, with a bar. Hover for the class touched + reasoning; click to open the diff. Toggle <b style="color:var(--ink)">± lines / count</b>.'),
+    note('1', 'Fleet · Workflows nav', 'The left rail — running agents across git worktrees + workflow runs, each with phase · sparkline · ± · tokens · time. Pick one to drive the detail.'),
+    note('2', 'Chapter ribbon', 'The selected item&rsquo;s to-dos across the top (● done · ◐ in progress · ○ planned). Click one to <b style="color:var(--ink)">brush</b> the map to just its files.'),
+    note('3', 'Module strip + ledger', 'One equal-width segment per module (click to filter), then every file ranked by churn with a bar. Hover for the class + reasoning; click to open the diff.'),
   ].join(''))),
   'win-actions': scene(1200, winDiag('ACTIONS', actionsCol, [
-    note('1', 'Fleet', 'Other Claude sessions in this project — active/idle, pending, files, risk.'),
+    note('1', 'Category groups', 'Now a sidebar tab (moved from the panel), collapsed by default — Edits · Commands · Reads · Searches · To-dos. Curated; errors always surface.'),
     note('2', 'Egress', 'Everywhere the session reached off-machine — web · MCP · network shell.'),
-    note('3', 'Subagents', 'Each subagent Claude spawned, with its own action timeline + metrics.'),
-    note('4', 'Category groups', 'The rest, grouped by kind — Edits · Commands · To-dos (curated; errors always surface). A row with an edit links to its review.'),
+    note('3', 'Audits', 'Risk &amp; egress audits ride the Observations change-feed alongside the edits they flag.'),
+    note('4', 'Review links', 'A row with an edit links straight to its inline review.'),
   ].join(''))),
   'win-observations': scene(1180, winDiag('OBSERVATIONS', observationsCol, [
     note('1', 'Session recap', 'Claude Code&rsquo;s own title for the session (zero-token; ✨ to refine).'),
-    note('2', 'Per-edit reasoning', 'One row per edit with Claude&rsquo;s actual words for it, plus file-memory (🧠) across sessions. Click → the combined report.'),
-  ].join(''))),
-  'win-timeline': scene(1180, winDiag('TIMELINE', timelineCol, [
-    note('1', 'Coalesced run', 'Files by most-recent activity; adjacent edits to one file collapse into a single <b style="color:var(--ink)">×N</b> row with the combined delta.'),
-    note('2', 'Per-edit rows', 'Expand a run to its individual edits (id · time · delta), each with Keep / Undo.'),
+    note('2', 'Change-feed + reasoning', 'The former Timeline folds in here: same-file edits coalesce into a <b style="color:var(--ink)">×N</b> run, above one row per edit with Claude&rsquo;s actual words + file-memory (🧠) across sessions.'),
   ].join(''))),
   'win-stats': scene(1120, winDiag('STATS', statsCol(40, 40), [
     note('1', 'Review scoreboard', 'Live pending / accepted / reverted counts + a progress bar that fills as you review.'),
@@ -462,7 +608,7 @@ const scenes = {
         </div>
         <div style="width:320px;background:var(--side);border-right:1px solid var(--border);padding:12px 14px;">
           <div style="font-size:9.5px;font-weight:700;color:var(--coral);letter-spacing:.05em;margin-bottom:7px;">② SIDEBAR · Claude Edits</div>
-          <div style="font-size:12px;color:var(--dim);line-height:1.55;"><b style="color:var(--ink)">Edits</b> (folder → file → class) · <b style="color:var(--ink)">Diffs</b> · <b style="color:var(--ink)">File&nbsp;History</b>.<br>Per-row Keep&nbsp;/&nbsp;Undo. Title bar: Search · Review&nbsp;◄► · Accept/Revert&nbsp;All · Clear · Switch&nbsp;session.</div>
+          <div style="font-size:12px;color:var(--dim);line-height:1.55;"><b style="color:var(--ink)">Edits</b> (folder → file → class) · <b style="color:var(--ink)">Diffs</b> · <b style="color:var(--ink)">File&nbsp;History</b> · <b style="color:var(--ink)">Actions</b>.<br>Per-row Keep&nbsp;/&nbsp;Undo. Title bar: Search · Review&nbsp;◄► · Accept/Revert&nbsp;All · Clear · Switch&nbsp;session.</div>
         </div>
         <div style="flex:1;padding:12px 16px;">
           <div style="font-size:9.5px;font-weight:700;color:var(--coral);letter-spacing:.05em;margin-bottom:7px;">③ EDITOR</div>
@@ -472,18 +618,16 @@ const scenes = {
       <div style="border-top:1px solid var(--border);background:var(--panel);">
         <div class="paneltabs"><span>PROBLEMS</span><span>OUTPUT</span><span>TERMINAL</span><span class="on">④ CLAUDE OBSERVATORY</span></div>
         <div class="row" style="align-items:stretch;height:168px;">
-          ${['ACTIONS|Every tool call, grouped by kind — Fleet · Egress · Subagents · Edits · Commands · To-dos.',
-             'OBSERVATIONS|Each edit paired with Claude&rsquo;s own reasoning, under a session recap.',
-             'TIMELINE|Files by most-recent activity; same-file edits coalesce into ×N runs.'].map(c => {
+          ${['OBSERVATIONS|Each edit paired with Claude&rsquo;s own reasoning, under a session recap — with the coalesced ×N change-feed (Timeline) folded in.'].map(c => {
             const [h, d] = c.split('|');
-            return `<div class="col" style="flex:1;border-right:1px solid var(--border);"><div class="colhead" style="color:var(--coral)">${h}</div><div style="font-size:11px;color:var(--dim);padding:2px 16px;line-height:1.5;">${d}</div></div>`;
+            return `<div class="col" style="flex:1.1;border-right:1px solid var(--border);"><div class="colhead" style="color:var(--coral)">${h}</div><div style="font-size:11px;color:var(--dim);padding:2px 16px;line-height:1.5;">${d}</div></div>`;
           }).join('')}
-          <div class="col" style="flex:1.15;border-right:1px solid var(--border);">
+          <div class="col" style="flex:1.5;border-right:1px solid var(--border);">
             <div class="colhead" style="color:var(--coral)">OVERVIEW</div>
-            <div style="font-size:11px;color:var(--dim);padding:2px 16px;line-height:1.55;">The session&rsquo;s changes at a glance:
-              <div style="margin-top:5px;"><b style="color:var(--kept)">ⓐ chapters</b> — Claude&rsquo;s to-dos; click to brush</div>
-              <div><b style="color:var(--pending)">ⓑ module strip</b> — equal-width, one per module</div>
-              <div><b style="color:var(--blue)">ⓒ file ledger</b> — files ranked by churn</div>
+            <div style="font-size:11px;color:var(--dim);padding:2px 16px;line-height:1.55;">Master–detail — a left nav drives the change-map:
+              <div style="margin-top:5px;"><b style="color:var(--blue)">ⓐ Fleet · Workflows</b> — running agents / workflow runs</div>
+              <div><b style="color:var(--kept)">ⓑ chapter ribbon</b> — the selection&rsquo;s to-dos; click to brush</div>
+              <div><b style="color:var(--pending)">ⓒ module strip + ledger</b> — files ranked by churn</div>
             </div>
           </div>
           <div class="col" style="flex:1;"><div class="colhead" style="color:var(--coral)">STATS</div><div style="font-size:11px;color:var(--dim);padding:2px 16px;line-height:1.5;">Review scoreboard · token plots · context&nbsp;/&nbsp;plan usage bars.</div></div>
@@ -508,11 +652,12 @@ const scenes = {
           <span style="opacity:.4">⚙</span>
         </div>
         <div style="position:relative;width:300px;background:var(--side);border-right:1px solid var(--border);box-shadow:inset 0 0 0 2px var(--coral);">
-          <span style="position:absolute;top:-8px;left:9px;background:var(--coral);color:#fff;font-size:9px;font-weight:700;letter-spacing:.04em;padding:1.5px 7px;border-radius:4px;z-index:5;white-space:nowrap;">① Activity bar · ② Sidebar (Claude Edits)</span>
+          <span style="position:absolute;top:-8px;left:9px;background:var(--coral);color:#fff;font-size:9px;font-weight:700;letter-spacing:.04em;padding:1.5px 7px;border-radius:4px;z-index:5;white-space:nowrap;">① Activity bar · ② Sidebar (Claude Edits: Edits·Diffs·File History·Actions)</span>
           <div style="padding:10px 14px 2px;font-size:11px;color:var(--dim);letter-spacing:.06em;">CLAUDE EDITS</div>
           ${editsTree}
           <div class="viewhead" style="border-top:1px solid var(--border);margin-top:8px;">DIFFS</div>
           <div class="viewhead" style="border-top:1px solid var(--border);">FILE HISTORY <span style="float:right;color:var(--faint)">User.js</span></div>
+          <div class="viewhead" style="border-top:1px solid var(--border);">ACTIONS</div>
         </div>
         <div style="flex:1;display:flex;flex-direction:column;">
           <div style="position:relative;display:flex;align-items:center;background:var(--side);border-bottom:1px solid var(--border);box-shadow:inset 0 0 0 2px var(--coral);">
@@ -526,11 +671,9 @@ const scenes = {
       <div style="border-top:1px solid var(--border);background:var(--panel);">
         <div class="paneltabs"><span>PROBLEMS</span><span>OUTPUT</span><span>TERMINAL</span><span class="on">④ CLAUDE OBSERVATORY</span></div>
         <div class="row" style="align-items:stretch;height:184px;">
-          ${mapPane('.95', 'ACTIONS', actionsCol)}
-          ${mapPane('1.15', 'OBSERVATIONS', observationsCol)}
-          ${mapPane('1.05', 'TIMELINE', timelineCol)}
-          ${mapPane('1.25', 'OVERVIEW', changeMapCol)}
-          ${mapPane('1.1', 'STATS', statsCol(30, 30).replace(/<div class="uhead">USAGE<\/div>[\\s\\S]*$/, '<div class="urow"><span class="lbl">ctx</span><span class="track"><span class="fill" style="width:39%;background:var(--kept)"></span></span><span class="pct" style="color:var(--kept)">39%</span><span class="sub">390k/1M</span></div>'), true)}
+          ${mapPane('1', 'OBSERVATIONS', observationsCol)}
+          ${mapPane('1.55', 'OVERVIEW', changeMapCol)}
+          ${mapPane('1', 'STATS', statsCol(30, 30).replace(/<div class="uhead">USAGE<\/div>[\s\S]*$/, '<div class="urow"><span class="lbl">ctx</span><span class="track"><span class="fill" style="width:39%;background:var(--kept)"></span></span><span class="pct" style="color:var(--kept)">39%</span><span class="sub">390k/1M</span></div>'), true)}
         </div>
       </div>
       <div class="statusbar" style="position:relative;box-shadow:inset 0 0 0 2px var(--coral);">
@@ -554,6 +697,7 @@ const scenes = {
           ${editsTree}
           <div class="viewhead" style="border-top:1px solid var(--border);margin-top:8px;">DIFFS</div>
           <div class="viewhead" style="border-top:1px solid var(--border);">FILE HISTORY <span style="float:right;color:var(--faint)">User.js</span></div>
+          <div class="viewhead" style="border-top:1px solid var(--border);">ACTIONS</div>
         </div>
         <div style="flex:1;display:flex;flex-direction:column;">
           <div style="display:flex;background:var(--side);border-bottom:1px solid var(--border);">
@@ -565,11 +709,9 @@ const scenes = {
       <div style="border-top:1px solid var(--border);background:var(--panel);">
         <div class="paneltabs"><span>PROBLEMS</span><span>OUTPUT</span><span>TERMINAL</span><span class="on">CLAUDE OBSERVATORY</span></div>
         <div class="row" style="align-items:stretch;height:212px;">
-          <div class="col" style="flex:.95;border-right:1px solid var(--border);"><div class="colhead">ACTIONS</div>${actionsCol}</div>
-          <div class="col" style="flex:1.15;border-right:1px solid var(--border);"><div class="colhead">OBSERVATIONS</div>${observationsCol}</div>
-          <div class="col" style="flex:1.05;border-right:1px solid var(--border);"><div class="colhead">TIMELINE</div>${timelineCol}</div>
-          <div class="col" style="flex:1.25;border-right:1px solid var(--border);"><div class="colhead">OVERVIEW</div>${changeMapCol}</div>
-          <div class="col" style="flex:1.1;"><div class="colhead">STATS</div>${statsCol(34, 34).replace(/<div class="uhead">USAGE<\/div>[\s\S]*$/, '<div class="urow"><span class="lbl">ctx</span><span class="track"><span class="fill" style="width:39%;background:var(--kept)"></span></span><span class="pct" style="color:var(--kept)">39%</span><span class="sub">390k/1M</span></div>')}</div>
+          <div class="col" style="flex:1;border-right:1px solid var(--border);"><div class="colhead">OBSERVATIONS</div>${observationsCol}</div>
+          <div class="col" style="flex:1.55;border-right:1px solid var(--border);"><div class="colhead">OVERVIEW</div>${changeMapCol}</div>
+          <div class="col" style="flex:1;"><div class="colhead">STATS</div>${statsCol(34, 34).replace(/<div class="uhead">USAGE<\/div>[\s\S]*$/, '<div class="urow"><span class="lbl">ctx</span><span class="track"><span class="fill" style="width:39%;background:var(--kept)"></span></span><span class="pct" style="color:var(--kept)">39%</span><span class="sub">390k/1M</span></div>')}</div>
         </div>
       </div>
       <div class="statusbar">
@@ -649,12 +791,72 @@ const scenes = {
       ${fileHistoryCol}
     </div>`),
 
-  // J. standalone Timeline — files by recent activity, runs coalesced
-  'timeline': scene(720, `
+  // J. 0.8.0 — the Overview's Fleet tab: every agent (worktree) in this project, its subagents, collisions.
+  'multitasking': scene(820, `
     <div class="window" style="padding-bottom:8px;">
-      <div class="paneltabs"><span>TERMINAL</span><span class="on">CLAUDE OBSERVATORY</span></div>
-      <div class="colhead" style="padding-top:10px;">TIMELINE</div>
-      ${timelineCol}
+      ${multitaskingBody}
+    </div>`),
+
+  // K. 0.8.0 — Overview master-detail: Fleet · Workflows left nav + the change-map detail (right).
+  'overview-tabs': scene(760, `
+    <div class="window" style="padding-bottom:10px;">
+      ${overviewTabsBody}
+    </div>`),
+
+  // L. 0.8.0 — task chapters: every edit under a named chapter (total — no "unassigned"); per-chapter
+  //    Accept/Reject/Clear act WYSIWYG on the row's displayed edits — the dimmed synthesized session
+  //    chapter is reviewable like any other.
+  'chapters': scene(720, `
+    <div class="window" style="padding-bottom:10px;">
+      <div class="viewhead" style="padding-top:12px;">OVERVIEW · CHAPTERS <span style="float:right;color:var(--faint)">session 0c396c6b</span></div>
+      ${chapterRow('◐', 'var(--pending)', 'Add the greeting API', '+42 −7', '3⏳', true)}
+      ${chapterRow('◐', 'var(--pending)', 'Write the tests', '+18 −3', '1⏳', true)}
+      ${chapterRow('●', 'var(--kept)', 'Update the docs', '+2 −0', '', true)}
+      ${chapterRow('◐', 'var(--pending)', 'Greeter: farewell, validation, tests', '+3 −0', '1⏳', true, true)}
+      <div style="display:flex;align-items:center;gap:8px;padding:6px 16px 2px;font-size:11.5px;color:var(--dim)">
+        <span style="width:9px;height:9px;border-radius:50%;background:var(--kept)"></span>4 done ▸
+        <span style="margin-left:auto;color:var(--faint)">🧹 clear completed</span>
+      </div>
+    </div>`),
+
+  // M. 0.8.0 — the zero-token chat handoff: chat-context assembles the prompt, copied to the clipboard.
+  'chat': scene(860, `
+    <div class="window">
+      <div class="titlebar"><span class="tl" style="background:#ff5f57"></span><span class="tl" style="background:#febc2e"></span><span class="tl" style="background:#28c840"></span><span class="t">Chat about Claude edit #2 — context assembled, zero tokens</span></div>
+      <div style="padding:14px 18px;font-size:12.5px;line-height:1.7">
+        <div class="mono" style="color:var(--dim);border:1px solid var(--border2);border-radius:6px;padding:12px 14px;background:var(--side)">
+          <div>I'm reviewing an edit you made with Claude Observatory. Context:</div>
+          <div style="margin-top:8px"><span style="color:var(--ink)">Edit #2</span> · Edit · <span class="add2">+4</span> <span class="rem2">−0</span> · <span style="color:var(--ink)">src/models/User.js</span> · task: <span style="color:var(--coral)">Add the greeting API</span></div>
+          <div style="margin-top:6px;color:var(--faint);font-style:italic">Your reasoning at the time: "Adding a farewell() alongside greet() so the app can close conversations too."</div>
+          <div style="margin-top:8px;color:var(--blue)">@@ src/models/User.js +4 −0 @@</div>
+          <div><span class="add2">+  farewell() {</span></div>
+          <div><span class="add2">+    return \`Goodbye from \${this.name}!\`;</span></div>
+          <div><span class="add2">+  }</span></div>
+          <div style="margin-top:8px;color:var(--ink)">My question: …</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:9px;margin-top:12px;font-size:12px;color:var(--dim)">
+          <span style="color:var(--kept)">✓</span> copied to the clipboard · opening your Claude — works for any edit, action, subagent, or chapter
+        </div>
+      </div>
+    </div>`),
+
+  // N. 0.8.0 — the live demo: one command simulates a full session through the real pipeline.
+  'demo': scene(880, `
+    <div class="window">
+      <div class="titlebar"><span class="tl" style="background:#ff5f57"></span><span class="tl" style="background:#febc2e"></span><span class="tl" style="background:#28c840"></span><span class="t">demo — claude-observatory</span></div>
+      <div class="term">
+        <div class="cmd"><span class="pr">$</span>claude-observatory <span class="fl">demo</span></div>
+        <div class="out">▸ prompt — asking Claude to extend the greeter app</div>
+        <div class="out">▸ plan — three to-dos (the Overview chapters)</div>
+        <div class="out">▸ chapter 1 — farewell support (2 edits)</div>
+        <div class="out">▸ chapter 2 — input validation</div>
+        <div class="out">▸ chapter 3 — tests via a <span class="file2">subagent</span> (its own timeline + attributed edits)</div>
+        <div class="out">▸ a <span class="file2">workflow</span> run — docs written one level above the subagents</div>
+        <div class="out">▸ recap — plan complete, next steps surfaced</div>
+        <div class="out"><span class="ok">✓</span> demo session <span class="id2">demo-3cc31d01</span> is live — <span class="warn">5 pending edits</span> in observatory-demo/</div>
+        <div class="out">  open the Overview / Observations panels, review the chapters, then: <span class="fl">demo --clean</span></div>
+        <div class="cmd"><span class="pr">$</span><span class="cursor">&nbsp;</span></div>
+      </div>
     </div>`),
 };
 
@@ -662,10 +864,12 @@ const scenes = {
 // per-scene capture viewport (width = sceneW + 48px body padding; height tuned to content)
 const SIZE = {
   layout: '1808,860', anatomy: '1808,700', map: '1808,706', bubble: '1248,368',
-  'win-overview': '1248,300', 'win-actions': '1248,300', 'win-observations': '1228,264', 'win-timeline': '1228,264', 'win-stats': '1168,420',
-  stats: '808,478', 'inline-review': '1028,720', observations: '1028,344',
+  'win-overview': '1248,320', 'win-actions': '1248,300', 'win-observations': '1228,288', 'win-stats': '1168,420',
+  stats: '808,478', 'inline-review': '1028,720', observations: '1028,368',
   cli: '948,500', conflict: '928,290', diffs: '1028,330', heatmap: '1028,400',
-  'file-history': '768,150', timeline: '768,230',
+  'file-history': '768,150',
+  multitasking: '868,352', 'overview-tabs': '808,340',
+  chapters: '768,210', chat: '908,412', demo: '928,392',
 };
 const tmp = join(tmpdir(), 'obs-media');
 mkdirSync(tmp, { recursive: true });

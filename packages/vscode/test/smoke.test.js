@@ -198,8 +198,25 @@ test('extension: three views, click commands, inline annotations, chat, status s
 
     const editsTree = trees['claudeObservatory.edits'];
     const diffsTree = trees['claudeObservatory.diffs'];
-    const timelineTree = trees['claudeObservatory.timeline'];
-    assert.ok(editsTree && diffsTree && timelineTree, 'Edits, Diffs, and Timeline views registered');
+    assert.ok(editsTree && diffsTree, 'Edits and Diffs views registered');
+    // 0.8.0 panel consolidation: Timeline folded into Observations. Round 3: the standalone Multitasking
+    // view is folded INTO the Overview (master–detail). Actions is now a SIDEBAR view (moved out of the
+    // bottom-panel Observations dock into the Claude Edits activity-bar window, at the bottom).
+    assert.ok(!trees['claudeObservatory.timeline'], 'the standalone Timeline view is gone (folded into Observations)');
+    assert.ok(!webviewProviders['claudeObservatory.multitask'] && !trees['claudeObservatory.multitask'], 'the standalone Multitasking view is gone (folded into the Overview)');
+    assert.ok(trees['claudeObservatory.actions'], 'Actions is registered as a timeline-style tree (now in the sidebar window)');
+
+    // The Actions view now lives in the "Claude Edits" SIDEBAR container (activity-bar), at the BOTTOM
+    // after File History — NOT in the bottom-panel dock (which is now Observations · Overview · Stats).
+    const pkg = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../package.json'), 'utf8'));
+    const sidebar = pkg.contributes.views.claudeObservatory;
+    const dock = pkg.contributes.views.claudeObservatoryDock;
+    const sidebarIds = sidebar.map((v) => v.id);
+    assert.ok(sidebarIds.includes('claudeObservatory.actions'), 'Actions view is in the Claude Edits sidebar container');
+    assert.equal(sidebarIds[sidebarIds.length - 1], 'claudeObservatory.actions', 'Actions is the LAST sidebar view (bottom, after File History)');
+    assert.equal(sidebarIds[sidebarIds.indexOf('claudeObservatory.actions') - 1], 'claudeObservatory.fileHistory', 'Actions sits directly after File History');
+    assert.ok(!dock.some((v) => v.id === 'claudeObservatory.actions'), 'Actions is no longer in the bottom-panel dock');
+    assert.deepEqual(dock.map((v) => v.id), ['claudeObservatory.observations', 'claudeObservatory.changemap', 'claudeObservatory.stats'], 'the dock is now Observations · Overview · Stats');
     assert.ok(contentProviders['claude-edit'] && contentProviders['claude-observation'], 'blob + markdown content providers registered');
     assert.ok(decoProvider, 'status FileDecorationProvider registered');
 
@@ -302,21 +319,9 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.match(diffCalls[diffCalls.length - 1][2], /#2/, 'diffNextEdit opens the next pending edit in the file');
     diffCalls.length = 0; // reset so the later openDiff test still sees exactly one diff call
 
-    // Timeline: a newest-first change feed; the two same-file edits coalesce into one collapsible run.
-    const feed = timelineTree.getChildren();
-    assert.equal(feed.length, 1, 'two same-file edits coalesce into one run row');
-    assert.equal(feed[0].kind, 'tlrun', 'multi-edit run node');
-    const runItem = timelineTree.getTreeItem(feed[0]);
-    assert.match(runItem.label, /app\.txt\s+×2/, 'run row shows the file + ×2');
-    assert.match(runItem.description, /^\+\d+ −\d+/, 'run row shows the combined delta');
-    const runEdits = timelineTree.getChildren(feed[0]);
-    assert.equal(runEdits.length, 2, 'run expands to its edits');
-    const childItem = timelineTree.getTreeItem(runEdits[0]);
-    assert.match(childItem.label, /#\d/, 'run child leads with #id');
-    assert.match(childItem.description, /^\d{2}:\d{2} · /, 'run child: time + delta');
-    assert.equal(childItem.command.command, 'claudeObservatory.openFileAtEdit', 'child click reveals the edit');
-
-    // Observations view: a one-line recap on top, then one row per edit (no groups, no Next steps).
+    // Observations view (0.8.0, Timeline folded in): timeline-STYLE — a recap on top, then the edit feed
+    // with adjacent same-file edits coalesced into ×N runs (each carrying Claude's reasoning inline),
+    // then a Next-steps group at the end. The two app.txt edits coalesce into one ×2 run.
     const obsTree = trees['claudeObservatory.observations'];
     assert.ok(obsTree, 'Observations view registered');
     const obsChildren = obsTree.getChildren();
@@ -325,57 +330,46 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.equal(recapItem.label, 'Reviewing app.txt edits', 'recap shows the session title (aiTitle)');
     assert.ok(!recapItem.command, 'recap has no click command — refresh is a button');
     assert.equal(recapItem.contextValue, 'recap');
-    assert.ok(!obsChildren.some((n) => n.kind === 'sug' || n.kind === 'group' || n.kind === 'sugGen'), 'Next-steps group is gone');
-    const obsNodes = obsChildren.filter((n) => n.kind === 'obs');
-    assert.equal(obsNodes.length, 2, 'one observation per edit');
-    const obsItem = obsTree.getTreeItem(obsNodes[0]);
-    assert.match(obsItem.label, /#\d/, 'observation labelled by edit');
-    assert.equal(obsItem.command.command, 'claudeObservatory.showObservation', 'observation click opens the report');
-    assert.equal(obsTree.getChildren(obsNodes[0]).length, 0, 'observation rows are leaves');
+    // timeline-style coalescing: the two same-file edits become one ×2 run (combined delta).
+    const obsRun = obsChildren.find((n) => n.kind === 'tlrun');
+    assert.ok(obsRun, 'the two same-file edits coalesce into one ×N run');
+    const runItem = obsTree.getTreeItem(obsRun);
+    assert.match(runItem.label, /app\.txt\s+×2/, 'run row shows the file + ×2');
+    assert.match(runItem.description, /^\+\d+ −\d+/, 'run row shows the combined delta');
+    assert.equal(runItem.contextValue, 'file', 'run reuses the file Keep-all/Undo-all/Clear menus');
+    // expand the run → per-edit rows, each showing Claude's reasoning inline, with Keep/Undo.
+    const runEdits = obsTree.getChildren(obsRun);
+    assert.equal(runEdits.length, 2, 'run expands to its per-edit rows');
+    const eItem = obsTree.getTreeItem(runEdits[0]);
+    assert.match(eItem.label, /#\d/, 'edit row leads with #id');
+    assert.match(String(eItem.description), /Operation/, "edit row shows Claude's reasoning inline");
+    assert.equal(eItem.contextValue, 'edit', 'per-edit rows reuse the edit context menu (Keep/Undo/Chat)');
+    assert.equal(eItem.command.command, 'claudeObservatory.showObservation', 'edit row opens the combined report');
+    // Next steps: the still-open to-dos + heuristic follow-ups, grouped at the end.
+    assert.ok(obsChildren.some((n) => n.kind === 'steps'), 'the Next-steps group is present');
+    assert.ok(obsChildren.some((n) => n.kind === 'suggestion'), 'next-steps suggestions are listed');
     const obsMd = contentProviders['claude-observation'].provideTextDocumentContent({ authority: 'obs', path: '/edit-1.md', query: 's=' + S });
     assert.match(obsMd, /\*\*Summary:\*\*/, 'observation markdown has a summary');
 
-    // Actions view (0.6.0): the session's tool calls grouped by category. This transcript has two Edit
-    // tool_uses on app.txt → one "Edits" group with 2 rows, each linked to its store edit (curated default).
-    const actionsTree = trees['claudeObservatory.actions'];
-    assert.ok(actionsTree, 'Actions view registered');
-    const actGroups = actionsTree.getChildren();
-    assert.ok(actGroups.some((g) => g.kind === 'group'), 'actions are grouped by category');
-    const editGroup = actGroups.find((g) => g.kind === 'group' && g.group.category === 'edit');
-    assert.ok(editGroup, 'the Edits group is present (curated default shows edits)');
-    const gItem = actionsTree.getTreeItem(editGroup);
-    assert.equal(gItem.label, 'Edits');
-    assert.match(String(gItem.description), /2/, 'Edits group shows its count');
-    const actRows = actionsTree.getChildren(editGroup);
-    assert.equal(actRows.length, 2, 'two Edit actions in the Edits group');
-    const aItem = actionsTree.getTreeItem(actRows[0]);
-    assert.match(aItem.label, /Edit/, 'action row leads with the tool name');
-    assert.equal(aItem.command.command, 'claudeObservatory.viewChanges', 'an edit action links to the review bubble');
-    assert.ok(typeof commands['claudeObservatory.actionsShowAll'] === 'function' && typeof commands['claudeObservatory.actionsShowCurated'] === 'function', 'actions show-all/curated toggles registered');
-
-    // Subagents (0.7.0): the Agent spawn correlates to its subagents/*.jsonl; a top-level Subagents node
-    // lists each subagent (expandable → its own action timeline) with per-subagent metrics.
-    const subRoot = actGroups.find((n) => n.kind === 'subagentsRoot');
-    assert.ok(subRoot, 'a Subagents node is present when the session spawned subagents');
-    const subItem = actionsTree.getTreeItem(subRoot);
-    assert.equal(subItem.label, 'Subagents');
-    assert.match(String(subItem.description), /2m/, 'Subagents node shows the rolled-up duration');
-    const subNodes = actionsTree.getChildren(subRoot);
-    assert.equal(subNodes.length, 1, 'one subagent under the Subagents node');
-    const saItem = actionsTree.getTreeItem(subNodes[0]);
-    assert.match(saItem.label, /code-reviewer/, 'subagent labelled by its type');
-    assert.match(String(saItem.description), /30k tok|2m/, 'subagent row shows metrics (duration / tokens)');
-    const saActions = actionsTree.getChildren(subNodes[0]);
-    assert.equal(saActions.length, 2, "the subagent's own tool calls nest under it (Read + Grep)");
-    assert.ok(saActions.every((n) => n.kind === 'action'), 'nested rows are action rows');
-
-    // Fleet (0.7.0): the backdated sibling session shows up as a Fleet node (siblings in this project).
-    const fleetRoot = actGroups.find((n) => n.kind === 'fleetRoot');
-    assert.ok(fleetRoot, 'a Fleet node is present when the project has sibling sessions');
-    assert.match(String(actionsTree.getTreeItem(fleetRoot).description), /sibling/, 'Fleet node counts siblings');
-    const siblings = actionsTree.getChildren(fleetRoot);
-    assert.ok(siblings.some((n) => n.kind === 'sibling' && n.sibling.self), 'the current session is marked self');
-    assert.ok(siblings.some((n) => n.kind === 'sibling' && !n.sibling.self), 'the sibling session is listed');
+    // Actions tab (0.8.0 round 3, moved out of Multitasking) — the session's tool-call timeline as the
+    // second tab of the Observations panel: collapsible category subsections (from buildActionGroups),
+    // each action TIMESTAMPED; an edit-action drills into its review. The Subagents (agent) category is
+    // dropped (those are the Overview fleet). The two seeded Edits form the "Edits" subsection.
+    const actTree = trees['claudeObservatory.actions'];
+    assert.ok(actTree, 'Actions view registered as a tree');
+    const actGroups = actTree.getChildren();
+    const editGroup = actGroups.find((n) => n.kind === 'agroup' && n.label === 'Edits');
+    assert.ok(editGroup, 'the Actions timeline has a collapsible "Edits" category subsection');
+    assert.equal(actTree.getTreeItem(editGroup).collapsibleState, vscode.TreeItemCollapsibleState.Collapsed, 'category subsections are collapsed by default (user expands on demand)');
+    assert.match(String(actTree.getTreeItem(editGroup).description), /2/, 'the Edits subsection counts the two seeded edits');
+    assert.ok(!actGroups.some((n) => n.kind === 'agroup' && n.label === 'Subagents'), 'the Subagents category is dropped (those are the Overview fleet)');
+    const actRows = actTree.getChildren(editGroup);
+    assert.equal(actRows.length, 2, 'the Edits subsection expands to its two action rows');
+    const aItem = actTree.getTreeItem(actRows[0]);
+    assert.match(aItem.label, /Edit/, 'an action row shows the tool');
+    assert.ok(/\d\d:\d\d|--:--/.test(aItem.label), 'an action row leads with a TIMESTAMP column');
+    assert.equal(aItem.command.command, 'claudeObservatory.viewChanges', 'an edit-action links to its review (viewChanges)');
+    assert.ok(typeof aItem.command.arguments[0] === 'number', 'the edit-action carries the store edit id to review');
 
     // Combined Stats + Usage webview: one view — plots on top, usage bars below; both fed via postMessage.
     const stProvider = webviewProviders['claudeObservatory.stats'];
@@ -406,10 +400,12 @@ test('extension: three views, click commands, inline annotations, chat, status s
     stProvider.postStatsError();
     assert.ok(stMsgs.some((m) => m.type === 'statsError'), 'failed stats scan posts the CLI-missing hint');
 
-    // Change Map webview (0.7.5): chapters on top, a module proportion strip, and a churn-ranked file
-    // ledger — all rendered from the CLI's changemap --json rollups (no aggregation in the client).
+    // Overview webview (0.8.0 round 3 — MASTER–DETAIL): the standalone Multitasking view is folded IN.
+    // LEFT NAV = two sub-tabs Fleet · Workflows (rendered from multitask --json). RIGHT DETAIL = the
+    // change-map (named-chapter ribbon · module strip · churn ledger) for the SELECTED nav item (from
+    // changemap --json). The count/size toggle is GONE (always sizes by ± lines).
     const cmProvider = webviewProviders['claudeObservatory.changemap'];
-    assert.ok(cmProvider, 'Change Map view registered in the panel');
+    assert.ok(cmProvider, 'Overview view registered in the panel');
     let cmMsgHandler = null;
     const cmView = {
       webview: { options: {}, html: '', postMessage: () => {}, onDidReceiveMessage: (cb) => { cmMsgHandler = cb; return { dispose() {} }; } },
@@ -417,19 +413,68 @@ test('extension: three views, click commands, inline annotations, chat, status s
       visible: false, // no subprocess spawn while hidden
     };
     cmProvider.resolveWebviewView(cmView);
-    assert.match(cmView.webview.html, /id="cm-chaps"/, 'change map: chapters row present (on top)');
-    assert.match(cmView.webview.html, /id="cm-strip"/, 'change map: module proportion strip present');
-    assert.match(cmView.webview.html, /id="cm-ledger"/, 'change map: ranked file ledger present');
-    assert.match(cmView.webview.html, /id="cm-readout"/, 'change map: footer readout present');
-    assert.ok(!/buildFiles|buildModules/.test(cmView.webview.html), 'the client must not re-aggregate — core ships files[]/modules[]');
+    // TOP NAVBAR (like Observations): a session selector (Switch Session) + the same session-wide review
+    // actions — Accept All · Revert All · Clear Resolved · Refresh — each posting to the host command.
+    assert.match(cmView.webview.html, /id="ov-toolbar"|class="ov-toolbar"/, 'Overview: a top navbar is present');
+    assert.match(cmView.webview.html, /id="ov-sess"/, 'Overview: the top navbar has a session-selector control');
+    assert.match(cmView.webview.html, /id="ov-sess-label"/, 'the session selector shows the active session (updated via postMessage)');
+    assert.ok(/id="ov-keepall"/.test(cmView.webview.html) && /id="ov-undoall"/.test(cmView.webview.html) && /id="ov-clearres"/.test(cmView.webview.html) && /id="ov-refresh"/.test(cmView.webview.html),
+      'the navbar carries Accept All · Revert All · Clear Resolved · Refresh');
+    assert.ok(/Switch session/i.test(cmView.webview.html) && /Accept All/.test(cmView.webview.html) && /Revert All/.test(cmView.webview.html) && /Clear Resolved/.test(cmView.webview.html),
+      'the navbar buttons are labelled to match the Observations toolbar');
+    // LEFT NAV = 25% of the panel width (change-map detail gets the remaining 75%).
+    assert.ok(/\.ov-nav \{[^}]*flex:0 0 25%/.test(cmView.webview.html), 'Overview: the left nav column is a fixed 25% (flex:0 0 25%)');
+    // LEFT NAV: the Fleet · Workflows sub-tabs + item list.
+    assert.match(cmView.webview.html, /id="ov-navtabs"/, 'Overview: left-nav sub-tab bar present (Fleet · Workflows)');
+    assert.ok(/'Fleet'/.test(cmView.webview.html) && /'Workflows'/.test(cmView.webview.html), 'the left nav labels Fleet/Workflows');
+    assert.ok(/renderNavTabs/.test(cmView.webview.html) && /function applyPanes/.test(cmView.webview.html), 'switching a nav tab toggles panes (renderNavTabs/applyPanes)');
+    assert.match(cmView.webview.html, /id="ov-fleet"/, 'Overview: the Fleet list container is present');
+    assert.match(cmView.webview.html, /id="ov-workflows"/, 'Overview: the Workflows list container is present');
+    assert.match(cmView.webview.html, /id="ov-collisions"/, 'Overview: the live-collisions indicator is present in the Fleet nav');
+    assert.ok(/Live conflicts/.test(cmView.webview.html), 'the collisions indicator is labelled "live conflicts"');
+    assert.ok(/awaiting permission/.test(cmView.webview.html), 'the awaiting-permission needs-attention phase is surfaced');
+    assert.ok(/mt-spark/.test(cmView.webview.html) && /renderFleet/.test(cmView.webview.html), 'Fleet rows carry a per-agent activity sparkline (+ ±lines/tokens/time/risk)');
+    assert.ok(/fmtTok/.test(cmView.webview.html) && /fmtDur/.test(cmView.webview.html), 'Fleet + Workflows show tokens/time (fmtTok/fmtDur)');
+    assert.ok(/phaseSummary/.test(cmView.webview.html) && /phaseGroups/.test(cmView.webview.html) && /w\.description/.test(cmView.webview.html) && /a\.label/.test(cmView.webview.html), 'Workflows show the informative name + per-phase progress + per-agent label');
+    // DISPLAY filters (Active-only + Clear-completed) over the SAME pure multitaskFilter, on the nav.
+    assert.match(cmView.webview.html, /id="mt-active"/, 'Overview: the Active-only toggle is present');
+    assert.ok(/Active only/.test(cmView.webview.html), 'the toggle is labelled "Active only"');
+    assert.match(cmView.webview.html, /id="mt-clear"/, 'Overview: the Clear-completed control is present');
+    assert.ok(/Clear completed/.test(cmView.webview.html), 'the control is labelled "Clear completed"');
+    assert.ok(/ACTIVE_ONLY/.test(cmView.webview.html) && /MTFILTER/.test(cmView.webview.html), 'the toggle drives a client-side ACTIVE_ONLY filter over the payload');
+    assert.ok(/DISMISS_AG/.test(cmView.webview.html) && /DISMISS_WF/.test(cmView.webview.html), 'Clear-completed keeps a client-side dismissed set (agents + workflows)');
+    assert.ok(/show all/.test(cmView.webview.html), 'an "N hidden · show all" un-dismiss affordance is present');
+    assert.ok(/agentActive/.test(cmView.webview.html), 'the pure multitaskFilter body is embedded verbatim into the webview (one source of truth for test + UI)');
+    // RIGHT DETAIL: the change-map for the selected nav item.
+    assert.match(cmView.webview.html, /id="cm-ribbon"/, 'Overview: named-chapter ribbon present (right detail)');
+    assert.match(cmView.webview.html, /id="cm-strip"/, 'Overview: module proportion strip present');
+    assert.match(cmView.webview.html, /id="cm-ledger"/, 'Overview: ranked file ledger present');
+    assert.match(cmView.webview.html, /id="cm-readout"/, 'Overview: footer readout present');
+    assert.ok(!/id="cm-area"|data-area=/.test(cmView.webview.html), 'the count/size toggle is gone (always ± lines)');
+    assert.ok(!/buildFiles|buildModules|buildChangeMap|listRepoSiblings|fleetConflicts|buildActionGroups/.test(cmView.webview.html), 'the client must not re-aggregate — core/CLI ship both payloads (changemap + multitask)');
+    // the ribbon is a VERTICAL stacked list (one chapter per row), not wrapping pills.
+    assert.ok(/\.cm-rwrap \{[^}]*flex-direction:column/.test(cmView.webview.html), 'Overview: the chapter ribbon is a vertical stacked list (cm-rwrap is a column)');
+    // the ribbon renders the NAMED CHAPTERS (chapters[]) for the slice, not the strict tasks[].
+    assert.ok(/a\.chapters/.test(cmView.webview.html) && /ch\.status==='wip'/.test(cmView.webview.html), 'Overview: the ribbon renders the slice’s named chapters[] (current work shows under its chapter, not unassigned)');
+    // a WORKFLOW nav item renders a synthetic per-workflow detail slice (rollup → chips, files → ledger,
+    // taskIds → the named-chapter ribbon), joined to CM by workflow id.
+    assert.ok(/function workflowSlice/.test(cmView.webview.html) && /kind==='workflow'/.test(cmView.webview.html), 'Overview: a selected workflow renders a per-workflow detail slice (workflowSlice)');
+    assert.ok(/function detailSlice/.test(cmView.webview.html) && /cmAgent/.test(cmView.webview.html), 'Overview: the detail joins the nav selection to the changemap slice by session/workflowId');
     // A hidden view must not shell out; and a failed scan (before any data) posts the CLI-missing hint.
     const cmMsgs = [];
     cmView.webview.postMessage = (m) => cmMsgs.push(m);
     cmProvider.refresh();
-    assert.equal(cmMsgs.length, 0, 'a hidden Change Map does not spawn the CLI or post');
+    assert.equal(cmMsgs.length, 0, 'a hidden Overview does not spawn the CLI or post');
     cmProvider.postError();
-    assert.ok(cmMsgs.some((m) => m.type === 'error'), 'a failed change-map scan posts the CLI-missing hint');
-    assert.ok(typeof cmMsgHandler === 'function', 'the change map registered a message handler');
+    assert.ok(cmMsgs.some((m) => m.type === 'error'), 'a failed Overview scan posts the CLI-missing hint');
+    assert.ok(typeof cmMsgHandler === 'function', 'the Overview registered a message handler');
+    // a subagent chat button (in the Fleet nav) hands off a zero-token chat by agentId.
+    const cmSubChat = [];
+    const realSubChat = commands['claudeObservatory.chatAction'];
+    commands['claudeObservatory.chatAction'] = (ref) => { cmSubChat.push(ref); };
+    cmMsgHandler({ type: 'chatAction', ref: { agentId: 'sa1' } });
+    commands['claudeObservatory.chatAction'] = realSubChat;
+    assert.deepEqual(cmSubChat, [{ agentId: 'sa1' }], 'a Fleet subagent chat button hands off a zero-token chat by agentId');
     // clicking a ledger row drills to the real edit review via the existing command (spy on the
     // registered callback — executeCommand resolves commands[id] at call time)
     const cmOpened = [];
@@ -438,6 +483,198 @@ test('extension: three views, click commands, inline annotations, chat, status s
     cmMsgHandler({ type: 'openEdit', id: 1 });
     commands['claudeObservatory.viewChanges'] = realViewChanges;
     assert.deepEqual(cmOpened, [1], 'a ledger row click opens that edit for review');
+    // a task-ribbon click hands off a zero-token chat about that task (chatAction with a taskId ref)
+    const cmChat = [];
+    const realChatAction = commands['claudeObservatory.chatAction'];
+    commands['claudeObservatory.chatAction'] = (ref) => { cmChat.push(ref); };
+    cmMsgHandler({ type: 'chatAction', ref: { taskId: 'abc123' } });
+    commands['claudeObservatory.chatAction'] = realChatAction;
+    assert.deepEqual(cmChat, [{ taskId: 'abc123' }], 'a task-ribbon click hands off a zero-token chat by taskId');
+
+    // Chapter review actions (0.8.0): each task chip's ✓/↩/🧹 mini-buttons post taskKeep/taskUndo/taskClear,
+    // which the provider routes to the strict-span task-keep/undo/clear commands. Plus a "Clear completed
+    // chapters" affordance. The commands are registered; verify the message handler routes each correctly.
+    for (const [msg, cmd] of [
+      ['taskKeep', 'claudeObservatory.taskKeep'],
+      ['taskUndo', 'claudeObservatory.taskUndo'],
+      ['taskClear', 'claudeObservatory.taskClear'],
+    ]) {
+      assert.ok(typeof commands[cmd] === 'function', `${cmd} registered`);
+      const seen = [];
+      const real = commands[cmd];
+      commands[cmd] = (id) => { seen.push(id); };
+      cmMsgHandler({ type: msg, taskId: 'chap1' });
+      commands[cmd] = real;
+      assert.deepEqual(seen, ['chap1'], `a chip ${msg} routes to ${cmd} with the taskId`);
+    }
+    assert.ok(typeof commands['claudeObservatory.clearCompletedChapters'] === 'function', 'clearCompletedChapters registered');
+    const ccSeen = [];
+    const realCC = commands['claudeObservatory.clearCompletedChapters'];
+    commands['claudeObservatory.clearCompletedChapters'] = () => { ccSeen.push(1); };
+    cmMsgHandler({ type: 'clearCompletedChapters' });
+    commands['claudeObservatory.clearCompletedChapters'] = realCC;
+    assert.equal(ccSeen.length, 1, 'the "clear completed chapters" control routes to its command');
+
+    // Top-navbar review actions route to the existing session-wide commands (the same the Observations
+    // toolbar drives): the session selector + Accept All / Revert All / Clear Resolved / Refresh.
+    for (const [msg, cmd] of [
+      ['switchSession', 'claudeObservatory.switchSession'],
+      ['keepAll', 'claudeObservatory.keepAll'],
+      ['undoAll', 'claudeObservatory.undoAll'],
+      ['clearResolved', 'claudeObservatory.clearResolved'],
+      ['refresh', 'claudeObservatory.refresh'],
+    ]) {
+      assert.ok(typeof commands[cmd] === 'function', `${cmd} registered`);
+      let seen = 0;
+      const real = commands[cmd];
+      commands[cmd] = () => { seen++; };
+      cmMsgHandler({ type: msg });
+      commands[cmd] = real;
+      assert.equal(seen, 1, `the Overview navbar "${msg}" control routes to ${cmd}`);
+    }
+
+    // (1) CHAPTER-SCOPED BULK ACTIONS: selecting a chapter chip in the ribbon scopes the title-bar
+    // Accept All / Revert All / Clear Resolved buttons to that chapter (reusing the strict-span task ops)
+    // and relabels them "…in <chapter>". Deselecting returns them to session-wide. Verified from the
+    // embedded webview source (the smoke harness renders the shell but doesn't execute its script).
+    assert.ok(/SEL_CH/.test(cmView.webview.html), 'Overview: a selected-chapter var (SEL_CH) scopes the bulk actions');
+    assert.match(cmView.webview.html, /data-sel=/, 'ribbon chips carry a selectable handle (data-sel)');
+    assert.match(cmView.webview.html, /\.cm-task\.sel/, 'a selected chapter chip gets a highlighted state (.cm-task.sel)');
+    assert.ok(/function toggleChapter/.test(cmView.webview.html), 'clicking a chip toggles the chapter selection (toggleChapter)');
+    assert.ok(/function relabelBulk/.test(cmView.webview.html), 'the bulk buttons relabel to the selected scope (relabelBulk)');
+    assert.ok(/Accept All in /.test(cmView.webview.html) && /Revert All in /.test(cmView.webview.html) && /Clear in /.test(cmView.webview.html),
+      'the scoped bulk buttons read "… in <chapter>"');
+    // the bulk wiring posts the strict-span task ops when a chapter is selected, else the session-wide op.
+    assert.ok(/bulk\('ov-keepall','keepAll','taskKeep'\)/.test(cmView.webview.html)
+      && /bulk\('ov-undoall','undoAll','taskUndo'\)/.test(cmView.webview.html)
+      && /bulk\('ov-clearres','clearResolved','taskClear'\)/.test(cmView.webview.html),
+      'a selected chapter reroutes Accept All / Revert All / Clear to the strict-span task ops');
+    // the folded-in per-chip chat still hands off a zero-token chat by taskId (unchanged routing).
+    assert.match(cmView.webview.html, /data-chat=/, 'each chapter chip keeps a zero-token chat handoff (💬)');
+
+    // (2) STATUS-BAR REVIEW NAV BAR IN THE TITLE BAR: File ◄►, Diff ◄► with live n/m · i/k counters, plus
+    // Keep, Undo, Accept File, Reject File, Spotlight, Search — the compact step-through controls, next to
+    // the session selector, each posting to the existing nav commands.
+    for (const id of ['ov-fileprev', 'ov-filecount', 'ov-filenext', 'ov-diffprev', 'ov-diffcount', 'ov-diffnext',
+      'ov-navkeep', 'ov-navundo', 'ov-acceptfile', 'ov-rejectfile', 'ov-clearfile', 'ov-spotlight', 'ov-search']) {
+      assert.ok(cmView.webview.html.includes(`id="${id}"`), `Overview title bar carries the nav-bar control ${id}`);
+    }
+    assert.ok(/renderNavPos/.test(cmView.webview.html), 'the Diff n/m · File i/k position counters render from the pushed NAVPOS');
+    // the nav-bar buttons route to the existing status-bar nav commands (same controls, same backend).
+    for (const [msg, cmd] of [
+      ['navFilePrev', 'claudeObservatory.navFilePrev'],
+      ['navFileNext', 'claudeObservatory.navFileNext'],
+      ['navDiffPrev', 'claudeObservatory.navDiffPrev'],
+      ['navDiffNext', 'claudeObservatory.navDiffNext'],
+      ['navKeep', 'claudeObservatory.navKeep'],
+      ['navUndo', 'claudeObservatory.navUndo'],
+      ['keepOpenFile', 'claudeObservatory.keepOpenFile'],
+      ['undoOpenFile', 'claudeObservatory.undoOpenFile'],
+      ['clearOpenFile', 'claudeObservatory.clearOpenFile'],
+      ['toggleHeatmap', 'claudeObservatory.toggleHeatmap'],
+      ['searchEdits', 'claudeObservatory.searchEdits'],
+    ]) {
+      assert.ok(typeof commands[cmd] === 'function', `${cmd} registered`);
+      let seen = 0;
+      const real = commands[cmd];
+      commands[cmd] = () => { seen++; };
+      cmMsgHandler({ type: msg });
+      commands[cmd] = real;
+      assert.equal(seen, 1, `the Overview nav-bar "${msg}" control routes to ${cmd}`);
+    }
+    // the live position push: setNavPos posts a {navpos} message to a VISIBLE Overview so the counters update.
+    assert.ok(typeof cmProvider.setNavPos === 'function', 'the Overview exposes setNavPos (the host pushes the live Diff/File position)');
+    cmView.visible = true;
+    const navPosMsgs = [];
+    cmView.webview.postMessage = (m) => navPosMsgs.push(m);
+    cmProvider.setNavPos({ diff: { i: 1, n: 3 }, file: { i: 2, n: 4 } });
+    cmView.visible = false;
+    assert.ok(navPosMsgs.some((m) => m.type === 'navpos' && m.pos && m.pos.diff.n === 3 && m.pos.file.i === 2),
+      'setNavPos pushes the Diff/File position to the visible Overview counters');
+
+    // 0.8.0 stabilization: the literal-tabs prototype (overviewTabs/OverviewTab) was superseded by the
+    // Fleet/Workflows master–detail nav and removed — the export must stay gone (dead code guard).
+    assert.equal(ext.overviewTabs, undefined, 'overviewTabs prototype removed — per-agent views are the Fleet nav rows');
+
+    // Chapter totality (0.8.0): the ribbon draws chapters[] as given — the residual "unassigned" math is
+    // gone (core appends a synthetic session chapter instead), and destructive ops gate on the STRICT
+    // chapter.taskId (null → the synthetic/duplicate rows render display-only).
+    assert.ok(!/label:'unassigned'/.test(cmView.webview.html), 'no "unassigned" ribbon row can render — chapters are total');
+    assert.ok(/data-keep="'\+cid/.test(cmView.webview.html), 'chapter ✓/↩/🧹 act WYSIWYG via the CHAPTER id (reviewEditIds — synthetic included)');
+    assert.ok(/ch\.taskId/.test(cmView.webview.html), 'chapter chips still carry the strict taskId (the 💬 chat gate)');
+    assert.ok(/ch\.synthetic/.test(cmView.webview.html), 'the synthetic session chapter is recognized and styled');
+    assert.ok(/cm-task syn|cm-task'\+\(it\.syn/.test(cmView.webview.html), 'synthetic chapters get the dimmed style');
+    assert.ok(/w\.chapters/.test(cmView.webview.html), 'a workflow slice renders its own core-built chapter ribbon (no residual math)');
+
+    // Workflow auto-focus (0.8.0): a NEWLY-appeared running workflow switches the nav to Workflows,
+    // selects it, and pulses its row; the FIRST payload only seeds the seen-set (no focus-steal on open).
+    assert.ok(/SEEN_WF===null/.test(cmView.webview.html), 'first payload seeds the seen-set instead of stealing focus');
+    assert.ok(/NAV='workflows'; SEL=\{kind:'workflow', id:freshWf\}/.test(cmView.webview.html), 'a new running workflow auto-focuses the Workflows nav + selects the run');
+    assert.ok(/mt-wf\.flash/.test(cmView.webview.html), 'the new run pulses via the flash style');
+
+    // multitaskFilter (unchanged, still exported): the ONE pure Active-only/Clear-completed filter the
+    // Overview nav embeds verbatim. Driven off a fabricated payload — the webview runs this exact fn.
+    assert.ok(typeof ext.multitaskFilter === 'function', 'multitaskFilter pure helper exported (unit-testable off the raw payload)');
+    const mtPayload = {
+      agents: [
+        { session: 'aw', phase: 'working', subagents: [] }, // active (own phase)
+        { session: 'ap', phase: 'awaiting-permission', subagents: [] }, // active (needs attention)
+        { session: 'idleSub', phase: 'idle', subagents: [{ phase: 'working' }] }, // active via a live subagent
+        { session: 'done1', phase: 'done', subagents: [] }, // completed
+        { session: 'idle1', phase: 'idle', subagents: [{ phase: 'done' }] }, // completed
+        { session: 'err1', phase: 'errored', subagents: [] }, // completed
+      ],
+      workflows: [{ id: 'wfRun', running: true }, { id: 'wfDone', running: false }],
+    };
+    const fAll = ext.multitaskFilter(mtPayload, {});
+    assert.equal(fAll.agents.length, 6, 'no filter → every agent shows');
+    assert.equal(fAll.workflows.length, 2, 'no filter → every workflow shows');
+    assert.equal(fAll.activeAgents, 3, 'active = working + awaiting-permission + idle-with-a-live-subagent');
+    assert.deepEqual(fAll.completedAgents.slice().sort(), ['done1', 'err1', 'idle1'], 'completed = idle/done/errored with no active subagent');
+    assert.deepEqual(fAll.completedWorkflows, ['wfDone'], 'completed workflows = the non-running ones');
+    const fActive = ext.multitaskFilter(mtPayload, { activeOnly: true });
+    assert.deepEqual(fActive.agents.map((a) => a.session).slice().sort(), ['ap', 'aw', 'idleSub'], 'active-only keeps working/awaiting + agents with a live subagent, hides idle/done/errored');
+    assert.deepEqual(fActive.workflows.map((w) => w.id), ['wfRun'], 'active-only keeps only running workflows');
+    const dismissed = { dismissedAgents: { done1: 1, idle1: 1, err1: 1 }, dismissedWorkflows: { wfDone: 1 } };
+    const fDismiss = ext.multitaskFilter(mtPayload, dismissed);
+    assert.deepEqual(fDismiss.agents.map((a) => a.session).slice().sort(), ['ap', 'aw', 'idleSub'], 'Clear-completed hides the dismissed completed agents; actives remain');
+    assert.equal(fDismiss.hiddenAgents, 3, 'the hidden-agent count feeds the "N hidden · show all" affordance');
+    assert.deepEqual(fDismiss.workflows.map((w) => w.id), ['wfRun'], 'the dismissed finished workflow is hidden');
+    assert.equal(fDismiss.hiddenWorkflows, 1, 'the hidden-workflow count is surfaced');
+    // a dismissed item REAPPEARS the moment it goes active again (dismissal only bites while inactive).
+    const revived = { agents: [{ session: 'done1', phase: 'working', subagents: [] }], workflows: [{ id: 'wfDone', running: true }] };
+    const fRevive = ext.multitaskFilter(revived, dismissed);
+    assert.equal(fRevive.agents.length, 1, 'a dismissed agent reappears once it is active again');
+    assert.equal(fRevive.workflows.length, 1, 'a dismissed workflow reappears once it is running again');
+    // The Workflows-tab cross-nav command is gone — selecting a workflow is now internal to the Overview.
+    assert.ok(!commands['claudeObservatory.focusWorkflow'], 'focusWorkflow is gone (workflow selection is internal to the combined Overview)');
+
+    // refreshAll refreshes the combined Overview + the Actions tab too — they ride the transcript watcher
+    // for realtime updates (the Overview nav is live multi-agent state, mined from the transcript).
+    let cmRefreshed = 0, actRefreshed = 0;
+    const origCmRefresh = cmProvider.refresh.bind(cmProvider);
+    const origActRefresh = actTree.refresh.bind(actTree);
+    cmProvider.refresh = () => { cmRefreshed++; };
+    actTree.refresh = () => { actRefreshed++; };
+    await commands['claudeObservatory.refresh']();
+    cmProvider.refresh = origCmRefresh;
+    actTree.refresh = origActRefresh;
+    assert.ok(cmRefreshed >= 1, 'refreshAll includes the combined Overview view');
+    assert.ok(actRefreshed >= 1, 'refreshAll includes the Actions tab');
+
+    // chatAction (0.8.0): the zero-token handoff for ANY action/edit/subagent/task. It assembles the
+    // prompt IN-PROCESS via core.assembleChatContext (the same single-backend the CLI's chat-context
+    // wraps — never a model call), copies it, and opens the user's Claude sidebar. Here: an edit ref.
+    assert.ok(typeof commands['claudeObservatory.chatAction'] === 'function', 'chatAction command registered');
+    let claudeOpened = 0;
+    commands['claude-vscode.sidebar.open'] = () => { claudeOpened++; };
+    clipboardText = '';
+    await commands['claudeObservatory.chatAction']({ editId: 1 });
+    assert.match(clipboardText, /app\.txt/, 'chatAction assembled a prompt about the edited file');
+    assert.ok(/Please explain/.test(clipboardText), 'chatAction wrote the assembled chat-context prompt to the clipboard');
+    assert.ok(clipboardText.includes('AAA') && clipboardText.includes('a\nb\nc'), 'chatAction prompt carries before/after (assembled in-process, not a model call)');
+    assert.ok(claudeOpened >= 1, "chatAction opened the user's Claude (zero-token handoff)");
+    delete commands['claude-vscode.sidebar.open'];
 
     // Stats top navbar: active session + clickable pending count → first edit. (The Search-edits box
     // was removed in 0.7.5 — the Edits/Diffs title-bar `searchEdits` action is the one search entry.)
@@ -578,9 +815,11 @@ test('extension: three views, click commands, inline annotations, chat, status s
       'pending row not greyed'
     );
 
-    // review memory: after the keep + undo above, the observation row carries the file's history
-    const obsAfter = obsTree.getChildren().filter((n) => n.kind === 'obs');
-    const memTip = obsTree.getTreeItem(obsAfter.find((n) => n.rec.id === 1)).tooltip;
+    // review memory: after the keep + undo above, the per-edit observation row carries the file's history.
+    // The two app.txt edits still coalesce into one ×2 run — expand it to reach edit #1's row.
+    const obsRunAfter = obsTree.getChildren().find((n) => n.kind === 'tlrun');
+    const editRows = obsRunAfter ? obsTree.getChildren(obsRunAfter) : obsTree.getChildren().filter((n) => n.kind === 'edit');
+    const memTip = obsTree.getTreeItem(editRows.find((n) => n.rec.id === 1)).tooltip;
     assert.match(memTip, /🧠 2 edits across sessions · 50% accepted/, 'observation tooltip carries cross-session file memory');
     const memMd = contentProviders['claude-observation'].provideTextDocumentContent({ authority: 'obs', path: '/edit-1.md', query: 's=' + S });
     assert.match(memMd, /## File history \(all sessions\)/, 'combined report has a File history section');
@@ -588,14 +827,15 @@ test('extension: three views, click commands, inline annotations, chat, status s
     // file-scoped accept: keepOpenFile (active editor = app.txt) touches ONLY that file's pending edits.
     const G = path.join(ws, 'other.txt');
     const fb = core.writeBlob(S, Buffer.from('p\n')), fa = core.writeBlob(S, Buffer.from('p\nq\n'));
-    core.appendLog(S, { id: 98, ts: 9800, tool: 'Edit', file: F, beforeBlob: fb, afterBlob: fa, status: 'pending' });
+    // appendLog now OWNS id allocation (S1) — capture the id it assigns instead of hardcoding one.
+    const rF = core.appendLog(S, { ts: 9800, tool: 'Edit', file: F, beforeBlob: fb, afterBlob: fa, status: 'pending' });
     const gb = core.writeBlob(S, Buffer.from('x\n')), ga = core.writeBlob(S, Buffer.from('x\ny\n'));
-    core.appendLog(S, { id: 99, ts: 9900, tool: 'Edit', file: G, beforeBlob: gb, afterBlob: ga, status: 'pending' });
+    const rG = core.appendLog(S, { ts: 9900, tool: 'Edit', file: G, beforeBlob: gb, afterBlob: ga, status: 'pending' });
     assert.ok(typeof commands['claudeObservatory.keepOpenFile'] === 'function', 'keepOpenFile registered');
     await commands['claudeObservatory.keepOpenFile'](); // active editor's file is app.txt (F)
     const flog = core.readLog(S);
-    assert.equal(flog.find((r) => r.id === 98).status, 'kept', 'keepOpenFile accepted the active file (app.txt)');
-    assert.equal(flog.find((r) => r.id === 99).status, 'pending', 'keepOpenFile left the other file (other.txt) untouched');
+    assert.equal(flog.find((r) => r.id === rF.id).status, 'kept', 'keepOpenFile accepted the active file (app.txt)');
+    assert.equal(flog.find((r) => r.id === rG.id).status, 'pending', 'keepOpenFile left the other file (other.txt) untouched');
   } finally {
     Module._load = origLoad;
   }
