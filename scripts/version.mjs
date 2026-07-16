@@ -41,6 +41,19 @@ const WORKSPACE_KEYS = ['packages/core', 'packages/cli', 'packages/vscode'];
 
 const read = (rel) => readFileSync(join(root, rel), 'utf8');
 
+// The README's static version badge — stamped here rather than shields' GitHub-API-backed
+// "latest release" badge, which reads "inaccessible" whenever GitHub's REST API hiccups.
+const README = 'README.md';
+const badgeRe = /(badge\/version-v)([0-9][^-]*)(-blue)/;
+function badgeVersionOf() {
+  const m = read(README).match(badgeRe);
+  if (!m) throw new Error(`no version badge found in ${README}`);
+  return m[2];
+}
+function setBadgeVersion(next) {
+  writeFileSync(join(root, README), read(README).replace(badgeRe, (_all, a, _v, c) => `${a}${next}${c}`));
+}
+
 function versionOf(rel) {
   const m = read(rel).match(reFor(rel));
   if (!m) throw new Error(`no version field found in ${rel}`);
@@ -109,7 +122,8 @@ if (arg && arg !== '--write' && arg !== 'check') {
   for (const t of targets) setVersion(t, arg);
   for (const t of CORE_PIN_FILES) setCorePin(t, arg);
   setLockfileVersions(arg);
-  console.log(`✓ set version ${arg} across ${targets.length} files (+ ${CORE_PIN_FILES.length} core pins + ${LOCKFILE})`);
+  setBadgeVersion(arg);
+  console.log(`✓ set version ${arg} across ${targets.length} files (+ ${CORE_PIN_FILES.length} core pins + ${LOCKFILE} + the README badge)`);
   process.exit(0);
 }
 
@@ -120,7 +134,8 @@ if (arg === '--write') {
   for (const t of targets) setVersion(t, rootVersion);
   for (const t of CORE_PIN_FILES) setCorePin(t, rootVersion);
   setLockfileVersions(rootVersion);
-  console.log(`✓ propagated root version ${rootVersion} to ${targets.length} files (+ ${CORE_PIN_FILES.length} core pins + ${LOCKFILE})`);
+  setBadgeVersion(rootVersion);
+  console.log(`✓ propagated root version ${rootVersion} to ${targets.length} files (+ ${CORE_PIN_FILES.length} core pins + ${LOCKFILE} + the README badge)`);
   process.exit(0);
 }
 
@@ -137,6 +152,11 @@ for (const t of CORE_PIN_FILES) {
   console.log(`${v === rootVersion ? '✓' : '✗'} ${t} (core pin): ${v}`);
 }
 if (checkLockfile(rootVersion)) drift = true;
+{
+  const v = badgeVersionOf();
+  if (v !== rootVersion) drift = true;
+  console.log(`${v === rootVersion ? '✓' : '✗'} ${README} (version badge): ${v}`);
+}
 if (drift) {
   console.error(`\nversion drift — root is ${rootVersion}. Run \`node scripts/version.mjs --write\` to fix.`);
   process.exit(1);
