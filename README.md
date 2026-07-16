@@ -1,6 +1,16 @@
 # 🔬 Claude Observatory
 
-[![CI](https://github.com/cell-observatory/claude-observatory/actions/workflows/ci.yml/badge.svg)](https://github.com/cell-observatory/claude-observatory/actions/workflows/ci.yml)
+[![Linux](https://github.com/cell-observatory/claude-observatory/actions/workflows/linux.yml/badge.svg)](https://github.com/cell-observatory/claude-observatory/actions/workflows/linux.yml)
+[![macOS](https://github.com/cell-observatory/claude-observatory/actions/workflows/macos.yml/badge.svg)](https://github.com/cell-observatory/claude-observatory/actions/workflows/macos.yml)
+[![Windows](https://github.com/cell-observatory/claude-observatory/actions/workflows/windows.yml/badge.svg)](https://github.com/cell-observatory/claude-observatory/actions/workflows/windows.yml)
+[![VS Code](https://github.com/cell-observatory/claude-observatory/actions/workflows/vscode.yml/badge.svg)](https://github.com/cell-observatory/claude-observatory/actions/workflows/vscode.yml)
+[![JetBrains](https://github.com/cell-observatory/claude-observatory/actions/workflows/jetbrains.yml/badge.svg)](https://github.com/cell-observatory/claude-observatory/actions/workflows/jetbrains.yml)
+[![CodeQL](https://github.com/cell-observatory/claude-observatory/actions/workflows/codeql.yml/badge.svg)](https://github.com/cell-observatory/claude-observatory/actions/workflows/codeql.yml)
+[![Pages](https://github.com/cell-observatory/claude-observatory/actions/workflows/pages.yml/badge.svg)](https://github.com/cell-observatory/claude-observatory/actions/workflows/pages.yml)
+[![Release](https://github.com/cell-observatory/claude-observatory/actions/workflows/release.yml/badge.svg)](https://github.com/cell-observatory/claude-observatory/actions/workflows/release.yml)
+[![Dependabot](https://img.shields.io/badge/dependabot-enabled-025E8C?logo=dependabot&logoColor=white)](https://github.com/cell-observatory/claude-observatory/blob/main/.github/dependabot.yml)
+[![Latest release](https://img.shields.io/github/v/release/cell-observatory/claude-observatory?label=latest)](https://github.com/cell-observatory/claude-observatory/releases/latest)
+[![License](https://img.shields.io/github/license/cell-observatory/claude-observatory)](https://github.com/cell-observatory/claude-observatory/blob/main/LICENSE)
 &nbsp;·&nbsp; **[🔬 Live showcase →](https://cell-observatory.github.io/claude-observatory/)**
 &nbsp;·&nbsp; **[Interactive demo →](https://cell-observatory.github.io/claude-observatory/demo.html)**
 &nbsp;·&nbsp; [Changelog](CHANGELOG.md)

@@ -17,8 +17,10 @@ import javax.swing.JComponent
 
 /**
  * Persistent review bar atop any editor whose file has pending Claude edits — parity with the VS Code
- * editor-title buttons (⏭ review-next · ✓ accept-all · ↩ revert-all · 🔍 search). Per-file gated; kept
- * live by ObservatoryStartup, which fires EditorNotifications.updateAllNotifications() on every store change.
+ * editor-title buttons. Every action renders a tinted nav-bar icon + a word label, icon AND text both
+ * clickable (Search · Prev/Next Edit · Prev/Next File · Keep · Undo · Accept File · Reject File ·
+ * Clear Resolved · Spotlight). Per-file gated; kept live by
+ * ObservatoryStartup, which fires EditorNotifications.updateAllNotifications() on every store change.
  */
 class ObservatoryEditorBanner : EditorNotificationProvider, DumbAware {
 
@@ -55,42 +57,92 @@ class ObservatoryEditorBanner : EditorNotificationProvider, DumbAware {
             )
             if (q != null) service.setFilter(q)
         }.apply {
+            setUseIconAsLink(true)
             setIcon(NavTint.SEARCH)
             toolTipText = "Search edits"
         }
-        panel.createActionLabel("↑") {
+        // Every button: tinted nav-bar icon + a WORD label (user rule 2026-07-16 — "text on all the
+        // icons"; a bare glyph like "↑" names nothing, and the same action must look the same as it
+        // does on the status-bar nav bar).
+        panel.createActionLabel("Prev Edit") {
             val s = service.currentSession() ?: return@createActionLabel
             val prev = service.prevPendingEdit()
             if (prev == null) ReviewOps.notify(project, "No pending Claude edits — all caught up")
             else Navigate.openFileAtEdit(project, s, prev)
-        }.toolTipText = "Previous pending edit"
-        panel.createActionLabel("↓") {
+        }.apply {
+            setUseIconAsLink(true)
+            setIcon(NavTint.tint(com.intellij.icons.AllIcons.Actions.PreviousOccurence, NavTint.BLUE))
+            toolTipText = "Previous pending edit"
+        }
+        panel.createActionLabel("Next Edit") {
             val s = service.currentSession() ?: return@createActionLabel
             val next = service.nextPendingEdit()
             if (next == null) ReviewOps.notify(project, "No pending Claude edits — all caught up")
             else Navigate.openFileAtEdit(project, s, next)
-        }.toolTipText = "Next pending edit"
-        // File axis — jump across every file with pending edits (parity with the nav bar's ◀ ▶).
-        panel.createActionLabel("◀") { stepFile(project, service, file.path, -1) }.toolTipText = "Previous changed file"
-        panel.createActionLabel("▶") { stepFile(project, service, file.path, 1) }.toolTipText = "Next changed file"
+        }.apply {
+            setUseIconAsLink(true)
+            setIcon(NavTint.tint(com.intellij.icons.AllIcons.Actions.NextOccurence, NavTint.BLUE))
+            toolTipText = "Next pending edit"
+        }
+        // File axis — jump across every file with pending edits (parity with the nav bar's file axis).
+        panel.createActionLabel("Prev File") { stepFile(project, service, file.path, -1) }.apply {
+            setUseIconAsLink(true)
+            setIcon(NavTint.tint(com.intellij.icons.AllIcons.Actions.Back, NavTint.BLUE))
+            toolTipText = "Previous changed file"
+        }
+        panel.createActionLabel("Next File") { stepFile(project, service, file.path, 1) }.apply {
+            setUseIconAsLink(true)
+            setIcon(NavTint.tint(com.intellij.icons.AllIcons.Actions.Forward, NavTint.BLUE))
+            toolTipText = "Next changed file"
+        }
+        // Per-edit pair — acts on the edit the review cursor is parked on when it sits in THIS file
+        // (the one Prev/Next Edit just landed on), else the file's first pending edit.
+        val bannerEdit = {
+            service.currentPendingEdit()?.takeIf { it.file == file.path }
+                ?: service.log().filter { it.pending && it.file == file.path }.minByOrNull { it.id }
+        }
+        panel.createActionLabel("Keep") {
+            service.currentSession()?.let { s -> bannerEdit()?.let { ReviewOps.keep(project, s, it.id) } }
+        }.apply {
+            setUseIconAsLink(true)
+            setIcon(NavTint.KEEP)
+            toolTipText = "Keep this edit — the one Prev/Next Edit is parked on"
+        }
+        panel.createActionLabel("Undo") {
+            service.currentSession()?.let { s -> bannerEdit()?.let { ReviewOps.undoOrRedo(project, s, it, redo = false) } }
+        }.apply {
+            setUseIconAsLink(true)
+            setIcon(NavTint.UNDO)
+            toolTipText = "Undo this edit — the one Prev/Next Edit is parked on"
+        }
         // These act on THIS file only — the banner is per-file, so session-wide would be misleading.
-        panel.createActionLabel("✓") {
+        panel.createActionLabel("Accept File") {
             service.currentSession()?.let { s ->
                 ReviewOps.keepAll(project, s, service.log().filter { it.file == file.path }, file.name)
             }
-        }.toolTipText = "Accept all edits in this file"
-        panel.createActionLabel("↩") {
+        }.apply {
+            setUseIconAsLink(true)
+            setIcon(NavTint.ACCEPT_FILE)
+            toolTipText = "Accept all edits in this file"
+        }
+        panel.createActionLabel("Reject File") {
             service.currentSession()?.let { s ->
                 ReviewOps.undoAll(project, s, service.log().filter { it.file == file.path }, file.name, file.path)
             }
-        }.toolTipText = "Revert all edits in this file"
-        // Clear resolved (kept/reverted) edits — parity with the nav bar's clear button.
-        panel.createActionLabel("Clear") {
+        }.apply {
+            setUseIconAsLink(true)
+            setIcon(NavTint.REJECT)
+            toolTipText = "Reject (revert) all edits in this file"
+        }
+        // Clear resolved (kept/reverted) edits — parity with the nav bar's clear button. The label
+        // spells out "Clear Resolved" (user rule: a bare "Clear" is ambiguous about what it drops).
+        panel.createActionLabel("Clear Resolved") {
             service.currentSession()?.let { s ->
                 val resolved = service.log().count { !it.pending }
                 if (resolved > 0) ReviewOps.clearResolved(project, s, resolved) else ReviewOps.notify(project, "No resolved edits to clear")
             }
         }.apply {
+            setUseIconAsLink(true)
             setIcon(NavTint.CLEAR)
             toolTipText = "Clear resolved (kept/reverted) edits"
         }
@@ -99,6 +151,7 @@ class ObservatoryEditorBanner : EditorNotificationProvider, DumbAware {
         panel.createActionLabel("Spotlight") {
             com.cellobservatory.observatory.ui.inline.InlineOverlay.getInstance(project).toggleHeatmap()
         }.apply {
+            setUseIconAsLink(true)
             setIcon(NavTint.SPOTLIGHT)
             toolTipText = "Toggle file heatmap (spotlight Claude's edits)"
         }

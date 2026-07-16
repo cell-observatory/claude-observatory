@@ -3,7 +3,7 @@
 // webview: plan → chapters filling → a subagent → a workflow run → WYSIWYG review → auto-clear.
 //
 // This one is a hand-authored mockup animation (the Swing panel can't render headlessly), faithful to
-// ChangeMapPanel.kt's real layout: the Fleet/Workflows nav tabs, vertical chapter rows with ✓ ↩ 🧹
+// ChangeMapPanel.kt's real layout: the Fleet/Workflows nav tabs, vertical chapter rows with the tinted
 // mini-buttons, the module strip, and the ledger list — in the PyCharm 2026 New UI dark palette
 // (same tokens as docs/media/pyc-layout.src.html).
 //
@@ -42,6 +42,7 @@ const CSS = `
   .toolbar{margin-left:auto;display:flex;gap:10px;align-items:center;color:var(--dim);font-size:11.5px;white-space:nowrap}
   .toolbar .b{border:1px solid var(--border2);border-radius:6px;padding:2px 9px;background:var(--panel2)}
   .toolbar .b.tog{color:var(--ink);border-color:var(--blue)}
+  .toolbar .sep{width:1px;align-self:stretch;background:var(--border2);margin:1px 2px}
   .main{flex:1;display:flex;min-height:0}
   .nav{width:25%;min-width:230px;border-right:1px solid var(--border);background:var(--panel2);display:flex;flex-direction:column}
   .nav-tabs{display:flex;gap:2px;padding:7px 10px 0;border-bottom:1px solid var(--border);font-size:12px;color:var(--dim)}
@@ -84,6 +85,15 @@ const CSS = `
 
 const spark = (bars) => `<span class="spark">${bars.map((b) => `<i style="height:${Math.max(2, Math.round(b * 11))}px"></i>`).join('')}</span>`;
 const Y = 'var(--yellow)', G = 'var(--green)', B = 'var(--blue)', F = 'var(--faint)';
+const R = '#E5534B', O = '#D9822B', P = '#9A6AC2', BLUE = '#4C8BF5';
+// Emoji-free mini icons — the platform icons the JB chips/toolbar actually show (commit-check /
+// VCS history / GC trash / find / bulb), as tiny inline SVGs.
+const ico = (d) => `<svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px">${d}</svg>`;
+const icoCommit = ico('<circle cx="8" cy="8" r="6"/><path d="M5.2 8.2l2 2 3.6-4"/>');
+const icoHistory = ico('<path d="M2.5 8a5.5 5.5 0 1 1 1.6 3.9"/><path d="M2.5 8L1.2 6.5M2.5 8L4 6.8"/><path d="M8 5.2V8l2.2 1.6"/>');
+const icoTrash = ico('<path d="M2.5 4.5h11M6.5 2.5h3M4.5 4.5l.7 9h5.6l.7-9M6.7 7v4M9.3 7v4"/>');
+const icoFind = ico('<circle cx="6.8" cy="6.8" r="4.5"/><path d="M10.2 10.2L14 14"/>');
+const icoBulb = ico('<path d="M6 12.5h4M6.7 14.5h2.6M8 1.8a4.4 4.4 0 0 0-2.6 7.9c.7.5 1.1 1.1 1.1 1.8v.5h3v-.5c0-.7.4-1.3 1.1-1.8A4.4 4.4 0 0 0 8 1.8z"/>');
 
 const agentRow = ({ phase, phaseColor, added, removed, sub, sel }) => `
   <div class="agent${sel ? ' sel' : ''}">
@@ -98,7 +108,7 @@ const chRow = ({ g, gc, title, syn, m, pending, act, kept }) => `
   <div class="chrow"><span class="g" style="color:${gc}">${g}</span>
     <span class="t${syn ? ' dim' : ''}">${title}</span>${syn ? '<span class="chip">session</span>' : ''}
     <span class="m">${m}${pending ? ` · <span style="color:${Y}">${pending}</span>` : ''}</span>
-    ${act ? `<span class="acts"><span style="color:${G}">✓</span><span style="color:${Y}">↩</span><span style="color:${F}">🧹</span></span>` : '<span style="width:44px"></span>'}
+    ${act ? `<span class="acts"><span style="color:${G}">${icoCommit}</span><span style="color:${R}">${icoHistory}</span><span style="color:${O}">${icoTrash}</span></span>` : '<span style="width:44px"></span>'}
   </div>`;
 
 const led = ({ c, f, mod, w, pm, st, stc }) => `
@@ -120,7 +130,7 @@ const wfRun = ({ running, sel }) => `
 const frame = ({ tab = 'fleet', agent, wf, chapters, mods, files, empty, cap }) => `<!doctype html><html><head><meta charset="utf-8"><style>${CSS}</style></head><body>
   <div class="tw-head"><span class="title">Claude Observatory Dashboards</span>
     <span class="tw-tabs"><span>Observations</span><span class="on">Overview</span><span>Stats</span></span>
-    <span class="toolbar"><span class="b">Accept All</span><span class="b">Revert All</span><span class="b">Clear Resolved</span><span class="b tog">Active only</span><span class="b">⟳</span></span></div>
+    <span class="toolbar"><span class="b" style="color:${P}">${icoFind} Search</span><span class="b tog">Active only</span><span class="sep"></span><span class="b" style="color:${G}">✓ Keep</span><span class="b" style="color:${R}">↩ Undo</span><span class="sep"></span><span class="b" style="color:${G}">✓✓ Accept File</span><span class="b" style="color:${R}">✕ Reject File</span><span class="sep"></span><span class="b" style="color:${G}">${icoCommit} Accept All</span><span class="b" style="color:${R}">${icoHistory} Revert All</span><span class="b" style="color:${O}">${icoTrash} Clear Resolved</span><span class="sep"></span><span class="b" style="color:${P}">${icoBulb} Spotlight</span><span class="b">⟳</span></span></div>
   <div class="main">
     <div class="nav">
       <div class="nav-tabs"><span class="${tab === 'fleet' ? 'on' : ''}">Fleet</span><span class="${tab === 'workflows' ? 'on' : ''}">Workflows</span><span>Tasks 2/3</span></div>
@@ -152,45 +162,45 @@ const beats = [
     cap: '▸ chapter 1 — feature scaling (2 edits land)',
     agent: { phase: 'working', phaseColor: G, added: 9, removed: 3 },
     chapters: [
-      { g: '◐', gc: Y, title: 'Add feature scaling to the pipeline', m: '+9 −3', pending: '2⏳', act: true },
+      { g: '◐', gc: Y, title: 'Add feature scaling to the pipeline', m: '+9 −3', pending: '2⧗', act: true },
       { g: '○', gc: F, title: 'Validate the training dataset', m: '', act: false },
       { g: '○', gc: F, title: 'Tests and docs', m: '', act: false },
     ],
     mods: [['observatory-demo', Y]],
     files: [
-      { c: Y, f: 'features.py', mod: 'observatory-demo', w: 80, pm: '+6', st: '1⏳', stc: Y },
-      { c: Y, f: 'train.py', mod: 'observatory-demo', w: 55, pm: '+3', st: '1⏳', stc: Y },
+      { c: Y, f: 'features.py', mod: 'observatory-demo', w: 80, pm: '+6', st: '1⧗', stc: Y },
+      { c: Y, f: 'train.py', mod: 'observatory-demo', w: 55, pm: '+3', st: '1⧗', stc: Y },
     ],
   },
   {
     cap: '▸ chapter 2 — dataset validation',
     agent: { phase: 'working', phaseColor: G, added: 16, removed: 3 },
     chapters: [
-      { g: '◐', gc: Y, title: 'Add feature scaling to the pipeline', m: '+9 −3', pending: '2⏳', act: true },
-      { g: '◐', gc: Y, title: 'Validate the training dataset', m: '+7 −0', pending: '1⏳', act: true },
+      { g: '◐', gc: Y, title: 'Add feature scaling to the pipeline', m: '+9 −3', pending: '2⧗', act: true },
+      { g: '◐', gc: Y, title: 'Validate the training dataset', m: '+7 −0', pending: '1⧗', act: true },
       { g: '○', gc: F, title: 'Tests and docs', m: '', act: false },
     ],
     mods: [['observatory-demo', Y], ['src/models', Y]],
     files: [
-      { c: Y, f: 'dataset.py', mod: 'src/models', w: 80, pm: '+7', st: '1⏳', stc: Y },
-      { c: Y, f: 'features.py', mod: 'observatory-demo', w: 75, pm: '+6', st: '1⏳', stc: Y },
-      { c: Y, f: 'train.py', mod: 'observatory-demo', w: 50, pm: '+3', st: '1⏳', stc: Y },
+      { c: Y, f: 'dataset.py', mod: 'src/models', w: 80, pm: '+7', st: '1⧗', stc: Y },
+      { c: Y, f: 'features.py', mod: 'observatory-demo', w: 75, pm: '+6', st: '1⧗', stc: Y },
+      { c: Y, f: 'train.py', mod: 'observatory-demo', w: 50, pm: '+3', st: '1⧗', stc: Y },
     ],
   },
   {
     cap: '▸ chapter 3 — tests, written by a subagent',
     agent: { phase: 'working', phaseColor: G, added: 28, removed: 3, sub: { phase: 'working' } },
     chapters: [
-      { g: '◐', gc: Y, title: 'Add feature scaling to the pipeline', m: '+9 −3', pending: '2⏳', act: true },
-      { g: '◐', gc: Y, title: 'Validate the training dataset', m: '+7 −0', pending: '1⏳', act: true },
-      { g: '◐', gc: Y, title: 'Tests and docs', m: '+12 −0', pending: '1⏳', act: true },
+      { g: '◐', gc: Y, title: 'Add feature scaling to the pipeline', m: '+9 −3', pending: '2⧗', act: true },
+      { g: '◐', gc: Y, title: 'Validate the training dataset', m: '+7 −0', pending: '1⧗', act: true },
+      { g: '◐', gc: Y, title: 'Tests and docs', m: '+12 −0', pending: '1⧗', act: true },
     ],
     mods: [['observatory-demo', Y], ['tests', Y], ['src/models', Y]],
     files: [
-      { c: Y, f: 'test_pipeline.py', mod: 'tests', w: 95, pm: '+12', st: '1⏳', stc: Y },
-      { c: Y, f: 'dataset.py', mod: 'src/models', w: 58, pm: '+7', st: '1⏳', stc: Y },
-      { c: Y, f: 'features.py', mod: 'observatory-demo', w: 55, pm: '+6', st: '1⏳', stc: Y },
-      { c: Y, f: 'train.py', mod: 'observatory-demo', w: 30, pm: '+3', st: '1⏳', stc: Y },
+      { c: Y, f: 'test_pipeline.py', mod: 'tests', w: 95, pm: '+12', st: '1⧗', stc: Y },
+      { c: Y, f: 'dataset.py', mod: 'src/models', w: 58, pm: '+7', st: '1⧗', stc: Y },
+      { c: Y, f: 'features.py', mod: 'observatory-demo', w: 55, pm: '+6', st: '1⧗', stc: Y },
+      { c: Y, f: 'train.py', mod: 'observatory-demo', w: 30, pm: '+3', st: '1⧗', stc: Y },
     ],
   },
   {
@@ -204,9 +214,9 @@ const beats = [
     tab: 'workflows',
     cap: '▸ the workflow completes — phases, agents, and its own chapter rollup',
     wf: { running: false, sel: true },
-    chapters: [{ g: '◐', gc: Y, title: 'Tests and docs', m: '+12 −0', pending: '1⏳', act: true }],
+    chapters: [{ g: '◐', gc: Y, title: 'Tests and docs', m: '+12 −0', pending: '1⧗', act: true }],
     mods: [['docs', Y]],
-    files: [{ c: Y, f: 'USAGE.md', mod: 'docs', w: 95, pm: '+12', st: '1⏳', stc: Y }],
+    files: [{ c: Y, f: 'USAGE.md', mod: 'docs', w: 95, pm: '+12', st: '1⧗', stc: Y }],
   },
   {
     cap: '✓ kept 1 edit(s) in task 500567ef — per-chapter accept',
@@ -214,12 +224,12 @@ const beats = [
     chapters: [
       { g: '●', gc: G, title: 'Add feature scaling to the pipeline', m: '+9 −3', act: true },
       { g: '●', gc: G, title: 'Validate the training dataset', m: '+7 −0', act: true },
-      { g: '◐', gc: Y, title: 'Tests and docs', m: '+24 −0', pending: '2⏳', act: true },
+      { g: '◐', gc: Y, title: 'Tests and docs', m: '+24 −0', pending: '2⧗', act: true },
     ],
     mods: [['docs', Y], ['tests', Y], ['observatory-demo', G], ['src/models', G]],
     files: [
-      { c: Y, f: 'USAGE.md', mod: 'docs', w: 95, pm: '+12', st: '1⏳', stc: Y },
-      { c: Y, f: 'test_pipeline.py', mod: 'tests', w: 95, pm: '+12', st: '1⏳', stc: Y },
+      { c: Y, f: 'USAGE.md', mod: 'docs', w: 95, pm: '+12', st: '1⧗', stc: Y },
+      { c: Y, f: 'test_pipeline.py', mod: 'tests', w: 95, pm: '+12', st: '1⧗', stc: Y },
       { c: G, f: 'dataset.py', mod: 'src/models', w: 58, pm: '+7', st: '✓', stc: G },
       { c: G, f: 'features.py', mod: 'observatory-demo', w: 55, pm: '+6', st: '✓', stc: G },
     ],

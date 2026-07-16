@@ -1,0 +1,41 @@
+name: Windows
+
+# Split from the old ci.yml so each platform / artifact carries its own README status badge
+# (badges are per-workflow). Nothing here needs a Claude account: unit tests run against temp
+# HOMEs with synthetic transcripts, the extension smoke test mocks the vscode API, and the e2e
+# harness drives the real bundled CLI + capture hook in an isolated store.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Least-privilege GITHUB_TOKEN — these jobs only checkout and upload artifacts.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (node ${{ matrix.node }})
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      # builds core + cli + the extension bundle, then runs core unit tests + the extension smoke test.
+      # Output is teed to a file and uploaded on failure, so failures are diagnosable from the artifact.
+      - run: npm test 2>&1 | tee test-output.txt
+        shell: bash
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: test-output-windows-node${{ matrix.node }}
+          path: test-output.txt
+      # e2e skipped on Windows: the harness isolates via $HOME, which node ignores there (USERPROFILE).

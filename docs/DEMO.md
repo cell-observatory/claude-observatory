@@ -503,9 +503,9 @@ session.)
 🔬 ad93a29f   185 edits · 20 pending · 27 kept · 57% reviewed · 3 agents · 2 err · 🛰 13 · ⇅ 3
 ● 1. Scaffold subagent tracking   ◐ 2. Risk + Egress audit   ○ 3. Update docs + showcase
 [██████████ core ██████████|████ vscode ████|██ docs ██|cli]
-extension.ts    vscode   ████████████  +751   6⏳
+extension.ts    vscode   ████████████  +751   6⧗
 changemap.ts    core     █████         +285   ✓
-README.md       docs     █              +44   2⏳
+README.md       docs     █              +44   2⧗
 ```
 
 Three layers, top to bottom:

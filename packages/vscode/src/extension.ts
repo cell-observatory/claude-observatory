@@ -2041,6 +2041,11 @@ function changeMapShell(): string {
   .cm-task:hover .cm-tbtns { opacity:1; }
   .cm-tb { background:transparent; border:0; color:inherit; font:inherit; font-size:14px; line-height:1; padding:2px 5px; cursor:pointer; opacity:0.85; }
   .cm-tb .codicon { font-size:14px; vertical-align:middle; }
+  /* chips carry the bulk actions' tints (they ARE those actions scoped to the chapter) */
+  .cm-tb.ok .codicon { color: var(--mt-done); }
+  .cm-tb.rj .codicon { color: var(--mt-warn); }
+  .cm-tb.cl .codicon { color: var(--mt-attn); }
+  .cm-tb.ch .codicon, .mt-chat .codicon { color: var(--mt-agent); font-size:12px; vertical-align:middle; }
   .cm-tb:hover { opacity:1; }
   .cm-tb.ok:hover { color: var(--cm-kept); }
   .cm-tb.rj:hover { color: var(--cm-risk); }
@@ -2736,7 +2741,7 @@ const OVERVIEW_SCRIPT = `
         '<span class="cm-md">'+esc(f.moduleLabel)+'</span>'+
         '<span class="cm-bar"><span class="cm-fill" style="width:'+w+'%;background:'+colorOf(f.status)+'"></span></span>'+
         '<span class="cm-n">+'+f.churn+'</span>'+
-        '<span class="cm-pd">'+(f.pending?('<span style="color:'+PAL.pending+'">'+f.pending+'⏳</span>'):('<span style="color:'+PAL.kept+'">✓</span>'))+'</span>'+
+        '<span class="cm-pd">'+(f.pending?('<span style="color:'+PAL.pending+'">'+f.pending+'⧗</span>'):('<span style="color:'+PAL.kept+'">✓</span>'))+'</span>'+
         '</button>';
     }
     var host=document.getElementById('cm-ledger');
@@ -2754,7 +2759,7 @@ const OVERVIEW_SCRIPT = `
     var clsline=cls.length? cls.slice(0,4).join(', ')+(cls.length>4?' +'+(cls.length-4):'') : 'file scope';
     return '<div class="tf">'+(f.agent?'<span class="ag">●</span> ':'')+esc(f.file)+(f.risk?' <span class="rk">⌐risk</span>':'')+'</div>'+
       '<div class="tm">'+esc(f.rel)+'</div>'+
-      '<div class="tm">+'+f.churn+' · '+f.cnt+' unit'+(f.cnt===1?'':'s')+' · '+f.kept+'✓ '+f.pending+'⏳ '+f.undone+'↩</div>'+
+      '<div class="tm">+'+f.churn+' · '+f.cnt+' unit'+(f.cnt===1?'':'s')+' · '+f.kept+'✓ '+f.pending+'⧗ '+f.undone+'↩</div>'+
       '<div class="tc">'+esc(clsline)+'</div>'+
       (f.reason?'<div class="tw">“'+esc(f.reason)+'”</div>':'')+
       (f.risk?'<div class="trk">⚠ '+esc(f.risk)+'</div>':'')+
@@ -2908,7 +2913,7 @@ const OVERVIEW_SCRIPT = `
       var st=t.status==='completed'?'done':(t.status==='in_progress'?'wip':'open');
       var glyph=st==='done'?'●':(st==='wip'?'◐':'○');
       var ch=t.chapterId?chBy[t.chapterId]:null;
-      var counts=(ch&&ch.edits>0)?('<span class="mt-tct">+'+ch.added+' −'+ch.removed+' · '+ch.edits+' edit'+(ch.edits===1?'':'s')+(ch.pending?' · '+ch.pending+'⏳':'')+'</span>'):'';
+      var counts=(ch&&ch.edits>0)?('<span class="mt-tct">+'+ch.added+' −'+ch.removed+' · '+ch.edits+' edit'+(ch.edits===1?'':'s')+(ch.pending?' · '+ch.pending+'⧗':'')+'</span>'):'';
       var dep=(t.blockedBy&&t.blockedBy.length)?'<span class="mt-tdep" title="blocked by #'+esc(t.blockedBy.join(', #'))+'">⛓ '+t.blockedBy.length+'</span>':'';
       return '<div class="mt-trow '+st+'" title="'+esc(t.description||t.subject)+'">'+
         '<span class="mt-tg">'+glyph+'</span><span class="mt-tid">#'+esc(t.id)+'</span>'+

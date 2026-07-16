@@ -58,8 +58,21 @@ Per-tag release artifacts and auto-generated notes are on the
     order, and its toolbar-only fleet filters (Clear Completed · Show Hidden · Clear Done Chapters)
     are gone — Active only already hides completed rows, and chapter clearing lives in the chapter
     context menu.
+  - **The JetBrains editor banner spells out its buttons**: the bare ↑ ↓ ◀ ▶ ✓ ↩ glyphs became
+    labeled, tinted buttons — Search · Prev/Next Edit · Prev/Next File · Accept File · Reject File ·
+    Clear · Spotlight — the same icons the nav bar wears.
   - **The Panels reference page shows panels only**: the status-bar / tab-bar / bubble glyph legends
-    came off `panels.html` — the workspace map and the per-panel gallery remain.
+    came off `panels.html` — the workspace map and the per-panel gallery remain, and the gallery
+    gains dedicated **Fleet / Workflows / Tasks** figures plus the five-group toolbar in the
+    Overview diagram.
+  - **All site mockups and GIFs regenerated emoji-free**: the demo/media mockups draw the real
+    codicon shapes (mini SVGs) with the product's labels, tints, and the current toolbar — no more
+    emoji stand-ins (the 🔬 brand mark stays). The ledger's pending marker likewise switched from
+    the ⏳ emoji to the monochrome ⧗ glyph in both editors.
+- **Per-platform CI badges**: the CI matrix split into per-OS workflows (Linux · macOS · Windows)
+  plus dedicated VS Code (.vsix build) and JetBrains (Gradle suite + plugin zip) workflows, so the
+  README now carries live status badges for each platform and editor alongside CodeQL, Pages,
+  Release, Dependabot, the latest release, and the license.
 
 ## [0.8.2] — 2026-07-16
 

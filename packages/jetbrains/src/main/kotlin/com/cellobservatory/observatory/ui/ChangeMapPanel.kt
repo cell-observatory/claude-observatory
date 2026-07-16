@@ -1047,9 +1047,11 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
                 row.add(JBLabel("+${ch.added} −${ch.removed}").apply { font = JBUI.Fonts.miniFont(); foreground = UIUtil.getContextHelpForeground() })
             }
             if (actable) {
-                row.add(miniButton(AllIcons.Actions.Checked, "Accept — keep the pending edits shown in this chapter") { withSession { s -> ReviewOps.keepTask(project, s, ch.id, title) } })
-                row.add(miniButton(AllIcons.Actions.Rollback, "Reject — revert the pending edits shown in this chapter") { withSession { s -> ReviewOps.undoTask(project, s, ch.id, title) } })
-                row.add(miniButton(AllIcons.Actions.GC, "Clear — drop this chapter's resolved edits") { withSession { s -> ReviewOps.clearTask(project, s, ch.id, title) } })
+                // The chips ARE the bulk actions retargeted to this chapter — same glyphs + tints as the
+                // toolbar's Accept All / Revert All / Clear Resolved (VS Code chip parity, one icon per action).
+                row.add(miniButton(NavTint.ACCEPT_ALL, "Accept — keep the pending edits shown in this chapter") { withSession { s -> ReviewOps.keepTask(project, s, ch.id, title) } })
+                row.add(miniButton(NavTint.REVERT_ALL, "Reject — revert the pending edits shown in this chapter") { withSession { s -> ReviewOps.undoTask(project, s, ch.id, title) } })
+                row.add(miniButton(NavTint.CLEAR, "Clear — drop this chapter's resolved edits") { withSession { s -> ReviewOps.clearTask(project, s, ch.id, title) } })
             }
             return row
         }
@@ -1203,7 +1205,7 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
                 selected = isSelected
                 toolTipText = buildString {
                     append(v.rel)
-                    append("\n+${v.churn} · ${v.cnt} unit(s) · ${v.kept}✓ ${v.pending}⏳ ${v.undone}↩")
+                    append("\n+${v.churn} · ${v.cnt} unit(s) · ${v.kept}✓ ${v.pending}⧗ ${v.undone}↩")
                     if (v.classes.isNotEmpty()) append("\n" + v.classes.take(4).joinToString(", "))
                     v.reason?.let { append("\n“$it”") }
                     v.risk?.let { append("\n⚠ $it") }
@@ -1257,7 +1259,7 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
                 g2.drawString(num, x + numW - g2.fontMetrics.stringWidth(num), mid + JBUI.scale(3))
                 x += numW + JBUI.scale(4)
 
-                val pend = if (v.pending > 0) "${v.pending}⏳" else "✓"
+                val pend = if (v.pending > 0) "${v.pending}⧗" else "✓"
                 g2.color = if (v.pending > 0) CM_PENDING else CM_KEPT
                 g2.drawString(pend, x + pendW - g2.fontMetrics.stringWidth(pend), mid + JBUI.scale(3))
             }
