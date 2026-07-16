@@ -24,8 +24,9 @@ repo and the observatory unifies them into a single **fleet**, right inside the 
 **master–detail** panel. Its **Fleet** tab lists every running agent with a live **phase** (working /
 awaiting-input / awaiting-permission / idle / errored / done; `~` marks an inferred one), an activity
 sparkline, its ±diff, risk, and a cross-agent file-collision strip; nested **subagents** show their task
-and to-dos. A companion **Workflows** tab tracks Claude Code's multi-agent orchestration runs; the right
-pane is the selected item's **change-map**. Still **zero extra Claude tokens**, still fully **local**, and
+and to-dos. A companion **Workflows** tab tracks Claude Code's multi-agent orchestration runs, and a **Tasks**
+tab shows the session's numbered task list — each task linked to its chapter, with live statuses and
+per-task edit counts; the right pane is the selected item's **change-map**. Still **zero extra Claude tokens**, still fully **local**, and
 the worktree correlation is **git-free** — it reads the `.git` pointer files, never the git binary.
 
 ![The Overview's Fleet tab: one row per running agent across the repo's git worktrees — a live phase badge (working / awaiting / done), branch, an activity sparkline, ±lines, risk and collision counts; nested subagents with their task, to-dos and a chat button; and a cross-agent File Collisions strip](docs/media/multitasking.png)

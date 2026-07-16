@@ -28,6 +28,7 @@ import * as crypto from 'crypto';
 import { projectDir } from './session';
 import { handleHookPayload } from './capture';
 import { readLog, clearResolved, removeSession, isSafeSessionId } from './store';
+import { claudeConfigDir } from './paths';
 
 export interface DemoOptions {
   /** Workspace folder the demo edits live in (created if missing). Default: `<cwd>/observatory-demo`. */
@@ -171,6 +172,46 @@ export async function runDemo(opts: DemoOptions = {}): Promise<DemoResult> {
     result(id);
   };
 
+  // The NUMBERED task list (TaskCreate/TaskUpdate, 0.8.3) — seeded alongside the todos so the
+  // Overview's Tasks tab shows live, LINKED data. Same titles as the to-dos: the merged plan dedupes
+  // (todos win), so this never mints twin chapters. Task state is written both ways a real session
+  // leaves it: transcript tool calls (the history + spans) AND the live task-dir files.
+  const taskDir = path.join(claudeConfigDir(), 'tasks', session);
+  const TASKS: { subject: string; description: string; activeForm: string }[] = [
+    { subject: 'Add feature scaling to the pipeline', description: 'z-score scale() in features.py, wired into train.py', activeForm: 'Adding feature scaling' },
+    { subject: 'Validate the training dataset', description: 'Dataset.validate() — length match + non-empty', activeForm: 'Validating the dataset' },
+    { subject: 'Tests and docs', description: 'subagent tests + workflow usage docs', activeForm: 'Writing tests and docs' },
+  ];
+  const taskStatus = ['pending', 'pending', 'pending'];
+  const writeTaskFiles = () => {
+    fs.mkdirSync(taskDir, { recursive: true });
+    TASKS.forEach((t, i) =>
+      fs.writeFileSync(
+        path.join(taskDir, `${i + 1}.json`),
+        JSON.stringify({ id: String(i + 1), subject: t.subject, description: t.description, activeForm: t.activeForm, status: taskStatus[i], blocks: [], blockedBy: [] })
+      ));
+  };
+  const taskCreateAll = () => {
+    TASKS.forEach((t, i) => {
+      const id = tid();
+      assistant([{ type: 'tool_use', id, name: 'TaskCreate', input: { subject: t.subject, description: t.description, activeForm: t.activeForm } }]);
+      append({
+        type: 'user',
+        sessionId: session,
+        timestamp: clock.iso(),
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: `Task #${i + 1} created successfully: ${t.subject}` }] },
+      });
+    });
+    writeTaskFiles();
+  };
+  const taskUpdate = (n: number, status: string) => {
+    taskStatus[n - 1] = status;
+    const id = tid();
+    assistant([{ type: 'tool_use', id, name: 'TaskUpdate', input: { taskId: String(n), status } }]);
+    result(id);
+    writeTaskFiles();
+  };
+
   /** A REAL captured edit: Pre hook → mutate the file → Post hook (the store record every review
    *  surface acts on), plus the matching transcript tool_use so reasoning/actions correlate. */
   const edit = (rel: string, newContent: string, reasoning: string, tool: 'Edit' | 'Write' = 'Edit') => {
@@ -213,12 +254,14 @@ export async function runDemo(opts: DemoOptions = {}): Promise<DemoResult> {
   append({ type: 'ai-title', aiTitle: 'Pipeline: scaling, validation, tests', timestamp: clock.iso() });
   assistant([{ type: 'text', text: 'I will plan this as three tasks: feature scaling, dataset validation, then tests and docs via a subagent and a workflow.' }]);
 
-  await beat('▸ plan — three to-dos (the Overview chapters)');
+  await beat('▸ plan — three to-dos (the Overview chapters) + the numbered task list');
   todos([
     { content: 'Add feature scaling to the pipeline', status: 'in_progress' },
     { content: 'Validate the training dataset', status: 'pending' },
     { content: 'Tests and docs', status: 'pending' },
   ]);
+  taskCreateAll();
+  taskUpdate(1, 'in_progress');
 
   await beat('▸ chapter 1 — feature scaling (2 edits)');
   edit(
@@ -248,6 +291,8 @@ export async function runDemo(opts: DemoOptions = {}): Promise<DemoResult> {
     { content: 'Validate the training dataset', status: 'in_progress' },
     { content: 'Tests and docs', status: 'pending' },
   ]);
+  taskUpdate(1, 'completed');
+  taskUpdate(2, 'in_progress');
   edit(
     'src/models/dataset.py',
     'class Dataset:\n    def __init__(self, features, labels):\n        self.features = features\n        self.labels = labels\n\n    def validate(self):\n        if len(self.features) != len(self.labels):\n            return {"ok": False, "error": "features/labels length mismatch"}\n        if not self.features:\n            return {"ok": False, "error": "empty dataset"}\n        return {"ok": True}\n',
@@ -260,6 +305,8 @@ export async function runDemo(opts: DemoOptions = {}): Promise<DemoResult> {
     { content: 'Validate the training dataset', status: 'completed' },
     { content: 'Tests and docs', status: 'in_progress' },
   ]);
+  taskUpdate(2, 'completed');
+  taskUpdate(3, 'in_progress');
   const subDir = path.join(proj, session, 'subagents');
   fs.mkdirSync(subDir, { recursive: true });
   const spawnId = tid();
@@ -407,6 +454,7 @@ export async function runDemo(opts: DemoOptions = {}): Promise<DemoResult> {
     { content: 'Validate the training dataset', status: 'completed' },
     { content: 'Tests and docs', status: 'completed' },
   ]);
+  taskUpdate(3, 'completed');
   assistant([
     {
       type: 'text',
@@ -457,6 +505,7 @@ export function cleanDemo(opts: { cwd?: string; dir?: string } = {}): DemoCleanR
     try {
       fs.rmSync(path.join(proj, name), { force: true });
       fs.rmSync(path.join(proj, id), { recursive: true, force: true }); // subagents/ + workflows/
+      fs.rmSync(path.join(claudeConfigDir(), 'tasks', id), { recursive: true, force: true }); // the task list (0.8.3)
       removeSession(id); // the store (log + blobs)
       sessions.push(id);
     } catch {

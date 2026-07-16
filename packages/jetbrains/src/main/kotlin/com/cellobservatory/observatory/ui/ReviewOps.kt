@@ -124,11 +124,15 @@ object ReviewOps {
         if (dirty.isNotEmpty()) {
             if (!confirmSaveAll(project, dirty)) return
         }
+        // A WARNING, not a question — this rewrites files on disk, and the count can be large.
+        val fileCount = list.map { it.file }.distinct().size
         val ok = Messages.showYesNoDialog(
             project,
-            "Undo ${list.size} edit(s) in $scope? Later-overlapping edits may conflict (undo those individually to force-restore).",
-            "Claude Observatory",
-            "Undo All", "Cancel", Messages.getQuestionIcon(),
+            "Revert ${list.size} pending edit(s) across $fileCount file(s) in $scope?\n\n" +
+                "This rewrites the files on disk. Later-overlapping edits may conflict " +
+                "(revert those individually to force-restore).",
+            "Revert Claude's Edits",
+            "Revert ${list.size} Edit(s)", "Cancel", Messages.getWarningIcon(),
         )
         if (ok != Messages.YES) return
         val files = list.map { it.file }.distinct()

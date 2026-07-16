@@ -2,7 +2,7 @@
   "name": "claude-observatory-vscode",
   "displayName": "Claude Observatory",
   "description": "A running list of every file change Claude Code makes, each with its own Keep / Undo (surgical, git-free).",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "publisher": "claude-observatory",
   "private": true,
   "engines": {
@@ -914,7 +914,7 @@
     "package": "vsce package --no-dependencies -o claude-observatory.vsix"
   },
   "devDependencies": {
-    "@claude-observatory/core": "0.8.2",
+    "@claude-observatory/core": "0.8.3",
     "@types/node": "^22.0.0",
     "@types/vscode": "^1.85.0",
     "@vscode/codicons": "^0.0.45",

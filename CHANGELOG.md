@@ -5,6 +5,35 @@ All notable changes to Claude Observatory are recorded here, following
 Per-tag release artifacts and auto-generated notes are on the
 [Releases page](https://github.com/cell-observatory/claude-observatory/releases).
 
+## [0.8.3] — 2026-07-16
+
+### Added
+
+- **The Overview tracks Claude's task list — fully linked to chapters and edits** (CLI + both
+  editors). A third left-nav tab — Fleet · Workflows · **Tasks** — shows the session's numbered tasks
+  (Claude Code's newer TaskCreate/TaskUpdate system). Task events are mined from the transcript and
+  merged into the same snapshot stream as the TodoWrite to-dos (todos win duplicate titles), so a
+  task-planned session gets **real chapters with edit attribution and per-task Accept / Reject /
+  Clear** — work that used to pile into the synthesized session chapter now lands under its task. Tab
+  rows join their chapters (`chapterId`) to carry live `+added −removed · edits · pending` counts,
+  statuses show with a done badge / spinner label / strikethrough, and the transcript history keeps
+  archived tasks visible after the runtime prunes their files. `multitask --json` gains the `tasks`
+  array (additive), TaskCreate/TaskUpdate classify under To-dos in the Actions timeline, and the
+  bundled demo seeds three linked tasks (removed without residue by `demo --clean`). The tab lists
+  newest first, completed tasks fold behind a "N done · show all" row (the fleet's dismiss pattern),
+  and the Active-only toggle hides them outright. The chapter-row chip buttons also switched to the
+  same codicons the Overview toolbar uses.
+
+### Changed
+
+- **Live conflicts moved to the Actions panel** (both editors): the cross-agent contested-files list
+  now leads the session's audit surface — expanded by default, orange, click a file to open it — and
+  the Overview's fleet nav dropped its conflicts strip. Fleet rows keep their per-agent ⛒ collision
+  badges.
+- **Revert All warns like it means it** (both editors): the confirmation is now a warning-grade
+  dialog stating the full blast radius — "Revert N edit(s) across M file(s)… this rewrites the files
+  on disk" — with an explicit count-bearing button, replacing the softer question-style prompt.
+
 ## [0.8.2] — 2026-07-16
 
 Presentation fixes across the JetBrains Overview and the web demos.

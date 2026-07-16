@@ -5,6 +5,7 @@ import com.cellobservatory.observatory.core.ObservatoryCli
 import com.cellobservatory.observatory.core.StoreReader
 import com.cellobservatory.observatory.model.ActionGroup
 import com.cellobservatory.observatory.model.ActionRecord
+import com.cellobservatory.observatory.model.Collision
 import com.cellobservatory.observatory.model.EgressChannel
 import com.cellobservatory.observatory.model.MtActions
 import com.cellobservatory.observatory.services.ObservatoryService
@@ -39,6 +40,9 @@ import javax.swing.tree.TreeSelectionModel
 class ActionsPanel(private val project: Project) : SimpleToolWindowPanel(true, true) {
 
     @Volatile private var actions: MtActions? = null
+    /** Live cross-agent file conflicts — moved here from the Overview's fleet nav (0.8.3): this is the
+     *  session's audit surface, and a contested file is exactly the kind of thing it should lead with. */
+    @Volatile private var collisions: List<Collision> = emptyList()
 
     private val actionsRoot = DefaultMutableTreeNode()
     private val actionsModel = DefaultTreeModel(actionsRoot)
@@ -57,6 +61,13 @@ class ActionsPanel(private val project: Project) : SimpleToolWindowPanel(true, t
         actionsTree.addMouseListener(object : MouseAdapter() {
             override fun mouseClicked(e: MouseEvent) {
                 if (e.clickCount != 2) return
+                // A conflict row opens the contested file itself.
+                ((actionsTree.lastSelectedPathComponent as? DefaultMutableTreeNode)?.userObject as? Collision)?.let { c ->
+                    val vf = com.intellij.openapi.vfs.LocalFileSystem.getInstance().refreshAndFindFileByPath(c.file)
+                    if (vf == null) ReviewOps.notify(project, "File not found: ${c.file}", com.intellij.notification.NotificationType.WARNING)
+                    else com.intellij.openapi.fileEditor.FileEditorManager.getInstance(project).openFile(vf, true)
+                    return
+                }
                 val a = (actionsTree.lastSelectedPathComponent as? DefaultMutableTreeNode)?.userObject as? ActionRecord ?: return
                 val id = a.editId ?: return // only file-edit actions link to a reviewable store record
                 val session = session() ?: return
@@ -103,6 +114,7 @@ class ActionsPanel(private val project: Project) : SimpleToolWindowPanel(true, t
         ApplicationManager.getApplication().invokeLater {
             if (project.isDisposed) return@invokeLater
             actions = mt?.actions
+            collisions = mt?.collisions ?: emptyList()
             repaintActions()
         }
     }
@@ -111,6 +123,14 @@ class ActionsPanel(private val project: Project) : SimpleToolWindowPanel(true, t
      *  destinations root. The fleet/subagent categories are already dropped in core — the panel only paints. */
     private fun repaintActions() {
         actionsRoot.removeAllChildren()
+        // Conflicts lead — they need eyes NOW (unlike the calm categories below, they start expanded).
+        val cols = collisions
+        var conflictsNode: DefaultMutableTreeNode? = null
+        if (cols.isNotEmpty()) {
+            conflictsNode = DefaultMutableTreeNode(ConflictsRoot(cols))
+            cols.forEach { conflictsNode.add(DefaultMutableTreeNode(it)) }
+            actionsRoot.add(conflictsNode)
+        }
         val a = actions
         a?.groups?.forEach { g ->
             val gNode = DefaultMutableTreeNode(g)
@@ -124,12 +144,17 @@ class ActionsPanel(private val project: Project) : SimpleToolWindowPanel(true, t
         }
         actionsModel.reload()
         // Categories collapsed by default: expand only the (hidden) root so the category headers show,
-        // but leave each category's rows collapsed — the user expands the ones they want.
+        // but leave each category's rows collapsed — the user expands the ones they want. Live conflicts
+        // are the exception: they start expanded.
         actionsTree.expandPath(TreePath(actionsRoot))
+        conflictsNode?.let { actionsTree.expandPath(TreePath(it.path)) }
     }
 
     /** Marker userObject for the Egress root — carries the off-machine destinations under it. */
     private class EgressRoot(val channels: List<EgressChannel>)
+
+    /** Marker userObject for the Live-conflicts root (files pending in 2+ both-active agents). */
+    private class ConflictsRoot(val collisions: List<Collision>)
 
     /** Renders the Actions timeline: category groups (Edits / Commands / Reads / Searches / To-dos …), their
      *  tool calls (each stamped HH:mm), and the Egress destinations root — the same timeline style. */
@@ -142,6 +167,19 @@ class ActionsPanel(private val project: Project) : SimpleToolWindowPanel(true, t
             leaf: Boolean, row: Int, hasFocus: Boolean,
         ) {
             when (val node = (value as? DefaultMutableTreeNode)?.userObject) {
+                is ConflictsRoot -> {
+                    icon = AllIcons.General.Warning
+                    append("Live conflicts", SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, JBColor.ORANGE))
+                    val pend = node.collisions.count { it.anyPending }
+                    append("  ${node.collisions.size}" + if (pend > 0) " · $pend pending" else "", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                    toolTipText = "Files being touched by more than one active agent right now — double-click one to open it"
+                }
+                is Collision -> {
+                    icon = AllIcons.Actions.Copy
+                    append(node.file.substringAfterLast('/'), amber)
+                    append("  ${node.agents.size} agents" + if (node.anyPending) " · pending" else "", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                    toolTipText = "${node.file} — ${node.agents.joinToString(", ") { it.take(8) }} · double-click to open"
+                }
                 is EgressRoot -> {
                     icon = AllIcons.General.Web
                     append("Egress")

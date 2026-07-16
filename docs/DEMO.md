@@ -21,8 +21,10 @@ claude-observatory demo          # run it in an open workspace and watch every p
 ```
 
 Open the Overview while it runs: the chapter ribbon fills chapter by chapter, the Fleet nav gains a
-subagent and a workflow, and Observations streams the reasoning. The edits are real store records on
-real files, so Accept / Reject / task-scoped review all genuinely work. When you're done:
+subagent and a workflow, the Tasks tab counts down three numbered tasks linked to those same chapters
+(live statuses + per-task edit counts), and Observations streams the reasoning. The edits are real
+store records on real files, so Accept / Reject / task-scoped review all genuinely work. When you're
+done:
 
 ```bash
 claude-observatory demo --clean  # removes the demo session, its store, and the demo folder
@@ -417,7 +419,7 @@ one's **change-map**. A **title bar** across the top carries a session selector,
 bar, and the session-wide bulk actions. It answers two questions at once — *what is my whole fleet doing
 right now* and *where did the work land, what still needs my eyes*.
 
-![Overview — the master-detail panel: a left nav with Fleet and Workflows tabs feeding the right-hand change-map detail (task ribbon, module proportion strip, file ledger), under a title bar with the review nav bar and bulk actions](media/overview-tabs.png)
+![Overview — the master-detail panel: a left nav with Fleet, Workflows, and Tasks tabs feeding the right-hand change-map detail (task ribbon, module proportion strip, file ledger), under a title bar with the review nav bar and bulk actions](media/overview-tabs.png)
 
 #### Left nav → **Fleet** — every running agent, live
 

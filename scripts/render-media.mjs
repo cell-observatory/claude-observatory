@@ -384,6 +384,7 @@ const changeMapCol = `
       <div style="display:flex;gap:11px;font-size:9.5px;letter-spacing:.04em;margin-bottom:6px">
         <span style="color:var(--ink);border-bottom:1.5px solid var(--accent);padding-bottom:3px">Fleet</span>
         <span style="color:var(--faint)">Workflows</span>
+        <span style="color:var(--faint)">Tasks 2/3</span>
       </div>
       ${cmFleetRow('var(--blue)', 'demo', 'demo/pipeline', [.3, .6, .4, .8, .5, .9, .7, 1], true)}
       ${cmFleetRow('var(--pending)', 'demo', 'feat-x', [.5, .7, .3, .6, .8, .4, .6, .5], false)}
@@ -447,6 +448,7 @@ const multitaskingBody = `
   <div style="display:flex;align-items:center;gap:14px;padding:9px 16px 0;border-bottom:1px solid var(--border);font-size:12px">
     <span style="color:var(--ink);border-bottom:1.5px solid var(--accent);padding-bottom:8px">Fleet</span>
     <span style="color:var(--faint);padding-bottom:8px">Workflows</span>
+    <span style="color:var(--faint);padding-bottom:8px">Tasks 2/3</span>
     <span style="color:var(--faint)">·</span><span style="color:var(--dim)">3 agents</span>
     <span style="color:var(--blue)">1 active</span>
     <span style="color:var(--pending)">1 conflict</span>
@@ -491,6 +493,7 @@ const overviewTabsBody = `
       <div style="display:flex;gap:12px;padding:9px 12px 7px;border-bottom:1px solid var(--border);font-size:11.5px">
         <span style="color:var(--ink);border-bottom:1.5px solid var(--accent);padding-bottom:6px;margin-bottom:-8px">Fleet</span>
         <span style="color:var(--faint)">Workflows</span>
+        <span style="color:var(--faint)">Tasks 2/3</span>
       </div>
       ${ovAgentRow('var(--blue)', 'demo/pipeline', true, [.3, .6, .4, .8, .5, .9, .7, 1], 40, 3, true)}
       ${ovAgentRow('var(--pending)', 'feat-x', false, [.5, .7, .3, .6, .8, .4, .6, .5], 42, 7, false)}
@@ -871,7 +874,7 @@ for (const [name, html] of Object.entries(scenes)) {
   const src = join(tmp, `${name}.html`);
   writeFileSync(src, html);
   execFileSync(CHROME, [
-    '--headless', '--disable-gpu', '--default-background-color=00000000',
+    '--headless', '--disable-gpu', '--use-mock-keychain', '--password-store=basic', '--default-background-color=00000000',
     '--force-device-scale-factor=2', '--hide-scrollbars',
     `--screenshot=${join(OUT, `${name}.png`)}`,
     `--window-size=${SIZE[name] || '1028,344'}`,
@@ -884,7 +887,7 @@ for (const [name, html] of Object.entries(scenes)) {
 // which the shared VS Code scene bits above don't cover). Each sets its own 1568x830 body size.
 for (const name of ['pyc-layout']) {
   execFileSync(CHROME, [
-    '--headless', '--disable-gpu', '--default-background-color=00000000',
+    '--headless', '--disable-gpu', '--use-mock-keychain', '--password-store=basic', '--default-background-color=00000000',
     '--force-device-scale-factor=2', '--hide-scrollbars',
     `--screenshot=${join(OUT, `${name}.png`)}`,
     '--window-size=1900,860',

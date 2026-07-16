@@ -12,6 +12,7 @@ import com.cellobservatory.observatory.model.ChangeMapWorkflow
 import com.cellobservatory.observatory.model.Collision
 import com.cellobservatory.observatory.model.MtSubagent
 import com.cellobservatory.observatory.model.MultitaskResult
+import com.cellobservatory.observatory.model.SessionTask
 import com.cellobservatory.observatory.model.MultitaskFilter
 import com.cellobservatory.observatory.model.RunningAgent
 import com.cellobservatory.observatory.model.WorkflowAgent
@@ -160,12 +161,18 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         emptyText.text = "No workflow runs — Claude Code Workflow orchestrations appear here"
         cellRenderer = SparklineTreeRenderer(WorkflowRenderer())
     }
-    private val collisionStrip = JBLabel().apply {
-        font = JBUI.Fonts.miniFont()
-        border = JBUI.Borders.empty(3, 8)
+    // --- LEFT NAV, third tab: the session's numbered task list (TaskCreate/TaskUpdate) ---
+    /** One Tasks-tab row: the task + its change-map chapter (per-task ±/edit counts), when it has one. */
+    private data class TaskRow(val task: SessionTask, val chapter: ChangeMapChapter?)
+    /** The "N done · show all" collapse row — completed tasks fold behind it (fleet dismiss pattern). */
+    private data class DoneTasksToggle(val count: Int, val open: Boolean)
+    private var tasksOpen = false
+    private var lastTasks: List<SessionTask> = emptyList()
+    private val tasksModel = javax.swing.DefaultListModel<Any>()
+    private val tasksList = JBList(tasksModel).apply {
+        emptyText.text = "No tasks — this session plans with a task list only when Claude creates one"
+        cellRenderer = TaskRowRenderer()
     }
-    /** The collisions behind the strip — kept so a click can open the contested file(s). */
-    private var lastCollisions: List<Collision> = emptyList()
 
     // --- RIGHT DETAIL: the change-map for the selected nav item ---
     private val detailHost = JPanel(BorderLayout())
@@ -189,15 +196,14 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
     private lateinit var navTabs: JBTabbedPane
 
     init {
-        val fleetTab = OnePixelSplitter(true, 0.82f).apply {
-            firstComponent = JBScrollPane(fleetTree)
-            secondComponent = JBScrollPane(collisionStrip)
-        }
+        // (Live conflicts moved to the Actions panel in 0.8.3 — the fleet tab is just the tree now.)
         navTabs = JBTabbedPane().apply {
-            addTab("Fleet", fleetTab)
+            addTab("Fleet", JBScrollPane(fleetTree))
             setToolTipTextAt(0, "Running agents across every worktree — siblings + their subagents — with the live file-conflict strip below. Select one to map its changes.")
             addTab("Workflows", JBScrollPane(workflowsTree))
             setToolTipTextAt(1, "Claude Code Workflow runs — agents grouped by phase, with tokens/time/edits per run. Select one to map its changes.")
+            addTab("Tasks", JBScrollPane(tasksList))
+            setToolTipTextAt(2, "The session's task list (Claude's numbered TaskCreate/TaskUpdate tasks) — live statuses; completed tasks leave the list when the runtime archives them.")
         }
         // Left nav (Fleet · Workflows) = 25% of the panel; the change-map detail takes the remaining 75%.
         val split = OnePixelSplitter(false, 0.25f).apply {
@@ -283,9 +289,15 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             }
         })
 
-        // Clicking the conflict strip opens the contested file (a chooser when several collide).
-        collisionStrip.addMouseListener(object : MouseAdapter() {
-            override fun mouseClicked(e: MouseEvent) = openCollision()
+        // Clicking the Tasks tab's "N done · show all" row folds/unfolds the completed tasks.
+        tasksList.addMouseListener(object : MouseAdapter() {
+            override fun mouseClicked(e: MouseEvent) {
+                val i = tasksList.locationToIndex(e.point)
+                if (i >= 0 && tasksModel.get(i) is DoneTasksToggle) {
+                    tasksOpen = !tasksOpen
+                    repaintTasks(lastTasks)
+                }
+            }
         })
 
         ObservatoryService.getInstance(project).addListener { rebuild() }
@@ -380,10 +392,29 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         }
         fleetModel.reload()
         TreeUtil.expandAll(fleetTree)
-        updateCollisionStrip(res?.collisions ?: emptyList())
         repaintWorkflows(res?.workflows)
+        repaintTasks(res?.tasks ?: emptyList())
         restoreSelection()
         suppressSel = false
+    }
+
+    /** Paint the Tasks tab (the session's numbered task list, newest first) and badge the tab with
+     *  done/total. Each row joins its change-map chapter by chapterId (tasks ARE chapters) for per-task
+     *  ±/edits. Completed tasks fold behind a "N done · show all" row; Active-only hides them outright
+     *  (the same semantics the fleet's filters use). */
+    private fun repaintTasks(tasks: List<SessionTask>) {
+        lastTasks = tasks
+        val chBy = map?.chapters?.associateBy { it.id } ?: emptyMap()
+        val (done, active) = tasks.partition { it.status == "completed" }
+        tasksModel.clear()
+        active.forEach { tasksModel.addElement(TaskRow(it, chBy[it.chapterId])) }
+        if (!activeOnly && done.isNotEmpty()) {
+            tasksModel.addElement(DoneTasksToggle(done.size, tasksOpen))
+            if (tasksOpen) done.forEach { tasksModel.addElement(TaskRow(it, chBy[it.chapterId])) }
+        }
+        if (::navTabs.isInitialized && navTabs.tabCount > 2) {
+            navTabs.setTitleAt(2, if (tasks.isEmpty()) "Tasks" else "Tasks ${done.size}/${tasks.size}")
+        }
     }
 
     /** Paint the Workflows tab: one node per run — its INFORMATIVE name (description/summary) · agents ·
@@ -431,40 +462,7 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         return null
     }
 
-    private fun updateCollisionStrip(collisions: List<Collision>) {
-        lastCollisions = collisions
-        collisionStrip.cursor = if (collisions.isEmpty()) Cursor.getDefaultCursor() else Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
-        if (collisions.isEmpty()) {
-            collisionStrip.text = "No live file conflicts"
-            collisionStrip.foreground = UIUtil.getContextHelpForeground()
-            collisionStrip.toolTipText = "No file is being touched by more than one active agent right now"
-            return
-        }
-        val pending = collisions.count { it.anyPending }
-        collisionStrip.text = "⚠ ${collisions.size} live conflict${if (collisions.size == 1) "" else "s"}" +
-            if (pending > 0) " · $pending with pending edits" else ""
-        collisionStrip.foreground = MT_ATTENTION
-        collisionStrip.toolTipText = "<html>" + collisions.take(20).joinToString("<br>") { c ->
-            shortFile(c.file) + " — " + c.agents.joinToString(", ") { it.take(8) } + (if (c.anyPending) " ⏳" else "")
-        } + (if (collisions.size > 20) "<br>+${collisions.size - 20} more" else "") + "<br>Click to open</html>"
-    }
 
-    /** Open a contested file from the conflict strip — directly for one collision, via a chooser for
-     *  several (VS Code parity: its conflict rows open the file on click). */
-    private fun openCollision() {
-        val cols = lastCollisions
-        if (cols.isEmpty()) return
-        fun open(path: String) {
-            val vf = com.intellij.openapi.vfs.LocalFileSystem.getInstance().refreshAndFindFileByPath(path)
-            if (vf == null) ReviewOps.notify(project, "File not found: $path", com.intellij.notification.NotificationType.WARNING)
-            else com.intellij.openapi.fileEditor.FileEditorManager.getInstance(project).openFile(vf, true)
-        }
-        if (cols.size == 1) return open(cols.first().file)
-        JPopupMenu().apply {
-            cols.take(20).forEach { c -> add(menuItem(shortFile(c.file)) { open(c.file) }) }
-            show(collisionStrip, 0, collisionStrip.height)
-        }
-    }
 
     // --- the right detail: change-map for the selected nav item ---
 
@@ -801,6 +799,42 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         }
     }
 
+    /** Paints one Tasks-tab row: status glyph (the fleet's state colors) · #id · subject (struck through
+     *  when completed) · per-task ±/edits from its chapter · the in-progress activeForm · a blocked-by
+     *  note. Tooltip = the description. */
+    private class TaskRowRenderer : com.intellij.ui.ColoredListCellRenderer<Any>() {
+        override fun customizeCellRenderer(
+            list: javax.swing.JList<out Any>, value: Any?, index: Int, selected: Boolean, hasFocus: Boolean,
+        ) {
+            if (value is DoneTasksToggle) {
+                append("${value.count} done · ${if (value.open) "hide" else "show all"}", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                toolTipText = "Completed tasks fold here — click to ${if (value.open) "hide" else "show"} them"
+                return
+            }
+            val row = value as? TaskRow ?: return
+            val t = row.task
+            val done = t.status == "completed"
+            val wip = t.status == "in_progress"
+            append(
+                if (done) "● " else if (wip) "◐ " else "○ ",
+                SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, if (done) MT_DONE else if (wip) MT_WORKING else JBColor.GRAY),
+            )
+            append("#${t.id}  ", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
+            append(
+                clip(t.subject, 64),
+                if (done) SimpleTextAttributes(SimpleTextAttributes.STYLE_STRIKEOUT, JBColor.GRAY) else SimpleTextAttributes.REGULAR_ATTRIBUTES,
+            )
+            row.chapter?.takeIf { it.edits > 0 }?.let { ch ->
+                append("  +${ch.added}", MT_ADD)
+                append(" −${ch.removed}", MT_REM)
+                append(" · ${ch.edits} edit${if (ch.edits == 1) "" else "s"}" + if (ch.pending > 0) " · ${ch.pending} pending" else "", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
+            }
+            if (wip && t.activeForm != null) append("  ${t.activeForm}…", SimpleTextAttributes(SimpleTextAttributes.STYLE_ITALIC, MT_WORKING))
+            if (t.blockedBy.isNotEmpty()) append("  blocked ×${t.blockedBy.size}", SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, MT_ATTENTION))
+            toolTipText = t.description.ifBlank { t.subject }
+        }
+    }
+
     /** Wraps a tree cell renderer so rows that carry activity bins — fleet agents, workflow runs + their
      *  agents — get a painted [SparklineIcon] on the row's right edge. The panel stays non-opaque so the
      *  tree's wide-selection background shows through; the inner renderer's tooltip is forwarded. */
@@ -925,6 +959,10 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             ribbon.removeAll()
             val done = ArrayList<ChangeMapChapter>()
             data.chapters.forEach { ch ->
+                // Task-born chapters live on the Tasks tab — never duplicate them here (VS Code parity);
+                // and planned zero-edit rows stay hidden like VS Code's ribbon filter.
+                if (ch.fromTask) return@forEach
+                if (ch.edits == 0 && ch.status != "wip") return@forEach
                 if (ch.edits > 0 && ch.pending == 0 && ch.undone == 0) done.add(ch) else ribbon.add(chapterRow(ch))
             }
             if (done.isNotEmpty()) {

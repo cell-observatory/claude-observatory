@@ -912,12 +912,13 @@ async function undoAllSession(session: string): Promise<void> {
     );
     return;
   }
+  const fileCount = new Set(targets.map((t) => t.file)).size;
   const choice = await vscode.window.showWarningMessage(
-    `Revert all ${targets.length} edit(s) in this session? Overlapping edits may conflict.`,
-    { modal: true },
-    'Revert all'
+    `Revert all ${targets.length} edit(s) across ${fileCount} file(s) in this session?`,
+    { modal: true, detail: 'This rewrites the files on disk. Overlapping edits may conflict (revert those individually to force-restore).' },
+    `Revert ${targets.length} edits`
   );
-  if (choice !== 'Revert all') return;
+  if (choice !== `Revert ${targets.length} edits`) return;
   const res = core.undoScope(session);
   vscode.window.showInformationMessage(
     `Reverted ${res.undone} edit(s)` +
@@ -1458,8 +1459,10 @@ class ObservationsProvider implements vscode.TreeDataProvider<ObsNode> {
 type ActNode =
   | { kind: 'agroup'; label: string; count: number; errors: number; icon: string; actions: core.ActionRecord[] }
   | { kind: 'egroup'; channels: core.EgressChannel[] }
+  | { kind: 'cgroup'; collisions: core.FileCollision[] }
   | { kind: 'arow'; rec: core.ActionRecord }
-  | { kind: 'erow'; ch: core.EgressChannel };
+  | { kind: 'erow'; ch: core.EgressChannel }
+  | { kind: 'crow'; c: core.FileCollision };
 
 /** Category → codicon for the timeline's collapsible subsection headers + rows. */
 const ACTION_ICON: Record<string, string> = {
@@ -1478,29 +1481,33 @@ class ActionsProvider implements vscode.TreeDataProvider<ActNode> {
       this.view.description = session ? `session ${shortId(session)}` : undefined;
     }
   }
-  /** Curated groups (Subagents dropped — they're the Overview fleet) + the egress sub-report, from core. */
-  private groups(): { groups: core.ActionGroup[]; egress: core.EgressChannel[] } {
+  /** Curated groups (Subagents dropped — they're the Overview fleet) + egress + the live cross-agent
+   *  file conflicts (moved here from the Overview's fleet nav — this is the audit surface). */
+  private groups(): { groups: core.ActionGroup[]; egress: core.EgressChannel[]; collisions: core.FileCollision[] } {
     const session = currentSession();
     const cwd = workspaceRoot();
-    if (!session || !cwd) return { groups: [], egress: [] };
+    if (!session || !cwd) return { groups: [], egress: [], collisions: [] };
     const actions = core.parseActions(cwd, session);
     return {
       groups: core.buildActionGroups(actions).filter((g) => g.category !== 'agent'),
       egress: core.buildEgressReport(actions),
+      collisions: core.fleetConflicts(core.listRepoSiblings(cwd, session)),
     };
   }
   getChildren(node?: ActNode): ActNode[] {
     if (!node) {
-      const { groups, egress } = this.groups();
+      const { groups, egress, collisions } = this.groups();
       const feed: ActNode[] = groups.map((g): ActNode => ({
         kind: 'agroup', label: g.label, count: g.count, errors: g.errors,
         icon: ACTION_ICON[g.category] ?? 'circle-small', actions: g.actions,
       }));
       if (egress.length) feed.push({ kind: 'egroup', channels: egress });
+      if (collisions.length) feed.unshift({ kind: 'cgroup', collisions }); // conflicts lead — they need eyes NOW
       return feed;
     }
     if (node.kind === 'agroup') return node.actions.slice().reverse().map((rec): ActNode => ({ kind: 'arow', rec })); // newest-first
     if (node.kind === 'egroup') return node.channels.map((ch): ActNode => ({ kind: 'erow', ch }));
+    if (node.kind === 'cgroup') return node.collisions.map((c): ActNode => ({ kind: 'crow', c }));
     return [];
   }
   getTreeItem(node: ActNode): vscode.TreeItem {
@@ -1518,6 +1525,23 @@ class ActionsProvider implements vscode.TreeDataProvider<ActNode> {
       item.description = `${node.channels.length}`;
       item.iconPath = new vscode.ThemeIcon('radio-tower');
       item.contextValue = 'actionGroup';
+      return item;
+    }
+    if (node.kind === 'cgroup') {
+      // Live cross-agent conflicts — expanded (unlike the calm categories): they need eyes NOW.
+      const item = new vscode.TreeItem('Live conflicts', vscode.TreeItemCollapsibleState.Expanded);
+      const pend = node.collisions.filter((c) => c.anyPending).length;
+      item.description = `${node.collisions.length}${pend ? ` · ${pend} pending` : ''}`;
+      item.iconPath = new vscode.ThemeIcon('warning', new vscode.ThemeColor('charts.orange'));
+      return item;
+    }
+    if (node.kind === 'crow') {
+      const c = node.c;
+      const item = new vscode.TreeItem(path.basename(c.file), vscode.TreeItemCollapsibleState.None);
+      item.description = `${c.agents.length} agents${c.anyPending ? ' · pending' : ''}`;
+      item.tooltip = `${c.file}\ntouched by ${c.agents.map((a) => a.slice(0, 8)).join(', ')} — click to open`;
+      item.iconPath = new vscode.ThemeIcon('files', new vscode.ThemeColor('charts.orange'));
+      item.command = { command: 'vscode.open', title: 'Open', arguments: [vscode.Uri.file(c.file), { preview: true }] };
       return item;
     }
     if (node.kind === 'erow') {
@@ -1943,13 +1967,21 @@ function changeMapShell(): string {
   .mt-todo { font-size:9px; color: var(--vscode-descriptionForeground); flex:none; }
   .mt-chat { margin-left:auto; background:transparent; border:0; cursor:pointer; font-size:11px; padding:0 2px; flex:none; opacity:0.75; }
   .mt-chat:hover { opacity:1; }
-  .mt-collisions { flex:none; margin-top:6px; border-top:1px solid var(--cm-border); padding-top:5px; max-height:32%; overflow-y:auto; }
   .mt-chead { font-family: var(--cm-mono); text-transform:uppercase; letter-spacing:0.08em; font-size:9px; color: var(--vscode-descriptionForeground); margin-bottom:4px; }
-  .mt-crow { display:flex; align-items:center; gap:8px; font-size:10px; padding:1px 2px; cursor:pointer; border-radius:3px; }
-  .mt-crow:hover { background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.18)); }
-  .mt-cf { font-family: var(--cm-mono); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:0 1 auto; }
-  .mt-ca { color: var(--vscode-descriptionForeground); flex:none; }
-  .mt-cp { color: var(--mt-attn); flex:none; margin-left:auto; }
+  /* Tasks tab — the session's numbered task list */
+  .mt-trow { display:flex; align-items:baseline; gap:7px; font-size:11px; padding:2px 2px; border-radius:3px; }
+  .mt-trow .mt-tg { flex:none; }
+  .mt-trow.done .mt-tg { color: var(--mt-done); }
+  .mt-trow.wip .mt-tg { color: var(--mt-working); }
+  .mt-trow.open .mt-tg { color: var(--vscode-descriptionForeground); }
+  .mt-trow .mt-tid { flex:none; font-family: var(--cm-mono); color: var(--vscode-descriptionForeground); font-size:10px; }
+  .mt-trow .mt-ts { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .mt-trow.done .mt-ts { text-decoration: line-through; color: var(--vscode-descriptionForeground); }
+  .mt-trow .mt-taf { flex:none; font-style:italic; color: var(--mt-working); font-size:10px; }
+  .mt-trow .mt-tct { flex:none; font-family: var(--cm-mono); color: var(--vscode-descriptionForeground); font-size:10px; }
+  .mt-ttog { display:block; background:transparent; border:1px dashed var(--cm-border); border-radius:99px; color: var(--vscode-descriptionForeground); font:inherit; font-size:10px; padding:2px 9px; margin:4px 0 2px; cursor:pointer; }
+  .mt-ttog:hover { color: var(--vscode-foreground); }
+  .mt-trow .mt-tdep { flex:none; color: var(--mt-attn); font-size:10px; }
   .mt-none { padding:10px 2px; color: var(--vscode-descriptionForeground); font-size:11px; }
   /* Workflows: one row per run — informative name, per-phase progress, tokens/time/edits; selected outlined */
   .mt-wf { border:1px solid var(--cm-border); border-radius:5px; margin-bottom:5px; padding:5px 7px; cursor:pointer; }
@@ -2000,6 +2032,7 @@ function changeMapShell(): string {
   .cm-tbtns { display:flex; align-items:center; gap:1px; flex:none; margin-left:1px; opacity:0.55; }
   .cm-task:hover .cm-tbtns { opacity:1; }
   .cm-tb { background:transparent; border:0; color:inherit; font:inherit; font-size:14px; line-height:1; padding:2px 5px; cursor:pointer; opacity:0.85; }
+  .cm-tb .codicon { font-size:14px; vertical-align:middle; }
   .cm-tb:hover { opacity:1; }
   .cm-tb.ok:hover { color: var(--cm-kept); }
   .cm-tb.rj:hover { color: var(--cm-risk); }
@@ -2086,9 +2119,10 @@ function changeMapShell(): string {
     `<div class="ov-empty" id="ov-empty" style="display:none"></div>` +
     `<div class="ov-pane" id="ov-pane-fleet">` +
     `<div class="ov-list" id="ov-fleet"></div>` +
-    `<div class="mt-collisions" id="ov-collisions"></div>` +
     `</div>` +
     `<div class="ov-pane" id="ov-pane-workflows" style="display:none"><div class="ov-list" id="ov-workflows"></div></div>` +
+    // The session's TASK LIST (TaskCreate/TaskUpdate — the newer numbered system next to TodoWrite).
+    `<div class="ov-pane" id="ov-pane-tasks" style="display:none"><div class="ov-list" id="ov-tasks"></div></div>` +
     `</div>` +
     `<div class="ov-detail">` +
     `<div class="cm-ribbon" id="cm-ribbon" style="display:none"></div>` +
@@ -2578,11 +2612,13 @@ const OVERVIEW_SCRIPT = `
     var cid = esc(it.id==null?'':it.id);
     var tid = esc(it.taskId==null?'':it.taskId);
     var isSel = selectable && SEL_CH && SEL_CH.id===String(it.id);
+    // The SAME codicons the Overview toolbar uses (check / discard / clear-all / comment) — no
+    // one-off text glyphs here.
     var btns = (canAct || it.taskId!=null) ? ('<span class="cm-tbtns">'+
-        (it.taskId!=null?'<button class="cm-tb ch" data-chat="'+tid+'" title="Chat about this chapter — copies context, opens your Claude">💬</button>':'')+
-        (canAct?('<button class="cm-tb ok" data-keep="'+cid+'" title="Accept — keep all pending edits shown in this chapter">✓</button>'+
-          '<button class="cm-tb rj" data-undo="'+cid+'" title="Reject — undo all pending edits shown in this chapter">↩</button>'+
-          '<button class="cm-tb cl" data-clear="'+cid+'" title="Clear — drop resolved (kept/undone) edits in this chapter">🧹</button>'):'')+
+        (it.taskId!=null?'<button class="cm-tb ch" data-chat="'+tid+'" title="Chat about this chapter — copies context, opens your Claude"><i class="codicon codicon-comment"></i></button>':'')+
+        (canAct?('<button class="cm-tb ok" data-keep="'+cid+'" title="Accept — keep all pending edits shown in this chapter"><i class="codicon codicon-check"></i></button>'+
+          '<button class="cm-tb rj" data-undo="'+cid+'" title="Reject — undo all pending edits shown in this chapter"><i class="codicon codicon-discard"></i></button>'+
+          '<button class="cm-tb cl" data-clear="'+cid+'" title="Clear — drop resolved (kept/undone) edits in this chapter"><i class="codicon codicon-clear-all"></i></button>'):'')+
         '</span>') : '';
     return '<span class="cm-task'+(it.syn?' syn':'')+(isSel?' sel':'')+'"'+(selectable?' data-sel="'+cid+'"':'')+' title="'+esc(it.label)+' — '+it.r.edits+' edit(s) · '+it.st+(it.syn?' · work outside any to-do, attributed to the session':'')+(selectable?' · click to scope the bulk actions to this chapter':'')+'">'+
       '<span class="cm-cg '+it.st+'"></span>'+
@@ -2617,6 +2653,7 @@ const OVERVIEW_SCRIPT = `
     // Active-only: keep only chapters with pending (unreviewed) edits — drops resolved AND wip-but-idle
     // chapters (e.g. a still-open to-do whose edits were all cleared), so clearing everything empties the ribbon.
     for(var c=0;c<chs.length;c++){ var ch=chs[c];
+      if(ch.fromTask) continue; // task-born chapters live on the Tasks tab — never duplicate them here
       if(ACTIVE_ONLY ? !(ch.pending>0) : !(ch.edits>0 || ch.status==='wip')) continue;
       items.push({ id:ch.id, taskId:(ch.taskId!=null?ch.taskId:null), label:ch.title, syn:!!ch.synthetic, r:{edits:ch.edits,added:ch.added,removed:ch.removed,pending:ch.pending,kept:ch.kept,undone:ch.undone}, wip:ch.status==='wip' }); }
     // Keep the chapter selection valid against the current slice (refresh its label; drop it if it vanished).
@@ -2631,7 +2668,7 @@ const OVERVIEW_SCRIPT = `
     for(var i=0;i<active.length;i++) h+=taskChip(active[i]);
     if(done.length){ h+='<div class="cm-done-row">'+
       '<button class="cm-done-tog" title="'+done.length+' completed chapter(s)"><span class="cm-cg kept"></span>'+done.length+' done <span class="cm-caret">'+(RIB_OPEN?'▾':'▸')+'</span></button>'+
-      '<button class="cm-clear-done" title="Clear resolved (kept/undone) edits of every completed chapter">🧹 clear completed</button></div>'; }
+      '<button class="cm-clear-done" title="Clear resolved (kept/undone) edits of every completed chapter"><i class="codicon codicon-clear-all"></i> clear completed</button></div>'; }
     h+='</div>';
     if(done.length && RIB_OPEN){ h+='<div class="cm-rwrap cm-done-list">'; for(var d=0;d<done.length;d++) h+=taskChip(done[d]); h+='</div>'; }
     host.innerHTML=h;
@@ -2787,13 +2824,7 @@ const OVERVIEW_SCRIPT = `
     }
     if(!vis.length) h+='<div class="mt-none">'+(ACTIVE_ONLY?'No active agents.':'No agents to show.')+'</div>';
     host.innerHTML=h; wireFilterBar(host);
-    var c=(MT&&MT.collisions)||[], ch='';
-    for(var m=0;m<c.length;m++){ var cc=c[m];
-      ch+='<div class="mt-crow" data-path="'+esc(cc.file)+'" title="'+esc(cc.file)+' — click to open"><span class="mt-cf">'+esc(base(cc.file))+'</span><span class="mt-ca">'+((cc.agents&&cc.agents.length)||0)+' agents</span>'+(cc.anyPending?'<span class="mt-cp">pending</span>':'')+'</div>';
-    }
-    document.getElementById('ov-collisions').innerHTML = c.length? ('<div class="mt-chead">Live conflicts ('+c.length+')</div>'+ch) : '';
-    var crows=document.querySelectorAll('#ov-collisions .mt-crow');
-    for(var cr=0;cr<crows.length;cr++) crows[cr].addEventListener('click', function(){ vscode.postMessage({type:'openPath', path:this.getAttribute('data-path')}); });
+    // Live conflicts moved to the Actions panel (0.8.3) — the audit surface owns them now.
     var rows=host.querySelectorAll('.mt-agent');
     for(var r=0;r<rows.length;r++) rows[r].addEventListener('click', function(ev){ if(ev.target && String(ev.target.className||'').indexOf('mt-chat')>=0) return; var s=this.getAttribute('data-sess'); SEL={kind:'agent', session:s}; paint(); });
     var bs=host.querySelectorAll('.mt-chat');
@@ -2853,21 +2884,54 @@ const OVERVIEW_SCRIPT = `
     for(var q=0;q<wrows.length;q++) wrows[q].addEventListener('click', function(){ var id=this.getAttribute('data-wf'); if(id){ SEL={kind:'workflow', id:id}; WF_OPEN[id]=true; paint(); } });
   }
 
-  // --- nav sub-tabs (Fleet · Workflows) --------------------------------------------------------------
-  function navCounts(){ return { fleet:((MT&&MT.agents)||[]).length, workflows:((MT&&MT.workflows)||[]).length }; }
-  function applyPanes(){ document.getElementById('ov-pane-fleet').style.display=(NAV==='fleet')?'flex':'none'; document.getElementById('ov-pane-workflows').style.display=(NAV==='workflows')?'flex':'none'; }
-  function renderNavTabs(){ var c=navCounts(); var defs=[['fleet','Fleet',c.fleet],['workflows','Workflows',c.workflows]];
+  // --- Tasks: the session's numbered task list (TaskCreate/TaskUpdate), live from the task dir ------
+  var TASKS_OPEN=false; // the "N done · show all" collapse — same dismiss pattern the fleet uses
+  function renderTasks(){ var host=document.getElementById('ov-tasks');
+    var ts=(MT&&MT.tasks)||[];
+    if(!ts.length){ host.innerHTML='<div class="mt-none">No tasks — this session plans with a task list only when Claude creates one.</div>'; return; }
+    // Tasks ARE chapters (0.8.3): join each row to its change-map chapter for per-task edit counts.
+    var chBy={}; var chs=(CM&&CM.chapters)||[]; for(var c=0;c<chs.length;c++) chBy[chs[c].id]=chs[c];
+    function trow(t){
+      var st=t.status==='completed'?'done':(t.status==='in_progress'?'wip':'open');
+      var glyph=st==='done'?'●':(st==='wip'?'◐':'○');
+      var ch=t.chapterId?chBy[t.chapterId]:null;
+      var counts=(ch&&ch.edits>0)?('<span class="mt-tct">+'+ch.added+' −'+ch.removed+' · '+ch.edits+' edit'+(ch.edits===1?'':'s')+(ch.pending?' · '+ch.pending+'⏳':'')+'</span>'):'';
+      var dep=(t.blockedBy&&t.blockedBy.length)?'<span class="mt-tdep" title="blocked by #'+esc(t.blockedBy.join(', #'))+'">⛓ '+t.blockedBy.length+'</span>':'';
+      return '<div class="mt-trow '+st+'" title="'+esc(t.description||t.subject)+'">'+
+        '<span class="mt-tg">'+glyph+'</span><span class="mt-tid">#'+esc(t.id)+'</span>'+
+        '<span class="mt-ts">'+esc(t.subject)+'</span>'+counts+dep+
+        (st==='wip'&&t.activeForm?'<span class="mt-taf">'+esc(t.activeForm)+'…</span>':'')+
+        '</div>';
+    }
+    var act=[], done=[];
+    for(var i=0;i<ts.length;i++) (ts[i].status==='completed'?done:act).push(ts[i]);
+    var h='<div class="mt-chead">'+ts.length+' task'+(ts.length===1?'':'s')+' · '+done.length+' done</div>';
+    for(var a2=0;a2<act.length;a2++) h+=trow(act[a2]);
+    // Active-only hides completed entirely (fleet semantics); otherwise they collapse behind a toggle.
+    if(!ACTIVE_ONLY && done.length){
+      h+='<button class="mt-ttog">'+done.length+' done · '+(TASKS_OPEN?'hide':'show all')+'</button>';
+      if(TASKS_OPEN) for(var d2=0;d2<done.length;d2++) h+=trow(done[d2]);
+    }
+    host.innerHTML=h;
+    var tog=host.querySelector('.mt-ttog');
+    if(tog) tog.addEventListener('click', function(){ TASKS_OPEN=!TASKS_OPEN; renderTasks(); });
+  }
+
+  // --- nav sub-tabs (Fleet · Workflows · Tasks) ------------------------------------------------------
+  function navCounts(){ return { fleet:((MT&&MT.agents)||[]).length, workflows:((MT&&MT.workflows)||[]).length, tasks:((MT&&MT.tasks)||[]).length }; }
+  function applyPanes(){ document.getElementById('ov-pane-fleet').style.display=(NAV==='fleet')?'flex':'none'; document.getElementById('ov-pane-workflows').style.display=(NAV==='workflows')?'flex':'none'; document.getElementById('ov-pane-tasks').style.display=(NAV==='tasks')?'flex':'none'; }
+  function renderNavTabs(){ var c=navCounts(); var defs=[['fleet','Fleet',c.fleet],['workflows','Workflows',c.workflows],['tasks','Tasks',c.tasks]];
     var h=''; for(var i=0;i<defs.length;i++){ var d=defs[i]; h+='<button class="ov-tab'+(d[0]===NAV?' on':'')+'" data-nav="'+d[0]+'">'+d[1]+'<span class="ov-tn">'+d[2]+'</span></button>'; }
     var host=document.getElementById('ov-navtabs'); host.innerHTML=h;
     var bs=host.querySelectorAll('.ov-tab'); for(var b=0;b<bs.length;b++) bs[b].addEventListener('click', function(){ NAV=this.getAttribute('data-nav'); renderNavTabs(); applyPanes(); }); }
 
   function paint(){
     var empty=document.getElementById('ov-empty');
-    if(MT && MT.agents){ empty.style.display='none'; renderNavTabs(); applyPanes(); renderFleet(); renderWorkflows(); }
+    if(MT && MT.agents){ empty.style.display='none'; renderNavTabs(); applyPanes(); renderFleet(); renderWorkflows(); renderTasks(); }
     else {
       renderNavTabs(); applyPanes();
       if(!CM){ empty.style.display='block'; empty.innerHTML='No agents yet. <span style="opacity:.75">This fills in as Claude works across your worktrees.</span>';
-        document.getElementById('ov-fleet').innerHTML=''; document.getElementById('ov-workflows').innerHTML=''; document.getElementById('ov-collisions').innerHTML=''; }
+        document.getElementById('ov-fleet').innerHTML=''; document.getElementById('ov-workflows').innerHTML=''; document.getElementById('ov-tasks').innerHTML=''; }
       else empty.style.display='none';
     }
     ensureSel();
@@ -2899,7 +2963,7 @@ const OVERVIEW_SCRIPT = `
     else if(m.type==='navpos'){ NAVPOS=m.pos||null; renderNavPos(); }
     else if(m.type==='error'){ CM=null; MT=null; var em=document.getElementById('ov-empty'); em.style.display='block';
       em.innerHTML='Needs the <b>claude-observatory</b> CLI, which was not found. <span style="opacity:.75">Install it (./install.sh), then reload.</span>';
-      document.getElementById('ov-fleet').innerHTML=''; document.getElementById('ov-workflows').innerHTML=''; document.getElementById('ov-collisions').innerHTML='';
+      document.getElementById('ov-fleet').innerHTML=''; document.getElementById('ov-workflows').innerHTML='';
       document.getElementById('cm-ribbon').style.display='none'; document.getElementById('cm-strip').innerHTML=''; document.getElementById('cm-ledger').innerHTML=''; document.getElementById('cm-detail-empty').style.display='none'; document.getElementById('cm-readout').innerHTML=''; }
   });
 

@@ -1,0 +1,222 @@
+/**
+ * The session TASK LIST — Claude Code's newer task system (TaskCreate/TaskUpdate: numbered tasks with
+ * statuses and dependencies), distinct from the older TodoWrite to-dos the chapter ribbon mines.
+ * State lives OUTSIDE the transcript as one JSON file per task under
+ * `<claudeConfigDir()>/tasks/<sessionId>/<id>.json` — this reader is the single backend for the
+ * Overview's Tasks tab in both editors (zero token, no model calls, read-only).
+ */
+import * as crypto from 'crypto';
+import * as fs from 'fs';
+import * as path from 'path';
+import { cachedByFiles } from './fscache';
+import { findTranscript } from './observe';
+import { claudeConfigDir } from './paths';
+
+/** One task from the session's task list, as Claude Code wrote it. */
+export interface SessionTask {
+  /** Numeric-string id ("1", "2", …) — display order is numeric by id (creation order). */
+  id: string;
+  subject: string;
+  /** Longer body; '' when absent. */
+  description: string;
+  /** 'pending' | 'in_progress' | 'completed' (deleted tasks have no file). Unknown values pass through. */
+  status: string;
+  /** Present-continuous spinner label while in_progress; null when absent. */
+  activeForm: string | null;
+  /** Ids of tasks this one blocks / is blocked by (dependencies), [] when absent. */
+  blocks: string[];
+  blockedBy: string[];
+}
+
+/** Roll-up for the tab badge / recap line. */
+export interface SessionTaskSummary {
+  total: number;
+  completed: number;
+  inProgress: number;
+  pending: number;
+}
+
+const asStrArray = (v: unknown): string[] =>
+  Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+
+/** Read the session's task list, ordered numerically by id. Missing dir (a session that never used
+ *  the task system) → []. A malformed task file is skipped — one bad write must not blank the tab. */
+export function readSessionTasks(sessionId: string): SessionTask[] {
+  // Task dirs are keyed by the RAW session id — never a path. Refuse anything that could traverse.
+  if (!/^[A-Za-z0-9._-]+$/.test(sessionId)) return [];
+  const dir = path.join(claudeConfigDir(), 'tasks', sessionId);
+  let files: string[];
+  try {
+    files = fs.readdirSync(dir).filter((f) => /^\d+\.json$/.test(f));
+  } catch {
+    return [];
+  }
+  const out: SessionTask[] = [];
+  for (const f of files) {
+    try {
+      const o = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));
+      if (!o || typeof o.subject !== 'string') continue;
+      out.push({
+        id: typeof o.id === 'string' ? o.id : f.replace(/\.json$/, ''),
+        subject: o.subject,
+        description: typeof o.description === 'string' ? o.description : '',
+        status: typeof o.status === 'string' ? o.status : 'pending',
+        activeForm: typeof o.activeForm === 'string' && o.activeForm ? o.activeForm : null,
+        blocks: asStrArray(o.blocks),
+        blockedBy: asStrArray(o.blockedBy),
+      });
+    } catch {
+      /* skip the malformed file, keep the rest */
+    }
+  }
+  out.sort((a, b) => Number(a.id) - Number(b.id));
+  return out;
+}
+
+/** One full-list snapshot of the task list at a moment — the SAME shape as changemap's TodoWrite
+ *  snapshots, so tasks ride the identical span/attribution machinery (chapters, WYSIWYG review). */
+export interface TaskSnap {
+  ts: number;
+  todos: { content: string; status: string }[];
+}
+
+interface MinedTask {
+  id: string;
+  subject: string;
+  description: string;
+  activeForm: string | null;
+  status: string;
+}
+
+/** The same digest changemap.taskId() computes for a chapter's content — kept in LOCKSTEP so a task
+ *  row can join its chapter (changemap imports this module; importing back would be a cycle). */
+export function taskChapterId(subject: string): string {
+  return crypto.createHash('sha1').update(subject.trim()).digest('hex').slice(0, 12);
+}
+
+/** TaskCreate/TaskUpdate events mined from the MAIN transcript → (a) full-list snapshots for the
+ *  chapter span model, (b) the task history — which survives the runtime archiving completed task
+ *  files, unlike the live dir. Memoized per (mtime,size) like todoSnaps. */
+function mineTasks(transcriptPath: string): { snaps: TaskSnap[]; history: MinedTask[] } {
+  return cachedByFiles('taskMine', [transcriptPath], () => mineTasksUncached(transcriptPath));
+}
+
+function mineTasksUncached(transcriptPath: string): { snaps: TaskSnap[]; history: MinedTask[] } {
+  let lines: string[];
+  try {
+    lines = fs.readFileSync(transcriptPath, 'utf8').split('\n');
+  } catch {
+    return { snaps: [], history: [] };
+  }
+  const state = new Map<string, MinedTask>(); // id → latest state, insertion-ordered by creation
+  // A TaskCreate's ASSIGNED id only appears in its tool_result ("Task #N created …"), so creations
+  // park here (keyed by tool_use id) until the matching result names them.
+  const pendingCreate = new Map<string, { t: MinedTask; ts: number }>();
+  const snaps: TaskSnap[] = [];
+  const toMs = (v: unknown): number => {
+    if (typeof v === 'number' && isFinite(v)) return v > 1e12 ? v : v * 1000;
+    if (typeof v === 'string') {
+      const t = Date.parse(v);
+      return isNaN(t) ? 0 : t;
+    }
+    return 0;
+  };
+  const snap = (ts: number) => {
+    const todos = [...state.values()]
+      .sort((a, b) => Number(a.id) - Number(b.id))
+      // src marks the item TASK-born: its chapter carries fromTask, so ribbons leave it to the Tasks tab.
+      .map((t) => ({ content: t.subject, status: t.status, src: 'task' as const }));
+    snaps.push({ ts, todos });
+  };
+  const resultText = (c: unknown): string => {
+    if (typeof c === 'string') return c;
+    if (Array.isArray(c)) return c.map((b: any) => (b && typeof b.text === 'string' ? b.text : '')).join('\n');
+    return '';
+  };
+  for (const line of lines) {
+    const t = line.trim();
+    if (!t || (!t.includes('TaskCreate') && !t.includes('TaskUpdate') && !t.includes('tool_result'))) continue;
+    let o: any;
+    try {
+      o = JSON.parse(t);
+    } catch {
+      continue;
+    }
+    if (o.isSidechain === true) continue; // a subagent's tasks are not the main plan
+    const msg = o.message;
+    if (!msg || !Array.isArray(msg.content)) continue;
+    const ts = toMs(o.timestamp ?? o.ts);
+    for (const b of msg.content) {
+      if (!b) continue;
+      if (b.type === 'tool_use' && b.name === 'TaskCreate' && b.input && typeof b.input.subject === 'string') {
+        pendingCreate.set(String(b.id ?? ''), {
+          ts,
+          t: {
+            id: '',
+            subject: String(b.input.subject).trim(),
+            description: typeof b.input.description === 'string' ? b.input.description : '',
+            activeForm: typeof b.input.activeForm === 'string' && b.input.activeForm ? b.input.activeForm : null,
+            status: 'pending',
+          },
+        });
+      } else if (b.type === 'tool_use' && b.name === 'TaskUpdate' && b.input && b.input.taskId != null) {
+        const cur = state.get(String(b.input.taskId));
+        if (!cur) continue; // an update we can't anchor (create's result never parsed) — skip, never guess
+        if (b.input.status === 'deleted') state.delete(cur.id);
+        else {
+          if (typeof b.input.status === 'string') cur.status = b.input.status;
+          if (typeof b.input.subject === 'string' && b.input.subject) cur.subject = b.input.subject.trim();
+          if (typeof b.input.description === 'string') cur.description = b.input.description;
+          if (typeof b.input.activeForm === 'string' && b.input.activeForm) cur.activeForm = b.input.activeForm;
+        }
+        snap(ts);
+      } else if (b.type === 'tool_result' && b.tool_use_id != null && pendingCreate.has(String(b.tool_use_id))) {
+        const pc = pendingCreate.get(String(b.tool_use_id))!;
+        pendingCreate.delete(String(b.tool_use_id));
+        const m = resultText(b.content).match(/Task #(\d+) created/);
+        if (!m) continue; // creation failed (or an unrecognized runtime message) — no task to track
+        pc.t.id = m[1];
+        state.set(pc.t.id, pc.t);
+        snap(ts || pc.ts);
+      }
+    }
+  }
+  return { snaps, history: [...state.values()].sort((a, b) => Number(a.id) - Number(b.id)) };
+}
+
+/** The task-list snapshots for the chapter span model — changemap merges these with the TodoWrite
+ *  snapshots (todos win on duplicate titles) so task-planned sessions get real chapters. */
+export function taskSnaps(transcriptPath: string): TaskSnap[] {
+  return mineTasks(transcriptPath).snaps;
+}
+
+/** A task enriched for the Overview's Tasks tab: [chapterId] joins it to its change-map chapter
+ *  (per-task edits/± and click-to-scope in the renderers). */
+export interface SessionTaskRow extends SessionTask {
+  chapterId: string;
+}
+
+/** The Tasks-tab list: transcript HISTORY (complete — the runtime archives completed task files)
+ *  overlaid with the live dir state (the runtime's current truth for tasks still on disk). */
+export function sessionTaskRows(cwd: string, sessionId: string): SessionTaskRow[] {
+  const byId = new Map<string, SessionTask>();
+  const transcript = findTranscript(cwd, sessionId);
+  if (transcript) for (const t of mineTasks(transcript).history) byId.set(t.id, { ...t, blocks: [], blockedBy: [] });
+  for (const t of readSessionTasks(sessionId)) byId.set(t.id, t); // dir wins — it carries dependencies too
+  return [...byId.values()]
+    .sort((a, b) => Number(b.id) - Number(a.id)) // newest first — the current work tops the tab
+    .map((t) => ({ ...t, chapterId: taskChapterId(t.subject) }));
+}
+
+/** Counts for the tab badge ("7 done · 1 in progress") and the Observations recap. */
+export function summarizeTasks(tasks: SessionTask[]): SessionTaskSummary {
+  let completed = 0;
+  let inProgress = 0;
+  let pending = 0;
+  for (const t of tasks) {
+    if (t.status === 'completed') completed++;
+    else if (t.status === 'in_progress') inProgress++;
+    else pending++;
+  }
+  return { total: tasks.length, completed, inProgress, pending };
+}

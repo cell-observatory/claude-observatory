@@ -430,8 +430,12 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.ok(/renderNavTabs/.test(cmView.webview.html) && /function applyPanes/.test(cmView.webview.html), 'switching a nav tab toggles panes (renderNavTabs/applyPanes)');
     assert.match(cmView.webview.html, /id="ov-fleet"/, 'Overview: the Fleet list container is present');
     assert.match(cmView.webview.html, /id="ov-workflows"/, 'Overview: the Workflows list container is present');
-    assert.match(cmView.webview.html, /id="ov-collisions"/, 'Overview: the live-collisions indicator is present in the Fleet nav');
-    assert.ok(/Live conflicts/.test(cmView.webview.html), 'the collisions indicator is labelled "live conflicts"');
+    // Live conflicts MOVED to the Actions panel (0.8.3) — the Overview must no longer render them.
+    assert.ok(!/ov-collisions/.test(cmView.webview.html), 'Overview: the live-collisions strip is gone (it lives in the Actions panel now)');
+    // The Tasks tab (0.8.3): third nav pane, chapter-joined rows, done-collapse toggle.
+    assert.match(cmView.webview.html, /id="ov-tasks"/, 'Overview: the Tasks pane container is present');
+    assert.ok(/'Tasks'/.test(cmView.webview.html) && /renderTasks/.test(cmView.webview.html), 'the left nav labels Tasks and renders it');
+    assert.ok(/chapterId/.test(cmView.webview.html) && /mt-ttog/.test(cmView.webview.html), 'task rows join their chapters + completed tasks collapse behind a toggle');
     assert.ok(/awaiting permission/.test(cmView.webview.html), 'the awaiting-permission needs-attention phase is surfaced');
     assert.ok(/mt-spark/.test(cmView.webview.html) && /renderFleet/.test(cmView.webview.html), 'Fleet rows carry a per-agent activity sparkline (+ ±lines/tokens/time/risk)');
     assert.ok(/fmtTok/.test(cmView.webview.html) && /fmtDur/.test(cmView.webview.html), 'Fleet + Workflows show tokens/time (fmtTok/fmtDur)');

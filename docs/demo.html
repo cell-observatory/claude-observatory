@@ -338,9 +338,8 @@
           <div class="ovbar" id="ovbar" aria-hidden="true"></div>
           <div class="ovwrap">
             <div class="ovnav">
-              <div class="ovtabs"><span class="on">Fleet</span><span id="wf-tab">Workflows</span></div>
+              <div class="ovtabs"><span class="on">Fleet</span><span id="wf-tab">Workflows</span><span id="tk-tab" title="The session's numbered task list — statuses update as chapters land">Tasks</span></div>
               <div id="fleet"></div>
-              <div class="collide">No live file conflicts</div>
             </div>
             <div class="ovdetail">
               <div id="ov-ribbon"></div>
@@ -541,7 +540,7 @@
       {ed:'seed',landed:0,typing:true,
        narr:'You ask Claude for a change. Observatory sits beside the session — hooks, not a wrapper — and records what happens, at zero extra tokens. Below the editor: the same three dashboards the extensions dock at the bottom of the IDE.'},
       {ed:'seed',landed:0,plan:true,
-       narr:'Claude plans three to-dos. The Overview adopts them as chapters — the session’s own structure — and the Fleet nav on its left lists this session as a running agent.'},
+       narr:'Claude plans three to-dos. The Overview adopts them as chapters — the session’s own structure — and tracks them as numbered tasks too (watch the Tasks tab count down as chapters land).'},
       {ed:1,landed:1,
        narr:'The first edit lands and becomes a reviewable entry: an inline lens over the changed lines, a timeline entry carrying Claude’s reasoning, and a churn-ranked ledger row in the Overview detail.'},
       {ed:2,landed:2,
@@ -699,6 +698,10 @@
       if(landed.length>=4) fleetHtml+='<div class="fr sub"><span class="gl">▷</span><span class="st2 done">● done</span> general-purpose — Write pipeline tests</div>';
       el('fleet').innerHTML=fleetHtml;
       el('wf-tab').textContent='Workflows'+(landed.length>=5?' (1)':'');
+      // Tasks tab badge — the demo's three chapters are also tracked as numbered tasks (0.8.3).
+      var tkDone=0;
+      if(showPlan) CHAPTERS.forEach(function(ch){ if(ch.edits.every(function(id){return id<=landed.length;})) tkDone++; });
+      el('tk-tab').textContent=showPlan?('Tasks '+tkDone+'/3'):'Tasks';
 
       var rib='';
       if(showPlan){

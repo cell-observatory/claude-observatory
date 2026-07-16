@@ -123,7 +123,7 @@ const frame = ({ tab = 'fleet', agent, wf, chapters, mods, files, empty, cap }) 
     <span class="toolbar"><span class="b">Accept All</span><span class="b">Revert All</span><span class="b">Clear Resolved</span><span class="b tog">Active only</span><span class="b">⟳</span></span></div>
   <div class="main">
     <div class="nav">
-      <div class="nav-tabs"><span class="${tab === 'fleet' ? 'on' : ''}">Fleet</span><span class="${tab === 'workflows' ? 'on' : ''}">Workflows</span></div>
+      <div class="nav-tabs"><span class="${tab === 'fleet' ? 'on' : ''}">Fleet</span><span class="${tab === 'workflows' ? 'on' : ''}">Workflows</span><span>Tasks 2/3</span></div>
       <div class="nav-body">${tab === 'fleet' ? (agent ? agentRow(agent) : '<div class="none">No agents yet — this fills in as Claude Code sessions run</div>') : (wf ? wfRun(wf) : '<div class="none">No workflow runs — orchestrations appear here</div>')}</div>
     </div>
     <div class="detail">
@@ -240,7 +240,7 @@ const pngs = beats.map((b, i) => {
   const png = path.join(tmp, `f${i}.png`);
   try {
     execFileSync(CHROME, [
-      '--headless', '--disable-gpu', '--hide-scrollbars', '--force-device-scale-factor=1',
+      '--headless', '--disable-gpu', '--use-mock-keychain', '--password-store=basic', '--hide-scrollbars', '--force-device-scale-factor=1',
       '--no-first-run', '--no-default-browser-check', `--user-data-dir=${path.join(tmp, 'chrome-profile')}`,
       `--screenshot=${png}`, `--window-size=${W},${H}`, `file://${file}`,
     ], { stdio: 'pipe', timeout: 20_000, killSignal: 'SIGKILL' });

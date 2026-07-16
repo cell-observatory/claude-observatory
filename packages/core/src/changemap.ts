@@ -18,6 +18,7 @@ import { parseSubagents } from './subagents';
 import { buildEgressReport } from './egress';
 import { projectSessionIds } from './fleet';
 import { parseWorkflows, workflowWindows, workflowForTs } from './workflows';
+import { taskSnaps } from './tasks';
 import { cachedByFiles } from './fscache';
 
 /** One edit (review unit) placed in the map: where it landed, how big, how reviewed, why, and which goal. */
@@ -45,6 +46,7 @@ export interface ChangeMapChapter {
   id: string; // stable content-hash brush key — ALSO the WYSIWYG review-op key (reviewEditIds); duplicate-content to-dos get an occurrence-salted id (first occurrence keeps the plain hash); the synthetic session chapter is 'ch:session'
   taskId: string | null; // the STRICT task this chapter joins for analytics + 💬 chat framing; null = no strict task (synthetic chapter, or a duplicate-content occurrence beyond the first)
   synthetic: boolean; // true for the fallback session chapter that claims work outside any to-do (never a real task)
+  fromTask: boolean; // true when this chapter was born from the numbered task list (0.8.3) — attribution + review + the Tasks-tab join use it, but ribbons don't draw it (its home is the Tasks tab)
   index: number;
   title: string; // Claude's own to-do text (or the session title / first prompt for the synthetic chapter)
   status: 'done' | 'wip' | 'todo'; // completed | in_progress | pending
@@ -351,7 +353,45 @@ function flattenTree(tree: EditTree): { rel: string; cls: string | null; edit: T
 
 interface TodoSnap {
   ts: number;
-  todos: { content: string; status: string }[];
+  /** src marks TASK-born items (tasks.ts snapshots) — their chapters carry `fromTask`, so ribbons
+   *  leave them to the Overview's Tasks tab instead of drawing duplicate rows. */
+  todos: { content: string; status: string; src?: 'task' }[];
+}
+
+/**
+ * The PLAN snapshots the span model consumes: TodoWrite ∪ the task system (TaskCreate/TaskUpdate,
+ * mined in tasks.ts), merged on one timeline into the same full-list shape — so task-planned sessions
+ * get real chapters (attribution + WYSIWYG review) through the identical machinery. Todos win
+ * duplicate titles (the bundled demo plans both ways) so the two systems never mint twin chapters.
+ */
+function planSnaps(transcriptPath: string): TodoSnap[] {
+  const todos = todoSnaps(transcriptPath);
+  const tasks = taskSnaps(transcriptPath);
+  if (!tasks.length) return todos;
+  if (!todos.length) return tasks;
+  const norm = (s: string) => s.trim().toLowerCase();
+  const out: TodoSnap[] = [];
+  let i = 0;
+  let j = 0;
+  let curTodos: TodoSnap['todos'] = [];
+  let curTasks: TodoSnap['todos'] = [];
+  while (i < todos.length || j < tasks.length) {
+    const tTs = i < todos.length ? todos[i].ts : Infinity;
+    const kTs = j < tasks.length ? tasks[j].ts : Infinity;
+    let ts: number;
+    if (tTs <= kTs) {
+      curTodos = todos[i].todos;
+      ts = tTs;
+      i++;
+    } else {
+      curTasks = tasks[j].todos;
+      ts = kTs;
+      j++;
+    }
+    const seen = new Set(curTodos.map((d) => norm(d.content)));
+    out.push({ ts, todos: [...curTodos, ...curTasks.filter((k) => !seen.has(norm(k.content)))] });
+  }
+  return out;
 }
 
 /** Ordered TodoWrite snapshots from the main transcript (each carries its ts + the full list). */
@@ -633,7 +673,7 @@ export function buildChangeMap(cwd: string, session: string, opts: { root?: stri
 
   const insights = transcriptInsights(cwd, session);
   const transcript = findTranscript(cwd, session);
-  const snaps = transcript ? todoSnaps(transcript) : [];
+  const snaps = transcript ? planSnaps(transcript) : [];
   const spans = inProgressSpans(snaps); // legacy edge-extended windows — the display brush only
   const strictSpans = inProgressSpansStrict(snaps); // REAL intervals — the taskId model (rollups + destructive ops)
   const firstSpan = new Map<string, Span>(); // a chapter's display start/end = its first in_progress span
@@ -641,13 +681,16 @@ export function buildChangeMap(cwd: string, session: string, opts: { root?: stri
   const firstSeenTs = new Map<string, number>(); // a to-do's first appearance ts — pins its taskId's firstTs
   for (const s of snaps) for (const td of s.todos) if (!firstSeenTs.has(td.content)) firstSeenTs.set(td.content, s.ts);
 
-  // Chapters from the FINAL to-do list (the full plan, in order); spans attach by content match.
-  // Duplicate-content to-dos: the timeline can't tell the occurrences apart (spans key by content), so
-  // the FIRST occurrence keeps the plain content-hash id (stable for every existing session) and claims
-  // the edits + the strict taskId; later occurrences get an occurrence-salted id and are display-only
-  // (`taskId: null`) — two ribbon rows never share a brush key, and nothing double-counts.
+  // Chapters from the FINAL plan list (the full plan, in order) — the last merged snapshot, so a
+  // task-planned session (TaskCreate, no TodoWrite) gets real chapters too; spans attach by content
+  // match. Duplicate-content items: the timeline can't tell the occurrences apart (spans key by
+  // content), so the FIRST occurrence keeps the plain content-hash id (stable for every existing
+  // session) and claims the edits + the strict taskId; later occurrences get an occurrence-salted id
+  // and are display-only (`taskId: null`) — two ribbon rows never share a brush key, nothing
+  // double-counts.
+  const finalPlan: TodoSnap['todos'] = snaps.length ? snaps[snaps.length - 1].todos : insights.todos;
   const occurrence = new Map<string, number>();
-  const chapters: ChangeMapChapter[] = insights.todos.map((td, i) => {
+  const chapters: ChangeMapChapter[] = finalPlan.map((td, i) => {
     const n = occurrence.get(td.content) ?? 0;
     occurrence.set(td.content, n + 1);
     const baseId = taskId(td.content, firstSeenTs.get(td.content) ?? 0);
@@ -656,6 +699,7 @@ export function buildChangeMap(cwd: string, session: string, opts: { root?: stri
       id: n === 0 ? baseId : dupChapterId(td.content, n),
       taskId: n === 0 ? baseId : null,
       synthetic: false,
+      fromTask: td.src === 'task',
       index: i,
       title: td.content,
       status: td.status === 'completed' ? 'done' : td.status === 'in_progress' ? 'wip' : 'todo',
@@ -721,6 +765,7 @@ export function buildChangeMap(cwd: string, session: string, opts: { root?: stri
       id: SYNTHETIC_CHAPTER_ID,
       taskId: null,
       synthetic: true,
+      fromTask: false,
       index: chapters.length,
       title: insights.title ?? (insights.firstUserPrompt ? firstLine(insights.firstUserPrompt, 80) : 'Session work'),
       status: 'wip', // refined to 'done' below once counts are folded
@@ -859,7 +904,7 @@ export function buildChangeMap(cwd: string, session: string, opts: { root?: stri
  */
 export function taskEditIds(cwd: string, session: string, taskId: string): number[] {
   const transcript = findTranscript(cwd, session);
-  const strictSpans = inProgressSpansStrict(transcript ? todoSnaps(transcript) : []);
+  const strictSpans = inProgressSpansStrict(transcript ? planSnaps(transcript) : []);
   return readLog(session)
     .filter((r) => strictTaskForTs(strictSpans, r.ts) === taskId)
     .map((r) => r.id);
@@ -876,12 +921,14 @@ export function taskEditIds(cwd: string, session: string, taskId: string): numbe
  */
 export function chapterEditIds(cwd: string, session: string, chapterId: string): number[] {
   const transcript = findTranscript(cwd, session);
-  const snaps = transcript ? todoSnaps(transcript) : [];
+  const snaps = transcript ? planSnaps(transcript) : [];
   const spans = inProgressSpans(snaps);
   const insights = transcriptInsights(cwd, session);
-  // First occurrence of each to-do content claims the content's spans (mirrors chapterByContent).
+  // First occurrence of each plan item's content claims the content's spans (mirrors chapterByContent).
+  // The FINAL merged snapshot, so task-chapters resolve here too (WYSIWYG review on task rows).
+  const finalPlan = snaps.length ? snaps[snaps.length - 1].todos : insights.todos;
   const idByContent = new Map<string, string>();
-  for (const td of insights.todos) if (!idByContent.has(td.content)) idByContent.set(td.content, taskId(td.content, 0));
+  for (const td of finalPlan) if (!idByContent.has(td.content)) idByContent.set(td.content, taskId(td.content, 0));
   const chapterOf = (ts: number): string => {
     if (ts) {
       // Display spans are gap-filled and disjoint → at most one contains ts.
