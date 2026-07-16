@@ -5,6 +5,58 @@ All notable changes to Claude Observatory are recorded here, following
 Per-tag release artifacts and auto-generated notes are on the
 [Releases page](https://github.com/cell-observatory/claude-observatory/releases).
 
+## [0.8.2] — 2026-07-16
+
+Presentation fixes across the JetBrains Overview and the web demos.
+
+### Fixed (JetBrains)
+
+- **Spotlight works, everywhere it's offered**: the editor banner's icon-only buttons (Spotlight,
+  Clear, and the new Search) rendered their icons but had no clickable hyperlink region — the toggle
+  never fired from the banner. They now carry clickable text labels, the dim highlighter renders above
+  the syntax layer, and toggling confirms itself with a notification (spotlight only dims files that
+  have pending edits).
+- **Sparklines and symbol buttons render properly**: activity sparklines are now custom-painted bars
+  (the Unicode block glyphs fell back to giant placeholder boxes in IDE fonts), and the chapter ribbon's
+  Accept / Reject / Clear mini-buttons, the done-chapters toggle, and the editor banner's search button
+  (a tiny "⌕" text glyph) use platform icons instead of glyph text.
+- **Fleet / Workflows rows carry the VS Code colors**: working/running blue, done green, awaiting
+  orange, errored red, subagents purple, +added green / −removed red, and chart-blue sparklines — the
+  same palette the VS Code webview reads from its chart tokens.
+- **Workflows tab gets a real renderer**: run, phase, and agent rows are styled and elided like the
+  Fleet tab (name in regular text, metrics grayed, painted sparkline) instead of raw clipped strings.
+- **Overview toolbar shows text labels** on the same buttons VS Code labels (Keep, Undo, Accept /
+  Reject / Clear File, Spotlight, Search, Accept All, Revert All, Clear Resolved, Refresh, Active
+  only); the four step chevrons stay icon-only, and the status-bar nav bar stays compact.
+- **Change-map detail is readable**: chapter titles, the done-toggle, and the readout move up to the
+  standard label font; the chapter ribbon is height-capped and scrolls (a huge session no longer fills
+  the panel with chapter rows).
+
+### Changed (both editors)
+
+- **Search Edits leads every nav bar** — the Overview toolbar, the status-bar nav, the editor banner,
+  and the Edits tree toolbar all put Search first, in both editors.
+- **Search now narrows the Overview ledger too** (it used to filter only the sidebar trees), with a
+  readout naming the active query so a filtered-empty ledger never reads as a bug.
+- **The module strip caps at 11 segments** — the churn-ranked tail merges into one gray "+K more"
+  segment instead of squeezing dozens of unreadable slivers across the strip.
+- **The dashboards default to Observations 10% · Overview 80% · Stats 10%** — the master-detail
+  Overview is the centerpiece. JetBrains applies the split on every start; VS Code applies it where
+  the panel hasn't been manually arranged yet (`initialSize` weights). The ribbon's per-chapter
+  Accept / Reject / Clear buttons also grew to a comfortable click size in VS Code.
+- **Live-conflict entries open the file**: click a conflict row (VS Code) or the conflict strip
+  (JetBrains — a chooser when several files collide) to jump into the contested file.
+
+### Changed (site)
+
+- **The showcase lead demo is fully self-running**: it simulates the review clicks itself (the target
+  control flashes as it "presses") and loops continuously; the transport row (dots / skip / pause /
+  restart) stays for jumping around, and a gate reached while paused still resolves itself — the
+  hands-on version lives on the demo page. Review and Tour left the nav.
+- **The full demo got closer to the real editor**: a Claude Edits sidebar joins the IDE frame, the
+  stage is wider with no inner scrollbars, and review gates now show a countdown and apply themselves
+  if the visitor doesn't respond — interaction is optional everywhere.
+
 ## [0.8.1] — 2026-07-16
 
 PyCharm parity fixes and an interactive web demo. No store or `--json` shape changes.

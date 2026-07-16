@@ -44,7 +44,19 @@ class ObservatoryEditorBanner : EditorNotificationProvider, DumbAware {
         val panel = EditorNotificationPanel(fileEditor, EditorNotificationPanel.Status.Info)
         panel.icon(Icons.Microscope)
         panel.text("$count pending")
-        // Icon-only actions, label on hover — parity with VS Code's editor-title buttons, kept minimal.
+        // Every action carries TEXT: an icon-only createActionLabel("") renders its icon but has no
+        // clickable hyperlink region in Swing — the 0.8.x "banner button does nothing" bug.
+        // Search leads every nav bar (user rule).
+        panel.createActionLabel("Search") {
+            val q = Messages.showInputDialog(
+                project, "Filter edits by file path (empty to clear):",
+                "Search Edits", null, service.filterQuery, null,
+            )
+            if (q != null) service.setFilter(q)
+        }.apply {
+            setIcon(com.intellij.icons.AllIcons.Actions.Find)
+            toolTipText = "Search edits"
+        }
         panel.createActionLabel("↑") {
             val s = service.currentSession() ?: return@createActionLabel
             val prev = service.prevPendingEdit()
@@ -72,7 +84,7 @@ class ObservatoryEditorBanner : EditorNotificationProvider, DumbAware {
             }
         }.toolTipText = "Revert all edits in this file"
         // Clear resolved (kept/reverted) edits — parity with the nav bar's clear button.
-        panel.createActionLabel("") {
+        panel.createActionLabel("Clear") {
             service.currentSession()?.let { s ->
                 val resolved = service.log().count { !it.pending }
                 if (resolved > 0) ReviewOps.clearResolved(project, s, resolved) else ReviewOps.notify(project, "No resolved edits to clear")
@@ -81,16 +93,9 @@ class ObservatoryEditorBanner : EditorNotificationProvider, DumbAware {
             setIcon(com.intellij.icons.AllIcons.Actions.GC)
             toolTipText = "Clear resolved (kept/reverted) edits"
         }
-        panel.createActionLabel("⌕") {
-            val q = Messages.showInputDialog(
-                project, "Filter edits by file path (empty to clear):",
-                "Search Edits", null, service.filterQuery, null,
-            )
-            if (q != null) service.setFilter(q)
-        }.toolTipText = "Search edits"
         // Spotlight/heatmap toggle — the same lightbulb icon the nav bar uses, so it reads identically
         // across every surface (status-bar nav bar + this editor banner).
-        panel.createActionLabel("") {
+        panel.createActionLabel("Spotlight") {
             com.cellobservatory.observatory.ui.inline.InlineOverlay.getInstance(project).toggleHeatmap()
         }.apply {
             setIcon(com.intellij.icons.AllIcons.Actions.IntentionBulb)

@@ -44,12 +44,13 @@ class ObservatoryToolWindowFactory : ToolWindowFactory, DumbAware {
 class ObservatoryDashboardsFactory : ToolWindowFactory, DumbAware {
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
         val stats = com.cellobservatory.observatory.ui.stats.StatsPanel(project)
-        // Overview is now a two-column master-detail (nav + change-map), so it takes the larger share.
-        val right = com.intellij.ui.OnePixelSplitter(false, 0.63f).apply {
+        // Default split: Observations 10% | Overview 80% | Stats 10% (user request 2026-07-16) — the
+        // master-detail Overview is the panel's centerpiece; the dividers stay draggable.
+        val right = com.intellij.ui.OnePixelSplitter(false, 8f / 9f).apply {
             firstComponent = titled("Overview", ChangeMapPanel(project))
             secondComponent = titled("Stats", stats)
         }
-        val split = com.intellij.ui.OnePixelSplitter(false, 0.3f).apply {
+        val split = com.intellij.ui.OnePixelSplitter(false, 0.10f).apply {
             firstComponent = titled("Observations", ObservationsPanel(project))
             secondComponent = right
         }

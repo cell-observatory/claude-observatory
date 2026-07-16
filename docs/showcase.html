@@ -297,6 +297,11 @@
   .lens button:hover{border-color:var(--accent);color:var(--accent-ink)}
   .lens button.hint{animation:sdpulse 1.6s ease-in-out infinite;border-color:var(--accent)}
   @keyframes sdpulse{0%,100%{box-shadow:0 0 0 0 var(--accent-soft)}50%{box-shadow:0 0 0 7px var(--accent-soft)}}
+  /* self-running demo: controls the DEMO presses (not the visitor) + the simulated click flash */
+  .fakebtn{border:1px solid var(--accent);background:var(--surface);color:var(--ink);border-radius:999px;padding:3px 12px;font-size:.78rem;font-family:var(--sans);transition:background .25s,color .25s}
+  .fakebtn.sim-press,.mini .mh button.sim-press{background:var(--accent);color:#fff;border-color:var(--accent)}
+  .mini .mh button{transition:background .25s,color .25s}
+  #sd-acceptall{pointer-events:none;cursor:default}
   .sd-ui{margin-top:34px;text-align:left}
   .sd-ui .narr{min-height:3em;font-size:.98rem;color:var(--ink-soft);max-width:70ch}
   .sd-ui .narr .hl{color:var(--accent-ink);font-weight:560}
@@ -315,9 +320,7 @@
     <a class="brand" href="#hero"><span class="m">🔬</span> Claude Observatory</a>
     <div class="links">
       <a href="#hero">Overview</a>
-      <a href="#act">Review</a>
       <a href="demo.html">Demo</a>
-      <a href="#tour">Tour</a>
       <a href="#install">Install</a>
       <a href="getting-started.html">Getting started</a>
       <a href="panels.html">Panels</a>
@@ -354,15 +357,14 @@
       <div class="meta" style="--i:4">git-free · zero extra Claude tokens · terminal + VS Code + JetBrains</div>
     </div>
 
-    <div class="sd-ui" aria-label="Interactive demo narration and controls">
+    <div class="sd-ui" aria-label="Demo narration and transport controls">
       <p class="narr" id="sd-narr" aria-live="polite"></p>
-      <p class="hintline" id="sd-hint" aria-live="polite"></p>
       <div class="ctrl">
         <button class="tbtn" id="sd-back" aria-label="Previous step">←</button>
         <div class="dots" id="sd-dots" role="group" aria-label="Demo steps"></div>
         <button class="tbtn" id="sd-next" aria-label="Next step">→</button>
         <span class="tcount" id="sd-count"></span>
-        <button class="tbtn" id="sd-play" aria-label="Pause or resume the autoplay">❚❚</button>
+        <button class="tbtn" id="sd-play" aria-label="Pause or resume the demo">❚❚</button>
         <button class="tbtn" id="sd-restart" aria-label="Restart the demo">↺</button>
       </div>
     </div>
@@ -943,19 +945,19 @@
        narr:'Claude hands the test-writing to a subagent. Its edit is attributed to it in the timeline — and reviewed exactly like any other.'},
       {ed:5,landed:5,
        narr:'A workflow run writes the docs. Five edits are now pending across three chapters — time to review.'},
-      {ed:1,landed:5,gate:'keep',hint:'Click ✓ Keep on the lens in the editor.',
-       narr:'Review the first edit: the scaling function is correct — <span class="hl">keep it</span>. Keeping one edit resolves it and nothing else.'},
-      {ed:2,landed:5,gate:'undo',hint:'Click ↩ Undo on the lens in the editor.',
-       narr:'The entrypoint wiring isn’t wanted — <span class="hl">undo just this edit</span>. The revert is surgical: every other pending change stays exactly as Claude left it.'},
-      {ed:2,landed:5,gate:'acceptall',hint:'Click ✓ Accept all pending in the Overview panel.',
-       narr:'Sweep the rest in one motion: <span class="hl">Accept all</span> resolves everything still pending. Chapter-scoped accepts on the ribbon work the same way.'},
+      {ed:1,landed:5,gate:'keep',
+       narr:'Review begins: the scaling function is correct, so its edit is <span class="hl">kept</span> — one click on the lens resolves that edit and nothing else.'},
+      {ed:2,landed:5,gate:'undo',
+       narr:'The entrypoint wiring isn’t wanted — <span class="hl">undone</span>, surgically. Every other pending change stays exactly as Claude left it.'},
+      {ed:2,landed:5,gate:'acceptall',
+       narr:'The rest is swept in one motion: <span class="hl">Accept all</span> resolves everything still pending. Chapter-scoped accepts on the ribbon work the same way.'},
       {ed:1,landed:5,recap:true,
-       narr:'That is the whole loop: every edit tracked with its reasoning, reviewed one at a time or by the chapter, and resolved without git. The <a href="demo.html" style="color:var(--accent-ink);text-decoration:underline">full demo</a> walks the panels in detail.'},
+       narr:'That is the whole loop: every edit tracked with its reasoning, reviewed one at a time or by the chapter, and resolved without git. <a href="demo.html" style="color:var(--accent-ink);text-decoration:underline">Try it yourself in the full demo</a>.'},
     ];
     var N=STEPS.length;
     var el=function(id){return document.getElementById(id);};
     if(!el('sd-narr')) return;
-    var step=0, resolved={}, timer=null, playing=false, typeTimer=null, advanceTok=0, gateWait=0, endWait=0;
+    var step=0, resolved={}, typeTimer=null, simTok=0, endWait=0;
 
     function statusOf(id,s,res){
       var afterKeep=s>7||(s===7&&res[7]), afterUndo=s>8||(s===8&&res[8]), afterAll=s>9||(s===9&&res[9]);
@@ -968,10 +970,9 @@
     function render(){
       var st=STEPS[step], res=resolved;
       el('sd-narr').innerHTML=st.narr;
-      el('sd-hint').textContent=(st.gate&&!res[step])?st.hint:'';
       el('sd-count').textContent=('0'+(step+1)).slice(-2)+' / '+('0'+N).slice(-2);
       el('sd-back').disabled=step===0;
-      el('sd-next').disabled=(step===N-1)||(!!st.gate&&!res[step]);
+      el('sd-next').disabled=step===N-1;
       var dots=el('sd-dots');
       if(!dots.childElementCount){
         STEPS.forEach(function(_,k){
@@ -982,6 +983,12 @@
         });
       }
       [].slice.call(dots.children).forEach(function(d,j){d.setAttribute('aria-current',j===step?'true':'false');});
+      // A gate reached while paused (manual browsing) still resolves itself shortly — the film never
+      // asks the visitor to click; the transport is only for skipping around.
+      if(st.gate&&!res[step]&&!playing){
+        var tok2=++simTok, s2=step;
+        setTimeout(function(){ if(tok2===simTok&&step===s2&&!resolved[s2]) simulateGate(); }, reduce?100:1200);
+      }
 
       var ed=st.ed, lines, fn, chip=null, lens=null;
       if(ed==='seed'){fn='src/features.py';lines=SEED;}
@@ -1010,9 +1017,9 @@
         if(lens&&ix===lens.e.lensAt){
           html+='<div class="lens"><span class="sp">✨ #'+lens.e.id+' · +'+lens.e.plus+' −'+lens.e.minus+'</span>';
           if(lens.gated&&!res[step]){
-            // Only the scripted action is a live button — the rest stay inert display text.
-            if(STEPS[step].gate==='keep') html+='<button id="sd-lens-keep" class="hint">✓ Keep</button><span class="a">↩ Undo</span>';
-            else html+='<span class="a">✓ Keep</span><button id="sd-lens-undo" class="hint">↩ Undo</button>';
+            // Self-running: the scripted action renders as a control the DEMO presses, not the visitor.
+            if(STEPS[step].gate==='keep') html+='<span class="fakebtn" id="sd-lens-keep">✓ Keep</span><span class="a">↩ Undo</span>';
+            else html+='<span class="a">✓ Keep</span><span class="fakebtn" id="sd-lens-undo">↩ Undo</span>';
             html+='<span class="a">💬 Chat</span><span class="a">⧉ View diff</span>';
           }else{
             html+='<span class="a">✓ Keep</span><span class="a">↩ Undo</span><span class="a">💬 Chat</span><span class="a">⧉ View diff</span>';
@@ -1023,9 +1030,6 @@
         html+='<div class="ln '+l.c+'"><span class="n">'+l.n+'</span><span class="t">'+(star?star+l.t:l.t)+'</span></div>';
       });
       el('sd-code').innerHTML=html;
-      var kb=el('sd-lens-keep'),ub=el('sd-lens-undo');
-      if(kb)kb.addEventListener('click',function(){resolveGate(false);});
-      if(ub)ub.addEventListener('click',function(){resolveGate(false);});
 
       var landed=landedEdits(step), rows='';
       for(var k=landed.length-1;k>=0;k--){
@@ -1073,8 +1077,8 @@
           '<span class="lc"><span class="p">+'+e.plus+'</span> <span class="m">−'+e.minus+'</span></span></div>';
       }).join('');
       var acceptBtn=el('sd-acceptall');
-      if(st.gate==='acceptall'&&!res[step]){acceptBtn.hidden=false;acceptBtn.classList.add('hint');}
-      else {acceptBtn.hidden=true;acceptBtn.classList.remove('hint');}
+      if(st.gate==='acceptall'&&!res[step]){acceptBtn.hidden=false;}
+      else {acceptBtn.hidden=true;acceptBtn.classList.remove('sim-press');}
 
       var p=0,kk=0,u=0;
       landed.forEach(function(e){var s3=statusOf(e.id,step,res);if(s3==='pending')p++;else if(s3==='kept')kk++;else u++;});
@@ -1084,43 +1088,40 @@
       el('sd-note').textContent=rev+' of '+tot2+' reviewed'+(tot2&&rev===tot2?' — session clean':'');
     }
 
-    function resolveGate(auto){
-      if(!auto) stopPlay();
-      resolved[step]=true;
-      render();
-      var tok=++advanceTok, s=step;
-      setTimeout(function(){ if(tok===advanceTok&&step===s&&resolved[s]&&s<N-1) go(s+1); }, reduce?250:1000);
-    }
     function go(k){
-      advanceTok++;
       var target=Math.max(0,Math.min(N-1,k));
       if(target!==step){ delete resolved[target]; step=target; }
       render();
     }
-    function autoResolve(){
-      var g=STEPS[step].gate;
-      var btn=g==='keep'?el('sd-lens-keep'):g==='undo'?el('sd-lens-undo'):el('sd-acceptall');
-      if(btn) resolveGate(true);
+    // Self-running: the review gates are SIMULATED — the target control flashes as if clicked, the
+    // action applies, and the loop continues; at the end it pauses briefly and restarts. The transport
+    // below the narration only lets a visitor skip or pause — the hands-on version lives on demo.html.
+    function simulateGate(){
+      var g=STEPS[step].gate, tok=++simTok, s=step;
+      var target=g==='keep'?el('sd-lens-keep'):g==='undo'?el('sd-lens-undo'):el('sd-acceptall');
+      if(target) target.classList.add('sim-press');
+      setTimeout(function(){ if(tok===simTok&&step===s&&!resolved[s]){ resolved[s]=true; render(); } }, 700);
     }
-    el('sd-acceptall').addEventListener('click',function(){if(STEPS[step].gate==='acceptall')resolveGate(false);});
+    var playing=false, timer=null;
+    function tick(){
+      var st=STEPS[step];
+      if(st.gate&&!resolved[step]){ simulateGate(); return; }
+      if(step>=N-1){ endWait++; if(endWait>=2){ endWait=0; resolved={}; step=0; render(); } return; }
+      go(step+1);
+    }
+    function stopPlay(){ playing=false; endWait=0; if(timer){clearInterval(timer);timer=null;} el('sd-play').classList.remove('playing'); el('sd-play').textContent='▸'; }
+    function startPlay(){
+      if(playing) return;
+      playing=true; el('sd-play').classList.add('playing'); el('sd-play').textContent='❚❚';
+      timer=setInterval(tick, 3200);
+    }
     el('sd-back').addEventListener('click',function(){stopPlay();go(step-1);});
     el('sd-next').addEventListener('click',function(){stopPlay();go(step+1);});
-    el('sd-restart').addEventListener('click',function(){stopPlay();resolved={};step=0;render();});
-    function stopPlay(){playing=false;gateWait=0;endWait=0;if(timer){clearInterval(timer);timer=null;}el('sd-play').classList.remove('playing');el('sd-play').textContent='▸';}
-    function startPlay(){
-      if(playing)return;
-      playing=true;el('sd-play').classList.add('playing');el('sd-play').textContent='❚❚';
-      timer=setInterval(function(){
-        var st=STEPS[step];
-        if(st.gate&&!resolved[step]){ gateWait++; if(gateWait>=2){gateWait=0;autoResolve();} return; }
-        gateWait=0;
-        if(step>=N-1){ endWait++; if(endWait>=2){endWait=0;resolved={};step=0;render();} return; }
-        go(step+1);
-      },3400);
-    }
+    el('sd-restart').addEventListener('click',function(){resolved={};step=0;render();startPlay();});
     el('sd-play').addEventListener('click',function(){ if(playing)stopPlay(); else startPlay(); });
     render();
-    if(!reduce) startPlay(); else stopPlay();
+    if(!reduce){ startPlay(); }
+    else { stopPlay(); step=6; render(); } // reduced motion: parked on a busy frame; transport still works
   })();
 </script>
 </body>

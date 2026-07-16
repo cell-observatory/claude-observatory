@@ -2,7 +2,7 @@
   "name": "claude-observatory-vscode",
   "displayName": "Claude Observatory",
   "description": "A running list of every file change Claude Code makes, each with its own Keep / Undo (surgical, git-free).",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "publisher": "claude-observatory",
   "private": true,
   "engines": {
@@ -62,19 +62,19 @@
           "id": "claudeObservatory.observations",
           "name": "Observations",
           "icon": "media/icon.svg",
-          "initialSize": 5
+          "initialSize": 1
         },
         {
           "id": "claudeObservatory.changemap",
           "name": "Overview",
           "type": "webview",
-          "initialSize": 6
+          "initialSize": 8
         },
         {
           "id": "claudeObservatory.stats",
           "name": "Stats",
           "type": "webview",
-          "initialSize": 3
+          "initialSize": 1
         }
       ]
     },
@@ -914,7 +914,7 @@
     "package": "vsce package --no-dependencies -o claude-observatory.vsix"
   },
   "devDependencies": {
-    "@claude-observatory/core": "0.8.1",
+    "@claude-observatory/core": "0.8.2",
     "@types/node": "^22.0.0",
     "@types/vscode": "^1.85.0",
     "@vscode/codicons": "^0.0.45",

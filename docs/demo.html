@@ -53,6 +53,7 @@
   html{scroll-behavior:smooth;scroll-padding-top:80px;-webkit-text-size-adjust:100%}
   body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:17px;line-height:1.62;-webkit-font-smoothing:antialiased;overflow-x:hidden}
   .wrap{width:min(var(--col),90%);margin-inline:auto}
+  .wrap.wide{width:min(1420px,96%)}
   a{color:inherit;text-decoration:none}
   h1,h2,h3{font-weight:640;letter-spacing:-.021em;line-height:1.08;text-wrap:balance;overflow-wrap:break-word}
   .hl{color:var(--accent)}
@@ -94,13 +95,26 @@
   .hero h1{font-size:clamp(2rem,5vw,3.3rem);margin:16px auto 14px;max-width:22ch}
   .hero .lede{margin-inline:auto;max-width:60ch}
 
-  /* the IDE frame: editor on top, the dashboards dock below — the real VS Code layout */
+  /* the IDE frame: sidebar + editor on top, the dashboards dock below — the real VS Code layout */
   .ide{border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);overflow:hidden;background:var(--ed-bg);margin-top:22px}
-  .editor{font-family:var(--mono);color:var(--ed-ink)}
+  .ide-top{display:grid;grid-template-columns:216px 1fr}
+  @media (max-width:900px){.ide-top{grid-template-columns:1fr}.side{display:none}}
+  .side{background:var(--ed-panel);border-right:1px solid var(--ed-line);font-family:var(--mono);font-size:.72rem;min-width:0}
+  .side-h{padding:9px 12px;font-size:.6rem;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-faint);border-bottom:1px solid var(--ed-line)}
+  .sr{display:flex;gap:7px;align-items:center;padding:2px 12px;color:var(--ink-soft);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .sr .sd{flex:none;width:8px;height:8px;border-radius:50%}
+  .sr .sd.pending{background:var(--pending)} .sr .sd.kept{background:var(--kept)} .sr .sd.undone{background:var(--undone)}
+  .sr .sn{overflow:hidden;text-overflow:ellipsis}
+  .sr .sc{margin-left:auto;flex:none;font-size:.64rem;color:var(--ink-faint)}
+  .sr .sc .p{color:var(--kept)} .sr .sc .m{color:var(--deleted)}
+  .sr.fold{color:var(--ink-faint);padding-top:7px}
+  .sr.on{background:var(--accent-soft);color:var(--ink)}
+  .side .empty{padding:9px 12px;color:var(--ink-faint)}
+  .editor{font-family:var(--mono);color:var(--ed-ink);min-width:0}
   .editor .bar{display:flex;align-items:center;gap:7px;height:38px;padding:0 14px;background:var(--ed-panel);border-bottom:1px solid var(--ed-line)}
   .editor .bar .d{width:11px;height:11px;border-radius:50%}
   .editor .bar .fn{margin-left:12px;font-size:.8rem;color:var(--ink-faint)}
-  .editor .code{padding:12px 0 10px;min-height:280px;overflow-x:auto}
+  .editor .code{padding:12px 0 10px;min-height:250px;overflow-x:auto}
   .ln{display:flex;font-size:.82rem;line-height:1.85;min-width:max-content}
   .ln .n{width:44px;text-align:right;padding-right:16px;color:var(--ed-gutter);flex:none;user-select:none}
   .ln .t{white-space:pre}
@@ -128,8 +142,9 @@
   .dockhead{display:flex;gap:14px;align-items:center;padding:6px 14px;background:var(--ed-panel);border-top:1px solid var(--ed-line);border-bottom:1px solid var(--ed-line);font-family:var(--mono);font-size:.6rem;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-faint)}
   .dock{display:grid;grid-template-columns:.95fr 1.6fr .95fr;background:var(--line-soft);gap:1px}
   @media (max-width:900px){.dock{grid-template-columns:1fr}}
-  .pane{background:var(--surface);min-height:240px;max-height:300px;overflow-y:auto;font-size:.74rem;display:flex;flex-direction:column}
-  .pane .ph{position:sticky;top:0;z-index:2;background:var(--surface);display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 12px;border-bottom:1px solid var(--line-soft);font-family:var(--mono);font-size:.62rem;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-faint)}
+  /* Panes size to their content — the whole dock is visible with NO inner scrollbars. */
+  .pane{background:var(--surface);min-height:250px;font-size:.76rem;display:flex;flex-direction:column}
+  .pane .ph{background:var(--surface);display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 12px;border-bottom:1px solid var(--line-soft);font-family:var(--mono);font-size:.62rem;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-faint)}
   .pane .ph .act{letter-spacing:0;text-transform:none}
   .pane .body{flex:1;display:flex;flex-direction:column}
 
@@ -275,12 +290,12 @@
   <div class="wrap">
     <span class="eyebrow">Interactive demo</span>
     <h1>The full panels, <span class="hl">step by step</span></h1>
-    <p class="lede">A scripted replay of the bundled demo session over a small Python training pipeline, laid out the way the panels sit in the editor: the file on top, the Observatory dashboards docked below. Nothing calls a model — the review clicks are yours.</p>
+    <p class="lede">A scripted replay of the bundled demo session over a small Python training pipeline, laid out the way it all sits in the editor: the Claude Edits sidebar and the file on top, the Observatory dashboards docked below. Nothing calls a model — the review clicks are yours, and each one applies itself if you just watch.</p>
   </div>
 </header>
 
 <section style="padding-top:6px" id="stage">
-  <div class="wrap">
+  <div class="wrap wide">
     <div class="demo-ui" aria-label="Demo narration and controls">
       <p class="narr" id="narr" aria-live="polite"></p>
       <p class="hintline" id="hint" aria-live="polite"></p>
@@ -294,15 +309,21 @@
       </div>
     </div>
 
-    <div class="ide" aria-label="Simulated editor with the Observatory dashboards docked below">
-      <div class="editor">
-        <div class="bar">
-          <span class="d" style="background:#ff5f57"></span><span class="d" style="background:#febc2e"></span><span class="d" style="background:#28c840"></span>
-          <span class="fn" id="ed-fn">src/features.py</span>
-          <span class="edchip pending" id="ed-chip" hidden></span>
+    <div class="ide" aria-label="Simulated editor with the Claude Edits sidebar and the Observatory dashboards docked below">
+      <div class="ide-top">
+        <aside class="side" aria-label="Claude Edits sidebar (simulated)">
+          <div class="side-h">Claude Edits</div>
+          <div id="side-tree"></div>
+        </aside>
+        <div class="editor">
+          <div class="bar">
+            <span class="d" style="background:#ff5f57"></span><span class="d" style="background:#febc2e"></span><span class="d" style="background:#28c840"></span>
+            <span class="fn" id="ed-fn">src/features.py</span>
+            <span class="edchip pending" id="ed-chip" hidden></span>
+          </div>
+          <div class="prompt-strip"><span class="pr">❯</span><span class="pt" id="ed-prompt"></span><span class="caret" id="ed-caret" hidden></span></div>
+          <div class="code" id="ed-code"></div>
         </div>
-        <div class="prompt-strip"><span class="pr">❯</span><span class="pt" id="ed-prompt"></span><span class="caret" id="ed-caret" hidden></span></div>
-        <div class="code" id="ed-code"></div>
       </div>
 
       <div class="dockhead"><span>Claude Observatory Dashboards</span></div>
@@ -543,6 +564,10 @@
     var N=STEPS.length;
     var el=function(id){return document.getElementById(id);};
     var step=0, resolved={}, timer=null, playing=false, typeTimer=null, advanceTok=0;
+    // Gate countdown: the visitor can act, and if they don't, the action applies itself when the
+    // timer runs out — the walkthrough never stalls.
+    var gateTimer=null, gateLeft=0, armedStep=-1;
+    var GATE_SECONDS=reduce?3:9;
 
     function statusOf(id,s,res){
       var afterKeep=s>7||(s===7&&res[7]), afterUndo=s>8||(s===8&&res[8]), afterAll=s>9||(s===9&&res[9]);
@@ -555,7 +580,10 @@
     function render(){
       var st=STEPS[step], res=resolved;
       el('narr').innerHTML=st.narr;
-      el('hint').textContent=(st.gate&&!res[step])?st.hint:'';
+      if(st.gate&&!res[step]){
+        if(armedStep!==step){ armedStep=step; armGate(); }
+        updateHint();
+      }else{ clearGateTimer(); if(armedStep===step) armedStep=-1; el('hint').textContent=''; }
       el('dcount').textContent=('0'+(step+1)).slice(-2)+' / '+('0'+N).slice(-2);
       el('dback').disabled=step===0;
       el('dnext').disabled=(step===N-1)||(!!st.gate&&!res[step]);
@@ -616,7 +644,22 @@
       if(ub)ub.addEventListener('click',function(){resolveGate();});
 
       // ---- observations ----
-      var landed=landedEdits(step), rows='';
+      // ---- sidebar: the Claude Edits tree — folders by module, files with status dots + deltas ----
+      var landed=landedEdits(step), sh='';
+      if(landed.length){
+        var byMod={};landed.forEach(function(e){(byMod[e.module]=byMod[e.module]||[]).push(e);});
+        Object.keys(byMod).forEach(function(m){
+          sh+='<div class="sr fold">▾ '+esc(m)+'</div>';
+          byMod[m].forEach(function(e2){
+            var s4=statusOf(e2.id,step,res);
+            sh+='<div class="sr'+(e2.file===fn?' on':'')+'"><span class="sd '+s4+'"></span><span class="sn">'+esc(e2.file.split('/').pop())+'</span><span class="sc"><span class="p">+'+e2.plus+'</span> <span class="m">−'+e2.minus+'</span></span></div>';
+          });
+        });
+      }else sh='<div class="empty">Edits appear here as Claude works.</div>';
+      el('side-tree').innerHTML=sh;
+
+      // ---- observations ----
+      var rows='';
       if(st.plan||landed.length) rows+='<div class="or"><div class="top"><span class="of">Pipeline: scaling, validation, tests</span><span class="badge">session recap</span></div><div class="ow">'+esc(PROMPT)+'</div></div>';
       for(var k=landed.length-1;k>=0;k--){
         var o=landed[k];
@@ -709,8 +752,25 @@
       el('tok-line').setAttribute('points',pts);
     }
 
+    function clearGateTimer(){ if(gateTimer){ clearInterval(gateTimer); gateTimer=null; } }
+    function updateHint(){
+      var st=STEPS[step];
+      el('hint').textContent=(st.gate&&!resolved[step])?(st.hint+' Applies automatically in '+gateLeft+'s.'):'';
+    }
+    function armGate(){
+      clearGateTimer();
+      gateLeft=GATE_SECONDS;
+      var s=step;
+      gateTimer=setInterval(function(){
+        if(step!==s||resolved[s]){ clearGateTimer(); return; }
+        gateLeft--;
+        if(gateLeft<=0){ clearGateTimer(); resolveGate(); } else updateHint();
+      },1000);
+    }
     function resolveGate(){
-      stopPlay(); // a gate click is the visitor driving — autoplay resumes only via ▸
+      // Applies the scripted action (visitor click or timer expiry) — the walkthrough keeps flowing
+      // either way; the transport controls are what pause it.
+      clearGateTimer(); armedStep=-1;
       resolved[step]=true;
       render();
       var tok=++advanceTok, s=step;
@@ -718,6 +778,7 @@
     }
     function go(k){
       advanceTok++;
+      clearGateTimer(); armedStep=-1;
       var target=Math.max(0,Math.min(N-1,k));
       if(target!==step){ delete resolved[target]; step=target; }
       render();
@@ -736,7 +797,7 @@
       playing=true;el('dplay').classList.add('playing');el('dplay').textContent='❚❚';
       timer=setInterval(function(){
         var st=STEPS[step];
-        if(st.gate&&!resolved[step])return; // hold at the gate — this page waits for the visitor
+        if(st.gate&&!resolved[step])return; // the gate countdown owns this moment
         if(step>=N-1){stopPlay();return;}
         go(step+1);
       },3600);
