@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Claude Observatory — every edit Claude makes, under review</title>
-<meta name="description" content="Per-edit Keep / Undo for Claude Code — in the terminal, VS Code, and JetBrains, at zero extra tokens. Standalone, git-free, shareable.">
+<title>Claude Observatory — per-edit review for Claude Code</title>
+<meta name="description" content="Per-edit Keep and Undo review for Claude Code, in the terminal, VS Code, and JetBrains, at zero extra tokens. Standalone, git-free, and shareable.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%AC%3C/text%3E%3C/svg%3E">
 <style>
   :root{
@@ -78,7 +78,15 @@
   .btn.primary:hover{background:var(--accent-ink);border-color:var(--accent-ink)}
   .btn.line{background:transparent;color:var(--ink);border-color:var(--line)}
   .btn.line:hover{border-color:var(--ink-faint)}
-  @media (max-width:720px){.nav .links a:not(.more){display:none}}
+  .menu-btn{display:none}
+  @media (max-width:720px){
+    .menu-btn{display:inline-flex}
+    .nav .links{display:none}
+    .nav.open .links{display:flex;flex-direction:column;align-items:flex-start;position:absolute;top:60px;left:0;right:0;margin:0;padding:14px 5% 18px;gap:14px;background:var(--bg);border-bottom:1px solid var(--line);box-shadow:var(--shadow)}
+    .nav.open,.nav.open.condensed{background:var(--bg)}
+    .lede{max-width:100%}
+    .editor{overflow-x:auto}
+  }
 
   section{padding-block:clamp(96px,14vh,190px)}
   .center{text-align:center;margin-inline:auto;max-width:660px}
@@ -239,13 +247,16 @@
     <div class="links">
       <a href="#hero">Overview</a>
       <a href="#act">Review</a>
+      <a href="#demo">Demo</a>
       <a href="#tour">Tour</a>
       <a href="#install">Install</a>
+      <a href="getting-started.html">Getting started</a>
       <a href="panels.html">Panels</a>
       <a class="more" href="features.html">Features&nbsp;→</a>
       <a href="https://github.com/cell-observatory/claude-observatory">GitHub</a>
     </div>
     <div class="right">
+      <button class="icon-btn menu-btn" id="menu" aria-label="Toggle navigation menu" aria-expanded="false">☰</button>
       <button class="icon-btn" id="theme" aria-label="Toggle theme">◐</button>
       <a class="ghost" href="https://github.com/cell-observatory/claude-observatory">GitHub&nbsp;↗</a>
     </div>
@@ -263,12 +274,12 @@
 <header class="hero" id="hero">
   <div class="wrap hero-grid">
     <div class="stagger">
-      <span class="eyebrow" style="--i:0">A review deck for Claude Code</span>
-      <h1 style="--i:1">Every edit Claude makes, <span class="hl">under review.</span></h1>
-      <p class="lede" style="--i:2">Per-edit Keep or Undo for Claude Code. Each change becomes a reviewable entry with its own surgical undo — in the terminal, VS Code, and JetBrains, at zero extra tokens.</p>
+      <span class="eyebrow" style="--i:0">A review tool for Claude Code</span>
+      <h1 style="--i:1">Per-edit review for <span class="hl">Claude Code</span></h1>
+      <p class="lede" style="--i:2">Each change Claude makes becomes a reviewable entry with its own Keep, Undo, and surgical revert — in the terminal, VS Code, and JetBrains, at zero extra tokens.</p>
       <div class="cta" style="--i:3">
         <a class="btn primary" href="#install">Get started</a>
-        <a class="btn line" href="#act">See how it works</a>
+        <a class="btn line" href="#act">How it works</a>
       </div>
       <div class="meta" style="--i:4">git-free · zero extra Claude tokens · terminal + VS Code + JetBrains</div>
     </div>
@@ -315,10 +326,10 @@
         <span class="eyebrow">Per-edit review</span>
         <div class="beats">
           <p class="beat b1">Claude proposes a change.</p>
-          <p class="beat b2">You <span class="hl">keep</span> what's right —</p>
-          <p class="beat b3">and undo what isn't, one edit at a time.</p>
+          <p class="beat b2">You <span class="hl">keep</span> the edits that are correct,</p>
+          <p class="beat b3">and undo the rest, one edit at a time.</p>
         </div>
-        <p class="act-sub">No end-of-session mega-diff. Every entry stands alone: accept it, revert it, or open its diff — reverting the third change never touches the other nine.</p>
+        <p class="act-sub">There is no end-of-session mega-diff. Every entry stands alone: accept it, revert it, or open its diff. Reverting one change never touches the others.</p>
       </div>
       <div class="editor act-editor" aria-hidden="true">
         <div class="bar">
@@ -346,156 +357,108 @@
 <section class="moment" id="everywhere">
   <div class="wrap rv">
     <span class="eyebrow">Terminal, VS Code, JetBrains</span>
-    <h2>The same review in every editor you use.</h2>
-    <p class="lede">One backend, identical decisions across the CLI, VS Code, and JetBrains. Start reviewing in the terminal, finish in your editor — nothing to reconcile. A navigation bar rides along as you work — step through pending edits from the status bar, the editor tab, or a bubble over the change. And an Action Timeline surfaces every tool call Claude made, not just the edits — flagging the risky commands it ran, mapping where a session reached off-machine, nesting each subagent's own timeline with per-agent metrics, and showing the fleet of other agents at work in the same project — all at zero extra tokens.</p>
+    <h2>The same review in every editor</h2>
+    <p class="lede">One backend serves the CLI, VS Code, and JetBrains, so a review can start in the terminal and finish in either editor with nothing to reconcile. A Claude Edits sidebar holds Edits, Diffs, File History, and the Actions timeline; a bottom Observatory panel holds Observations, the multi-agent Overview, and Stats. A navigation bar steps through pending edits from the status bar, the editor tab, or a bubble over the change. The Actions timeline records every tool call Claude made, not just the edits: it flags risky commands, maps where a session reached off-machine, nests each subagent's timeline with per-agent metrics, and lists the fleet of agents at work across the repo's worktrees — all at zero extra tokens.</p>
   </div>
-  <div class="wrap"><div class="panel rv scale"><img src="media/layout.png" loading="lazy" alt="The observatory in VS Code: sidebar edits, inline review, and the bottom dashboards"></div></div>
-  <div class="wrap rv" style="margin-top:clamp(20px,3vw,34px)"><span class="eyebrow">Anatomy</span><h3 style="font-size:clamp(1.1rem,2vw,1.4rem);margin:.3em 0 .1em">Every surface, named.</h3></div>
-  <div class="wrap"><div class="panel rv"><img src="media/anatomy.png" loading="lazy" alt="Anatomy of the workspace: the Claude Edits activity bar and sidebar; the editor with inline review and its tab-bar toolbar; the bottom panel — Actions, Observations, Timeline, Overview (chapters, module strip, file ledger), Stats; and the status-bar microscope plus navigation bar"></div></div>
+  <div class="wrap"><a href="panels.html" title="Panels reference — every control named"><div class="panel rv scale"><img src="media/layout.png" loading="lazy" alt="The observatory in VS Code: sidebar edits, inline review, and the bottom dashboards"></div></a></div>
+</section>
+
+<!-- RECORDED DEMO: the Overview as a session runs -->
+<section class="moment" id="demo">
+  <div class="wrap rv">
+    <span class="eyebrow">Recorded demo</span>
+    <h2>The Overview as a session runs</h2>
+    <p class="lede">Recorded from the bundled demo: a session plans three chapters, edits land under each, a subagent and a workflow join, and the panel updates throughout. The <a href="getting-started.html" style="color:var(--accent-ink);text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:4px">full recorded walkthrough</a> covers the workflow view, PyCharm, and the chapter-by-chapter review.</p>
+  </div>
+  <div class="wrap"><a href="getting-started.html" title="Getting started — the recorded walkthrough"><div class="panel rv scale"><img src="media/demo-live.gif" loading="lazy" alt="Recording of the Overview panel during the bundled demo: the chapter ribbon completing chapter by chapter, the module strip and file ledger growing with each edit, and the fleet agent's phase updating"></div></a></div>
 </section>
 
 <!-- FEATURE TOUR: every surface, one slide at a time -->
 <section class="moment" id="tour">
   <div class="wrap rv">
-    <span class="eyebrow">The full tour</span>
-    <h2>Seventeen ways to stay in the loop.</h2>
-    <p class="lede" style="margin-inline:auto">Inline, in the panel, in the terminal, and across both editors — every surface, one at a time.</p>
+    <span class="eyebrow">Feature tour</span>
+    <h2><a href="features.html" style="text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:5px;text-decoration-color:var(--accent)">Features</a></h2>
+    <p class="lede" style="margin-inline:auto">Every surface, one slide at a time: inline, in the panel, in the terminal, and in both editors.</p>
   </div>
   <div class="wrap">
     <div class="tour rv" role="region" aria-roledescription="carousel" aria-label="Feature tour">
       <div class="tour-view">
         <div class="slides" id="slides">
 
+          <article class="slide" role="group" aria-roledescription="slide" aria-label="Overview — master-detail multi-agent panel">
+            <div class="slide-in">
+              <div><span class="eyebrow">Overview</span><h3>Every agent and its changes in one panel</h3>
+                <p>A master-detail panel. The left nav lists every running agent across the repo's worktrees under the <b>Fleet</b> tab, plus every multi-agent Workflows run, each with a live phase and an activity sparkline; an interrupted run that never completed is not shown as running. Selecting one fills the right side with its change map: Claude's own to-dos as a task ribbon, a module-proportion strip, and every file ranked by churn with bars sized by ±lines. Clicking a chapter scopes Accept / Revert to that task; clicking a file opens its diff.</p></div>
+              <div class="panel"><img src="media/overview-tabs.png" loading="lazy" alt="The master-detail Overview: Fleet and Workflows in the left nav; the selected agent's change map — task ribbon, module strip, and churn-ranked file ledger — on the right"></div>
+            </div>
+          </article>
+
+          <article class="slide" role="group" aria-roledescription="slide" aria-label="Multitasking across worktrees">
+            <div class="slide-in">
+              <div><span class="eyebrow">The fleet</span><h3>Multitasking across worktrees</h3>
+                <p>Every running Claude session appears in one live board, including sessions in separate git worktrees of one repo, correlated without the git binary. Each row carries a live phase (working · awaiting-input · awaiting-permission · idle · done, with heuristic phases marked ~), its worktree and branch, a sparkline, ±lines, tokens · time, risk, and a strip flagging any file two agents are touching. Tracking is path-only, at zero tokens.</p></div>
+              <div class="panel"><img src="media/multitasking.png" loading="lazy" alt="Multitasking: one row per running agent across the repo's git worktrees — live phase, branch, sparkline, ±lines, risk, nested subagents, and a cross-agent file-collision strip"></div>
+            </div>
+          </article>
+
+          <article class="slide" role="group" aria-roledescription="slide" aria-label="Task chapters">
+            <div class="slide-in">
+              <div><span class="eyebrow">Task chapters</span><h3>Review organized by Claude's to-dos</h3>
+                <p>Every edit belongs to a named chapter; work outside any to-do lands in a session chapter titled from the session's goal. A chapter can be accepted, rejected, or cleared at once — the buttons act on exactly the edits the row shows.</p></div>
+              <div class="panel"><img src="media/chapters.png" loading="lazy" alt="Task chapters: the chapter ribbon — Claude's own to-dos as named chapters with per-chapter review actions"></div>
+            </div>
+          </article>
+
           <article class="slide" role="group" aria-roledescription="slide" aria-label="Inline review">
             <div class="slide-in">
-              <div><span class="eyebrow">Inline review</span><h3>The change, right where it happened.</h3>
-                <p>Claude's pending edits sit in the editor itself — a tinted line, a ✨ marker, and Keep / Undo / Diff / Chat on hover.</p></div>
+              <div><span class="eyebrow">Inline review</span><h3>Review directly in the editor</h3>
+                <p>Claude's pending edits appear in the editor itself: a tinted line, a gutter star, and Keep / Undo / Diff / Chat on hover.</p></div>
               <div class="panel"><img src="media/inline-review.png" loading="lazy" alt="Inline review: a tinted pending edit with a ✨ marker and Keep/Undo actions"></div>
             </div>
           </article>
 
           <article class="slide" role="group" aria-roledescription="slide" aria-label="Per-edit diffs">
             <div class="slide-in">
-              <div><span class="eyebrow">Per-edit diffs</span><h3>Any edit, as its own before and after.</h3>
-                <p>Every entry opens its own diff — not a session-wide mega-diff you have to untangle.</p></div>
+              <div><span class="eyebrow">Per-edit diffs</span><h3>A dedicated diff for each edit</h3>
+                <p>Every entry opens as its own diff rather than one session-wide diff to untangle.</p></div>
               <div class="panel"><img src="media/diffs.png" loading="lazy" alt="Per-edit diff: one edit's before and after, side by side"></div>
             </div>
           </article>
 
           <article class="slide" role="group" aria-roledescription="slide" aria-label="Surgical undo and file history">
             <div class="slide-in">
-              <div><span class="eyebrow">Surgical undo &amp; file history</span><h3>Undo one edit. Keep the rest.</h3>
-                <p>Revert the third change without touching the other nine — and see every revision a file has been through.</p></div>
+              <div><span class="eyebrow">Surgical undo &amp; file history</span><h3>Surgical undo</h3>
+                <p>A single change can be reverted without touching later edits, and File History lists every revision a file has been through.</p></div>
               <div class="panel"><img src="media/file-history.png" loading="lazy" alt="File History: the active file's edits, newest first"></div>
-            </div>
-          </article>
-
-          <article class="slide" role="group" aria-roledescription="slide" aria-label="Timeline">
-            <div class="slide-in">
-              <div><span class="eyebrow">Timeline</span><h3>The session as a change feed.</h3>
-                <p>Files by most-recent activity; adjacent edits to the same file coalesce into one ×N run, so a busy session stays legible.</p></div>
-              <div class="panel"><img src="media/timeline.png" loading="lazy" alt="Timeline: files by recent activity, edits coalesced into runs"></div>
             </div>
           </article>
 
           <article class="slide" role="group" aria-roledescription="slide" aria-label="Observations">
             <div class="slide-in">
-              <div><span class="eyebrow">Observations</span><h3>What Claude was thinking.</h3>
-                <p>Each edit paired with Claude's actual reasoning, lifted from the transcript it already wrote. Zero extra tokens.</p></div>
-              <div class="panel"><img src="media/observations.png" loading="lazy" alt="Observations: each edit with Claude's own reasoning"></div>
-            </div>
-          </article>
-
-          <article class="slide" role="group" aria-roledescription="slide" aria-label="Overview">
-            <div class="slide-in">
-              <div><span class="eyebrow">Overview</span><h3>The session's changes at a glance.</h3>
-                <p>Claude's own to-dos become chapters across the top; an equal-width strip names each module Claude touched; every file ranked by churn. Click a row to open its diff.</p></div>
-              <div class="panel"><div class="mock">
-                <div class="mh">Overview · this session</div>
-                <div><span class="k">●</span> 1. Scaffold tracking &nbsp; <span class="p">◐</span> 2. Risk audit &nbsp; <span class="d">○ 3. Update docs</span></div>
-                <div class="d">▏<span class="p">&nbsp;vscode&nbsp;</span>▏<span class="k">&nbsp;core&nbsp;</span>▏<span class="p">&nbsp;docs&nbsp;</span>▏<span class="k">&nbsp;cli&nbsp;</span>▏</div>
-                <div><b>extension.ts</b> <span class="d">vscode</span> <span class="p">████████</span> +751 <span class="p">6⏳</span></div>
-                <div><b>changemap.ts</b> <span class="d">core</span> &nbsp;<span class="k">████</span> +285 <span class="k">✓</span></div>
-                <div><b>README.md</b> <span class="d">docs</span> &nbsp;&nbsp;<span class="p">█</span> +44 <span class="p">2⏳</span></div>
-              </div></div>
-            </div>
-          </article>
-
-          <article class="slide" role="group" aria-roledescription="slide" aria-label="Stats">
-            <div class="slide-in">
-              <div><span class="eyebrow">Stats</span><h3>Progress, tokens, and usage.</h3>
-                <p>A live scoreboard of pending / accepted / reverted, token plots by session and window, and your context + plan usage.</p></div>
-              <div class="panel"><img src="media/stats.png" loading="lazy" alt="Stats: review scoreboard, token plots, and usage bars"></div>
-            </div>
-          </article>
-
-          <article class="slide" role="group" aria-roledescription="slide" aria-label="Spotlight">
-            <div class="slide-in">
-              <div><span class="eyebrow">Spotlight</span><h3>Dim everything but the edits.</h3>
-                <p>Dim every line Claude didn't touch, so what changed reads at full contrast.</p></div>
-              <div class="panel"><img src="media/heatmap.png" loading="lazy" alt="Heatmap: unmodified lines dimmed so Claude's edits stand out"></div>
-            </div>
-          </article>
-
-          <article class="slide" role="group" aria-roledescription="slide" aria-label="Conflict resolution">
-            <div class="slide-in">
-              <div><span class="eyebrow">Conflict resolution</span><h3>It never guesses.</h3>
-                <p>If you edited the same lines, the undo stops and shows you the conflict instead of silently clobbering your work.</p></div>
-              <div class="panel"><img src="media/conflict.png" loading="lazy" alt="Conflict: undo halts and surfaces the clash rather than guessing"></div>
-            </div>
-          </article>
-
-          <article class="slide" role="group" aria-roledescription="slide" aria-label="The CLI backend">
-            <div class="slide-in">
-              <div><span class="eyebrow">The CLI backend</span><h3>Review without leaving the shell.</h3>
-                <p>One backend behind every surface. Same decisions in the terminal as in either editor — and every view is a <code>--json</code> command.</p></div>
-              <div class="panel"><img src="media/cli.png" loading="lazy" alt="The CLI: reviewing Claude's edits from the terminal"></div>
-            </div>
-          </article>
-
-          <article class="slide" role="group" aria-roledescription="slide" aria-label="Navigation bar">
-            <div class="slide-in">
-              <div><span class="eyebrow">Navigation bar</span><h3>Drive the review from any surface.</h3>
-                <p>One review bar on three surfaces — the status bar, the editor's title bar, and a floating bubble over the live edit.</p></div>
-              <div class="panel"><div class="mock">
-                <div class="mh">Review bar · three surfaces</div>
-                <div><span class="a">🔬 3</span> <span class="d">·</span> ▲ Diff 1/2 ▼ <span class="d">·</span> ◀ File 1/3 ▶ <span class="d">·</span> ✓ ↩ ✓✓ ✕ <span class="d">·</span> 🧹 💡 🔍</div>
-                <div class="d" style="margin-top:6px">Status bar · Editor title · Review bubble</div>
-              </div></div>
+              <div><span class="eyebrow">Observations</span><h3>A change feed with Claude's reasoning</h3>
+                <p>The session appears as a feed of files ordered by most-recent activity; adjacent edits to the same file coalesce into one ×N run. Each entry is paired with Claude's reasoning, parsed from the transcript it already wrote, at zero extra tokens.</p></div>
+              <div class="panel"><img src="media/observations.png" loading="lazy" alt="Observations: files by recent activity with same-file edits coalesced into ×N runs, each with Claude's own reasoning"></div>
             </div>
           </article>
 
           <article class="slide" role="group" aria-roledescription="slide" aria-label="Action timeline">
             <div class="slide-in">
-              <div><span class="eyebrow">Action timeline</span><h3>Every tool call, not just the edits.</h3>
-                <p>Every read, grep, shell command, web fetch, and subagent spawn — grouped by kind, curated by default, errors always surfaced.</p></div>
+              <div><span class="eyebrow">Action timeline</span><h3>A timeline of every tool call</h3>
+                <p>Every read, grep, shell command, web fetch, and subagent spawn is grouped by kind in the Claude Edits sidebar, with each category collapsed by default and errors always surfaced. Edit rows link directly to their review.</p></div>
               <div class="panel"><div class="mock">
-                <div class="mh">Actions · this session</div>
+                <div class="mh">Actions · sidebar</div>
+                <div>▸ Commands <span class="d">(229) ·</span> <span class="r">2 errors</span></div>
                 <div>▾ Edits <span class="d">(185)</span></div>
                 <div>&nbsp;&nbsp;extension.ts <span class="a">→ review</span></div>
-                <div>▾ Commands <span class="d">(229) ·</span> <span class="r">2 errors</span></div>
-                <div>▾ To-dos <span class="d">(30)</span></div>
-              </div></div>
-            </div>
-          </article>
-
-          <article class="slide" role="group" aria-roledescription="slide" aria-label="Risk and egress">
-            <div class="slide-in">
-              <div><span class="eyebrow">Risk &amp; egress</span><h3>Two audits, zero tokens.</h3>
-                <p>Which shell commands were destructive or privileged — and everywhere the session reached off-machine.</p></div>
-              <div class="panel"><div class="mock">
-                <div class="mh">Risk · Egress</div>
-                <div><span class="r">⚠ HIGH</span> &nbsp;rm -rf build/ <span class="d">recursive delete</span></div>
-                <div><span class="p">⚠ med</span> &nbsp;&nbsp;curl api.example.com <span class="d">network</span></div>
-                <div style="margin-top:6px">⇅ 3 destinations <span class="d">· 3 remote</span></div>
+                <div>▸ To-dos <span class="d">(30)</span></div>
               </div></div>
             </div>
           </article>
 
           <article class="slide" role="group" aria-roledescription="slide" aria-label="Subagent tracking">
             <div class="slide-in">
-              <div><span class="eyebrow">Subagent tracking</span><h3>Every subagent, its own timeline.</h3>
-                <p>Each agent Claude spawned, nested with its own actions and per-agent metrics — duration, tokens, tool calls.</p></div>
+              <div><span class="eyebrow">Subagent tracking</span><h3>Per-subagent timelines</h3>
+                <p>Each agent Claude spawned appears nested with its own actions and per-agent metrics: duration, tokens, and tool calls.</p></div>
               <div class="panel"><div class="mock">
                 <div class="mh">Subagents</div>
                 <div>▾ <b>code-reviewer</b> <span class="d">68 actions · 12m47s · 45k tok</span></div>
@@ -506,23 +469,31 @@
             </div>
           </article>
 
-          <article class="slide" role="group" aria-roledescription="slide" aria-label="Fleet and cross-agent awareness">
+          <article class="slide" role="group" aria-roledescription="slide" aria-label="Risk and egress">
             <div class="slide-in">
-              <div><span class="eyebrow">Fleet &amp; cross-agent awareness</span><h3>See what the other agents are doing.</h3>
-                <p>Other Claude sessions working the same project — active or idle, what's pending, which files they hold, and their risk.</p></div>
+              <div><span class="eyebrow">Risk &amp; egress</span><h3>Risk and egress audits</h3>
+                <p>Risk flags the shell commands that were destructive or privileged; egress lists everywhere the session reached off-machine.</p></div>
               <div class="panel"><div class="mock">
-                <div class="mh">Fleet · this project</div>
-                <div><span class="k">●</span> a1b2c3d4 <span class="d">active · 2 pending · 5 edits</span></div>
-                <div><span class="d">○ e5f6a7b8 &nbsp;idle · 0 pending</span> <span class="r">⚠ 1 high</span></div>
-                <div><span class="d">○ 9c8d7e6f &nbsp;idle · 3 pending</span></div>
+                <div class="mh">Risk · Egress</div>
+                <div><span class="r">⚠ HIGH</span> &nbsp;rm -rf build/ <span class="d">recursive delete</span></div>
+                <div><span class="p">⚠ med</span> &nbsp;&nbsp;curl api.example.com <span class="d">network</span></div>
+                <div style="margin-top:6px">⇅ 3 destinations <span class="d">· 3 remote</span></div>
               </div></div>
+            </div>
+          </article>
+
+          <article class="slide" role="group" aria-roledescription="slide" aria-label="Chat handoff">
+            <div class="slide-in">
+              <div><span class="eyebrow">Chat handoff</span><h3>Context-preloaded chat prompts</h3>
+                <p>One click assembles the before/after diff, Claude's reasoning, and the command and its result into a ready-to-paste prompt on your clipboard, for your own Claude session. The observatory never calls a model, so this costs zero extra tokens.</p></div>
+              <div class="panel"><img src="media/chat.png" loading="lazy" alt="Chat handoff: a context-preloaded prompt about one edit, ready to paste into your own Claude"></div>
             </div>
           </article>
 
           <article class="slide" role="group" aria-roledescription="slide" aria-label="Metrics">
             <div class="slide-in">
-              <div><span class="eyebrow">Metrics</span><h3>The session by the numbers.</h3>
-                <p>Line deltas, action and error counts, per-subagent duration and tokens, and how long Claude's tools actually took.</p></div>
+              <div><span class="eyebrow">Metrics</span><h3>Session metrics</h3>
+                <p>Line deltas, action and error counts, per-subagent duration and tokens, and how long Claude's tools took.</p></div>
               <div class="panel"><div class="mock">
                 <div class="mh">Metrics</div>
                 <div>edits &nbsp;&nbsp;&nbsp;&nbsp;<b>185</b> &nbsp;<span class="k">+1220</span> <span class="r">−40</span> <span class="d">· 20 pending</span></div>
@@ -533,10 +504,62 @@
             </div>
           </article>
 
+          <article class="slide" role="group" aria-roledescription="slide" aria-label="Stats">
+            <div class="slide-in">
+              <div><span class="eyebrow">Stats</span><h3>Progress, tokens, and usage</h3>
+                <p>A live scoreboard of pending / accepted / reverted edits, token plots by session and window, and context and plan usage.</p></div>
+              <div class="panel"><img src="media/stats.png" loading="lazy" alt="Stats: review scoreboard, token plots, and usage bars"></div>
+            </div>
+          </article>
+
+          <article class="slide" role="group" aria-roledescription="slide" aria-label="Navigation bar">
+            <div class="slide-in">
+              <div><span class="eyebrow">Navigation bar</span><h3>Review controls on four surfaces</h3>
+                <p>One review bar appears on four surfaces: the status bar, the editor's title bar, a floating bubble over the live edit, and the Overview panel's title bar.</p></div>
+              <div class="panel"><div class="mock">
+                <div class="mh">Review bar · four surfaces</div>
+                <div><span class="a">🔬 3</span> <span class="d">·</span> ▲ Diff 1/2 ▼ <span class="d">·</span> ◀ File 1/3 ▶ <span class="d">·</span> ✓ ↩ ✓✓ ✕ <span class="d">·</span> 🧹 💡 🔍</div>
+                <div class="d" style="margin-top:6px">Status bar · Editor title · Review bubble · Overview title bar</div>
+              </div></div>
+            </div>
+          </article>
+
+          <article class="slide" role="group" aria-roledescription="slide" aria-label="Spotlight">
+            <div class="slide-in">
+              <div><span class="eyebrow">Spotlight</span><h3>A focused view of changed lines</h3>
+                <p>Spotlight dims every line Claude did not touch, so the changes read at full contrast.</p></div>
+              <div class="panel"><img src="media/heatmap.png" loading="lazy" alt="Heatmap: unmodified lines dimmed so Claude's edits stand out"></div>
+            </div>
+          </article>
+
+          <article class="slide" role="group" aria-roledescription="slide" aria-label="Conflict resolution">
+            <div class="slide-in">
+              <div><span class="eyebrow">Conflict resolution</span><h3>Conflict handling</h3>
+                <p>If you edited the same lines, the undo stops and shows the conflict instead of overwriting your work.</p></div>
+              <div class="panel"><img src="media/conflict.png" loading="lazy" alt="Conflict: undo halts and surfaces the clash rather than guessing"></div>
+            </div>
+          </article>
+
+          <article class="slide" role="group" aria-roledescription="slide" aria-label="Live demo">
+            <div class="slide-in">
+              <div><span class="eyebrow">Live demo</span><h3>The built-in demo</h3>
+                <p><code>claude-observatory demo</code> replays a scripted session through the real pipeline — a real transcript, captured edits, a subagent, and a workflow — in an isolated demo session. Every panel fills in live and review works normally; <code>demo --clean</code> removes every trace. The recording below shows the Overview during a demo run.</p></div>
+              <div class="panel"><img src="media/demo-live.gif" loading="lazy" alt="The demo recorded live: the Overview's chapter ribbon, module strip, and file ledger filling in beat by beat — a fleet agent with its subagent appears, then a workflow run"></div>
+            </div>
+          </article>
+
+          <article class="slide" role="group" aria-roledescription="slide" aria-label="The CLI backend">
+            <div class="slide-in">
+              <div><span class="eyebrow">The CLI backend</span><h3>Review from the terminal</h3>
+                <p>One backend serves every surface. Decisions made in the terminal match either editor, and every view is available as a <code>--json</code> command.</p></div>
+              <div class="panel"><img src="media/cli.png" loading="lazy" alt="The CLI: reviewing Claude's edits from the terminal"></div>
+            </div>
+          </article>
+
           <article class="slide" role="group" aria-roledescription="slide" aria-label="Cross-editor parity">
             <div class="slide-in">
-              <div><span class="eyebrow">Cross-editor parity</span><h3>The same tool in both editors.</h3>
-                <p>VS Code and JetBrains render the identical model from the identical backend. Start in one, finish in the other.</p></div>
+              <div><span class="eyebrow">Cross-editor parity</span><h3>The same tool in both editors</h3>
+                <p>VS Code and JetBrains render the same model from the same backend, so a review can start in one editor and finish in the other.</p></div>
               <div class="panel"><img src="media/layout.png" loading="lazy" alt="The observatory in VS Code: sidebar edits, inline review, and the bottom dashboards"></div>
             </div>
           </article>
@@ -546,7 +569,7 @@
       <div class="tour-ui">
         <button class="tbtn" id="tprev" type="button" aria-label="Previous feature">‹</button>
         <div class="dots" id="tdots" role="tablist" aria-label="Choose a feature"></div>
-        <span class="tcount" id="tcount" aria-live="polite">01 / 17</span>
+        <span class="tcount" id="tcount" aria-live="polite">01 / 19</span>
         <button class="tbtn" id="tnext" type="button" aria-label="Next feature">›</button>
       </div>
     </div>
@@ -556,8 +579,8 @@
 <section class="moment" id="standalone">
   <div class="wrap rv">
     <span class="eyebrow">No repo required</span>
-    <h2>Standalone. Git-free. Shareable.</h2>
-    <p class="lede">A content-addressed snapshot store records every edit itself — no repo, no commits, zero extra Claude tokens. Then hand the session to a teammate.</p>
+    <h2>Standalone, git-free, and shareable</h2>
+    <p class="lede">A content-addressed snapshot store records every edit — no repo, no commits, and zero extra Claude tokens. A session can then be handed to a teammate.</p>
   </div>
   <div class="wrap"><div class="panel rv scale"><img src="media/file-history.png" loading="lazy" alt="File History: the active file's edits, newest first, following the editor"></div></div>
 </section>
@@ -565,12 +588,12 @@
 <section class="moment" id="specs">
   <div class="wrap center rv">
     <span class="eyebrow">By the numbers</span>
-    <h2>Quietly out of your way.</h2>
+    <h2>Key properties</h2>
   </div>
   <div class="wrap"><div class="specs rv">
     <div class="s"><div class="n">0</div><div class="l">extra tokens</div><div class="d">Capture runs in local hooks, outside the model loop.</div></div>
     <div class="s"><div class="n">1</div><div class="l">edit → 1 undo</div><div class="d">Revert one change; keep every later edit to the file.</div></div>
-    <div class="s"><div class="n">3</div><div class="l">surfaces → 1 store</div><div class="d">CLI, VS Code &amp; JetBrains read the same log, in sync.</div></div>
+    <div class="s"><div class="n">n</div><div class="l">agents → 1 panel</div><div class="d">Every agent · every worktree · one Overview.</div></div>
     <div class="s"><div class="n">git</div><div class="l">not required</div><div class="d">A content-addressed snapshot store — no repo, no commits.</div></div>
   </div></div>
 </section>
@@ -578,22 +601,23 @@
 <section class="moment center" id="install">
   <div class="wrap rv">
     <span class="eyebrow">Install</span>
-    <h2>Get started in one command.</h2>
-    <p class="lede">Install, run Claude Code, and every edit is waiting for you.</p>
+    <h2>One-command install</h2>
+    <p class="lede">Install once, run Claude Code, and every edit is captured for review.</p>
     <div class="cmd"><span class="pr">$</span><code>curl -fsSL https://raw.githubusercontent.com/cell-observatory/claude-observatory/main/scripts/bootstrap.sh | bash</code><button class="copy" data-copy="curl -fsSL https://raw.githubusercontent.com/cell-observatory/claude-observatory/main/scripts/bootstrap.sh | bash">Copy</button></div>
     <div class="install-cta">
       <a class="btn primary" href="https://github.com/cell-observatory/claude-observatory#quickstart">Read the README</a>
+      <a class="btn line" href="getting-started.html">Getting started →</a>
       <a class="btn line" href="features.html">See the full tour →</a>
     </div>
     <div class="or-claude rv">
-      <div class="or">— or let Claude do it —</div>
+      <div class="or">— or install via Claude Code —</div>
       <div class="promptbox">
         <button class="copy" data-copy="Please install Claude Observatory (github.com/cell-observatory/claude-observatory) for me: run its installer with `curl -fsSL https://raw.githubusercontent.com/cell-observatory/claude-observatory/main/scripts/bootstrap.sh | bash`, then run `claude-observatory doctor` and show me the output. Note: the capture hooks only take effect on a fresh session, so after installing, tell me to quit you, then run `claude-observatory init` in a plain terminal and relaunch you.">Copy prompt</button>
-        <p>Paste this into a Claude Code session — it installs everything for you.</p>
+        <p>Paste this into a Claude Code session to install everything.</p>
         <code class="prompt">Install Claude Observatory for me — run its bootstrap installer, then `claude-observatory doctor`. The capture hooks only take effect on a fresh session, so afterward have me quit, run `claude-observatory init` in a plain terminal, and relaunch.</code>
       </div>
     </div>
-    <p class="stay-current rv">Already installed? Stay up to date by re-running the one-liner above, or run <code>claude-observatory update</code> — add <code>--check</code> to just see what's new.</p>
+    <p class="stay-current rv">To update an existing install, re-run the command above or run <code>claude-observatory update</code>; add <code>--check</code> to preview what's new.</p>
   </div>
 </section>
 
@@ -723,6 +747,13 @@
       var a=map[e.target.id];if(a)a.classList.add('is-active');
     }});},{rootMargin:'-45% 0px -50% 0px'});
     ['hero','act','everywhere','specs','install'].forEach(function(id){var el=document.getElementById(id);if(el)io.observe(el);});
+  })();
+  (function(){
+    var nav=document.getElementById('nav'),btn=document.getElementById('menu');
+    if(!nav||!btn) return;
+    btn.addEventListener('click',function(){ var open=nav.classList.toggle('open'); btn.setAttribute('aria-expanded',open?'true':'false'); });
+    var ls=nav.querySelectorAll('.links a');
+    for(var i=0;i<ls.length;i++) ls[i].addEventListener('click',function(){ nav.classList.remove('open'); btn.setAttribute('aria-expanded','false'); });
   })();
 </script>
 </body>

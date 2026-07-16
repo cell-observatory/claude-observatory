@@ -10,12 +10,22 @@ import com.google.gson.JsonParser
  * result (no local aggregation, so VS Code and JetBrains can never disagree about the numbers).
  */
 data class ChangeMapChapter(
+    /** Stable brush key AND the WYSIWYG review-op key: ✓/↩/🧹 resolve via core.reviewEditIds(id) —
+     *  exactly the edits the row displays, the synthetic session chapter included. */
     val id: String,
+    /** The STRICT task this chapter joins for analytics + 💬 chat framing; null = no strict task (the
+     *  synthetic session chapter, or a duplicate-content occurrence beyond the first). 0.8.0 chapters
+     *  are TOTAL — no "unassigned" row exists; work outside any to-do lands in the synthetic chapter. */
+    val taskId: String?,
+    /** True for the fallback session chapter that claims work outside any to-do. */
+    val synthetic: Boolean,
     val index: Int,
     val title: String,
     /** "done" | "wip" | "todo" — from Claude's own to-do status. */
     val status: String,
     val edits: Int,
+    val added: Int,
+    val removed: Int,
     val kept: Int,
     val pending: Int,
     val undone: Int,
@@ -62,6 +72,9 @@ data class ChangeMapSummary(
     val pending: Int,
     val kept: Int,
     val undone: Int,
+    /** ±lines across the slice (headline counts; chapters are total, so no residual math needs these). */
+    val added: Int,
+    val removed: Int,
     val errors: Int,
     val subagents: Int,
     /** Sibling sessions in this project (the 🛰 chip) — same headline the VS Code panel shows. */
@@ -70,11 +83,119 @@ data class ChangeMapSummary(
     val egress: Int,
 )
 
+/** A stable-id task (0.8.0) — content-hash identity spanning strict in-progress intervals. The Overview
+ *  ribbon is built from these, JOINED to [TaskRoll] by [taskId] (NOT keyed off chapters). */
+data class ChangeMapTask(
+    val taskId: String,
+    val content: String,
+    val firstTs: Long,
+    val lastTs: Long,
+)
+
+/** Per-task change rollup (0.8.0). [taskId] == null is the explicit "unassigned" bucket — edits that
+ *  fell in no strict in-progress interval, never swept into a neighbouring task. */
+data class TaskRoll(
+    val taskId: String?,
+    val edits: Int,
+    val added: Int,
+    val removed: Int,
+    val pending: Int,
+    val kept: Int,
+    val undone: Int,
+)
+
+/** Per-subagent change rollup (0.8.0). [subagentId] == null = main-chain or unattributed. */
+data class SubagentRoll(
+    val subagentId: String?,
+    val edits: Int,
+    val added: Int,
+    val removed: Int,
+    val pending: Int,
+    val kept: Int,
+    val undone: Int,
+)
+
+/** Per-workflow change rollup (0.8.0 r2). [workflowId] == null = no-workflow / main-chain / ambiguous. */
+data class WorkflowRoll(
+    val workflowId: String?,
+    val edits: Int,
+    val added: Int,
+    val removed: Int,
+    val pending: Int,
+    val kept: Int,
+    val undone: Int,
+)
+
+/** One workflow's aggregate rollup (mirrors core ChangeMapWorkflow.rollup — the per-workflow Overview tab). */
+data class WorkflowRollup(
+    val edits: Int,
+    val added: Int,
+    val removed: Int,
+    val pending: Int,
+    val kept: Int,
+    val undone: Int,
+)
+
+/** One workflow's Overview TAB (0.8.0 r2): its ts-window-attributed edits rolled up + its touched files.
+ *  [taskIds] are the distinct non-null tasks this workflow contributed to (the tab's informational ribbon). */
+data class ChangeMapWorkflow(
+    val id: String,
+    val name: String,
+    val running: Boolean,
+    val rollup: WorkflowRollup,
+    val files: List<ChangeMapFile>,
+    val taskIds: List<String>,
+    /** The run's edits regrouped by session chapter (counts scoped to the run) — rendered as the
+     *  workflow slice's ribbon as-is; total chapters made the residual "unassigned" math obsolete. */
+    val chapters: List<ChangeMapChapter>,
+)
+
+/** Per-agent (session) change rollup (0.8.0), worktree-aware. */
+data class AgentRoll(
+    val session: String,
+    val edits: Int,
+    val added: Int,
+    val removed: Int,
+    val pending: Int,
+    val kept: Int,
+    val undone: Int,
+    val files: Int,
+)
+
+/** One agent's full change-map build (0.8.0) — the per-agent Overview TAB. Carries top-level
+ *  session/worktree/gitBranch/phase for the tab label, plus its own summary/files/modules/tasks and
+ *  rollups (each a per-sibling `buildChangeMap` aggregated once in core). */
+data class ChangeMapAgent(
+    val session: String,
+    val worktree: String,
+    val gitBranch: String,
+    val phase: String,
+    val summary: ChangeMapSummary?,
+    val chapters: List<ChangeMapChapter>,
+    val files: List<ChangeMapFile>,
+    val modules: List<ChangeMapModule>,
+    val tasks: List<ChangeMapTask>,
+    val rollupByTask: List<TaskRoll>,
+    val rollupBySubagent: List<SubagentRoll>,
+)
+
 data class ChangeMap(
     val summary: ChangeMapSummary?,
     val chapters: List<ChangeMapChapter>,
     val files: List<ChangeMapFile>,
     val modules: List<ChangeMapModule>,
+    // 0.8.0 additions — the three-level attribution + per-agent tabs.
+    val tasks: List<ChangeMapTask>,
+    val rollupByTask: List<TaskRoll>,
+    val rollupBySubagent: List<SubagentRoll>,
+    val rollupByAgent: List<AgentRoll>,
+    val agents: List<ChangeMapAgent>,
+    /** The session-wide unassigned bucket (edits outside every strict in-progress interval). */
+    val unassigned: TaskRoll?,
+    /** Per-workflow rollup, incl. the `workflowId: null` no-workflow/ambiguous bucket. */
+    val rollupByWorkflow: List<WorkflowRoll>,
+    /** One entry per workflow that produced attributed edits — the Overview's per-workflow tabs. */
+    val workflows: List<ChangeMapWorkflow>,
 )
 
 object ChangeMapParser {
@@ -85,6 +206,14 @@ object ChangeMapParser {
             arr(o, "chapters").map { chapter(it.asJsonObject) },
             arr(o, "files").map { file(it.asJsonObject) },
             arr(o, "modules").map { module(it.asJsonObject) },
+            arr(o, "tasks").map { task(it.asJsonObject) },
+            arr(o, "rollupByTask").map { taskRoll(it.asJsonObject) },
+            arr(o, "rollupBySubagent").map { subagentRoll(it.asJsonObject) },
+            arr(o, "rollupByAgent").map { agentRoll(it.asJsonObject) },
+            arr(o, "agents").map { agent(it.asJsonObject) },
+            o.getAsJsonObject("unassigned")?.let { taskRoll(it) },
+            arr(o, "rollupByWorkflow").map { workflowRoll(it.asJsonObject) },
+            arr(o, "workflows").map { workflow(it.asJsonObject) },
         )
     } catch (_: Exception) {
         null
@@ -108,12 +237,19 @@ object ChangeMapParser {
     private fun summary(o: JsonObject) = ChangeMapSummary(
         str(o, "session") ?: "",
         int(o, "units"), int(o, "pending"), int(o, "kept"), int(o, "undone"),
+        int(o, "added"), int(o, "removed"),
         int(o, "errors"), int(o, "subagents"), int(o, "fleet"), int(o, "egress"),
     )
 
     private fun chapter(o: JsonObject) = ChangeMapChapter(
-        str(o, "id") ?: "", int(o, "index"), str(o, "title") ?: "", str(o, "status") ?: "todo",
-        int(o, "edits"), int(o, "kept"), int(o, "pending"), int(o, "undone"), bool(o, "agent"),
+        str(o, "id") ?: "",
+        // Version-skew tolerance: an older CLI has no `taskId` key — there, chapter.id WAS the strict
+        // taskId, so fall back to it. An explicit JSON null (synthetic/duplicate row) must stay null.
+        if (o.has("taskId")) str(o, "taskId") else str(o, "id"),
+        bool(o, "synthetic"),
+        int(o, "index"), str(o, "title") ?: "", str(o, "status") ?: "todo",
+        int(o, "edits"), int(o, "added"), int(o, "removed"),
+        int(o, "kept"), int(o, "pending"), int(o, "undone"), bool(o, "agent"),
     )
 
     private fun file(o: JsonObject) = ChangeMapFile(
@@ -128,5 +264,62 @@ object ChangeMapParser {
         str(o, "module") ?: "", str(o, "label") ?: "", int(o, "churn"), int(o, "cnt"),
         int(o, "kept"), int(o, "pending"), int(o, "undone"), str(o, "status") ?: "kept",
         int(o, "files"), strings(o, "chapters"),
+    )
+
+    private fun long(o: JsonObject, k: String): Long =
+        o.get(k)?.takeIf { !it.isJsonNull }?.asLong ?: 0L
+
+    private fun task(o: JsonObject) = ChangeMapTask(
+        str(o, "taskId") ?: "", str(o, "content") ?: "", long(o, "firstTs"), long(o, "lastTs"),
+    )
+
+    private fun taskRoll(o: JsonObject) = TaskRoll(
+        str(o, "taskId"), int(o, "edits"), int(o, "added"), int(o, "removed"),
+        int(o, "pending"), int(o, "kept"), int(o, "undone"),
+    )
+
+    private fun subagentRoll(o: JsonObject) = SubagentRoll(
+        str(o, "subagentId"), int(o, "edits"), int(o, "added"), int(o, "removed"),
+        int(o, "pending"), int(o, "kept"), int(o, "undone"),
+    )
+
+    private fun workflowRoll(o: JsonObject) = WorkflowRoll(
+        str(o, "workflowId"), int(o, "edits"), int(o, "added"), int(o, "removed"),
+        int(o, "pending"), int(o, "kept"), int(o, "undone"),
+    )
+
+    private fun workflow(o: JsonObject): ChangeMapWorkflow {
+        val r = o.getAsJsonObject("rollup")
+        return ChangeMapWorkflow(
+            id = str(o, "id") ?: "",
+            name = str(o, "name") ?: "workflow",
+            running = bool(o, "running"),
+            rollup = WorkflowRollup(
+                r?.let { int(it, "edits") } ?: 0, r?.let { int(it, "added") } ?: 0, r?.let { int(it, "removed") } ?: 0,
+                r?.let { int(it, "pending") } ?: 0, r?.let { int(it, "kept") } ?: 0, r?.let { int(it, "undone") } ?: 0,
+            ),
+            files = arr(o, "files").map { file(it.asJsonObject) },
+            taskIds = strings(o, "taskIds"),
+            chapters = arr(o, "chapters").map { chapter(it.asJsonObject) },
+        )
+    }
+
+    private fun agentRoll(o: JsonObject) = AgentRoll(
+        str(o, "session") ?: "", int(o, "edits"), int(o, "added"), int(o, "removed"),
+        int(o, "pending"), int(o, "kept"), int(o, "undone"), int(o, "files"),
+    )
+
+    private fun agent(o: JsonObject) = ChangeMapAgent(
+        session = str(o, "session") ?: "",
+        worktree = str(o, "worktree") ?: "",
+        gitBranch = str(o, "gitBranch") ?: "",
+        phase = str(o, "phase") ?: "idle",
+        summary = o.getAsJsonObject("summary")?.let { summary(it) },
+        chapters = arr(o, "chapters").map { chapter(it.asJsonObject) },
+        files = arr(o, "files").map { file(it.asJsonObject) },
+        modules = arr(o, "modules").map { module(it.asJsonObject) },
+        tasks = arr(o, "tasks").map { task(it.asJsonObject) },
+        rollupByTask = arr(o, "rollupByTask").map { taskRoll(it.asJsonObject) },
+        rollupBySubagent = arr(o, "rollupBySubagent").map { subagentRoll(it.asJsonObject) },
     )
 }

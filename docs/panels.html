@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Claude Observatory — panels: every surface, named</title>
+<title>Claude Observatory — interface reference</title>
 <meta name="description" content="A visual reference for Claude Observatory — the name of every window, tab, and toolbar button across the sidebar, editor, bottom panel, status bar, and the inline review bubble.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%AC%3C/text%3E%3C/svg%3E">
 <style>
@@ -56,6 +56,13 @@
   .themebtn{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-soft);background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:6px 13px;cursor:pointer}
   .themebtn:hover{border-color:var(--accent);color:var(--accent-ink)}
   .themebtn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .menu-btn{display:none;font-family:var(--mono);font-size:14px;color:var(--ink-soft);background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:5px 12px;cursor:pointer;margin-left:auto}
+  @media (max-width:720px){
+    .menu-btn{display:inline-flex}
+    .nav .links{display:none}
+    .nav.open .links{display:flex;flex-direction:column;align-items:flex-start;position:absolute;top:60px;left:0;right:0;margin:0;padding:14px 5% 18px;gap:14px;background:var(--bg);border-bottom:1px solid var(--line)}
+    .nav.open{background:var(--bg)}
+  }
 
   /* hero */
   header.hero{padding:clamp(38px,6vw,72px) 0 8px}
@@ -110,14 +117,16 @@
 </head>
 <body>
 
-<nav class="nav"><div class="wrap row">
+<nav class="nav" id="nav"><div class="wrap row">
   <a class="brand" href="showcase.html"><span class="m">🔬</span> Claude Observatory</a>
   <div class="links">
     <a href="showcase.html">Overview</a>
+    <a href="getting-started.html">Getting started</a>
     <a href="features.html">Features</a>
     <a href="https://github.com/cell-observatory/claude-observatory">GitHub</a>
     <button class="themebtn" id="themebtn" type="button" aria-label="Toggle light and dark theme">◑ theme</button>
   </div>
+  <button class="icon-btn menu-btn" id="menu" aria-label="Toggle navigation menu" aria-expanded="false">☰</button>
 </div></nav>
 
 <header class="hero"><div class="wrap">
@@ -129,29 +138,29 @@
 <!-- 01 · the workspace (master map) -->
 <section id="workspace"><div class="wrap">
   <div class="sechead"><span class="n">01</span><h2>The workspace</h2></div>
-  <p class="lede">Every region and toolbar, called out on one screen. The <b>Claude&nbsp;Edits</b> sidebar and the editor on top; the <b>Claude&nbsp;Observatory</b> bottom panel below; the status bar along the bottom.</p>
+  <p class="lede">Every region and toolbar, called out on one screen: the <b>Claude&nbsp;Edits</b> sidebar and the editor on top, the Claude&nbsp;Observatory bottom panel below, and the status bar along the bottom.</p>
   <figure>
-    <div class="panel"><img src="media/map.png" loading="lazy" alt="The workspace with a coral callout box on every region: ① activity bar, ② Claude Edits sidebar, ③ editor tab bar, ④ Claude Observatory bottom panel (Actions · Observations · Timeline · Overview · Stats), ⑤ status bar with the navigation bar"></div>
+    <div class="panel"><img src="media/map.png" loading="lazy" alt="The workspace with a coral callout box on every region: ① activity bar, ② Claude Edits sidebar (Edits · Diffs · File History · Actions), ③ editor tab bar, ④ Claude Observatory bottom panel (Observations · Overview · Stats — Actions now lives in the Claude Edits sidebar), ⑤ status bar with the navigation bar"></div>
   </figure>
 </div></section>
 
-<!-- 02 · the five panel views, each in detail -->
+<!-- 02 · the observatory's panel views, each in detail -->
 <section id="panels"><div class="wrap">
-  <div class="sechead"><span class="n">02</span><h2>The five panel views &mdash; in detail</h2></div>
-  <p class="lede">Each pane in the &ldquo;Claude Observatory&rdquo; bottom panel, with every part named.</p>
+  <div class="sechead"><span class="n">02</span><h2>The panel views in detail</h2></div>
+  <p class="lede">The observatory&rsquo;s own views, with every part named: the Observations · Overview · Stats panes of the &ldquo;Claude&nbsp;Observatory&rdquo; bottom panel, plus <b>Actions</b>, which lives in the Claude&nbsp;Edits sidebar.</p>
   <div class="diagrams">
-    <figure id="overview"><h3 class="dh">Overview <span class="id">the session at a glance</span></h3><div class="panel plain"><img src="media/win-overview.png" loading="lazy" alt="Overview panel: 1 chapters (Claude's to-dos, click to brush), 2 module strip (equal-width, one per module), 3 file ledger (files ranked by churn)"></div></figure>
-    <figure id="actions"><h3 class="dh">Actions <span class="id">every tool call</span></h3><div class="panel plain"><img src="media/win-actions.png" loading="lazy" alt="Actions panel: 1 Fleet, 2 Egress, 3 Subagents, 4 category groups (Edits · Commands · To-dos)"></div></figure>
-    <figure id="timeline"><h3 class="dh">Timeline <span class="id">the change feed</span></h3><div class="panel plain"><img src="media/win-timeline.png" loading="lazy" alt="Timeline panel: 1 coalesced ×N run, 2 per-edit rows"></div></figure>
-    <figure id="observations"><h3 class="dh">Observations <span class="id">what Claude was thinking</span></h3><div class="panel plain"><img src="media/win-observations.png" loading="lazy" alt="Observations panel: 1 session recap, 2 per-edit reasoning rows"></div></figure>
+    <figure id="overview"><h3 class="dh">Overview <span class="id">master-detail · the fleet and the change-map</span></h3><div class="panel plain"><img src="media/overview-tabs.png" loading="lazy" alt="Overview panel, master-detail. LEFT NAV (~25%), two tabs: 1 Fleet — every running agent across the repo's git worktrees, each with a live phase badge (working / awaiting-input / awaiting-permission / idle / errored / done; heuristic phases carry a ~ marker — inferred from inactivity), worktree + branch, an activity sparkline, ±diff, tokens·time, risk and a collision badge, unfolding to nested subagents (agentType/description, phase, current task + to-dos, ±lines, a chat button); 2 Workflows — each multi-agent workflow run, with an informative name, running/done, per-phase progress groups and its agents (tokens·time·edits) over a matching sparkline; plus an Active-only toggle, Clear-completed (dismisses, never deletes) and a cross-agent conflicts strip. RIGHT DETAIL (~75%): 3 the selected agent's change-map — a named-chapter task ribbon (Claude's to-dos as stable content-hash chapters, click one to scope the bulk actions; chapters are total — work outside any to-do appears as a dimmed synthesized session chapter titled from the session's goal, reviewable like any other; each chapter's Accept/Reject/Clear act on exactly the edits its row shows; duplicate to-do titles render as separate rows), a one-row module proportion strip, and a file ledger ranked by churn (±line bars colored by review status). TITLE BAR: 4 a session selector, the combined review nav bar, and bulk actions (Accept All · Revert All · Clear Resolved · Refresh)"></div><figcaption>Phases marked ~ are inferred from inactivity, never asserted. The chapter ribbon is total — work outside any to-do lands in a dimmed session chapter, reviewable like any other; a chapter's Accept / Reject / Clear act on exactly the edits its row shows.</figcaption></figure>
+    <figure id="fleet"><h3 class="dh">Overview &rarr; Fleet <span class="id">every running agent, live</span></h3><div class="panel plain"><img src="media/multitasking.png" loading="lazy" alt="The Overview's Fleet left-nav tab (formerly the Multitasking window): 1 per-agent rows — each running agent across the repo's git worktrees, with a live phase badge (heuristic phases carry a ~ marker), worktree + branch, an activity sparkline, ±diff, tokens·time, risk and a collision badge; 2 nested subagents (agentType/description, phase, current task + to-dos, ±lines, a chat button); 3 a cross-agent file-conflicts strip"></div></figure>
+    <figure id="observations"><h3 class="dh">Observations <span class="id">the change feed · Claude's reasoning</span></h3><div class="panel plain"><img src="media/win-observations.png" loading="lazy" alt="Observations panel: 1 session recap, 2 the coalesced change feed (files ordered by recent activity; adjacent same-file edits collapse into a ×N run) — the former Timeline is folded in here, 3 per-edit reasoning rows with flags and file-memory, 4 next steps"></div></figure>
     <figure id="stats"><h3 class="dh">Stats <span class="id">progress &amp; usage</span></h3><div class="panel plain"><img src="media/win-stats.png" loading="lazy" alt="Stats panel: 1 review scoreboard, 2 range toggle, 3 token plot, 4 usage bars"></div></figure>
+    <figure id="actions"><h3 class="dh">Actions <span class="id">every tool call &mdash; in the sidebar</span></h3><div class="panel plain"><img src="media/win-actions.png" loading="lazy" alt="Actions view — now in the Claude Edits sidebar, not the bottom panel: every tool call Claude made, grouped by category (Edits · Commands · Reads · Searches · Web · To-dos · Egress) and collapsed by default; errors always surface, a Show-all toggle reveals the low-signal categories, and edit rows link to their review. The Risk and Egress audits ride the same timeline"></div></figure>
   </div>
 </div></section>
 
 <!-- 04 · status bar nav bar -->
 <section id="navbar"><div class="wrap">
   <div class="sechead"><span class="n">03</span><h2>Status bar &mdash; navigation bar</h2></div>
-  <p class="lede">The compact review toolbar beside the 🔬 microscope, shown whenever edits await review. This is the one with live counters (the status bar is the only surface that can show them).</p>
+  <p class="lede">The compact review toolbar beside the 🔬 microscope, shown whenever edits await review. The status bar is the only surface that shows live counters. The <b>Overview</b> panel&rsquo;s title bar carries the same combined review nav bar (File&nbsp;◄► / Diff&nbsp;◄► step-through, Keep · Undo · Accept/Reject File · Clear · Spotlight · Search) alongside its session selector and bulk actions.</p>
   <div class="strip" aria-hidden="true">
     <span class="g">🔬</span><span class="num">3</span><span class="sep">·</span>
     <span class="g">⌃</span><span class="num">2/3</span><span class="g">⌄</span><span class="sep">·</span>
@@ -176,14 +185,14 @@
 <!-- 05 · inline review bubble -->
 <section id="bubble"><div class="wrap">
   <div class="sechead"><span class="n">04</span><h2>Inline review bubble</h2></div>
-  <p class="lede">Opens on <em>view changes</em> — the edit&rsquo;s before ⟷ after right in the editor, its title showing <span class="num">Diff n/m · File i/k</span>. Its toolbar mirrors the navigation bar.</p>
+  <p class="lede">Opens from <em>view changes</em>: the edit&rsquo;s before ⟷ after in the editor, with a title showing <span class="num">Diff n/m · File i/k</span>. Its toolbar mirrors the navigation bar.</p>
   <figure><div class="panel plain"><img src="media/bubble.png" loading="lazy" alt="The inline review bubble: 1 title (edit id, delta, Diff n/m · File i/k), 2 toolbar (prev/next edit and file, Keep, Undo, Accept/Reject File, Chat, Clear, Spotlight, Search), 3 reasoning, 4 diff"></div></figure>
 </div></section>
 
 <!-- 06 · editor tab bar -->
 <section id="tabbar"><div class="wrap">
   <div class="sechead"><span class="n">05</span><h2>Editor tab bar</h2></div>
-  <p class="lede">Shown on a file with pending edits. Icon buttons only — the live counters live in the CodeLens on each edit and in the status-bar navigation bar.</p>
+  <p class="lede">Shown on a file with pending edits. Icon buttons only; the live counters appear in the CodeLens on each edit and in the status-bar navigation bar.</p>
   <div class="strip" aria-hidden="true">
     <span class="g">‹</span><span class="g">›</span><span class="sep">·</span>
     <span class="g k-kept">✓</span><span class="g k-pending">↩</span><span class="sep">·</span>
@@ -207,7 +216,7 @@
 <!-- 07 · sidebar title bar -->
 <section id="sidebar"><div class="wrap">
   <div class="sechead"><span class="n">06</span><h2>Claude Edits sidebar &mdash; title bar</h2></div>
-  <p class="lede">On the <b>Edits</b> / <b>Diffs</b> views. (Per-file Accept / Revert lives on the tab bar and status bar, not here.)</p>
+  <p class="lede">On the Edits / Diffs views. Per-file Accept / Revert lives on the tab bar and status bar, not here.</p>
   <div class="strip" aria-hidden="true">
     <span class="g">🔍</span><span class="sep">·</span><span class="g">‹</span><span class="g">›</span><span class="sep">·</span>
     <span class="g k-kept">✓✓</span><span class="g k-pending">↩↩</span><span class="g">🧹</span><span class="sep">·</span>
@@ -236,7 +245,7 @@
   </div>
 </div></section>
 
-<footer><div class="wrap">Claude Observatory — visual reference. Glyphs approximate the VS Code codicons; JetBrains uses its own icon set for the same actions. <a href="showcase.html">← Overview</a></div></footer>
+<footer><div class="wrap">Claude Observatory — visual reference. Glyphs approximate the VS Code codicons; JetBrains uses its own icon set for the same actions. Demo: every surface on this page can be populated without Claude — <code>claude-observatory demo</code> replays a scripted session through the real pipeline; <code>claude-observatory demo --clean</code> removes every trace. <a href="showcase.html">← Overview</a></div></footer>
 
 <script>
   (function(){
@@ -246,6 +255,13 @@
       if(!cur) cur=matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';
       root.setAttribute('data-theme',cur==='dark'?'light':'dark');
     });
+  })();
+  (function(){
+    var nav=document.getElementById('nav'),btn=document.getElementById('menu');
+    if(!nav||!btn) return;
+    btn.addEventListener('click',function(){ var open=nav.classList.toggle('open'); btn.setAttribute('aria-expanded',open?'true':'false'); });
+    var ls=nav.querySelectorAll('.links a');
+    for(var i=0;i<ls.length;i++) ls[i].addEventListener('click',function(){ nav.classList.remove('open'); btn.setAttribute('aria-expanded','false'); });
   })();
 </script>
 </body>

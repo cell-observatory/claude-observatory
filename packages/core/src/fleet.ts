@@ -3,16 +3,19 @@
  * project as this one — so a human can watch a fleet of concurrent agents, and (via `siblings --json`)
  * so an agent can see what its siblings are touching and adjust in real time.
  *
- * "Sibling" = a session whose transcript lives in the same project dir (projectDir(cwd)). For each we
- * derive, live from the store + transcript: active/idle status (transcript freshness), pending edits,
- * the files it has touched, and a risk-flag count. Read-only and path-only — no file contents cross
- * between agents, so this can't leak one agent's secrets to another. No model calls, no network.
+ * "Sibling" = another session in the same project (listSiblings, one project dir) or — repo-scoped —
+ * any WORKTREE of the same git repo (listRepoSiblings, unioned via §S2 commonDir since worktrees
+ * mangle to different project dirs). For each we derive, live from the store + transcript: active/idle
+ * status (transcript freshness), pending edits, the files it has touched, and a risk-flag count.
+ * Read-only and path-only — no file contents cross between agents, so this can't leak one agent's
+ * secrets to another. No model calls, no network.
  */
 import * as fs from 'fs';
 import * as path from 'path';
-import { projectDir } from './session';
+import { claudeConfigDir } from './paths';
+import { projectDir, commonDir, repoKeyForSession, firstCwdLine } from './session';
 import { readLog, isSafeSessionId } from './store';
-import { parseActions } from './actions';
+import { parseTranscriptActions, agentPhaseDetail } from './actions';
 
 /** A session whose transcript mtime is within this of now is "active" (an agent is live in it). */
 export const FLEET_ACTIVE_MS = 60_000;
@@ -30,8 +33,25 @@ export interface SiblingSession {
   /** Distinct absolute files this session has edits for (capped; `moreFiles` = how many were elided). */
   files: string[];
   moreFiles: number;
+  /** UNCAPPED distinct files this session has a PENDING (unresolved) edit for — the live-overlap signal
+   *  fleetConflicts intersects. Path-only; a file reviewed (kept/undone) in every edit drops out. */
+  pendingFiles: string[];
   /** Risky shell commands this session ran (total + high-severity), for a conflict/safety heads-up. */
   risk: { total: number; high: number };
+  // --- S3 (0.8.0): repo-scoped worktree siblings + conflict detection ---
+  /** This session's launch cwd — its worktree dir. Sibling worktrees of one repo differ here. */
+  worktree: string;
+  /** Branch from the transcript's first cwd-bearing line (display disambiguator; null when unresolved,
+   *  e.g. the cheap same-dir listSiblings path — never a guess). */
+  gitBranch: string | null;
+  /** UNCAPPED distinct file set this session touched — exposed to clients (siblings --json). Path-only;
+   *  no file contents ever cross. (Collisions now key off `pendingFiles`, above — not this.) */
+  allFiles: string[];
+  /** Live phase (working/awaiting-input/…) from a bounded tail read of the transcript (S4, agentPhase). */
+  phase?: string;
+  /** 'high' = structural; 'heuristic' = staleness-inferred (awaiting-permission/idle/done). Renderers
+   *  dim/qualify heuristic phases instead of asserting them as truth. */
+  phaseConfidence?: string;
 }
 
 /** How many distinct files to list per sibling before eliding the rest (keeps the digest compact). */
@@ -52,6 +72,72 @@ export function projectSessionIds(cwd: string): string[] {
 }
 
 /**
+ * Build one SiblingSession from its transcript + store log — shared by listSiblings (same project dir)
+ * and listRepoSiblings (across worktree project dirs). `worktree` is the session's launch cwd and
+ * `gitBranch` its transcript branch (null when the caller didn't resolve one). Returns null if the
+ * transcript can't be stat'd (vanished mid-scan). Path-only — no file contents are read. Zero token.
+ */
+function buildSibling(
+  id: string,
+  transcriptPath: string,
+  worktree: string,
+  gitBranch: string | null,
+  activeSessionId: string | undefined,
+  now: number
+): SiblingSession | null {
+  let lastMs = 0;
+  try {
+    lastMs = fs.statSync(transcriptPath).mtimeMs;
+  } catch {
+    return null;
+  }
+  const log = readLog(id); // [] when the session captured no edits — still a real sibling agent
+  const distinct: string[] = [];
+  const seen = new Set<string>();
+  const pendingSeen = new Set<string>(); // distinct files with a PENDING edit — the live-overlap set
+  let pending = 0;
+  for (const r of log) {
+    if (r.status === 'pending') {
+      pending++;
+      pendingSeen.add(r.file);
+    }
+    if (!seen.has(r.file)) {
+      seen.add(r.file);
+      distinct.push(r.file);
+    }
+  }
+  // Risk needs the transcript (Bash commands aren't in the store); parse it the same way the Actions
+  // view does. Repo-siblings are few, so the extra parse per refresh is acceptable.
+  let riskTotal = 0;
+  let riskHigh = 0;
+  for (const a of parseTranscriptActions(transcriptPath, { includeSidechain: false })) {
+    if (a.risk) {
+      riskTotal++;
+      if (a.risk.level === 'high') riskHigh++;
+    }
+  }
+  const phaseDetail = agentPhaseDetail(transcriptPath);
+  return {
+    id,
+    self: id === activeSessionId,
+    active: now - lastMs <= FLEET_ACTIVE_MS,
+    lastMs,
+    edits: log.length,
+    pending,
+    files: distinct.slice(0, FILE_CAP),
+    moreFiles: Math.max(0, distinct.length - FILE_CAP),
+    pendingFiles: [...pendingSeen],
+    risk: { total: riskTotal, high: riskHigh },
+    worktree,
+    gitBranch,
+    allFiles: distinct,
+    // S4: bounded tail read — the sibling's live phase, with its confidence (structural vs heuristic).
+    phase: phaseDetail.phase,
+    phaseConfidence: phaseDetail.confidence,
+  };
+}
+
+/**
  * Every session in the current project (siblings + self), newest activity first. `activeSessionId`
  * marks which one is `self`. Zero token — store reads plus one transcript parse per sibling for risk.
  */
@@ -69,46 +155,95 @@ export function listSiblings(cwd: string, activeSessionId?: string): SiblingSess
     if (!name.endsWith('.jsonl')) continue;
     const id = name.slice(0, -'.jsonl'.length);
     if (!isSafeSessionId(id)) continue;
-    let lastMs = 0;
-    try {
-      lastMs = fs.statSync(path.join(dir, name)).mtimeMs;
-    } catch {
-      continue;
-    }
-    const log = readLog(id); // [] when the session captured no edits — still a real sibling agent
-    const distinct: string[] = [];
-    const seen = new Set<string>();
-    let pending = 0;
-    for (const r of log) {
-      if (r.status === 'pending') pending++;
-      if (!seen.has(r.file)) {
-        seen.add(r.file);
-        distinct.push(r.file);
-      }
-    }
-    // Risk needs the transcript (Bash commands aren't in the store); parse it the same way the Actions
-    // view does. Siblings in one project are few, so the extra parse per refresh is acceptable.
-    let riskTotal = 0;
-    let riskHigh = 0;
-    for (const a of parseActions(cwd, id)) {
-      if (a.risk) {
-        riskTotal++;
-        if (a.risk.level === 'high') riskHigh++;
-      }
-    }
-    out.push({
-      id,
-      self: id === activeSessionId,
-      active: now - lastMs <= FLEET_ACTIVE_MS,
-      lastMs,
-      edits: log.length,
-      pending,
-      files: distinct.slice(0, FILE_CAP),
-      moreFiles: Math.max(0, distinct.length - FILE_CAP),
-      risk: { total: riskTotal, high: riskHigh },
-    });
+    // Same project dir ⇒ every session here launched from `cwd`; the branch isn't resolved on this
+    // cheap same-dir path (honest null, not a guess) — listRepoSiblings reads it from the transcript.
+    const s = buildSibling(id, path.join(dir, name), cwd, null, activeSessionId, now);
+    if (s) out.push(s);
   }
   return out.sort((a, b) => b.lastMs - a.lastMs);
+}
+
+/**
+ * Every session across ALL worktrees of the same logical repo as `cwd` — the repo-scoped superset of
+ * listSiblings. Two worktrees launch from different cwds, so they mangle to different project dirs and
+ * listSiblings (one dir) can't see across them; this unions every projectDir whose commonDir (§S2)
+ * equals this cwd's. Each candidate's real cwd is read from its transcript (firstCwdLine — the mangled
+ * folder name is irreversible), then keyed via repoKeyForSession. Git-free, path-only, zero token.
+ * Returns [] when this cwd has no resolvable repo (never unions on a null key — that would wrongly
+ * group every unrelated non-repo session together).
+ */
+export function listRepoSiblings(cwd: string, activeSessionId?: string): SiblingSession[] {
+  const key = commonDir(cwd);
+  if (key === null) return [];
+  const root = path.join(claudeConfigDir(), 'projects');
+  let projects: string[];
+  try {
+    projects = fs.readdirSync(root);
+  } catch {
+    return [];
+  }
+  const now = Date.now();
+  const out: SiblingSession[] = [];
+  for (const proj of projects) {
+    const dir = path.join(root, proj);
+    let names: string[];
+    try {
+      names = fs.readdirSync(dir);
+    } catch {
+      continue; // not a directory / unreadable — skip
+    }
+    for (const name of names) {
+      if (!name.endsWith('.jsonl')) continue;
+      const id = name.slice(0, -'.jsonl'.length);
+      if (!isSafeSessionId(id)) continue;
+      const transcript = path.join(dir, name);
+      const first = firstCwdLine(transcript);
+      if (!first) continue; // no cwd line ⇒ can't resolve its repo; skip (never guess membership)
+      if (repoKeyForSession(id, first.cwd) !== key) continue; // different (or unresolvable) repo
+      const s = buildSibling(id, transcript, first.cwd, first.gitBranch, activeSessionId, now);
+      if (s) out.push(s);
+    }
+  }
+  return out.sort((a, b) => b.lastMs - a.lastMs);
+}
+
+export interface FileCollision {
+  /** Absolute path with an unresolved (pending) edit in 2+ siblings, at least one active (path-only). */
+  file: string;
+  /** ALL session ids that have this file pending (2+), active or idle. Honest: exact agents, never a "winner". */
+  agents: string[];
+  /** The subset of `agents` that are active right now — the side that can trample the others' pending
+   *  work. Renderers dim the idle holders. Always ≥1 (an all-idle overlap is not a live hazard). */
+  activeAgents: string[];
+  /** Always true — a collision is by definition a set of pending edits (kept for payload stability; the
+   *  overlap is unresolved in every listed agent). */
+  anyPending: boolean;
+}
+
+/**
+ * LIVE cross-agent collisions: a file flagged when 2+ siblings each have it in their `pendingFiles` AND
+ * at least ONE of them is `active` right now — a live agent's in-flight edit can trample another agent's
+ * unresolved work even if that other agent has gone idle (>60s without a transcript write is routine for
+ * a long think). This is still deliberately NARROWER than "any file two agents ever touched": a file
+ * reviewed (kept/undone) on one side drops out, and an ALL-idle overlap (nobody moving) does not flag.
+ * Intersects the UNCAPPED `pendingFiles` (never the display-capped `files`), so a busy agent's 21st+
+ * shared pending file is still caught. Path-only: no file contents cross between agents.
+ */
+export function fleetConflicts(sessions: SiblingSession[]): FileCollision[] {
+  const activeIds = new Set(sessions.filter((s) => s.active).map((s) => s.id));
+  const byFile = new Map<string, string[]>(); // file -> ALL agent ids that have it pending
+  for (const s of sessions) {
+    for (const f of s.pendingFiles) {
+      if (!byFile.has(f)) byFile.set(f, []);
+      byFile.get(f)!.push(s.id);
+    }
+  }
+  const out: FileCollision[] = [];
+  for (const [file, agents] of byFile) {
+    const activeAgents = agents.filter((id) => activeIds.has(id));
+    if (agents.length >= 2 && activeAgents.length >= 1) out.push({ file, agents, activeAgents, anyPending: true });
+  }
+  return out;
 }
 
 export interface FleetSummary {
@@ -116,6 +251,7 @@ export interface FleetSummary {
   active: number; // how many are live right now
   siblings: number; // total minus self
   pending: number; // pending edits across siblings (excludes self)
+  conflicts: number; // LIVE collisions: files pending in 2+ BOTH-active siblings (fleetConflicts)
 }
 
 /** Headline rollup for the fleet (the Actions "Fleet" node header + `siblings` non-JSON output). */
@@ -126,5 +262,6 @@ export function summarizeFleet(sessions: SiblingSession[]): FleetSummary {
     active: sessions.filter((s) => s.active).length,
     siblings: siblings.length,
     pending: siblings.reduce((n, s) => n + s.pending, 0),
+    conflicts: fleetConflicts(sessions).length,
   };
 }

@@ -18,6 +18,7 @@ import * as crypto from 'crypto';
 import { diffArrays } from 'diff';
 import { findRecord, isUnderPath, readBlob, readLog, setStatus } from './store';
 import { groupMembers } from './groups';
+import { reviewEditIds } from './changemap';
 
 export interface UndoResult {
   ok: boolean;
@@ -449,14 +450,16 @@ export interface UndoScopeResult {
  */
 export function undoScope(
   sessionId: string,
-  opts: { under?: string; fileSubstr?: string } = {}
+  opts: { under?: string; fileSubstr?: string; ids?: number[] } = {}
 ): UndoScopeResult {
+  const idSet = opts.ids ? new Set(opts.ids) : null; // the task-scoped path passes a resolved edit-id set
   const targets = readLog(sessionId)
     .filter(
       (r) =>
         r.status === 'pending' &&
         (opts.under === undefined || isUnderPath(r.file, opts.under)) &&
-        (opts.fileSubstr === undefined || r.file.includes(opts.fileSubstr))
+        (opts.fileSubstr === undefined || r.file.includes(opts.fileSubstr)) &&
+        (idSet === null || idSet.has(r.id))
     )
     .sort((a, b) => b.id - a.id);
   let undone = 0;
@@ -471,4 +474,40 @@ export function undoScope(
     }
   }
   return { undone, conflicts, total: targets.length, ids };
+}
+
+/**
+ * Chapter-scoped revert: undo every PENDING edit in the chapter's DISPLAYED set (reviewEditIds — the
+ * WYSIWYG rule: the ↩ button reverts exactly the edits the chapter row shows, so a partial accept
+ * never strands leftovers the buttons can't reach). An id that names no display chapter (an
+ * analytics-side task id) falls back to its strict-span set. Reuses undoScope, so a chapter revert
+ * behaves exactly like every other scoped/bulk revert (newest-first, per-edit conflict fallback —
+ * a mis-anchored revert still surfaces as a conflict, never a silent clobber).
+ */
+export function undoTask(cwd: string, session: string, taskId: string): UndoScopeResult {
+  return undoScope(session, { ids: reviewEditIds(cwd, session, taskId) });
+}
+
+export interface KeepScopeResult {
+  kept: number; // edits flipped to kept
+  total: number; // edits in the task's strict-span set (any status)
+  ids: number[]; // the kept edit ids
+}
+
+/**
+ * Chapter-scoped keep: mark every PENDING edit in the chapter's DISPLAYED set (reviewEditIds — the
+ * same WYSIWYG set undoTask reverts) as kept. Only pending edits are flipped: keeping an already-
+ * undone edit would assert a change that isn't on disk. Accepting a chapter therefore resolves
+ * everything its row shows — including gap-filled members and the synthetic session chapter.
+ */
+export function keepTask(cwd: string, session: string, taskId: string): KeepScopeResult {
+  const idSet = new Set(reviewEditIds(cwd, session, taskId));
+  const ids: number[] = [];
+  for (const r of readLog(session)) {
+    if (idSet.has(r.id) && r.status === 'pending') {
+      setStatus(session, r.id, 'kept');
+      ids.push(r.id);
+    }
+  }
+  return { kept: ids.length, total: idSet.size, ids };
 }

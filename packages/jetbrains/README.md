@@ -47,18 +47,23 @@ found, set both explicitly in **Settings → Tools → Claude Observatory**. Ful
 
 | Surface | Where |
 | --- | --- |
-| **Edits / Diffs / File History** trees (Edits/Diffs group folder → file → class → edit; **File History** is a flat, chronological list of just the active file's edits that follows the editor) — Keep/Undo/Redo/Diff via context menu | "Claude Observatory" tool window, left stripe |
-| **Observations · Timeline · Stats** side-by-side panes (Stats leads with a live **review scoreboard** — pending / accepted / reverted counts + a progress bar — over the tokens plot) | "Claude Observatory Dashboards" tool window, bottom stripe |
+| **Edits / Diffs / File History / Actions** trees (Edits/Diffs group folder → file → class → edit; **File History** is a flat, chronological list of just the active file's edits that follows the editor; **Actions** is the zero-token action timeline with the risk + egress audits) — Keep/Undo/Redo/Diff via context menu | "Claude Observatory" tool window, left stripe |
+| **Observations · Overview · Stats** side-by-side panes. The **Overview** is the flagship 0.8.0 **master–detail** view: a **Fleet** / **Workflows** nav on the left (every running agent across the repo's git **worktrees** — live phase with `~` marking inferred ones, sparkline, ±lines, risk, collisions, nested subagents — plus orchestration runs), and the selected item's change-map on the right (a named-chapter **task ribbon** — chapters are **total**, with per-chapter **Accept / Reject / Clear** — a module strip, and a churn-ranked file ledger). Observations carries the recap + chronological change feed; Stats leads with a live **review scoreboard** — pending / accepted / reverted counts + a progress bar — over the tokens plot | "Claude Observatory Dashboards" tool window, bottom stripe |
 | **Inline menu** — `✨ #N view changes` (opens the edit's inline diff) then `✓ Keep · ↩ Undo · 💬 Chat` on the lens above each pending edit; a **✨ gutter star** (click to open the diff), a subtle green/red line tint, a **Claude-coral error-stripe** marker | every editor |
 | **Click → inline diff** — the edit's before ⟷ after opens **unified**, with Claude's reasoning in the title and `Keep · Undo · Chat` on the diff toolbar; **📄 file heatmap** dims unmodified lines (editor banner) | every editor |
 | **🔬 scoreboard** — pending count, accept rate, oldest pending; click = review next | status bar |
 | **Keyboard loop** — `⌥⌘N` review next · `⌥⌘Y` keep at cursor · `⌥⌘U` undo at cursor · `⌥⌘[` / `⌥⌘]` step file revisions in a diff (`Ctrl+Alt` on Windows/Linux) | global |
 
-Both tool windows now carry **icon-only tabs (hover for the label)**, matching VS Code's icon-driven
-views, and the tool-window stripe shows a **pending badge**. This release brings the plugin to full
-**feature parity** with the VS Code extension: a toggle-inline button, **Accept/Revert this file** on
-the Edits toolbar, revision-nav buttons, Timeline bulk actions, Observations clear/switch/doctor, and a
-5th **⧉ View diff** lens segment.
+Both tool windows carry **icon-only tabs (hover for the label)**, matching VS Code's icon-driven
+views, and the tool-window stripe shows a **pending badge**. The plugin tracks the VS Code extension
+**feature-for-feature** — every 0.8.0 surface (the master–detail Overview, multitasking across
+worktrees, total chapters with per-chapter review, the context-preloaded **💬 Chat** handoff) ships in
+both. All panels refresh in **real time** on any tool call — a `TranscriptWatcher` watches the session
+transcripts — and share throttled CLI fetches (≤1 spawn per view per ~3s), so live views stay cheap.
+
+Try it without Claude: `claude-observatory demo` replays a scripted session live through the real
+pipeline in an isolated `demo-*` session — every panel fills in, and review genuinely works.
+`claude-observatory demo --clean` removes every trace.
 
 Undo is surgical (position-anchored 3-way merge, via the CLI): reverting one edit preserves later
 edits to the same file; genuine overlaps surface a conflict dialog with a **Force-restore** option.
@@ -81,6 +86,9 @@ The plugin is a Kotlin **front-end over the TypeScript core**, never a re-implem
 - **Cheap reads** → straight off disk (`log.jsonl` + status-op folding, content-addressed blobs,
   session resolution) — schemas match core's `store.ts`/`session.ts`, locked in by the unit tests
   in `src/test/kotlin` (`gradle test`).
+- **Live refresh** → a `TranscriptWatcher` (per-directory `nio` watches with dynamic new-dir handling
+  and an ENOSPC→poll fallback) refreshes every panel on any tool call; panels share one throttled CLI
+  fetch per view (≤1 spawn per view per ~3s), mirroring VS Code's webview throttle.
 - **Stats plots** → native Swing (no JCEF): step-line charts + usage bars that track pane width.
 
 ```bash

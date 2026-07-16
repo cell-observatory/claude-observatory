@@ -55,6 +55,11 @@ Everything lives under `CLAUDE_CONFIG_DIR` (default `~/.claude`), resolved by
 - **Staging** is the two-phase capture handshake: `PreToolUse` writes a `StagingRecord` (the file's
   pre-edit `beforeBlob`); `PostToolUse` reads it, snapshots the after state, appends the `EditRecord`,
   and deletes the staging file. Bash-driven changes use a `__bash__.json` manifest instead.
+- **Skip markers** are the no-silent-fail escape hatch. When a capture *must* drop a real change — a
+  binary/oversized file (>5 MB), a missing before-snapshot (Pre didn't run), or a Bash working tree over
+  the file cap — `appendSkip` writes a one-line `{op:"skip", file, reason, ts}` op instead of swallowing
+  it. `readSkips(session)` folds them out separately and `status` surfaces the gap, so a dropped change is
+  loud, not lost.
 
 ### Why append-only
 
@@ -156,14 +161,34 @@ If you change a store or session read, update the port **and** these tests in th
 `buildChangeMap(cwd, session, { root })` places every review-unit edit as `module → file → class`, then
 rolls it up **once** so no front-end re-aggregates: `files[]` and `modules[]` arrive churn-sorted, each
 with a pre-rendered `moduleLabel`, a worst-unreviewed-wins `status`, and `maxId` — the drill-through
-target a click opens. Chapters come from Claude's own `TodoWrite` checkpoints: a to-do flipping to
-`in_progress` opens a window that runs until the next one does, and an edit falling outside every
-window stays honestly unattributed (`chapter: null`) rather than being mis-filed.
+target a click opens. Chapters come from Claude's own `TodoWrite` checkpoints, and the display dimension
+is **total**: a to-do flipping to `in_progress` opens a window that fills forward to the next flip (and
+the final chapter runs to the end of the session), while anything left over — a session with no to-dos,
+a timestamp-less edit — lands in one **synthesized session chapter** (`id: 'ch:session'`,
+`synthetic: true`), titled from the session title or first prompt. Every edit therefore carries a
+non-null `chapter`. The synthesized chapter and any duplicate-content to-do row are display-only:
+`ChangeMapChapter.taskId` names the STRICT task destructive ops resolve against and is `null` there, so
+task-scoped keep/undo never widen past a real in-progress interval.
+
+0.8.0 adds **three per-edit attribution dimensions** on top of that — every `ChangeMapEdit` gains a
+stable-content-hash `taskId` (`sha1(todo-content).slice(0,12)`), a `subagentId` (the subagent that
+authored it, only set when correlated — never guessed), and a `workflowId` (the `wf_<id>` whose agent
+ts-window it fell in, `null` when none or ambiguous). They roll up **four ways**: `rollupByTask`,
+`rollupBySubagent`, and `rollupByWorkflow` on the map itself (each carries its explicit `null`
+unassigned / main-chain / no-workflow bucket), plus `rollupByAgent(maps[])` — a per-session roll that
+unions the subagent rolls across a whole fleet of change-maps. The mechanism (strict `in_progress`
+intervals, the honest unassigned rule, and the cross-worktree fold) is detailed in
+[Multi-agent](#multi-agent-080-worktree-correlation-honest-attribution-real-time) below.
 
 ```ts
 interface ChangeMap {
   summary: ChangeMapSummary; edits: ChangeMapEdit[]; chapters: ChangeMapChapter[];
   files: ChangeMapFile[]; modules: ChangeMapModule[];
+  tasks: TaskInfo[];                 // strict-span task identities: stable taskId → to-do content
+  rollupByTask: TaskRoll[];          // per-task rollup (strict spans); taskId:null = the unassigned bucket
+  rollupBySubagent: SubagentRoll[];  // per-subagent rollup; subagentId:null = main-chain / unattributed
+  rollupByWorkflow: WorkflowRoll[];  // per-workflow rollup; workflowId:null = no-workflow / ambiguous
+  workflows: ChangeMapWorkflow[];    // per-workflow Overview slice: rollup + files + its OWN chapter rollup
 }
 interface ChangeMapFile {
   rel: string; module: string; moduleLabel: string; file: string;
@@ -180,12 +205,139 @@ interface ChangeMapModule {
   status: EditStatus; files: number; chapters: string[];
 }
 interface ChangeMapChapter {
-  id: string; index: number; title: string;
+  id: string;                        // stable content-hash brush key; 'ch:session' for the synthetic chapter
+  taskId: string | null;             // the STRICT task destructive ops resolve to; null = display-only
+  synthetic: boolean;                // true for the synthesized session chapter (work outside any to-do)
+  index: number; title: string;
   status: 'done' | 'wip' | 'todo';   // from Claude's own to-do status
   startTs: number; endTs: number;
   edits: number; kept: number; pending: number; undone: number; agent: boolean;
 }
 ```
+
+### `WorkflowRun` — a multi-agent workflow run, rolled up (`workflows.ts`)
+
+A Claude Code **workflow run** is a scripted fan-out of agents one level *above* subagents — and
+`parseSubagents` deliberately skips the `workflows/` subdir, so without this aggregator a workflow's
+agents are invisible. `parseWorkflows(cwd, session)` returns the runs newest-first (by last transcript
+activity). It reads the **rich per-run state file** `<session>/workflows/wf_<id>.json` when present — the
+run's informative name/summary, declared phases, and a `workflowProgress` stream of phase markers +
+labeled agent entries — and **falls back** to the run dir's `journal.jsonl` + naming script
+(`scripts/<name>-wf_<id>.js`, brace-matched and regex-read, never executed) for older runs. Per-agent
+**edits and ±lines are always mined from each agent's own `agent-<id>.jsonl` transcript** (reusing
+`parseTranscriptActions` + a single diff pass — the store can't attribute workflow agents, and the state
+file doesn't carry them); run-level tokens/`durationMs` prefer the state file's totals. Honest by
+construction: an unrecoverable field is `0`/`null`, never fabricated.
+
+```ts
+interface WorkflowRun {
+  id: string; name: string; description?: string; phases: string[];
+  agents: WorkflowAgent[];            // per-agent label/phase/agentType/done/tokens/durationMs/edits/±lines
+  phaseGroups: WorkflowPhaseGroup[];  // agents grouped by phase title, in order, per-phase done/total
+  running: boolean;                   // freshness-gated (see below)
+  agentCount; tokens; durationMs; edits; added; removed; startedTs; lastTs: number;
+  sparkline: number[];                // 20-bin activity histogram over all agents' assistant turns
+}
+```
+
+The `sparkline` is a 20-bin, span-normalized activity histogram — one tick per counted assistant turn,
+bucketed with a loop-based min/max (not `Math.min(...ts)`, which a long run's timestamp array could blow
+the stack on) — built **identically to the Fleet-row sparkline** so Workflows rows render the same
+mini-chart. `running` is **freshness-gated**: the state file reads `status:'running'` until the runner
+writes `'completed'`, but a killed/interrupted/crashed run never writes that — so `running` is `true` only
+when the run is *also* fresh (the newest mtime among the state file + agent transcripts is within
+`FLEET_ACTIVE_MS`). An interrupted run that never completed is therefore **not** shown running (the exact
+"shows two running things that aren't" bug). A parallel `workflowWindows` / `workflowForTs` pair attributes
+parent-session store edits to a workflow by ts-window — a ts inside two *different* workflows' windows is
+honestly `null`, never guessed — and is the source of `edit.workflowId`.
+
+## Multi-agent (0.8.0): worktree correlation, honest attribution, real-time
+
+0.8.0 turns the single-agent store into a **fleet view** — still zero extra Claude tokens, still fully
+local, and the git part is **git-free**: it reads the `.git` **pointer files** git already keeps on
+disk, never shelling out to the git binary.
+
+**Worktree correlation (`session.ts`).** Concurrent Claude sessions launched from different git
+**worktrees** of one repo mangle to *different* project dirs, so nothing links them by path.
+`repoKeyForSession` recovers the link from those plain files:
+
+- `repoRoot(cwd)` walks up to the nearest ancestor holding a `.git` entry (file *or* dir).
+- Read `<root>/.git`: a **directory** ⇒ a main working tree, key = `realpath(<root>/.git)`; a **file**
+  ⇒ a linked worktree holding `gitdir: <admindir>` — read `<admindir>/commondir`, which points back at
+  the **shared** repo, and key on that. Bare repos and pruned/unreadable worktree admin files return
+  `null` — never a guess, and a null key never unions unrelated sessions.
+
+`listRepoSiblings(cwd)` (`fleet.ts`) unions every session whose `repoKeyForSession` matches, so a fleet
+spread across worktrees resolves to one set. It is strictly **read-only and path-only**: `fleetConflicts`
+intersects each sibling's **uncapped** `allFiles` set to surface `FileCollision`s (same file, 2+
+agents), comparing only paths so no file contents ever cross between agents. Each sibling carries its
+live `phase` (`agentPhase` — a bounded transcript tail-read) and `gitBranch`.
+
+**Live phase detection (`agentPhase` / `agentPhaseDetail`, `actions.ts`).** A row's phase is a bounded,
+structural, zero-token read of only the transcript's **tail** (the last 64 KB — never the whole 20-34 MB
+file), classified in one pass into `working | awaiting-input | awaiting-permission | idle | errored |
+done`. It walks the tail tracking tool_uses still awaiting a result and the trailing event's kind: a
+pending `AskUserQuestion`/`ExitPlanMode` ⇒ **awaiting-input** (structural); any *other* pending tool_use ⇒
+**working** if fresh, else **awaiting-permission** (a harness permission prompt writes *nothing* to the
+transcript, so it's disambiguated only by staleness — a labeled `heuristic`). With no pending tool_use, a
+trailing *error* result ⇒ **errored**; a trailing *non-error* `tool_result` ⇒ **working**, because a
+conversation can never end on a tool_result — the turn is mid-flight (this is what keeps the live self
+session reading "working" *between* tool calls instead of flickering to idle after each result), aging to
+**done** once long-stale. A completed turn (assistant spoke and stopped) reads **idle** when recent,
+**done** past `DONE_STALE_MS`. `agentPhaseDetail` also returns a `confidence` (`high` = structural,
+`heuristic` = staleness-derived) so a front-end never asserts an inferred state as certain.
+
+**Honest, content-hashed attribution (`changemap.ts`).** The Overview task ribbon and every task-scoped
+op key on a **stable `taskId`** — `taskId(content) = sha1(content).slice(0,12)` — so reordering or
+inserting to-dos never renumbers a task, and two identical to-dos deterministically share one id.
+Attribution uses **strict `in_progress` intervals** (`inProgressSpansStrict`) with **no edge fill**: a
+span starts exactly when a to-do enters `in_progress` (the first span does *not* reach back to time 0)
+and an open, never-completed span ends at its **last observed** `in_progress` mtime, never `+∞`. An edit
+whose commit ts falls in **no** real interval is honestly `taskId: null` — the explicit **unassigned**
+bucket — never force-filed onto the head/tail task. That is the destructive-safety invariant behind
+`tasklog` and the strict rollups: `taskEditIds` selects raw store ids by the same strict rule, so an edge edit
+is never in a task's set. The rollup runs **once**, four ways — `rollupByTask` (`taskId: null` sorted
+last), `rollupBySubagent`, `rollupByWorkflow`, and `rollupByAgent` (unions the subagent rolls across a
+fleet of change-maps).
+`crossAgentTaskLog` (`taskLog.ts`) folds every worktree-sibling's change-map by `taskId`, so one logical
+task spanning agents/worktrees is a single `TaskLogEntry`; `unassigned` edits are excluded, never swept in.
+
+**Workflow-run tracking (`workflows.ts`).** One level *above* subagents, `parseWorkflows` aggregates each
+scripted multi-agent run (`<session>/subagents/workflows/wf_<id>/` transcripts + the rich
+`<session>/workflows/wf_<id>.json` state file) into a `WorkflowRun` — per-run and per-agent
+tokens/time/edits, phase groups, a freshness-gated `running` flag, and a 20-bin activity sparkline (see the
+[`WorkflowRun` shape](#workflowrun--a-multi-agent-workflow-run-rolled-up-workflowsts) above). It surfaces
+in the Overview's **Workflows** tab and in `multitask` / `changemap --json` (`edit.workflowId` +
+`rollupByWorkflow`). Same terms as everything else here: zero token, git-free, path-only.
+
+**Real-time (`multitask` + JetBrains `TranscriptWatcher`).** The `multitask` payload assembles the
+per-agent rows (phase, sparkline, ±diff, tokens·time, nested subagents), the workflow runs, and the
+`FileCollision`s in the CLI, so both editors render it thin. To make "live" honest, JetBrains gained a
+`TranscriptWatcher` that watches the Claude Code **transcripts** — not just the edit store — bounded to the
+fleet's worktree-sibling project dirs, so every panel (Overview, Actions, Observations) rebuilds on **any**
+tool call — reads, bash, subagent spawns, to-dos — not only when Claude writes a file. (VS Code already
+rebuilt on transcript
+change; this brings JetBrains to parity — a window that silently updated on edits alone would be a
+no-silent-fail violation.) On macOS it uses a 2s mtime poll (the JDK's default `WatchService` is a slow
+poller); on Linux/Windows it uses native inotify/RDC and falls back to the poll on watch exhaustion,
+degrading loudly-but-functionally.
+
+**Hot-path memoization (`fscache.ts`, 0.8.0).** One Overview refresh derives several views that each
+re-read the same multi-megabyte transcripts, so the pure parsers (`parseTranscriptActions`, `todoSnaps`,
+`transcriptInsights`, `reasoningByEdit`, `subagentMeta`, `agentMetrics`, `sessionUsage`) are memoized per
+`(path, mtimeMs, size)` — one parse per file per process, revalidated on every call so a long-lived host
+(the VS Code extension calls core in-process) can never serve a stale parse. Cached values are treated as
+immutable; `parseTranscriptActions` hands out per-call record copies because editId attribution mutates
+them. `clearFsCache()` is exported for hosts and tests. On the same principle, JetBrains'
+`ObservatoryService` shares one throttled fetch per CLI view (multitask/changemap/observations, ≥3s apart)
+across all panels.
+
+**The demo simulator (`demo.ts`, 0.8.0).** `runDemo` replays a scripted session through the REAL
+pipeline — transcript lines appended to the real project dir, edits captured via the same
+`handleHookPayload` logic the hooks run, a subagent transcript, and a workflow run — inside an isolated
+`demo-<hex>` session and a marker-gated `observatory-demo/` folder. It doubles as the live showcase
+(`claude-observatory demo`) and the e2e fixture (`--fast`); `autoClearDemo` drops a fully reviewed demo
+session's store so reviewing the demo leaves no residue, and `cleanDemo` removes every trace.
 
 ## The CLI `--json` contract
 
@@ -204,7 +356,12 @@ VS Code renderers key on them by name. Add fields; don't rename them. (`emitJson
 | `subagents [--json]` (alias `agents`) | `{ session, summary, subagents: [{ agentId, agentType, description, status, ts, durationMs, tokens, toolUseCount, actions[], edits, summary }] }` | Subagents node in the Actions view — **both editors**; each subagent's nested timeline is mined zero-token from `subagents/agent-<id>.jsonl` and correlated via the spawning tool call's `toolUseResult` |
 | `siblings [--json]` (alias `fleet`) | `{ session, summary, siblings: [{ id, self, active, lastMs, edits, pending, files[], moreFiles, risk{ total, high } }] }` | Fleet node in the Actions view — **both editors** — plus an agent-facing digest a run can poll mid-flight; READ-ONLY / PATH-ONLY (no file contents cross agents). `--json` = siblings only; `--all` includes self |
 | `metrics [--json]` | `{ session, spanMs, actions{ total, errors, byCategory }, edits{ count, added, removed, pending, kept, undone }, subagents{…}, toolLatency{ count, medianMs, p95Ms, maxMs } }` | Session metrics roll-up — diff stats, action/error counts, per-subagent duration/tokens, and tool latency (from each `tool_use`→`tool_result` timestamp gap) |
-| `changemap [--root <d>] [--json]` | `{ summary, edits[], chapters[], files[], modules[] }` — `files`/`modules` are the churn + worst-unreviewed-wins rollups, pre-labelled and churn-sorted | Overview panel — VS Code webview + JetBrains `ChangeMapPanel` (both render as-given) |
+| `changemap [--root <d>] [--json]` | `{ summary, edits[], chapters[], files[], modules[], tasks[], rollupByTask[], rollupBySubagent[], rollupByWorkflow[], workflows[], rollupByAgent[], agents[], unassigned }` — `files`/`modules` are the churn + worst-unreviewed-wins rollups (pre-labelled, churn-sorted); `chapters[]` is TOTAL (0.8.0: every edit has a chapter; `taskId`/`synthetic` mark display-only rows) and each `workflows[]` entry carries its own scoped `chapters[]`; the three `rollupBy*` each keep their explicit `null` strict-unassigned/main-chain bucket (scripts still see the honest strict view); `agents[]` is one full change-map per worktree-sibling (the master-detail per-agent view, active session first) | Overview panel (master-detail; Fleet/Workflows nav → change-map detail) — VS Code webview + JetBrains `ChangeMapPanel` (both render as-given) |
+| `multitask [--root <d>] [--json]` | `{ agents: [{ session, worktree, gitBranch, self, phase, phaseConfidence, sparkline[], todos, subagents[], files[], diff{ added, removed }, tokens, durationMs, risk }], collisions: FileCollision[], worktrees[], workflows: WorkflowRun[], actions{ groups[], egress }, summary{ active, conflicts } }` | Overview Fleet/Workflows nav — **both editors** (render thin); assembled in the CLI from `listRepoSiblings` + per-agent `buildChangeMap` + `parseWorkflows`. Git-free / path-only |
+| `tasklog` (always JSON) | `TaskLogEntry[]` — `{ taskId, content, agentIds[], subagentIds[], firstTs, lastTs, edits, added, removed, status }`, one row per stable `taskId` unioned across worktrees + subagents (`unassigned` excluded) | Cross-agent task log — both editors |
+| `task-keep <id> --json` / `task-undo <id> --json` | `{ kept, total, ids }` / `{ undone, conflicts, total, ids }` — **WYSIWYG**: acts on the chapter's DISPLAYED edit set (`reviewEditIds`; the synthetic session chapter included), falling back to the strict span for analytics-only task ids | chapter-scoped Keep/Undo — both editors |
+| `demo [--fast] [--speed <n>] [--dir <d>] [--clean] [--json]` | `{ session, workspace, transcript, edits, steps }` (`--clean` → `{ sessions[], workspaces[] }`) — replays a scripted session through the REAL pipeline in an isolated `demo-<hex>` session + marked folder | Live showcase + the e2e fixture (`demo.ts`); a fully reviewed demo auto-clears its store (`autoClearDemo`) |
+| `chat-context [--tool-use-id <id> \| --edit <n> \| --agent <id> \| --task <id>]` | `{ prompt }` — a ready-to-paste chat prompt built by `assembleChatContext`; **never** spawns a process or calls a model | 💬 Chat handoff — both editors |
 | `locate --file <f>` (buffer on stdin) | `{ file, placements: [{ id, lines: [int] }] }` | inline overlays — JetBrains `ObservatoryCli.locate`; VS Code computes in-process via `core.locateEditInCurrent` |
 | `usage` | `{ ...UsageLine, staleMs }` (`staleMs` = `USAGE_STALE_MS`, 300000) | the 5h/week Usage bars |
 | `stats --json` | `StatsResult` (`{ daily[30], hourly[24], windows{session,day,week,month}, generatedAt }`) | Stats panel (both spawn a subprocess) |
@@ -224,6 +381,13 @@ further: it ships the *rendered* rollups (`files[]` / `modules[]`), so the VS Co
 JetBrains Swing panel are both pure renderers with no aggregation logic of their own to drift. `parseActions` was refactored to share `parseTranscriptActions`, so
 every subagent's `subagents/agent-<id>.jsonl` transcript parses through exactly the same code as the
 main session's action timeline.
+
+0.8.0 continues the pattern with `taskLog.ts`, `workflows.ts`, and the worktree-correlation helpers in
+`session.ts` / `fleet.ts` — all pure derivations of the same Claude Code transcript + content-addressed
+store, with **no model calls, no network, and no git binary** (the fleet reads `.git` pointer files
+directly). Every 0.8.0 surface — the Overview's master-detail Fleet/Workflows nav, the per-agent
+change-maps, the four-way rollups, workflow-run tracking, the cross-agent task log, task-scoped
+keep/undo, and the context-preloaded chat handoff — costs **zero extra Claude tokens**.
 
 ## See also
 

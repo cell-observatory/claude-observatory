@@ -1,10 +1,10 @@
 package com.cellobservatory.observatory.ui
 
 import com.cellobservatory.observatory.core.ObservatoryCli
-import com.cellobservatory.observatory.model.ObsEdit
-import com.cellobservatory.observatory.model.relTime
+import com.cellobservatory.observatory.model.ObservationEdit
+import com.cellobservatory.observatory.model.ObservationRun
+import com.cellobservatory.observatory.model.Observations
 import com.cellobservatory.observatory.services.ObservatoryService
-import com.cellobservatory.observatory.services.ObserveCache
 import com.intellij.icons.AllIcons
 import com.intellij.notification.NotificationType
 import com.intellij.openapi.actionSystem.ActionManager
@@ -17,44 +17,49 @@ import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.progress.Task
 import com.intellij.openapi.project.DumbAware
 import com.intellij.openapi.project.Project
-import com.intellij.openapi.ui.DialogWrapper
 import com.intellij.openapi.ui.SimpleToolWindowPanel
 import com.intellij.ui.ColoredTreeCellRenderer
 import com.intellij.ui.PopupHandler
 import com.intellij.ui.SimpleTextAttributes
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.treeStructure.Tree
-import com.intellij.util.ui.JBUI
-import java.awt.Dimension
+import com.intellij.util.ui.tree.TreeUtil
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
 import javax.swing.JComponent
-import javax.swing.JEditorPane
 import javax.swing.JTree
 import javax.swing.tree.DefaultMutableTreeNode
 import javax.swing.tree.DefaultTreeModel
 import javax.swing.tree.TreeSelectionModel
 
 /**
- * Observations: a session recap row on top (✨ regenerates it via `claude -p`), then one row per
- * edit — Claude's actual transcript reasoning, heuristic flags, and the cross-session memory of
- * the file (risky files get a warning icon). Click a row for the combined report; ✨ Analyze runs
- * the opt-in deep analysis. Data comes from one `observe --json` payload (ObserveCache).
+ * Observations (0.8.0 r4 — the single reasoning feed): the session recap on top, then the edit timeline in
+ * chronological-run STYLE (files by most-recent activity; adjacent same-file edits coalesce into ×N runs with
+ * a combined delta, expandable to their per-edit rows with Keep/Undo), Claude's own reasoning inline on each
+ * edit, and the still-open Next steps at the end. Backed by one `observations --json` payload (assembled in
+ * core). The Actions tool-call timeline now lives in the Edits sidebar (ActionsPanel).
+ *
+ * This panel only paints — parity with the VS Code Observations view. Keep/Undo route through the store-
+ * mutation CLI (ReviewOps), zero-token.
  */
 class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(true, true) {
 
     private object RecapMarker
     private object StepsMarker
 
+    @Volatile private var data: Observations? = null
+
     private val root = DefaultMutableTreeNode()
     private val model = DefaultTreeModel(root)
     private val tree = Tree(model).apply {
         isRootVisible = false
-        showsRootHandles = false
+        showsRootHandles = true
         selectionModel.selectionMode = TreeSelectionModel.SINGLE_TREE_SELECTION
         emptyText.text = "No tracked Claude edits in this project yet"
-        cellRenderer = Renderer(project)
+        cellRenderer = Renderer()
     }
 
     init {
@@ -62,115 +67,101 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
         toolbar = buildToolbar()
         tree.addMouseListener(object : MouseAdapter() {
             override fun mouseClicked(e: MouseEvent) {
-                if (e.clickCount == 2) selectedObs()?.let { showReport(it) }
+                if (e.clickCount == 2) selectedEdit()?.let { openEdit(it.id) }
             }
         })
         PopupHandler.installPopupMenu(tree, buildPopupGroup(), "ClaudeObservatoryObsPopup")
+
         ObservatoryService.getInstance(project).addListener { rebuild() }
-        ObserveCache.getInstance(project).addListener { rebuild() }
         rebuild()
     }
 
-    private fun selectedObs(): ObsEdit? =
-        (tree.lastSelectedPathComponent as? DefaultMutableTreeNode)?.userObject as? ObsEdit
+    // --- selection: an ObservationEdit row, or a single-edit run (which stands in for its lone edit) ---
+
+    private fun selectedEdit(): ObservationEdit? =
+        when (val o = (tree.lastSelectedPathComponent as? DefaultMutableTreeNode)?.userObject) {
+            is ObservationEdit -> o
+            is ObservationRun -> if (o.count == 1) o.edits.firstOrNull() else null
+            else -> null
+        }
+
+    // --- data / paint (one observations --json payload; off the EDT, repaint back on it) ---
 
     fun rebuild() {
-        val payload = ObserveCache.getInstance(project).payload()
-        root.removeAllChildren()
-        if (payload != null && payload.edits.isNotEmpty()) {
-            root.add(DefaultMutableTreeNode(RecapMarker))
-            for (e in payload.edits) root.add(DefaultMutableTreeNode(e))
+        val service = ObservatoryService.getInstance(project)
+        val session = service.currentSession()
+        if (session == null) {
+            data = null
+            ApplicationManager.getApplication().invokeLater { if (!project.isDisposed) repaintTree() }
+            return
         }
-        // Next-steps: Claude's own open to-dos + heuristic suggestions (parity with VS Code + `insights`).
-        if (payload != null && payload.suggestions.isNotEmpty()) {
+        // The SHARED throttled observations view (0.8.0 stabilization) — one spawn per ~3s across the
+        // window; get() serves the latest cached view now and re-fires the listener when fresh data lands.
+        val res = service.observations()
+        ApplicationManager.getApplication().invokeLater {
+            if (project.isDisposed) return@invokeLater
+            data = res
+            repaintTree()
+        }
+    }
+
+    private fun repaintTree() {
+        root.removeAllChildren()
+        val d = data
+        if (d != null && d.runs.isNotEmpty()) {
+            root.add(DefaultMutableTreeNode(RecapMarker)) // the session recap heads the timeline
+            for (r in d.runs) {
+                val runNode = DefaultMutableTreeNode(r)
+                // A lone edit is its own run (count 1) — render it as a leaf so its row IS the edit; only
+                // multi-edit runs expand into per-edit rows (with Keep/Undo).
+                if (r.count > 1) for (e in r.edits) runNode.add(DefaultMutableTreeNode(e))
+                root.add(runNode)
+            }
+        }
+        // Next-steps: Claude's own open to-dos + heuristic follow-ups (shown independently of the timeline).
+        if (d != null && d.nextSteps.isNotEmpty()) {
             root.add(DefaultMutableTreeNode(StepsMarker))
-            for (s in payload.suggestions) root.add(DefaultMutableTreeNode(s))
+            for (s in d.nextSteps) root.add(DefaultMutableTreeNode(s))
         }
         model.reload()
+        TreeUtil.expandAll(tree)
     }
 
-    // --- report ---
+    // --- keep / undo (per-edit — expand a run to its rows), + open / diff / chat ---
 
-    private fun showReport(obs: ObsEdit) {
-        val html = buildString {
-            append("<html><body style='font-family:sans-serif;margin:8px'>")
-            append("<h2>Edit #${obs.id} — ${escape(File(obs.file).name)}</h2>")
-            append("<p><b>${escape(obs.summary)}</b> · ${obs.tool} · ${obs.status} · ${relTime(obs.ts)}</p>")
-            obs.reasoning?.let { append("<h3>💭 Claude's reasoning</h3><p>${escape(it)}</p>") }
-            if (obs.flags.isNotEmpty()) {
-                append("<h3>Flags</h3><ul>")
-                for (f in obs.flags) append("<li>${if (f.level == "warn") "⚠" else "ℹ"} ${escape(f.message)}</li>")
-                append("</ul>")
-            }
-            if (obs.memorySummary.isNotBlank()) {
-                append("<h3>🧠 File memory</h3><p>${if (obs.risky) "⚠ " else ""}${escape(obs.memorySummary)}</p>")
-            }
-            obs.analysis?.let {
-                append("<h3>✨ Deep analysis (Claude)</h3><p>${escape(it).replace("\n", "<br>")}</p>")
-            }
-            append("</body></html>")
-        }
-        object : DialogWrapper(project) {
-            init {
-                title = "Claude Observatory — Edit #${obs.id}"
-                init()
-            }
+    private fun session(): String? = ObservatoryService.getInstance(project).currentSession()
 
-            override fun createCenterPanel(): JComponent {
-                val pane = JEditorPane("text/html", html).apply { isEditable = false; caretPosition = 0 }
-                return JBScrollPane(pane).apply { preferredSize = Dimension(JBUI.scale(560), JBUI.scale(420)) }
-            }
-
-            override fun createActions() = arrayOf(okAction)
-        }.show()
+    private fun keepSelected() {
+        val session = session() ?: return
+        val edit = selectedEdit() ?: return ReviewOps.notify(project, "Select an edit to keep (expand a run to its rows)")
+        if (edit.status != "pending") return ReviewOps.notify(project, "Edit #${edit.id} is already ${edit.status}")
+        ReviewOps.keep(project, session, edit.id)
     }
 
-    private fun escape(s: String) = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-    // --- opt-in claude -p actions ---
-
-    private fun analyze(obs: ObsEdit) {
-        val session = ObservatoryService.getInstance(project).currentSession() ?: return
-        if (obs.analysis != null) return showReport(obs) // cached — just open, like the VS Code flow
-        ProgressManager.getInstance().run(object : Task.Backgroundable(project, "Analyzing edit #${obs.id} with Claude…", false) {
-            override fun run(indicator: ProgressIndicator) {
-                val text = ObservatoryCli.analyze(session, obs.id, project.basePath)
-                ApplicationManager.getApplication().invokeLater {
-                    if (text == null) {
-                        ReviewOps.notify(project, "Analyze failed — is the `claude` CLI on PATH?", NotificationType.ERROR)
-                    } else {
-                        ObserveCache.getInstance(project).invalidate()
-                        rebuild()
-                        showReport(obs.copy(analysis = text))
-                    }
-                }
-            }
-        })
+    private fun undoSelected() {
+        val session = session() ?: return
+        val edit = selectedEdit() ?: return ReviewOps.notify(project, "Select an edit to undo (expand a run to its rows)")
+        val rec = ObservatoryService.getInstance(project).log().find { it.id == edit.id }
+            ?: return ReviewOps.notify(project, "Edit #${edit.id} is no longer in the store")
+        ReviewOps.undoOrRedo(project, session, rec, redo = false)
     }
 
-    private fun refreshRecap() {
-        val session = ObservatoryService.getInstance(project).currentSession() ?: return
-        ProgressManager.getInstance().run(object : Task.Backgroundable(project, "Refreshing the session recap with Claude…", false) {
-            override fun run(indicator: ProgressIndicator) {
-                val text = ObservatoryCli.recap(session, fresh = true, workDir = project.basePath)
-                ApplicationManager.getApplication().invokeLater {
-                    if (text == null) {
-                        ReviewOps.notify(project, "Recap failed — is the `claude` CLI on PATH?", NotificationType.ERROR)
-                    } else {
-                        ObserveCache.getInstance(project).invalidate()
-                        rebuild()
-                    }
-                }
-            }
-        })
+    private fun openEdit(id: Int) {
+        val session = session() ?: return
+        ObservatoryService.getInstance(project).log().find { it.id == id }?.let { Navigate.openFileAtEdit(project, session, it) }
     }
 
-    private fun chatAbout(obs: ObsEdit) {
-        val session = ObservatoryService.getInstance(project).currentSession() ?: return
-        ReviewOps.chatAbout(project, session, obs.id)
+    private fun diffEdit(id: Int) {
+        val session = session() ?: return
+        ObservatoryService.getInstance(project).log().find { it.id == id }?.let { Diffs.show(project, session, it) }
     }
 
-    // --- toolbar / menu / renderer ---
+    private fun chatEdit(id: Int) {
+        val session = session() ?: return
+        ReviewOps.chatAbout(project, session, id)
+    }
+
+    // --- store maintenance (unique to this panel: install hooks, clean store) ---
 
     private fun installHooks() {
         ProgressManager.getInstance().run(object : Task.Backgroundable(project, "Installing capture hooks…", false) {
@@ -223,20 +214,35 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
             .showInCenterOf(tree)
     }
 
+    // --- toolbar / menu / renderer ---
+
+    private fun service() = ObservatoryService.getInstance(project)
+
+    private fun withSession(block: (String) -> Unit) {
+        val s = service().currentSession()
+        if (s == null) {
+            ReviewOps.notify(project, "No active Claude Code session for this project", NotificationType.WARNING)
+            return
+        }
+        block(s)
+    }
+
     private fun buildToolbar(): JComponent {
         val group = DefaultActionGroup(
+            action("Accept All Edits", Icons.CheckAll) { withSession { s -> ReviewOps.keepAll(project, s) } },
+            action("Revert All Edits", AllIcons.Actions.Rollback) {
+                withSession { s -> ReviewOps.undoAll(project, s, service().log(), "this session") }
+            },
+            action("Clear Resolved Edits", AllIcons.Actions.GC) {
+                withSession { s ->
+                    val resolved = service().log().count { !it.pending }
+                    if (resolved > 0) ReviewOps.clearResolved(project, s, resolved) else ReviewOps.notify(project, "No resolved edits to clear")
+                }
+            },
             action("Install Capture Hooks", AllIcons.Actions.Install) { installHooks() },
             action("Clean Store…", AllIcons.Vcs.Remove) { cleanStore() },
-            action("Refresh Recap with Claude (spends tokens)", AllIcons.Actions.ForceRefresh) { refreshRecap() },
-            action("Clear Resolved Edits", AllIcons.Actions.GC) {
-                val service = ObservatoryService.getInstance(project)
-                val session = service.currentSession()
-                    ?: return@action ReviewOps.notify(project, "No active Claude Code session for this project", NotificationType.WARNING)
-                val resolved = service.log().count { !it.pending }
-                if (resolved > 0) ReviewOps.clearResolved(project, session, resolved) else ReviewOps.notify(project, "No resolved edits to clear")
-            },
             action("Switch Session", AllIcons.Vcs.Branch) { ReviewOps.chooseSession(project, tree) },
-            action("Refresh", AllIcons.Actions.Refresh) { ObservatoryService.getInstance(project).refresh() },
+            action("Refresh", AllIcons.Actions.Refresh) { service().observations(force = true); service().refresh() },
             action("Setup Check (doctor)", AllIcons.General.Information) { ReviewOps.openDoctor(project) },
         )
         val tb = ActionManager.getInstance().createActionToolbar("ClaudeObservatoryObs", group, true)
@@ -245,21 +251,11 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
     }
 
     private fun buildPopupGroup() = DefaultActionGroup(
-        action("Show Report", AllIcons.Actions.Preview) { selectedObs()?.let { showReport(it) } },
-        action("Analyze with Claude (spends tokens)", AllIcons.Actions.IntentionBulb) { selectedObs()?.let { analyze(it) } },
-        action("Chat About This Edit", AllIcons.General.Balloon) { selectedObs()?.let { chatAbout(it) } },
-        action("Open File at Edit", AllIcons.Actions.EditSource) {
-            val obs = selectedObs() ?: return@action
-            val service = ObservatoryService.getInstance(project)
-            val session = service.currentSession() ?: return@action
-            service.log().find { it.id == obs.id }?.let { Navigate.openFileAtEdit(project, session, it) }
-        },
-        action("Show Diff", AllIcons.Actions.Diff) {
-            val obs = selectedObs() ?: return@action
-            val service = ObservatoryService.getInstance(project)
-            val session = service.currentSession() ?: return@action
-            service.log().find { it.id == obs.id }?.let { Diffs.show(project, session, it) }
-        },
+        action("Keep", AllIcons.Actions.Checked) { keepSelected() },
+        action("Undo", AllIcons.Actions.Rollback) { undoSelected() },
+        action("Open File at Edit", AllIcons.Actions.EditSource) { selectedEdit()?.let { openEdit(it.id) } },
+        action("Show Diff", AllIcons.Actions.Diff) { selectedEdit()?.let { diffEdit(it.id) } },
+        action("Chat About This Edit", AllIcons.General.Balloon) { selectedEdit()?.let { chatEdit(it.id) } },
     )
 
     private fun action(text: String, icon: javax.swing.Icon, run: () -> Unit): AnAction =
@@ -267,7 +263,9 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
             override fun actionPerformed(e: AnActionEvent) = run()
         }
 
-    private class Renderer(private val project: Project) : ColoredTreeCellRenderer() {
+    private inner class Renderer : ColoredTreeCellRenderer() {
+        private val hhmm = SimpleDateFormat("HH:mm")
+
         override fun customizeCellRenderer(
             tree: JTree, value: Any?, selected: Boolean, expanded: Boolean,
             leaf: Boolean, row: Int, hasFocus: Boolean,
@@ -275,9 +273,8 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
             when (val node = (value as? DefaultMutableTreeNode)?.userObject) {
                 is RecapMarker -> {
                     icon = Icons.Microscope
-                    val payload = ObserveCache.getInstance(project).payload()
-                    val recap = payload?.recap ?: payload?.insights?.lastSummary
-                    append(recap ?: "No recap yet — hit ✨ to generate one.")
+                    val recap = data?.recap?.takeIf { it.isNotBlank() }
+                    append(recap ?: "No recap yet — it fills in from Claude's session title / last summary.")
                     append("  session recap", SimpleTextAttributes.GRAYED_ATTRIBUTES)
                 }
                 is StepsMarker -> {
@@ -289,23 +286,42 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
                     icon = AllIcons.General.ArrowRight
                     append(node, SimpleTextAttributes.REGULAR_ATTRIBUTES)
                 }
-                is ObsEdit -> {
-                    val warn = node.risky || node.flags.any { it.level == "warn" }
-                    icon = if (warn) AllIcons.General.Warning else AllIcons.Actions.Show
+                is ObservationRun -> {
+                    icon = when (node.status) {
+                        "pending" -> AllIcons.General.Modified
+                        "undone" -> AllIcons.Actions.Cancel
+                        else -> AllIcons.Actions.Checked
+                    }
+                    val ts = node.edits.lastOrNull()?.ts ?: 0L
+                    append((if (ts > 0) "${hhmm.format(Date(ts))}  " else "") + File(node.file).name)
+                    if (node.count > 1) append("  ×${node.count}", SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES)
+                    if (node.added > 0 || node.removed > 0) append("  +${node.added} -${node.removed}", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                    val why = node.edits.firstNotNullOfOrNull { it.reasoning?.lineSequence()?.firstOrNull()?.takeIf { l -> l.isNotBlank() } }
+                    if (why != null) append("  $why", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                    toolTipText = buildString {
+                        append(node.rel)
+                        append("\n${node.count} edit(s) · +${node.added} -${node.removed} · ${node.status}")
+                        if (node.count == 1) node.edits.firstOrNull()?.reasoning?.let { append("\n💭 $it") }
+                    }
+                }
+                is ObservationEdit -> {
+                    icon = when (node.status) {
+                        "kept" -> AllIcons.Actions.Checked
+                        "undone" -> AllIcons.Actions.Cancel
+                        else -> AllIcons.General.Modified
+                    }
                     val style = when (node.status) {
                         "undone" -> SimpleTextAttributes(SimpleTextAttributes.STYLE_STRIKEOUT, null)
                         "kept" -> SimpleTextAttributes.GRAYED_ATTRIBUTES
                         else -> SimpleTextAttributes.REGULAR_ATTRIBUTES
                     }
-                    append("#${node.id}  ${node.summary}", style)
-                    val desc = node.reasoning?.lineSequence()?.firstOrNull()
-                        ?: if (node.flags.isNotEmpty()) "${node.flags.size} flag(s)" else ""
-                    if (desc.isNotBlank()) append("  $desc", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                    append("#${node.id}", style)
+                    if (node.added > 0 || node.removed > 0) append("  +${node.added} -${node.removed}", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                    node.reasoning?.lineSequence()?.firstOrNull()?.takeIf { it.isNotBlank() }
+                        ?.let { append("  $it", SimpleTextAttributes.GRAYED_ATTRIBUTES) }
                     toolTipText = buildString {
                         node.reasoning?.let { append("💭 $it\n") }
-                        node.flags.forEach { append(if (it.level == "warn") "⚠ " else "ℹ ").append(it.message).append('\n') }
-                        if (node.memorySummary.isNotBlank()) append("🧠 ${node.memorySummary}\n")
-                        append("Double-click for the full report.")
+                        append("edit #${node.id} · +${node.added} -${node.removed} · ${node.status}")
                     }
                 }
             }

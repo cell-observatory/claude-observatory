@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Getting started — Claude Observatory</title>
+<meta name="description" content="A recorded walkthrough of Claude Observatory: the bundled demo replays a full Claude session — chapters of edits, a subagent, and a workflow — in VS Code and PyCharm, ending in a chapter-by-chapter review.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%AC%3C/text%3E%3C/svg%3E">
+<style>
+  :root{
+    --bg:#fbfaf9; --surface:#ffffff; --surface-2:#f5f3f0;
+    --ink:#17171a; --ink-soft:#54545b; --ink-faint:#8b8a92;
+    --line:rgba(20,18,16,.10); --line-soft:rgba(20,18,16,.06);
+    --accent:#cf6440; --accent-ink:#a94e2c; --accent-soft:rgba(207,100,64,.10);
+    --shadow:0 30px 70px -40px rgba(40,25,15,.40), 0 8px 22px -18px rgba(40,25,15,.25);
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,Roboto,Helvetica,sans-serif;
+    --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+    --col:1140px;
+  }
+  @media (prefers-color-scheme:dark){:root{
+    --bg:#0e0e11;--surface:#161619;--surface-2:#1a1a1e;--ink:#ececef;--ink-soft:#a5a4ac;--ink-faint:#76757d;
+    --line:rgba(255,255,255,.11);--line-soft:rgba(255,255,255,.06);--accent:#e08a63;--accent-ink:#ef9f7c;--accent-soft:rgba(224,138,99,.14);
+    --shadow:0 30px 70px -40px rgba(0,0,0,.8),0 8px 22px -18px rgba(0,0,0,.6);
+  }}
+  :root[data-theme="light"]{--bg:#fbfaf9;--surface:#fff;--surface-2:#f5f3f0;--ink:#17171a;--ink-soft:#54545b;--ink-faint:#8b8a92;--line:rgba(20,18,16,.10);--line-soft:rgba(20,18,16,.06);--accent:#cf6440;--accent-ink:#a94e2c;--accent-soft:rgba(207,100,64,.10);--shadow:0 30px 70px -40px rgba(40,25,15,.40),0 8px 22px -18px rgba(40,25,15,.25)}
+  :root[data-theme="dark"]{--bg:#0e0e11;--surface:#161619;--surface-2:#1a1a1e;--ink:#ececef;--ink-soft:#a5a4ac;--ink-faint:#76757d;--line:rgba(255,255,255,.11);--line-soft:rgba(255,255,255,.06);--accent:#e08a63;--accent-ink:#ef9f7c;--accent-soft:rgba(224,138,99,.14);--shadow:0 30px 70px -40px rgba(0,0,0,.8),0 8px 22px -18px rgba(0,0,0,.6)}
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth;scroll-padding-top:80px;-webkit-text-size-adjust:100%}
+  body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:17px;line-height:1.62;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+  .wrap{width:min(var(--col),90%);margin-inline:auto}
+  .feature .grid>*{min-width:0}
+  a{color:inherit;text-decoration:none}
+  h1,h2,h3{font-weight:640;letter-spacing:-.021em;line-height:1.1;text-wrap:balance;overflow-wrap:break-word}
+  .hl{color:var(--accent)}
+  .eyebrow{font-family:var(--mono);font-size:.72rem;text-transform:uppercase;letter-spacing:.2em;color:var(--accent-ink);font-weight:600}
+  .lede{color:var(--ink-soft);font-size:clamp(1.05rem,2vw,1.24rem);line-height:1.55;max-width:56ch;text-wrap:pretty}
+  code{font-family:var(--mono);font-size:.86em}
+
+  .nav{position:sticky;top:0;z-index:60;background:transparent;transition:background .25s,border-color .25s}
+  .nav.condensed{background:color-mix(in srgb,var(--bg) 80%,transparent);backdrop-filter:saturate(1.5) blur(14px);-webkit-backdrop-filter:saturate(1.5) blur(14px);border-bottom:1px solid var(--line-soft)}
+  .nav .row{display:flex;align-items:center;gap:20px;height:60px}
+  .brand{display:flex;align-items:center;gap:9px;font-weight:640;letter-spacing:-.02em;font-size:1.02rem}
+  .brand .m{font-size:1.2rem}
+  .nav .links{display:flex;gap:26px;margin-inline:auto;font-size:.95rem;color:var(--ink-soft)}
+  .nav .links a:hover{color:var(--ink)} .nav .links a.more{color:var(--accent-ink)}
+  .nav .right{display:flex;align-items:center;gap:10px}
+  .icon-btn,.ghost{border:1px solid var(--line);background:var(--surface);color:var(--ink-soft);border-radius:999px;padding:7px 13px;font-size:.85rem;font-family:var(--mono);cursor:pointer;transition:.15s}
+  .icon-btn:hover,.ghost:hover{color:var(--ink);border-color:var(--ink-faint)}
+  .menu-btn{display:none}
+  @media (max-width:720px){
+    .menu-btn{display:inline-flex}
+    .nav .links{display:none}
+    .nav.open .links{display:flex;flex-direction:column;align-items:flex-start;position:absolute;top:60px;left:0;right:0;margin:0;padding:14px 5% 18px;gap:14px;background:var(--bg);border-bottom:1px solid var(--line);box-shadow:var(--shadow)}
+    .nav.open,.nav.open.condensed{background:var(--bg)}
+  }
+
+  header.head{padding:clamp(56px,9vw,110px) 0 clamp(30px,5vw,56px)}
+  header.head h1{font-size:clamp(2.4rem,6vw,4rem);margin:16px 0}
+  .back{display:inline-flex;align-items:center;gap:7px;font-family:var(--mono);font-size:.8rem;color:var(--ink-soft)}
+  .back:hover{color:var(--accent-ink)}
+
+  .feature{padding-block:clamp(52px,8vh,104px);border-top:1px solid var(--line-soft)}
+  .feature .grid{display:grid;grid-template-columns:1fr 1.15fr;gap:clamp(32px,5vw,64px);align-items:center}
+  .feature.flip .grid .copy{order:2}
+  .feature h2{font-size:clamp(1.6rem,3vw,2.3rem);margin:12px 0 14px}
+  .feature p{color:var(--ink-soft);max-width:52ch}
+  .feature .num{font-family:var(--mono);font-size:.72rem;color:var(--ink-faint);letter-spacing:.12em}
+  .panel{background:var(--surface);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);overflow:hidden}
+  .panel .scroll{overflow-x:auto}
+  .panel img{display:block;width:100%;height:auto}
+  .two-up{display:flex;gap:14px;min-width:min-content}
+  .two-up figure{flex:1;min-width:320px}
+  .two-up figcaption{font-family:var(--mono);font-size:.7rem;color:var(--ink-faint);padding:8px 12px;text-align:center}
+  @media (max-width:860px){.feature .grid{grid-template-columns:1fr;gap:26px}.feature.flip .grid .copy{order:0}}
+
+  .deeper{padding-block:clamp(56px,8vh,110px);border-top:1px solid var(--line-soft);text-align:center}
+  .deeper h2{font-size:clamp(1.7rem,3.5vw,2.6rem)}
+  .doclinks{display:flex;flex-wrap:wrap;gap:12px;justify-content:center;margin-top:28px}
+  .doclinks a{border:1px solid var(--line);border-radius:999px;padding:10px 18px;font-size:.92rem;color:var(--ink-soft);transition:.15s}
+  .doclinks a:hover{color:var(--ink);border-color:var(--ink-faint)}
+  .doclinks a.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+  .doclinks a.primary:hover{background:var(--accent-ink)}
+
+  .foot{padding:48px 0 60px;border-top:1px solid var(--line-soft);color:var(--ink-faint)}
+  .foot .fine{font-family:var(--mono);font-size:.74rem}
+
+  .rv{opacity:0;transform:translateY(20px) scale(.985);transition:opacity .6s cubic-bezier(.22,.61,.36,1),transform .7s cubic-bezier(.22,.61,.36,1)}
+  .rv.in{opacity:1;transform:none}
+  @media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}.rv{opacity:1;transform:none;transition:opacity .2s}}
+</style>
+</head>
+<body>
+
+<nav class="nav" id="nav">
+  <div class="wrap row">
+    <a class="brand" href="showcase.html"><span class="m">🔬</span> Claude Observatory</a>
+    <div class="links">
+      <a href="showcase.html">← Overview</a>
+      <a href="panels.html">Panels</a>
+      <a href="features.html">Features&nbsp;→</a>
+      <a class="more" href="https://github.com/cell-observatory/claude-observatory">GitHub</a>
+    </div>
+    <div class="right">
+      <button class="icon-btn menu-btn" id="menu" aria-label="Toggle navigation menu" aria-expanded="false">☰</button>
+      <button class="icon-btn" id="theme" aria-label="Toggle theme">◐</button>
+      <a class="ghost" href="showcase.html">← Overview</a>
+    </div>
+  </div>
+</nav>
+
+<header class="head">
+  <div class="wrap">
+    <a class="back" href="showcase.html">← Overview</a>
+    <div style="margin-top:22px"><span class="eyebrow">Getting started</span></div>
+    <h1>A recorded walkthrough</h1>
+    <p class="lede">The bundled demo replays a full Claude session — a plan, three chapters of edits, a subagent, and a workflow — and the observatory records all of it. This page shows that demo as recorded in VS Code and PyCharm.</p>
+    <p style="margin-top:16px;font-family:var(--mono);font-size:.8rem;color:var(--ink-faint)">If Claude Observatory is installed, run <code style="color:var(--ink-soft)">claude-observatory demo</code> to follow along; installation is <a href="https://github.com/cell-observatory/claude-observatory#install" style="color:var(--accent-ink);text-decoration:underline;text-underline-offset:3px">one line in the README</a>.</p>
+  </div>
+</header>
+
+<main>
+  <section class="feature">
+    <div class="wrap grid">
+      <div class="copy"><div class="num">01</div><span class="eyebrow">The session</span><h2>Run the demo</h2><p><code>claude-observatory demo</code> replays a scripted session through the real pipeline — a real transcript, with edits captured by the real hooks — inside an isolated <code>demo-*</code> session and an <code>observatory-demo/</code> folder. Claude plans three to-dos and the Overview turns them into <b>chapters</b>: each edit lands under the goal it served, the module strip and file ledger update live, and the fleet row on the left tracks the agent's phase and ±lines. Everything shown is derived from the transcript and the capture hooks, at zero extra tokens.</p></div>
+      <div class="panel rv"><figure><img src="media/demo-live.gif" loading="lazy" alt="Recording of the live demo in VS Code: the actual Overview webview filling in as the session runs — the chapter ribbon completing chapter by chapter, the module strip and churn-ranked file ledger growing with each edit, and the fleet agent's phase and ±lines updating live"><figcaption style="font-family:var(--mono);font-size:.7rem;color:var(--ink-faint);padding:8px 12px;text-align:center">Recorded from a demo run — the Overview panel as the session progresses.</figcaption></figure></div>
+    </div>
+  </section>
+
+  <section class="feature flip">
+    <div class="wrap grid">
+      <div class="copy"><div class="num">02</div><span class="eyebrow">Multi-agent work</span><h2>Subagents and workflows</h2><p>Mid-session, Claude delegates the tests to a <b>subagent</b>. It appears nested under its parent in the Fleet nav with its own phase, current task, and ±lines, and its edit is attributed to it by its action window rather than guessed. A workflow run then starts an agent one level above the subagents: the nav focuses the new run, shows it running, and on completion lists its phase groups, per-agent tokens · time · edits, and the run's own change-map slice — its chapters and files — on the right.</p></div>
+      <div class="panel rv"><figure><img src="media/demo-workflow.gif" loading="lazy" alt="Recording of the workflow arc in the Workflows nav: the empty tab, the run appearing while still running, its agent's documentation edit landing, then the completed run with its Docs phase group, per-agent tokens, time, and edits — with the run's own change-map slice on the right"><figcaption style="font-family:var(--mono);font-size:.7rem;color:var(--ink-faint);padding:8px 12px;text-align:center">Recorded from the Workflows tab — a run moves from running to complete, with its own change-map slice.</figcaption></figure></div>
+    </div>
+  </section>
+
+  <section class="feature">
+    <div class="wrap grid">
+      <div class="copy"><div class="num">03</div><span class="eyebrow">PyCharm</span><h2>The same session in JetBrains IDEs</h2><p>The JetBrains plugin renders the same <code>multitask</code> and <code>changemap</code> payloads in native tool windows: the Fleet and Workflows nav, the chapter rows with their per-chapter ✓ ↩ 🧹, the module strip, and the ledger. Every rollup is computed once in core and rendered as given, so both editors show identical numbers.</p></div>
+      <div class="panel rv"><figure><img src="media/demo-pyc.gif" loading="lazy" alt="The same demo session in PyCharm's Claude Observatory Dashboards tool window: the Fleet nav with the working agent and its subagent, chapters filling in with per-chapter review buttons, the workflow run with its Docs phase, and the review ending in a cleared store"><figcaption style="font-family:var(--mono);font-size:.7rem;color:var(--ink-faint);padding:8px 12px;text-align:center">The Overview in PyCharm — the same payloads rendered in native Swing panels.</figcaption></figure></div>
+    </div>
+  </section>
+
+  <section class="feature flip">
+    <div class="wrap grid">
+      <div class="copy"><div class="num">04</div><span class="eyebrow">The review</span><h2>Review by chapter</h2><p>The demo's edits are real store records on real files, so the review works normally. Each chapter's ✓ accepts <b>exactly the edits its row shows</b>: accepting the first two chapters settles their rows while the third stays pending. Reject works the same way, conflict-guarded per edit, and clicking a chapter scopes the toolbar's bulk actions to it. A fully reviewed demo clears its own store, and <code>claude-observatory demo --clean</code> removes the session, the store, and the demo folder entirely.</p></div>
+      <div class="panel rv"><figure><img src="media/demo-review.gif" loading="lazy" alt="Recording of the review: task-keep accepting the first chapter — its row settles to green while the others stay pending — then the second, then Accept All clearing the fully-reviewed demo store to an empty panel"><figcaption style="font-family:var(--mono);font-size:.7rem;color:var(--ink-faint);padding:8px 12px;text-align:center">Chapter operations against the demo store — WYSIWYG accept per chapter, then Accept All clears the reviewed store.</figcaption></figure></div>
+    </div>
+  </section>
+
+  <section class="feature">
+    <div class="wrap grid">
+      <div class="copy"><div class="num">05</div><span class="eyebrow">Beyond the demo</span><h2>Working with real sessions</h2><p>Run <code>claude-observatory init</code> once, with Claude Code closed, and every later session is captured automatically — the same chapters, fleet, workflows, and review as the demo, in the 🔬 <b>Claude Edits</b> sidebar and the Claude Observatory panel in both editors. Sessions running in several git worktrees are unified into one fleet in the Overview, collision strip included; the Active only toggle narrows the list to work still in progress.</p></div>
+      <div class="panel rv"><div class="scroll"><div class="two-up">
+        <figure><img src="media/layout.png" loading="lazy" alt="Claude Observatory in VS Code: the Claude Edits sidebar and the Claude Observatory bottom panel"><figcaption>VS Code</figcaption></figure>
+        <figure><img src="media/pyc-layout.png" loading="lazy" alt="Claude Observatory in PyCharm: the same two tool windows with icon-only tabs"><figcaption>PyCharm / JetBrains</figcaption></figure>
+      </div></div></div>
+    </div>
+  </section>
+
+  <section class="feature flip">
+    <div class="wrap grid">
+      <div class="copy"><div class="num">06</div><span class="eyebrow">Everyday usage</span><h2>Command-line usage</h2><p>The <code>claude-observatory</code> CLI is a first-class front-end over the same store; the quick reference below covers the common commands. For more detail, see the <a href="https://github.com/cell-observatory/claude-observatory/blob/main/docs/DEMO.md" style="color:var(--accent-ink);text-decoration:underline;text-underline-offset:3px">full walkthrough</a>, every surface in <a href="features.html" style="color:var(--accent-ink);text-decoration:underline;text-underline-offset:3px">Features</a>, and every control by name in the <a href="panels.html" style="color:var(--accent-ink);text-decoration:underline;text-underline-offset:3px">Panels reference</a>.</p></div>
+      <div class="panel rv"><div class="scroll">
+        <div style="padding:20px 22px;font-family:var(--mono);font-size:.8rem;line-height:1.9;color:var(--ink);min-width:min-content">
+          <div style="font-size:.68rem;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-faint);margin-bottom:12px">Terminal · quick reference</div>
+          <div style="white-space:nowrap">claude-observatory status            <span style="color:var(--ink-faint)"># hooks + hook-path health + active session + counts</span></div>
+          <div style="white-space:nowrap">claude-observatory list              <span style="color:var(--ink-faint)"># edits in the active session (grouped by file, ±lines, status)</span></div>
+          <div style="white-space:nowrap">claude-observatory diff &lt;id&gt;         <span style="color:var(--ink-faint)"># colored before/after for one edit</span></div>
+          <div style="white-space:nowrap">claude-observatory keep &lt;id&gt;         <span style="color:var(--ink-faint)"># mark reviewed; no disk change</span></div>
+          <div style="white-space:nowrap">claude-observatory undo &lt;id&gt;         <span style="color:var(--ink-faint)"># surgically undo one edit</span></div>
+          <div style="white-space:nowrap">claude-observatory task-keep &lt;id&gt;    <span style="color:var(--ink-faint)"># keep every pending edit shown under a chapter (WYSIWYG)</span></div>
+          <div style="white-space:nowrap">claude-observatory task-undo &lt;id&gt;    <span style="color:var(--ink-faint)"># revert every pending edit shown under a chapter (WYSIWYG)</span></div>
+          <div style="white-space:nowrap">claude-observatory multitask --json  <span style="color:var(--ink-faint)"># every running agent across the repo's worktrees</span></div>
+          <div style="white-space:nowrap">claude-observatory tasklog           <span style="color:var(--ink-faint)"># cross-agent task log: one row per stable taskId</span></div>
+          <div style="white-space:nowrap">claude-observatory chat-context      <span style="color:var(--ink-faint)"># ready-to-paste chat prompt about an edit/action/subagent/task</span></div>
+          <div style="white-space:nowrap">claude-observatory demo              <span style="color:var(--ink-faint)"># replay a scripted session through the real pipeline</span></div>
+          <div style="white-space:nowrap">claude-observatory demo --clean      <span style="color:var(--ink-faint)"># removes the demo session, its store, and the demo folder</span></div>
+        </div>
+      </div></div>
+    </div>
+  </section>
+</main>
+
+<section class="deeper">
+  <div class="wrap">
+    <span class="eyebrow">Next</span>
+    <h2>Get started</h2>
+    <div class="doclinks">
+      <a class="primary" href="showcase.html">← Overview</a>
+      <a href="features.html">Features</a>
+      <a href="https://github.com/cell-observatory/claude-observatory">GitHub</a>
+    </div>
+  </div>
+</section>
+
+<footer class="foot">
+  <div class="wrap"><span class="fine">Apache-2.0 · git-free · zero extra Claude tokens · terminal + VS Code + JetBrains</span></div>
+</footer>
+
+<script>
+  (function(){
+    var root=document.documentElement,btn=document.getElementById('theme'),KEY='co-theme';
+    try{var s=localStorage.getItem(KEY);if(s)root.setAttribute('data-theme',s);}catch(e){}
+    btn.addEventListener('click',function(){
+      var cur=root.getAttribute('data-theme')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light');
+      var next=cur==='dark'?'light':'dark';root.setAttribute('data-theme',next);
+      try{localStorage.setItem(KEY,next);}catch(e){}
+    });
+  })();
+  (function(){
+    var nav=document.getElementById('nav');var f=function(){nav.classList.toggle('condensed',window.scrollY>40);};
+    window.addEventListener('scroll',f,{passive:true});f();
+  })();
+  (function(){
+    var els=document.querySelectorAll('.rv');
+    if(!('IntersectionObserver'in window)){els.forEach(function(e){e.classList.add('in');});return;}
+    var io=new IntersectionObserver(function(en){en.forEach(function(e){if(e.isIntersecting){e.target.classList.add('in');io.unobserve(e.target);}});},{threshold:.18,rootMargin:'0px 0px -8% 0px'});
+    els.forEach(function(e){io.observe(e);});
+  })();
+  (function(){
+    var nav=document.getElementById('nav'),btn=document.getElementById('menu');
+    if(!nav||!btn) return;
+    btn.addEventListener('click',function(){ var open=nav.classList.toggle('open'); btn.setAttribute('aria-expanded',open?'true':'false'); });
+    var ls=nav.querySelectorAll('.links a');
+    for(var i=0;i<ls.length;i++) ls[i].addEventListener('click',function(){ nav.classList.remove('open'); btn.setAttribute('aria-expanded','false'); });
+  })();
+</script>
+</body>
+</html>
