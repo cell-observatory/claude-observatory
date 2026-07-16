@@ -1,6 +1,6 @@
 {
   "name": "claude-observatory-monorepo",
-  "version": "0.7.6",
+  "version": "0.8.0",
   "private": true,
   "description": "Standalone, git-free, per-edit Keep/Undo for Claude Code — terminal + VS Code, zero extra tokens.",
   "workspaces": [
@@ -22,6 +22,8 @@
     "clean": "rm -rf packages/*/dist release"
   },
   "devDependencies": {
+    "gifenc": "^1.0.3",
+    "pngjs": "^7.0.0",
     "typescript": "^5.6.0"
   },
   "license": "Apache-2.0",

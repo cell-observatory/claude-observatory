@@ -11,9 +11,12 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
-import { readLog } from './store';
+import { readLog, readBlob, findRecord, EditRecord } from './store';
 import { findTranscript } from './observe';
+import { findSubagentsDir } from './subagents';
 import { scoreCommand, CommandRisk } from './risk';
+import { cachedByFiles } from './fscache';
+import { taskId } from './changemap';
 
 /** Coarse action kind, drives the timeline's icon + grouping + which rows the UI can dim/filter. */
 export type ActionCategory =
@@ -140,6 +143,16 @@ function toMs(v: unknown): number {
  */
 export function parseTranscriptActions(transcriptPath: string, opts?: { includeSidechain?: boolean }): ActionRecord[] {
   const includeSidechain = opts?.includeSidechain ?? false;
+  // Memoized per (file mtime,size) — one Overview refresh used to re-parse the same multi-MB transcript
+  // ~6× across views (the "Overview is slow" fix). Attribution (editId linking) mutates records per
+  // caller context, so hand out fresh per-record copies and keep the cached master pristine.
+  const master = cachedByFiles(`actions:${includeSidechain}`, [transcriptPath], () =>
+    parseTranscriptActionsUncached(transcriptPath, includeSidechain)
+  );
+  return master.map((a) => ({ ...a }));
+}
+
+function parseTranscriptActionsUncached(transcriptPath: string, includeSidechain: boolean): ActionRecord[] {
   let lines: string[];
   try {
     lines = fs.readFileSync(transcriptPath, 'utf8').split('\n');
@@ -228,35 +241,133 @@ export function parseActions(cwd: string, sessionId: string): ActionRecord[] {
   const transcript = findTranscript(cwd, sessionId);
   if (!transcript) return [];
   const actions = parseTranscriptActions(transcript, { includeSidechain: false });
-  linkEditIds(sessionId, actions);
+  linkEditIds(cwd, sessionId, actions);
   return actions;
 }
 
-/**
- * Attach the store EditRecord id to each file-edit action, per file in order — the same positional
- * correlation observe.ts uses for reasoning. Bash actions are left unlinked (one Bash command can
- * produce many store records; there is no 1:1 mapping to hang on the single Bash row).
- */
-function linkEditIds(sessionId: string, actions: ActionRecord[]): void {
-  const queues = new Map<string, ActionRecord[]>(); // resolved file path -> its edit actions, in order
-  for (const a of actions) {
-    if (a.category !== 'edit') continue;
-    const key = path.resolve(a.target);
-    if (!queues.has(key)) queues.set(key, []);
-    queues.get(key)!.push(a);
+/** One file-editing author for honest editId attribution: the main chain (`agentId: null`) or a
+ *  subagent. `edits` are that author's edit ActionRecords (any file) — mutated in place to get `editId`. */
+export interface EditAttributionAuthor {
+  agentId: string | null;
+  edits: ActionRecord[];
+}
+
+/** [min, max] ts across a set of edit actions — this author's action-window on some file. */
+function editWindow(acts: ActionRecord[]): [number, number] {
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const a of acts) {
+    if (a.ts < lo) lo = a.ts;
+    if (a.ts > hi) hi = a.ts;
   }
-  if (queues.size === 0) return;
-  const cursor = new Map<string, number>();
+  return [lo, hi];
+}
+
+/** Do any two of these ts-windows overlap (touching endpoints count)? Sweep after sorting by start. */
+function windowsOverlap(windows: [number, number][]): boolean {
+  const sorted = windows.slice().sort((a, b) => a[0] - b[0]);
+  let maxEnd = -Infinity;
+  for (const [lo, hi] of sorted) {
+    if (lo <= maxEnd) return true;
+    if (hi > maxEnd) maxEnd = hi;
+  }
+  return false;
+}
+
+/**
+ * Attach store EditRecord ids to transcript edit actions across the main chain + subagents — HONESTLY
+ * (§6). The store has no author column and same-file subagent + main-chain edits all land under one
+ * parent session, so attribution is reconstructed post-hoc by (file, ts-window) alignment:
+ *  - a file with a SINGLE author → positional linking of its store records (no ambiguity, common case);
+ *  - MULTIPLE authors with DISJOINT windows → each subagent claims the records inside its window and
+ *    the main chain claims the rest (a record outside every subagent window is main-chain's, §6.2);
+ *  - MULTIPLE authors with OVERLAPPING/interleaved windows → the records CANNOT be partitioned, so
+ *    BOTH sides are left null (→ unassigned, §6.3) — never positionally cross-attributed.
+ * Mutates each author's `edits` (their `editId`). Bash actions carry no `editId` (no 1:1 store row).
+ */
+export function attributeEditIds(sessionId: string, authors: EditAttributionAuthor[]): void {
+  const recsByFile = new Map<string, EditRecord[]>(); // resolved file -> its store edit records, append order
   for (const rec of readLog(sessionId)) {
     if (!EDIT_TOOLS.has(rec.tool)) continue; // only the 4 file tools have a 1:1 transcript tool_use
-    const q = queues.get(path.resolve(rec.file));
-    if (!q) continue;
-    const i = cursor.get(rec.file) ?? 0;
-    if (i < q.length) {
-      q[i].editId = rec.id;
-      cursor.set(rec.file, i + 1);
+    const key = path.resolve(rec.file);
+    if (!recsByFile.has(key)) recsByFile.set(key, []);
+    recsByFile.get(key)!.push(rec);
+  }
+  if (recsByFile.size === 0) return;
+
+  // Each author's edit actions, grouped by resolved file (transcript order).
+  const perAuthor = authors.map((author) => {
+    const byFile = new Map<string, ActionRecord[]>();
+    for (const a of author.edits) {
+      if (a.category !== 'edit') continue;
+      const key = path.resolve(a.target);
+      if (!byFile.has(key)) byFile.set(key, []);
+      byFile.get(key)!.push(a);
+    }
+    return { agentId: author.agentId, byFile };
+  });
+
+  for (const [file, recs] of recsByFile) {
+    const fileAuthors = perAuthor
+      .map((a) => ({ agentId: a.agentId, acts: a.byFile.get(file) }))
+      .filter((a): a is { agentId: string | null; acts: ActionRecord[] } => !!a.acts && a.acts.length > 0);
+    if (fileAuthors.length === 0) continue; // no transcript edit action for this file — leave null
+
+    // Single author: positional over ALL of the file's store records (the common, unambiguous case).
+    if (fileAuthors.length === 1) {
+      const acts = fileAuthors[0].acts;
+      for (let i = 0; i < recs.length && i < acts.length; i++) acts[i].editId = recs[i].id;
+      continue;
+    }
+
+    // Multiple authors touched this file: partition by ts-window, or bail to null on any overlap.
+    // BY DESIGN (0.8.0 stabilization review): genuinely interleaved same-file work stays unattributed on
+    // BOTH sides rather than guessed — the null folds into the main-chain display bucket, and the chapter
+    // dimension is total regardless, so nothing disappears from the Overview. Pinned by a core test.
+    const windows = fileAuthors.map((a) => editWindow(a.acts));
+    if (windowsOverlap(windows)) continue; // interleaved/ambiguous → BOTH sides null (§6.3)
+
+    const claimed = new Set<EditRecord>();
+    fileAuthors.forEach((a, idx) => {
+      if (a.agentId === null) return; // the main chain claims the leftovers below (§6.2)
+      const [lo, hi] = windows[idx];
+      const inWin = recs.filter((r) => r.ts >= lo && r.ts <= hi); // this subagent's window claims these
+      for (let i = 0; i < inWin.length && i < a.acts.length; i++) {
+        a.acts[i].editId = inWin[i].id;
+        claimed.add(inWin[i]);
+      }
+    });
+    const main = fileAuthors.find((a) => a.agentId === null);
+    if (main) {
+      const rest = recs.filter((r) => !claimed.has(r)); // records in no subagent window are main-chain's
+      for (let i = 0; i < rest.length && i < main.acts.length; i++) main.acts[i].editId = rest[i].id;
     }
   }
+}
+
+/** Every subagent's parsed action stream (for editId windowing), from <subagents>/agent-*.jsonl. */
+function subagentEditStreams(cwd: string, sessionId: string): EditAttributionAuthor[] {
+  const dir = findSubagentsDir(cwd, sessionId);
+  if (!dir) return [];
+  let files: string[];
+  try {
+    files = fs.readdirSync(dir).filter((f) => f.startsWith('agent-') && f.endsWith('.jsonl'));
+  } catch {
+    return [];
+  }
+  return files.map((f) => ({
+    agentId: f.replace(/^agent-/, '').replace(/\.jsonl$/, ''),
+    edits: parseTranscriptActions(path.join(dir, f), { includeSidechain: true }),
+  }));
+}
+
+/**
+ * Link the MAIN chain's file-edit actions to their store EditRecord ids — subagent-aware (§6): a store
+ * record inside a subagent's action window for that file belongs to the subagent, so the main chain
+ * must not consume it, and an interleaved same-file overlap leaves both sides null (unassigned).
+ */
+function linkEditIds(cwd: string, sessionId: string, actions: ActionRecord[]): void {
+  attributeEditIds(sessionId, [{ agentId: null, edits: actions }, ...subagentEditStreams(cwd, sessionId)]);
 }
 
 // --- category grouping (the Actions view is grouped by kind; curated by default) ---
@@ -341,4 +452,304 @@ export function summarizeActions(actions: ActionRecord[]): ActionSummary {
     firstTs: ts.length ? Math.min(...ts) : 0,
     lastTs: ts.length ? Math.max(...ts) : 0,
   };
+}
+
+// --- live phase (0.8.0) ------------------------------------------------------------------------
+// What is the agent in a transcript doing RIGHT NOW? A bounded, structural, zero-token read of only
+// the transcript's TAIL (never the whole 20-34MB file) — it inspects just the trailing tool_use /
+// tool_result / end_turn. Boundary-tolerant by construction: starting mid-file, it drops its first
+// (partial) line, and a tool_result whose tool_use precedes the window is a harmless no-op delete.
+// Some states have no structural marker (a harness permission prompt writes NOTHING to the transcript;
+// there is no session-end record) and are inferred from staleness — surfaced via `confidence` as a
+// labeled heuristic, never asserted as certain.
+
+/** The live states a watcher surfaces. `awaiting-permission`/`idle`/`done` are staleness heuristics. */
+export type Phase = 'working' | 'awaiting-input' | 'awaiting-permission' | 'idle' | 'errored' | 'done';
+export type PhaseConfidence = 'high' | 'heuristic';
+export interface PhaseResult {
+  phase: Phase;
+  /** 'high' = structural (pending AskUserQuestion, an error result, an active tool_use); 'heuristic' =
+   *  staleness-derived (awaiting-permission / idle / done have no structural marker — inferred by mtime). */
+  confidence: PhaseConfidence;
+}
+
+/** Tool_uses that block on the USER, not a tool_result — a pending one means the agent awaits input. */
+const INPUT_TOOLS = new Set(['AskUserQuestion', 'ExitPlanMode']);
+/** How many trailing bytes to read for the classification (the trailing records are tiny). */
+const PHASE_TAIL_BYTES = 64 * 1024;
+/** A tool_use awaiting its result with no append for this long reads as a (heuristic) permission block. */
+const PERMISSION_STALE_MS = 10_000;
+/** A completed turn with no append for this long reads as `done` (vs a recently-`idle` pause). */
+const DONE_STALE_MS = 5 * 60_000;
+
+/**
+ * What is the agent in this transcript doing right now? Structural + zero-token — see the section note.
+ * `agentPhase` returns just the label; `agentPhaseDetail` also reports whether it's a staleness heuristic.
+ */
+export function agentPhaseDetail(transcriptPath: string): PhaseResult {
+  const idle: PhaseResult = { phase: 'idle', confidence: 'heuristic' }; // neutral fallback (no transcript)
+  let mtimeMs: number;
+  try {
+    mtimeMs = fs.statSync(transcriptPath).mtimeMs;
+  } catch {
+    return idle;
+  }
+  const objs: any[] = [];
+  let fd: number | null = null;
+  try {
+    fd = fs.openSync(transcriptPath, 'r');
+    const size = fs.fstatSync(fd).size;
+    const start = Math.max(0, size - PHASE_TAIL_BYTES);
+    const len = size - start;
+    const buf = Buffer.alloc(len);
+    const n = fs.readSync(fd, buf, 0, len, start);
+    let text = buf.toString('utf8', 0, n);
+    if (start > 0) text = text.slice(text.indexOf('\n') + 1); // started mid-file: drop the partial line
+    for (const line of text.split('\n')) {
+      const t = line.trim();
+      if (!t) continue;
+      try {
+        objs.push(JSON.parse(t));
+      } catch {
+        // tolerate partial/non-JSON lines (schema evolves)
+      }
+    }
+  } catch {
+    return idle;
+  } finally {
+    if (fd !== null) fs.closeSync(fd);
+  }
+
+  // Walk the tail in order: track tool_uses still awaiting a result, and the kind of the trailing event.
+  const pending = new Map<string, string>(); // tool_use_id -> tool name (no tool_result seen after it)
+  let lastKind: 'result' | 'assistant_end' | 'none' = 'none';
+  let lastResultErr = false;
+  for (const o of objs) {
+    const msg = o && o.message;
+    if (!msg || !Array.isArray(msg.content)) continue;
+    if (msg.role === 'assistant') {
+      let hadToolUse = false;
+      for (const b of msg.content) {
+        if (b && b.type === 'tool_use' && typeof b.name === 'string') {
+          hadToolUse = true;
+          if (typeof b.id === 'string') pending.set(b.id, b.name);
+        }
+      }
+      if (!hadToolUse) lastKind = 'assistant_end'; // spoke and stopped (no tool call) => turn complete
+    } else if (msg.role === 'user') {
+      for (const b of msg.content) {
+        if (b && b.type === 'tool_result' && typeof b.tool_use_id === 'string') {
+          pending.delete(b.tool_use_id); // a tool_use before the window just no-ops (boundary-tolerant)
+          lastKind = 'result';
+          lastResultErr = !!b.is_error;
+        }
+      }
+    }
+  }
+
+  const age = Date.now() - mtimeMs;
+  // 1. A pending tool_use that blocks on the user => awaiting-input (structural).
+  for (const name of pending.values()) {
+    if (INPUT_TOOLS.has(name)) return { phase: 'awaiting-input', confidence: 'high' };
+  }
+  // 2. A pending (non-blocking) tool_use => the tool is running, OR the agent is blocked on a harness
+  //    permission prompt (which writes NO transcript record) — disambiguated only by staleness (heuristic).
+  if (pending.size > 0) {
+    return age > PERMISSION_STALE_MS
+      ? { phase: 'awaiting-permission', confidence: 'heuristic' }
+      : { phase: 'working', confidence: 'high' };
+  }
+  // 3. No pending tool_use.
+  //    a. A trailing error result => errored (structural).
+  if (lastKind === 'result' && lastResultErr) return { phase: 'errored', confidence: 'high' };
+  //    b. A trailing (non-error) tool_result means the turn is UNFINISHED — a conversation can't end on a
+  //       tool_result; it always obligates an assistant follow-up. So the agent is mid-turn (generating the
+  //       next step), NOT idle. Fresh => working (structural, same as an active tool_use); long-stale =>
+  //       the turn was abandoned mid-flight (crash/kill/interrupt) => done. This is what keeps the live
+  //       session reading "working" between tool calls instead of flickering to idle after each result.
+  if (lastKind === 'result') return age > DONE_STALE_MS ? { phase: 'done', confidence: 'heuristic' } : { phase: 'working', confidence: 'high' };
+  //    c. The turn is COMPLETE (assistant spoke and stopped, or nothing in view): recently => idle,
+  //       long-stale => done (both staleness heuristics — there's no session-end record).
+  return age > DONE_STALE_MS ? { phase: 'done', confidence: 'heuristic' } : idle;
+}
+
+/** The live phase of the agent in a transcript (label only; use `agentPhaseDetail` for confidence). */
+export function agentPhase(transcriptPath: string): Phase {
+  return agentPhaseDetail(transcriptPath).phase;
+}
+
+// --- chat-context assembler (0.8.0) ------------------------------------------------------------
+// The single, zero-token backend for "chat about this action / edit / subagent / task" — assembles a
+// ready-to-paste prompt (previously duplicated in both editors) so an editor just: build ← copy →
+// hand to the user's Claude. It reads the store + transcript ONLY — never spawns a process, never
+// calls a model (it must NOT touch analyze.ts's `claude -p`). This is also the review-context primitive.
+
+/** How much of a shell command's result to carry (a Bash dump can be huge — the prompt stays paste-able). */
+const RESULT_CONTEXT_MAX = 4000;
+
+/** The tool_result text for one tool_use_id, from the transcript (for the exec command+result context).
+ *  Handles both string and content-array result shapes; truncates a large output. Zero token, no spawn. */
+function toolResultText(transcriptPath: string, toolUseId: string): string | null {
+  let lines: string[];
+  try {
+    lines = fs.readFileSync(transcriptPath, 'utf8').split('\n');
+  } catch {
+    return null;
+  }
+  for (const line of lines) {
+    const t = line.trim();
+    if (!t) continue;
+    let o: any;
+    try {
+      o = JSON.parse(t);
+    } catch {
+      continue;
+    }
+    const msg = o.message;
+    if (!msg || msg.role !== 'user' || !Array.isArray(msg.content)) continue;
+    for (const b of msg.content) {
+      if (b && b.type === 'tool_result' && b.tool_use_id === toolUseId) {
+        const text =
+          typeof b.content === 'string'
+            ? b.content
+            : Array.isArray(b.content)
+              ? b.content.map((c: any) => (c && typeof c.text === 'string' ? c.text : '')).join('')
+              : '';
+        const trimmed = text.trim();
+        return trimmed.length > RESULT_CONTEXT_MAX ? trimmed.slice(0, RESULT_CONTEXT_MAX) + '\n…(truncated)' : trimmed;
+      }
+    }
+  }
+  return null;
+}
+
+/** The todo CONTENT whose stable taskId matches, scanned from the transcript's TodoWrite entries, so the
+ *  framing names the task instead of its opaque hash. null when no todo hashes to it. Zero token. */
+function taskContentFor(transcriptPath: string, wantTaskId: string): string | null {
+  let lines: string[];
+  try {
+    lines = fs.readFileSync(transcriptPath, 'utf8').split('\n');
+  } catch {
+    return null;
+  }
+  for (const line of lines) {
+    const t = line.trim();
+    if (!t) continue;
+    let o: any;
+    try {
+      o = JSON.parse(t);
+    } catch {
+      continue;
+    }
+    const msg = o.message;
+    if (!msg || msg.role !== 'assistant' || !Array.isArray(msg.content)) continue;
+    for (const b of msg.content) {
+      if (b && b.type === 'tool_use' && b.name === 'TodoWrite' && b.input && Array.isArray(b.input.todos)) {
+        for (const td of b.input.todos) {
+          if (td && typeof td.content === 'string') {
+            const content = td.content.trim();
+            if (content && taskId(content, 0) === wantTaskId) return content; // firstSeenTs is not hashed
+          }
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/** A subagent's human label (agentType/description) from its meta.json sidecar; the raw id when absent. */
+function subagentLabel(cwd: string, sessionId: string, agentId: string): string {
+  const dir = findSubagentsDir(cwd, sessionId);
+  if (dir) {
+    try {
+      const o = JSON.parse(fs.readFileSync(path.join(dir, `agent-${agentId}.meta.json`), 'utf8'));
+      const type = o && typeof o.agentType === 'string' ? o.agentType : '';
+      const desc = o && typeof o.description === 'string' ? o.description : '';
+      const label = [type, desc].filter(Boolean).join(': ');
+      if (label) return label;
+    } catch {
+      /* no sidecar (async_launched spawns often lack one) — fall back to the id */
+    }
+  }
+  return agentId;
+}
+
+/** What a chat-context prompt can be built about: one action/edit (by `toolUseId` — stable per-action —
+ *  or store `editId`), optionally framed by the `agentId`/`taskId` it belonged to. `agentId`/`taskId`
+ *  can also stand alone to ask about a whole subagent or task. */
+export interface ChatContextRef {
+  toolUseId?: string;
+  editId?: number;
+  agentId?: string;
+  taskId?: string;
+}
+
+/**
+ * Assemble a ready-to-paste, ZERO-TOKEN chat prompt about one action / edit / subagent / task (§2.6/§7):
+ * the target/file, Claude's OWN reasoning for that call, the before/after blobs (edit, from the store) or
+ * command+result (exec, from the transcript), plus task/subagent framing ("part of task X run by subagent
+ * Y"). Reads plain files only — NEVER spawns a process or calls a model (must not touch analyze.ts). This
+ * is the single backend both editors call in place of their duplicated prompt builders.
+ *
+ * Deviation from the blueprint's `(session, ref)` shorthand: takes `cwd` first, matching the module's
+ * `(cwd, sessionId, …)` convention — the transcript and subagent files are located from `cwd` (same
+ * reason S4's `subagentTodos` added `cwd`). CLI/editors pass their working dir.
+ */
+export function assembleChatContext(cwd: string, session: string, ref: ChatContextRef): string {
+  const parts: string[] = [];
+
+  // Resolve the primary action/edit (if any) from the transcript's typed action stream (whole-file
+  // parse + editId linking — pure fs reads, no spawn). Empty when there's no transcript; a store-only
+  // editId ref still works below via findRecord.
+  const actions = parseActions(cwd, session);
+  let action: ActionRecord | undefined;
+  if (ref.toolUseId) action = actions.find((a) => a.toolUseId === ref.toolUseId);
+  else if (ref.editId != null) action = actions.find((a) => a.editId === ref.editId);
+
+  // The store record for before/after blobs: an explicit editId, else the resolved action's editId.
+  const editId = ref.editId != null ? ref.editId : action?.editId;
+  const rec = editId != null ? findRecord(session, editId) : null;
+
+  const transcript = findTranscript(cwd, session);
+
+  // --- header: what this is about (primary action/edit, else a whole subagent/task, else the session) ---
+  if (action) {
+    parts.push(`I'm reviewing a ${action.tool} action Claude Code took in this session: ${action.target}`);
+  } else if (rec) {
+    parts.push(`I'm reviewing an edit Claude Code made to \`${rec.file}\` (edit #${rec.id}, ${rec.tool}).`);
+  } else if (ref.agentId) {
+    parts.push(`I'm reviewing the work of subagent ${subagentLabel(cwd, session, ref.agentId)} in this Claude Code session.`);
+  } else if (ref.taskId) {
+    const content = transcript ? taskContentFor(transcript, ref.taskId) : null;
+    parts.push(`I'm reviewing the task "${content ?? ref.taskId}" in this Claude Code session.`);
+  } else {
+    parts.push(`I'm reviewing this Claude Code session.`);
+  }
+
+  // --- Claude's OWN reasoning for the call (the assistant text/thinking that preceded it) ---
+  if (action?.reasoning) parts.push(`Claude's own reasoning for this:\n${action.reasoning}`);
+
+  // --- the evidence: before/after (edit, from the store) or command+result (exec, from the transcript) ---
+  if (rec) {
+    const before = rec.beforeBlob ? readBlob(session, rec.beforeBlob).toString('utf8') : '(new file)';
+    const after = rec.afterBlob ? readBlob(session, rec.afterBlob).toString('utf8') : '(deleted)';
+    parts.push(`--- before ---\n${before}\n--- after ---\n${after}`);
+  } else if (action && action.category === 'exec') {
+    const result = action.toolUseId && transcript ? toolResultText(transcript, action.toolUseId) : null;
+    parts.push(`--- command ---\n${action.target}\n--- result ---\n${result ?? '(no result captured)'}`);
+  }
+
+  // --- task / subagent framing (supplementary — only when the prompt is about a primary action/edit) ---
+  if (action || rec) {
+    const framing: string[] = [];
+    if (ref.taskId) {
+      const content = transcript ? taskContentFor(transcript, ref.taskId) : null;
+      framing.push(`part of task "${content ?? ref.taskId}"`);
+    }
+    if (ref.agentId) framing.push(`run by subagent ${subagentLabel(cwd, session, ref.agentId)}`);
+    if (framing.length) parts.push(`For context, this action was ${framing.join(' ')}.`);
+  }
+
+  parts.push(`Please explain what this does and whether it looks correct.`);
+  return parts.join('\n\n');
 }

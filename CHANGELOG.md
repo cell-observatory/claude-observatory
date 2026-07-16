@@ -5,6 +5,151 @@ All notable changes to Claude Observatory are recorded here, following
 Per-tag release artifacts and auto-generated notes are on the
 [Releases page](https://github.com/cell-observatory/claude-observatory/releases).
 
+## [0.8.0] — 2026-07-15
+
+Real-time multi-agent observability. Observatory now shows *everything Claude is doing across parallel
+agents* — including agents running in separate git **worktrees** of the same repo — as it happens. Still
+zero-token, local-only, git-free, and cross-editor (CLI + VS Code + JetBrains). No breaking changes: the
+store format is unchanged, every existing `--json` shape is preserved (additively extended), and the new
+commands are new. Two behavioral notes: the Change Map / Overview chapter id is now a stable content-hash
+**taskId** (was positional `ch0`), and chapter attribution is now **total** — the Overview never shows an
+"unassigned" bucket (see below). Both editors' renderers were updated in lockstep.
+
+### Added — the Multitasking window (CLI + both editors)
+
+A new bottom-panel view that answers *who is doing what, right now*. One row per running agent (unified
+**across worktrees** — see below), each with a live **phase** (working · awaiting-input ·
+**awaiting-permission** · idle · errored · done), its worktree + branch, an activity sparkline, its ±diff,
+risk count, and a collision badge. Nested under each agent are its **subagents** with their type,
+description, current task + to-dos, ±lines, and a chat button. A cross-agent **file-collisions** strip
+flags any file two or more agents have touched. Backed by the new `multitask --json` command; both editors
+are thin renderers. Real-time: VS Code rides its transcript watcher; JetBrains gained a new
+**`TranscriptWatcher`** (per-directory `nio` registration with dynamic new-dir handling and an
+ENOSPC→poll fallback) so *all* panels now refresh on any tool call, not only on edits.
+
+### Added — git worktree correlation (git-free)
+
+Claude Code keys its session storage by working directory, so two agents in two worktrees of one repo
+land in different project folders that the old fleet view could never connect. Observatory now correlates
+them by reading the worktree's `.git` pointer files (`gitdir:` → `commondir`) — **plain-file reads, never
+the `git` binary** — and unions them into one logical fleet. Also new: **fleet conflict detection**
+(`fleetConflicts`), computed over the *uncapped* file set so a busy agent's 21st shared file is never a
+silent miss.
+
+### Changed — the Overview view: master–detail across agents and workflows
+
+The Overview (née Change Map) is now a master–detail panel: a left nav of **Fleet** (running agents
+across worktrees, with nested subagents) and **Workflows** (runs), and a right detail showing the
+selected item's change-map — chapter ribbon, module strip, and churn-ranked ledger. The old count/size
+toggle is **gone** — it always sizes by ±lines now. An **Active only** toggle sits in the title bar
+(both editors). And when a **new workflow run starts**, the nav auto-focuses it — switches to
+Workflows, selects the run (VS Code pulses its row), and tracks its subagents, phases, and edits live;
+the first payload after opening only seeds the seen-set, so opening the panel never steals focus.
+
+### Changed — chapters are total: the Overview never shows "unassigned"
+
+Every edit now belongs to a named chapter. Work done between to-dos fills forward to the nearest
+preceding chapter; trailing work joins the final chapter; and a session with no to-dos at all gets a
+single **synthesized session chapter**, titled from the session's own title or the first prompt — a goal,
+never a bookkeeping bucket. Chapters carry an explicit strict `taskId` for the analytics join and the
+💬 chat framing (`null` on the synthesized chapter and duplicate-content rows), and the strict
+`unassigned` rollup stays in the JSON for scripts. Chapter review ops are **WYSIWYG**: Accept/Reject/Clear act on exactly
+the edits the chapter row displays (`reviewEditIds`) — including gap-filled members and the synthesized
+session chapter — so accepting a chapter never leaves stragglers behind, and a partial accept can never
+strand edits the buttons can't reach. (Reverts remain conflict-guarded per edit — a mis-anchored undo
+surfaces as a conflict, never a silent clobber.) Two to-dos with identical text also stopped
+colliding on one ribbon row: the first occurrence keeps its stable id, later occurrences render
+display-only. Workflow slices carry their own core-built chapter rollup, replacing both editors'
+hand-rolled residual math (which double-counted in JetBrains).
+
+### Added — `demo`: a live simulator that is also a test harness
+
+`claude-observatory demo` replays a scripted session through the **real pipeline** — a genuine transcript,
+edits captured by the same hook logic, a subagent with its own timeline, and a workflow run — inside an
+isolated `demo-<hex>` session and an `observatory-demo/` folder. Open the Overview and watch chapters,
+fleet rows, and observations fill in live; then review the edits for real (Accept/Reject genuinely work).
+Nothing leaks: a fully reviewed demo session clears its own store, and `demo --clean` removes every trace.
+`--fast` lands the whole scenario in under a second — the e2e suite drives every 0.8.0 `--json` surface
+off it. The demo also records itself: `scripts/record-demo.mjs` snapshots the real `--json` payloads at
+every beat, renders each through the actual Overview webview code in headless Chrome, and assembles
+three recordings — the run (`demo-live.gif`), the workflow arc from the Workflows nav
+(`demo-workflow.gif`), and the chapter-by-chapter review ending in the auto-clear (`demo-review.gif`) —
+so the site's demo footage is the real UI fed by a real run, never a mock. A PyCharm counterpart
+(`scripts/render-pyc-demo.mjs` → `demo-pyc.gif`) mirrors the same beats in the JetBrains panel's native
+layout, and the **Getting started** page is built from these recordings end to end.
+
+### Fixed — multi-agent tracking accuracy (stabilization pass)
+
+- **Phase confidence is explicit.** `awaiting-permission` / `idle` / `done` have no transcript marker and
+  are inferred from inactivity; agents, subagents, and siblings now carry `phaseConfidence`
+  (`high`/`heuristic`) and both editors mark inferred phases with `~` instead of asserting them.
+- **Workflows stopped flapping.** A workflow's `running` gate widened from the fleet's 60s freshness to a
+  5-minute `WORKFLOW_ACTIVE_MS` (a long reasoning turn writes nothing for minutes); killed runs still age
+  out, and a new `lastActivityMs` lets renderers say "active 3m ago".
+- **Journal keys can't fake phases.** A key-derived phase is trusted only when it slug-matches a declared
+  phase title or is shared by 2+ agents — a future hash format that slips past the regex can no longer
+  render one bogus "phase" per agent. The script-meta parser is also string/comment-aware now, so braces
+  inside a `description` can't mis-slice it.
+- **Collisions include idle victims.** A file pending in two agents now flags when *either* is active
+  (was: only when both were) — a live agent can trample an idle agent's unreviewed work. `activeAgents`
+  names the moving side so renderers dim the rest.
+- Dead code removed: the superseded `overviewTabs` prototype in the VS Code extension.
+
+### Performance — the Overview loads ~2× faster
+
+One Overview refresh used to re-read and re-parse the same multi-megabyte transcript ~6 times per view
+(and per worktree-sibling). Core's pure parsers are now memoized per `(mtime, size)`, `changemap` no
+longer builds the active session's map twice, and JetBrains panels share one throttled fetch per view
+(≤1 CLI spawn per view per ~3s, mirroring VS Code's webview throttle) instead of ~4 spawns every 2s.
+On an 18 MB transcript: `changemap` 0.63s → 0.30s, `multitask` 0.68s → 0.40s, before multi-agent gains.
+
+### Added — three-level change tracking, honestly attributed
+
+Every edit is now attributed per **task**, per **subagent**, and per **agent**. Task attribution uses
+**strict** in-progress intervals (no edge-filling), so an edit made before the first to-do or after the
+last one completes is honestly **unassigned** — never force-filed onto a neighbouring task. Subagent
+attribution partitions the store by each subagent's action window; a same-file edit that can't be
+unambiguously attributed is left unassigned on **both** sides rather than positionally guessed.
+
+### Added — task-scoped keep/undo + a cross-agent task log
+
+`task-keep`/`task-undo` resolve a taskId to exactly the edits inside its real in-progress intervals (a
+destructive-safety invariant: a task's undo set never includes an edit that wasn't part of that task).
+`tasklog --json` (`crossAgentTaskLog`) gives one row per task, unioned across every worktree-sibling and
+subagent that contributed to it.
+
+### Added — context-preloaded chat about any action
+
+Chat with Claude about **any** action, edit, subagent, or task with the right context pre-assembled —
+`chat-context --json` builds a ready-to-paste prompt (target + Claude's own reasoning + the before/after
+diff or command/result + task/subagent framing) in core, and the editor hands it to your own Claude.
+**Zero-token** — Observatory never calls a model. Replaces the old edit-only chat handoff on every surface
+in both editors.
+
+### Fixed — the store's single-writer id hazard
+
+`nextId` read the log outside the append lock, so two concurrent subagent captures (they share one
+session) could allocate duplicate ids. Ids are now allocated inside the lock, each record carries a
+collision-proof `uid`, and `readLog` re-keys any residual duplicate — so parallel-agent captures can't
+corrupt the byId fold, status ops, or undo targeting.
+
+### Tests
+
+Extensive new coverage across the layer: worktree resolution (subdir-launch walk-up, dir/file `.git`,
+relative/absolute `commondir`, symlink realpath, bare-repo guard); repo-sibling union + the uncapped
+collision regression; the store id-hazard reconciliation; live phase (incl. the stale-mtime
+awaiting-permission heuristic) and subagent todos; the hardened linker (overlapping same-file windows →
+both unassigned); strict-span taskId (head/tail edits → strictly unassigned, while the display chapter
+stays total) + the `tasks[]`↔`rollupByTask` id-space join; the cross-agent task log; task-scoped undo's
+destructive-safety invariant; the chat-context assembler (never spawns); chapter totality (no-to-do
+sessions, gap/trailing edits, duplicate-content to-dos, ts-less edits); the parser-cache invalidation
+contract; workflow freshness boundaries and journal-key trust rules. A new **fast contract rename-guard**
+pins the key set of every 0.8.0 machine surface (`multitask`, `changemap`, `tasklog`, `chat-context`,
+`observations`, `metrics`, `siblings --repo`) against a demo-simulator fixture, so an editor-breaking
+rename fails `npm test`, not just the bash e2e. Plus a new e2e block driving the demo end-to-end
+(attribution, auto-clear, `--clean`), VS Code smoke coverage of the master–detail Overview + total
+chapters, and JetBrains port, `TranscriptWatcher`, and `MultitaskFilter` parity tests.
+
 ## [0.7.6] — 2026-07-14
 
 A polish pass over the 0.7.5 Change Map and the review toolbars: the view is renamed **Overview**, its

@@ -93,7 +93,21 @@ object ActionsParser {
     private fun longOrNull(o: JsonObject, k: String) = o.get(k)?.takeIf { !it.isJsonNull }?.asLong
     private fun intOrNull(o: JsonObject, k: String) = o.get(k)?.takeIf { !it.isJsonNull }?.asInt
 
-    private fun parseAction(ao: JsonObject): ActionRecord = ActionRecord(
+    /** Parse one category group (`{category,label,count,errors,actions[]}`) — shared with MultitaskParser
+     *  so the `multitask --json`.actions section reads the identical shape without duplicating the logic. */
+    fun parseGroup(go: JsonObject): ActionGroup = ActionGroup(
+        category = go.get("category").asString,
+        label = go.get("label").asString,
+        count = go.get("count").asInt,
+        errors = go.get("errors").asInt,
+        actions = go.getAsJsonArray("actions").map { parseAction(it.asJsonObject) },
+    )
+
+    /** Parse one egress destination (`{kind,target,scope,count}`) — shared with MultitaskParser. */
+    fun parseEgress(eo: JsonObject): EgressChannel =
+        EgressChannel(eo.get("kind").asString, eo.get("target").asString, eo.get("scope").asString, eo.get("count").asInt)
+
+    fun parseAction(ao: JsonObject): ActionRecord = ActionRecord(
         ts = ao.get("ts")?.takeIf { !it.isJsonNull }?.asLong ?: 0L,
         tool = ao.get("tool")?.asString ?: "",
         category = ao.get("category")?.asString ?: "other",
@@ -111,16 +125,7 @@ object ActionsParser {
     fun parse(json: String): ActionsResult? = try {
         val o = JsonParser.parseString(json).asJsonObject
         val summary = o.getAsJsonObject("summary")
-        val groups = o.getAsJsonArray("groups").map { g ->
-            val go = g.asJsonObject
-            ActionGroup(
-                category = go.get("category").asString,
-                label = go.get("label").asString,
-                count = go.get("count").asInt,
-                errors = go.get("errors").asInt,
-                actions = go.getAsJsonArray("actions").map { parseAction(it.asJsonObject) },
-            )
-        }
+        val groups = o.getAsJsonArray("groups").map { parseGroup(it.asJsonObject) }
         val subagents = o.get("subagents")?.takeIf { it.isJsonArray }?.asJsonArray?.map { s ->
             val so = s.asJsonObject
             val sum = so.getAsJsonObject("summary")
@@ -178,10 +183,7 @@ object ActionsParser {
             total = summary?.get("total")?.asInt ?: 0,
             errors = summary?.get("errors")?.asInt ?: 0,
             groups = groups,
-            egress = o.getAsJsonArray("egress")?.map { e ->
-                val eo = e.asJsonObject
-                EgressChannel(eo.get("kind").asString, eo.get("target").asString, eo.get("scope").asString, eo.get("count").asInt)
-            } ?: emptyList(),
+            egress = o.getAsJsonArray("egress")?.map { parseEgress(it.asJsonObject) } ?: emptyList(),
             subagents = subagents,
             subagentsSummary = subagentsSummary,
             fleet = fleet,

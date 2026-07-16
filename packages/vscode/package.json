@@ -2,7 +2,7 @@
   "name": "claude-observatory-vscode",
   "displayName": "Claude Observatory",
   "description": "A running list of every file change Claude Code makes, each with its own Keep / Undo (surgical, git-free).",
-  "version": "0.7.6",
+  "version": "0.8.0",
   "publisher": "claude-observatory",
   "private": true,
   "engines": {
@@ -28,7 +28,7 @@
       ],
       "panel": [
         {
-          "id": "claudeObservatoryPanel",
+          "id": "claudeObservatoryDock",
           "title": "Claude Observatory",
           "icon": "media/icon.svg"
         }
@@ -50,24 +50,17 @@
           "id": "claudeObservatory.fileHistory",
           "name": "File History",
           "icon": "media/history.svg"
-        }
-      ],
-      "claudeObservatoryPanel": [
+        },
         {
           "id": "claudeObservatory.actions",
           "name": "Actions",
-          "icon": "$(list-tree)",
-          "initialSize": 2
-        },
+          "icon": "media/icon.svg"
+        }
+      ],
+      "claudeObservatoryDock": [
         {
           "id": "claudeObservatory.observations",
           "name": "Observations",
-          "icon": "media/icon.svg",
-          "initialSize": 5
-        },
-        {
-          "id": "claudeObservatory.timeline",
-          "name": "Timeline",
           "icon": "media/icon.svg",
           "initialSize": 5
         },
@@ -99,14 +92,6 @@
         "contents": "Open a file Claude has edited to see its edit history here."
       },
       {
-        "view": "claudeObservatory.timeline",
-        "contents": "No tracked Claude edits in this workspace yet."
-      },
-      {
-        "view": "claudeObservatory.actions",
-        "contents": "No actions yet — this fills in once Claude runs tools in this workspace's session."
-      },
-      {
         "view": "claudeObservatory.observations",
         "contents": "No tracked Claude edits in this workspace yet."
       }
@@ -119,16 +104,10 @@
         "icon": "$(refresh)"
       },
       {
-        "command": "claudeObservatory.actionsShowAll",
-        "title": "Show all actions (incl. reads/searches)",
+        "command": "claudeObservatory.clearCompletedChapters",
+        "title": "Clear completed chapters (drop resolved edits of every settled chapter)",
         "category": "Claude Observatory",
-        "icon": "$(eye)"
-      },
-      {
-        "command": "claudeObservatory.actionsShowCurated",
-        "title": "Show curated actions only",
-        "category": "Claude Observatory",
-        "icon": "$(eye-closed)"
+        "icon": "$(clear-all)"
       },
       {
         "command": "claudeObservatory.openDiff",
@@ -187,6 +166,12 @@
         "title": "Revert all edits in this file",
         "category": "Claude Observatory",
         "icon": "$(close-all)"
+      },
+      {
+        "command": "claudeObservatory.clearOpenFile",
+        "title": "Clear resolved (kept/reverted) edits in this file",
+        "category": "Claude Observatory",
+        "icon": "$(clear-all)"
       },
       {
         "command": "claudeObservatory.setup",
@@ -347,6 +332,12 @@
       {
         "command": "claudeObservatory.chatEdit",
         "title": "Chat about this edit",
+        "category": "Claude Observatory",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "claudeObservatory.chatAction",
+        "title": "Chat about this (copies context, opens Claude)",
         "category": "Claude Observatory",
         "icon": "$(comment-discussion)"
       },
@@ -626,58 +617,48 @@
         },
         {
           "command": "claudeObservatory.keepAll",
-          "when": "view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline",
+          "when": "view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.observations",
           "group": "navigation@4"
         },
         {
           "command": "claudeObservatory.undoAll",
-          "when": "view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline",
+          "when": "view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.observations",
           "group": "navigation@5"
         },
         {
           "command": "claudeObservatory.clearResolved",
-          "when": "view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline || view == claudeObservatory.observations",
+          "when": "view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.observations",
           "group": "navigation@8"
         },
         {
           "command": "claudeObservatory.switchSession",
-          "when": "view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline || view == claudeObservatory.observations",
+          "when": "view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.observations",
           "group": "navigation@9"
         },
         {
           "command": "claudeObservatory.cleanStore",
-          "when": "view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline || view == claudeObservatory.observations",
+          "when": "view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.observations",
           "group": "navigation@10"
         },
         {
           "command": "claudeObservatory.refresh",
-          "when": "view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline || view == claudeObservatory.observations",
+          "when": "view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.observations",
           "group": "navigation@10"
         },
         {
-          "command": "claudeObservatory.actionsShowAll",
-          "when": "view == claudeObservatory.actions && !claudeObservatory.actionsShowAll",
-          "group": "navigation@1"
-        },
-        {
-          "command": "claudeObservatory.actionsShowCurated",
-          "when": "view == claudeObservatory.actions && claudeObservatory.actionsShowAll",
-          "group": "navigation@1"
-        },
-        {
-          "command": "claudeObservatory.switchSession",
-          "when": "view == claudeObservatory.actions",
-          "group": "navigation@2"
-        },
-        {
-          "command": "claudeObservatory.refresh",
-          "when": "view == claudeObservatory.actions",
-          "group": "navigation@3"
+          "command": "claudeObservatory.clearCompletedChapters",
+          "when": "view == claudeObservatory.changemap",
+          "group": "navigation@0"
         },
         {
           "command": "claudeObservatory.switchSession",
           "when": "view == claudeObservatory.changemap",
           "group": "navigation@1"
+        },
+        {
+          "command": "claudeObservatory.refresh",
+          "when": "view == claudeObservatory.changemap",
+          "group": "navigation@2"
         },
         {
           "command": "claudeObservatory.switchSession",
@@ -830,57 +811,52 @@
         },
         {
           "command": "claudeObservatory.analyzeEdit",
-          "when": "view == claudeObservatory.observations && viewItem == observation",
+          "when": "view == claudeObservatory.observations && viewItem == edit",
           "group": "inline@0"
         },
         {
-          "command": "claudeObservatory.chatEdit",
-          "when": "view == claudeObservatory.observations && viewItem == observation",
-          "group": "navigation@1"
-        },
-        {
           "command": "claudeObservatory.keep",
-          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline || view == claudeObservatory.fileHistory) && viewItem == edit",
+          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.observations || view == claudeObservatory.fileHistory) && viewItem == edit",
           "group": "inline@1"
         },
         {
           "command": "claudeObservatory.undo",
-          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline || view == claudeObservatory.fileHistory) && viewItem == edit",
+          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.observations || view == claudeObservatory.fileHistory) && viewItem == edit",
           "group": "inline@2"
         },
         {
           "command": "claudeObservatory.openFile",
-          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline || view == claudeObservatory.fileHistory) && viewItem == edit",
+          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.observations || view == claudeObservatory.fileHistory) && viewItem == edit",
           "group": "navigation@1"
         },
         {
           "command": "claudeObservatory.redo",
-          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline || view == claudeObservatory.fileHistory) && viewItem == editUndone",
+          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.observations || view == claudeObservatory.fileHistory) && viewItem == editUndone",
           "group": "inline@1"
         },
         {
           "command": "claudeObservatory.openFile",
-          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline || view == claudeObservatory.fileHistory) && viewItem == editUndone",
+          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.observations || view == claudeObservatory.fileHistory) && viewItem == editUndone",
           "group": "navigation@1"
         },
         {
           "command": "claudeObservatory.openFile",
-          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline) && viewItem == file",
+          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.observations) && viewItem == file",
           "group": "inline@0"
         },
         {
           "command": "claudeObservatory.keepFile",
-          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline) && viewItem == file",
+          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.observations) && viewItem == file",
           "group": "inline@1"
         },
         {
           "command": "claudeObservatory.undoFile",
-          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline) && viewItem == file",
+          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.observations) && viewItem == file",
           "group": "inline@2"
         },
         {
           "command": "claudeObservatory.clearFile",
-          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline) && viewItem == file",
+          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.observations) && viewItem == file",
           "group": "inline@3"
         },
         {
@@ -900,7 +876,7 @@
         },
         {
           "command": "claudeObservatory.chatEdit",
-          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.timeline || view == claudeObservatory.fileHistory) && (viewItem == edit || viewItem == editUndone)",
+          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.observations || view == claudeObservatory.fileHistory) && (viewItem == edit || viewItem == editUndone)",
           "group": "navigation@2"
         }
       ]
@@ -938,9 +914,10 @@
     "package": "vsce package --no-dependencies -o claude-observatory.vsix"
   },
   "devDependencies": {
-    "@claude-observatory/core": "0.7.6",
+    "@claude-observatory/core": "0.8.0",
     "@types/node": "^22.0.0",
     "@types/vscode": "^1.85.0",
+    "@vscode/codicons": "^0.0.45",
     "@vscode/vsce": "^3.0.0",
     "esbuild": "^0.25.0",
     "typescript": "^5.6.0"

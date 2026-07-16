@@ -12,6 +12,7 @@ import { lineDelta } from './format';
 import { findTranscript } from './observe';
 import { parseActions, summarizeActions } from './actions';
 import { parseSubagents, summarizeSubagents, SubagentsSummary } from './subagents';
+import { cachedByFiles } from './fscache';
 
 export interface EditMetrics {
   count: number;
@@ -56,6 +57,62 @@ function toMs(v: unknown): number {
     return isNaN(t) ? 0 : t;
   }
   return 0;
+}
+
+/** Usage fields must be finite numbers — a malformed line must not poison the sum (a string would turn
+ *  the next `+=` into concatenation). */
+const num = (v: unknown): number => (typeof v === 'number' && isFinite(v) ? v : 0);
+
+/**
+ * Session-total usage from one light transcript pass — the per-sibling numbers the Fleet view shows
+ * alongside Workflows. `tokens` = input+cache+output summed across the session's main-chain assistant
+ * messages (deduped by message id, the same formula Stats/Workflows use, so a multi-block message isn't
+ * multiplied); `durationMs` = wall-clock span of the transcript (last − first timestamp over every
+ * timestamped line). Both 0 when the transcript is absent/unreadable. Cheap enough to call per fleet
+ * sibling on the slow tier. Zero token, no model calls.
+ */
+export function sessionUsage(cwd: string, sessionId: string): { tokens: number; durationMs: number } {
+  const transcript = findTranscript(cwd, sessionId);
+  if (!transcript) return { tokens: 0, durationMs: 0 };
+  // Memoized per (mtime,size) — the fleet views ask per sibling per refresh. Read-only result.
+  return cachedByFiles('sessionUsage', [transcript], () => sessionUsageUncached(transcript));
+}
+
+function sessionUsageUncached(transcript: string): { tokens: number; durationMs: number } {
+  let lines: string[];
+  try {
+    lines = fs.readFileSync(transcript, 'utf8').split('\n');
+  } catch {
+    return { tokens: 0, durationMs: 0 };
+  }
+  let tokens = 0;
+  let firstTs = 0;
+  let lastTs = 0;
+  const seen = new Set<string>();
+  for (const line of lines) {
+    const t = line.trim();
+    if (!t) continue;
+    let o: any;
+    try {
+      o = JSON.parse(t);
+    } catch {
+      continue;
+    }
+    const ts = toMs(o.timestamp ?? o.ts);
+    if (ts > 0) {
+      if (!firstTs || ts < firstTs) firstTs = ts;
+      if (ts > lastTs) lastTs = ts;
+    }
+    const m = o.message;
+    if (!m || m.role !== 'assistant' || o.isSidechain === true) continue; // main-chain assistant turns only
+    // One assistant message is split across lines sharing message.id + identical usage — count each id once.
+    const id = typeof m.id === 'string' ? m.id : null;
+    if (id !== null && seen.has(id)) continue;
+    if (id !== null) seen.add(id);
+    const u = m.usage || {};
+    tokens += num(u.output_tokens) + num(u.input_tokens) + num(u.cache_read_input_tokens) + num(u.cache_creation_input_tokens);
+  }
+  return { tokens, durationMs: firstTs && lastTs ? Math.max(0, lastTs - firstTs) : 0 };
 }
 
 /** Tool-call latencies (ms) = each tool_result timestamp − its tool_use timestamp, matched by id. */

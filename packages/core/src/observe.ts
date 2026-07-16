@@ -6,9 +6,11 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { diffArrays } from 'diff';
-import { EditRecord, readLog, readBlob } from './store';
+import { EditRecord, EditStatus, readLog, readBlob, logPath } from './store';
+import { lineDelta } from './format';
 import { projectDir } from './session';
 import { claudeConfigDir } from './paths';
+import { cachedByFiles } from './fscache';
 
 /** Locate the Claude Code transcript jsonl for a session, walking up from cwd (like resolveSessionId). */
 export function findTranscript(cwd: string, sessionId: string): string | null {
@@ -83,9 +85,17 @@ function parseToolUses(transcriptPath: string): ToolUse[] {
 
 /** Map edit id -> Claude's reasoning text, correlating store edits to transcript tool_uses per file. */
 export function reasoningByEdit(cwd: string, sessionId: string): Map<number, string> {
-  const map = new Map<number, string>();
   const transcript = findTranscript(cwd, sessionId);
-  if (!transcript) return map;
+  if (!transcript) return new Map<number, string>();
+  // Depends on the transcript (tool_uses) AND the store log (the cursor walk) — keyed on both files'
+  // (mtime,size), so a new capture or a review op invalidates it. Read-only result, shared as-is.
+  return cachedByFiles('reasoningByEdit', [transcript, logPath(sessionId)], () =>
+    reasoningByEditUncached(transcript, sessionId)
+  );
+}
+
+function reasoningByEditUncached(transcript: string, sessionId: string): Map<number, string> {
+  const map = new Map<number, string>();
   const byFile = new Map<string, string[]>();
   for (const e of parseToolUses(transcript)) {
     if (!byFile.has(e.file)) byFile.set(e.file, []);
@@ -117,11 +127,18 @@ export interface TranscriptInsights {
   todos: { content: string; status: string }[]; // from the latest non-empty TodoWrite in the session
   lastSummary: string | null; // last assistant text block (what Claude said it just did)
   title: string | null; // Claude Code's latest auto session title (the `ai-title` entries) — a recap line
+  firstUserPrompt: string | null; // first real user message (non-sidechain, text — never a tool_result/command wrapper)
 }
 export function transcriptInsights(cwd: string, sessionId: string): TranscriptInsights {
-  const empty: TranscriptInsights = { todos: [], lastSummary: null, title: null };
+  const empty: TranscriptInsights = { todos: [], lastSummary: null, title: null, firstUserPrompt: null };
   const p = findTranscript(cwd, sessionId);
   if (!p) return empty;
+  // Memoized per (mtime,size) — several views consult the same insights per refresh. Read-only result.
+  return cachedByFiles('insights', [p], () => transcriptInsightsUncached(p));
+}
+
+function transcriptInsightsUncached(p: string): TranscriptInsights {
+  const empty: TranscriptInsights = { todos: [], lastSummary: null, title: null, firstUserPrompt: null };
   let lines: string[];
   try {
     lines = fs.readFileSync(p, 'utf8').split('\n');
@@ -131,6 +148,7 @@ export function transcriptInsights(cwd: string, sessionId: string): TranscriptIn
   let todos: { content: string; status: string }[] = [];
   let lastSummary: string | null = null;
   let title: string | null = null;
+  let firstUserPrompt: string | null = null;
   for (const line of lines) {
     const t = line.trim();
     if (!t) continue;
@@ -146,6 +164,19 @@ export function transcriptInsights(cwd: string, sessionId: string): TranscriptIn
       continue;
     }
     const msg = o.message;
+    // First REAL user prompt — the fallback chapter title for sessions without to-dos. String or
+    // text-block content both occur; skip sidechains, tool_result-only turns, and the harness's
+    // command/caveat wrappers (`<command-name>…`, `Caveat: …`) — those aren't what the user asked.
+    if (firstUserPrompt === null && msg && msg.role === 'user' && o.isSidechain !== true) {
+      let text: string | null = null;
+      if (typeof msg.content === 'string') text = msg.content;
+      else if (Array.isArray(msg.content)) {
+        const tb = msg.content.find((b: any) => b && b.type === 'text' && typeof b.text === 'string');
+        if (tb) text = tb.text;
+      }
+      const clean = text ? text.trim() : '';
+      if (clean && !clean.startsWith('<') && !/^caveat:/i.test(clean)) firstUserPrompt = clean;
+    }
     if (!msg || msg.role !== 'assistant' || !Array.isArray(msg.content)) continue;
     // Skip inlined sidechain (subagent) turns: a subagent's report/TodoWrite is not "what Claude
     // said it just did" in the main conversation. (Current Claude Code stores sidechains in
@@ -161,7 +192,7 @@ export function transcriptInsights(cwd: string, sessionId: string): TranscriptIn
       }
     }
   }
-  return { todos, lastSummary, title };
+  return { todos, lastSummary, title, firstUserPrompt };
 }
 
 /** Pull a "Next steps / TODO / Follow-ups" bullet section out of Claude's recap (last summary). */
@@ -296,6 +327,87 @@ export function heuristicSuggestions(sessionId: string): string[] {
   for (const r of todoFiles) out.push(`Follow up on the TODO/FIXME added in ${path.basename(r.file)}.`);
   if (out.length === 0) out.push('No obvious follow-ups from heuristics — run “Generate suggestions” for a deeper look.');
   return out;
+}
+
+// --- Observations view-model (0.8.0): timeline-style coalesced runs + per-edit reasoning + recap ---
+
+/** One edit inside a coalesced run — its ±lines, review status, and Claude's reasoning for it. */
+export interface ObservationEdit {
+  id: number;
+  ts: number;
+  added: number;
+  removed: number;
+  status: EditStatus;
+  reasoning: string | null; // Claude's own words for this edit (reasoningByEdit), null when uncorrelated
+}
+
+/** A run of adjacent same-file edits — the timeline's ×N unit, with a combined delta. */
+export interface ObservationRun {
+  file: string; // absolute path
+  rel: string; // root-relative, forward slashes
+  count: number; // edits in the run (the ×N)
+  added: number; // combined + across the run
+  removed: number; // combined − across the run
+  status: EditStatus; // worst-unreviewed-wins rollup (pending > undone > kept)
+  edits: ObservationEdit[]; // members in chronological order (expand for per-edit Keep/Undo)
+}
+
+export interface Observations {
+  recap: string; // session recap (auto-title, else the last assistant summary)
+  runs: ObservationRun[]; // most-recent activity first
+  nextSteps: string[]; // still-open to-dos + heuristic follow-ups
+}
+
+/** Worst-unreviewed-wins status for a run (mirrors changemap.fileStatus, inlined to avoid a cycle). */
+function runStatus(edits: ObservationEdit[]): EditStatus {
+  if (edits.some((e) => e.status === 'pending')) return 'pending';
+  if (edits.some((e) => e.status === 'undone')) return 'undone';
+  return 'kept';
+}
+
+/**
+ * The Observations view-model (zero token): the session's edits as a chronological timeline where
+ * adjacent same-file edits coalesce into ×N runs (combined delta), each edit carrying Claude's own
+ * reasoning, under a session recap with the still-open next steps at the end. Runs are ordered by
+ * most-recent activity. Assembled ONCE here so the CLI `observations --json` and both editors render
+ * the same payload. `root` sets the display-relative paths (defaults to cwd).
+ */
+export function buildObservations(cwd: string, sessionId: string, opts: { root?: string } = {}): Observations {
+  const root = opts.root ?? cwd;
+  const relOf = (file: string): string => path.relative(root, file).split(path.sep).join('/');
+  const log = readLog(sessionId);
+  const reasoning = reasoningByEdit(cwd, sessionId);
+  const insights = transcriptInsights(cwd, sessionId);
+  const recap = insights.title ?? insights.lastSummary ?? '';
+  const nextSteps = [...new Set([...transcriptSuggestions(cwd, sessionId), ...heuristicSuggestions(sessionId)])];
+
+  // Walk the log in chronological (capture) order, merging consecutive same-file edits into one run.
+  const runs: ObservationRun[] = [];
+  for (const rec of log) {
+    const d = lineDelta(sessionId, rec);
+    const edit: ObservationEdit = {
+      id: rec.id,
+      ts: rec.ts,
+      added: d.added,
+      removed: d.removed,
+      status: rec.status,
+      reasoning: reasoning.get(rec.id) ?? null,
+    };
+    const last = runs[runs.length - 1];
+    if (last && last.file === rec.file) {
+      last.edits.push(edit);
+      last.count++;
+      last.added += d.added;
+      last.removed += d.removed;
+    } else {
+      runs.push({ file: rec.file, rel: relOf(rec.file), count: 1, added: d.added, removed: d.removed, status: rec.status, edits: [edit] });
+    }
+  }
+  for (const r of runs) r.status = runStatus(r.edits);
+  // Most-recent activity first: the run's newest member ts (falls back to id order for ts-less records).
+  const runTs = (r: ObservationRun): number => Math.max(...r.edits.map((e) => e.ts || e.id));
+  runs.sort((a, b) => runTs(b) - runTs(a));
+  return { recap, runs, nextSteps };
 }
 
 // --- usage readout (context fill + rough 5h/week plan usage) for the sidebar status line ---

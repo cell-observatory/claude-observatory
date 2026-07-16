@@ -1,5 +1,6 @@
 package com.cellobservatory.observatory.ui
 
+import com.cellobservatory.observatory.core.ChatRef
 import com.cellobservatory.observatory.core.ObservatoryCli
 import com.cellobservatory.observatory.model.EditRecord
 import com.cellobservatory.observatory.model.UndoResult
@@ -175,21 +176,98 @@ object ReviewOps {
         }
     }
 
-    /** Chat about an edit: build the same before/after prompt as VS Code and copy it to the
-     *  clipboard (Anthropic's JetBrains plugin exposes no public API to open its chat). */
+    // --- chapter (task) review, over the strict-span task edit sets (0.8.0 Overview ribbon) ---
+
+    /** Accept a chapter: keep every PENDING edit in the task's STRICT-span set (`task-keep`). Non-destructive. */
+    fun keepTask(project: Project, session: String, taskId: String, label: String) {
+        runBg(project, "Accepting chapter “$label”") {
+            val kept = ObservatoryCli.taskKeep(session, taskId, project.basePath)
+            when {
+                kept == null -> done(project, cliFailMsg("accept chapter “$label”"), NotificationType.ERROR)
+                kept == 0 -> done(project, "No pending edits to accept in chapter “$label”")
+                else -> done(project, "Accepted $kept edit(s) in chapter “$label”")
+            }
+        }
+    }
+
+    /** Reject a chapter: revert every PENDING edit in the task's STRICT-span set (`task-undo`). Writes to
+     *  disk, so save dirty buffers first (with consent) and refresh the workspace subtree after. */
+    fun undoTask(project: Project, session: String, taskId: String, label: String) {
+        val ok = Messages.showYesNoDialog(
+            project,
+            "Reject all pending edits in chapter “$label”? This reverts them on disk. " +
+                "Unsaved changes to affected files are saved first; later-overlapping edits may conflict " +
+                "(revert those individually to force).",
+            "Claude Observatory", "Reject Chapter", "Cancel", Messages.getWarningIcon(),
+        )
+        if (ok != Messages.YES) return
+        FileDocumentManager.getInstance().saveAllDocuments()
+        runBg(project, "Rejecting chapter “$label”") {
+            val res = ObservatoryCli.taskUndo(session, taskId, project.basePath)
+            project.basePath?.let { refreshRecursive(it) } // covers every reverted file in the chapter
+            if (res == null) {
+                done(project, cliFailMsg("reject chapter “$label”"), NotificationType.ERROR)
+            } else if (res.undone == 0 && res.conflicts == 0) {
+                done(project, "No pending edits to reject in chapter “$label”")
+            } else {
+                done(
+                    project,
+                    "Rejected ${res.undone} edit(s) in chapter “$label”" +
+                        if (res.conflicts > 0) " · ${res.conflicts} conflict(s) — revert those individually to force" else "",
+                )
+            }
+        }
+    }
+
+    /** Clear a chapter: drop the RESOLVED (kept/undone) edits of the task's STRICT-span set (`task-clear`).
+     *  Pending edits are preserved. */
+    fun clearTask(project: Project, session: String, taskId: String, label: String) {
+        runBg(project, "Clearing resolved edits in chapter “$label”") {
+            val cleared = ObservatoryCli.taskClear(session, taskId, project.basePath)
+            when {
+                cleared == null -> done(project, cliFailMsg("clear chapter “$label”"), NotificationType.ERROR)
+                cleared == 0 -> done(project, "No resolved edits to clear in chapter “$label”")
+                else -> done(project, "Cleared $cleared resolved edit(s) in chapter “$label”")
+            }
+        }
+    }
+
+    /** Clear the resolved edits of EVERY settled chapter (`task-clear --completed`). */
+    fun clearCompletedChapters(project: Project, session: String) {
+        runBg(project, "Clearing completed chapters") {
+            val res = ObservatoryCli.taskClearCompleted(session, project.basePath)
+            when {
+                res == null -> done(project, cliFailMsg("clear completed chapters"), NotificationType.ERROR)
+                res.cleared == 0 -> done(project, "No resolved edits to clear in completed chapters")
+                else -> done(project, "Cleared ${res.cleared} resolved edit(s) across ${res.chapters} completed chapter(s)")
+            }
+        }
+    }
+
+    /** Chat about an edit — routes through the single core assembler (chatContext / `chat-context --json`)
+     *  so every edit-chat surface gets the same reasoning + task/subagent framing as the Actions and
+     *  Multitasking surfaces, instead of a local before/after-only builder. Clipboard-only, zero-token. */
     fun chatAbout(project: Project, session: String, id: Int) {
-        val rec = com.cellobservatory.observatory.core.StoreReader.findRecord(session, id) ?: return
-        val rel = project.basePath?.let { base -> rec.file.removePrefix("$base/") } ?: rec.file
-        val before = if (rec.beforeBlob == null) "(new file)"
-        else com.cellobservatory.observatory.core.StoreReader.readBlob(session, rec.beforeBlob)
-        val after = if (rec.afterBlob == null) "(deleted)"
-        else com.cellobservatory.observatory.core.StoreReader.readBlob(session, rec.afterBlob)
-        val prompt = "I'm reviewing a change Claude Code made to `$rel` (edit #${rec.id}, ${rec.tool}).\n\n" +
-            "--- before ---\n$before\n--- after ---\n$after\n\n" +
-            "Please explain what this change does and whether it looks correct."
-        com.intellij.openapi.ide.CopyPasteManager.getInstance()
-            .setContents(java.awt.datatransfer.StringSelection(prompt))
-        notify(project, "Prompt about edit #$id copied — paste it into your Claude Code terminal/chat.")
+        chatContext(project, session, ChatRef.Edit(id), "edit #$id")
+    }
+
+    /** Zero-token context chat about ANY reference (edit / subagent / task / action / whole session):
+     *  core assembles the ready-to-paste prompt via `chat-context --json`, and we copy it to the
+     *  clipboard (Anthropic's JetBrains plugin exposes no open-chat API — clipboard-only, degrading
+     *  identically to VS Code when the Claude extension is absent). NEVER calls a model. */
+    fun chatContext(project: Project, session: String, ref: ChatRef, label: String) {
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val prompt = ObservatoryCli.chatContextJson(session, project.basePath, ref)
+            ApplicationManager.getApplication().invokeLater {
+                if (prompt.isNullOrBlank()) {
+                    notify(project, cliFailMsg("build the chat context for $label"), NotificationType.ERROR)
+                } else {
+                    com.intellij.openapi.ide.CopyPasteManager.getInstance()
+                        .setContents(java.awt.datatransfer.StringSelection(prompt))
+                    notify(project, "Prompt about $label copied — paste it into your Claude Code terminal/chat.")
+                }
+            }
+        }
     }
 
     /** Fetch markdown off the EDT and open it in an editor tab (or notify on failure). Shared by the

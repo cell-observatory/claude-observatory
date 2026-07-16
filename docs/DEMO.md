@@ -3,10 +3,31 @@
 A hands-on tour of every feature, driven by a real auto-captured session. The commands and output
 below are from an actual `claude -p` run that created a small `User` model — nothing staged.
 
-![The observatory layout](media/layout.png)
+![The observatory layout — the sidebar "Claude Edits" (Edits · Diffs · File History · Actions) plus the bottom panel "Claude Observatory" (Observations · Overview · Stats)](media/layout.png)
 
 > Prefer pictures? See the **[visual showcase](https://cell-observatory.github.io/claude-observatory/showcase.html)**
 > in your browser (rendered from [showcase.html](showcase.html) via GitHub Pages).
+
+## Zero-setup demo — try it without Claude
+
+Don't want to burn a session just to see the panels move? The built-in simulator replays a scripted
+session through the **real pipeline** — a genuine transcript, edits captured by the same hooks, a
+subagent, and a workflow run — inside an isolated `demo-…` session and an `observatory-demo/` folder:
+
+```bash
+claude-observatory demo          # run it in an open workspace and watch every panel update live
+```
+
+Open the Overview while it runs: the chapter ribbon fills chapter by chapter, the Fleet nav gains a
+subagent and a workflow, and Observations streams the reasoning. The edits are real store records on
+real files, so Accept / Reject / task-scoped review all genuinely work. When you're done:
+
+```bash
+claude-observatory demo --clean  # removes the demo session, its store, and the demo folder
+```
+
+Reviewing the demo leaves no residue either way — a fully reviewed demo session clears its own store.
+(`--speed 2` paces it faster; `--fast` lands everything at once, which is what the test suite uses.)
 
 ## The demo session
 
@@ -123,6 +144,23 @@ $ claude-observatory redo 2
 
 **Redo** re-applies an undone edit; `--force` on either falls back to a whole-file restore.
 
+**Keep or undo a whole task at once.** Claude's own to-dos define stable, content-hash `taskId`s (see
+the [Overview](#overview--the-master-detail-multi-agent-panel)). `task-keep` / `task-undo` act **WYSIWYG
+on every pending edit displayed under that chapter** — exactly the set the ribbon row shows, gap-filled
+members and the synthesized session chapter included — so accepting a chapter never leaves stragglers:
+
+```console
+$ claude-observatory task-keep 4d9f1a2b3c4d
+✓ kept 6 edit(s) in task 4d9f1a2b3c4d
+
+$ claude-observatory task-undo 4d9f1a2b3c4d
+⚠ reverted 5 edit(s) in task 4d9f1a2b3c4d · 1 conflict(s) left (undo individually with --force)
+```
+
+Both take `--json` — `task-keep` returns `{ kept, total, ids }`, `task-undo` `{ undone, conflicts,
+total, ids }` — and both stay zero-token: the task↔edit mapping is mined from the transcript's to-dos,
+never a model call.
+
 ## 5 · Clean up
 
 ```console
@@ -175,18 +213,22 @@ in the others instantly. The layout is deliberately identical; only the host chr
 | Surface | VS Code | PyCharm / JetBrains |
 | --- | --- | --- |
 | Install | `code --install-extension claude-observatory.vsix` | `./scripts/install-jetbrains.sh` (or Install Plugin from Disk) |
-| **Edits · Diffs · File History** (review) | **Claude Edits** — microscope in the Activity Bar, badged with the pending count | **Claude Observatory** tool window, left stripe |
-| **Actions · Observations · Timeline · Overview · Stats** | **Claude Observatory** bottom panel, side by side (like Terminal/Problems) | **Claude Observatory Dashboards** tool window, bottom stripe — the same five panes side by side |
+| **Edits · Diffs · File History · Actions** (the sidebar) | **Claude Edits** — microscope in the Activity Bar, badged with the pending count | **Claude Observatory** tool window, left stripe |
+| **Observations · Overview · Stats** (the bottom panel) | **Claude Observatory** bottom panel, side by side (like Terminal/Problems) | **Claude Observatory Dashboards** tool window, bottom stripe — the same three panes side by side |
 | Inline menu (**✨ #N · +A −R · view changes · Keep · Undo · Chat · View diff**) | CodeLens above each edit + ✨ gutter star + bold green/red highlight + coral ruler mark | lens above each edit + clickable ✨ gutter star + bold green/red highlight + coral stripe |
 | Click **view changes** | opens the **inline review bubble** at the edit — the diff in git's colors + reasoning + `+A −R`, Accept/Revert/Chat/Prev/Next on its toolbar (no tab) | opens the edit's unified **diff** (reasoning in title, Keep/Undo/Chat on toolbar) |
 | File spotlight | 📄 spotlight (tab-bar) | 📄 spotlight (editor banner) |
 | Scoreboard | status-bar `🔬 N` (amber while pending) + live bar in Stats | status-bar `🔬 N` + live bar in Stats |
 | Keyboard loop | `⌥⌘N` next · `⌥⌘Y` keep · `⌥⌘U` undo · `⌥⌘[`/`⌥⌘]` revisions (`Ctrl+Alt` on Win/Linux) | same keys |
 
-Both front-ends now drive the review surfaces from **icon-only tabs** (hover for the label), and JetBrains
-is at full **feature parity** with VS Code: the toggle-inline button, **Accept/Revert this file** on the
-Edits toolbar, revision-nav buttons, Timeline bulk actions, Observations clear/switch/doctor, a 5th
-**⧉ View diff** lens segment, and a pending badge on the tool-window stripe.
+In 0.8.0 the **sidebar** ("Claude Edits") carries the four review-and-audit panes — **Edits · Diffs ·
+File History · Actions** — and the **bottom panel** ("Claude Observatory") carries the three dashboards —
+**Observations · Overview · Stats**. (Timeline is gone as a standalone pane — its coalesced change-feed
+now leads **Observations**; **Actions** moved up into the sidebar; and the old Multitasking window folded
+into **Overview** as its **Fleet** tab.) Both front-ends drive the review surfaces from **icon-only tabs**
+(hover for the label), and JetBrains is at full **feature parity** with VS Code: the toggle-inline button,
+**Accept/Revert this file** on the Edits toolbar, revision-nav buttons, Overview bulk actions, Observations
+clear/switch/doctor, a 5th **⧉ View diff** lens segment, and a pending badge on the tool-window stripe.
 
 The **status-bar microscope** shows the pending count in realtime — the moment Claude writes a
 change. Click it (or **Review next pending edit**) to jump straight to the oldest unreviewed edit;
@@ -235,12 +277,13 @@ diff.
 
 ![the file spotlight — every unmodified line dimmed so Claude's edits stand out](media/heatmap.png)
 
-### Navigation bar
+### The review nav bar
 
-One review bar, mirrored across three surfaces so the surgical loop is always a click away: the
+One combined review bar, mirrored across four surfaces so the surgical loop is always a click away: the
 **status bar** (both editors), the **editor tab bar** (VS Code's editor-title actions; a banner
-across the top of the editor in JetBrains), and a single floating **review bubble** (VS Code's
-Comments API) parked over the edit you're on.
+across the top of the editor in JetBrains), a single floating **review bubble** (VS Code's
+Comments API) parked over the edit you're on, and — new in 0.8.0 — the **Overview title bar**, where
+it rides alongside the session selector and the bulk actions.
 
 ```text
 🔬 3  ▲ Diff 1/2 ▼  ◀ File 1/3 ▶  ✓ ↩ ✓✓ ✕  🧹 💡 🔍
@@ -265,30 +308,17 @@ keep / undo / diff it; the toolbar steps revisions and does **Accept all in this
 
 ![File History — the active file's edits in order, following the editor as you switch tabs](media/file-history.png)
 
-### Timeline — a collapsed change feed
+### Actions — every tool call, zero tokens
 
-```text
-🟡 19:32  index.js        +6 −0 · created index.js
-🟢 19:31  User.js  ×2     +13 −1 · added farewell() to mirror greet()
-```
+The whole session as a typed record of **every tool call Claude made**: reads, greps, shell commands,
+web fetches, subagent spawns, to-do updates, not just the file writes the store captures. Like
+everything else here it costs **zero tokens** — it's mined straight from the Claude Code transcript —
+and each action is correlated with its **result** (`ok` / `error`). File-edit actions **link back to
+their store record**, so you can jump from the trace into the review in one click.
 
-Newest first; consecutive edits to the same file coalesce into one `×N` row with the combined delta
-and a change summary (Claude's own reasoning when available). Expand a row for the individual edits;
-pending / kept / reverted keep their color (and reverted stays struck through).
-
-![Timeline — a collapsed change feed, consecutive edits to a file coalesced into one ×N row](media/timeline.png)
-
-### Action Timeline — every tool call, zero tokens
-
-The Timeline above is only the *edits*. The **Action Timeline** is the whole session — a typed
-record of **every tool call Claude made**: reads, greps, shell commands, web fetches, subagent
-spawns, to-do updates, not just the file writes the store captures. Like everything else here it
-costs **zero tokens** — it's mined straight from the Claude Code transcript — and each action is
-correlated with its **result** (`ok` / `error`). File-edit actions **link back to their store
-record**, so you can jump from the trace into the review in one click.
-
-It lands as a new **Actions view** — a panel view beside Observations / Timeline / Stats in VS Code,
-a pane in the **Dashboards** window in JetBrains — **grouped by category**:
+In 0.8.0 **Actions** lives in the **sidebar** ("Claude Edits") alongside Edits · Diffs · File History
+(it used to sit in the bottom panel). It's **grouped by category** and — new — every group is
+**collapsed by default**, so you expand only the ones you care about:
 
 ```text
 ▾ Edits          3
@@ -306,36 +336,52 @@ By default the view is **curated** — high-signal categories only, though **err
 with a **Show all** toggle that folds in the noise (reads, searches, meta). Errored calls are
 flagged; an edit row **opens the review**, like every other surface.
 
-The same trace is one command away:
+The same trace is one command away. The CLI prints it as a **flat chronological feed** (each row: time ·
+`[category]` · tool · target · the `edit#N` link for file edits · Claude's own one-line detail); the
+editors render the grouped-by-category view above from the same data:
 
 ```console
 $ claude-observatory actions
-9 action(s)  ·  1 error  ·  session 0c396c6b-2da9-4be2-9c6d-c8c5797de7a5
+Actions  9 total · 3 edit · 3 read · 2 exec · 1 todo · 1 error(s) · session 0c396c6b-2da9-4be2-9c6d-c8c5797de7a5
 
-Edits
-  ✓  #1  Write  src/models/User.js
-  ✓  #2  Edit   src/models/User.js
-  ✓  #3  Write  src/index.js
-Commands
-  ✓  node src/index.js
-  ✕  npm test                       exit 1
-To-dos
-  ✓  3 items · 2 done
+2m ago       [edit]    Write      src/models/User.js edit#1  (create the User class)
+2m ago       [edit]    Edit       src/models/User.js edit#2  (add a farewell() method)
+1m ago       [read]    Read       src/models/User.js
+1m ago       [edit]    Write      src/index.js edit#3  (import User and print a greeting)
+1m ago       [exec]    Bash       node src/index.js  (run the greeter)
+1m ago     ✗ [exec]    Bash       npm test  (run the test suite)
+1m ago       [todo]    TodoWrite  3 items · 2 done
 
 trace (alias) · --json · --category <c> · --errors · --limit <n> · --all
 ```
 
-`--json` emits the structured form (`{ session, summary, actions, groups }`); `--category <c>`,
-`--errors`, `--limit <n>`, and `--all` filter the feed.
+`--json` emits the structured form (`{ session, summary, actions, groups, egress, subagents,
+subagentsSummary, fleet, fleetSummary }` — `groups` is the curated, category-grouped view the editors
+render); `--category <c>`, `--errors`, `--limit <n>`, and `--all` filter the feed.
 
-### Observations — the recap, reasoning, and file memory
+### Observations — the recap, the change feed, reasoning, and file memory
 
 The top row is a one-line **session recap** — "here's what you were doing" — taken from Claude Code's
 own session title at zero token cost (hit **✨** for a Claude-refined one-liner via
-`claude -p --resume`, which reuses the session's cached context). Below it, one row per edit: a change
-summary with Claude's **actual reasoning** surfaced inline (also pulled from the transcript). Click a
-row for a combined report; a warning icon flags possible issues (debug statements, hard-coded secrets,
-large deletions). **Analyze** spends tokens only when you click it; results are cached in the store.
+`claude -p --resume`, which reuses the session's cached context).
+
+Below the recap, **Observations now leads with the coalesced change-feed** that used to be its own
+Timeline pane — files newest-first, and consecutive edits to the same file coalesced into one `×N` run
+with the combined delta and a change summary (Claude's own reasoning when available):
+
+```text
+🟡 19:32  index.js        +6 −0 · created index.js
+🟢 19:31  User.js  ×2     +13 −1 · added farewell() to mirror greet()
+```
+
+Expand a run for the individual edits; pending / kept / reverted keep their color (reverted stays struck
+through). The same coalesced runs come out of `claude-observatory observations --json` (each run carries
+its edits and reasoning) — both editors render that view-model thin.
+
+Then, one row per edit: a change summary with Claude's **actual reasoning** surfaced inline (also pulled
+from the transcript). Click a row for a combined report; a warning icon flags possible issues (debug
+statements, hard-coded secrets, large deletions). **Analyze** spends tokens only when you click it;
+results are cached in the store.
 
 Each row also carries the observatory's **memory of that file**, derived from every past session:
 
@@ -360,10 +406,85 @@ estimates). The full scoreboard (`3 pending · 42 accepted · 5 reverted · 89% 
 also lives in the status-bar microscope's tooltip. The stats scan runs in a subprocess with an
 incremental cache, so the UI never blocks.
 
-### Overview — the session's changes at a glance
+### Overview — the master-detail multi-agent panel
 
-The other views answer *what happened, in order*. This one answers **where did the work land, and what
-still needs my eyes** — the whole session as one picture, in the **Overview** pane (both editors).
+The flagship 0.8.0 surface, and the one that replaces both the old **Change Map** and the old
+**Multitasking** window. **Overview** is a **master-detail** panel (both editors): a **left nav**
+(~25%) that lists every agent and every workflow, and a **right detail** (~75%) that shows the selected
+one's **change-map**. A **title bar** across the top carries a session selector, the combined review nav
+bar, and the session-wide bulk actions. It answers two questions at once — *what is my whole fleet doing
+right now* and *where did the work land, what still needs my eyes*.
+
+![Overview — the master-detail panel: a left nav with Fleet and Workflows tabs feeding the right-hand change-map detail (task ribbon, module proportion strip, file ledger), under a title bar with the review nav bar and bulk actions](media/overview-tabs.png)
+
+#### Left nav → **Fleet** — every running agent, live
+
+The **Fleet** tab (this is where the old Multitasking window went) lists **one row per running agent**
+across every git **worktree** of the repo. Worktrees are correlated **git-free** — the observatory reads
+the `.git` **pointer files** (a linked worktree's `.git` is a *file* naming its admin dir; that dir's
+`commondir` points back at the shared repo), never shelling out to the git binary — so sessions launched
+from sibling worktrees of one logical repo unify into a **single fleet** keyed by that shared repo.
+
+Each agent row carries a live **phase** badge — `working` · `awaiting-input` · `awaiting-permission` ·
+`idle` · `errored` · `done` — its **worktree + branch**, an activity **sparkline**, its **±diff**,
+**tokens · time**, **risk** flags, and a **collision** badge. Unfold it for the agent's nested
+**subagents**, each with its `agentType` / description, phase, current task + to-dos, ±lines, and a
+**💬 chat** button. An **Active only** toggle hides the finished ones, and **Clear completed** *dismisses*
+them from view — it never deletes anything, because the observatory only ever observes. A cross-agent
+**conflicts** strip flags any file touched by **2+ agents**.
+
+The **phase** is detected **zero-token, from the transcript tail**: an active `tool_use` (or a trailing
+`tool_result` — the turn is mid-flight) reads `working`; a pending `AskUserQuestion` reads
+`awaiting-input`; a pending permission prompt reads `awaiting-permission`; otherwise `idle` / `errored` /
+`done`, staleness-gated. The querying (self) session shows **working** while it is actively running.
+
+![The Fleet / Workflows left nav — the fleet of running agents across the repo's git worktrees, each with a live phase, branch, activity sparkline, ±lines, tokens·time, risk and collision counts; nested subagents with their task, to-dos and a chat button](media/multitasking.png)
+
+The view is one JSON payload — both editors render it thin, no client-side aggregation. `multitask`
+(its output is JSON either way) emits `agents[]`, `workflows[]`, `worktrees[]`, and `collisions[]`:
+
+```console
+$ claude-observatory multitask --json | jq '.agents[] | {worktree, branch: .gitBranch, phase, diff, subs: (.subagents|length)}'
+{ "worktree": "…/repo",        "branch": "main",     "phase": "working",             "diff": {"added":751,"removed":12}, "subs": 2 }
+{ "worktree": "…/repo-hotfix", "branch": "fix/login","phase": "awaiting-permission", "diff": {"added":44,"removed":3},   "subs": 0 }
+
+$ claude-observatory multitask --json | jq '.collisions[]'      # same file, 2+ agents
+{ "file": "…/src/store.ts", "agents": ["ad93a29f", "7b1c…"], "anyPending": true }
+```
+
+The whole thing is **zero token, git-free, path-only** — filenames, never contents — so nothing one
+agent is editing leaks into another.
+
+#### Left nav → **Workflows** — each multi-agent run
+
+The **Workflows** tab lists every **workflow run** — Claude Code's deterministic multi-agent
+orchestration — one level **above** the subagents. Each run shows an **informative name**, a
+**running / done** flag, its **per-phase** progress groups, and its **agents** (each with its own
+**tokens · time · edits**) under an activity **sparkline** styled identically to the Fleet rows.
+
+Under the hood a run is tracked in `subagents/workflows/wf_<id>/` plus a rich per-run state file, so both
+per-run and per-agent **tokens / time / edits** and the **phase** groups fall straight out — and the
+**running** flag is **freshness-gated**: an interrupted run that never wrote `completed` is *not* shown
+running. The same data is in `multitask --json .workflows` and `changemap --json .workflows` /
+`.rollupByWorkflow`:
+
+```console
+$ claude-observatory changemap --json | jq '.rollupByWorkflow[] | {workflowId, edits, added, removed, pending}'
+{ "workflowId": "wf_99d45022-8f2", "edits": 9, "added": 49, "removed": 43, "pending": 9 }
+
+$ claude-observatory multitask --json | jq '.workflows[0] | {name, phases, agents: (.agents|length)}'
+{ "name": "scaffold-user-model", "phases": ["Build", "Verify"], "agents": 3 }
+
+$ claude-observatory multitask --json | jq '.workflows[0].agents[] | {agentType, done, tokens, ms: .durationMs, edits}'
+{ "agentType": "general-purpose", "done": true,  "tokens": 12100, "ms": 8400, "edits": 4 }
+{ "agentType": "general-purpose", "done": false, "tokens": 18300, "ms": 5100, "edits": 5 }
+```
+
+#### Right detail → the change-map
+
+Select an agent or a workflow and the right pane fills with its **change-map** — the whole of that
+scope's work as one picture. (The default selection is the **orchestrator** — the querying/self
+session.)
 
 ```text
 🔬 ad93a29f   185 edits · 20 pending · 27 kept · 57% reviewed · 3 agents · 2 err · 🛰 13 · ⇅ 3
@@ -376,33 +497,77 @@ README.md       docs     █              +44   2⏳
 
 Three layers, top to bottom:
 
-- **Chapters** — Claude's own to-dos, mined from its `TodoWrite` checkpoints. A filled ● is done, a
-  half ◐ is in progress, a hollow ○ is still planned. **Click one to brush the map**: everything that
-  chapter didn't produce fades to context. Attribution is a time-window heuristic and says so — an
-  edit made outside every window is left **unassigned** rather than mis-filed onto the wrong goal.
-- **The proportion strip** — one row, width by churn, colour by review status. It answers "where did
-  this session actually land" before you read a single row. **Click a segment** to filter to a module.
-- **The ranked ledger** — every file by churn, with a bar. Colour is **worst-unreviewed-wins**: a
+- **The chapter ribbon** — Claude's own to-dos become **named chapters**, each keyed by a **stable
+  content-hash `taskId`** (a 12-char sha1 of the to-do text, so reordering or inserting to-dos never
+  renumbers a task). A filled ● is done, a half ◐ is in progress, a hollow ○ is still planned. **Click
+  one to scope the map — and the bulk actions — to that chapter**: everything the task didn't produce
+  fades to context. Chapters are **total**: work done between to-dos joins the nearest preceding
+  chapter, and a session with no to-dos gets a single dimmed **session chapter** named after the
+  session's own goal — never an "unassigned" bucket. Destructive ops stay honest underneath: a
+  chapter's Accept/Reject acts **WYSIWYG** on exactly the edits its row shows — the session chapter
+  included — while the strict per-task intervals keep powering `tasklog` and the analytics rollups.
+- **The module proportion strip** — one row, width by churn, colour by review status. It answers "where
+  did this session actually land" before you read a single row. **Click a segment** to filter to a module.
+- **The file ledger** — every file by churn, with a ±line bar. Colour is **worst-unreviewed-wins**: a
   module never reads green while something under it is still pending. Hover for the class touched and
   Claude's own reasoning; **click to open the real diff** — the same review surface as everywhere else.
 
-Toggle **± lines ⇄ count** to re-weight by edit count instead of churn.
-
-From the shell, the same model both editors render:
+The map always sizes by **±lines** (churn). Under the hood the same change-map rolls up on **four
+levels** — **per task**, **per subagent**, **per agent**, and **per workflow** — with **honest
+attribution** throughout: where a subagent/workflow placement is ambiguous the edit is left
+unattributed, never guessed. From the shell, the same model both editors render (the `unassigned` key
+is the strict rollup's honest leftover — the display chapters are total, this is for scripts):
 
 ```bash
-claude-observatory changemap --json | jq '.modules[] | {label, churn, status, files}'
+claude-observatory changemap --json | jq '.modules[]     | {label, churn, status, files}'
+claude-observatory changemap --json | jq '.rollupByTask[] | {taskId, edits, added, removed}'
+claude-observatory changemap --json | jq '.unassigned     | {edits, added, removed}'
 ```
 
-Every rollup — churn, status precedence, module labels, the drill-through target — is computed once in
-`core`, so the VS Code webview and the JetBrains panel show identical numbers by construction.
+Every rollup — churn, status precedence, module labels, the per-task / per-subagent / per-workflow
+breakdowns, the drill-through target — is computed once in `core`, so the VS Code webview and the
+JetBrains panel show identical numbers by construction.
+
+#### Title bar → review nav + chapter-scoped bulk actions
+
+Across the top of Overview sits a **session selector**, the combined **[review nav bar](#the-review-nav-bar)**
+(File ◄► / Diff ◄► step-through with live n/m counters · Keep · Undo · Accept File · Reject File · Clear
+File · Spotlight · Search), and the session-wide **bulk actions** — **Accept All · Revert All · Clear
+Resolved · Refresh**. Selecting a ribbon chapter **re-scopes** Accept/Revert/Clear to *just that
+chapter*, so you can accept a whole to-do's worth of edits in one click. The icons are consistent
+everywhere: ✓ = accept/keep, ↩ = reject/revert/undo, 🧹 = clear.
+
+The bulk actions are the same task-scoped verbs the CLI exposes — `task-keep` / `task-undo` /
+`task-clear` on a `taskId`, or `keep --all` / `undo --all` for the whole session.
+
+**A task log across the whole fleet.** `tasklog` folds every worktree-sibling's change-map by stable
+`taskId`, so **one logical task spanning agents or worktrees reads as a single row** — edit counts and
+±lines use the same strict-span attribution, and `unassigned` edits are excluded rather than swept into
+a neighbour:
+
+```console
+$ claude-observatory tasklog | jq '.[] | {taskId, content, agents: (.agentIds|length), subs: (.subagentIds|length), edits, added, removed}'
+{ "taskId": "4d9f1a2b3c4d", "content": "Scaffold subagent tracking", "agents": 2, "subs": 1, "edits": 18, "added": 512, "removed": 30 }
+```
+
+**Chat about anything, with the context pre-assembled.** `chat-context` builds a **zero-token,
+ready-to-paste** prompt about one action, edit, subagent, or task — the observatory assembles the right
+context and hands it to *your own* Claude; it **never calls a model itself**:
+
+```console
+$ claude-observatory chat-context --edit 2 --json                # → { "prompt": "…before/after + reasoning…" }
+$ claude-observatory chat-context --task 4d9f1a2b3c4d --json
+$ claude-observatory chat-context --agent a669a284d111a7745 --json
+```
+
+Both `tasklog` and `chat-context` are **additive** — mined from the transcript + the local store, they
+add nothing to the store and change no on-disk format.
 
 ### Risk & Egress — two zero-token audits
 
-The Action Timeline already knows every command Claude ran and every host it reached, so two safety
-audits fall straight out of it — **zero tokens, no new store or format**. Both live in the **Actions
-view** (a pane in the Dashboards window / a panel beside the others in VS Code) and each gets its own
-CLI verb.
+The Actions timeline already knows every command Claude ran and every host it reached, so two safety
+audits fall straight out of it — **zero tokens, no new store or format**. Both ride the same **Actions**
+view in the **sidebar** ("Claude Edits"), and each gets its own CLI verb.
 
 **Risk** flags the shell commands that can bite: data-destroying (`rm -rf`, `git reset --hard`, force
 push), remote code execution (`curl … | sh`), privilege escalation (`sudo`), or reads/writes of
@@ -441,16 +606,16 @@ change no on-disk format.
 
 ### Subagents — every spawned agent, its own timeline
 
-The Action Timeline already records that Claude **spawned a subagent** (the Task / Agent tool); 0.7.0
-opens each one up. Every subagent now gets its **own nested action timeline** and **per-subagent
-metrics** — duration, tokens, tool-use count, status — turning the observatory from a single-agent into
-a **multi-agent view**. Like everything else here it costs **zero tokens**: it's mined from
+The Actions timeline already records that Claude **spawned a subagent** (the Task / Agent tool); the
+observatory opens each one up. Every subagent gets its **own nested action timeline** and **per-subagent
+metrics** — duration, tokens, tool-use count, status — which is what makes the observatory a
+**multi-agent view**. Like everything else here it costs **zero tokens**: it's mined from
 `~/.claude/projects/<proj>/<session>/subagents/agent-<id>.jsonl` and correlated back to the spawning
 Task call via the transcript's `toolUseResult` block (which conveniently carries the `agentId`,
 `totalDurationMs`, `totalTokens`, `totalToolUseCount`, and `status`).
 
-It lands as a **Subagents** node in the Actions view of both editors — each subagent expands into its
-own reads / edits / bash / web calls:
+It lands as a **Subagents** node in the sidebar **Actions** view of both editors — each subagent expands
+into its own reads / edits / bash / web calls:
 
 ```text
 ▾ Subagents               2
@@ -463,52 +628,60 @@ own reads / edits / bash / web calls:
         ✓  WebFetch  nodejs.org/api/modules.html
 ```
 
-The same view is one command away:
+The same view is one command away — each subagent as a `▸` row (its `agentType`, action count and
+status), followed by its own timeline (`--all` expands every action):
 
 ```console
 $ claude-observatory subagents
-2 subagent(s)  ·  session 0c396c6b-2da9-4be2-9c6d-c8c5797de7a5
+Subagents  2 subagent(s) · 13 action(s) · session 0c396c6b-2da9-4be2-9c6d-c8c5797de7a5
 
-✓  general-purpose   8.4s · 12.1k tok · 9 tools
-✓  general-purpose   5.1s ·  6.3k tok · 4 tools
+▸ general-purpose  9 action(s) · done
+   Explore tests, then update the User model
+     [read]    Read  src/models/User.js
+     [exec]    Grep  "greet"  (4 files)
+     [exec]    Bash  npm test                exit 1
+   … 6 more (`--all` to expand)
 
-agents (alias) · --json
+▸ general-purpose  4 action(s) · done
+   Verify the index imports
+     [read]    Read  src/index.js
+     [web]     WebFetch  nodejs.org/api/modules.html
+
+agents (alias) · --json · --all
 ```
 
 Expand a subagent to see exactly which files it read, what it ran, and where it errored — the same
-`ok` / `error` correlation and edit-row links as the top-level trace.
+`ok` / `error` correlation and edit-row links as the top-level trace. `--json` returns
+`{ session, summary, subagents[] }`, each subagent carrying its `agentType`, `description`, `status`,
+and full `actions[]`.
 
-### Fleet — the other agents in this project
+### Siblings — the cross-agent CLI digest
 
-The observatory can also see the **other Claude Code sessions** working in the **same project**, so
-0.7.0 surfaces them. For each sibling: **active / idle** status (from transcript freshness — *active*
-means touched within ~60s), **pending edits**, **files touched**, and **risk-flag counts**. It is
+The Overview's **Fleet** tab is the *visual* fleet; `siblings` is its **agent-facing CLI digest** — an
+agent can call it mid-run to see what its siblings are touching and adjust in real time. For each other
+Claude Code session in the **same project**: **active / idle** status (from transcript freshness —
+*active* means touched within ~60s), **pending edits**, **files touched**, and **risk-flag counts**. It's
 strictly **read-only and path-only** — filenames, never contents — so nothing one agent is editing can
 leak into another.
 
-It lands as a **Fleet** node in the Actions view of both editors:
-
-```text
-▾ Fleet                   2 other agents
-    ● active   a1b2c3d4   2 pending · 5 files · 1 ⚠
-    ○ idle     e5f6a7b8   0 pending · 3 files · 0 ⚠
-```
-
-The CLI form is an **agent-facing digest** — an agent can call it mid-run to see what its siblings are
-touching and adjust in real time:
-
 ```console
 $ claude-observatory siblings
-2 sibling(s)  ·  1 active · 1 idle  ·  project claude-observatory
+Fleet  16 session(s) · 1 active · 15 sibling(s) · 117 pending across siblings
 
-● active   a1b2c3d4   2 pending · 5 files · 1 ⚠   12s ago
-○ idle     e5f6a7b8   0 pending · 3 files · 0 ⚠   8m ago
+● ad93a29f (you)  1 edit(s) · 1 pending · 0s ago ⚠ 2 high
+   docs/panels.html
+○ f9b72393        47 edit(s) · 20 pending · 1d ago ⚠ 3 high
+   packages/core/src/actions.ts, packages/core/src/subagents.ts +9 more
+○ dcf61fae        12 edit(s) · 12 pending · 3d ago ⚠ 3 high
+   demo/src/greeter.js, demo/src/index.js, demo/src/models/User.js
 
-fleet (alias) · --json (siblings only, excludes self) · --all (include self)
+fleet (alias) · --json (siblings only, excludes self) · --all (include self) · --repo (every worktree)
 ```
 
-`--json` defaults to **siblings only** (excludes the calling session); `--all` folds self back in. (An
-optional MCP server exposing the same digest is planned; 0.7.0 ships the CLI digest.)
+`--json` defaults to **siblings only** (excludes the calling session); `--all` folds self back in; and
+**`--repo`** widens the digest to **every git worktree** of the repo, adding each session's **worktree /
+branch / phase** and a cross-agent **conflicts** count — the same data the Overview Fleet tab renders,
+git-free.
 
 ### Metrics — the session by the numbers
 
@@ -519,17 +692,16 @@ each `tool_use → tool_result` timestamp gap):
 
 ```console
 $ claude-observatory metrics
-session 0c396c6b-2da9-4be2-9c6d-c8c5797de7a5
+Metrics  session 0c396c6b-2da9-4be2-9c6d-c8c5797de7a5
 
-edits         3   +19 −1
-actions       9   1 error
-subagents     2   13.5s · 18.4k tok
-tool latency  median 0.4s · p95 2.1s · max 8.4s
-
---json
+  edits         3  +19 -1  0 pending · 2 kept · 1 undone
+  actions       9  1 error(s)
+  subagents     2  13 action(s) · 0 edit(s) · 14s · 18k tok
+  tool latency  median 420ms · p95 2.1s · max 8.4s (9 call(s))
+  span          6m 12s
 ```
 
-All three are **additive** — like the Action Timeline they're mined from the transcript, add nothing
+All three are **additive** — like the Actions timeline they're mined from the transcript, add nothing
 to the store, and change no on-disk format. The existing `actions --json` payload simply gains four new
 fields — **`subagents`**, **`subagentsSummary`**, **`fleet`**, **`fleetSummary`** — alongside its
 unchanged `{ session, summary, actions, groups }`; every existing shape stays as it was.

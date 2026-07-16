@@ -139,6 +139,7 @@
           <span class="tw-tab on" title="Edits">🔬</span>
           <span class="tw-tab" title="Diffs">⇆</span>
           <span class="tw-tab" title="File History">🕘</span>
+          <span class="tw-tab" title="Actions">⚡</span>
         </span>
         <span class="tools">
           <span title="Search">⌕</span><span title="Review previous">⏮</span><span title="Review next">⏭</span>
@@ -181,33 +182,47 @@
       <span class="others">Terminal &nbsp; Problems &nbsp; Services</span>
     </div>
     <div class="panes">
-      <div class="pane" style="flex:.92">
-        <div class="pane-h">Actions</div>
-        <div class="prow"><span class="pic">🛰</span>Fleet <span class="dim2">&nbsp;13 siblings</span></div>
-        <div class="prow"><span class="pic">⇅</span>Egress <span class="dim2">&nbsp;3 destinations · 3 remote</span></div>
-        <div class="prow"><span class="pic" style="color:var(--green-bright)">▾</span>Subagents <span class="dim2">&nbsp;3 · 68 actions · 12m47s</span></div>
-        <div class="prow"><span class="pic">▸</span>Edits <span class="dim2">&nbsp;185</span></div>
-        <div class="prow"><span class="pic">▸</span>Commands <span class="dim2" style="color:var(--yellow)">&nbsp;229 · 2 errors</span></div>
-        <div class="prow"><span class="pic">▸</span>To-dos <span class="dim2">&nbsp;30</span></div>
-      </div>
-      <div class="pane" style="flex:1.05">
+      <div class="pane" style="flex:1">
         <div class="pane-h">Observations</div>
         <div class="prow"><span class="pic">🔬</span>Create User class and test imports <span class="dim2">&nbsp;session recap</span></div>
+        <div class="grp">CHANGE FEED</div>
+        <div class="prow"><span class="pic" style="color:var(--yellow)">●</span>User.js&nbsp;<b style="font-size:11px">×2</b> <span class="delta">+15 −0</span> <span class="dim2">· 14:02 · coalesced (Timeline folded in)</span></div>
         <div class="grp">PER-EDIT REASONING</div>
         <div class="prow"><span class="pic" style="color:var(--yellow)">●</span><span class="id">#3</span>&nbsp;created index.js <span class="dim2">💭 Wiring up an entry point that imports User…</span></div>
         <div class="prow"><span class="pic" style="color:var(--yellow)">●</span><span class="id">#2</span>&nbsp;edited User.js (+4 −0) <span class="dim2">💭 Adding a farewell() method to mirror greet()…</span></div>
         <div class="prow"><span class="pic" style="color:var(--green-bright)">✓</span><span class="id grey">#1</span>&nbsp;<span class="grey">created User.js</span> <span class="dim2">🧠 6 edits across sessions · 83% accepted</span></div>
       </div>
-      <div class="pane" style="flex:1">
-        <div class="pane-h">Timeline</div>
-        <div class="prow"><span class="pic" style="color:var(--yellow)">●</span><span style="font-family:var(--mono);color:var(--dim)">14:02</span>&nbsp;index.js <span class="delta">+4 −0</span> <span class="dim2">· created index.js</span></div>
-        <div class="prow"><span class="pic" style="color:var(--yellow)">●</span><span style="font-family:var(--mono);color:var(--dim)">14:01</span>&nbsp;User.js&nbsp;<b style="font-size:11px">×2</b> <span class="delta">+15 −0</span> <span class="dim2">· added farewell() to mirror greet()</span></div>
-        <div class="prow" style="padding-left:34px"><span class="pic" style="color:var(--yellow)">●</span><span class="id">#2</span> <span class="dim2">💭 Adding a farewell() method…</span></div>
-        <div class="prow" style="padding-left:34px"><span class="pic" style="color:var(--green-bright)">✓</span><span class="id grey">#1</span> <span class="dim2">💭 Creating the User model…</span></div>
-      </div>
-      <div class="pane" style="flex:1.2">
+      <div class="pane" style="flex:1.7">
         <div class="pane-h">Overview</div>
-        <div style="padding:2px 12px 8px">
+        <div style="display:flex;flex:1;min-height:0">
+        <div style="flex:0 0 39%;min-width:0;border-right:1px solid var(--border);padding:2px 10px 0 12px">
+          <div style="display:flex;gap:12px;font-size:10px;margin-bottom:6px">
+            <span style="color:var(--ink);border-bottom:1.5px solid var(--blue);padding-bottom:3px">Fleet</span>
+            <span style="color:var(--faint)">Workflows</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px;font-size:11px;padding:3px 0;box-shadow:inset 2px 0 0 var(--blue);background:var(--blue-soft)">
+            <span style="width:7px;height:7px;border-radius:50%;background:var(--blue);flex:none"></span>
+            <span style="font-family:var(--mono);color:var(--ink);white-space:nowrap">demo <span style="color:var(--faint)">⑂main</span></span>
+            <span style="font-size:8px;font-weight:700;color:#cc785c;border:1px solid #cc785c;border-radius:8px;padding:0 5px">self</span>
+            <span style="margin-left:auto;display:inline-flex;align-items:flex-end;gap:1.5px;height:12px"><span style="width:2.5px;height:5px;background:var(--blue);border-radius:1px"></span><span style="width:2.5px;height:8px;background:var(--blue);border-radius:1px"></span><span style="width:2.5px;height:6px;background:var(--blue);border-radius:1px"></span><span style="width:2.5px;height:11px;background:var(--blue);border-radius:1px"></span><span style="width:2.5px;height:7px;background:var(--blue);border-radius:1px"></span><span style="width:2.5px;height:12px;background:var(--blue);border-radius:1px"></span></span>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px;font-size:11px;padding:3px 0">
+            <span style="width:7px;height:7px;border-radius:50%;background:var(--yellow);flex:none"></span>
+            <span style="font-family:var(--mono);color:var(--dim);white-space:nowrap">demo <span style="color:var(--faint)">⑂feat-x</span></span>
+            <span style="margin-left:auto;display:inline-flex;align-items:flex-end;gap:1.5px;height:12px"><span style="width:2.5px;height:7px;background:var(--yellow);border-radius:1px"></span><span style="width:2.5px;height:9px;background:var(--yellow);border-radius:1px"></span><span style="width:2.5px;height:5px;background:var(--yellow);border-radius:1px"></span><span style="width:2.5px;height:8px;background:var(--yellow);border-radius:1px"></span><span style="width:2.5px;height:10px;background:var(--yellow);border-radius:1px"></span><span style="width:2.5px;height:6px;background:var(--yellow);border-radius:1px"></span></span>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px;font-size:11px;padding:3px 0">
+            <span style="width:7px;height:7px;border-radius:50%;background:var(--green-bright);flex:none"></span>
+            <span style="font-family:var(--mono);color:var(--dim);white-space:nowrap">demo <span style="color:var(--faint)">⑂hotfix</span></span>
+            <span style="margin-left:auto;display:inline-flex;align-items:flex-end;gap:1.5px;height:12px"><span style="width:2.5px;height:6px;background:var(--green-bright);border-radius:1px"></span><span style="width:2.5px;height:10px;background:var(--green-bright);border-radius:1px"></span><span style="width:2.5px;height:8px;background:var(--green-bright);border-radius:1px"></span><span style="width:2.5px;height:5px;background:var(--green-bright);border-radius:1px"></span><span style="width:2.5px;height:9px;background:var(--green-bright);border-radius:1px"></span><span style="width:2.5px;height:7px;background:var(--green-bright);border-radius:1px"></span></span>
+          </div>
+          <div style="font-size:8.5px;letter-spacing:.4px;color:var(--faint);font-weight:700;padding:8px 0 2px;border-top:1px solid var(--border);margin-top:6px">WORKFLOWS</div>
+          <div style="display:flex;align-items:center;gap:6px;font-size:11px;padding:2px 0">
+            <span style="width:7px;height:7px;border-radius:50%;background:var(--blue);flex:none"></span>
+            <span style="color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">ship-release <span style="color:var(--faint)">3/5</span></span>
+          </div>
+        </div>
+        <div style="flex:1;min-width:0;padding:2px 12px 8px">
           <div style="display:flex;gap:9px;font-size:9.5px;color:var(--dim);margin-bottom:8px;flex-wrap:wrap">
             <span style="white-space:nowrap"><span style="color:var(--green-bright)">●</span> 1 Subagents</span>
             <span style="white-space:nowrap"><span style="color:var(--yellow)">◐</span> 2 Risk audit</span>
@@ -223,6 +238,7 @@
           <div style="display:flex;align-items:center;gap:7px;font-size:11px;padding:2.5px 0"><span style="width:6px;height:6px;border-radius:2px;background:var(--green-bright);flex:none"></span><span class="mono" style="color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto;max-width:44%">changemap.ts</span><span style="font-size:8.5px;color:var(--faint)">core</span><span style="flex:1;height:5px;border-radius:2px;background:var(--panel);overflow:hidden;min-width:14px"><span style="display:block;height:100%;width:38%;background:var(--green-bright)"></span></span><span class="mono" style="font-size:9.5px;color:var(--faint);width:36px;text-align:right">+285</span><span class="mono" style="font-size:9.5px;width:24px;text-align:right;color:var(--green-bright)">✓</span></div>
           <div style="display:flex;align-items:center;gap:7px;font-size:11px;padding:2.5px 0"><span style="width:6px;height:6px;border-radius:2px;background:var(--yellow);flex:none"></span><span class="mono" style="color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto;max-width:44%">README.md</span><span style="font-size:8.5px;color:var(--faint)">docs</span><span style="flex:1;height:5px;border-radius:2px;background:var(--panel);overflow:hidden;min-width:14px"><span style="display:block;height:100%;width:14%;background:var(--yellow)"></span></span><span class="mono" style="font-size:9.5px;color:var(--faint);width:36px;text-align:right">+44</span><span class="mono" style="font-size:9.5px;width:24px;text-align:right;color:var(--yellow)">2⏳</span></div>
           <div style="display:flex;align-items:center;gap:7px;font-size:11px;padding:2.5px 0"><span style="width:6px;height:6px;border-radius:2px;background:var(--green-bright);flex:none"></span><span class="mono" style="color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto;max-width:44%">index.ts</span><span style="font-size:8.5px;color:var(--faint)">cli</span><span style="flex:1;height:5px;border-radius:2px;background:var(--panel);overflow:hidden;min-width:14px"><span style="display:block;height:100%;width:6%;background:var(--green-bright)"></span></span><span class="mono" style="font-size:9.5px;color:var(--faint);width:36px;text-align:right">+13</span><span class="mono" style="font-size:9.5px;width:24px;text-align:right;color:var(--green-bright)">✓</span></div>
+        </div>
         </div>
       </div>
       <div class="pane" style="flex:1.1">

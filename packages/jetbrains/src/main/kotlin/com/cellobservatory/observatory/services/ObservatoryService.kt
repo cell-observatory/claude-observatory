@@ -4,8 +4,15 @@ import com.cellobservatory.observatory.core.ObservatoryCli
 import com.cellobservatory.observatory.core.SessionResolver
 import com.cellobservatory.observatory.core.StoreReader
 import com.cellobservatory.observatory.core.StoreWatcher
+import com.cellobservatory.observatory.core.TranscriptWatcher
+import com.cellobservatory.observatory.model.ChangeMap
+import com.cellobservatory.observatory.model.ChangeMapParser
 import com.cellobservatory.observatory.model.EditRecord
 import com.cellobservatory.observatory.model.EditTree
+import com.cellobservatory.observatory.model.MultitaskParser
+import com.cellobservatory.observatory.model.MultitaskResult
+import com.cellobservatory.observatory.model.Observations
+import com.cellobservatory.observatory.model.ObservationsParser
 import com.cellobservatory.observatory.model.TreeParser
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
@@ -29,6 +36,9 @@ class ObservatoryService(private val project: Project) : Disposable {
 
     init {
         StoreWatcher.instance.addListener(watchListener)
+        // Store watcher only fires on EDITS; the transcript watcher fires on transcript growth (reads,
+        // bash, subagent spawns, to-dos) so Actions/Observations/Timeline/Overview/Multitasking stay live.
+        TranscriptWatcher.getInstance(project).addListener(watchListener)
     }
 
     val workspaceRoot: String? get() = project.basePath
@@ -137,6 +147,65 @@ class ObservatoryService(private val project: Project) : Disposable {
         }
     }
 
+    // --- Shared throttled CLI views (0.8.0 stabilization) -------------------------------------------
+    // One refresh() cycle used to spawn ~4 CLI processes (ChangeMapPanel: multitask + changemap;
+    // ActionsPanel: multitask again; ObservationsPanel: observations) as often as every ~2s during
+    // active work. Each view below is fetched at most once per MIN_FETCH_MS, shared by every panel
+    // (multitask now spawns once per window, not twice), and fanned out via the listener ring when it
+    // lands — VS Code parity: its Overview webview self-throttles its spawns at 3s.
+
+    private inner class ThrottledFetch<T : Any>(private val fetch: (String) -> T?) {
+        @Volatile var value: T? = null
+            private set
+        @Volatile private var fetchedKey = ""
+        @Volatile private var fetchedAt = 0L
+        @Volatile private var inFlight = false
+
+        /** Latest cached view (possibly null before the first fetch lands); kicks a background refresh
+         *  when stale. `force` bypasses the throttle (the toolbar Refresh button). */
+        fun get(key: String, force: Boolean = false): T? {
+            val now = System.currentTimeMillis()
+            val stale = key != fetchedKey || now - fetchedAt >= MIN_FETCH_MS
+            if (!inFlight && (stale || force)) {
+                inFlight = true
+                ApplicationManager.getApplication().executeOnPooledThread {
+                    try {
+                        val v = fetch(key)
+                        fetchedAt = System.currentTimeMillis() // set on failure too — back off, don't spin
+                        if (v != null) {
+                            value = v
+                            fetchedKey = key
+                            ApplicationManager.getApplication().invokeLater { listeners.forEach { it.run() } }
+                        }
+                    } finally {
+                        inFlight = false
+                    }
+                }
+            }
+            return value
+        }
+    }
+
+    private val multitaskFetch = ThrottledFetch { _ ->
+        ObservatoryCli.multitaskJson(workspaceRoot)?.let { MultitaskParser.parse(it) }
+    }
+    private val changemapFetch = ThrottledFetch { session ->
+        ObservatoryCli.changemapJson(session, workspaceRoot)?.let { ChangeMapParser.parse(it) }
+    }
+    private val observationsFetch = ThrottledFetch { session ->
+        ObservatoryCli.observationsJson(session, workspaceRoot)?.let { ObservationsParser.parse(it) }
+    }
+
+    /** The shared `multitask --json` view (fleet + workflows + curated actions). Keyed on the active
+     *  session so a session switch refetches immediately. */
+    fun multitask(force: Boolean = false): MultitaskResult? = multitaskFetch.get(currentSession() ?: "", force)
+
+    /** The shared `changemap --json` view (the Overview detail). */
+    fun changemap(force: Boolean = false): ChangeMap? = currentSession()?.let { changemapFetch.get(it, force) }
+
+    /** The shared `observations --json` view-model. */
+    fun observations(force: Boolean = false): Observations? = currentSession()?.let { observationsFetch.get(it, force) }
+
     data class Counts(val pending: Int, val kept: Int, val undone: Int, val oldestPendingTs: Long?)
 
     fun counts(): Counts {
@@ -162,10 +231,14 @@ class ObservatoryService(private val project: Project) : Disposable {
 
     override fun dispose() {
         StoreWatcher.instance.removeListener(watchListener)
+        TranscriptWatcher.getInstance(project).removeListener(watchListener)
     }
 
     companion object {
         fun getInstance(project: Project): ObservatoryService = project.getService(ObservatoryService::class.java)
+
+        /** Minimum interval between spawns of the same CLI view (matches VS Code's Overview throttle). */
+        private const val MIN_FETCH_MS = 3_000L
     }
 }
 
