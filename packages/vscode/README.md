@@ -23,13 +23,17 @@ Think of it as the Cursor "keep/undo each change" experience, but for Claude Cod
 
 The **review surfaces** live in the Activity Bar (icon-only tabs; the microscope icon is badged with the pending count); the **observatory dashboards** live side-by-side in the bottom panel (like Terminal/Problems). A **status-bar microscope** shows the pending count in realtime (amber while anything awaits review), with the full **review scoreboard** in its tooltip.
 
-- **Edits · Diffs · File History** (Activity Bar) — pending edits grouped **folder → file → class**, plus a diff tree and the active file's history. In the editor, each edit gets a **✨ gutter star**, a subtle green/red line tint, a coral ruler mark, and an inline **✨ #N · view changes** menu that opens an **inline review bubble** in git's own colors (reasoning + `+A −R`, with Accept/Revert/Chat/Prev/Next buttons).
-- **Observations · Timeline · Stats** (bottom panel) — the session recap + per-edit reasoning and cross-session file memory; a collapsed change feed; and a live **review scoreboard** over token/usage plots.
+- **Overview** (bottom panel) — the flagship **master–detail** view. A left nav of **Fleet** — every running agent across the repo's git **worktrees** (correlated git-free, without the git binary), each with a live phase (`~` marks an inferred one), an activity sparkline, ±lines, risk, and file collisions, nested subagents included — and **Workflows** (orchestration runs). The right pane is the selected item's change-map: a named-chapter **task ribbon** (chapters are **total** — every edit belongs to one; per-chapter **Accept / Reject / Clear** acting on exactly the edits the row shows), a module strip, and a churn-ranked file ledger, sized by ±lines.
+- **Edits · Diffs · File History · Actions** (Activity Bar) — pending edits grouped **folder → file → class**, a diff tree, the active file's history, and the zero-token **action timeline** (every tool call this session, with risk + egress audits). In the editor, each edit gets a **✨ gutter star**, a subtle green/red line tint, a coral ruler mark, and an inline **✨ #N · view changes** menu that opens an **inline review bubble** in git's own colors (reasoning + `+A −R`, with Accept/Revert/Chat/Prev/Next buttons).
+- **Observations · Stats** (bottom panel) — the session recap + the chronological change feed with per-edit reasoning and cross-session file memory; and a live **review scoreboard** over token/usage plots.
+- **💬 Chat** — on any action, edit, subagent, or task: hands your own Claude a **context-preloaded** prompt (the target, Claude's reasoning, and the diff or command/result). **Zero-token** — Observatory never calls a model.
 
 The review loop is keyboard-driven: **⌥⌘N** (`ctrl+alt+n`) jumps to the oldest pending edit, **⌥⌘Y** keeps it, **⌥⌘U** undoes it; **⌥⌘[** / **⌥⌘]** step a file's revisions. Keep/Undo operate on the same store as the `claude-observatory` CLI, so the two stay in sync.
+
+Try it without Claude: `claude-observatory demo` replays a scripted session live through the real pipeline in an isolated `demo-*` session — every panel fills in, and review genuinely works. `claude-observatory demo --clean` removes every trace.
 
 See the full feature tour in the [main README](../../README.md#the-observatory).
 
 ## What's captured
 
-Tool edits only: `Edit`, `Write`, `MultiEdit`, `NotebookEdit`. Binary and >5 MB files are skipped. Bash-driven file changes are intentionally not tracked.
+Tool edits (`Edit`, `Write`, `MultiEdit`, `NotebookEdit`) plus files changed by `Bash` commands (set `CLAUDE_OBSERVATORY_NO_BASH=1` to opt out). Binary and >5 MB files are skipped.

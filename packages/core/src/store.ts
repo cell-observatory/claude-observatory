@@ -22,6 +22,15 @@ export type EditStatus = 'pending' | 'kept' | 'undone';
 export interface EditRecord {
   /** Monotonic per-session integer id — short and typeable for `diff <id>` / `undo <id>`. */
   id: number;
+  /**
+   * Collision-proof per-record token (pid + hrtime + counter), decoupled from the small display `id`.
+   * Two capture processes that both fail the best-effort append lock can append the same display `id`;
+   * `uid` never collides, so readLog can deterministically reconcile a duplicate display id (§2.7).
+   * `appendLog` stamps one on every new record. Optional because records written before this field
+   * existed (and synthetic/derived records) lack it — reconciliation keys on append order, so a missing
+   * `uid` is tolerated.
+   */
+  uid?: string;
   /** ms epoch when the edit was committed (PostToolUse). */
   ts: number;
   /** Edit | Write | MultiEdit | NotebookEdit */
@@ -280,6 +289,8 @@ export function readLog(sessionId: string): EditRecord[] {
   if (!fs.existsSync(p)) return [];
   const records: EditRecord[] = [];
   const byId = new Map<number, EditRecord>();
+  const usedIds = new Set<number>();
+  let maxId = 0;
   for (const line of fs.readFileSync(p, 'utf8').split('\n')) {
     const t = line.trim();
     if (!t) continue;
@@ -299,6 +310,14 @@ export function readLog(sessionId: string): EditRecord[] {
       continue;
     }
     const rec = obj as EditRecord;
+    // §2.7 reconciliation: a residual unlocked append (two writers that both failed the lock) can put
+    // two records on disk with the SAME display id. Deterministically re-key the LATER one (append
+    // order) to a fresh id above every id seen so far, so byId / the status fold / undo targeting each
+    // resolve to a distinct record. Depends only on records at-or-before this one, so effective ids are
+    // stable across future appends (and `nextId`, reading this reconciled log, won't re-collide).
+    if (usedIds.has(rec.id)) rec.id = maxId + 1;
+    usedIds.add(rec.id);
+    if (rec.id > maxId) maxId = rec.id;
     records.push(rec);
     byId.set(rec.id, rec);
   }
@@ -331,17 +350,41 @@ export function readSkips(sessionId: string): SkipOp[] {
   return out;
 }
 
-/** Next monotonic id = max existing id + 1 (safe: hooks run serially within a session). */
+/**
+ * Next display id = max existing (reconciled) id + 1. `appendLog` calls this INSIDE the append lock so
+ * two concurrent writers can't read the same max and collide (§2.7); reads the reconciled log, so a
+ * re-keyed duplicate id is counted too and a subsequent append can't re-collide with it.
+ */
 export function nextId(sessionId: string): number {
   const log = readLog(sessionId);
   return log.reduce((m, r) => Math.max(m, r.id), 0) + 1;
 }
 
-export function appendLog(sessionId: string, rec: EditRecord): void {
-  // Under the lock so an append can't land inside clearResolved's read→rewrite→rename window.
-  withLock(sessionId, APPEND_LOCK_BUDGET_MS, () =>
-    fs.appendFileSync(logPath(sessionId), JSON.stringify(rec) + '\n', { mode: 0o600 })
-  );
+// Per-process monotonic counter for uid: guarantees distinct uids even if two calls read the same
+// hrtime tick within this process. pid distinguishes separate capture processes.
+let uidCounter = 0;
+
+/** Collision-proof per-record token: pid + high-res monotonic clock + a per-process counter. Two
+ *  separate capture processes that both fail the append lock still get distinct uids (§2.7). */
+function makeUid(): string {
+  return `${process.pid.toString(36)}-${process.hrtime.bigint().toString(36)}-${(uidCounter++).toString(36)}`;
+}
+
+/**
+ * Append a new edit record; returns it with the store-allocated `id` + `uid`.
+ *
+ * §2.7 single-writer hazard: the display `id` is allocated INSIDE the lock (folding `nextId` into the
+ * locked append) so a concurrent writer can't read the same max and collide — the common-case fix.
+ * The lock is best-effort (it can give up and proceed unlocked), so each record also carries a
+ * collision-proof `uid`; any residual unlocked duplicate display id is reconciled deterministically on
+ * read (readLog). The store owns id allocation: any `id` on the input object is ignored.
+ */
+export function appendLog(sessionId: string, rec: Omit<EditRecord, 'id' | 'uid'>): EditRecord {
+  return withLock(sessionId, APPEND_LOCK_BUDGET_MS, () => {
+    const full: EditRecord = { ...rec, id: nextId(sessionId), uid: makeUid() };
+    fs.appendFileSync(logPath(sessionId), JSON.stringify(full) + '\n', { mode: 0o600 });
+    return full;
+  });
 }
 
 /**
@@ -499,5 +542,28 @@ export function clearResolved(sessionId: string, under?: string): number {
     fs.renameSync(tmp, lp);
     gcSessionCore(sessionId); // reclaim blobs referenced only by the removed edits (already locked)
     return removed;
+  });
+}
+
+/**
+ * Drop resolved (kept + undone) edits whose id is in `ids`, keeping every pending one — the id-scoped
+ * counterpart to `clearResolved`, so a chapter's strict-span edit set (taskEditIds) can be cleared
+ * without touching edits outside it. Pending edits in the set, and every edit outside it, are preserved.
+ * Returns the count + the ids actually dropped.
+ */
+export function clearResolvedIds(sessionId: string, ids: number[]): { cleared: number; ids: number[] } {
+  const want = new Set(ids);
+  return withLock(sessionId, MAINT_LOCK_BUDGET_MS, () => {
+    const log = readLog(sessionId);
+    const dropped = log.filter((r) => want.has(r.id) && r.status !== 'pending').map((r) => r.id);
+    if (dropped.length === 0) return { cleared: 0, ids: [] };
+    const drop = new Set(dropped);
+    const keep = log.filter((r) => !drop.has(r.id));
+    const lp = logPath(sessionId);
+    const tmp = lp + '.tmp';
+    fs.writeFileSync(tmp, keep.length ? keep.map((r) => JSON.stringify(r)).join('\n') + '\n' : '', { mode: 0o600 });
+    fs.renameSync(tmp, lp);
+    gcSessionCore(sessionId); // reclaim blobs referenced only by the removed edits (already locked)
+    return { cleared: dropped.length, ids: dropped };
   });
 }

@@ -186,13 +186,59 @@ object ObservatoryCli {
         return if (r.ok) r.stdout else null
     }
 
-    /** The action timeline (every tool call, grouped by category) — `--all` shows the noisy categories too. */
-    fun actionsJson(session: String, workDir: String?, all: Boolean): String? {
+    /** The Observations view-model (0.8.0, Timeline folded in): recap + coalesced same-file ×N runs with
+     *  per-edit reasoning + next-steps. Always JSON; both editors render this payload thin. */
+    fun observationsJson(session: String, workDir: String?): String? {
         val args = buildList {
-            add("actions"); add("--session"); add(session); add("--json"); if (all) add("--all")
+            add("observations"); add("--session"); add(session)
+            workDir?.let { add("--root"); add(it) }
         }
         val r = run(args, workDir)
         return if (r.ok) r.stdout else null
+    }
+
+    /** `task-keep <taskId>` — accept every PENDING edit in a chapter's STRICT-span set. Returns the kept
+     *  count, or null if the CLI call failed (distinct from a genuine 0-pending chapter). */
+    fun taskKeep(session: String, taskId: String, workDir: String?): Int? {
+        val r = run(listOf("task-keep", taskId, "--session", session, "--json"), workDir)
+        return if (r.ok) parseInt(r.stdout, "kept") else null
+    }
+
+    data class TaskUndoResult(val undone: Int, val conflicts: Int, val total: Int)
+
+    /** `task-undo <taskId>` — revert every PENDING edit in a chapter's STRICT-span set, newest-first.
+     *  Writes to disk. Returns {undone, conflicts, total}, or null if the CLI call failed. */
+    fun taskUndo(session: String, taskId: String, workDir: String?): TaskUndoResult? {
+        val r = run(listOf("task-undo", taskId, "--session", session, "--json"), workDir)
+        if (!r.ok) return null
+        return try {
+            val o = JsonParser.parseString(r.stdout).asJsonObject
+            TaskUndoResult(o.get("undone").asInt, o.get("conflicts").asInt, o.get("total").asInt)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** `task-clear <taskId>` — drop the RESOLVED (kept/undone) edits of a chapter's STRICT-span set;
+     *  pending edits are preserved. Returns the cleared count, or null if the CLI call failed. */
+    fun taskClear(session: String, taskId: String, workDir: String?): Int? {
+        val r = run(listOf("task-clear", taskId, "--session", session, "--json"), workDir)
+        return if (r.ok) parseInt(r.stdout, "cleared") else null
+    }
+
+    data class TaskClearCompletedResult(val cleared: Int, val chapters: Int)
+
+    /** `task-clear --completed` — clear the resolved edits of EVERY settled chapter (all edits kept).
+     *  Returns {cleared, chapters}, or null if the CLI call failed. */
+    fun taskClearCompleted(session: String, workDir: String?): TaskClearCompletedResult? {
+        val r = run(listOf("task-clear", "--completed", "--session", session, "--json"), workDir)
+        if (!r.ok) return null
+        return try {
+            val o = JsonParser.parseString(r.stdout).asJsonObject
+            TaskClearCompletedResult(o.get("cleared").asInt, o.getAsJsonArray("chapters")?.size() ?: 0)
+        } catch (_: Exception) {
+            null
+        }
     }
 
     /** The folder→file→class→edit view-model (with exact deltas) — the single source both editors render. */
@@ -217,6 +263,43 @@ object ObservatoryCli {
         }
         val r = run(args, workDir)
         return if (r.ok) r.stdout else null
+    }
+
+    /** The multi-agent view: one row per running agent across every worktree (live phase, sparkline,
+     *  ±diff, risk), nested subagents, and cross-agent file collisions. `--root` keys the repo-scoped
+     *  fleet. Everything is aggregated in core — the panel only paints. */
+    fun multitaskJson(workDir: String?): String? {
+        val args = buildList {
+            add("multitask"); add("--json")
+            workDir?.let { add("--root"); add(it) }
+        }
+        val r = run(args, workDir)
+        return if (r.ok) r.stdout else null
+    }
+
+    /** Zero-token chat handoff: core assembles a ready-to-paste review prompt for an edit / subagent /
+     *  task / action (or the whole session), which the caller copies to the clipboard. NEVER calls a
+     *  model — this only reads the store + transcripts. Returns the prompt, or null if the CLI failed. */
+    fun chatContextJson(session: String, workDir: String?, ref: ChatRef): String? {
+        val args = buildList {
+            add("chat-context"); add("--json")
+            when (ref) {
+                is ChatRef.Edit -> { add("--edit"); add(ref.id.toString()) }
+                is ChatRef.Agent -> { add("--agent"); add(ref.agentId) }
+                is ChatRef.Task -> { add("--task"); add(ref.taskId) }
+                is ChatRef.ToolUse -> { add("--tool-use-id"); add(ref.toolUseId) }
+                ChatRef.Session -> {} // no ref flag → session-level framing
+            }
+            add("--session"); add(session)
+            workDir?.let { add("--root"); add(it) }
+        }
+        val r = run(args, workDir)
+        if (!r.ok) return null
+        return try {
+            JsonParser.parseString(r.stdout).asJsonObject.get("prompt")?.takeIf { !it.isJsonNull }?.asString
+        } catch (_: Exception) {
+            null
+        }
     }
 
     /** Portable markdown review summary (kept/reverted per file) for export. */
@@ -270,4 +353,14 @@ object ObservatoryCli {
     } catch (_: Exception) {
         0
     }
+}
+
+/** What a zero-token chat handoff is about — maps 1:1 to `chat-context`'s ref flags (§7). */
+sealed class ChatRef {
+    /** No ref flag → a whole-session framing prompt. */
+    object Session : ChatRef()
+    data class Edit(val id: Int) : ChatRef()          // --edit <n>
+    data class Agent(val agentId: String) : ChatRef() // --agent <id> (a subagent)
+    data class Task(val taskId: String) : ChatRef()   // --task <id>
+    data class ToolUse(val toolUseId: String) : ChatRef() // --tool-use-id <id>
 }

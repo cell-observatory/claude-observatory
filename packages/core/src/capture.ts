@@ -30,7 +30,6 @@ import {
   deleteBashManifest,
   appendLog,
   appendSkip,
-  nextId,
 } from './store';
 
 const MAX_BYTES = 5 * 1024 * 1024; // skip files larger than 5 MB
@@ -60,7 +59,7 @@ function isSecretName(name: string): boolean {
   );
 }
 
-interface HookPayload {
+export interface HookPayload {
   session_id?: string;
   cwd?: string;
   tool_name?: string;
@@ -123,7 +122,14 @@ function handlePost(session: string, payload: HookPayload): void {
   if (!file) return;
   const key = pathKey(file);
   const staging = readStaging(session, key);
-  if (!staging) return; // Pre skipped or didn't run — nothing reliable to commit
+  if (!staging) {
+    // A real edit to a captured tool, but there's no before-snapshot: Pre skipped it (the file was
+    // binary/oversized AT PRE-TIME) or PreToolUse never ran. We can't reconstruct the before, so the edit
+    // isn't recorded — but it DID happen. Leave a marker (mirroring the post-time-skip branch below) so
+    // `status` surfaces the gap instead of swallowing it silently. (no-silent-fail)
+    appendSkip(session, file, 'edit not captured — no before-snapshot (binary/oversized at pre-time, or PreToolUse did not run)');
+    return;
+  }
 
   const s = snapshot(file);
   if (s.kind === 'skip') {
@@ -142,7 +148,6 @@ function handlePost(session: string, payload: HookPayload): void {
   }
 
   appendLog(session, {
-    id: nextId(session),
     ts: Date.now(),
     tool: staging.tool,
     file,
@@ -216,27 +221,25 @@ function handlePostBash(session: string, payload: HookPayload): void {
     const afterBlob = writeBlob(session, s.content);
     const beforeBlob = Object.prototype.hasOwnProperty.call(before, abs) ? before[abs] : null;
     if (beforeBlob === afterBlob) return; // unchanged — no edit
-    appendLog(session, { id: nextId(session), ts: Date.now(), tool: 'Bash', file: abs, beforeBlob, afterBlob, status: 'pending' });
+    appendLog(session, { ts: Date.now(), tool: 'Bash', file: abs, beforeBlob, afterBlob, status: 'pending' });
   });
   // Deletions: present before, gone now. Only trust this when the post-walk wasn't truncated.
   if (ok) {
     for (const abs of Object.keys(before)) {
       if (seen.has(abs) || before[abs] === null) continue;
-      appendLog(session, { id: nextId(session), ts: Date.now(), tool: 'Bash', file: abs, beforeBlob: before[abs], afterBlob: null, status: 'pending' });
+      appendLog(session, { ts: Date.now(), tool: 'Bash', file: abs, beforeBlob: before[abs], afterBlob: null, status: 'pending' });
     }
   }
   deleteBashManifest(session);
 }
 
 /**
- * Read the hook payload from stdin and record the edit. Never throws, never writes stdout.
- * The caller is responsible for exit(0).
+ * Record one hook payload — the EXACT logic the Pre/PostToolUse hooks run (staging, blobs, appendLog),
+ * exposed so the demo simulator can drive the real pipeline in-process (its keep/undo/task ops then
+ * work on genuinely captured edits). Never throws, never writes stdout.
  */
-export function runCapture(): void {
+export function handleHookPayload(payload: HookPayload): void {
   try {
-    const raw = fs.readFileSync(0, 'utf8');
-    if (!raw.trim()) return;
-    const payload = JSON.parse(raw) as HookPayload;
     const session = payload.session_id;
     if (!session) return;
     const isBash = payload.tool_name === 'Bash';
@@ -248,6 +251,20 @@ export function runCapture(): void {
       if (isBash) handlePostBash(session, payload);
       else handlePost(session, payload);
     }
+  } catch {
+    // Silent by design: capture must never block, slow, or perturb an edit.
+  }
+}
+
+/**
+ * Read the hook payload from stdin and record the edit. Never throws, never writes stdout.
+ * The caller is responsible for exit(0).
+ */
+export function runCapture(): void {
+  try {
+    const raw = fs.readFileSync(0, 'utf8');
+    if (!raw.trim()) return;
+    handleHookPayload(JSON.parse(raw) as HookPayload);
   } catch {
     // Silent by design: capture must never block, slow, or perturb an edit.
   }

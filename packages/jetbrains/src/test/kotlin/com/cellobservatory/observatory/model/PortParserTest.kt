@@ -1,6 +1,7 @@
 package com.cellobservatory.observatory.model
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -212,6 +213,10 @@ class PortParserTest {
         assertEquals(2, m.chapters[0].edits)
         assertTrue(m.chapters[0].agent)
         assertEquals("todo", m.chapters[1].status) // a planned to-do with no attributed edits
+        // Version skew: this payload predates chapter.taskId (0.8.0 totality) — there chapter.id WAS the
+        // strict taskId, so the parser falls back to it (destructive ops keep working against an old CLI).
+        assertEquals("ch0", m.chapters[0].taskId)
+        assertFalse(m.chapters[0].synthetic)
 
         val f = m.files[0]
         assertEquals("packages/core/src/a.ts", f.rel)
@@ -235,7 +240,283 @@ class PortParserTest {
         // back-compat: an older CLI without files/modules parses to empty lists, not a crash
         val legacy = ChangeMapParser.parse("""{"summary":{"session":"s"},"edits":[],"chapters":[]}""")!!
         assertTrue(legacy.files.isEmpty() && legacy.modules.isEmpty())
+        // a 0.7.x payload predates the 0.8.0 attribution keys — they default empty, not a crash
+        assertTrue(legacy.tasks.isEmpty() && legacy.agents.isEmpty() && legacy.rollupByTask.isEmpty())
+        assertTrue(legacy.workflows.isEmpty() && legacy.rollupByWorkflow.isEmpty()) // 0.8.0 r2 keys default empty
+        assertNull(legacy.unassigned)
         // garbage in -> null out (the panel then just renders empty)
         assertNull(ChangeMapParser.parse("not json"))
+    }
+
+    @Test
+    fun `ChangeMapParser extracts the 0_8_0 attribution keys tasks rollups agents and unassigned`() {
+        // Mirrors the 0.8.0 `changemap --json`: stable-id tasks, three-level rollups (incl. the null-id
+        // unassigned bucket), and per-agent tab builds (each with its own tasks + rollupByTask). The
+        // Overview ribbon JOINS agents[i].tasks to agents[i].rollupByTask by taskId — pin every field.
+        val json = """
+            {"summary":{"session":"s1","units":5,"pending":3,"kept":2,"undone":0,"added":50,"removed":4,
+                        "errors":0,"subagents":1,"fleet":2,"egress":0},
+             "edits":[],
+             "chapters":[{"id":"7aabc656686a","taskId":"7aabc656686a","synthetic":false,"index":0,"title":"Wire the CLI",
+                          "status":"wip","startTs":1000,"endTs":0,"edits":3,"added":30,"removed":2,"pending":1,"kept":2,"undone":0,"agent":false},
+                         {"id":"ch:session","taskId":null,"synthetic":true,"index":1,"title":"Session work",
+                          "status":"wip","startTs":0,"endTs":0,"edits":2,"added":20,"removed":2,"pending":2,"kept":0,"undone":0,"agent":false}],
+             "files":[],"modules":[],
+             "tasks":[{"taskId":"7aabc656686a","content":"Wire the CLI","firstTs":1000,"lastTs":2000},
+                      {"taskId":"92b86356a7a3","content":"Ship it","firstTs":2000,"lastTs":3000}],
+             "rollupByTask":[{"taskId":"7aabc656686a","edits":3,"added":30,"removed":2,"pending":1,"kept":2,"undone":0},
+                             {"taskId":null,"edits":2,"added":20,"removed":2,"pending":2,"kept":0,"undone":0}],
+             "rollupBySubagent":[{"subagentId":"a1","edits":1,"added":10,"removed":0,"pending":1,"kept":0,"undone":0},
+                                 {"subagentId":null,"edits":4,"added":40,"removed":4,"pending":2,"kept":2,"undone":0}],
+             "rollupByAgent":[{"session":"s1","edits":5,"added":50,"removed":4,"pending":3,"kept":2,"undone":0,"files":3}],
+             "rollupByWorkflow":[{"workflowId":"wf_1","edits":3,"added":30,"removed":2,"pending":1,"kept":2,"undone":0},
+                                 {"workflowId":null,"edits":2,"added":20,"removed":2,"pending":2,"kept":0,"undone":0}],
+             "workflows":[{"id":"wf_1","name":"obs-round2","running":true,
+                "rollup":{"edits":3,"added":30,"removed":2,"pending":1,"kept":2,"undone":0},
+                "files":[{"rel":"pkg/cli/a.ts","module":"pkg/cli","moduleLabel":"cli","file":"a.ts","churn":30,"cnt":3,
+                          "added":30,"removed":2,"kept":2,"pending":1,"undone":0,"status":"pending","maxId":9,
+                          "classes":[],"chapters":[],"agent":false,"risk":null,"reason":null}],
+                "taskIds":["7aabc656686a"],
+                "chapters":[{"id":"ch:session","taskId":null,"synthetic":true,"index":0,"title":"Session work",
+                             "status":"wip","startTs":0,"endTs":0,"edits":3,"added":30,"removed":2,"pending":1,"kept":2,"undone":0,"agent":false}]}],
+             "unassigned":{"taskId":null,"edits":2,"added":20,"removed":2,"pending":2,"kept":0,"undone":0},
+             "agents":[
+               {"session":"s1","worktree":"/w/main","gitBranch":"main","phase":"working",
+                "summary":{"session":"s1","units":5,"pending":3,"kept":2,"undone":0,"added":50,"removed":4,
+                           "errors":0,"subagents":1,"fleet":2,"egress":0},
+                "chapters":[],"modules":[{"module":"pkg/cli","label":"cli","churn":30,"cnt":3,"added":30,"removed":2,
+                                          "kept":2,"pending":1,"undone":0,"status":"pending","files":1,"chapters":[]}],
+                "files":[{"rel":"pkg/cli/a.ts","module":"pkg/cli","moduleLabel":"cli","file":"a.ts","churn":30,"cnt":3,
+                          "added":30,"removed":2,"kept":2,"pending":1,"undone":0,"status":"pending","maxId":9,
+                          "classes":[],"chapters":[],"agent":false,"risk":null,"reason":null}],
+                "tasks":[{"taskId":"7aabc656686a","content":"Wire the CLI","firstTs":1000,"lastTs":2000}],
+                "rollupByTask":[{"taskId":"7aabc656686a","edits":3,"added":30,"removed":2,"pending":1,"kept":2,"undone":0},
+                                {"taskId":null,"edits":2,"added":20,"removed":2,"pending":2,"kept":0,"undone":0}],
+                "rollupBySubagent":[{"subagentId":null,"edits":5,"added":50,"removed":4,"pending":3,"kept":2,"undone":0}]},
+               {"session":"s2","worktree":"/w/feat","gitBranch":"feat/x","phase":"idle",
+                "summary":{"session":"s2","units":0},"chapters":[],"modules":[],"files":[],"tasks":[],
+                "rollupByTask":[],"rollupBySubagent":[]}
+             ]}
+        """.trimIndent()
+        val m = ChangeMapParser.parse(json)!!
+
+        // Top-level stable-id tasks + the three parallel rollups.
+        assertEquals(2, m.tasks.size)
+        assertEquals("7aabc656686a", m.tasks[0].taskId)
+        assertEquals("Wire the CLI", m.tasks[0].content)
+        assertEquals(1000L, m.tasks[0].firstTs)
+        // rollupByTask carries the null-id (unassigned) bucket alongside real tasks.
+        assertEquals(30, m.rollupByTask.first { it.taskId == "7aabc656686a" }.added)
+        assertNull(m.rollupByTask.first { it.taskId == null }.taskId)
+        assertEquals(2, m.rollupByTask.first { it.taskId == null }.edits)
+        assertEquals(1, m.rollupBySubagent.first { it.subagentId == "a1" }.edits)
+        assertNull(m.rollupBySubagent.first { it.subagentId == null }.subagentId)
+        assertEquals("s1", m.rollupByAgent[0].session)
+        assertEquals(3, m.rollupByAgent[0].files)
+        // The explicit session-wide unassigned bucket.
+        assertEquals(2, m.unassigned?.edits)
+        assertEquals(20, m.unassigned?.added)
+
+        // 0.8.0 r2: per-workflow rollup (incl. the null-id no-workflow bucket) + the per-workflow Overview
+        // tab (id/name/running + its rollup, touched files, and contributed taskIds).
+        assertEquals(3, m.rollupByWorkflow.first { it.workflowId == "wf_1" }.edits)
+        assertNull(m.rollupByWorkflow.first { it.workflowId == null }.workflowId)
+        assertEquals(2, m.rollupByWorkflow.first { it.workflowId == null }.edits)
+        assertEquals(1, m.workflows.size)
+        val wf = m.workflows[0]
+        assertEquals("wf_1", wf.id)
+        assertEquals("obs-round2", wf.name)
+        assertTrue(wf.running)
+        assertEquals(3, wf.rollup.edits)
+        assertEquals(30, wf.rollup.added)
+        assertEquals("pkg/cli/a.ts", wf.files[0].rel) // its churn-ranked touched files (a per-workflow rollupFiles)
+        assertEquals(listOf("7aabc656686a"), wf.taskIds) // the tasks this workflow contributed to
+
+        // 0.8.0 totality: chapters carry the strict taskId (null = display-only) + the synthetic flag,
+        // and a workflow ships its OWN chapter rollup (rendered as-is — no residual math in the plugin).
+        assertEquals("7aabc656686a", m.chapters[0].taskId)
+        assertFalse(m.chapters[0].synthetic)
+        assertNull(m.chapters[1].taskId) // explicit JSON null stays null — never falls back to id
+        assertTrue(m.chapters[1].synthetic)
+        assertEquals("Session work", m.chapters[1].title)
+        assertEquals(1, wf.chapters.size)
+        assertTrue(wf.chapters[0].synthetic)
+        assertEquals(3, wf.chapters[0].edits) // scoped to the RUN's edits, not the session totals
+
+        // Per-agent tabs: each is a full build with top-level session/worktree/gitBranch/phase.
+        assertEquals(2, m.agents.size)
+        val a0 = m.agents[0]
+        assertEquals("s1", a0.session)
+        assertEquals("/w/main", a0.worktree)
+        assertEquals("main", a0.gitBranch)
+        assertEquals("working", a0.phase)
+        assertEquals(5, a0.summary?.units)
+        assertEquals("cli", a0.modules[0].label)
+        assertEquals("pkg/cli/a.ts", a0.files[0].rel)
+        // The ribbon JOIN: agents[0].tasks JOINED to agents[0].rollupByTask by taskId.
+        assertEquals(1, a0.tasks.size)
+        val roll = a0.rollupByTask.first { it.taskId == a0.tasks[0].taskId }
+        assertEquals(3, roll.edits)
+        assertEquals(1, roll.pending)
+        // ...and the agent's own unassigned bucket (null taskId) is present.
+        assertEquals(2, a0.rollupByTask.first { it.taskId == null }.edits)
+        // A second, idle agent with an empty build parses to a valid one-task-free tab.
+        val a1 = m.agents[1]
+        assertEquals("feat/x", a1.gitBranch)
+        assertTrue(a1.tasks.isEmpty() && a1.files.isEmpty())
+    }
+
+    @Test
+    fun `MultitaskParser extracts running agents, sparkline, subagents, and cross-agent collisions`() {
+        val json = """
+            {"agents":[
+               {"session":"s1","worktree":"/w/main","gitBranch":"main","self":true,"phase":"awaiting-permission",
+                "phaseConfidence":"heuristic","sparkline":[0,3,7,0,2],"todos":[{"content":"do X","status":"in_progress"}],
+                "subagents":[{"agentId":"a1","agentType":"Explore","description":"scan tests","phase":"working",
+                              "currentTask":"reading","todos":[{"content":"read","status":"in_progress"}],
+                              "edits":2,"added":12,"removed":1}],
+                "files":["/w/main/a.ts","/w/main/b.ts"],"diff":{"added":40,"removed":3},
+                "tokens":8000,"durationMs":120000,"risk":{"total":2,"high":1}},
+               {"session":"s2","worktree":"/w/feat","gitBranch":"feat/x","self":false,"phase":"idle",
+                "phaseConfidence":"heuristic","sparkline":[0,0,0,0,0],"todos":[],"subagents":[],
+                "files":["/w/feat/a.ts"],"diff":{"added":0,"removed":0},"risk":{"total":0,"high":0}}],
+             "collisions":[{"file":"/w/main/a.ts","agents":["s1","s2"],"anyPending":true}],
+             "worktrees":[{"worktree":"/w/main","gitBranch":"main","sessions":["s1"]},
+                          {"worktree":"/w/feat","gitBranch":"feat/x","sessions":["s2"]}],
+             "actions":{"groups":[
+                 {"category":"edit","label":"Edits","count":2,"errors":0,"actions":[
+                   {"ts":1500,"tool":"Edit","category":"edit","target":"/w/main/a.ts","ok":true,"isError":false,"editId":5,"reasoning":"tighten"}]},
+                 {"category":"exec","label":"Commands","count":1,"errors":0,"actions":[
+                   {"ts":1600,"tool":"Bash","category":"exec","target":"npm test","ok":true,"isError":false,"editId":null}]}],
+               "egress":[{"kind":"web","target":"api.example.com","scope":"remote","count":1}]},
+             "workflows":[{"id":"wf_1","name":"Editors R2","description":"ship the round-2 upgrade",
+                 "phases":["Implement","Verify"],
+                 "phaseGroups":[{"title":"Implement","done":2,"total":2},{"title":"Verify","done":1,"total":2}],
+                 "agents":[{"agentId":"imp1","label":"S11-vscode","phase":"Implement","agentType":"workflow-subagent","done":true,"tokens":500,"durationMs":30000,"edits":1,"added":3,"removed":0,"model":"Opus 4.8","sparkline":[1,0,2]},
+                           {"agentId":"ver2","label":"S22-jetbrains","phase":"Verify","agentType":null,"done":false,"tokens":100,"durationMs":5000,"edits":1}],
+                 "running":true,"agentCount":2,"tokens":1100,"durationMs":45000,"edits":3,"added":3,"removed":1,"sparkline":[5,0,2,4,1]}],
+             "summary":{"active":1,"conflicts":1}}
+        """.trimIndent()
+        val r = MultitaskParser.parse(json)!!
+        assertEquals(2, r.agents.size)
+        val a = r.agents[0]
+        assertEquals("s1", a.session)
+        assertTrue(a.self)
+        assertEquals("awaiting-permission", a.phase) // the needs-attention state must survive the port
+        assertEquals("heuristic", a.phaseConfidence)
+        assertEquals(listOf(0, 3, 7, 0, 2), a.sparkline)
+        assertEquals(40, a.added)
+        assertEquals(3, a.removed)
+        assertEquals(8000L, a.tokens) // 0.8.0 r3: the tokens/time metric the Fleet nav shows, like Workflows
+        assertEquals(120000L, a.durationMs)
+        assertEquals(2, a.riskTotal)
+        assertEquals(1, a.riskHigh)
+        assertEquals(1, a.todos.size)
+        // nested subagent with its own live phase + current task + ±
+        assertEquals(1, a.subagents.size)
+        val sub = a.subagents[0]
+        assertEquals("Explore", sub.agentType)
+        assertEquals("working", sub.phase)
+        assertEquals("reading", sub.currentTask)
+        assertEquals(12, sub.added)
+        assertEquals(1, sub.todos.size)
+        // collisions (uncapped) + worktrees (drives the TranscriptWatcher's bounded dir set) + summary
+        assertEquals(1, r.collisions.size)
+        assertEquals(listOf("s1", "s2"), r.collisions[0].agents)
+        assertTrue(r.collisions[0].anyPending)
+        assertEquals(listOf("/w/main", "/w/feat"), r.worktrees)
+        assertEquals(1, r.active)
+        assertEquals(1, r.conflicts)
+
+        // 0.8.0: the folded-in Actions section — the active session's curated groups + egress, rendered
+        // below the fleet (the fleet/subagent categories are dropped in core; not re-aggregated here).
+        assertEquals(2, r.actions?.groups?.size)
+        assertEquals("Edits", r.actions?.groups?.get(0)?.label)
+        assertEquals(5, r.actions?.groups?.get(0)?.actions?.get(0)?.editId) // links to a reviewable store record
+        assertEquals("Commands", r.actions?.groups?.get(1)?.label)
+        assertEquals("npm test", r.actions?.groups?.get(1)?.actions?.get(0)?.target)
+        assertEquals(1, r.actions?.egress?.size)
+        assertEquals("api.example.com", r.actions?.egress?.get(0)?.target)
+        assertEquals("remote", r.actions?.egress?.get(0)?.scope)
+
+        // 0.8.0 r2: workflow runs from the rich state file — informative description, per-phase progress
+        // (phaseGroups), and labeled agents carrying a REAL phase title. All aggregated in core.
+        assertEquals(1, r.workflows.size)
+        val wf = r.workflows[0]
+        assertEquals("Editors R2", wf.name)
+        assertEquals("ship the round-2 upgrade", wf.description)
+        assertEquals(listOf("Implement", "Verify"), wf.phases)
+        assertTrue(wf.running)
+        assertEquals(1100L, wf.tokens)
+        assertEquals(45000L, wf.durationMs)
+        assertEquals(listOf(5, 0, 2, 4, 1), wf.sparkline) // the fleet-style activity sparkline survives the port
+        assertEquals(2, wf.phaseGroups.size)
+        assertEquals("Implement", wf.phaseGroups[0].title)
+        assertEquals(2, wf.phaseGroups[0].done)
+        assertEquals(2, wf.phaseGroups[0].total)
+        assertEquals(1, wf.phaseGroups[1].done) // Verify: one agent still running
+        assertEquals(2, wf.phaseGroups[1].total)
+        val wa = wf.agents[0]
+        assertEquals("S11-vscode", wa.label)
+        assertEquals("Implement", wa.phase) // a REAL phase title, not the journal hash
+        assertEquals("workflow-subagent", wa.agentType)
+        assertEquals(500L, wa.tokens)
+        assertEquals(1, wa.edits)
+        assertTrue(wa.done)
+        // per-agent "extras" (0.8.0): ±diff, model, and the per-agent activity sparkline survive the port
+        assertEquals(3, wa.added)
+        assertEquals(0, wa.removed)
+        assertEquals("Opus 4.8", wa.model)
+        assertEquals(listOf(1, 0, 2), wa.sparkline)
+
+        // back-compat / empty: a payload with no agents parses to empty, not a crash
+        val empty = MultitaskParser.parse("""{"agents":[],"collisions":[],"worktrees":[],"summary":{"active":0,"conflicts":0}}""")!!
+        assertTrue(empty.agents.isEmpty() && empty.collisions.isEmpty())
+        assertNull(empty.actions) // an older CLI without the actions section -> null, not a crash
+        assertNull(MultitaskParser.parse("not json"))
+    }
+
+    @Test
+    fun `ObservationsParser extracts recap, coalesced runs with per-edit reasoning, and next steps`() {
+        // Mirrors `observations --json` (0.8.0, Timeline folded into Observations): a recap, the edit
+        // timeline as coalesced same-file ×N runs (most-recent first) each edit carrying its reasoning,
+        // and the still-open next steps. The panel renders this payload thin — pin every field.
+        val json = """
+            {"recap":"Wire the CLI + ship",
+             "runs":[
+               {"file":"/w/src/a.ts","rel":"src/a.ts","count":2,"added":30,"removed":4,"status":"pending","edits":[
+                  {"id":3,"ts":3000,"added":20,"removed":3,"status":"pending","reasoning":"tighten the loop"},
+                  {"id":5,"ts":3200,"added":10,"removed":1,"status":"kept","reasoning":null}]},
+               {"file":"/w/docs/x.md","rel":"docs/x.md","count":1,"added":8,"removed":0,"status":"kept","edits":[
+                  {"id":1,"ts":1000,"added":8,"removed":0,"status":"kept","reasoning":"document it"}]}],
+             "nextSteps":["run the tests","update the changelog"]}
+        """.trimIndent()
+        val o = ObservationsParser.parse(json)!!
+        assertEquals("Wire the CLI + ship", o.recap)
+        assertEquals(2, o.runs.size)
+        val run = o.runs[0]
+        assertEquals("/w/src/a.ts", run.file)
+        assertEquals("src/a.ts", run.rel)
+        assertEquals(2, run.count) // adjacent same-file edits coalesced into a ×N run
+        assertEquals(30, run.added)
+        assertEquals(4, run.removed)
+        assertEquals("pending", run.status) // worst-unreviewed-wins rollup, computed in core
+        assertEquals(2, run.edits.size)
+        assertEquals(3, run.edits[0].id)
+        assertEquals("tighten the loop", run.edits[0].reasoning) // Claude's own words, inline per edit
+        assertEquals("kept", run.edits[1].status)
+        assertNull(run.edits[1].reasoning) // JSON null -> null (uncorrelated edit)
+        // A lone edit is still its own run (count 1) — the panel renders it as a leaf.
+        assertEquals(1, o.runs[1].count)
+        assertEquals("kept", o.runs[1].status)
+        assertEquals(listOf("run the tests", "update the changelog"), o.nextSteps)
+
+        // back-compat / empty: a payload with no runs/nextSteps parses to empty, not a crash
+        val bare = ObservationsParser.parse("""{"recap":"","runs":[],"nextSteps":[]}""")!!
+        assertEquals("", bare.recap)
+        assertTrue(bare.runs.isEmpty() && bare.nextSteps.isEmpty())
+        // absent recap -> "" (not a crash); garbage -> null (the panel then renders empty)
+        assertEquals("", ObservationsParser.parse("""{"runs":[]}""")!!.recap)
+        assertNull(ObservationsParser.parse("not json"))
     }
 }
