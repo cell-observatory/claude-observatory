@@ -36,7 +36,8 @@ private class ObservatoryActionsWidget(private val project: Project) : CustomSta
     private val navBar = ReviewNavBar(project) { refreshUi() }
 
     private val toolbar = ActionManager.getInstance()
-        .createActionToolbar("ClaudeObservatoryNavBar", navBar.buildGroup(), true)
+        // sessionClear: the status bar carries the session-wide Clear Resolved (VS Code status-bar parity).
+        .createActionToolbar("ClaudeObservatoryNavBar", navBar.buildGroup(sessionClear = true), true)
         .apply {
             isReservePlaceAutoPopupIcon = false
             targetComponent = component

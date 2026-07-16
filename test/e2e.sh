@@ -456,7 +456,7 @@ DMT=$( ( cd "$DEMOWS" && node "$CLI" multitask --session "$DSESS" --json ) )
 ok "demo multitask: the demo agent + its subagent + the workflow"      "printf '%s' \"\$DMT\" | jq -e '(.agents|length)>=1 and (.agents[0].subagents|length)==1 and (.workflows[0].id==\"wf_demo\")' >/dev/null"
 ok "demo multitask: subagent rows carry phaseConfidence (0.8.0)"       "printf '%s' \"\$DMT\" | jq -e '.agents[0].subagents[0] | has(\"phaseConfidence\")' >/dev/null"
 DTL=$( ( cd "$DEMOWS" && node "$CLI" tasklog --session "$DSESS" ) )
-ok "demo tasklog: one row per named task"                              "printf '%s' \"\$DTL\" | jq -e 'length==3 and ([.[]|select(.content==\"Validate user input\")]|length)==1' >/dev/null"
+ok "demo tasklog: one row per named task"                              "printf '%s' \"\$DTL\" | jq -e 'length==3 and ([.[]|select(.content==\"Validate the training dataset\")]|length)==1' >/dev/null"
 DOBS=$( ( cd "$DEMOWS" && node "$CLI" observations --session "$DSESS" ) )
 ok "demo observations: runs + reasoning + next steps"                  "printf '%s' \"\$DOBS\" | jq -e '(.runs|length)>=4 and ([.runs[].edits[]|select(.reasoning!=null)]|length)>=3 and (.nextSteps|length)>=1' >/dev/null"
 # No-residue lifecycle: accepting everything auto-clears a demo session's store…

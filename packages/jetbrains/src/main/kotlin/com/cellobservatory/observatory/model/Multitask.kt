@@ -64,8 +64,11 @@ data class MtActions(val groups: List<ActionGroup>, val egress: List<EgressChann
 /** One agent inside a Workflow run, with its own tokens/time/edits mined from its transcript. */
 data class WorkflowAgent(
     val agentId: String,
-    /** The runner's per-agent label (e.g. 'S11-vscode') from the rich state file; null in the journal fallback. */
+    /** The runner's per-agent label (e.g. 'S11-vscode') from the rich state file; on a LIVE run, core
+     *  derives one from the agent's prompt instead (marked by [labelDerived]); null when neither. */
     val label: String?,
+    /** True when [label] is heuristic (prompt-derived) — rendered with a trailing '~', never asserted. */
+    val labelDerived: Boolean,
     /** The agent's phase — a REAL phase title (e.g. 'Implement') from the state file, else the journal key; null when neither. */
     val phase: String?,
     val agentType: String?,
@@ -157,6 +160,7 @@ object MultitaskParser {
             WorkflowAgent(
                 agentId = str(ao, "agentId") ?: "",
                 label = str(ao, "label"),
+                labelDerived = bool(ao, "labelDerived"),
                 phase = str(ao, "phase"),
                 agentType = str(ao, "agentType"),
                 done = bool(ao, "done"),

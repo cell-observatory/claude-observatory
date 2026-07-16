@@ -27,6 +27,7 @@ import com.intellij.openapi.actionSystem.DefaultActionGroup
 import com.intellij.openapi.actionSystem.Separator
 import com.intellij.openapi.actionSystem.ToggleAction
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.DumbAware
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.SimpleToolWindowPanel
@@ -187,9 +188,16 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         }
         setContent(split)
 
-        // Top navbar — the same session selector + review actions as the Observations toolbar, then the
-        // Overview-specific fleet/workflow filters.
+        // Top navbar — VS Code Overview toolbar order (parity): session · Active only | the step-through
+        // review nav bar | bulk Accept/Revert/Clear · Refresh | the JetBrains-only fleet filters last.
         val group = DefaultActionGroup(
+            action("Switch Session", AllIcons.Vcs.Branch) { ReviewOps.chooseSession(project, fleetTree) },
+            activeOnlyToggle(),
+            Separator.getInstance(),
+            // The compact step-through review nav bar (File/Diff axes + counters, Keep/Undo, Accept/Reject/
+            // Clear File, Spotlight, Search) — the same controls the status-bar nav bar shows.
+            reviewNavBar.buildGroup(),
+            Separator.getInstance(),
             // Bulk actions RETARGET to the picked ribbon chapter when one is selected (task-keep/undo/clear
             // on chapter.id), else run session-wide; the presentation text reflects the scope.
             bulkAction("Accept All Edits", Icons.CheckAll, { "Accept All in “$it”" },
@@ -206,15 +214,8 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
                     }
                 },
                 { p -> ReviewOps.clearTask(project, p.session, p.id, p.title) }),
-            action("Switch Session", AllIcons.Vcs.Branch) { ReviewOps.chooseSession(project, fleetTree) },
-            Separator.getInstance(),
-            // The compact step-through review nav bar (File/Diff axes + counters, Keep/Undo, Accept/Reject
-            // File, Clear resolved, Spotlight, Search) — the same controls the status-bar nav bar shows.
-            reviewNavBar.buildGroup(),
-            Separator.getInstance(),
             action("Refresh", AllIcons.Actions.Refresh) { rebuild(force = true) },
             Separator.getInstance(),
-            activeOnlyToggle(),
             clearCompletedAction(),
             showHiddenAction(),
             action("Clear Reviewed Edits in Completed Chapters", AllIcons.Vcs.Remove) {
@@ -397,7 +398,8 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
      *  model · tokens · time · edits — the same "extras" the run header carries, per agent. */
     private fun agentLine(a: WorkflowAgent): String {
         val d = if (a.done) "●" else "○"
-        val who = a.label ?: "${a.agentType ?: "agent"} ${a.agentId.take(8)}"
+        // A '~' marks a prompt-derived (heuristic) label on a live run — same convention as phases.
+        val who = a.label?.let { it + if (a.labelDerived) "~" else "" } ?: "${a.agentType ?: "agent"} ${a.agentId.take(8)}"
         val spark = sparkline(a.sparkline).let { if (it.isNotBlank()) "  $it" else "" }
         val diff = if (a.added > 0 || a.removed > 0) "+${a.added} -${a.removed} · " else ""
         val mdl = if (a.model.isNotBlank()) "${a.model} · " else ""
@@ -443,12 +445,18 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
 
     private fun renderDetail() {
         detailHost.removeAll()
-        val m = map
-        val td = if (m == null) null else (tabDataFor(selected, m) ?: tabDataFor(NavSel.Main, m))
-        if (td == null) {
-            detailHost.add(emptyLabel("No edits in this session yet — this fills in as Claude edits files"), BorderLayout.CENTER)
-        } else {
-            detailHost.add(AgentDetail(td), BorderLayout.CENTER)
+        try {
+            val m = map
+            val td = if (m == null) null else (tabDataFor(selected, m) ?: tabDataFor(NavSel.Main, m))
+            if (td == null) {
+                detailHost.add(emptyLabel("No edits in this session yet — this fills in as Claude edits files"), BorderLayout.CENTER)
+            } else {
+                detailHost.add(AgentDetail(td), BorderLayout.CENTER)
+            }
+        } catch (t: Throwable) {
+            // Never leave the detail blank — a paint failure must be visible here, not only in idea.log.
+            Logger.getInstance(ChangeMapPanel::class.java).warn("Overview detail failed to render", t)
+            detailHost.add(emptyLabel("Overview detail failed to render: ${t.message ?: t.javaClass.simpleName} — see idea.log"), BorderLayout.CENTER)
         }
         detailHost.revalidate()
         detailHost.repaint()
@@ -715,8 +723,11 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         private var ribOpen = false
         private val strip = StripBar()
         private val listModel = DefaultListModel<ChangeMapFile>()
+        // Held directly — JBList wraps the assigned renderer (ExpandedItemListCellRendererWrapper), so
+        // reading list.cellRenderer back would not return this instance.
+        private val ledgerRenderer = LedgerRenderer()
         private val list = JBList(listModel).apply {
-            cellRenderer = LedgerRenderer()
+            cellRenderer = ledgerRenderer
             emptyText.text = "No edits attributed to this agent yet"
         }
         private val readout = JBLabel().apply { font = JBUI.Fonts.miniFont(); foreground = UIUtil.getContextHelpForeground() }
@@ -784,7 +795,7 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             val shown = data.files.filter { modFilter == null || it.moduleLabel == modFilter }
             listModel.clear()
             val max = shown.maxOfOrNull { maxOf(1, it.churn) } ?: 1
-            (list.cellRenderer as LedgerRenderer).configure(max.coerceAtLeast(1))
+            ledgerRenderer.configure(max.coerceAtLeast(1))
             shown.forEach { listModel.addElement(it) }
 
             readout.text = modFilter?.let { mf ->

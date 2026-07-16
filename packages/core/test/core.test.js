@@ -2517,9 +2517,62 @@ test('workflows: a RUNNING run whose journal keys are per-agent HASHES shows NO 
   assert.deepEqual(w.phaseGroups, [], 'a hash journal key is NOT a phase — no phase groups until the state file lands');
   for (const a of w.agents) {
     assert.equal(a.phase, null, 'agent phase is null (the hash key is ignored, not used as a phase)');
-    assert.equal(a.label, null, 'no per-agent label on disk while running (renders as agentType + short id)');
+    assert.equal(a.label, null, 'no label derivable (assistant-only transcript — a prompt line is required)');
+    assert.equal(a.labelDerived, false, 'labelDerived stays false when nothing was derived');
     assert.equal(a.agentType, 'general-purpose', 'agentType still read from the sidecar');
   }
+});
+
+test('workflows: LIVE runs derive per-agent labels from the first distinguishing prompt line (hash-key journal, no state file) — marked labelDerived (0.8.1)', () => {
+  // Newer runtimes journal only {type, key: "v2:<hash>", agentId} — no label/phaseTitle — so a running
+  // fan-out used to render as "workflow-subagent <id>" rows. The agents' prompts share their preamble
+  // and diverge at the task line: that first unique line IS the live label (heuristic, hence the flag).
+  freshHome();
+  const S = 'wflive';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), '');
+  const wfDir = path.join(proj, S, 'subagents', 'workflows', 'wf_live1');
+  fs.mkdirSync(wfDir, { recursive: true });
+  const PREAMBLE = 'Repo rules: do not commit, do not touch git — shared preamble every sibling carries.';
+  const agents = [
+    { id: 'a111aaaaaaaaaaaaa', task: 'Your job: convert the core demo simulator to the Python canon.' },
+    { id: 'a222bbbbbbbbbbbbb', task: 'Your job: convert README.md and docs/DEMO.md to the Python canon.' },
+  ];
+  fs.writeFileSync(
+    path.join(wfDir, 'journal.jsonl'),
+    agents.map((a, i) => JSON.stringify({ type: 'started', key: `v2:${String(i).repeat(64)}`, agentId: a.id })).join('\n')
+  );
+  for (const a of agents) {
+    fs.writeFileSync(
+      path.join(wfDir, `agent-${a.id}.jsonl`),
+      [
+        { type: 'user', timestamp: '2026-07-16T10:00:00.000Z', message: { role: 'user', content: PREAMBLE + '\n\n' + a.task } },
+        { timestamp: '2026-07-16T10:00:05.000Z', message: { role: 'assistant', id: 'm' + a.id, usage: { input_tokens: 10, output_tokens: 10 }, content: [{ type: 'text', text: 'starting the conversion' }] } },
+      ].map((o) => JSON.stringify(o)).join('\n')
+    );
+    fs.writeFileSync(path.join(wfDir, `agent-${a.id}.meta.json`), JSON.stringify({ agentType: 'workflow-subagent', spawnDepth: 1 }));
+  }
+  // A third sibling whose prompt is ONLY the shared preamble: no distinguishing line exists, so NO label
+  // may be derived (three identical labels would be worse than the agentType + id fallback rows).
+  fs.appendFileSync(
+    path.join(wfDir, 'journal.jsonl'),
+    '\n' + JSON.stringify({ type: 'started', key: 'v2:' + 'c'.repeat(64), agentId: 'a333ccccccccccccc' })
+  );
+  fs.writeFileSync(
+    path.join(wfDir, `agent-a333ccccccccccccc.jsonl`),
+    JSON.stringify({ type: 'user', timestamp: '2026-07-16T10:00:00.000Z', message: { role: 'user', content: PREAMBLE } })
+  );
+  fs.writeFileSync(path.join(wfDir, `agent-a333ccccccccccccc.meta.json`), JSON.stringify({ agentType: 'workflow-subagent', spawnDepth: 1 }));
+  const w = core.parseWorkflows(cwd, S)[0];
+  const byId = new Map(w.agents.map((a) => [a.agentId, a]));
+  assert.equal(byId.get('a111aaaaaaaaaaaaa').label, 'Your job: convert the core demo simulator to the Python canon.', 'label = the first prompt line unique to the agent (the shared preamble is skipped)');
+  assert.equal(byId.get('a222bbbbbbbbbbbbb').label, 'Your job: convert README.md and docs/DEMO.md to the Python canon.');
+  assert.equal(byId.get('a111aaaaaaaaaaaaa').labelDerived, true, 'derived labels are flagged so renderers mark them (~), never assert them');
+  assert.equal(byId.get('a222bbbbbbbbbbbbb').labelDerived, true);
+  assert.equal(byId.get('a333ccccccccccccc').label, null, 'all-shared prompt → no derived label (agentType + id beats identical labels)');
+  assert.equal(byId.get('a333ccccccccccccc').labelDerived, false);
 });
 
 test('metrics: sessionUsage sums main-chain tokens (deduped by message id, sidechain excluded) + transcript wall-clock (0.8.0 r3 — the per-sibling Fleet metric)', () => {
@@ -4199,7 +4252,7 @@ test('demo: runDemo replays a real-pipeline session — named total chapters, at
   const ws = fs.realpathSync(tmpWork()); // physical path — the demo records under the shell's getcwd()
   const res = await core.runDemo({ fast: true, cwd: ws });
   assert.match(res.session, /^demo-[0-9a-f]{8}$/, 'the demo- prefix gates every demo-only behavior');
-  assert.equal(res.edits, 5, 'five captured store edits (2 farewell, 1 validation, 1 tests, 1 docs)');
+  assert.equal(res.edits, 5, 'five captured store edits (2 scaling, 1 validation, 1 tests, 1 docs)');
   assert.ok(fs.existsSync(res.transcript), 'a real transcript in the real project dir');
 
   // Chapters are total AND fully named — the scenario keeps a to-do in_progress for every edit.

@@ -39,8 +39,13 @@ export const WORKFLOW_ACTIVE_MS = 5 * 60_000;
 /** One workflow agent's metrics, mined from its OWN agent-<id>.jsonl transcript. */
 export interface WorkflowAgent {
   agentId: string;
-  /** The runner's per-agent label (e.g. 'S11-vscode') from the rich state file; null in the journal fallback. */
+  /** The runner's per-agent label (e.g. 'S11-vscode') from the rich state file; in the journal fallback
+   *  (a LIVE run — the state file only lands at completion) a label DERIVED from the agent's own prompt
+   *  (see derivePromptLabels), marked by [labelDerived]; null when neither source yields one. */
   label: string | null;
+  /** True when [label] is heuristic (prompt-derived on a live run) — renderers mark it (trailing '~'),
+   *  never assert it. Always false for state-file labels. */
+  labelDerived: boolean;
   /** The agent's phase — a REAL phase title (e.g. 'Implement') from the state file, else the journal `key`; null when neither. */
   phase: string | null;
   /** From the agent-<id>.meta.json sidecar (e.g. "workflow-subagent"); null when absent. */
@@ -263,6 +268,72 @@ function isHashKey(k: string): boolean {
   return /^v\d+:/.test(k) || /^[0-9a-f]{24,}$/i.test(k);
 }
 
+/** The first prompt text of one workflow agent's transcript (its first `user` line), or null.
+ *  Reads only the leading bytes — transcripts grow to MBs but the prompt is always the first line. */
+function readAgentPrompt(transcriptPath: string): string | null {
+  let fd: number;
+  try {
+    fd = fs.openSync(transcriptPath, 'r');
+  } catch {
+    return null;
+  }
+  try {
+    const buf = Buffer.alloc(262144);
+    const n = fs.readSync(fd, buf, 0, buf.length, 0);
+    const chunk = buf.toString('utf8', 0, n);
+    const nl = chunk.indexOf('\n');
+    if (nl < 0) return null; // first line longer than the window — skip rather than mis-parse
+    const o = JSON.parse(chunk.slice(0, nl));
+    // Only the agent's PROMPT (its first user line) identifies it — never assistant output.
+    if (o?.type !== 'user' && o?.message?.role !== 'user') return null;
+    const content = o?.message?.content;
+    if (typeof content === 'string') return content;
+    if (Array.isArray(content)) {
+      for (const b of content) if (b && b.type === 'text' && typeof b.text === 'string') return b.text;
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/** LIVE-RUN label fallback: newer runtimes write journal entries with only a content-hash key — no
+ *  label/phaseTitle — so until the completion-time state file lands, an agent's only on-disk identity is
+ *  its own prompt. Fan-out prompts share their preamble and diverge at the task line, so each agent's
+ *  label is its first prompt line NOT shared with a sibling (first line as a last resort). Heuristic —
+ *  callers mark it via labelDerived, and the state file's real labels replace it at completion. */
+function derivePromptLabels(wfDir: string, agentIds: Iterable<string>): Map<string, string> {
+  const perAgent = new Map<string, string[]>();
+  for (const id of agentIds) {
+    const text = readAgentPrompt(path.join(wfDir, `agent-${id}.jsonl`));
+    if (!text) continue;
+    // A wide window: fan-out preambles (shared context pasted into every sibling) can run kilobytes
+    // before the line that actually distinguishes the agent.
+    const lines = text
+      .slice(0, 48000)
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.length >= 8)
+      .slice(0, 400);
+    if (lines.length) perAgent.set(id, lines);
+  }
+  const freq = new Map<string, number>();
+  for (const lines of perAgent.values()) for (const l of new Set(lines)) freq.set(l, (freq.get(l) ?? 0) + 1);
+  const total = perAgent.size;
+  const out = new Map<string, string>();
+  for (const [id, lines] of perAgent) {
+    // Siblings: first line unique to this agent, else first non-universal line. NO fallback to a shared
+    // line — identical labels are worse than the agentType+id rows the caller renders without one.
+    const pick = total > 1
+      ? lines.find((l) => freq.get(l) === 1) ?? lines.find((l) => (freq.get(l) ?? 0) < total)
+      : lines[0];
+    if (pick) out.set(id, pick.length > 72 ? pick.slice(0, 71) + '…' : pick);
+  }
+  return out;
+}
+
 /** Per-agentId: its journal phase + label (when the runtime records them) + whether a `result` fired.
  *  Prefers an explicit `phaseTitle`/`label`; falls back to the `key` for phase ONLY when it's a real phase
  *  name (not a hash). A running workflow's journal typically carries none of these — the rich per-run
@@ -448,6 +519,7 @@ function buildRunFromState(state: any, wfDir: string, wfId: string, stateFile: s
     agents.push({
       agentId: e.agentId,
       label: typeof e.label === 'string' ? e.label : null,
+      labelDerived: false,
       phase: typeof e.phaseTitle === 'string' ? e.phaseTitle : null,
       agentType: readAgentType(wfDir, e.agentId),
       done: e.state === 'done' || e.state === 'completed', // the state file uses 'done' for finished agents
@@ -559,6 +631,9 @@ function buildRunFromJournal(wfDir: string, wfId: string, scriptsDir: string, no
   for (const e of journal.values()) {
     if (e.phaseFromKey && e.phase && !matchesDeclared(e.phase) && (keyShare.get(e.phase) ?? 0) < 2) e.phase = null;
   }
+  // Live runs: the journal carries no labels (hash keys only) — derive per-agent identity from the
+  // prompts, used only where the journal has none (state-file labels replace these at completion).
+  const derived = derivePromptLabels(wfDir, agentIds);
   const agents: WorkflowAgent[] = [];
   let startedTs = 0;
   let lastTs = 0;
@@ -569,9 +644,11 @@ function buildRunFromJournal(wfDir: string, wfId: string, scriptsDir: string, no
     if (met.firstTs && (!startedTs || met.firstTs < startedTs)) startedTs = met.firstTs;
     if (met.lastTs > lastTs) lastTs = met.lastTs;
     for (const t of met.activityTs) allActivityTs.push(t);
+    const journalLabel = j ? j.label : null;
     agents.push({
       agentId,
-      label: j ? j.label : null,
+      label: journalLabel ?? derived.get(agentId) ?? null,
+      labelDerived: !journalLabel && derived.has(agentId),
       phase: j ? j.phase : null,
       agentType: readAgentType(wfDir, agentId),
       done: j ? j.done : false,

@@ -2785,9 +2785,9 @@ const OVERVIEW_SCRIPT = `
     var parts=[]; for(var i=0;i<pg.length;i++) parts.push(esc(pg[i].title)+' '+pg[i].done+'/'+pg[i].total);
     return parts.join(' · '); }
   function wagRow(a){ var sid=String(a.agentId||'').replace(/^v\d+:/,'').slice(0,6);
-    // A running workflow has no per-agent label on disk yet — fall back to agentType + a short id so the
-    // rows are distinguishable (the real labels arrive once the run's state file is written at completion).
-    var lbl=a.label||((a.agentType||'agent')+(sid?' '+sid:''));
+    // A running workflow's label is DERIVED from the agent's prompt (labelDerived — shown with '~', the
+    // heuristic marker); the runner's real labels replace it once the state file lands at completion.
+    var lbl=a.label?(a.label+(a.labelDerived?'~':'')):((a.agentType||'agent')+(sid?' '+sid:''));
     // Each agent row carries the same "extras" as the run header: activity sparkline · ±diff · model · tokens · time · edits.
     return '<div class="mt-wag"><span class="mt-badge xs" style="background:'+(a.done?PAL.done:PAL.working)+'"></span>'+
       '<span class="mt-wat">'+esc(lbl)+'</span>'+
