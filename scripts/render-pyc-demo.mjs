@@ -88,10 +88,10 @@ const Y = 'var(--yellow)', G = 'var(--green)', B = 'var(--blue)', F = 'var(--fai
 const agentRow = ({ phase, phaseColor, added, removed, sub, sel }) => `
   <div class="agent${sel ? ' sel' : ''}">
     <div class="arow"><span class="badge" style="background:${phaseColor}">${phase}</span>
-      <span style="font-family:var(--mono)">demo <span style="color:${F}">⑂demo/greeter</span></span>
+      <span style="font-family:var(--mono)">demo <span style="color:${F}">⑂demo/pipeline</span></span>
       <span style="margin-left:auto">${spark([0.3, 0.7, 0.5, 0.9, 0.6, 1])}</span>
       <span style="font-family:var(--mono);font-size:10px"><span style="color:${G}">+${added}</span> <span style="color:${Y}">−${removed}</span></span></div>
-    ${sub ? `<div class="sub"><span class="badge" style="background:${sub.done ? F : B};font-size:8px">${sub.phase}</span> general-purpose · <i>Write greeter tests</i> · +9 −0</div>` : ''}
+    ${sub ? `<div class="sub"><span class="badge" style="background:${sub.done ? F : B};font-size:8px">${sub.phase}</span> general-purpose · <i>Write pipeline tests</i> · +12 −0</div>` : ''}
   </div>`;
 
 const chRow = ({ g, gc, title, syn, m, pending, act, kept }) => `
@@ -110,8 +110,8 @@ const strip = (mods) => `<div class="strip">${mods.map(([label, color]) => `<spa
 const wfRun = ({ running, sel }) => `
   <div class="wf${sel ? ' sel' : ''}">
     <div class="arow"><span class="badge" style="background:${running ? G : F}">${running ? '▶ running' : '✓ done'}</span>
-      <span>Write usage docs for the greeter app</span></div>
-    <div class="arow" style="margin-top:3px;color:${F};font-size:10.5px">${spark([0.8, 0.2, 0.6, 1])}<span style="font-family:var(--mono)">1 ag · 240 tok · 4s · <span style="color:${G}">+15</span> <span style="color:${Y}">−0</span></span></div>
+      <span>Write usage docs for the training pipeline</span></div>
+    <div class="arow" style="margin-top:3px;color:${F};font-size:10.5px">${spark([0.8, 0.2, 0.6, 1])}<span style="font-family:var(--mono)">1 ag · 240 tok · 4s · <span style="color:${G}">+12</span> <span style="color:${Y}">−0</span></span></div>
     <div class="ph">DOCS ${running ? '0/1' : '1/1'}</div>
     <div class="sub" style="padding-left:6px"><span style="color:${running ? B : G}">${running ? '○' : '●'}</span> docs-writer ${spark([0.5, 0.9, 0.4])} · 240 tok · 1 edit</div>
   </div>`;
@@ -142,55 +142,55 @@ const beats = [
     cap: '▸ plan — three to-dos become the chapters',
     agent: { phase: 'working', phaseColor: G, added: 0, removed: 0 },
     chapters: [
-      { g: '◐', gc: Y, title: 'Add farewell support to the greeter', m: '', act: false },
-      { g: '○', gc: F, title: 'Validate user input', m: '', act: false },
+      { g: '◐', gc: Y, title: 'Add feature scaling to the pipeline', m: '', act: false },
+      { g: '○', gc: F, title: 'Validate the training dataset', m: '', act: false },
       { g: '○', gc: F, title: 'Tests and docs', m: '', act: false },
     ],
     empty: 'No edits yet. This fills in as Claude edits files.',
   },
   {
-    cap: '▸ chapter 1 — farewell support (2 edits land)',
-    agent: { phase: 'working', phaseColor: G, added: 7, removed: 2 },
+    cap: '▸ chapter 1 — feature scaling (2 edits land)',
+    agent: { phase: 'working', phaseColor: G, added: 9, removed: 3 },
     chapters: [
-      { g: '◐', gc: Y, title: 'Add farewell support to the greeter', m: '+7 −2', pending: '2⏳', act: true },
-      { g: '○', gc: F, title: 'Validate user input', m: '', act: false },
+      { g: '◐', gc: Y, title: 'Add feature scaling to the pipeline', m: '+9 −3', pending: '2⏳', act: true },
+      { g: '○', gc: F, title: 'Validate the training dataset', m: '', act: false },
       { g: '○', gc: F, title: 'Tests and docs', m: '', act: false },
     ],
     mods: [['observatory-demo', Y]],
     files: [
-      { c: Y, f: 'greeter.js', mod: 'observatory-demo', w: 80, pm: '+6', st: '1⏳', stc: Y },
-      { c: Y, f: 'index.js', mod: 'observatory-demo', w: 40, pm: '+3', st: '1⏳', stc: Y },
+      { c: Y, f: 'features.py', mod: 'observatory-demo', w: 80, pm: '+6', st: '1⏳', stc: Y },
+      { c: Y, f: 'train.py', mod: 'observatory-demo', w: 55, pm: '+3', st: '1⏳', stc: Y },
     ],
   },
   {
-    cap: '▸ chapter 2 — input validation',
-    agent: { phase: 'working', phaseColor: G, added: 13, removed: 2 },
+    cap: '▸ chapter 2 — dataset validation',
+    agent: { phase: 'working', phaseColor: G, added: 16, removed: 3 },
     chapters: [
-      { g: '◐', gc: Y, title: 'Add farewell support to the greeter', m: '+7 −2', pending: '2⏳', act: true },
-      { g: '◐', gc: Y, title: 'Validate user input', m: '+6 −0', pending: '1⏳', act: true },
+      { g: '◐', gc: Y, title: 'Add feature scaling to the pipeline', m: '+9 −3', pending: '2⏳', act: true },
+      { g: '◐', gc: Y, title: 'Validate the training dataset', m: '+7 −0', pending: '1⏳', act: true },
       { g: '○', gc: F, title: 'Tests and docs', m: '', act: false },
     ],
     mods: [['observatory-demo', Y], ['src/models', Y]],
     files: [
-      { c: Y, f: 'greeter.js', mod: 'observatory-demo', w: 80, pm: '+6', st: '1⏳', stc: Y },
-      { c: Y, f: 'User.js', mod: 'src/models', w: 75, pm: '+6', st: '1⏳', stc: Y },
-      { c: Y, f: 'index.js', mod: 'observatory-demo', w: 40, pm: '+3', st: '1⏳', stc: Y },
+      { c: Y, f: 'dataset.py', mod: 'src/models', w: 80, pm: '+7', st: '1⏳', stc: Y },
+      { c: Y, f: 'features.py', mod: 'observatory-demo', w: 75, pm: '+6', st: '1⏳', stc: Y },
+      { c: Y, f: 'train.py', mod: 'observatory-demo', w: 50, pm: '+3', st: '1⏳', stc: Y },
     ],
   },
   {
     cap: '▸ chapter 3 — tests, written by a subagent',
-    agent: { phase: 'working', phaseColor: G, added: 22, removed: 2, sub: { phase: 'working' } },
+    agent: { phase: 'working', phaseColor: G, added: 28, removed: 3, sub: { phase: 'working' } },
     chapters: [
-      { g: '◐', gc: Y, title: 'Add farewell support to the greeter', m: '+7 −2', pending: '2⏳', act: true },
-      { g: '◐', gc: Y, title: 'Validate user input', m: '+6 −0', pending: '1⏳', act: true },
-      { g: '◐', gc: Y, title: 'Tests and docs', m: '+9 −0', pending: '1⏳', act: true },
+      { g: '◐', gc: Y, title: 'Add feature scaling to the pipeline', m: '+9 −3', pending: '2⏳', act: true },
+      { g: '◐', gc: Y, title: 'Validate the training dataset', m: '+7 −0', pending: '1⏳', act: true },
+      { g: '◐', gc: Y, title: 'Tests and docs', m: '+12 −0', pending: '1⏳', act: true },
     ],
-    mods: [['observatory-demo', Y], ['test', Y], ['src/models', Y]],
+    mods: [['observatory-demo', Y], ['tests', Y], ['src/models', Y]],
     files: [
-      { c: Y, f: 'greeter.test.js', mod: 'test', w: 95, pm: '+9', st: '1⏳', stc: Y },
-      { c: Y, f: 'greeter.js', mod: 'observatory-demo', w: 62, pm: '+6', st: '1⏳', stc: Y },
-      { c: Y, f: 'User.js', mod: 'src/models', w: 58, pm: '+6', st: '1⏳', stc: Y },
-      { c: Y, f: 'index.js', mod: 'observatory-demo', w: 30, pm: '+3', st: '1⏳', stc: Y },
+      { c: Y, f: 'test_pipeline.py', mod: 'tests', w: 95, pm: '+12', st: '1⏳', stc: Y },
+      { c: Y, f: 'dataset.py', mod: 'src/models', w: 58, pm: '+7', st: '1⏳', stc: Y },
+      { c: Y, f: 'features.py', mod: 'observatory-demo', w: 55, pm: '+6', st: '1⏳', stc: Y },
+      { c: Y, f: 'train.py', mod: 'observatory-demo', w: 30, pm: '+3', st: '1⏳', stc: Y },
     ],
   },
   {
@@ -204,24 +204,24 @@ const beats = [
     tab: 'workflows',
     cap: '▸ the workflow completes — phases, agents, and its own chapter rollup',
     wf: { running: false, sel: true },
-    chapters: [{ g: '◐', gc: Y, title: 'Tests and docs', m: '+14 −0', pending: '1⏳', act: true }],
+    chapters: [{ g: '◐', gc: Y, title: 'Tests and docs', m: '+12 −0', pending: '1⏳', act: true }],
     mods: [['docs', Y]],
-    files: [{ c: Y, f: 'USAGE.md', mod: 'docs', w: 95, pm: '+14', st: '1⏳', stc: Y }],
+    files: [{ c: Y, f: 'USAGE.md', mod: 'docs', w: 95, pm: '+12', st: '1⏳', stc: Y }],
   },
   {
-    cap: '✓ kept 2 edit(s) in task 500567ef — per-chapter accept',
-    agent: { phase: '~idle', phaseColor: F, added: 36, removed: 2, sub: { phase: 'done', done: true } },
+    cap: '✓ kept 1 edit(s) in task 500567ef — per-chapter accept',
+    agent: { phase: '~idle', phaseColor: F, added: 40, removed: 3, sub: { phase: 'done', done: true } },
     chapters: [
-      { g: '●', gc: G, title: 'Add farewell support to the greeter', m: '+7 −2', act: true },
-      { g: '●', gc: G, title: 'Validate user input', m: '+6 −0', act: true },
-      { g: '◐', gc: Y, title: 'Tests and docs', m: '+23 −0', pending: '2⏳', act: true },
+      { g: '●', gc: G, title: 'Add feature scaling to the pipeline', m: '+9 −3', act: true },
+      { g: '●', gc: G, title: 'Validate the training dataset', m: '+7 −0', act: true },
+      { g: '◐', gc: Y, title: 'Tests and docs', m: '+24 −0', pending: '2⏳', act: true },
     ],
-    mods: [['docs', G], ['observatory-demo', G], ['test', Y], ['src/models', G]],
+    mods: [['docs', Y], ['tests', Y], ['observatory-demo', G], ['src/models', G]],
     files: [
-      { c: G, f: 'USAGE.md', mod: 'docs', w: 95, pm: '+14', st: '✓', stc: G },
-      { c: Y, f: 'greeter.test.js', mod: 'test', w: 62, pm: '+9', st: '1⏳', stc: Y },
-      { c: G, f: 'greeter.js', mod: 'observatory-demo', w: 42, pm: '+6', st: '✓', stc: G },
-      { c: G, f: 'User.js', mod: 'src/models', w: 40, pm: '+6', st: '✓', stc: G },
+      { c: Y, f: 'USAGE.md', mod: 'docs', w: 95, pm: '+12', st: '1⏳', stc: Y },
+      { c: Y, f: 'test_pipeline.py', mod: 'tests', w: 95, pm: '+12', st: '1⏳', stc: Y },
+      { c: G, f: 'dataset.py', mod: 'src/models', w: 58, pm: '+7', st: '✓', stc: G },
+      { c: G, f: 'features.py', mod: 'observatory-demo', w: 55, pm: '+6', st: '✓', stc: G },
     ],
   },
   {

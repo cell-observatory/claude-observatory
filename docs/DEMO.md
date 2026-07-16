@@ -1,7 +1,7 @@
 # Claude Observatory — feature walkthrough
 
 A hands-on tour of every feature, driven by a real auto-captured session. The commands and output
-below are from an actual `claude -p` run that created a small `User` model — nothing staged.
+below are from an actual `claude -p` run that created a small `Dataset` model — nothing staged.
 
 ![The observatory layout — the sidebar "Claude Edits" (Edits · Diffs · File History · Actions) plus the bottom panel "Claude Observatory" (Observations · Overview · Stats)](media/layout.png)
 
@@ -10,7 +10,9 @@ below are from an actual `claude -p` run that created a small `User` model — n
 
 ## Zero-setup demo — try it without Claude
 
-Don't want to burn a session just to see the panels move? The built-in simulator replays a scripted
+Don't want to burn a session just to see the panels move? The
+**[interactive demo](https://cell-observatory.github.io/claude-observatory/demo.html)** replays the
+scenario in the browser — no editor needed. Locally, the built-in simulator replays the same scripted
 session through the **real pipeline** — a genuine transcript, edits captured by the same hooks, a
 subagent, and a workflow run — inside an isolated `demo-…` session and an `observatory-demo/` folder:
 
@@ -35,12 +37,12 @@ With the capture hooks installed, a short Claude Code session made three edits:
 
 | # | File | Tool | Change |
 | --- | --- | --- | --- |
-| 1 | `src/models/User.js` | Write | create the file with `class User { constructor, greet() }` (+11) |
-| 2 | `src/models/User.js` | Edit | add a `farewell()` method to the class (+4) |
-| 3 | `src/index.js` | Write | import `User` and print a greeting (+4) |
+| 1 | `src/models/dataset.py` | Write | create the file with `class Dataset` (`__init__` + `describe()`) (+11) |
+| 2 | `src/models/dataset.py` | Edit | add a `validate()` method to the class (+4) |
+| 3 | `src/train.py` | Write | import `Dataset` and print a validation report (+4) |
 
 No extra tokens were spent capturing any of it — the hooks run outside the model loop. The transcript
-even gives the Observations panel its recap ("Create User class and test imports") and each edit's
+even gives the Observations panel its recap ("Create Dataset class and test validation") and each edit's
 reasoning, for free.
 
 ---
@@ -76,11 +78,11 @@ Edits are grouped by file, newest ids last, with the line delta and status:
 $ claude-observatory list
 3 edit(s)  ·  3 pending  ·  session 0c396c6b-2da9-4be2-9c6d-c8c5797de7a5
 
-src/models/User.js
+src/models/dataset.py
   #1  pending  +11 -0  Write  1m ago
   #2  pending  +4 -0  Edit  1m ago
 
-src/index.js
+src/train.py
   #3  pending  +4 -0  Write  1m ago
 
 diff <id> · keep <id> · undo <id>
@@ -97,16 +99,16 @@ with `claude-observatory sessions` (a `●` marks the one that resolves for your
 $ claude-observatory diff 2
 @@ -5,7 +5,11 @@
 
-   greet() {
-     return `Hello, my name is ${this.name}!`;
-   }
+     def describe(self):
+         return {
+             "count": len(self.features),
+             "labels": len(self.labels),
+             "empty": not self.features,
+         }
 +
-+  farewell() {
-+    return `Goodbye from ${this.name}!`;
-+  }
- }
-
- module.exports = User;
++    def validate(self):
++        ok = len(self.features) == len(self.labels) and bool(self.features)
++        return {"ok": ok}
 ```
 
 ![a diff tab — before ⟷ after for a single edit](media/diffs.png)
@@ -117,7 +119,7 @@ $ claude-observatory diff 2
 
 ```console
 $ claude-observatory keep 2
-✓ kept edit #2 (src/models/User.js)
+✓ kept edit #2 (src/models/dataset.py)
 ```
 
 **Undo** is surgical, and it refuses to corrupt: reverting edit #1 (the file creation) would strand
@@ -125,21 +127,21 @@ edit #2, which built on it — so you get a clear conflict instead:
 
 ```console
 $ claude-observatory undo 1
-⚠ conflict: edit #1 overlaps a later change to User.js. Run `claude-observatory undo 1 --force`
+⚠ conflict: edit #1 overlaps a later change to dataset.py. Run `claude-observatory undo 1 --force`
   to restore the file to its pre-edit-#1 state (this also drops later edits to this file).
 ```
 
 ![an undo that would strand a later edit — the observatory refuses and points to `--force`](media/conflict.png)
 
-Undoing #2, though, peels out just the `farewell()` method — `greet()` and the rest of the file
+Undoing #2, though, peels out just the `validate()` method — `describe()` and the rest of the file
 survive untouched (a **position-anchored 3-way line merge**, not a whole-file rewind):
 
 ```console
 $ claude-observatory undo 2
-✓ undid edit #2 (demo/src/models/User.js)
+✓ undid edit #2 (observatory-demo/src/models/dataset.py)
 
 $ claude-observatory redo 2
-✓ re-applied edit #2 (demo/src/models/User.js)
+✓ re-applied edit #2 (observatory-demo/src/models/dataset.py)
 ```
 
 **Redo** re-applies an undone edit; `--force` on either falls back to a whole-file restore.
@@ -176,30 +178,30 @@ $ claude-observatory clean                # GC orphaned blobs across all session
 ## 6 · Deletions & mixed edits
 
 Claude removes and refactors code too, and the observatory captures that the same way. When an edit
-deletes lines — say Claude later drops the `farewell()` method it added — `diff` shows them with a
+deletes lines — say Claude later drops the `validate()` method it added — `diff` shows them with a
 leading `-`:
 
 ```console
 $ claude-observatory diff 4
 @@ -5,11 +5,7 @@
 
-   greet() {
-     return `Hello, my name is ${this.name}!`;
-   }
+     def describe(self):
+         return {
+             "count": len(self.features),
+             "labels": len(self.labels),
+             "empty": not self.features,
+         }
 -
--  farewell() {
--    return `Goodbye from ${this.name}!`;
--  }
- }
-
- module.exports = User;
+-    def validate(self):
+-        ok = len(self.features) == len(self.labels) and bool(self.features)
+-        return {"ok": ok}
 ```
 
 A pure deletion lists as `+0 −4`; a refactor that both adds and removes (drop one method, add another)
 lists the combined delta, e.g. `+2 −4`. In the **inline overlay**, added lines get their usual green
 highlight — but deleted lines no longer exist in the buffer, so they can't be highlighted in place.
 Instead the removed code is shown as **red "ghost" text** on the surviving line where it used to be
-(`− farewell() { …(+2)`), over a red line highlight with a red overview-ruler tick. A **mixed edit**
+(`− def validate(self): …(+2)`), over a red line highlight with a red overview-ruler tick. A **mixed edit**
 shows both at once: green where it added, red ghost text where it removed. The full removed text is
 always a click away — open the edit's inline diff from its ✨ star / lens.
 
@@ -241,12 +243,12 @@ review, decide, click again. That's the surgical loop, in either editor.
 ```text
 ▾ src
   ▾ models
-      User.js                 2 edits
-      ◆ class User            2 · 1 pending
-          #1  +9 −0           reverted
-          #2  +4 −1           kept
-  index.js                    1 edit
-      #3  +6 −0               pending
+      dataset.py              2 edits
+      ◆ class Dataset         2 · 1 pending
+          #1  +11 −0          reverted
+          #2  +4 −0           kept
+  train.py                    1 edit
+      #3  +4 −0               pending
 ```
 
 Edits nest under the class they land in (detected heuristically for JS/TS/Python). Hover a file or
@@ -322,12 +324,12 @@ In 0.8.0 **Actions** lives in the **sidebar** ("Claude Edits") alongside Edits �
 
 ```text
 ▾ Edits          3
-    ✓  Write   src/models/User.js    → #1
-    ✓  Edit    src/models/User.js    → #2
-    ✓  Write   src/index.js          → #3
+    ✓  Write   src/models/dataset.py  → #1
+    ✓  Edit    src/models/dataset.py  → #2
+    ✓  Write   src/train.py           → #3
 ▾ Commands       2
-    ✓  node src/index.js
-    ✕  npm test                        exit 1
+    ✓  python src/train.py
+    ✕  python -m unittest              exit 1
 ▾ To-dos         1
     ✓  3 items · 2 done
 ```
@@ -344,12 +346,12 @@ editors render the grouped-by-category view above from the same data:
 $ claude-observatory actions
 Actions  9 total · 3 edit · 3 read · 2 exec · 1 todo · 1 error(s) · session 0c396c6b-2da9-4be2-9c6d-c8c5797de7a5
 
-2m ago       [edit]    Write      src/models/User.js edit#1  (create the User class)
-2m ago       [edit]    Edit       src/models/User.js edit#2  (add a farewell() method)
-1m ago       [read]    Read       src/models/User.js
-1m ago       [edit]    Write      src/index.js edit#3  (import User and print a greeting)
-1m ago       [exec]    Bash       node src/index.js  (run the greeter)
-1m ago     ✗ [exec]    Bash       npm test  (run the test suite)
+2m ago       [edit]    Write      src/models/dataset.py edit#1  (create the Dataset class)
+2m ago       [edit]    Edit       src/models/dataset.py edit#2  (add a validate() method)
+1m ago       [read]    Read       src/models/dataset.py
+1m ago       [edit]    Write      src/train.py edit#3  (import Dataset and print a validation report)
+1m ago       [exec]    Bash       python src/train.py  (run the training entrypoint)
+1m ago     ✗ [exec]    Bash       python -m unittest  (run the test suite)
 1m ago       [todo]    TodoWrite  3 items · 2 done
 
 trace (alias) · --json · --category <c> · --errors · --limit <n> · --all
@@ -370,8 +372,8 @@ Timeline pane — files newest-first, and consecutive edits to the same file coa
 with the combined delta and a change summary (Claude's own reasoning when available):
 
 ```text
-🟡 19:32  index.js        +6 −0 · created index.js
-🟢 19:31  User.js  ×2     +13 −1 · added farewell() to mirror greet()
+🟡 19:32  train.py        +4 −0 · created train.py
+🟢 19:31  dataset.py  ×2  +15 −0 · added validate() alongside describe()
 ```
 
 Expand a run for the individual edits; pending / kept / reverted keep their color (reverted stays struck
@@ -473,7 +475,7 @@ $ claude-observatory changemap --json | jq '.rollupByWorkflow[] | {workflowId, e
 { "workflowId": "wf_99d45022-8f2", "edits": 9, "added": 49, "removed": 43, "pending": 9 }
 
 $ claude-observatory multitask --json | jq '.workflows[0] | {name, phases, agents: (.agents|length)}'
-{ "name": "scaffold-user-model", "phases": ["Build", "Verify"], "agents": 3 }
+{ "name": "pipeline-docs", "phases": ["Build", "Verify"], "agents": 3 }
 
 $ claude-observatory multitask --json | jq '.workflows[0].agents[] | {agentType, done, tokens, ms: .durationMs, edits}'
 { "agentType": "general-purpose", "done": true,  "tokens": 12100, "ms": 8400, "edits": 4 }
@@ -582,7 +584,7 @@ each tagged **remote** or **unknown** — pinned as an **Egress** node at the ve
     unknown  MCP       localhost:7331 (fs)
 ▾ Commands                2
     ⚠ high  ✓  rm -rf build/
-    ✓  node src/index.js
+    ✓  python src/train.py
 ```
 
 Each audit is also one command away:
@@ -620,12 +622,12 @@ into its own reads / edits / bash / web calls:
 ```text
 ▾ Subagents               2
   ▾ ✓  general-purpose    8.4s · 12.1k tok · 9 tools
-        ✓  Read   src/models/User.js
-        ✓  Grep   "greet"  (4 files)
-        ✕  Bash   npm test               exit 1
+        ✓  Read   src/models/dataset.py
+        ✓  Grep   "validate"  (4 files)
+        ✕  Bash   python -m unittest     exit 1
   ▾ ✓  general-purpose    5.1s ·  6.3k tok · 4 tools
-        ✓  Read   src/index.js
-        ✓  WebFetch  nodejs.org/api/modules.html
+        ✓  Read   src/train.py
+        ✓  WebFetch  docs.python.org/3/library/statistics.html
 ```
 
 The same view is one command away — each subagent as a `▸` row (its `agentType`, action count and
@@ -636,16 +638,16 @@ $ claude-observatory subagents
 Subagents  2 subagent(s) · 13 action(s) · session 0c396c6b-2da9-4be2-9c6d-c8c5797de7a5
 
 ▸ general-purpose  9 action(s) · done
-   Explore tests, then update the User model
-     [read]    Read  src/models/User.js
-     [exec]    Grep  "greet"  (4 files)
-     [exec]    Bash  npm test                exit 1
+   Explore tests, then update the Dataset model
+     [read]    Read  src/models/dataset.py
+     [exec]    Grep  "validate"  (4 files)
+     [exec]    Bash  python -m unittest      exit 1
    … 6 more (`--all` to expand)
 
 ▸ general-purpose  4 action(s) · done
-   Verify the index imports
-     [read]    Read  src/index.js
-     [web]     WebFetch  nodejs.org/api/modules.html
+   Verify the pipeline imports
+     [read]    Read  src/train.py
+     [web]     WebFetch  docs.python.org/3/library/statistics.html
 
 agents (alias) · --json · --all
 ```
@@ -672,8 +674,8 @@ Fleet  16 session(s) · 1 active · 15 sibling(s) · 117 pending across siblings
    docs/panels.html
 ○ f9b72393        47 edit(s) · 20 pending · 1d ago ⚠ 3 high
    packages/core/src/actions.ts, packages/core/src/subagents.ts +9 more
-○ dcf61fae        12 edit(s) · 12 pending · 3d ago ⚠ 3 high
-   demo/src/greeter.js, demo/src/index.js, demo/src/models/User.js
+○ dcf61fae        5 edit(s) · 5 pending · 3d ago
+   observatory-demo/src/features.py, observatory-demo/src/train.py, observatory-demo/src/models/dataset.py +2 more
 
 fleet (alias) · --json (siblings only, excludes self) · --all (include self) · --repo (every worktree)
 ```
@@ -714,8 +716,9 @@ unchanged `{ session, summary, actions, groups }`; every existing shape stays as
 claude-observatory init                       # hooks on (Claude Code closed)
 # then, from any project directory:
 claude -p --permission-mode acceptEdits 'Do this in three separate file operations: (1) create
-  src/models/User.js with a User class (constructor(name) + greet()); (2) edit it to add a
-  farewell() method; (3) create src/index.js that imports User and prints a greeting.'
+  src/models/dataset.py with a Dataset class (__init__(features, labels) + describe()); (2) edit it
+  to add a validate() method; (3) create src/train.py that imports Dataset and prints a validation
+  report.'
 claude-observatory list                       # your three edits, captured automatically
 ```
 

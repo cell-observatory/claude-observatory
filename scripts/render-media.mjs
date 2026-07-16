@@ -139,39 +139,38 @@ const microscope = '🔬';
 const editsTree = `
   <div class="viewhead">EDITS <span style="float:right;color:var(--faint)">session 0c396c6b</span></div>
   <div class="trow"><span class="tw">▾</span><span class="ic">📁</span>src</div>
+  <div class="trow" style="padding-left:26px"><span class="tw">▾</span><span class="ic">📄</span>features.py<span class="meta">1 edit · 1 pending</span></div>
+  <div class="trow mono" style="padding-left:60px"><span class="dot" style="background:var(--pending)"></span>&nbsp;#1&nbsp; +6 −1<span class="meta"><span class="pill p-pending">pending</span></span></div>
+  <div class="trow" style="padding-left:26px"><span class="tw">▾</span><span class="ic">📄</span>train.py<span class="meta">1 edit · 1 pending</span></div>
+  <div class="trow mono" style="padding-left:60px"><span class="dot" style="background:var(--pending)"></span>&nbsp;#2&nbsp; +3 −2<span class="meta"><span class="pill p-pending">pending</span></span></div>
   <div class="trow" style="padding-left:26px"><span class="tw">▾</span><span class="ic">📁</span>models</div>
-  <div class="trow" style="padding-left:42px"><span class="tw">▾</span><span class="ic">📄</span>User.js<span class="meta">2 edits · 2 pending</span></div>
-  <div class="trow" style="padding-left:58px"><span class="tw">▾</span><span class="ic" style="color:var(--orange)">◆</span>class User<span class="meta">2 edits · 2 pending</span></div>
-  <div class="trow mono" style="padding-left:76px"><span class="dot" style="background:var(--pending)"></span>&nbsp;#1&nbsp; +11 −0<span class="meta"><span class="pill p-pending">pending</span></span></div>
-  <div class="trow mono" style="padding-left:76px"><span class="dot" style="background:var(--pending)"></span>&nbsp;#2&nbsp; +4 −0<span class="meta"><span class="pill p-pending">pending</span></span></div>
-  <div class="trow" style="padding-left:26px"><span class="tw"></span><span class="ic">📄</span>index.js<span class="meta">1 edit · 1 pending</span></div>
-  <div class="trow mono" style="padding-left:60px"><span class="dot" style="background:var(--pending)"></span>&nbsp;#3&nbsp; +4 −0<span class="meta"><span class="pill p-pending">pending</span></span></div>`;
+  <div class="trow" style="padding-left:42px"><span class="tw">▾</span><span class="ic">📄</span>dataset.py<span class="meta">1 edit · 1 pending</span></div>
+  <div class="trow" style="padding-left:58px"><span class="tw">▾</span><span class="ic" style="color:var(--orange)">◆</span>class Dataset<span class="meta">1 edit · 1 pending</span></div>
+  <div class="trow mono" style="padding-left:76px"><span class="dot" style="background:var(--pending)"></span>&nbsp;#3&nbsp; +7 −0<span class="meta"><span class="pill p-pending">pending</span></span></div>`;
 
 const editorCode = () => `
   <div style="background:var(--bg);padding:10px 0 14px;">
-    <div class="codelens"><a>✨ #2 +4 −0 view changes</a><a>✓ Keep</a><a>↩ Undo</a><a>💬 Chat</a><a>⧉ View diff</a></div>
-    <div class="codeline"><span class="ln">5</span><span>  <span class="tok-f">greet</span>() {</span></div>
-    <div class="codeline"><span class="ln">6</span><span>    <span class="tok-k">return</span> <span class="tok-s">\`Hello, my name is \${</span><span class="tok-v">this</span><span class="tok-s">.name}!\`</span>;</span></div>
-    <div class="codeline"><span class="ln">7</span><span>  }</span></div>
-    <div class="codeline hl"><span class="ln">8</span><span></span></div>
-    <div class="codeline hl"><span class="ln">9</span><span class="gutstar">✨</span><span>  <span class="tok-f">farewell</span>() {</span></div>
-    <div class="codeline hl"><span class="ln">10</span><span>    <span class="tok-k">return</span> <span class="tok-s">\`Goodbye from \${</span><span class="tok-v">this</span><span class="tok-s">.name}!\`</span>;</span></div>
-    <div class="codeline hl"><span class="ln">11</span><span>  }</span></div>
-    <div class="codeline"><span class="ln">12</span><span>}</span></div>
+    <div class="codelens"><a>✨ #1 +6 −1 view changes</a><a>✓ Keep</a><a>↩ Undo</a><a>💬 Chat</a><a>⧉ View diff</a></div>
+    <div class="codeline hl"><span class="ln">1</span><span><span class="tok-k">from</span> <span class="tok-v">statistics</span> <span class="tok-k">import</span> <span class="tok-v">mean</span>, <span class="tok-v">stdev</span></span></div>
+    <div class="codeline"><span class="ln">2</span><span></span></div>
+    <div class="codeline"><span class="ln">3</span><span></span></div>
+    <div class="codeline"><span class="ln">4</span><span><span class="tok-k">def</span> <span class="tok-f">summarize</span>(<span class="tok-v">values</span>):</span></div>
+    <div class="codeline"><span class="ln">5</span><span>    <span class="tok-k">return</span> {<span class="tok-s">"count"</span>: <span class="tok-f">len</span>(values), <span class="tok-s">"mean"</span>: <span class="tok-f">mean</span>(values)}</span></div>
+    <div class="codeline"><span class="ln">6</span><span></span></div>
+    <div class="codeline hl"><span class="ln">7</span><span></span></div>
+    <div class="codeline hl"><span class="ln">8</span><span class="gutstar">✨</span><span><span class="tok-k">def</span> <span class="tok-f">scale</span>(<span class="tok-v">values</span>):</span></div>
+    <div class="codeline hl"><span class="ln">9</span><span>    mu, sigma = <span class="tok-f">mean</span>(values), <span class="tok-f">stdev</span>(values)</span></div>
+    <div class="codeline hl"><span class="ln">10</span><span>    <span class="tok-k">return</span> [(v - mu) / sigma <span class="tok-k">for</span> v <span class="tok-k">in</span> values]</span></div>
   </div>`;
 
 // inline frame showing a single edit that BOTH adds (green) and deletes (red rule) — feature closeup
 const editorCodeCombined = () => `
   <div style="background:var(--bg);padding:10px 0 14px;">
-    <div class="codelens"><a>✨ #5 +2 −4 view changes</a><a>✓ Keep</a><a>↩ Undo</a><a>💬 Chat</a><a>⧉ View diff</a></div>
-    <div class="codeline"><span class="ln">2</span><span>  <span class="tok-f">constructor</span>(<span class="tok-v">name</span>) {</span></div>
-    <div class="codeline"><span class="ln">3</span><span>    <span class="tok-v">this</span>.name = name;</span></div>
-    <div class="codeline"><span class="ln">4</span><span>  }</span></div>
-    <div class="codeline del"><span class="ln">5</span><span>}<span class="delnote">− greet() { …(+3)</span></span></div>
-    <div class="codeline"><span class="ln">6</span><span></span></div>
-    <div class="codeline hl"><span class="ln">7</span><span class="gutstar">✨</span><span><span class="tok-v">User</span>.role = <span class="tok-s">'member'</span>;</span></div>
-    <div class="codeline"><span class="ln">8</span><span></span></div>
-    <div class="codeline"><span class="ln">9</span><span><span class="tok-k">module</span>.exports = <span class="tok-v">User</span>;</span></div>
+    <div class="codelens"><a>✨ #2 +3 −2 view changes</a><a>✓ Keep</a><a>↩ Undo</a><a>💬 Chat</a><a>⧉ View diff</a></div>
+    <div class="codeline hl"><span class="ln">1</span><span class="gutstar">✨</span><span><span class="tok-k">from</span> <span class="tok-v">features</span> <span class="tok-k">import</span> <span class="tok-v">summarize</span>, <span class="tok-v">scale</span></span></div>
+    <div class="codeline"><span class="ln">2</span><span></span></div>
+    <div class="codeline hl"><span class="ln">3</span><span>features = <span class="tok-f">scale</span>([<span class="tok-v">1.0</span>, <span class="tok-v">2.0</span>, <span class="tok-v">3.0</span>])</span></div>
+    <div class="codeline del"><span class="ln">4</span><span><span class="tok-f">print</span>(<span class="tok-f">summarize</span>(features))<span class="delnote">− print(summarize([1.0, 2.0, 3.0]))</span></span></div>
   </div>`;
 
 // the inline review bubble that "view changes" opens at the edit (comment-thread widget): the diff in
@@ -180,32 +179,28 @@ const dl = (kind, text) => `<span class="dl ${kind}">${text}</span>`;
 const reviewBubble = () => `
   <div class="bubble">
     <div class="bb-head">
-      <span class="bb-title">✨ Claude edit <span class="bb-id">#5</span></span>
-      <span class="bb-id">+2 −4</span>
-      <span class="bb-why">💭 dropped greet(); added a role field</span>
+      <span class="bb-title">✨ Claude edit <span class="bb-id">#2</span></span>
+      <span class="bb-id">+3 −2</span>
+      <span class="bb-why">💭 scaling the features in the training entrypoint before they reach the model</span>
       <span class="bb-tools"><span>✓ Accept</span><span>↩ Revert</span><span>💬 Chat</span><span>↑ Prev</span><span>↓ Next</span></span>
     </div>
     <div class="bb-diff">
-      ${dl('hunk', '@@ -2,9 +2,7 @@')}
-      ${dl('ctx', '   constructor(name) {')}
-      ${dl('ctx', '     this.name = name;')}
-      ${dl('ctx', '   }')}
-      ${dl('rem', '-  greet() {')}
-      ${dl('rem', '-    return `Hello, my name is ${this.name}!`;')}
-      ${dl('rem', '-  }')}
-      ${dl('rem', '-')}
-      ${dl('add', "+  User.role = 'member';")}
-      ${dl('add', '+  User.active = true;')}
-      ${dl('ctx', '     module.exports = User;')}
+      ${dl('hunk', '@@ -1,3 +1,4 @@')}
+      ${dl('rem', '-from features import summarize')}
+      ${dl('add', '+from features import summarize, scale')}
+      ${dl('ctx', ' ')}
+      ${dl('rem', '-print(summarize([1.0, 2.0, 3.0]))')}
+      ${dl('add', '+features = scale([1.0, 2.0, 3.0])')}
+      ${dl('add', '+print(summarize(features))')}
     </div>
   </div>`;
 
 const observationsCol = `
-  <div class="obsrow"><span>🧭</span><span class="id" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Create User class and test imports</span><span class="r" style="flex:none">session recap</span></div>
-  <div class="obsrow"><span class="dot" style="background:var(--pending)"></span><span class="id mono">User.js&nbsp;×2</span><span class="r">14:02 · +15 −0 · coalesced change-feed (Timeline folded in)</span></div>
-  <div class="obsrow"><span style="color:var(--dim)">👁</span><span class="id">#3</span><span class="r">created index.js — "Operation 3 — create src/index.js that imports User…"</span></div>
-  <div class="obsrow"><span style="color:var(--dim)">👁</span><span class="id">#2</span><span class="r">edited User.js (+4 −0) — "Operation 2 — add a farewell() method…"</span></div>
-  <div class="obsrow"><span style="color:var(--pending)">⚠</span><span class="id">#1</span><span class="r">created User.js — 🧠 6 edits across sessions · 50% accepted</span></div>`;
+  <div class="obsrow"><span>🧭</span><span class="id" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Pipeline: scaling, validation, tests</span><span class="r" style="flex:none">session recap</span></div>
+  <div class="obsrow"><span class="dot" style="background:var(--pending)"></span><span class="id mono">features.py</span><span class="r">14:02 · +6 −1 · change-feed (Timeline folded in)</span></div>
+  <div class="obsrow"><span style="color:var(--dim)">👁</span><span class="id">#3</span><span class="r">edited dataset.py (+7 −0) — "Adding Dataset.validate() — matching feature/label lengths…"</span></div>
+  <div class="obsrow"><span style="color:var(--dim)">👁</span><span class="id">#2</span><span class="r">edited train.py (+3 −2) — "Scaling the features in the training entrypoint…"</span></div>
+  <div class="obsrow"><span style="color:var(--pending)">⚠</span><span class="id">#1</span><span class="r">edited features.py — 🧠 6 edits across sessions · 50% accepted</span></div>`;
 
 const stepPlot = (name, legend, paths, yticks, H) => `
   <div class="plothead"><span class="pname">${name}</span><div class="legend">${legend}</div></div>
@@ -285,18 +280,19 @@ const terminalBody = () => `
     <div class="cmd"><span class="pr">$</span>claude-observatory <span class="fl">status</span></div>
     <div class="out"><span class="ok">✓</span> hooks installed · session <span class="id2">0c396c6b</span> · <span class="warn">3 pending</span> · 42 kept · 5 reverted</div>
     <div class="cmd"><span class="pr">$</span>claude-observatory <span class="fl">list --pending</span></div>
-    <div class="out"><span class="file2">src/models/User.js</span></div>
-    <div class="out">  <span class="warn">●</span> <span class="id2">#1</span>  <span class="add2">+11</span> <span class="rem2">−0</span>   Write   created the User class</div>
-    <div class="out">  <span class="warn">●</span> <span class="id2">#2</span>  <span class="add2">+4</span>  <span class="rem2">−0</span>   Edit    added a farewell() method</div>
-    <div class="out"><span class="file2">src/index.js</span></div>
-    <div class="out">  <span class="warn">●</span> <span class="id2">#3</span>  <span class="add2">+4</span>  <span class="rem2">−0</span>   Write   import User + greet()</div>
+    <div class="out"><span class="file2">src/features.py</span></div>
+    <div class="out">  <span class="warn">●</span> <span class="id2">#1</span>  <span class="add2">+6</span>  <span class="rem2">−1</span>   Edit    added scale() — z-score standardization</div>
+    <div class="out"><span class="file2">src/train.py</span></div>
+    <div class="out">  <span class="warn">●</span> <span class="id2">#2</span>  <span class="add2">+3</span>  <span class="rem2">−2</span>   Edit    scaled the features in the entrypoint</div>
+    <div class="out"><span class="file2">src/models/dataset.py</span></div>
+    <div class="out">  <span class="warn">●</span> <span class="id2">#3</span>  <span class="add2">+7</span>  <span class="rem2">−0</span>   Edit    added Dataset.validate()</div>
     <div class="cmd"><span class="pr">$</span>claude-observatory <span class="fl">diff 2</span></div>
-    <div class="out"><span style="color:var(--blue)">@@ src/models/User.js  +4 −0 @@</span></div>
-    <div class="out"><span class="add2">+  farewell() {</span></div>
-    <div class="out"><span class="add2">+    return \`Goodbye from \${this.name}!\`;</span></div>
-    <div class="out"><span class="add2">+  }</span></div>
+    <div class="out"><span style="color:var(--blue)">@@ src/train.py  +3 −2 @@</span></div>
+    <div class="out"><span class="rem2">-from features import summarize</span></div>
+    <div class="out"><span class="add2">+from features import summarize, scale</span></div>
+    <div class="out"><span class="add2">+features = scale([1.0, 2.0, 3.0])</span></div>
     <div class="cmd"><span class="pr">$</span>claude-observatory <span class="fl">undo 2</span></div>
-    <div class="out"><span class="ok">↩</span> undone <span class="id2">#2</span> · later edits to User.js preserved (surgical 3-way merge)</div>
+    <div class="out"><span class="ok">↩</span> undone <span class="id2">#2</span> · later edits to train.py preserved (surgical 3-way merge)</div>
     <div class="cmd"><span class="pr">$</span><span class="cursor">&nbsp;</span></div>
   </div>`;
 
@@ -307,46 +303,45 @@ const conflictBody = () => `
     <div class="out"><span class="warn">⚠ conflict</span> — edit <span class="id2">#1</span> overlaps later changes on the same lines; won't guess.</div>
     <div class="out">  Re-run with <span class="fl">--force</span> to restore the file to its pre-#1 state (drops the overlapping later edits).</div>
     <div class="cmd"><span class="pr">$</span>claude-observatory <span class="fl">undo 1 --force</span></div>
-    <div class="out"><span class="ok">↩</span> restored src/models/User.js · <span class="id2">#1</span> reverted</div>
+    <div class="out"><span class="ok">↩</span> restored src/features.py · <span class="id2">#1</span> reverted</div>
     <div class="cmd"><span class="pr">$</span><span class="cursor">&nbsp;</span></div>
   </div>`;
 
 // a single edit opened as its own full diff tab (the Diffs surface), git colors, title-bar Prev/Next
 const diffTabBody = () => `
   <div class="difftab">
-    <div class="tab">User.js  ⟷  Claude #2</div>
-    <div class="acts"><span>⧉ #2 +4 −0</span><span>✓ Keep</span><span>↩ Undo</span><span>💬 Chat</span><span>↑ Prev</span><span>↓ Next</span></div>
+    <div class="tab">train.py  ⟷  Claude #2</div>
+    <div class="acts"><span>⧉ #2 +3 −2</span><span>✓ Keep</span><span>↩ Undo</span><span>💬 Chat</span><span>↑ Prev</span><span>↓ Next</span></div>
   </div>
   <div class="bb-diff" style="background:var(--bg);padding:12px 0;font-size:12.5px;line-height:1.85;">
-    ${dl('hunk', '@@ -4,4 +4,8 @@ class User')}
-    ${dl('ctx', '     this.name = name;')}
-    ${dl('ctx', '   }')}
-    ${dl('add', '+  farewell() {')}
-    ${dl('add', '+    return `Goodbye from ${this.name}!`;')}
-    ${dl('add', '+  }')}
-    ${dl('add', '+')}
-    ${dl('ctx', '   greet() {')}
+    ${dl('hunk', '@@ -1,3 +1,4 @@')}
+    ${dl('rem', '-from features import summarize')}
+    ${dl('add', '+from features import summarize, scale')}
+    ${dl('ctx', ' ')}
+    ${dl('rem', '-print(summarize([1.0, 2.0, 3.0]))')}
+    ${dl('add', '+features = scale([1.0, 2.0, 3.0])')}
+    ${dl('add', '+print(summarize(features))')}
   </div>`;
 
 // file heatmap — unmodified lines dimmed so the edit is a spotlight (📄 toggle)
 const heatmapEditor = () => `
   <div style="background:var(--bg);padding:10px 0 14px;">
-    <div class="codelens"><a>✨ #2 +4 −0 view changes</a><a>✓ Keep</a><a>↩ Undo</a><a>💬 Chat</a><a>⧉ View diff</a><a style="color:var(--coral)">📄 Heatmap</a></div>
-    <div class="codeline dim"><span class="ln">1</span><span><span class="tok-k">class</span> <span class="tok-v">User</span> {</span></div>
-    <div class="codeline dim"><span class="ln">2</span><span>  <span class="tok-f">constructor</span>(<span class="tok-v">name</span>) { <span class="tok-v">this</span>.name = name; }</span></div>
-    <div class="codeline dim"><span class="ln">3</span><span>  <span class="tok-f">greet</span>() { <span class="tok-k">return</span> <span class="tok-s">\`Hi \${this.name}\`</span>; }</span></div>
-    <div class="codeline dim"><span class="ln">4</span><span></span></div>
-    <div class="codeline hl"><span class="ln">5</span><span class="gutstar">✨</span><span>  <span class="tok-f">farewell</span>() {</span></div>
-    <div class="codeline hl"><span class="ln">6</span><span>    <span class="tok-k">return</span> <span class="tok-s">\`Goodbye from \${</span><span class="tok-v">this</span><span class="tok-s">.name}!\`</span>;</span></div>
-    <div class="codeline hl"><span class="ln">7</span><span>  }</span></div>
-    <div class="codeline dim"><span class="ln">8</span><span>}</span></div>
-    <div class="codeline dim"><span class="ln">9</span><span><span class="tok-k">module</span>.exports = <span class="tok-v">User</span>;</span></div>
+    <div class="codelens"><a>✨ #1 +6 −1 view changes</a><a>✓ Keep</a><a>↩ Undo</a><a>💬 Chat</a><a>⧉ View diff</a><a style="color:var(--coral)">📄 Heatmap</a></div>
+    <div class="codeline hl"><span class="ln">1</span><span><span class="tok-k">from</span> <span class="tok-v">statistics</span> <span class="tok-k">import</span> <span class="tok-v">mean</span>, <span class="tok-v">stdev</span></span></div>
+    <div class="codeline dim"><span class="ln">2</span><span></span></div>
+    <div class="codeline dim"><span class="ln">3</span><span></span></div>
+    <div class="codeline dim"><span class="ln">4</span><span><span class="tok-k">def</span> <span class="tok-f">summarize</span>(<span class="tok-v">values</span>):</span></div>
+    <div class="codeline dim"><span class="ln">5</span><span>    <span class="tok-k">return</span> {<span class="tok-s">"count"</span>: <span class="tok-f">len</span>(values), <span class="tok-s">"mean"</span>: <span class="tok-f">mean</span>(values)}</span></div>
+    <div class="codeline dim"><span class="ln">6</span><span></span></div>
+    <div class="codeline hl"><span class="ln">7</span><span></span></div>
+    <div class="codeline hl"><span class="ln">8</span><span class="gutstar">✨</span><span><span class="tok-k">def</span> <span class="tok-f">scale</span>(<span class="tok-v">values</span>):</span></div>
+    <div class="codeline hl"><span class="ln">9</span><span>    mu, sigma = <span class="tok-f">mean</span>(values), <span class="tok-f">stdev</span>(values)</span></div>
+    <div class="codeline hl"><span class="ln">10</span><span>    <span class="tok-k">return</span> [(v - mu) / sigma <span class="tok-k">for</span> v <span class="tok-k">in</span> values]</span></div>
   </div>`;
 
 // File History — a flat, chronological list of just the active file's edits (follows the editor)
 const fileHistoryCol = `
-  <div class="obsrow"><span class="dot" style="background:var(--pending)"></span><span class="id mono">#2</span><span class="r">14:02 · +4 −0 · <span style="color:var(--pending)">pending</span> · added a farewell() method to mirror greet()</span></div>
-  <div class="obsrow"><span class="dot" style="background:var(--kept)"></span><span class="id mono strike">#1</span><span class="r strike">14:01 · +11 −0 · kept · created the User class</span></div>`;
+  <div class="obsrow"><span class="dot" style="background:var(--pending)"></span><span class="id mono">#1</span><span class="r">14:02 · +6 −1 · <span style="color:var(--pending)">pending</span> · added scale() — z-score standardization</span></div>`;
 
 // A numbered annotation pin (a coral circle) + a callout label, absolutely placed over a mockup.
 const pin = (n, x, y) => `<span style="position:absolute;left:${x};top:${y};width:20px;height:20px;border-radius:50%;background:var(--coral);color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;font-family:-apple-system,sans-serif;box-shadow:0 1px 4px rgba(0,0,0,.5);z-index:3">${n}</span>`;
@@ -390,21 +385,21 @@ const changeMapCol = `
         <span style="color:var(--ink);border-bottom:1.5px solid var(--accent);padding-bottom:3px">Fleet</span>
         <span style="color:var(--faint)">Workflows</span>
       </div>
-      ${cmFleetRow('var(--blue)', 'demo', 'main', [.3, .6, .4, .8, .5, .9, .7, 1], true)}
+      ${cmFleetRow('var(--blue)', 'demo', 'demo/pipeline', [.3, .6, .4, .8, .5, .9, .7, 1], true)}
       ${cmFleetRow('var(--pending)', 'demo', 'feat-x', [.5, .7, .3, .6, .8, .4, .6, .5], false)}
       ${cmFleetRow('var(--kept)', 'demo', 'hotfix', [.4, .8, .6, .3, .7, .5, .2, .4], false)}
     </div>
     <div style="flex:1;min-width:0;padding:2px 16px 8px 14px">
       <div style="display:flex;gap:9px;font-size:10px;color:var(--dim);margin-bottom:8px;flex-wrap:wrap">
-        ${cmChapter('●', 'var(--kept)', '1 Subagent tracking')}${cmChapter('◐', 'var(--pending)', '2 Risk audit')}${cmChapter('○', 'var(--faint)', '3 Update docs')}
+        ${cmChapter('●', 'var(--kept)', '1 Feature scaling')}${cmChapter('◐', 'var(--pending)', '2 Dataset validation')}${cmChapter('○', 'var(--faint)', '3 Tests and docs')}
       </div>
       <div style="display:flex;height:16px;border-radius:3px;overflow:hidden;margin-bottom:9px">
-        ${cmSeg('var(--pending)', 'vscode')}${cmSeg('var(--kept)', 'core')}${cmSeg('var(--pending)', 'docs')}${cmSeg('var(--kept)', 'cli')}
+        ${cmSeg('var(--kept)', 'docs')}${cmSeg('var(--pending)', 'tests')}${cmSeg('var(--pending)', 'src')}${cmSeg('var(--kept)', 'src/models')}
       </div>
-      ${cmRow('var(--pending)', 'extension.ts', 'vscode', 100, '+751', '6⏳')}
-      ${cmRow('var(--kept)', 'changemap.ts', 'core', 38, '+285', '')}
-      ${cmRow('var(--pending)', 'README.md', 'docs', 14, '+44', '2⏳')}
-      ${cmRow('var(--kept)', 'index.ts', 'cli', 6, '+13', '')}
+      ${cmRow('var(--kept)', 'USAGE.md', 'docs', 100, '+12', '')}
+      ${cmRow('var(--pending)', 'test_pipeline.py', 'tests', 96, '+12', '1⏳')}
+      ${cmRow('var(--kept)', 'dataset.py', 'src/models', 58, '+7', '')}
+      ${cmRow('var(--pending)', 'features.py', 'src', 55, '+6', '1⏳')}
     </div>
   </div>`;
 // One agent (worktree) row: badge · worktree ⑂branch · self tag · sparkline · ± · ⚠risk · ⇄collisions.
@@ -440,7 +435,7 @@ const collisionStrip = `
     <div style="font-size:10px;letter-spacing:.08em;color:var(--dim);font-weight:600;margin-bottom:7px">FILE COLLISIONS (1)</div>
     <div style="display:flex;align-items:center;gap:9px;font-size:11.5px;padding:2px 0">
       <span style="color:var(--pending)">⇄</span>
-      <span class="mono" style="color:var(--ink)">src/models/User.js</span>
+      <span class="mono" style="color:var(--ink)">src/models/dataset.py</span>
       <span style="margin-left:auto;display:flex;gap:11px;align-items:center;color:var(--dim);font-size:11px">
         <span>2 agents</span><span class="pill p-pending">pending</span>
       </span>
@@ -458,7 +453,7 @@ const multitaskingBody = `
     <span style="margin-left:auto;display:flex;gap:14px;color:var(--faint);font-size:11px;padding-bottom:8px"><span>Active only</span><span>Clear completed</span></span>
   </div>
   ${agentRow(phase('working', 'var(--blue)'), 'demo', 'main', true, [.3, .6, .4, .8, .5, .9, .7, 1], 'var(--blue)', 15, 0, 1, 1)}
-  ${subRow(phase('working', 'var(--blue)'), 'Explore', 'maps the models layer', 'reading src/models/*.js', 0, 0)}
+  ${subRow(phase('working', 'var(--blue)'), 'Explore', 'maps the models layer', 'reading src/models/*.py', 0, 0)}
   ${subRow(phase('done', 'var(--kept)'), 'Explore', 'audits the import graph', '12 files scanned', 0, 0)}
   ${agentRow(phase('awaiting', 'var(--pending)'), 'demo-feat-x', 'feat-x', false, [.5, .7, .3, .6, .8, .4, .6, .5], 'var(--pending)', 42, 7, 2, 1)}
   ${agentRow(phase('done', 'var(--kept)'), 'demo-hotfix', 'hotfix', false, [.4, .8, .6, .3, .7, .5, .2, .4], 'var(--kept)', 6, 0, null, null)}
@@ -486,18 +481,18 @@ const chapterRow = (glyph, color, title, delta, pending, actable, synthetic) => 
 const ovAgentRow = (dot, branch, self, bars, added, removed, sel) => `
   <div style="display:flex;align-items:center;gap:7px;padding:6px 12px;font-size:11.5px${sel ? ';background:var(--bg);box-shadow:inset 2px 0 0 var(--accent)' : ''}">
     <span class="dot" style="background:${dot};flex:none"></span>
-    <span class="mono" style="color:${sel ? 'var(--ink)' : 'var(--dim)'};white-space:nowrap">demo <span style="color:var(--faint)">⑂${branch}</span></span>
-    ${self ? `<span style="font-size:8px;font-weight:700;color:var(--coral);border:1px solid var(--coral);border-radius:8px;padding:0 5px">self</span>` : ''}
+    <span class="mono" style="color:${sel ? 'var(--ink)' : 'var(--dim)'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto;min-width:0">demo <span style="color:var(--faint)">⑂${branch}</span></span>
+    ${self ? `<span style="font-size:8px;font-weight:700;color:var(--coral);border:1px solid var(--coral);border-radius:8px;padding:0 5px;flex:none">self</span>` : ''}
     <span style="margin-left:auto;display:flex;align-items:center;gap:7px;flex:none">${spark(bars, dot)}<span class="mono" style="font-size:9.5px"><span style="color:${gADD}">+${added}</span> <span style="color:${gREM}">−${removed}</span></span></span>
   </div>`;
 const overviewTabsBody = `
   <div style="display:flex;align-items:stretch">
-    <div style="flex:0 0 31%;min-width:0;background:var(--side);border-right:1px solid var(--border)">
+    <div style="flex:0 0 35%;min-width:0;background:var(--side);border-right:1px solid var(--border)">
       <div style="display:flex;gap:12px;padding:9px 12px 7px;border-bottom:1px solid var(--border);font-size:11.5px">
         <span style="color:var(--ink);border-bottom:1.5px solid var(--accent);padding-bottom:6px;margin-bottom:-8px">Fleet</span>
         <span style="color:var(--faint)">Workflows</span>
       </div>
-      ${ovAgentRow('var(--blue)', 'main', true, [.3, .6, .4, .8, .5, .9, .7, 1], 15, 0, true)}
+      ${ovAgentRow('var(--blue)', 'demo/pipeline', true, [.3, .6, .4, .8, .5, .9, .7, 1], 40, 3, true)}
       ${ovAgentRow('var(--pending)', 'feat-x', false, [.5, .7, .3, .6, .8, .4, .6, .5], 42, 7, false)}
       ${ovAgentRow('var(--kept)', 'hotfix', false, [.4, .8, .6, .3, .7, .5, .2, .4], 6, 0, false)}
       <div style="font-size:9px;letter-spacing:.08em;color:var(--faint);font-weight:600;padding:9px 12px 2px;border-top:1px solid var(--border);margin-top:5px">WORKFLOWS</div>
@@ -510,27 +505,25 @@ const overviewTabsBody = `
     <div style="flex:1;min-width:0">
       <div style="display:flex;align-items:center;gap:9px;padding:10px 16px 6px;font-size:11.5px">
         <span style="background:var(--side);border:1px solid var(--border2);border-radius:12px;padding:2px 11px;display:inline-flex;gap:9px;align-items:center;white-space:nowrap">
-          <span class="mono" style="color:var(--ink)">demo <span style="color:var(--faint)">⑂main</span></span>
+          <span class="mono" style="color:var(--ink)">demo <span style="color:var(--faint)">⑂demo/pipeline</span></span>
           <span style="color:var(--faint)">·</span><span>${microscope}</span><span class="mono" style="color:var(--coral)">0c396c6b</span>
-          <span style="color:var(--faint)">·</span><span style="color:var(--dim)">7 edits</span>
-          <span style="color:var(--pending)">3⏳</span><span style="color:var(--kept)">42✓</span>
-          <span style="color:var(--faint)">·</span><span style="color:var(--ink)">89%</span>
+          <span style="color:var(--faint)">·</span><span style="color:var(--dim)">5 edits</span>
+          <span style="color:var(--pending)">2⏳</span><span style="color:var(--kept)">3✓</span>
+          <span style="color:var(--faint)">·</span><span style="color:var(--ink)">60%</span>
         </span>
       </div>
       <div style="display:flex;align-items:center;gap:5px;padding:4px 16px 10px;flex-wrap:wrap">
-        ${taskPill('Add the greeting API', '+42 −7', 'var(--pending)', false)}
-        ${taskPill('Write the tests', '+18 −3', 'var(--pending)', false)}
-        ${taskPill('Update the docs', '+2 −0', 'var(--kept)', false)}
-        <span style="display:inline-flex;align-items:center;gap:6px;border:1px dashed var(--border2);border-radius:99px;padding:3px 10px;font-size:12px;color:var(--dim);white-space:nowrap"><span style="width:9px;height:9px;border-radius:50%;background:var(--kept)"></span>4 done ▸</span>
+        ${taskPill('Tests and docs', '+24 −0', 'var(--pending)', false)}
+        <span style="display:inline-flex;align-items:center;gap:6px;border:1px dashed var(--border2);border-radius:99px;padding:3px 10px;font-size:12px;color:var(--dim);white-space:nowrap"><span style="width:9px;height:9px;border-radius:50%;background:var(--kept)"></span>2 done ▸</span>
       </div>
       <div style="display:flex;height:16px;border-radius:3px;overflow:hidden;margin:0 16px 10px">
-        ${cmSeg('var(--pending)', 'vscode')}${cmSeg('var(--kept)', 'core')}${cmSeg('var(--pending)', 'docs')}${cmSeg('var(--kept)', 'cli')}
+        ${cmSeg('var(--pending)', 'docs')}${cmSeg('var(--pending)', 'tests')}${cmSeg('var(--kept)', 'src')}${cmSeg('var(--kept)', 'src/models')}
       </div>
       <div style="padding:0 16px 8px">
-        ${cmRow('var(--pending)', 'User.js', 'core', 100, '+15', '2⏳')}
-        ${cmRow('var(--kept)', 'index.js', 'core', 40, '+4', '')}
-        ${cmRow('var(--pending)', 'README.md', 'docs', 16, '+8', '1⏳')}
-        ${cmRow('var(--kept)', 'extension.ts', 'vscode', 26, '+9', '')}
+        ${cmRow('var(--pending)', 'USAGE.md', 'docs', 100, '+12', '1⏳')}
+        ${cmRow('var(--pending)', 'test_pipeline.py', 'tests', 96, '+12', '1⏳')}
+        ${cmRow('var(--kept)', 'dataset.py', 'src/models', 58, '+7', '')}
+        ${cmRow('var(--kept)', 'features.py', 'src', 55, '+6', '')}
       </div>
     </div>
   </div>`;
@@ -656,13 +649,13 @@ const scenes = {
           <div style="padding:10px 14px 2px;font-size:11px;color:var(--dim);letter-spacing:.06em;">CLAUDE EDITS</div>
           ${editsTree}
           <div class="viewhead" style="border-top:1px solid var(--border);margin-top:8px;">DIFFS</div>
-          <div class="viewhead" style="border-top:1px solid var(--border);">FILE HISTORY <span style="float:right;color:var(--faint)">User.js</span></div>
+          <div class="viewhead" style="border-top:1px solid var(--border);">FILE HISTORY <span style="float:right;color:var(--faint)">features.py</span></div>
           <div class="viewhead" style="border-top:1px solid var(--border);">ACTIONS</div>
         </div>
         <div style="flex:1;display:flex;flex-direction:column;">
           <div style="position:relative;display:flex;align-items:center;background:var(--side);border-bottom:1px solid var(--border);box-shadow:inset 0 0 0 2px var(--coral);">
             ${clabel('③ EDITOR TAB BAR')}
-            <div style="padding:8px 18px;background:var(--bg);border-right:1px solid var(--border);font-size:12.5px;">User.js</div>
+            <div style="padding:8px 18px;background:var(--bg);border-right:1px solid var(--border);font-size:12.5px;">features.py</div>
             <span style="margin-left:auto;display:flex;gap:12px;padding-right:14px;color:var(--dim);font-size:13px;">‹ › <span style="color:var(--kept)">✓</span> <span style="color:var(--pending)">↩</span> 🧹 💡 🔍 ⇄</span>
           </div>
           ${editorCode()}
@@ -696,12 +689,12 @@ const scenes = {
           <div style="padding:10px 14px 2px;font-size:11px;color:var(--dim);letter-spacing:.06em;">CLAUDE EDITS</div>
           ${editsTree}
           <div class="viewhead" style="border-top:1px solid var(--border);margin-top:8px;">DIFFS</div>
-          <div class="viewhead" style="border-top:1px solid var(--border);">FILE HISTORY <span style="float:right;color:var(--faint)">User.js</span></div>
+          <div class="viewhead" style="border-top:1px solid var(--border);">FILE HISTORY <span style="float:right;color:var(--faint)">features.py</span></div>
           <div class="viewhead" style="border-top:1px solid var(--border);">ACTIONS</div>
         </div>
         <div style="flex:1;display:flex;flex-direction:column;">
           <div style="display:flex;background:var(--side);border-bottom:1px solid var(--border);">
-            <div style="padding:8px 18px;background:var(--bg);border-right:1px solid var(--border);font-size:12.5px;">User.js</div>
+            <div style="padding:8px 18px;background:var(--bg);border-right:1px solid var(--border);font-size:12.5px;">features.py</div>
           </div>
           ${editorCode()}
         </div>
@@ -716,7 +709,7 @@ const scenes = {
       </div>
       <div class="statusbar">
         <span class="sb-warn">${microscope} 3</span>
-        <span>⎇ main</span><span style="margin-left:auto">Ln 9, Col 14&nbsp;&nbsp;UTF-8&nbsp;&nbsp;JavaScript</span>
+        <span>⎇ main</span><span style="margin-left:auto">Ln 8, Col 1&nbsp;&nbsp;UTF-8&nbsp;&nbsp;Python</span>
       </div>
     </div>`),
 
@@ -724,7 +717,7 @@ const scenes = {
   'inline-review': scene(980, `
     <div class="window">
       <div style="display:flex;background:var(--side);border-bottom:1px solid var(--border);">
-        <div style="padding:8px 18px;background:var(--bg);border-right:1px solid var(--border);font-size:12.5px;">User.js</div>
+        <div style="padding:8px 18px;background:var(--bg);border-right:1px solid var(--border);font-size:12.5px;">train.py</div>
       </div>
       ${editorCodeCombined()}
       ${reviewBubble()}
@@ -738,8 +731,8 @@ const scenes = {
       <div class="colhead" style="padding-top:10px;">OBSERVATIONS</div>
       ${observationsCol}
       <div class="hovercard" style="margin:10px 16px 8px 40px;width:430px;">
-        <b>#1 created User.js</b><br>
-        <span style="color:var(--dim)">💭 "I'll do the three operations in order. First, a quick check of the demo directory…"</span><br>
+        <b>#1 edited features.py</b><br>
+        <span style="color:var(--dim)">💭 "Adding scale() — z-score standardization so features share a range before training."</span><br>
         <span style="color:var(--pending)">⚠ history: edits to this file get reverted often (3 of 5 verdicts)</span><br>
         <span style="color:var(--dim)">🧠 6 edits across sessions · 50% accepted · last reverted 2d ago</span>
       </div>
@@ -778,7 +771,7 @@ const scenes = {
   'heatmap': scene(980, `
     <div class="window">
       <div style="display:flex;background:var(--side);border-bottom:1px solid var(--border);">
-        <div style="padding:8px 18px;background:var(--bg);border-right:1px solid var(--border);font-size:12.5px;">User.js</div>
+        <div style="padding:8px 18px;background:var(--bg);border-right:1px solid var(--border);font-size:12.5px;">features.py</div>
       </div>
       ${heatmapEditor()}
       <div class="statusbar"><span class="sb-warn">${microscope} 3</span><span style="color:var(--faint)">📄 Heatmap on — every unmodified line dimmed</span></div>
@@ -787,7 +780,7 @@ const scenes = {
   // I. File History — the active file's edits, chronological, follows the editor
   'file-history': scene(720, `
     <div class="window" style="padding-bottom:8px;">
-      <div class="viewhead" style="padding-top:12px;">FILE HISTORY <span style="float:right;color:var(--faint)">User.js</span></div>
+      <div class="viewhead" style="padding-top:12px;">FILE HISTORY <span style="float:right;color:var(--faint)">features.py</span></div>
       ${fileHistoryCol}
     </div>`),
 
@@ -809,12 +802,12 @@ const scenes = {
   'chapters': scene(720, `
     <div class="window" style="padding-bottom:10px;">
       <div class="viewhead" style="padding-top:12px;">OVERVIEW · CHAPTERS <span style="float:right;color:var(--faint)">session 0c396c6b</span></div>
-      ${chapterRow('◐', 'var(--pending)', 'Add the greeting API', '+42 −7', '3⏳', true)}
-      ${chapterRow('◐', 'var(--pending)', 'Write the tests', '+18 −3', '1⏳', true)}
-      ${chapterRow('●', 'var(--kept)', 'Update the docs', '+2 −0', '', true)}
-      ${chapterRow('◐', 'var(--pending)', 'Greeter: farewell, validation, tests', '+3 −0', '1⏳', true, true)}
+      ${chapterRow('●', 'var(--kept)', 'Add feature scaling to the pipeline', '+9 −3', '', true)}
+      ${chapterRow('●', 'var(--kept)', 'Validate the training dataset', '+7 −0', '', true)}
+      ${chapterRow('◐', 'var(--pending)', 'Tests and docs', '+24 −0', '2⏳', true)}
+      ${chapterRow('◐', 'var(--pending)', 'Pipeline: scaling, validation, tests', '', '', true, true)}
       <div style="display:flex;align-items:center;gap:8px;padding:6px 16px 2px;font-size:11.5px;color:var(--dim)">
-        <span style="width:9px;height:9px;border-radius:50%;background:var(--kept)"></span>4 done ▸
+        <span style="width:9px;height:9px;border-radius:50%;background:var(--kept)"></span>2 done ▸
         <span style="margin-left:auto;color:var(--faint)">🧹 clear completed</span>
       </div>
     </div>`),
@@ -826,12 +819,13 @@ const scenes = {
       <div style="padding:14px 18px;font-size:12.5px;line-height:1.7">
         <div class="mono" style="color:var(--dim);border:1px solid var(--border2);border-radius:6px;padding:12px 14px;background:var(--side)">
           <div>I'm reviewing an edit you made with Claude Observatory. Context:</div>
-          <div style="margin-top:8px"><span style="color:var(--ink)">Edit #2</span> · Edit · <span class="add2">+4</span> <span class="rem2">−0</span> · <span style="color:var(--ink)">src/models/User.js</span> · task: <span style="color:var(--coral)">Add the greeting API</span></div>
-          <div style="margin-top:6px;color:var(--faint);font-style:italic">Your reasoning at the time: "Adding a farewell() alongside greet() so the app can close conversations too."</div>
-          <div style="margin-top:8px;color:var(--blue)">@@ src/models/User.js +4 −0 @@</div>
-          <div><span class="add2">+  farewell() {</span></div>
-          <div><span class="add2">+    return \`Goodbye from \${this.name}!\`;</span></div>
-          <div><span class="add2">+  }</span></div>
+          <div style="margin-top:8px"><span style="color:var(--ink)">Edit #2</span> · Edit · <span class="add2">+3</span> <span class="rem2">−2</span> · <span style="color:var(--ink)">src/train.py</span> · task: <span style="color:var(--coral)">Add feature scaling to the pipeline</span></div>
+          <div style="margin-top:6px;color:var(--faint);font-style:italic">Your reasoning at the time: "Scaling the features in the training entrypoint before they reach the model."</div>
+          <div style="margin-top:8px;color:var(--blue)">@@ src/train.py +3 −2 @@</div>
+          <div><span class="rem2">-from features import summarize</span></div>
+          <div><span class="add2">+from features import summarize, scale</span></div>
+          <div><span class="add2">+features = scale([1.0, 2.0, 3.0])</span></div>
+          <div><span class="add2">+print(summarize(features))</span></div>
           <div style="margin-top:8px;color:var(--ink)">My question: …</div>
         </div>
         <div style="display:flex;align-items:center;gap:9px;margin-top:12px;font-size:12px;color:var(--dim)">
@@ -846,12 +840,12 @@ const scenes = {
       <div class="titlebar"><span class="tl" style="background:#ff5f57"></span><span class="tl" style="background:#febc2e"></span><span class="tl" style="background:#28c840"></span><span class="t">demo — claude-observatory</span></div>
       <div class="term">
         <div class="cmd"><span class="pr">$</span>claude-observatory <span class="fl">demo</span></div>
-        <div class="out">▸ prompt — asking Claude to extend the greeter app</div>
+        <div class="out">▸ prompt — asking Claude to extend the training pipeline</div>
         <div class="out">▸ plan — three to-dos (the Overview chapters)</div>
-        <div class="out">▸ chapter 1 — farewell support (2 edits)</div>
-        <div class="out">▸ chapter 2 — input validation</div>
-        <div class="out">▸ chapter 3 — tests via a <span class="file2">subagent</span> (its own timeline + attributed edits)</div>
-        <div class="out">▸ a <span class="file2">workflow</span> run — docs written one level above the subagents</div>
+        <div class="out">▸ chapter 1 — feature scaling (2 edits)</div>
+        <div class="out">▸ chapter 2 — dataset validation</div>
+        <div class="out">▸ chapter 3 — tests, written by a <span class="file2">subagent</span></div>
+        <div class="out">▸ a <span class="file2">workflow</span> run starts — documentation, one level above the subagents</div>
         <div class="out">▸ recap — plan complete, next steps surfaced</div>
         <div class="out"><span class="ok">✓</span> demo session <span class="id2">demo-3cc31d01</span> is live — <span class="warn">5 pending edits</span> in observatory-demo/</div>
         <div class="out">  open the Overview / Observations panels, review the chapters, then: <span class="fl">demo --clean</span></div>
@@ -865,11 +859,11 @@ const scenes = {
 const SIZE = {
   layout: '1808,860', anatomy: '1808,700', map: '1808,706', bubble: '1248,368',
   'win-overview': '1248,320', 'win-actions': '1248,300', 'win-observations': '1228,288', 'win-stats': '1168,420',
-  stats: '808,478', 'inline-review': '1028,720', observations: '1028,368',
-  cli: '948,500', conflict: '928,290', diffs: '1028,330', heatmap: '1028,400',
-  'file-history': '768,150',
-  multitasking: '868,352', 'overview-tabs': '808,340',
-  chapters: '768,210', chat: '908,412', demo: '928,392',
+  stats: '808,478', 'inline-review': '1028,440', observations: '1028,368',
+  cli: '948,540', conflict: '928,290', diffs: '1028,330', heatmap: '1028,400',
+  'file-history': '768,130',
+  multitasking: '868,352', 'overview-tabs': '808,248',
+  chapters: '768,224', chat: '908,440', demo: '928,392',
 };
 const tmp = join(tmpdir(), 'obs-media');
 mkdirSync(tmp, { recursive: true });

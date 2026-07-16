@@ -27,11 +27,11 @@ test('extension: three views, click commands, inline annotations, chat, status s
   fs.writeFileSync(path.join(proj, S + '.jsonl'), [
     JSON.stringify({ type: 'ai-title', aiTitle: 'Reviewing app.txt edits' }),
     JSON.stringify({ message: { role: 'assistant', content: [
-      { type: 'text', text: 'Operation 1 — introduce the greeting' },
+      { type: 'text', text: 'Operation 1 — introduce feature scaling' },
       { type: 'tool_use', name: 'Edit', input: { file_path: F } },
     ] } }),
     JSON.stringify({ message: { role: 'assistant', content: [
-      { type: 'text', text: 'Operation 2 — add a farewell() method' },
+      { type: 'text', text: 'Operation 2 — add a validate() method' },
       { type: 'tool_use', name: 'Edit', input: { file_path: F } },
     ] } }),
     // Subagents (0.7.0): an Agent spawn + its result carrying the subagent's id + metrics.
@@ -48,7 +48,7 @@ test('extension: three views, click commands, inline annotations, chat, status s
   fs.writeFileSync(path.join(subDir, `agent-${AG}.jsonl`), [
     JSON.stringify({ isSidechain: true, agentId: AG, sessionId: S, timestamp: '2026-07-13T10:01:00.000Z', message: { role: 'assistant', content: [
       { type: 'tool_use', id: 'sa1', name: 'Read', input: { file_path: F } },
-      { type: 'tool_use', id: 'sa2', name: 'Grep', input: { pattern: 'greet' } },
+      { type: 'tool_use', id: 'sa2', name: 'Grep', input: { pattern: 'scale' } },
     ] } }),
   ].join('\n'));
   // a sibling session in the SAME project (0.7.0 fleet), backdated so resolveSessionId still returns S.

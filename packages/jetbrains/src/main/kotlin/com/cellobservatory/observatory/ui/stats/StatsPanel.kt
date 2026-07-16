@@ -121,12 +121,12 @@ class StatsPanel(private val project: Project) : JPanel(BorderLayout()), com.int
         border = JBUI.Borders.empty(4, 8)
         isVisible = false
     }
-    // Stats top navbar (parity with the VS Code Stats navbar): the active session + a Search-edits box.
+    // Stats top navbar (parity with the VS Code Stats navbar): the active session only — Search-edits
+    // lives on the review nav bar (Overview toolbar + status bar), as in VS Code.
     private val sessionLabel = JBLabel().apply {
         foreground = UIUtil.getContextHelpForeground()
         toolTipText = "Active Claude Code session"
     }
-    private val searchField = com.intellij.ui.components.JBTextField().apply { emptyText.text = "Search edits…" }
 
     init {
         val ranges = JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(4), JBUI.scale(4)))
@@ -137,22 +137,11 @@ class StatsPanel(private val project: Project) : JPanel(BorderLayout()), com.int
             group.add(b)
             ranges.add(b)
         }
-        // Top navbar: active session + a Search-edits box (debounced → the shared edit filter), above
-        // the range toggle. Clicking the scoreboard's PENDING column jumps to the first edit to review.
-        val filterAlarm = com.intellij.util.Alarm(com.intellij.util.Alarm.ThreadToUse.SWING_THREAD, this)
-        searchField.document.addDocumentListener(object : javax.swing.event.DocumentListener {
-            private fun changed() {
-                filterAlarm.cancelAllRequests()
-                filterAlarm.addRequest({ ObservatoryService.getInstance(project).setFilter(searchField.text) }, 300)
-            }
-            override fun insertUpdate(e: javax.swing.event.DocumentEvent) = changed()
-            override fun removeUpdate(e: javax.swing.event.DocumentEvent) = changed()
-            override fun changedUpdate(e: javax.swing.event.DocumentEvent) = changed()
-        })
+        // Top navbar: the active session, above the range toggle. Clicking the scoreboard's PENDING
+        // column jumps to the first edit to review.
         val navbar = JPanel(BorderLayout(JBUI.scale(8), 0)).apply {
             border = JBUI.Borders.empty(4, 8, 3, 8)
             add(sessionLabel, BorderLayout.WEST)
-            add(searchField, BorderLayout.CENTER)
         }
         add(JPanel().apply { layout = javax.swing.BoxLayout(this, javax.swing.BoxLayout.Y_AXIS); add(navbar); add(ranges) }, BorderLayout.NORTH)
         scoreboard.toolTipText = "Click the PENDING count to jump to the first edit to review"
