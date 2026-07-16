@@ -58,13 +58,17 @@ import javax.swing.BoxLayout
 import javax.swing.DefaultListModel
 import javax.swing.Icon
 import javax.swing.JComponent
+import javax.swing.JLabel
 import javax.swing.JList
 import javax.swing.JPanel
 import javax.swing.JPopupMenu
 import javax.swing.JTree
 import javax.swing.ListCellRenderer
+import javax.swing.ScrollPaneConstants
+import javax.swing.SwingConstants
 import javax.swing.tree.DefaultMutableTreeNode
 import javax.swing.tree.DefaultTreeModel
+import javax.swing.tree.TreeCellRenderer
 import javax.swing.tree.TreePath
 import javax.swing.tree.TreeSelectionModel
 
@@ -73,9 +77,20 @@ import javax.swing.tree.TreeSelectionModel
 private val CM_PENDING = JBColor(Color(0xD9A441), Color(0xD9A441))
 private val CM_KEPT = JBColor(Color(0x3FB950), Color(0x3FB950))
 private val CM_REVERTED = JBColor.GRAY
-private val MT_ATTENTION = JBColor(Color(0xD9A441), Color(0xD9A441))
-private val MT_WORKING = JBColor(Color(0x3FB950), Color(0x3FB950))
+// The multitask palette — the same hexes the VS Code webview reads from --vscode-charts-* (extension.ts
+// --mt-*): working/running BLUE, done GREEN, awaiting ORANGE, error RED, subagents PURPLE.
+private val MT_ATTENTION = JBColor(Color(0xD9822B), Color(0xD9822B))
+private val MT_WORKING = JBColor(Color(0x4C8BF5), Color(0x4C8BF5))
+private val MT_DONE = JBColor(Color(0x3FB950), Color(0x3FB950))
 private val MT_ERROR = JBColor(Color(0xE5534B), Color(0xE5534B))
+private val MT_AGENT = JBColor(Color(0x9A6AC2), Color(0x9A6AC2))
+private val MT_ADD = SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, MT_DONE)
+private val MT_REM = SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, MT_ERROR)
+
+/** The module strip shows at most this many segments; the churn-ranked tail merges into "+K more". */
+private const val MAX_SEGMENTS = 11
+/** Sentinel module id for the strip's merged overflow segment — never a real module, never clickable. */
+private const val OVERFLOW_MODULE = "+more"
 
 /** status → colour. "undone" surfaces as "reverted" grey, matching the VS Code renderer. */
 private fun statusColor(status: String): JBColor = when (status) {
@@ -134,7 +149,7 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         showsRootHandles = true
         selectionModel.selectionMode = TreeSelectionModel.SINGLE_TREE_SELECTION
         emptyText.text = "No agents yet — this fills in as Claude Code sessions run in this repo's worktrees"
-        cellRenderer = FleetRenderer()
+        cellRenderer = SparklineTreeRenderer(FleetRenderer())
     }
     private val workflowsRoot = DefaultMutableTreeNode()
     private val workflowsModel = DefaultTreeModel(workflowsRoot)
@@ -143,11 +158,14 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         showsRootHandles = true
         selectionModel.selectionMode = TreeSelectionModel.SINGLE_TREE_SELECTION
         emptyText.text = "No workflow runs — Claude Code Workflow orchestrations appear here"
+        cellRenderer = SparklineTreeRenderer(WorkflowRenderer())
     }
     private val collisionStrip = JBLabel().apply {
         font = JBUI.Fonts.miniFont()
         border = JBUI.Borders.empty(3, 8)
     }
+    /** The collisions behind the strip — kept so a click can open the contested file(s). */
+    private var lastCollisions: List<Collision> = emptyList()
 
     // --- RIGHT DETAIL: the change-map for the selected nav item ---
     private val detailHost = JPanel(BorderLayout())
@@ -190,23 +208,24 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
 
         // Top navbar — VS Code Overview toolbar order (parity): session · Active only | the step-through
         // review nav bar | bulk Accept/Revert/Clear · Refresh | the JetBrains-only fleet filters last.
+        // showText: this toolbar renders each button's label beside its icon, like VS Code's Overview.
         val group = DefaultActionGroup(
             action("Switch Session", AllIcons.Vcs.Branch) { ReviewOps.chooseSession(project, fleetTree) },
             activeOnlyToggle(),
             Separator.getInstance(),
             // The compact step-through review nav bar (File/Diff axes + counters, Keep/Undo, Accept/Reject/
             // Clear File, Spotlight, Search) — the same controls the status-bar nav bar shows.
-            reviewNavBar.buildGroup(),
+            reviewNavBar.buildGroup(showText = true),
             Separator.getInstance(),
             // Bulk actions RETARGET to the picked ribbon chapter when one is selected (task-keep/undo/clear
             // on chapter.id), else run session-wide; the presentation text reflects the scope.
-            bulkAction("Accept All Edits", Icons.CheckAll, { "Accept All in “$it”" },
+            bulkAction("Accept All", Icons.CheckAll, { "Accept All in “$it”" },
                 { withSession { s -> ReviewOps.keepAll(project, s) } },
                 { p -> ReviewOps.keepTask(project, p.session, p.id, p.title) }),
-            bulkAction("Revert All Edits", AllIcons.Actions.Rollback, { "Revert All in “$it”" },
+            bulkAction("Revert All", AllIcons.Actions.Rollback, { "Revert All in “$it”" },
                 { withSession { s -> ReviewOps.undoAll(project, s, service().log(), "this session") } },
                 { p -> ReviewOps.undoTask(project, p.session, p.id, p.title) }),
-            bulkAction("Clear Resolved Edits", AllIcons.Actions.GC, { "Clear in “$it”" },
+            bulkAction("Clear Resolved", AllIcons.Actions.GC, { "Clear in “$it”" },
                 {
                     withSession { s ->
                         val resolved = service().log().count { !it.pending }
@@ -218,7 +237,7 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             Separator.getInstance(),
             clearCompletedAction(),
             showHiddenAction(),
-            action("Clear Reviewed Edits in Completed Chapters", AllIcons.Vcs.Remove) {
+            action("Clear Done Chapters", AllIcons.Vcs.Remove, "Clear reviewed edits in completed chapters") {
                 // Scope to the session whose change-map the detail is showing — an Agent tab targets that
                 // agent, Main/Workflow fall back to the orchestrator. (Distinct from the nav "Clear Completed"
                 // above, which only DISMISSES rows from the fleet list.)
@@ -262,6 +281,11 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
                 fleetTree.selectionPath = path
                 popupFor((path.lastPathComponent as? DefaultMutableTreeNode)?.userObject)?.show(fleetTree, e.x, e.y)
             }
+        })
+
+        // Clicking the conflict strip opens the contested file (a chooser when several collide).
+        collisionStrip.addMouseListener(object : MouseAdapter() {
+            override fun mouseClicked(e: MouseEvent) = openCollision()
         })
 
         ObservatoryService.getInstance(project).addListener { rebuild() }
@@ -363,47 +387,29 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
     }
 
     /** Paint the Workflows tab: one node per run — its INFORMATIVE name (description/summary) · agents ·
-     *  tokens · time · ±lines · running/done + a per-phase progress summary — with its agents GROUPED BY
-     *  PHASE, each agent showing its label + tokens/time/edits. Thin — renders the core-aggregated payload. */
+     *  tokens · time · ±lines · running/done — with its agents GROUPED BY PHASE, each agent showing its
+     *  label + tokens/time/edits. Thin — builds userObject nodes; [WorkflowRenderer] paints them. */
     private fun repaintWorkflows(workflows: List<WorkflowRun>?) {
         workflowsRoot.removeAllChildren()
         val allWf = workflows ?: emptyList()
         val shownWf = allWf.filter { MultitaskFilter.showWorkflow(it, activeOnly, dismissedWorkflows) }
         workflowsInfoNode(allWf, shownWf)?.let { workflowsRoot.add(it) }
         shownWf.forEach { w ->
-            val badge = if (w.running) "▶ running" else "✓ done"
-            val name = w.description?.takeIf { it.isNotBlank() } ?: w.name
-            val progress = if (w.phaseGroups.isNotEmpty()) "  ·  " + w.phaseGroups.joinToString(" · ") { "${it.title} ${it.done}/${it.total}" } else ""
-            // Same activity sparkline the fleet rows draw, in the same name → spark → metrics order (parity).
-            val spark = sparkline(w.sparkline).let { if (it.isNotBlank()) "  $it" else "" }
-            val label = "$badge  $name$spark  —  ${w.agentCount} ag · ${fmtTok(w.tokens)} tok · ${fmtDur(w.durationMs)} · +${w.added} −${w.removed}$progress"
-            val node = DefaultMutableTreeNode(WfRunRow(w.id, label))
+            val node = DefaultMutableTreeNode(WfRunRow(w))
             val grouped = HashSet<String>()
             w.phaseGroups.forEach { pg ->
-                val phaseNode = DefaultMutableTreeNode("${pg.title}  ${pg.done}/${pg.total}")
+                val phaseNode = DefaultMutableTreeNode(WfPhaseRow(pg.title, pg.done, pg.total))
                 w.agents.filter { it.phase == pg.title }.forEach { a ->
-                    phaseNode.add(DefaultMutableTreeNode(agentLine(a)))
+                    phaseNode.add(DefaultMutableTreeNode(WfAgentRow(a)))
                     grouped.add(a.agentId)
                 }
                 node.add(phaseNode)
             }
-            w.agents.filter { it.agentId !in grouped }.forEach { a -> node.add(DefaultMutableTreeNode(agentLine(a))) }
+            w.agents.filter { it.agentId !in grouped }.forEach { a -> node.add(DefaultMutableTreeNode(WfAgentRow(a))) }
             workflowsRoot.add(node)
         }
         workflowsModel.reload()
         TreeUtil.expandAll(workflowsTree)
-    }
-
-    /** One workflow agent's row: done-dot · label (state-file label, else type+id) · sparkline · ±diff ·
-     *  model · tokens · time · edits — the same "extras" the run header carries, per agent. */
-    private fun agentLine(a: WorkflowAgent): String {
-        val d = if (a.done) "●" else "○"
-        // A '~' marks a prompt-derived (heuristic) label on a live run — same convention as phases.
-        val who = a.label?.let { it + if (a.labelDerived) "~" else "" } ?: "${a.agentType ?: "agent"} ${a.agentId.take(8)}"
-        val spark = sparkline(a.sparkline).let { if (it.isNotBlank()) "  $it" else "" }
-        val diff = if (a.added > 0 || a.removed > 0) "+${a.added} -${a.removed} · " else ""
-        val mdl = if (a.model.isNotBlank()) "${a.model} · " else ""
-        return "$d $who$spark · $diff$mdl${fmtTok(a.tokens)} tok · ${fmtDur(a.durationMs)} · ${a.edits} edit${if (a.edits == 1) "" else "s"}"
     }
 
     /** Re-select the tree row for the current [selected] after a reload wiped the selection (best-effort). */
@@ -426,6 +432,8 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
     }
 
     private fun updateCollisionStrip(collisions: List<Collision>) {
+        lastCollisions = collisions
+        collisionStrip.cursor = if (collisions.isEmpty()) Cursor.getDefaultCursor() else Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
         if (collisions.isEmpty()) {
             collisionStrip.text = "No live file conflicts"
             collisionStrip.foreground = UIUtil.getContextHelpForeground()
@@ -438,7 +446,24 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         collisionStrip.foreground = MT_ATTENTION
         collisionStrip.toolTipText = "<html>" + collisions.take(20).joinToString("<br>") { c ->
             shortFile(c.file) + " — " + c.agents.joinToString(", ") { it.take(8) } + (if (c.anyPending) " ⏳" else "")
-        } + (if (collisions.size > 20) "<br>+${collisions.size - 20} more" else "") + "</html>"
+        } + (if (collisions.size > 20) "<br>+${collisions.size - 20} more" else "") + "<br>Click to open</html>"
+    }
+
+    /** Open a contested file from the conflict strip — directly for one collision, via a chooser for
+     *  several (VS Code parity: its conflict rows open the file on click). */
+    private fun openCollision() {
+        val cols = lastCollisions
+        if (cols.isEmpty()) return
+        fun open(path: String) {
+            val vf = com.intellij.openapi.vfs.LocalFileSystem.getInstance().refreshAndFindFileByPath(path)
+            if (vf == null) ReviewOps.notify(project, "File not found: $path", com.intellij.notification.NotificationType.WARNING)
+            else com.intellij.openapi.fileEditor.FileEditorManager.getInstance(project).openFile(vf, true)
+        }
+        if (cols.size == 1) return open(cols.first().file)
+        JPopupMenu().apply {
+            cols.take(20).forEach { c -> add(menuItem(shortFile(c.file)) { open(c.file) }) }
+            show(collisionStrip, 0, collisionStrip.height)
+        }
     }
 
     // --- the right detail: change-map for the selected nav item ---
@@ -502,8 +527,12 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         foreground = UIUtil.getContextHelpForeground()
     }
 
-    private fun action(text: String, icon: Icon, run: () -> Unit): AnAction =
-        object : AnAction(text, null, icon), DumbAware {
+    /** An Overview-toolbar button: [text] renders beside the icon (VS Code shows these labels), with an
+     *  optional longer [description] as the tooltip. */
+    private fun action(text: String, icon: Icon, description: String? = null, run: () -> Unit): AnAction =
+        object : AnAction(text, description, icon), DumbAware {
+            @Suppress("OVERRIDE_DEPRECATION") // displayTextInToolbar: still honored; renders the label
+            override fun displayTextInToolbar() = true
             override fun actionPerformed(e: AnActionEvent) = run()
         }
 
@@ -518,6 +547,8 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         chapterRun: (PickedChapter) -> Unit,
     ): AnAction = object : AnAction(baseText, null, icon), DumbAware {
         override fun getActionUpdateThread() = ActionUpdateThread.EDT
+        @Suppress("OVERRIDE_DEPRECATION") // displayTextInToolbar: still honored; renders the scoped label
+        override fun displayTextInToolbar() = true
         override fun update(e: AnActionEvent) {
             val pick = pickedChapter
             e.presentation.text = if (pick != null) scopedText(pick.title) else baseText
@@ -556,6 +587,8 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         AllIcons.General.Filter,
     ), DumbAware {
         override fun getActionUpdateThread() = ActionUpdateThread.EDT
+        @Suppress("OVERRIDE_DEPRECATION") // displayTextInToolbar: still honored; renders the label
+        override fun displayTextInToolbar() = true
         override fun isSelected(e: AnActionEvent) = activeOnly
         override fun setSelected(e: AnActionEvent, state: Boolean) {
             activeOnly = state
@@ -621,9 +654,11 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
 
     private class AgentRow(val agent: RunningAgent, val collides: Boolean)
     private class SubRow(val session: String, val sub: MtSubagent)
-    private class WfRunRow(val id: String, val label: String) {
-        override fun toString(): String = label
+    private class WfRunRow(val run: WorkflowRun) {
+        val id: String get() = run.id
     }
+    private class WfPhaseRow(val title: String, val done: Int, val total: Int)
+    private class WfAgentRow(val agent: WorkflowAgent)
     private class FilterInfo(val text: String) {
         override fun toString(): String = text
     }
@@ -651,11 +686,13 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             // marker) — parity with the VS Code badge; the tooltip carries the explanation.
             val heuristic = a.phaseConfidence == "heuristic"
             val head = (if (a.self) "(you) " else "") + a.gitBranch.ifBlank { a.session.take(8) }
-            append("$glyph${if (heuristic) "~" else ""} $head  ", attrs)
+            append("$glyph${if (heuristic) "~" else ""} ", attrs)
+            append("$head  ", SimpleTextAttributes.REGULAR_ATTRIBUTES)
             append(baseName(a.worktree), SimpleTextAttributes.GRAYED_ATTRIBUTES)
-            val spark = sparkline(a.sparkline)
-            if (spark.isNotBlank()) append("  $spark", SimpleTextAttributes.GRAYED_ATTRIBUTES)
-            if (a.added > 0 || a.removed > 0) append("  +${a.added} -${a.removed}", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+            if (a.added > 0 || a.removed > 0) {
+                append("  +${a.added}", MT_ADD)
+                append(" −${a.removed}", MT_REM)
+            }
             // 0.8.0: tokens + wall-clock, the same metric style Workflows already show.
             if (a.tokens > 0 || a.durationMs > 0) append("  ${fmtTok(a.tokens)} tok · ${fmtDur(a.durationMs)}", SimpleTextAttributes.GRAYED_ATTRIBUTES)
             if (a.riskTotal > 0) append("  ⚠ ${if (a.riskHigh > 0) "${a.riskHigh} high" else "${a.riskTotal}"}",
@@ -679,10 +716,14 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             icon = phaseIcon(s.phase)
             val heuristic = s.phaseConfidence == "heuristic"
             val title = s.agentType ?: s.description ?: s.agentId.take(12)
-            append(title, SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES)
+            // Subagent identity in PURPLE — the VS Code webview's --mt-agent accent.
+            append(title, SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, MT_AGENT))
             append("  $glyph ${s.phase}${if (heuristic) "~" else ""}", SimpleTextAttributes.GRAYED_ATTRIBUTES)
             s.currentTask?.takeIf { it.isNotBlank() }?.let { append("  · ${clip(it, 48)}", SimpleTextAttributes.GRAYED_ATTRIBUTES) }
-            if (s.edits > 0 || s.added > 0 || s.removed > 0) append("  +${s.added} -${s.removed}", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+            if (s.edits > 0 || s.added > 0 || s.removed > 0) {
+                append("  +${s.added}", MT_ADD)
+                append(" −${s.removed}", MT_REM)
+            }
             toolTipText = buildString {
                 append(title)
                 if (s.description != null && s.agentType != null) append("\n${s.description}")
@@ -703,6 +744,92 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         }
     }
 
+    /** Paints the Workflows tab (mirrors [FleetRenderer]): a run row = status badge + INFORMATIVE name +
+     *  GRAYED metrics; a phase row = "Title done/total"; an agent row = done-dot · label (a trailing '~'
+     *  marks a prompt-derived label, same convention as phases) · GRAYED metrics. The activity sparkline
+     *  is painted beside the row by [SparklineTreeRenderer]. */
+    private class WorkflowRenderer : ColoredTreeCellRenderer() {
+        override fun customizeCellRenderer(
+            tree: JTree, value: Any?, selected: Boolean, expanded: Boolean,
+            leaf: Boolean, row: Int, hasFocus: Boolean,
+        ) {
+            when (val node = (value as? DefaultMutableTreeNode)?.userObject) {
+                is WfRunRow -> renderRun(node.run)
+                is WfPhaseRow -> {
+                    append(node.title, SimpleTextAttributes.REGULAR_ATTRIBUTES)
+                    append("  ${node.done}/${node.total}",
+                        if (node.done >= node.total) SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, MT_DONE) else SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                }
+                is WfAgentRow -> renderAgent(node.agent)
+                is FilterInfo -> {
+                    icon = AllIcons.General.Filter
+                    append(node.text, SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                }
+            }
+        }
+
+        private fun renderRun(w: WorkflowRun) {
+            if (w.running) append("▶ running  ", SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, MT_WORKING))
+            else append("✓ done  ", SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, MT_DONE))
+            val name = w.description?.takeIf { it.isNotBlank() } ?: w.name
+            append(clip(name, 64), SimpleTextAttributes.REGULAR_ATTRIBUTES)
+            append("  ${w.agentCount} ag · ${fmtTok(w.tokens)} tok · ${fmtDur(w.durationMs)}", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
+            append("  +${w.added}", MT_ADD)
+            append(" −${w.removed}", MT_REM)
+            toolTipText = buildString {
+                append(name)
+                if (w.phaseGroups.isNotEmpty()) append("\n" + w.phaseGroups.joinToString(" · ") { "${it.title} ${it.done}/${it.total}" })
+                append("\nSelect to map this run's changes on the right")
+            }
+        }
+
+        private fun renderAgent(a: WorkflowAgent) {
+            // Done dot GREEN, running dot BLUE — the same state colors the VS Code agent rows use.
+            append(if (a.done) "● " else "○ ",
+                SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, if (a.done) MT_DONE else MT_WORKING))
+            // A '~' marks a prompt-derived (heuristic) label on a live run — same convention as phases.
+            val who = a.label?.let { it + if (a.labelDerived) "~" else "" } ?: "${a.agentType ?: "agent"} ${a.agentId.take(8)}"
+            append(clip(who, 48), SimpleTextAttributes.REGULAR_ATTRIBUTES)
+            if (a.added > 0 || a.removed > 0) {
+                append("  +${a.added}", MT_ADD)
+                append(" −${a.removed}", MT_REM)
+            }
+            val mdl = if (a.model.isNotBlank()) "${a.model} · " else ""
+            append("  $mdl${fmtTok(a.tokens)} tok · ${fmtDur(a.durationMs)} · ${a.edits} edit${if (a.edits == 1) "" else "s"}",
+                SimpleTextAttributes.GRAYED_ATTRIBUTES)
+            toolTipText = who
+        }
+    }
+
+    /** Wraps a tree cell renderer so rows that carry activity bins — fleet agents, workflow runs + their
+     *  agents — get a painted [SparklineIcon] on the row's right edge. The panel stays non-opaque so the
+     *  tree's wide-selection background shows through; the inner renderer's tooltip is forwarded. */
+    private class SparklineTreeRenderer(private val inner: ColoredTreeCellRenderer) : TreeCellRenderer {
+        private val spark = JLabel()
+        private val panel = JPanel(BorderLayout(JBUI.scale(6), 0)).apply {
+            isOpaque = false
+            add(inner, BorderLayout.CENTER)
+            add(spark, BorderLayout.EAST)
+        }
+
+        override fun getTreeCellRendererComponent(
+            tree: JTree, value: Any?, selected: Boolean, expanded: Boolean,
+            leaf: Boolean, row: Int, hasFocus: Boolean,
+        ): Component {
+            val c = inner.getTreeCellRendererComponent(tree, value, selected, expanded, leaf, row, hasFocus)
+            val bins = when (val node = (value as? DefaultMutableTreeNode)?.userObject) {
+                is AgentRow -> node.agent.sparkline
+                is WfRunRow -> node.run.sparkline
+                is WfAgentRow -> node.agent.sparkline
+                else -> null
+            }
+            spark.icon = bins?.takeIf { b -> b.any { it > 0 } }?.let { SparklineIcon(it) }
+            spark.isVisible = spark.icon != null
+            panel.toolTipText = (c as? JComponent)?.toolTipText
+            return panel
+        }
+    }
+
     /** The per-detail render inputs — one change-map slice (main session, a sibling agent, or a workflow). */
     private class TabData(
         val session: String,
@@ -719,7 +846,25 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
     private inner class AgentDetail(private val data: TabData) : JPanel(BorderLayout()) {
         private var modFilter: String? = null
 
-        private val ribbon = JPanel().apply { layout = BoxLayout(this, BoxLayout.Y_AXIS); border = JBUI.Borders.empty(2, 0) }
+        // Scrollable + tracksViewportWidth so the ribbon fills its scroll pane's width — the empty-area
+        // click (clear the chapter pick) and the picked-row highlight keep working edge to edge.
+        private val ribbon = object : JPanel(), javax.swing.Scrollable {
+            override fun getPreferredScrollableViewportSize(): Dimension = preferredSize
+            override fun getScrollableUnitIncrement(visible: java.awt.Rectangle, orientation: Int, direction: Int) = JBUI.scale(18)
+            override fun getScrollableBlockIncrement(visible: java.awt.Rectangle, orientation: Int, direction: Int) = visible.height
+            override fun getScrollableTracksViewportWidth() = true
+            override fun getScrollableTracksViewportHeight() = false
+        }.apply { layout = BoxLayout(this, BoxLayout.Y_AXIS); border = JBUI.Borders.empty(2, 0) }
+        // The ribbon scrolls past ~150px instead of squeezing the ledger out (VS Code .cm-ribbon's
+        // max-height + overflow-y:auto); hidden as a whole when the ribbon has no rows.
+        private val ribbonScroll = JBScrollPane(
+            ribbon, ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED, ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER,
+        ).apply {
+            border = JBUI.Borders.empty()
+            isOpaque = false
+            viewport.isOpaque = false
+            maximumSize = Dimension(Int.MAX_VALUE, JBUI.scale(150))
+        }
         private var ribOpen = false
         private val strip = StripBar()
         private val listModel = DefaultListModel<ChangeMapFile>()
@@ -730,16 +875,15 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             cellRenderer = ledgerRenderer
             emptyText.text = "No edits attributed to this agent yet"
         }
-        private val readout = JBLabel().apply { font = JBUI.Fonts.miniFont(); foreground = UIUtil.getContextHelpForeground() }
+        private val readout = JBLabel().apply { font = JBUI.Fonts.label(); foreground = UIUtil.getContextHelpForeground() }
 
         init {
-            ribbon.alignmentX = Component.LEFT_ALIGNMENT
+            ribbonScroll.alignmentX = Component.LEFT_ALIGNMENT
             strip.alignmentX = Component.LEFT_ALIGNMENT
-            ribbon.maximumSize = Dimension(Int.MAX_VALUE, Int.MAX_VALUE)
             val north = JPanel().apply {
                 layout = BoxLayout(this, BoxLayout.Y_AXIS)
                 border = JBUI.Borders.empty(2, 4)
-                add(ribbon)
+                add(ribbonScroll)
                 add(strip)
             }
             add(north, BorderLayout.NORTH)
@@ -787,20 +931,27 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
                 ribbon.add(doneToggle(done.size))
                 if (ribOpen) done.forEach { ribbon.add(chapterRow(it)) }
             }
-            ribbon.isVisible = ribbon.componentCount > 0
+            ribbonScroll.isVisible = ribbon.componentCount > 0
 
             strip.isVisible = data.modules.isNotEmpty()
             strip.update(data.modules, modFilter)
 
-            val shown = data.files.filter { modFilter == null || it.moduleLabel == modFilter }
+            // The Search-edits filter narrows this ledger too (parity with the sidebar trees + VS Code).
+            val q = ObservatoryService.getInstance(project).filterQuery
+            val shown = data.files.filter {
+                (modFilter == null || it.moduleLabel == modFilter) &&
+                    (q.isBlank() || it.rel.contains(q, ignoreCase = true))
+            }
             listModel.clear()
             val max = shown.maxOfOrNull { maxOf(1, it.churn) } ?: 1
             ledgerRenderer.configure(max.coerceAtLeast(1))
             shown.forEach { listModel.addElement(it) }
 
-            readout.text = modFilter?.let { mf ->
-                data.modules.find { it.module == mf }?.let { "filtered by module ${it.label} — click again to clear" } ?: ""
-            } ?: ""
+            // Say WHY the ledger is narrowed — a silently filtered-empty list reads as a bug.
+            val notes = mutableListOf<String>()
+            modFilter?.let { mf -> data.modules.find { it.module == mf }?.let { notes.add("module ${it.label} — click again to clear") } }
+            if (q.isNotBlank()) notes.add("search “$q” · ${shown.size} file(s) — Search again (empty) to clear")
+            readout.text = notes.joinToString("  ·  ")
 
             ribbon.revalidate(); ribbon.repaint()
             strip.repaint()
@@ -813,9 +964,8 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             maximumSize = Dimension(Int.MAX_VALUE, JBUI.scale(24))
         }
 
-        private fun miniButton(glyph: String, tip: String, run: () -> Unit): JComponent =
-            javax.swing.JButton(glyph).apply {
-                font = JBUI.Fonts.miniFont()
+        private fun miniButton(icon: Icon, tip: String, run: () -> Unit): JComponent =
+            javax.swing.JButton(icon).apply {
                 toolTipText = tip
                 margin = JBUI.insets(0, 3)
                 isFocusable = false
@@ -848,7 +998,7 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             refreshOverviewToolbar()
         }
 
-        /** One chapter row: [status dot] [title] [±counts] [✓ Accept] [↩ Reject] [🧹 Clear]. The actions
+        /** One chapter row: [status dot] [title] [±counts] [Accept] [Reject] [Clear]. The actions
          *  and the scoped pick key on ch.id and act WYSIWYG — core.reviewEditIds resolves exactly the
          *  edits the row displays (the synthetic session chapter included, so a fully-reviewable ribbon).
          *  A planned (edits==0) chapter is an informational ○ row. */
@@ -868,9 +1018,9 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
                 row.isOpaque = true
                 row.background = UIUtil.getListSelectionBackground(false)
             }
-            row.add(JBLabel(glyph).apply { font = JBUI.Fonts.miniFont(); foreground = color })
+            row.add(JBLabel(glyph).apply { font = JBUI.Fonts.label(); foreground = color })
             row.add(JBLabel(clipText(title + (if (ch.agent) " ●" else ""), 44)).apply {
-                font = JBUI.Fonts.miniFont()
+                font = JBUI.Fonts.label()
                 if (ch.synthetic) foreground = UIUtil.getContextHelpForeground() // dimmed — display-only
                 toolTipText = buildString {
                     append(title)
@@ -904,9 +1054,9 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
                 row.add(JBLabel("+${ch.added} −${ch.removed}").apply { font = JBUI.Fonts.miniFont(); foreground = UIUtil.getContextHelpForeground() })
             }
             if (actable) {
-                row.add(miniButton("✓", "Accept — keep the pending edits shown in this chapter") { withSession { s -> ReviewOps.keepTask(project, s, ch.id, title) } })
-                row.add(miniButton("↩", "Reject — revert the pending edits shown in this chapter") { withSession { s -> ReviewOps.undoTask(project, s, ch.id, title) } })
-                row.add(miniButton("🧹", "Clear — drop this chapter's resolved edits") { withSession { s -> ReviewOps.clearTask(project, s, ch.id, title) } })
+                row.add(miniButton(AllIcons.Actions.Checked, "Accept — keep the pending edits shown in this chapter") { withSession { s -> ReviewOps.keepTask(project, s, ch.id, title) } })
+                row.add(miniButton(AllIcons.Actions.Rollback, "Reject — revert the pending edits shown in this chapter") { withSession { s -> ReviewOps.undoTask(project, s, ch.id, title) } })
+                row.add(miniButton(AllIcons.Actions.GC, "Clear — drop this chapter's resolved edits") { withSession { s -> ReviewOps.clearTask(project, s, ch.id, title) } })
             }
             return row
         }
@@ -934,16 +1084,18 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         /** The collapse/expand toggle row for settled ("done") chapters, plus a "clear completed" affordance. */
         private fun doneToggle(count: Int): JComponent {
             val row = rowPanel()
-            row.add(JBLabel("● $count done ${if (ribOpen) "▾" else "▸"}").apply {
-                font = JBUI.Fonts.miniFont()
+            row.add(JBLabel("● $count done").apply {
+                font = JBUI.Fonts.label()
                 foreground = CM_KEPT
+                icon = if (ribOpen) AllIcons.General.ArrowDown else AllIcons.General.ArrowRight
+                horizontalTextPosition = SwingConstants.LEADING // the caret icon trails the text
                 cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
                 toolTipText = "$count completed chapter(s) — click to ${if (ribOpen) "collapse" else "expand"}"
                 addMouseListener(object : MouseAdapter() {
                     override fun mouseClicked(e: MouseEvent) { ribOpen = !ribOpen; paintTab() }
                 })
             })
-            row.add(miniButton("🧹", "Clear resolved edits of every completed chapter") {
+            row.add(miniButton(AllIcons.Actions.GC, "Clear resolved edits of every completed chapter") {
                 withSession { s -> ReviewOps.clearCompletedChapters(project, s) }
             })
             return row
@@ -963,13 +1115,27 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
                 toolTipText = ""
                 addMouseListener(object : MouseAdapter() {
                     override fun mouseClicked(e: MouseEvent) {
-                        hit.firstOrNull { e.x >= it.first && e.x < it.second }?.let { onClick?.invoke(it.third.module) }
+                        hit.firstOrNull { e.x >= it.first && e.x < it.second }
+                            ?.takeIf { it.third.module != OVERFLOW_MODULE } // the "+K more" tail isn't a filter
+                            ?.let { onClick?.invoke(it.third.module) }
                     }
                 })
             }
 
             fun update(modules: List<ChangeMapModule>, selected: String?) {
-                mods = modules
+                // Cap the strip (VS Code parity): a busy session can span dozens of modules, which
+                // squeezes every segment into unreadable slivers — keep the top movers (modules arrive
+                // churn-ranked from core), merge the tail into one gray non-clickable "+K more" segment.
+                mods = if (modules.size > MAX_SEGMENTS) {
+                    val tail = modules.drop(MAX_SEGMENTS)
+                    modules.take(MAX_SEGMENTS) + ChangeMapModule(
+                        module = OVERFLOW_MODULE, label = "+${tail.size} more",
+                        churn = tail.sumOf { it.churn }, cnt = tail.sumOf { it.cnt },
+                        kept = tail.sumOf { it.kept }, pending = tail.sumOf { it.pending },
+                        undone = tail.sumOf { it.undone }, status = "undone", // → the gray status color
+                        files = tail.sumOf { it.files }, chapters = emptyList(),
+                    )
+                } else modules
                 sel = selected
                 repaint()
             }
@@ -1071,12 +1237,13 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
                 g2.fillRoundRect(x, mid - JBUI.scale(3), JBUI.scale(6), JBUI.scale(6), 2, 2)
                 x += JBUI.scale(11)
 
-                g2.font = JBUI.Fonts.miniFont()
+                g2.font = JBUI.Fonts.smallFont() // the file name reads at small; the metric columns stay mini
                 g2.color = fg
                 val nameW = JBUI.scale(120)
                 g2.drawString(clip(g2, v.file + (if (v.agent) " ●" else "") + (if (v.risk != null) " ⌐" else ""), nameW), x, mid + JBUI.scale(3))
                 x += nameW + JBUI.scale(4)
 
+                g2.font = JBUI.Fonts.miniFont()
                 g2.color = grey
                 val modW = JBUI.scale(60)
                 g2.drawString(clip(g2, v.moduleLabel, modW), x, mid + JBUI.scale(3))
@@ -1120,19 +1287,35 @@ private fun phaseBadge(phase: String): Pair<String, SimpleTextAttributes> = when
     "awaiting-input" -> "❓ awaiting input" to SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, MT_ATTENTION)
     "awaiting-permission" -> "⏸ awaiting permission" to SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, MT_ATTENTION)
     "errored" -> "✖ errored" to SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, MT_ERROR)
-    "done" -> "● done" to SimpleTextAttributes.GRAYED_BOLD_ATTRIBUTES
+    "done" -> "● done" to SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, MT_DONE)
     else -> "○ idle" to SimpleTextAttributes.GRAYED_BOLD_ATTRIBUTES
 }
 
-private val SPARK_BLOCKS = charArrayOf('▁', '▂', '▃', '▄', '▅', '▆', '▇', '█')
+/** ~20 activity bins → a PAINTED mini bar chart (one bar per bin, height v/max, bar ≈72% of its slot) —
+ *  the same geometry VS Code's spark() SVG draws, replacing the old unicode block-glyph sparkline. */
+private class SparklineIcon(private val bins: List<Int>) : Icon {
+    private val w = JBUI.scale(58)
+    private val h = JBUI.scale(11)
+    override fun getIconWidth(): Int = w
+    override fun getIconHeight(): Int = h
 
-/** ~20 activity bins → a unicode block sparkline (JetBrains-idiomatic; VS Code paints the same bins). */
-private fun sparkline(bins: List<Int>): String {
-    if (bins.isEmpty()) return ""
-    val max = bins.max()
-    if (max <= 0) return ""
-    return bins.joinToString("") { v ->
-        if (v <= 0) "·" else SPARK_BLOCKS[((v.toDouble() / max) * (SPARK_BLOCKS.size - 1)).toInt().coerceIn(0, SPARK_BLOCKS.size - 1)].toString()
+    override fun paintIcon(c: Component?, g: Graphics, x: Int, y: Int) {
+        val max = bins.maxOrNull() ?: 0
+        if (max <= 0) return // empty / all-zero bins → nothing to paint
+        val g2 = g.create() as Graphics2D
+        try {
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+            g2.color = UIUtil.toAlpha(MT_WORKING, 170) // chart-blue bars — the VS Code --mt-spark color
+            val slot = w.toDouble() / bins.size
+            val bar = (slot * 0.72).toInt().coerceAtLeast(1)
+            for ((i, v) in bins.withIndex()) {
+                if (v <= 0) continue
+                val bh = ((v.toDouble() / max) * h).toInt().coerceAtLeast(1)
+                g2.fillRect(x + (i * slot).toInt(), y + h - bh, bar, bh)
+            }
+        } finally {
+            g2.dispose()
+        }
     }
 }
 

@@ -103,6 +103,13 @@ class InlineOverlay(private val project: Project) : Disposable {
         heatmapOn = !heatmapOn
         renderSig.clear() // force a rebuild so the dim appears/disappears
         refreshAll()
+        // Confirm the toggle out loud — spotlight only dims files WITH pending edits, so on a clean
+        // file a silent toggle reads as "the button does nothing".
+        com.cellobservatory.observatory.ui.ReviewOps.notify(
+            project,
+            if (heatmapOn) "Spotlight on — unedited lines dim in files with pending Claude edits"
+            else "Spotlight off",
+        )
     }
 
     private fun editorsFor(document: Document) =
@@ -182,6 +189,9 @@ class InlineOverlay(private val project: Project) : Disposable {
         }
         // Heatmap: dim every UNMODIFIED line (flat grey, no syntax colors) so Claude's edits stand out.
         // JetBrains can't alpha-blend text, so "dim" is a muted foreground (parity with VS Code's opacity).
+        // The layer must sit ABOVE HighlighterLayer.SYNTAX (2000) — a foreground at CARET_ROW-2 (998)
+        // loses the merge to syntax colors and the dim never shows (the 0.8.x "Spotlight does nothing"
+        // bug); SELECTION-1 wins over syntax + inspections while still yielding to the selection.
         if (heatmapOn) {
             val changed = placements.flatMap { it.lines }.filter { it < editor.document.lineCount }.toHashSet()
             val dimAttrs = TextAttributes(com.intellij.ui.JBColor.GRAY, null, null, null, Font.PLAIN)
@@ -192,7 +202,7 @@ class InlineOverlay(private val project: Project) : Disposable {
                         markup.addRangeHighlighter(
                             editor.document.getLineStartOffset(runStart),
                             editor.document.getLineEndOffset(end),
-                            HighlighterLayer.CARET_ROW - 2, dimAttrs,
+                            HighlighterLayer.SELECTION - 1, dimAttrs,
                             com.intellij.openapi.editor.markup.HighlighterTargetArea.EXACT_RANGE,
                         )
                     )

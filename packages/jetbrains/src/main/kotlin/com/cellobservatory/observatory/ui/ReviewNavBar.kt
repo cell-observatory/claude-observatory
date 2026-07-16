@@ -41,8 +41,13 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
 
     /** [sessionClear] picks the bar's clear button per host (VS Code parity): the STATUS BAR carries the
      *  session-wide Clear Resolved and no Clear File; the OVERVIEW title bar (default) carries the
-     *  file-scoped Clear File instead — its toolbar's bulk actions already include the session-wide clear. */
-    fun buildGroup(sessionClear: Boolean = false) = DefaultActionGroup(
+     *  file-scoped Clear File instead — its toolbar's bulk actions already include the session-wide clear.
+     *  [showText] renders each action button's SHORT label beside its icon (the Overview title bar — VS
+     *  Code shows these labels); the status bar keeps icon-only compactness. The four nav chevrons stay
+     *  icon-only on BOTH hosts (VS Code parity — its chevrons carry no label either). */
+    fun buildGroup(sessionClear: Boolean = false, showText: Boolean = false) = DefaultActionGroup(
+        // Search leads every nav bar (user rule 2026-07-16 — same position on every surface).
+        labelAct(showText, "Search", "Search Edits", AllIcons.Actions.Find, ::sessionHasPending) { searchEdits() },
         // File axis — steps across every file with pending edits; the counter opens the Edits tool window.
         iconAct("Previous changed file", AllIcons.Actions.Back, ::sessionHasPending) { navFile(-1) },
         textAct(::fileCounterText) { ToolWindowManager.getInstance(project).getToolWindow("Claude Observatory")?.activate(null) },
@@ -52,20 +57,20 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
         textAct(::diffCounterText) { currentNavRec()?.let { rec -> session()?.let { Diffs.show(project, it, rec) } } },
         iconAct("Next edit in this file", AllIcons.Actions.NextOccurence, ::activeHasPending) { navDiff(1) },
         // Per-edit + per-file actions on the OPEN file.
-        iconAct("Keep This Edit", AllIcons.Actions.Checked, ::activeHasPending) {
+        labelAct(showText, "Keep", "Keep This Edit", AllIcons.Actions.Checked, ::activeHasPending) {
             currentNavRec()?.let { rec -> withSession { s -> ReviewOps.keep(project, s, rec.id) } }
         },
-        iconAct("Undo This Edit", AllIcons.Actions.Rollback, ::activeHasPending) {
+        labelAct(showText, "Undo", "Undo This Edit", AllIcons.Actions.Rollback, ::activeHasPending) {
             currentNavRec()?.let { rec -> withSession { s -> ReviewOps.undoOrRedo(project, s, rec, redo = false) } }
         },
-        iconAct("Accept File", Icons.CheckAll, ::activeHasPending) {
+        labelAct(showText, "Accept File", "Accept every pending edit in this file", Icons.CheckAll, ::activeHasPending) {
             activeFilePath()?.let { f -> withSession { s -> ReviewOps.keepAll(project, s, service.log().filter { it.file == f }, File(f).name) } }
         },
-        iconAct("Reject File", AllIcons.Actions.Cancel, ::activeHasPending) {
+        labelAct(showText, "Reject File", "Reject (revert) every pending edit in this file", AllIcons.Actions.Cancel, ::activeHasPending) {
             activeFilePath()?.let { f -> withSession { s -> ReviewOps.undoAll(project, s, service.log().filter { it.file == f }, File(f).name, f) } }
         },
         if (sessionClear)
-            iconAct("Clear Resolved Edits", AllIcons.Actions.GC, ::sessionHasPending) {
+            labelAct(showText, "Clear Resolved", "Clear Resolved Edits", AllIcons.Actions.GC, ::sessionHasPending) {
                 withSession { s ->
                     val resolved = service.log().count { !it.pending }
                     if (resolved > 0) ReviewOps.clearResolved(project, s, resolved) else ReviewOps.notify(project, "No resolved edits to clear")
@@ -73,7 +78,7 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
             }
         else
             // Clear File — the file-scoped clear (VS Code ov-clearfile parity).
-            iconAct("Clear File — clear this file's resolved edits", AllIcons.Actions.GC, ::activeHasResolved) {
+            labelAct(showText, "Clear File", "Clear File — clear this file's resolved edits", AllIcons.Actions.GC, ::activeHasResolved) {
                 activeFilePath()?.let { f ->
                     withSession { s ->
                         val resolved = service.log().count { !it.pending && it.file == f }
@@ -82,10 +87,9 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
                 }
             },
         // Session-wide utilities.
-        iconAct("Toggle Spotlight — dim unedited lines", AllIcons.Actions.IntentionBulb, ::sessionHasPending) {
+        labelAct(showText, "Spotlight", "Toggle Spotlight — dim unedited lines", AllIcons.Actions.IntentionBulb, ::sessionHasPending) {
             InlineOverlay.getInstance(project).toggleHeatmap()
         },
-        iconAct("Search Edits", AllIcons.Actions.Find, ::sessionHasPending) { searchEdits() },
     )
 
     // --- nav-bar state (mirrors the VS Code helpers) ---
@@ -168,6 +172,17 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
     private fun iconAct(text: String, icon: Icon, visible: () -> Boolean, run: () -> Unit): AnAction =
         object : AnAction(text, text, icon), DumbAware {
             override fun getActionUpdateThread() = ActionUpdateThread.EDT // reads the active editor
+            override fun update(e: AnActionEvent) { e.presentation.isVisible = visible() }
+            override fun actionPerformed(e: AnActionEvent) = run()
+        }
+
+    /** Like [iconAct], but when [showText] the SHORT [text] also renders beside the icon (the Overview
+     *  title bar — VS Code labels these buttons); the long [description] is the tooltip on both hosts. */
+    private fun labelAct(showText: Boolean, text: String, description: String, icon: Icon, visible: () -> Boolean, run: () -> Unit): AnAction =
+        object : AnAction(text, description, icon), DumbAware {
+            override fun getActionUpdateThread() = ActionUpdateThread.EDT // reads the active editor
+            @Suppress("OVERRIDE_DEPRECATION") // displayTextInToolbar: still honored; renders the short label
+            override fun displayTextInToolbar() = showText
             override fun update(e: AnActionEvent) { e.presentation.isVisible = visible() }
             override fun actionPerformed(e: AnActionEvent) = run()
         }
