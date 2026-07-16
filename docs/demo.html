@@ -1,0 +1,750 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude Observatory — interactive demo</title>
+<meta name="description" content="A scripted, in-browser replay of the bundled demo session laid out like the real VS Code panels: watch Observatory track a simulated Claude request over a Python training pipeline, then keep, undo, and accept the edits yourself. No model is called.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%AC%3C/text%3E%3C/svg%3E">
+<style>
+  :root{
+    --bg:#fbfaf9; --surface:#ffffff; --surface-2:#f5f3f0; --surface-3:#efece8;
+    --ink:#17171a; --ink-soft:#54545b; --ink-faint:#8b8a92;
+    --line:rgba(20,18,16,.10); --line-soft:rgba(20,18,16,.06);
+    --accent:#cf6440; --accent-ink:#a94e2c; --accent-soft:rgba(207,100,64,.10);
+    --pending:#a2711a; --kept:#2f7d4b; --deleted:#c0392b; --undone:#8b8a92;
+    --ed-bg:#ffffff; --ed-panel:#f7f6f4; --ed-line:rgba(20,18,16,.07); --ed-ink:#2b2b31;
+    --ed-gutter:#b7b5bd; --ed-add:rgba(47,125,75,.10); --ed-addln:#2f7d4b;
+    --ed-del:rgba(192,57,43,.09); --ed-delln:#c0392b; --ed-key:#a94e2c; --ed-fn:#2b6cb0; --ed-str:#2f7d4b;
+    --shadow:0 30px 70px -40px rgba(40,25,15,.40), 0 8px 22px -18px rgba(40,25,15,.25);
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,Roboto,Helvetica,sans-serif;
+    --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+    --col:1140px;
+  }
+  @media (prefers-color-scheme:dark){:root{
+    --bg:#0e0e11; --surface:#161619; --surface-2:#1a1a1e; --surface-3:#202024;
+    --ink:#ececef; --ink-soft:#a5a4ac; --ink-faint:#76757d;
+    --line:rgba(255,255,255,.11); --line-soft:rgba(255,255,255,.06);
+    --accent:#e08a63; --accent-ink:#ef9f7c; --accent-soft:rgba(224,138,99,.14);
+    --pending:#e0b155; --kept:#79c089; --deleted:#ec8078; --undone:#76757d;
+    --ed-bg:#1b1b1f; --ed-panel:#161619; --ed-line:rgba(255,255,255,.07); --ed-ink:#d6d6db;
+    --ed-gutter:#5b5b64; --ed-add:rgba(63,185,80,.13); --ed-addln:#79c089;
+    --ed-del:rgba(248,81,73,.13); --ed-delln:#ec8078; --ed-key:#e0a06d; --ed-fn:#6aa6f0; --ed-str:#8fc99a;
+    --shadow:0 30px 70px -40px rgba(0,0,0,.8), 0 8px 22px -18px rgba(0,0,0,.6);
+  }}
+  :root[data-theme="light"]{
+    --bg:#fbfaf9;--surface:#fff;--surface-2:#f5f3f0;--surface-3:#efece8;--ink:#17171a;--ink-soft:#54545b;--ink-faint:#8b8a92;
+    --line:rgba(20,18,16,.10);--line-soft:rgba(20,18,16,.06);--accent:#cf6440;--accent-ink:#a94e2c;--accent-soft:rgba(207,100,64,.10);
+    --pending:#a2711a;--kept:#2f7d4b;--deleted:#c0392b;--undone:#8b8a92;
+    --ed-bg:#fff;--ed-panel:#f7f6f4;--ed-line:rgba(20,18,16,.07);--ed-ink:#2b2b31;--ed-gutter:#b7b5bd;
+    --ed-add:rgba(47,125,75,.10);--ed-addln:#2f7d4b;--ed-del:rgba(192,57,43,.09);--ed-delln:#c0392b;--ed-key:#a94e2c;--ed-fn:#2b6cb0;--ed-str:#2f7d4b;
+    --shadow:0 30px 70px -40px rgba(40,25,15,.40),0 8px 22px -18px rgba(40,25,15,.25);
+  }
+  :root[data-theme="dark"]{
+    --bg:#0e0e11;--surface:#161619;--surface-2:#1a1a1e;--surface-3:#202024;--ink:#ececef;--ink-soft:#a5a4ac;--ink-faint:#76757d;
+    --line:rgba(255,255,255,.11);--line-soft:rgba(255,255,255,.06);--accent:#e08a63;--accent-ink:#ef9f7c;--accent-soft:rgba(224,138,99,.14);
+    --pending:#e0b155;--kept:#79c089;--deleted:#ec8078;--undone:#76757d;
+    --ed-bg:#1b1b1f;--ed-panel:#161619;--ed-line:rgba(255,255,255,.07);--ed-ink:#d6d6db;--ed-gutter:#5b5b64;
+    --ed-add:rgba(63,185,80,.13);--ed-addln:#79c089;--ed-del:rgba(248,81,73,.13);--ed-delln:#ec8078;--ed-key:#e0a06d;--ed-fn:#6aa6f0;--ed-str:#8fc99a;
+    --shadow:0 30px 70px -40px rgba(0,0,0,.8),0 8px 22px -18px rgba(0,0,0,.6);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  [hidden]{display:none!important}
+  html{scroll-behavior:smooth;scroll-padding-top:80px;-webkit-text-size-adjust:100%}
+  body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:17px;line-height:1.62;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+  .wrap{width:min(var(--col),90%);margin-inline:auto}
+  a{color:inherit;text-decoration:none}
+  h1,h2,h3{font-weight:640;letter-spacing:-.021em;line-height:1.08;text-wrap:balance;overflow-wrap:break-word}
+  .hl{color:var(--accent)}
+  .eyebrow{font-family:var(--mono);font-size:.72rem;text-transform:uppercase;letter-spacing:.2em;color:var(--accent-ink);font-weight:600}
+  .lede{color:var(--ink-soft);font-size:clamp(1.05rem,2vw,1.28rem);line-height:1.55;text-wrap:pretty}
+  code,kbd{font-family:var(--mono);font-size:.86em}
+
+  /* nav (shared pattern) */
+  .nav{position:sticky;top:0;z-index:60;background:transparent;transition:background .25s,border-color .25s}
+  .nav.condensed{background:color-mix(in srgb,var(--bg) 80%,transparent);backdrop-filter:saturate(1.5) blur(14px);-webkit-backdrop-filter:saturate(1.5) blur(14px);border-bottom:1px solid var(--line-soft)}
+  .nav .row{display:flex;align-items:center;gap:20px;height:60px}
+  .brand{display:flex;align-items:center;gap:9px;font-weight:640;letter-spacing:-.02em;font-size:1.02rem}
+  .brand .m{font-size:1.2rem}
+  .nav .links{display:flex;gap:26px;margin-inline:auto;font-size:.95rem;color:var(--ink-soft)}
+  .nav .links a{transition:color .15s}
+  .nav .links a:hover{color:var(--ink)}
+  .nav .links a.more{color:var(--accent-ink)}
+  .nav .right{display:flex;align-items:center;gap:10px}
+  .icon-btn,.ghost{border:1px solid var(--line);background:var(--surface);color:var(--ink-soft);border-radius:999px;padding:7px 13px;font-size:.85rem;font-family:var(--mono);cursor:pointer;transition:.15s}
+  .icon-btn:hover,.ghost:hover{color:var(--ink);border-color:var(--ink-faint)}
+  .btn{display:inline-flex;align-items:center;gap:8px;border-radius:999px;padding:11px 20px;font-weight:560;font-size:.95rem;border:1px solid transparent;cursor:pointer;transition:.15s;white-space:nowrap}
+  .btn.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+  .btn.primary:hover{background:var(--accent-ink);border-color:var(--accent-ink)}
+  .btn.line{background:transparent;color:var(--ink);border-color:var(--line)}
+  .btn.line:hover{border-color:var(--ink-faint)}
+  .menu-btn{display:none}
+  @media (max-width:720px){
+    .menu-btn{display:inline-flex}
+    .nav .links{display:none}
+    .nav.open .links{display:flex;flex-direction:column;align-items:flex-start;position:absolute;top:60px;left:0;right:0;margin:0;padding:14px 5% 18px;gap:14px;background:var(--bg);border-bottom:1px solid var(--line);box-shadow:var(--shadow)}
+    .nav.open,.nav.open.condensed{background:var(--bg)}
+  }
+
+  section{padding-block:clamp(48px,7vh,96px)}
+  h2{font-size:clamp(1.8rem,4.5vw,2.8rem)}
+
+  /* hero */
+  .hero{padding-top:clamp(32px,5vw,60px);padding-bottom:8px;text-align:center}
+  .hero h1{font-size:clamp(2rem,5vw,3.3rem);margin:16px auto 14px;max-width:22ch}
+  .hero .lede{margin-inline:auto;max-width:60ch}
+
+  /* the IDE frame: editor on top, the dashboards dock below — the real VS Code layout */
+  .ide{border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);overflow:hidden;background:var(--ed-bg);margin-top:22px}
+  .editor{font-family:var(--mono);color:var(--ed-ink)}
+  .editor .bar{display:flex;align-items:center;gap:7px;height:38px;padding:0 14px;background:var(--ed-panel);border-bottom:1px solid var(--ed-line)}
+  .editor .bar .d{width:11px;height:11px;border-radius:50%}
+  .editor .bar .fn{margin-left:12px;font-size:.8rem;color:var(--ink-faint)}
+  .editor .code{padding:12px 0 10px;min-height:280px;overflow-x:auto}
+  .ln{display:flex;font-size:.82rem;line-height:1.85;min-width:max-content}
+  .ln .n{width:44px;text-align:right;padding-right:16px;color:var(--ed-gutter);flex:none;user-select:none}
+  .ln .t{white-space:pre}
+  .ln.add{background:var(--ed-add);box-shadow:inset 3px 0 0 var(--accent)}
+  .ln.undone{opacity:.38;background:transparent;box-shadow:none}
+  .ln.undone .t{text-decoration:line-through}
+  .ln .star{color:var(--accent);margin-left:-13px;margin-right:5px}
+  .kw{color:var(--ed-key)}.fnm{color:var(--ed-fn)}.st{color:var(--ed-str)}.cm{color:var(--ink-faint)}
+  .lens{display:flex;gap:14px;flex-wrap:wrap;align-items:center;padding:6px 12px 8px 44px;font-family:var(--sans);font-size:.78rem;color:var(--ink-faint)}
+  .lens .sp{color:var(--accent)}
+  .lens .a{color:var(--ink-soft)}
+  .lens button{border:1px solid var(--line);background:var(--surface);color:var(--ink);border-radius:999px;padding:3px 12px;font-size:.78rem;font-family:var(--sans);cursor:pointer;transition:.15s}
+  .lens button:hover{border-color:var(--accent);color:var(--accent-ink)}
+  .lens button.hint{animation:pulse 1.6s ease-in-out infinite;border-color:var(--accent)}
+  @keyframes pulse{0%,100%{box-shadow:0 0 0 0 var(--accent-soft)}50%{box-shadow:0 0 0 7px var(--accent-soft)}}
+  .edchip{margin-left:auto;display:inline-flex;align-items:center;gap:5px;font-family:var(--sans);font-size:.72rem;padding:2px 9px;border-radius:999px;border:1px solid currentColor;white-space:nowrap}
+  .edchip.pending{color:var(--pending)} .edchip.kept{color:var(--kept)} .edchip.undone{color:var(--undone)}
+  .prompt-strip{display:flex;gap:10px;align-items:baseline;padding:9px 14px;background:var(--ed-panel);border-bottom:1px solid var(--ed-line);font-size:.78rem;font-family:var(--mono)}
+  .prompt-strip .pr{color:var(--accent);flex:none}
+  .prompt-strip .pt{color:var(--ink-soft);white-space:pre-wrap;word-break:break-word}
+  .prompt-strip .caret{display:inline-block;width:7px;height:1em;background:var(--accent);vertical-align:text-bottom;animation:blink 1s steps(1) infinite}
+  @keyframes blink{50%{opacity:0}}
+
+  /* dashboards dock */
+  .dockhead{display:flex;gap:14px;align-items:center;padding:6px 14px;background:var(--ed-panel);border-top:1px solid var(--ed-line);border-bottom:1px solid var(--ed-line);font-family:var(--mono);font-size:.6rem;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-faint)}
+  .dock{display:grid;grid-template-columns:.95fr 1.6fr .95fr;background:var(--line-soft);gap:1px}
+  @media (max-width:900px){.dock{grid-template-columns:1fr}}
+  .pane{background:var(--surface);min-height:240px;max-height:300px;overflow-y:auto;font-size:.74rem;display:flex;flex-direction:column}
+  .pane .ph{position:sticky;top:0;z-index:2;background:var(--surface);display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 12px;border-bottom:1px solid var(--line-soft);font-family:var(--mono);font-size:.62rem;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-faint)}
+  .pane .ph .act{letter-spacing:0;text-transform:none}
+  .pane .body{flex:1;display:flex;flex-direction:column}
+
+  /* observations pane */
+  .or{padding:5px 12px;border-bottom:1px solid var(--line-soft)}
+  .or .top{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+  .or .tm{font-family:var(--mono);color:var(--ink-faint);flex:none}
+  .or .of{font-family:var(--mono);color:var(--ink)}
+  .or .od{font-family:var(--mono);color:var(--ink-faint)}
+  .or .od .p{color:var(--kept)} .or .od .m{color:var(--deleted)}
+  .or .ow{color:var(--ink-faint);font-style:italic}
+  .badge{font-size:.64rem;font-family:var(--mono);border:1px solid var(--line);border-radius:999px;padding:0 7px;color:var(--accent-ink)}
+  .nextsteps{margin-top:auto;border-top:1px solid var(--line-soft);padding:6px 12px;color:var(--ink-faint)}
+  .nextsteps .nh{font-family:var(--mono);font-size:.6rem;letter-spacing:.12em;text-transform:uppercase;margin-bottom:2px}
+  .nextsteps div{padding:1px 0}
+  .empty{padding:9px 12px;color:var(--ink-faint)}
+
+  /* overview pane: toolbar strip + master-detail */
+  .ovbar{display:flex;gap:9px;align-items:center;flex-wrap:wrap;padding:5px 12px;border-bottom:1px solid var(--line-soft);font-family:var(--mono);font-size:.66rem;color:var(--ink-faint)}
+  .ovbar .g{display:flex;gap:7px;align-items:center;white-space:nowrap}
+  .ovbar .sep{width:1px;height:12px;background:var(--line)}
+  .ovbar .on{color:var(--ink-soft)}
+  .ovbar button{border:1px solid var(--accent);background:var(--surface);color:var(--ink);border-radius:999px;padding:1px 10px;font-family:var(--sans);font-size:.72rem;cursor:pointer}
+  .ovbar button.hint{animation:pulse 1.6s ease-in-out infinite}
+  .ovwrap{display:grid;grid-template-columns:170px 1fr;flex:1}
+  @media (max-width:640px){.ovwrap{grid-template-columns:1fr}.ovnav{display:none}}
+  .ovnav{border-right:1px solid var(--line-soft);display:flex;flex-direction:column;min-width:0}
+  .ovtabs{display:flex;gap:2px;padding:6px 8px;border-bottom:1px solid var(--line-soft);font-size:.68rem}
+  .ovtabs span{padding:2px 8px;border-radius:6px;color:var(--ink-faint);white-space:nowrap}
+  .ovtabs .on{background:var(--accent-soft);color:var(--accent-ink)}
+  .fr{display:flex;gap:6px;align-items:baseline;padding:4px 8px;font-family:var(--mono);font-size:.64rem;color:var(--ink-soft);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .fr .gl{flex:none;color:var(--accent)}
+  .fr .st2{flex:none}
+  .fr .st2.working{color:var(--kept)} .fr .st2.done{color:var(--ink-faint)}
+  .fr.sub{padding-left:20px}
+  .collide{margin-top:auto;padding:5px 8px;font-size:.6rem;color:var(--ink-faint);border-top:1px solid var(--line-soft)}
+  .ovdetail{min-width:0;display:flex;flex-direction:column}
+  .rr{display:flex;gap:9px;align-items:center;padding:4px 12px;border-bottom:1px solid var(--line-soft)}
+  .rr .rd.todo{color:var(--ink-faint)} .rr .rd.part{color:var(--pending)} .rr .rd.done{color:var(--kept)}
+  .rr .rt{color:var(--ink);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .rr .rc{margin-left:auto;flex:none;font-family:var(--mono);font-size:.66rem;color:var(--ink-faint)}
+  .rr .mini-acts{flex:none;display:flex;gap:5px;font-size:.7rem;color:var(--ink-faint)}
+  .strip{display:flex;height:15px;border-radius:5px;overflow:hidden;margin:9px 12px 2px;border:1px solid var(--line-soft)}
+  .strip .seg{display:grid;place-items:center;font-family:var(--mono);font-size:.56rem;color:var(--ink-soft);background:var(--accent-soft);white-space:nowrap;overflow:hidden}
+  .strip .seg:nth-child(2n){background:var(--surface-3)}
+  .lr{display:flex;gap:8px;align-items:center;padding:3px 12px}
+  .lr .sd{flex:none;width:8px;height:8px;border-radius:50%}
+  .lr .sd.pending{background:var(--pending)} .lr .sd.kept{background:var(--kept)} .lr .sd.undone{background:var(--undone)}
+  .lr .lf{font-family:var(--mono);color:var(--ink);flex:none}
+  .lr .lb{flex:1;height:6px;border-radius:4px;background:var(--surface-3);overflow:hidden;min-width:22px}
+  .lr .lb i{display:block;height:100%;background:var(--accent);opacity:.55}
+  .lr .lc{flex:none;font-family:var(--mono);font-size:.66rem;color:var(--ink-faint)}
+  .lr .lc .p{color:var(--kept)} .lr .lc .m{color:var(--deleted)}
+  .readout{padding:6px 12px;font-family:var(--mono);font-size:.64rem;color:var(--ink-faint);border-top:1px solid var(--line-soft);margin-top:auto}
+
+  /* stats pane */
+  .stnav{display:flex;gap:8px;align-items:baseline;padding:6px 12px;border-bottom:1px solid var(--line-soft);font-family:var(--mono);font-size:.68rem;color:var(--ink-soft)}
+  .tiles{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--line-soft)}
+  .tile{background:var(--surface);padding:8px 6px;text-align:center}
+  .tile .tv{font-family:var(--mono);font-size:1.15rem;font-weight:600}
+  .tile .tl{font-family:var(--mono);font-size:.56rem;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-faint);margin-top:2px}
+  .tile.pending .tv{color:var(--pending)} .tile.kept .tv{color:var(--kept)} .tile.undone .tv{color:var(--undone)}
+  .progress{height:5px;background:var(--surface-3)}
+  .progress i{display:block;height:100%;width:0;background:var(--kept);transition:width .4s ease}
+  .prognote{padding:5px 12px;font-family:var(--mono);font-size:.64rem;color:var(--ink-faint)}
+  .stblock{padding:6px 12px;border-top:1px solid var(--line-soft)}
+  .stblock .sh{font-family:var(--mono);font-size:.58rem;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-faint);margin-bottom:4px}
+  .spark{width:100%;height:34px;display:block}
+  .spark polyline{fill:none;stroke:var(--accent);stroke-width:1.5}
+  .ubar{display:flex;gap:8px;align-items:center;font-family:var(--mono);font-size:.62rem;color:var(--ink-faint);padding:2px 0}
+  .ubar .ul{width:24px;flex:none}
+  .ubar .ub{flex:1;height:6px;border-radius:4px;background:var(--surface-3);overflow:hidden}
+  .ubar .ub i{display:block;height:100%;background:var(--kept)}
+  .ranges{display:flex;gap:6px;padding:7px 12px;border-top:1px solid var(--line-soft)}
+  .ranges .seg2{font-family:var(--mono);font-size:.62rem;border:1px solid var(--line);border-radius:999px;padding:1px 9px;color:var(--ink-faint)}
+  .ranges .seg2.on{border-color:var(--accent);color:var(--accent-ink)}
+
+  /* controls */
+  .demo-ui{margin-top:8px}
+  .narr{min-height:3.4em;font-size:1.02rem;color:var(--ink-soft);max-width:70ch;text-wrap:pretty}
+  .narr .hl{color:var(--accent-ink);font-weight:560}
+  .hintline{font-size:.85rem;color:var(--accent-ink);min-height:1.6em;margin-top:4px}
+  .ctrl{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:12px}
+  .tbtn{width:36px;height:36px;border-radius:999px;border:1px solid var(--line);background:var(--surface);color:var(--ink-soft);cursor:pointer;font-size:16px;line-height:1;display:grid;place-items:center;transition:border-color .15s,color .15s,opacity .15s}
+  .tbtn:hover{border-color:var(--accent);color:var(--accent-ink)}
+  .tbtn:disabled{opacity:.35;cursor:default}
+  .tbtn:disabled:hover{border-color:var(--line);color:var(--ink-soft)}
+  .tbtn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .tbtn.playing{color:var(--accent-ink);border-color:var(--accent)}
+  .dots{display:flex;gap:7px;flex-wrap:wrap}
+  .dot{width:8px;height:8px;border-radius:999px;border:0;padding:0;background:var(--line);cursor:pointer;transition:background .2s,transform .2s}
+  .dot[aria-current="true"]{background:var(--accent);transform:scale(1.4)}
+  .dot:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+  .tcount{font-family:var(--mono);font-size:.74rem;color:var(--ink-faint);letter-spacing:.1em;min-width:64px;font-variant-numeric:tabular-nums}
+
+  /* install cta */
+  .center{text-align:center;margin-inline:auto;max-width:660px}
+  .center .lede{margin-inline:auto;max-width:52ch}
+  .cmd{display:flex;align-items:center;gap:12px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:13px 12px 13px 16px;font-family:var(--mono);font-size:.9rem;overflow-x:auto;max-width:640px;margin:26px auto 0}
+  .cmd .pr{color:var(--accent);flex:none}
+  .cmd code{white-space:nowrap;color:var(--ink)}
+  .cmd .copy{margin-left:auto;flex:none;border:1px solid var(--line);background:var(--surface-2);color:var(--ink-soft);border-radius:7px;padding:5px 11px;font-family:var(--mono);font-size:.74rem;cursor:pointer;transition:.15s}
+  .cmd .copy:hover{color:var(--ink);border-color:var(--ink-faint)}
+  .cmd-note{font-family:var(--mono);font-size:.72rem;color:var(--ink-faint);margin-top:10px}
+  .install-cta{display:flex;gap:12px;flex-wrap:wrap;justify-content:center;margin-top:26px}
+
+  /* footer */
+  .foot{padding:56px 0 68px;border-top:1px solid var(--line-soft);color:var(--ink-faint)}
+  .foot .row{display:flex;flex-wrap:wrap;gap:20px 30px;align-items:center;justify-content:space-between}
+  .foot .flinks{display:flex;flex-wrap:wrap;gap:20px;font-size:.92rem}
+  .foot .flinks a{color:var(--ink-soft)} .foot .flinks a:hover{color:var(--ink)}
+  .foot .fine{font-family:var(--mono);font-size:.74rem;margin-top:16px}
+
+  @media (prefers-reduced-motion:reduce){
+    html{scroll-behavior:auto}
+    .lens button.hint,.ovbar button.hint{animation:none;border-color:var(--accent)}
+    .prompt-strip .caret{animation:none}
+    .progress i{transition:none}
+  }
+</style>
+</head>
+<body>
+
+<nav class="nav" id="nav">
+  <div class="wrap row">
+    <a class="brand" href="showcase.html"><span class="m">🔬</span> Claude Observatory</a>
+    <div class="links">
+      <a href="showcase.html">Overview</a>
+      <a href="demo.html" style="color:var(--ink)">Demo</a>
+      <a href="getting-started.html">Getting started</a>
+      <a href="panels.html">Panels</a>
+      <a class="more" href="features.html">Features&nbsp;→</a>
+      <a href="https://github.com/cell-observatory/claude-observatory">GitHub</a>
+    </div>
+    <div class="right">
+      <button class="icon-btn menu-btn" id="menu" aria-label="Toggle navigation menu" aria-expanded="false">☰</button>
+      <button class="icon-btn" id="theme" aria-label="Toggle theme">◐</button>
+    </div>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="wrap">
+    <span class="eyebrow">Interactive demo</span>
+    <h1>The full panels, <span class="hl">step by step</span></h1>
+    <p class="lede">A scripted replay of the bundled demo session over a small Python training pipeline, laid out the way the panels sit in the editor: the file on top, the Observatory dashboards docked below. Nothing calls a model — the review clicks are yours.</p>
+  </div>
+</header>
+
+<section style="padding-top:6px" id="stage">
+  <div class="wrap">
+    <div class="demo-ui" aria-label="Demo narration and controls">
+      <p class="narr" id="narr" aria-live="polite"></p>
+      <p class="hintline" id="hint" aria-live="polite"></p>
+      <div class="ctrl">
+        <button class="tbtn" id="dback" aria-label="Previous step">←</button>
+        <div class="dots" id="ddots" role="group" aria-label="Demo steps"></div>
+        <button class="tbtn" id="dnext" aria-label="Next step">→</button>
+        <span class="tcount" id="dcount"></span>
+        <button class="tbtn" id="dplay" aria-label="Pause or resume the autoplay">❚❚</button>
+        <button class="tbtn" id="drestart" aria-label="Restart the demo" title="Restart">↺</button>
+      </div>
+    </div>
+
+    <div class="ide" aria-label="Simulated editor with the Observatory dashboards docked below">
+      <div class="editor">
+        <div class="bar">
+          <span class="d" style="background:#ff5f57"></span><span class="d" style="background:#febc2e"></span><span class="d" style="background:#28c840"></span>
+          <span class="fn" id="ed-fn">src/features.py</span>
+          <span class="edchip pending" id="ed-chip" hidden></span>
+        </div>
+        <div class="prompt-strip"><span class="pr">❯</span><span class="pt" id="ed-prompt"></span><span class="caret" id="ed-caret" hidden></span></div>
+        <div class="code" id="ed-code"></div>
+      </div>
+
+      <div class="dockhead"><span>Claude Observatory Dashboards</span></div>
+      <div class="dock">
+        <section class="pane" aria-label="Observations timeline (simulated)">
+          <div class="ph"><span>Observations</span><span id="obs-count"></span></div>
+          <div class="body" id="obs"></div>
+        </section>
+
+        <section class="pane" aria-label="Overview panel (simulated)">
+          <div class="ph"><span>Overview</span></div>
+          <div class="ovbar" id="ovbar" aria-hidden="true"></div>
+          <div class="ovwrap">
+            <div class="ovnav">
+              <div class="ovtabs"><span class="on">Fleet</span><span id="wf-tab">Workflows</span></div>
+              <div id="fleet"></div>
+              <div class="collide">No live file conflicts</div>
+            </div>
+            <div class="ovdetail">
+              <div id="ov-ribbon"></div>
+              <div class="strip" id="ov-strip" hidden></div>
+              <div id="ov-ledger"></div>
+              <div class="readout" id="ov-readout"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="pane" aria-label="Stats panel (simulated)">
+          <div class="ph"><span>Stats</span></div>
+          <div class="stnav">🔬 demo-session · zero tokens</div>
+          <div class="tiles">
+            <div class="tile pending"><div class="tv" id="st-p">0</div><div class="tl">pending</div></div>
+            <div class="tile kept"><div class="tv" id="st-k">0</div><div class="tl">accepted</div></div>
+            <div class="tile undone"><div class="tv" id="st-u">0</div><div class="tl">reverted</div></div>
+          </div>
+          <div class="progress"><i id="st-fill"></i></div>
+          <div class="prognote" id="st-note">0 of 0 reviewed</div>
+          <div class="stblock"><div class="sh">Tokens</div>
+            <svg class="spark" id="tok-spark" viewBox="0 0 120 34" preserveAspectRatio="none" aria-hidden="true"><polyline id="tok-line" points=""/></svg>
+          </div>
+          <div class="stblock"><div class="sh">Usage</div>
+            <div class="ubar"><span class="ul">ctx</span><span class="ub"><i style="width:12%"></i></span><span>12%</span></div>
+            <div class="ubar"><span class="ul">5h</span><span class="ub"><i style="width:34%"></i></span><span>34%</span></div>
+            <div class="ubar"><span class="ul">wk</span><span class="ub"><i style="width:61%"></i></span><span>61%</span></div>
+          </div>
+          <div class="ranges"><span class="seg2 on">Today</span><span class="seg2">7 days</span><span class="seg2">30 days</span></div>
+        </section>
+      </div>
+    </div>
+    <noscript><p class="lede" style="margin-top:20px">This demo needs JavaScript. The <a href="getting-started.html" style="color:var(--accent-ink);text-decoration:underline">recorded walkthrough</a> covers the same session as GIFs.</p></noscript>
+  </div>
+</section>
+
+<section class="center" id="install" style="text-align:center">
+  <div class="wrap">
+    <span class="eyebrow">Run it for real</span>
+    <h2>The same session, in your editor</h2>
+    <p class="lede" style="margin-inline:auto;max-width:52ch">Once Observatory is installed, the bundled demo replays this exact scenario through the real capture pipeline — panels, lenses, and review included, still at zero tokens.</p>
+    <div class="cmd"><span class="pr">❯</span><code>claude-observatory demo</code><button class="copy" data-copy="claude-observatory demo">Copy</button></div>
+    <p class="cmd-note">Installation first — see <a href="showcase.html#install" style="color:var(--accent-ink);text-decoration:underline">Install Observatory</a>.</p>
+    <div class="install-cta">
+      <a class="btn primary" href="getting-started.html">Getting started</a>
+      <a class="btn line" href="showcase.html#install">Install Observatory</a>
+      <a class="btn line" href="panels.html">Panels reference</a>
+    </div>
+  </div>
+</section>
+
+<footer class="foot">
+  <div class="wrap">
+    <div class="row">
+      <a class="brand" href="showcase.html"><span class="m">🔬</span> Claude Observatory</a>
+      <div class="flinks">
+        <a href="showcase.html">Overview</a>
+        <a href="getting-started.html">Getting started</a>
+        <a href="panels.html">Panels</a>
+        <a href="features.html">Features</a>
+        <a href="https://github.com/cell-observatory/claude-observatory">GitHub</a>
+      </div>
+    </div>
+    <p class="fine">A scripted simulation — no model is called from this page.</p>
+  </div>
+</footer>
+
+<script>
+  // theme toggle (remembers choice; defaults to system)
+  (function(){
+    var root=document.documentElement, btn=document.getElementById('theme'), KEY='co-theme';
+    try{var s=localStorage.getItem(KEY); if(s) root.setAttribute('data-theme',s);}catch(e){}
+    btn.addEventListener('click',function(){
+      var cur=root.getAttribute('data-theme')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light');
+      var next=cur==='dark'?'light':'dark';
+      root.setAttribute('data-theme',next);
+      try{localStorage.setItem(KEY,next);}catch(e){}
+    });
+  })();
+  // copy buttons
+  document.querySelectorAll('[data-copy]').forEach(function(b){
+    b.addEventListener('click',function(){
+      var t=b.getAttribute('data-copy'),old=b.textContent;
+      navigator.clipboard&&navigator.clipboard.writeText(t).then(function(){b.textContent='Copied ✓';setTimeout(function(){b.textContent=old;},1400);});
+    });
+  });
+  // nav condense + mobile menu
+  (function(){
+    var nav=document.getElementById('nav');
+    addEventListener('scroll',function(){nav.classList.toggle('condensed',scrollY>8);},{passive:true});
+    var menu=document.getElementById('menu');
+    menu.addEventListener('click',function(){
+      var open=nav.classList.toggle('open');
+      menu.setAttribute('aria-expanded',open?'true':'false');
+    });
+    nav.querySelectorAll('.links a').forEach(function(a){a.addEventListener('click',function(){nav.classList.remove('open');menu.setAttribute('aria-expanded','false');});});
+  })();
+
+  // ---- the detailed scripted demo ----------------------------------------------------------------
+  // Mirrors the bundled `claude-observatory demo` scenario (packages/core/src/demo.ts): a Python
+  // training pipeline gains scaling + validation + tests + docs, then the visitor reviews it.
+  // State is DERIVED per step from (edits landed, gate decisions), so Back/Restart/dot-jumps always
+  // re-render consistently. Autoplays by default; gates wait for the visitor's click.
+  (function(){
+    var reduce=window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    var esc=function(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;');};
+    var PROMPT='Add feature scaling and dataset validation to the training pipeline, then bring in tests and docs.';
+    function L(n,t,c){return {n:n,t:t,c:c||''};}
+    var SEED=[
+      L(1,'<span class="kw">from</span> statistics <span class="kw">import</span> mean'),
+      L(2,''),
+      L(3,''),
+      L(4,'<span class="kw">def</span> <span class="fnm">summarize</span>(values):'),
+      L(5,'    <span class="kw">return</span> {<span class="st">"count"</span>: len(values), <span class="st">"mean"</span>: mean(values)}'),
+    ];
+    var EDITS=[
+      {id:1,file:'src/features.py',module:'src',plus:6,minus:1,agent:null,time:'14:42',
+       why:'Adding scale() — z-score standardization so features share a range before training.',
+       lensAt:0,
+       code:[
+        L(1,'<span class="kw">from</span> statistics <span class="kw">import</span> mean, stdev','add'),
+        L(2,''),
+        L(3,''),
+        L(4,'<span class="kw">def</span> <span class="fnm">summarize</span>(values):'),
+        L(5,'    <span class="kw">return</span> {<span class="st">"count"</span>: len(values), <span class="st">"mean"</span>: mean(values)}'),
+        L(6,'','add'),
+        L(7,'','add'),
+        L(8,'<span class="kw">def</span> <span class="fnm">scale</span>(values):','add'),
+        L(9,'    mu, sigma = mean(values), stdev(values)','add'),
+        L(10,'    <span class="kw">return</span> [(v - mu) / sigma <span class="kw">for</span> v <span class="kw">in</span> values]','add'),
+       ]},
+      {id:2,file:'src/train.py',module:'src',plus:3,minus:2,agent:null,time:'14:43',
+       why:'Scaling the features in the training entrypoint before they reach the model.',
+       lensAt:0,
+       code:[
+        L(1,'<span class="kw">from</span> features <span class="kw">import</span> summarize, scale','add'),
+        L(2,''),
+        L(3,'features = <span class="fnm">scale</span>([1.0, 2.0, 3.0])','add'),
+        L(4,'<span class="fnm">print</span>(<span class="fnm">summarize</span>(features))','add'),
+       ]},
+      {id:3,file:'src/models/dataset.py',module:'src/models',plus:7,minus:0,agent:null,time:'14:45',
+       why:'Adding Dataset.validate() — matching feature/label lengths and a non-empty check, returned as {ok, error}.',
+       lensAt:4,
+       code:[
+        L(1,'<span class="kw">class</span> <span class="fnm">Dataset</span>:'),
+        L(2,'    <span class="kw">def</span> <span class="fnm">__init__</span>(self, features, labels):'),
+        L(3,'        self.features = features'),
+        L(4,'        self.labels = labels'),
+        L(5,'','add'),
+        L(6,'    <span class="kw">def</span> <span class="fnm">validate</span>(self):','add'),
+        L(7,'        <span class="kw">if</span> len(self.features) != len(self.labels):','add'),
+        L(8,'            <span class="kw">return</span> {<span class="st">"ok"</span>: <span class="kw">False</span>, <span class="st">"error"</span>: <span class="st">"length mismatch"</span>}','add'),
+        L(9,'        <span class="kw">if not</span> self.features:','add'),
+        L(10,'            <span class="kw">return</span> {<span class="st">"ok"</span>: <span class="kw">False</span>, <span class="st">"error"</span>: <span class="st">"empty dataset"</span>}','add'),
+        L(11,'        <span class="kw">return</span> {<span class="st">"ok"</span>: <span class="kw">True</span>}','add'),
+       ]},
+      {id:4,file:'tests/test_pipeline.py',module:'tests',plus:12,minus:0,agent:'subagent',time:'14:46',
+       why:'Covering scale, summarize, and both validate branches.',
+       lensAt:0,
+       code:[
+        L(1,'<span class="kw">import</span> sys, pathlib','add'),
+        L(2,'','add'),
+        L(3,'sys.path.insert(0, str(pathlib.<span class="fnm">Path</span>(__file__).resolve().parents[1] / <span class="st">"src"</span>))','add'),
+        L(4,'<span class="kw">from</span> features <span class="kw">import</span> scale, summarize','add'),
+        L(5,'<span class="kw">from</span> models.dataset <span class="kw">import</span> Dataset','add'),
+        L(6,'','add'),
+        L(7,'scaled = <span class="fnm">scale</span>([1.0, 2.0, 3.0])','add'),
+        L(8,'<span class="kw">assert</span> abs(sum(scaled)) &lt; 1e-9','add'),
+        L(9,'<span class="kw">assert</span> <span class="fnm">summarize</span>(scaled)[<span class="st">"count"</span>] == 3','add'),
+        L(10,'<span class="kw">assert</span> <span class="fnm">Dataset</span>([[1.0]], [0]).validate()[<span class="st">"ok"</span>] <span class="kw">is True</span>','add'),
+        L(11,'<span class="kw">assert</span> <span class="fnm">Dataset</span>([[1.0]], []).validate()[<span class="st">"ok"</span>] <span class="kw">is False</span>','add'),
+        L(12,'<span class="fnm">print</span>(<span class="st">"pipeline tests: all assertions pass"</span>)','add'),
+       ]},
+      {id:5,file:'docs/USAGE.md',module:'docs',plus:12,minus:0,agent:'workflow',time:'14:48',
+       why:'Documenting the public API with runnable examples.',
+       lensAt:0,
+       code:[
+        L(1,'<span class="fnm"># Pipeline usage</span>','add'),
+        L(2,'','add'),
+        L(3,'<span class="st">```python</span>','add'),
+        L(4,'<span class="kw">from</span> features <span class="kw">import</span> scale, summarize','add'),
+        L(5,'<span class="fnm">summarize</span>(<span class="fnm">scale</span>([1.0, 2.0, 3.0]))  <span class="cm"># {"count": 3, "mean": 0.0}</span>','add'),
+        L(6,'<span class="st">```</span>','add'),
+        L(7,'','add'),
+        L(8,'Validate a dataset before training:','add'),
+        L(9,'','add'),
+        L(10,'<span class="st">```python</span>','add'),
+        L(11,'<span class="fnm">Dataset</span>(features, labels).validate()  <span class="cm"># {"ok": True} | {"ok": False, "error": ...}</span>','add'),
+        L(12,'<span class="st">```</span>','add'),
+       ]},
+    ];
+    var CHAPTERS=[
+      {title:'Add feature scaling to the pipeline',edits:[1,2]},
+      {title:'Validate the training dataset',edits:[3]},
+      {title:'Tests and docs',edits:[4,5]},
+    ];
+    var STEPS=[
+      {ed:'seed',landed:0,typing:true,
+       narr:'You ask Claude for a change. Observatory sits beside the session — hooks, not a wrapper — and records what happens, at zero extra tokens. Below the editor: the same three dashboards the extensions dock at the bottom of the IDE.'},
+      {ed:'seed',landed:0,plan:true,
+       narr:'Claude plans three to-dos. The Overview adopts them as chapters — the session’s own structure — and the Fleet nav on its left lists this session as a running agent.'},
+      {ed:1,landed:1,
+       narr:'The first edit lands and becomes a reviewable entry: an inline lens over the changed lines, a timeline entry carrying Claude’s reasoning, and a churn-ranked ledger row in the Overview detail.'},
+      {ed:2,landed:2,
+       narr:'A second edit wires scaling into the training entrypoint. Chapter one is complete — the ribbon marks it half-moon: finished, but both edits still pending your review. The nav bar’s File and Diff counters track exactly where you are.'},
+      {ed:3,landed:3,
+       narr:'Chapter two adds dataset validation. The module strip apportions the churn across src, src/models, tests, and docs; commands Claude runs (a quick python src/train.py sanity check here) land in the Actions timeline the same way.'},
+      {ed:4,landed:4,
+       narr:'Claude hands the test-writing to a subagent — watch it appear under the session in the Fleet nav. Its edit is attributed to it in the timeline and reviewed exactly like any other.'},
+      {ed:5,landed:5,
+       narr:'A workflow run writes the docs — the Workflows tab picks up the run. Five edits are now pending across three chapters; the Next steps list at the bottom of Observations says what remains.'},
+      {ed:1,landed:5,gate:'keep',hint:'Click ✓ Keep on the lens in the editor.',
+       narr:'Review the first edit: the scaling function is correct — <span class="hl">keep it</span>. Keeping one edit resolves it and nothing else.'},
+      {ed:2,landed:5,gate:'undo',hint:'Click ↩ Undo on the lens in the editor.',
+       narr:'The entrypoint wiring isn’t wanted — <span class="hl">undo just this edit</span>. The revert is surgical: a position-anchored line merge, so every other pending change stays exactly as Claude left it.'},
+      {ed:2,landed:5,gate:'acceptall',hint:'Click ✓ Accept all in the Overview toolbar.',
+       narr:'Sweep the rest in one motion: <span class="hl">Accept all</span> resolves everything still pending. Clicking a chapter row scopes the same bulk actions to just that task.'},
+      {ed:1,landed:5,recap:true,
+       narr:'That is the whole loop: every edit tracked with its reasoning, reviewed one at a time or by the chapter, and resolved without git. Run the same session in your own editor below — or start with the <a href="getting-started.html" style="color:var(--accent-ink);text-decoration:underline">recorded walkthrough</a>.'},
+    ];
+    var N=STEPS.length;
+    var el=function(id){return document.getElementById(id);};
+    var step=0, resolved={}, timer=null, playing=false, typeTimer=null, advanceTok=0;
+
+    function statusOf(id,s,res){
+      var afterKeep=s>7||(s===7&&res[7]), afterUndo=s>8||(s===8&&res[8]), afterAll=s>9||(s===9&&res[9]);
+      if(id===1) return afterKeep?'kept':'pending';
+      if(id===2) return afterUndo?'undone':'pending';
+      return afterAll?'kept':'pending';
+    }
+    function landedEdits(s){return EDITS.slice(0,STEPS[s].landed);}
+
+    function render(){
+      var st=STEPS[step], res=resolved;
+      el('narr').innerHTML=st.narr;
+      el('hint').textContent=(st.gate&&!res[step])?st.hint:'';
+      el('dcount').textContent=('0'+(step+1)).slice(-2)+' / '+('0'+N).slice(-2);
+      el('dback').disabled=step===0;
+      el('dnext').disabled=(step===N-1)||(!!st.gate&&!res[step]);
+      var dots=el('ddots');
+      if(!dots.childElementCount){
+        STEPS.forEach(function(_,k){
+          var d=document.createElement('button');
+          d.className='dot';d.type='button';d.setAttribute('aria-label','Step '+(k+1));
+          d.addEventListener('click',function(){stopPlay();go(k);});
+          dots.appendChild(d);
+        });
+      }
+      [].slice.call(dots.children).forEach(function(d,j){d.setAttribute('aria-current',j===step?'true':'false');});
+
+      // ---- editor ----
+      var ed=st.ed, lines, fn, chip=null, lens=null;
+      if(ed==='seed'){fn='src/features.py';lines=SEED;}
+      else{
+        var e=EDITS[ed-1];fn=e.file;
+        var status=statusOf(e.id,step,res);
+        lines=e.code.map(function(l){return {n:l.n,t:l.t,c:l.c==='add'&&status==='undone'?'undone':l.c};});
+        chip=status;
+        lens={e:e,status:status,gated:st.gate==='keep'||st.gate==='undo'};
+      }
+      el('ed-fn').textContent=fn;
+      var chipEl=el('ed-chip');
+      if(chip){chipEl.hidden=false;chipEl.className='edchip '+chip;chipEl.textContent=chip==='pending'?'● pending':chip==='kept'?'✓ kept':'⤺ undone';}
+      else {chipEl.hidden=true;chipEl.textContent='';}
+      if(typeTimer){clearInterval(typeTimer);typeTimer=null;}
+      if(st.typing&&!reduce){
+        el('ed-prompt').textContent='';el('ed-caret').hidden=false;
+        var ti=0;
+        typeTimer=setInterval(function(){
+          ti+=2;el('ed-prompt').textContent=PROMPT.slice(0,ti);
+          if(ti>=PROMPT.length){clearInterval(typeTimer);typeTimer=null;el('ed-caret').hidden=true;}
+        },24);
+      }else{el('ed-prompt').textContent=PROMPT;el('ed-caret').hidden=true;}
+      var html='';
+      lines.forEach(function(l,ix){
+        if(lens&&ix===lens.e.lensAt){
+          html+='<div class="lens"><span class="sp">✨ #'+lens.e.id+' · +'+lens.e.plus+' −'+lens.e.minus+'</span>';
+          if(lens.gated&&!res[step]){
+            // Only the scripted action is a live button — the rest stay inert display text.
+            if(STEPS[step].gate==='keep') html+='<button id="lens-keep" class="hint">✓ Keep</button><span class="a">↩ Undo</span>';
+            else html+='<span class="a">✓ Keep</span><button id="lens-undo" class="hint">↩ Undo</button>';
+            html+='<span class="a">💬 Chat</span><span class="a">⧉ View diff</span>';
+          }else{
+            html+='<span class="a">✓ Keep</span><span class="a">↩ Undo</span><span class="a">💬 Chat</span><span class="a">⧉ View diff</span>';
+          }
+          html+='</div>';
+        }
+        var star=l.c==='add'?'<span class="star">✨</span>':l.c==='undone'?'<span class="star" style="color:var(--undone)">⤺</span>':'';
+        html+='<div class="ln '+l.c+'"><span class="n">'+l.n+'</span><span class="t">'+(star?star+l.t:l.t)+'</span></div>';
+      });
+      el('ed-code').innerHTML=html;
+      var kb=el('lens-keep'),ub=el('lens-undo');
+      if(kb)kb.addEventListener('click',function(){resolveGate();});
+      if(ub)ub.addEventListener('click',function(){resolveGate();});
+
+      // ---- observations ----
+      var landed=landedEdits(step), rows='';
+      if(st.plan||landed.length) rows+='<div class="or"><div class="top"><span class="of">Pipeline: scaling, validation, tests</span><span class="badge">session recap</span></div><div class="ow">'+esc(PROMPT)+'</div></div>';
+      for(var k=landed.length-1;k>=0;k--){
+        var o=landed[k];
+        rows+='<div class="or"><div class="top"><span class="tm">'+o.time+'</span><span class="of">'+esc(o.file.split('/').pop())+'</span>'+
+          '<span class="od"><span class="p">+'+o.plus+'</span> <span class="m">−'+o.minus+'</span></span>'+
+          (o.agent?'<span class="badge">'+o.agent+'</span>':'')+'</div>'+
+          '<div class="ow">'+esc(o.why)+'</div></div>';
+      }
+      var p0=0;landed.forEach(function(e){if(statusOf(e.id,step,res)==='pending')p0++;});
+      if(landed.length){
+        rows+='<div class="nextsteps"><div class="nh">Next steps</div>';
+        if(p0>0) rows+='<div>› '+p0+' edit'+(p0===1?'':'s')+' still pending review — Accept or Revert them.</div>';
+        else rows+='<div>› Session reviewed clean — nothing pending.</div>';
+        rows+='<div>› Run python observatory-demo/tests/test_pipeline.py</div></div>';
+      }
+      el('obs').innerHTML=rows||'<div class="empty">The timeline fills in as the session runs.</div>';
+      el('obs-count').textContent=landed.length?landed.length+' edit'+(landed.length===1?'':'s'):'';
+
+      // ---- overview: toolbar + fleet nav + detail ----
+      var pendingFiles=[],curFile=fn;
+      landed.forEach(function(e){if(statusOf(e.id,step,res)==='pending'&&pendingFiles.indexOf(e.file)<0)pendingFiles.push(e.file);});
+      var fIdx=pendingFiles.indexOf(curFile);
+      var fileCounter=pendingFiles.length?('File '+(fIdx>=0?fIdx+1:'–')+'/'+pendingFiles.length):'';
+      var diffCounter=(ed!=='seed'&&statusOf(EDITS[ed-1].id,step,res)==='pending')?'Diff 1/1':'';
+      var bar='<span class="g">🔬 demo-session</span><span class="sep"></span>';
+      if(fileCounter) bar+='<span class="g">◀ <span class="on">'+fileCounter+'</span> ▶</span><span class="sep"></span>';
+      if(diffCounter) bar+='<span class="g">▲ <span class="on">'+diffCounter+'</span> ▼</span><span class="sep"></span>';
+      bar+='<span class="g">✓ ↩ · ✓✓ ✗ 🧹 · 💡 🔍</span>';
+      if(st.gate==='acceptall'&&!res[step]) bar+='<span class="sep"></span><button id="ov-acceptall" class="hint">✓ Accept all</button>';
+      el('ovbar').innerHTML=bar;
+      var ab=el('ov-acceptall');
+      if(ab)ab.addEventListener('click',function(){resolveGate();});
+
+      var showPlan=st.plan||landed.length>0||step>1;
+      var sessDone=!!st.recap;
+      var fleetHtml='<div class="fr"><span class="gl">▶</span><span class="st2 '+(sessDone?'done':'working')+'">'+(sessDone?'● done':'● working')+'</span> you · demo/pipeline</div>';
+      if(landed.length>=4) fleetHtml+='<div class="fr sub"><span class="gl">▷</span><span class="st2 done">● done</span> general-purpose — Write pipeline tests</div>';
+      el('fleet').innerHTML=fleetHtml;
+      el('wf-tab').textContent='Workflows'+(landed.length>=5?' (1)':'');
+
+      var rib='';
+      if(showPlan){
+        CHAPTERS.forEach(function(ch){
+          var chEdits=landed.filter(function(e){return ch.edits.indexOf(e.id)>=0;});
+          var pend=chEdits.filter(function(e){return statusOf(e.id,step,res)==='pending';}).length;
+          var dot,cls;
+          if(!chEdits.length){dot='○';cls='todo';}
+          else if(pend>0){dot='◐';cls='part';}
+          else{dot='●';cls='done';}
+          var plus=chEdits.reduce(function(a,e){return a+e.plus;},0),minus=chEdits.reduce(function(a,e){return a+e.minus;},0);
+          rib+='<div class="rr"><span class="rd '+cls+'">'+dot+'</span><span class="rt">'+esc(ch.title)+'</span>'+
+            (chEdits.length?'<span class="mini-acts" aria-hidden="true">✓ ↩ 🧹</span>':'')+
+            '<span class="rc">'+(chEdits.length?('+'+plus+' −'+minus+(pend?' · '+pend+' pending':' · reviewed')):'planned')+'</span></div>';
+        });
+      }
+      el('ov-ribbon').innerHTML=rib||'<div class="empty">Claude’s to-dos become the chapter ribbon.</div>';
+      var strip=el('ov-strip');
+      var mods={};landed.forEach(function(e){mods[e.module]=(mods[e.module]||0)+e.plus+e.minus;});
+      var modKeys=Object.keys(mods);
+      if(modKeys.length){
+        strip.hidden=false;
+        var tot=modKeys.reduce(function(a,m){return a+mods[m];},0);
+        strip.innerHTML=modKeys.map(function(m){
+          var pct=Math.round(100*mods[m]/tot);
+          return '<span class="seg" style="width:'+pct+'%" title="'+m+' — '+pct+'% of churn">'+m+'</span>';
+        }).join('');
+      }else{strip.hidden=true;strip.innerHTML='';}
+      var maxChurn=landed.reduce(function(a,e){return Math.max(a,e.plus+e.minus);},1);
+      el('ov-ledger').innerHTML=landed.slice().sort(function(a,b){return (b.plus+b.minus)-(a.plus+a.minus);}).map(function(e){
+        var s2=statusOf(e.id,step,res);
+        return '<div class="lr"><span class="sd '+s2+'"></span><span class="lf">'+esc(e.file)+'</span>'+
+          '<span class="lb"><i style="width:'+Math.round(100*(e.plus+e.minus)/maxChurn)+'%"></i></span>'+
+          '<span class="lc"><span class="p">+'+e.plus+'</span> <span class="m">−'+e.minus+'</span></span></div>';
+      }).join('');
+      var addAll=landed.reduce(function(a,e){return a+e.plus;},0),remAll=landed.reduce(function(a,e){return a+e.minus;},0);
+      el('ov-readout').textContent=landed.length?(landed.length+' file'+(landed.length===1?'':'s')+' · +'+addAll+' −'+remAll+(p0?' · '+p0+' pending':' · reviewed clean')):'';
+
+      // ---- stats ----
+      var p=0,kk=0,u=0;
+      landed.forEach(function(e){var s3=statusOf(e.id,step,res);if(s3==='pending')p++;else if(s3==='kept')kk++;else u++;});
+      el('st-p').textContent=p;el('st-k').textContent=kk;el('st-u').textContent=u;
+      var tot2=landed.length,rev=kk+u;
+      el('st-fill').style.width=tot2?Math.round(100*rev/tot2)+'%':'0%';
+      el('st-note').textContent=rev+' of '+tot2+' reviewed'+(tot2&&rev===tot2?' — session clean':'');
+      var toks=[2,7,13,18,26,31].slice(0,landed.length+1);
+      var pts=toks.map(function(v,i2){
+        var x=toks.length>1?(i2*120/(toks.length-1)):0;
+        return x.toFixed(1)+','+(31-v*28/31).toFixed(1);
+      }).join(' ');
+      el('tok-line').setAttribute('points',pts);
+    }
+
+    function resolveGate(){
+      stopPlay(); // a gate click is the visitor driving — autoplay resumes only via ▸
+      resolved[step]=true;
+      render();
+      var tok=++advanceTok, s=step;
+      setTimeout(function(){ if(tok===advanceTok&&step===s&&resolved[s]&&s<N-1) go(s+1); }, reduce?250:1000);
+    }
+    function go(k){
+      advanceTok++;
+      var target=Math.max(0,Math.min(N-1,k));
+      if(target!==step){ delete resolved[target]; step=target; }
+      render();
+    }
+    el('dback').addEventListener('click',function(){stopPlay();go(step-1);});
+    el('dnext').addEventListener('click',function(){stopPlay();go(step+1);});
+    el('drestart').addEventListener('click',function(){stopPlay();resolved={};step=0;render();});
+    document.addEventListener('keydown',function(e){
+      if(e.target&&/INPUT|TEXTAREA/.test(e.target.tagName))return;
+      if(e.key==='ArrowRight'&&!el('dnext').disabled){stopPlay();go(step+1);}
+      if(e.key==='ArrowLeft'&&step>0){stopPlay();go(step-1);}
+    });
+    function stopPlay(){playing=false;if(timer){clearInterval(timer);timer=null;}el('dplay').classList.remove('playing');el('dplay').textContent='▸';}
+    function startPlay(){
+      if(playing)return;
+      playing=true;el('dplay').classList.add('playing');el('dplay').textContent='❚❚';
+      timer=setInterval(function(){
+        var st=STEPS[step];
+        if(st.gate&&!resolved[step])return; // hold at the gate — this page waits for the visitor
+        if(step>=N-1){stopPlay();return;}
+        go(step+1);
+      },3600);
+    }
+    el('dplay').addEventListener('click',function(){ if(playing)stopPlay(); else startPlay(); });
+    render();
+    if(!reduce) startPlay(); else stopPlay();
+  })();
+</script>
+</body>
+</html>

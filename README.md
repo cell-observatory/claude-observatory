@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/cell-observatory/claude-observatory/actions/workflows/ci.yml/badge.svg)](https://github.com/cell-observatory/claude-observatory/actions/workflows/ci.yml)
 &nbsp;·&nbsp; **[🔬 Live showcase →](https://cell-observatory.github.io/claude-observatory/)**
+&nbsp;·&nbsp; **[Interactive demo →](https://cell-observatory.github.io/claude-observatory/demo.html)**
 &nbsp;·&nbsp; [Changelog](CHANGELOG.md)
 
 **Per-edit Keep / Undo for [Claude Code](https://claude.com/claude-code).** Every file change Claude makes
@@ -64,7 +65,9 @@ claude-observatory init          # add --with-statusline for the 5h/week Usage b
 **3 — Launch Claude Code** and start working. Every edit is captured automatically; open the **🔬 Claude
 Observatory** view in your editor (or run `claude-observatory list`) to review.
 
-**Try it without Claude** — `claude-observatory demo` replays a scripted session through the real
+**Try it without Claude** — the same scenario is clickable in the browser on the
+**[interactive demo](https://cell-observatory.github.io/claude-observatory/demo.html)** page, nothing to
+install. Locally, `claude-observatory demo` replays a scripted session through the real
 pipeline in an isolated `demo-*` session and an `observatory-demo/` folder: open the Overview and watch
 chapters, fleet rows, and observations fill in live, then review the edits for real.
 `claude-observatory demo --clean` removes every trace.

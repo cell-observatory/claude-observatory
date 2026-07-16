@@ -22,9 +22,10 @@ class ObservatoryToolWindowFactory : ToolWindowFactory, DumbAware {
         cm.addContent(iconTab(factory, ActionsPanel(project), "Actions", AllIcons.Debugger.Console))
     }
 
-    /** An icon-only tab: the glyph is the tab, its name rides in the hover tooltip + overflow chooser. */
+    /** An icon + text tab. The label must be the displayName — the new UI (PyCharm 2025+) renders content
+     *  tabs by text and may drop the icon, so an empty displayName leaves the tab blank/invisible. */
     private fun iconTab(factory: ContentFactory, component: JComponent, label: String, icon: Icon): Content =
-        factory.createContent(component, "", false).apply {
+        factory.createContent(component, label, false).apply {
             this.icon = icon          // Content.setIcon — the tab glyph
             description = label        // Content.setDescription — the hover tooltip
             popupIcon = icon           // shown in the tab-overflow chooser

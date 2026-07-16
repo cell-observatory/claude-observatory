@@ -237,6 +237,75 @@
     .beats{min-height:auto}.beat{position:static;opacity:1;transform:none;display:block;font-size:1.4rem;margin-bottom:6px}
     .chip{position:static;opacity:0}.chip.kept{opacity:1;display:inline-flex}.act-editor .bar .chips{width:auto}
   }
+  /* ---- lead interactive demo (hero) ---- */
+  [hidden]{display:none!important}
+  .hero-lead{text-align:center;max-width:760px;margin-inline:auto}
+  .hero-lead .lede{margin-inline:auto;max-width:52ch}
+  .hero-lead .cta{justify-content:center}
+  .sd-stage{display:grid;grid-template-columns:1.15fr .85fr;gap:20px;align-items:start;margin-top:26px;text-align:left}
+  @media (max-width:900px){.sd-stage{grid-template-columns:1fr}}
+  .sd-panels{display:flex;flex-direction:column;gap:12px;min-width:0}
+  .mini{background:var(--surface);border:1px solid var(--line);border-radius:14px;overflow:hidden;font-size:.76rem}
+  .mini .mh{display:flex;align-items:center;justify-content:space-between;gap:10px;font-family:var(--mono);font-size:.62rem;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-faint);padding:7px 12px;border-bottom:1px solid var(--line-soft)}
+  .mini .mh button{border:1px solid var(--line);background:var(--surface-2);color:var(--ink);border-radius:999px;padding:2px 11px;font-family:var(--sans);font-size:.74rem;cursor:pointer;transition:.15s;letter-spacing:0;text-transform:none}
+  .mini .mh button:hover{border-color:var(--accent);color:var(--accent-ink)}
+  .mini .empty{padding:9px 12px;color:var(--ink-faint)}
+  .sd-obs{max-height:150px;overflow-y:auto}
+  .or{padding:5px 12px;border-bottom:1px solid var(--line-soft)}
+  .or:last-child{border-bottom:0}
+  .or .top{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+  .or .of{font-family:var(--mono);color:var(--ink)}
+  .or .od{font-family:var(--mono);color:var(--ink-faint)}
+  .or .od .p{color:var(--kept)} .or .od .m{color:var(--deleted)}
+  .or .ow{color:var(--ink-faint);font-style:italic}
+  .badge{font-size:.64rem;font-family:var(--mono);border:1px solid var(--line);border-radius:999px;padding:0 7px;color:var(--accent-ink)}
+  .rr{display:flex;gap:9px;align-items:baseline;padding:4px 12px;border-bottom:1px solid var(--line-soft)}
+  .rr:last-child{border-bottom:0}
+  .rr .rd.todo{color:var(--ink-faint)} .rr .rd.part{color:var(--pending)} .rr .rd.done{color:var(--kept)}
+  .rr .rt{color:var(--ink);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .rr .rc{margin-left:auto;flex:none;font-family:var(--mono);font-size:.68rem;color:var(--ink-faint)}
+  .sd-strip{display:flex;height:15px;border-radius:5px;overflow:hidden;margin:9px 12px 2px;border:1px solid var(--line-soft)}
+  .sd-strip .seg{display:grid;place-items:center;font-family:var(--mono);font-size:.56rem;color:var(--ink-soft);background:var(--accent-soft);white-space:nowrap;overflow:hidden}
+  .sd-strip .seg:nth-child(2n){background:var(--surface-3)}
+  .lr{display:flex;gap:8px;align-items:center;padding:3px 12px}
+  .lr .sd{flex:none;width:8px;height:8px;border-radius:50%}
+  .lr .sd.pending{background:var(--pending)} .lr .sd.kept{background:var(--kept)} .lr .sd.undone{background:var(--undone)}
+  .lr .lf{font-family:var(--mono);color:var(--ink);flex:none}
+  .lr .lb{flex:1;height:6px;border-radius:4px;background:var(--surface-3);overflow:hidden;min-width:26px}
+  .lr .lb i{display:block;height:100%;background:var(--accent);opacity:.55}
+  .lr .lc{flex:none;font-family:var(--mono);font-size:.68rem;color:var(--ink-faint)}
+  .lr .lc .p{color:var(--kept)} .lr .lc .m{color:var(--deleted)}
+  .tiles{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--line-soft)}
+  .tile{background:var(--surface);padding:8px 6px;text-align:center}
+  .tile .tv{font-family:var(--mono);font-size:1.15rem;font-weight:600}
+  .tile .tl{font-family:var(--mono);font-size:.58rem;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-faint);margin-top:2px}
+  .tile.pending .tv{color:var(--pending)} .tile.kept .tv{color:var(--kept)} .tile.undone .tv{color:var(--undone)}
+  .sd-progress{height:5px;background:var(--surface-3)}
+  .sd-progress i{display:block;height:100%;width:0;background:var(--kept);transition:width .4s ease}
+  .prognote{padding:5px 12px 8px;font-family:var(--mono);font-size:.66rem;color:var(--ink-faint)}
+  .edchip{margin-left:auto;display:inline-flex;align-items:center;gap:5px;font-family:var(--sans);font-size:.72rem;padding:2px 9px;border-radius:999px;border:1px solid currentColor;white-space:nowrap}
+  .edchip.pending{color:var(--pending)} .edchip.kept{color:var(--kept)} .edchip.undone{color:var(--undone)}
+  .prompt-strip{display:flex;gap:10px;align-items:baseline;padding:9px 14px;background:var(--ed-panel);border-bottom:1px solid var(--ed-line);font-size:.78rem}
+  .prompt-strip .pr{color:var(--accent);flex:none}
+  .prompt-strip .pt{color:var(--ink-soft);font-family:var(--mono);white-space:pre-wrap;word-break:break-word}
+  .prompt-strip .caret{display:inline-block;width:7px;height:1em;background:var(--accent);vertical-align:text-bottom;animation:sdblink 1s steps(1) infinite}
+  @keyframes sdblink{50%{opacity:0}}
+  .sd-ed .code{min-height:300px;overflow-x:auto}
+  .ln.undone{opacity:.38;background:transparent;box-shadow:none}
+  .ln.undone .t{text-decoration:line-through}
+  .lens button{border:1px solid var(--line);background:var(--surface);color:var(--ink);border-radius:999px;padding:3px 12px;font-size:.78rem;font-family:var(--sans);cursor:pointer;transition:.15s}
+  .lens button:hover{border-color:var(--accent);color:var(--accent-ink)}
+  .lens button.hint{animation:sdpulse 1.6s ease-in-out infinite;border-color:var(--accent)}
+  @keyframes sdpulse{0%,100%{box-shadow:0 0 0 0 var(--accent-soft)}50%{box-shadow:0 0 0 7px var(--accent-soft)}}
+  .sd-ui{margin-top:34px;text-align:left}
+  .sd-ui .narr{min-height:3em;font-size:.98rem;color:var(--ink-soft);max-width:70ch}
+  .sd-ui .narr .hl{color:var(--accent-ink);font-weight:560}
+  .sd-ui .hintline{font-size:.84rem;color:var(--accent-ink);min-height:1.5em;margin-top:2px}
+  .sd-ui .ctrl{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:8px}
+  .tbtn.playing{color:var(--accent-ink);border-color:var(--accent)}
+  .tbtn:disabled{opacity:.35;cursor:default}
+  .tbtn:disabled:hover{border-color:var(--line);color:var(--ink-soft)}
+  @media (prefers-reduced-motion:reduce){.lens button.hint{animation:none;border-color:var(--accent)}.prompt-strip .caret{animation:none}.sd-progress i{transition:none}}
 </style>
 </head>
 <body>
@@ -247,7 +316,7 @@
     <div class="links">
       <a href="#hero">Overview</a>
       <a href="#act">Review</a>
-      <a href="#demo">Demo</a>
+      <a href="demo.html">Demo</a>
       <a href="#tour">Tour</a>
       <a href="#install">Install</a>
       <a href="getting-started.html">Getting started</a>
@@ -272,49 +341,51 @@
 </aside>
 
 <header class="hero" id="hero">
-  <div class="wrap hero-grid">
-    <div class="stagger">
+  <div class="wrap">
+    <div class="stagger hero-lead">
       <span class="eyebrow" style="--i:0">A review tool for Claude Code</span>
       <h1 style="--i:1">Per-edit review for <span class="hl">Claude Code</span></h1>
       <p class="lede" style="--i:2">Each change Claude makes becomes a reviewable entry with its own Keep, Undo, and surgical revert — in the terminal, VS Code, and JetBrains, at zero extra tokens.</p>
       <div class="cta" style="--i:3">
         <a class="btn primary" href="#install">Get started</a>
+        <a class="btn line" href="demo.html">Full interactive demo →</a>
         <a class="btn line" href="#act">How it works</a>
       </div>
       <div class="meta" style="--i:4">git-free · zero extra Claude tokens · terminal + VS Code + JetBrains</div>
     </div>
 
-    <div class="editor hero-v" aria-label="Inline review: a Claude edit with Keep / Undo and its diff">
-      <div class="bar">
-        <span class="d" style="background:#ff5f57"></span><span class="d" style="background:#febc2e"></span><span class="d" style="background:#28c840"></span>
-        <span class="fn">User.js</span>
+    <div class="sd-ui" aria-label="Interactive demo narration and controls">
+      <p class="narr" id="sd-narr" aria-live="polite"></p>
+      <p class="hintline" id="sd-hint" aria-live="polite"></p>
+      <div class="ctrl">
+        <button class="tbtn" id="sd-back" aria-label="Previous step">←</button>
+        <div class="dots" id="sd-dots" role="group" aria-label="Demo steps"></div>
+        <button class="tbtn" id="sd-next" aria-label="Next step">→</button>
+        <span class="tcount" id="sd-count"></span>
+        <button class="tbtn" id="sd-play" aria-label="Pause or resume the autoplay">❚❚</button>
+        <button class="tbtn" id="sd-restart" aria-label="Restart the demo">↺</button>
       </div>
-      <div class="code">
-        <div class="ln"><span class="n">5</span><span class="t">  <span class="fnm">greet</span>() {</span></div>
-        <div class="ln"><span class="n">6</span><span class="t">    <span class="kw">return</span> <span class="st">`Hello, ${this.name}!`</span>;</span></div>
-        <div class="ln"><span class="n">7</span><span class="t">  }</span></div>
-        <div class="lens"><span class="sp">✨ #2 · +4 −0 · view changes</span><span class="a">✓ Keep</span><span class="a">↩ Undo</span><span class="a">💬 Chat</span><span class="a">⧉ View diff</span></div>
-        <div class="ln add"><span class="n">8</span><span class="t"><span class="star">✨</span>  <span class="fnm">farewell</span>() {</span></div>
-        <div class="ln add"><span class="n">9</span><span class="t">    <span class="kw">return</span> <span class="st">`Goodbye from ${this.name}!`</span>;</span></div>
-        <div class="ln add"><span class="n">10</span><span class="t">  }</span></div>
-      </div>
-      <div class="bubble">
-        <div class="bh">
-          <span>✨ Claude edit <span class="id">#2</span></span>
-          <span class="id">+4 −0</span>
-          <span class="why">💭 added a farewell() to mirror greet()</span>
-          <span class="tools"><span>✓ Accept</span><span>↩ Revert</span><span>↓ Next</span></span>
+    </div>
+    <div class="sd-stage">
+      <div class="editor sd-ed" aria-label="Simulated editor with Claude's edits">
+        <div class="bar">
+          <span class="d" style="background:#ff5f57"></span><span class="d" style="background:#febc2e"></span><span class="d" style="background:#28c840"></span>
+          <span class="fn" id="sd-fn">src/features.py</span>
+          <span class="edchip pending" id="sd-chip" hidden></span>
         </div>
-        <div class="diff">
-          <span class="dl h">@@ -5,3 +5,7 @@ class User</span>
-          <span class="dl c">   greet() {</span>
-          <span class="dl c">   }</span>
-          <span class="dl ad">+  farewell() {</span>
-          <span class="dl ad">+    return `Goodbye from ${this.name}!`;</span>
-          <span class="dl ad">+  }</span>
+        <div class="prompt-strip"><span class="pr">❯</span><span class="pt" id="sd-prompt"></span><span class="caret" id="sd-caret" hidden></span></div>
+        <div class="code" id="sd-code"></div>
+      </div>
+      <div class="sd-panels">
+        <div class="mini"><div class="mh"><span>Observations</span><span id="sd-obsn"></span></div><div class="sd-obs" id="sd-obs"></div></div>
+        <div class="mini"><div class="mh"><span>Overview</span><button id="sd-acceptall" hidden>✓ Accept all pending</button></div><div id="sd-ribbon"></div><div class="sd-strip" id="sd-strip" hidden></div><div id="sd-ledger"></div></div>
+        <div class="mini"><div class="mh"><span>Stats</span><span>🔬 demo-session</span></div>
+          <div class="tiles"><div class="tile pending"><div class="tv" id="sd-p">0</div><div class="tl">pending</div></div><div class="tile kept"><div class="tv" id="sd-k">0</div><div class="tl">accepted</div></div><div class="tile undone"><div class="tv" id="sd-u">0</div><div class="tl">reverted</div></div></div>
+          <div class="sd-progress"><i id="sd-fill"></i></div><div class="prognote" id="sd-note">0 of 0 reviewed</div>
         </div>
       </div>
     </div>
+    <noscript><p class="lede" style="margin-top:16px">The interactive demo needs JavaScript — the <a href="getting-started.html" style="color:var(--accent-ink);text-decoration:underline">recorded walkthrough</a> covers the same session.</p></noscript>
   </div>
 </header>
 
@@ -334,7 +405,7 @@
       <div class="editor act-editor" aria-hidden="true">
         <div class="bar">
           <span class="d" style="background:#ff5f57"></span><span class="d" style="background:#febc2e"></span><span class="d" style="background:#28c840"></span>
-          <span class="fn">User.js</span>
+          <span class="fn">src/models/dataset.py</span>
           <span class="chips">
             <span class="chip pending">● pending</span>
             <span class="chip kept"><span class="tk">✓</span> kept</span>
@@ -342,11 +413,12 @@
           </span>
         </div>
         <div class="code">
-          <div class="ln"><span class="n">7</span><span class="t">  }</span></div>
-          <div class="ln add"><span class="n">8</span><span class="t"><span class="star">✨</span>  <span class="fnm">farewell</span>() {</span></div>
-          <div class="ln add"><span class="n">9</span><span class="t">    <span class="kw">return</span> <span class="st">`Goodbye from ${this.name}!`</span>;</span></div>
-          <div class="ln add"><span class="n">10</span><span class="t">  }</span></div>
-          <div class="ln"><span class="n">11</span><span class="t">}</span></div>
+          <div class="ln"><span class="n">4</span><span class="t">        self.labels = labels</span></div>
+          <div class="ln"><span class="n">5</span><span class="t"></span></div>
+          <div class="ln add"><span class="n">6</span><span class="t"><span class="star">✨</span>    <span class="kw">def</span> <span class="fnm">validate</span>(self):</span></div>
+          <div class="ln add"><span class="n">7</span><span class="t">        <span class="kw">if</span> len(self.features) != len(self.labels):</span></div>
+          <div class="ln add"><span class="n">8</span><span class="t">            <span class="kw">return</span> {<span class="st">"ok"</span>: <span class="kw">False</span>, <span class="st">"error"</span>: <span class="st">"length mismatch"</span>}</span></div>
+          <div class="ln add"><span class="n">9</span><span class="t">        <span class="kw">return</span> {<span class="st">"ok"</span>: <span class="kw">True</span>}</span></div>
         </div>
       </div>
     </div>
@@ -369,6 +441,7 @@
     <span class="eyebrow">Recorded demo</span>
     <h2>The Overview as a session runs</h2>
     <p class="lede">Recorded from the bundled demo: a session plans three chapters, edits land under each, a subagent and a workflow join, and the panel updates throughout. The <a href="getting-started.html" style="color:var(--accent-ink);text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:4px">full recorded walkthrough</a> covers the workflow view, PyCharm, and the chapter-by-chapter review.</p>
+    <div style="margin-top:22px"><a class="btn primary" href="demo.html">Try the interactive demo →</a></div>
   </div>
   <div class="wrap"><a href="getting-started.html" title="Getting started — the recorded walkthrough"><div class="panel rv scale"><img src="media/demo-live.gif" loading="lazy" alt="Recording of the Overview panel during the bundled demo: the chapter ribbon completing chapter by chapter, the module strip and file ledger growing with each edit, and the fleet agent's phase updating"></div></a></div>
 </section>
@@ -449,7 +522,7 @@
                 <div class="mh">Actions · sidebar</div>
                 <div>▸ Commands <span class="d">(229) ·</span> <span class="r">2 errors</span></div>
                 <div>▾ Edits <span class="d">(185)</span></div>
-                <div>&nbsp;&nbsp;extension.ts <span class="a">→ review</span></div>
+                <div>&nbsp;&nbsp;src/features.py <span class="a">→ review</span></div>
                 <div>▸ To-dos <span class="d">(30)</span></div>
               </div></div>
             </div>
@@ -462,8 +535,8 @@
               <div class="panel"><div class="mock">
                 <div class="mh">Subagents</div>
                 <div>▾ <b>code-reviewer</b> <span class="d">68 actions · 12m47s · 45k tok</span></div>
-                <div>&nbsp;&nbsp;Read /x.ts</div>
-                <div>&nbsp;&nbsp;Grep foo <span class="r">✕ error</span></div>
+                <div>&nbsp;&nbsp;Read src/features.py</div>
+                <div>&nbsp;&nbsp;Grep "def scale(" <span class="r">✕ error</span></div>
                 <div>▸ <b>doc-writer</b> <span class="d">21 actions · 3m02s</span></div>
               </div></div>
             </div>
@@ -754,6 +827,300 @@
     btn.addEventListener('click',function(){ var open=nav.classList.toggle('open'); btn.setAttribute('aria-expanded',open?'true':'false'); });
     var ls=nav.querySelectorAll('.links a');
     for(var i=0;i<ls.length;i++) ls[i].addEventListener('click',function(){ nav.classList.remove('open'); btn.setAttribute('aria-expanded','false'); });
+  })();
+</script>
+<script>
+  // ---- the lead interactive demo -----------------------------------------------------------------
+  // Mirrors the bundled `claude-observatory demo` scenario (packages/core/src/demo.ts): a Python
+  // training pipeline gains scaling + validation + tests + docs. State is DERIVED per step from
+  // (edits landed, gate decisions), so Back/Restart/dot-jumps always re-render consistently.
+  // Autoplays by default; gates self-resolve after a pause; any manual control hands over the wheel.
+  (function(){
+    var reduce=window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    var esc=function(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;');};
+    var PROMPT='Add feature scaling and dataset validation to the training pipeline, then bring in tests and docs.';
+    function L(n,t,c){return {n:n,t:t,c:c||''};}
+    var SEED=[
+      L(1,'<span class="kw">from</span> statistics <span class="kw">import</span> mean'),
+      L(2,''),
+      L(3,''),
+      L(4,'<span class="kw">def</span> <span class="fnm">summarize</span>(values):'),
+      L(5,'    <span class="kw">return</span> {<span class="st">"count"</span>: len(values), <span class="st">"mean"</span>: mean(values)}'),
+    ];
+    var EDITS=[
+      {id:1,file:'src/features.py',module:'src',plus:6,minus:1,agent:null,
+       why:'Adding scale() — z-score standardization so features share a range before training.',
+       lensAt:0,
+       code:[
+        L(1,'<span class="kw">from</span> statistics <span class="kw">import</span> mean, stdev','add'),
+        L(2,''),
+        L(3,''),
+        L(4,'<span class="kw">def</span> <span class="fnm">summarize</span>(values):'),
+        L(5,'    <span class="kw">return</span> {<span class="st">"count"</span>: len(values), <span class="st">"mean"</span>: mean(values)}'),
+        L(6,'','add'),
+        L(7,'','add'),
+        L(8,'<span class="kw">def</span> <span class="fnm">scale</span>(values):','add'),
+        L(9,'    mu, sigma = mean(values), stdev(values)','add'),
+        L(10,'    <span class="kw">return</span> [(v - mu) / sigma <span class="kw">for</span> v <span class="kw">in</span> values]','add'),
+       ]},
+      {id:2,file:'src/train.py',module:'src',plus:3,minus:2,agent:null,
+       why:'Scaling the features in the training entrypoint before they reach the model.',
+       lensAt:0,
+       code:[
+        L(1,'<span class="kw">from</span> features <span class="kw">import</span> summarize, scale','add'),
+        L(2,''),
+        L(3,'features = <span class="fnm">scale</span>([1.0, 2.0, 3.0])','add'),
+        L(4,'<span class="fnm">print</span>(<span class="fnm">summarize</span>(features))','add'),
+       ]},
+      {id:3,file:'src/models/dataset.py',module:'src/models',plus:7,minus:0,agent:null,
+       why:'Adding Dataset.validate() — matching feature/label lengths and a non-empty check, returned as {ok, error}.',
+       lensAt:4,
+       code:[
+        L(1,'<span class="kw">class</span> <span class="fnm">Dataset</span>:'),
+        L(2,'    <span class="kw">def</span> <span class="fnm">__init__</span>(self, features, labels):'),
+        L(3,'        self.features = features'),
+        L(4,'        self.labels = labels'),
+        L(5,'','add'),
+        L(6,'    <span class="kw">def</span> <span class="fnm">validate</span>(self):','add'),
+        L(7,'        <span class="kw">if</span> len(self.features) != len(self.labels):','add'),
+        L(8,'            <span class="kw">return</span> {<span class="st">"ok"</span>: <span class="kw">False</span>, <span class="st">"error"</span>: <span class="st">"length mismatch"</span>}','add'),
+        L(9,'        <span class="kw">if not</span> self.features:','add'),
+        L(10,'            <span class="kw">return</span> {<span class="st">"ok"</span>: <span class="kw">False</span>, <span class="st">"error"</span>: <span class="st">"empty dataset"</span>}','add'),
+        L(11,'        <span class="kw">return</span> {<span class="st">"ok"</span>: <span class="kw">True</span>}','add'),
+       ]},
+      {id:4,file:'tests/test_pipeline.py',module:'tests',plus:12,minus:0,agent:'subagent',
+       why:'Covering scale, summarize, and both validate branches.',
+       lensAt:0,
+       code:[
+        L(1,'<span class="kw">import</span> sys, pathlib','add'),
+        L(2,'','add'),
+        L(3,'sys.path.insert(0, str(pathlib.<span class="fnm">Path</span>(__file__).resolve().parents[1] / <span class="st">"src"</span>))','add'),
+        L(4,'<span class="kw">from</span> features <span class="kw">import</span> scale, summarize','add'),
+        L(5,'<span class="kw">from</span> models.dataset <span class="kw">import</span> Dataset','add'),
+        L(6,'','add'),
+        L(7,'scaled = <span class="fnm">scale</span>([1.0, 2.0, 3.0])','add'),
+        L(8,'<span class="kw">assert</span> abs(sum(scaled)) &lt; 1e-9','add'),
+        L(9,'<span class="kw">assert</span> <span class="fnm">summarize</span>(scaled)[<span class="st">"count"</span>] == 3','add'),
+        L(10,'<span class="kw">assert</span> <span class="fnm">Dataset</span>([[1.0]], [0]).validate()[<span class="st">"ok"</span>] <span class="kw">is True</span>','add'),
+        L(11,'<span class="kw">assert</span> <span class="fnm">Dataset</span>([[1.0]], []).validate()[<span class="st">"ok"</span>] <span class="kw">is False</span>','add'),
+        L(12,'<span class="fnm">print</span>(<span class="st">"pipeline tests: all assertions pass"</span>)','add'),
+       ]},
+      {id:5,file:'docs/USAGE.md',module:'docs',plus:12,minus:0,agent:'workflow',
+       why:'Documenting the public API with runnable examples.',
+       lensAt:0,
+       code:[
+        L(1,'<span class="fnm"># Pipeline usage</span>','add'),
+        L(2,'','add'),
+        L(3,'<span class="st">```python</span>','add'),
+        L(4,'<span class="kw">from</span> features <span class="kw">import</span> scale, summarize','add'),
+        L(5,'<span class="fnm">summarize</span>(<span class="fnm">scale</span>([1.0, 2.0, 3.0]))  <span class="cm"># {"count": 3, "mean": 0.0}</span>','add'),
+        L(6,'<span class="st">```</span>','add'),
+        L(7,'','add'),
+        L(8,'Validate a dataset before training:','add'),
+        L(9,'','add'),
+        L(10,'<span class="st">```python</span>','add'),
+        L(11,'<span class="fnm">Dataset</span>(features, labels).validate()  <span class="cm"># {"ok": True} | {"ok": False, "error": ...}</span>','add'),
+        L(12,'<span class="st">```</span>','add'),
+       ]},
+    ];
+    var CHAPTERS=[
+      {title:'Add feature scaling to the pipeline',edits:[1,2]},
+      {title:'Validate the training dataset',edits:[3]},
+      {title:'Tests and docs',edits:[4,5]},
+    ];
+    var STEPS=[
+      {ed:'seed',landed:0,typing:true,
+       narr:'You ask Claude for a change. Observatory sits beside the session — hooks, not a wrapper — and records what happens, at zero extra tokens.'},
+      {ed:'seed',landed:0,plan:true,
+       narr:'Claude plans three to-dos. The Overview adopts them as chapters: the session’s own structure, not a file list.'},
+      {ed:1,landed:1,
+       narr:'The first edit lands and becomes a reviewable entry: an inline lens over the changed lines, a timeline entry carrying Claude’s reasoning, and a ledger row ranked by churn.'},
+      {ed:2,landed:2,
+       narr:'A second edit wires scaling into the training entrypoint. Chapter one is complete — both of its edits stay pending until you review them.'},
+      {ed:3,landed:3,
+       narr:'Chapter two adds dataset validation. The module strip and the churn ledger keep the growing change set legible; commands Claude runs land in the Actions timeline the same way.'},
+      {ed:4,landed:4,
+       narr:'Claude hands the test-writing to a subagent. Its edit is attributed to it in the timeline — and reviewed exactly like any other.'},
+      {ed:5,landed:5,
+       narr:'A workflow run writes the docs. Five edits are now pending across three chapters — time to review.'},
+      {ed:1,landed:5,gate:'keep',hint:'Click ✓ Keep on the lens in the editor.',
+       narr:'Review the first edit: the scaling function is correct — <span class="hl">keep it</span>. Keeping one edit resolves it and nothing else.'},
+      {ed:2,landed:5,gate:'undo',hint:'Click ↩ Undo on the lens in the editor.',
+       narr:'The entrypoint wiring isn’t wanted — <span class="hl">undo just this edit</span>. The revert is surgical: every other pending change stays exactly as Claude left it.'},
+      {ed:2,landed:5,gate:'acceptall',hint:'Click ✓ Accept all pending in the Overview panel.',
+       narr:'Sweep the rest in one motion: <span class="hl">Accept all</span> resolves everything still pending. Chapter-scoped accepts on the ribbon work the same way.'},
+      {ed:1,landed:5,recap:true,
+       narr:'That is the whole loop: every edit tracked with its reasoning, reviewed one at a time or by the chapter, and resolved without git. The <a href="demo.html" style="color:var(--accent-ink);text-decoration:underline">full demo</a> walks the panels in detail.'},
+    ];
+    var N=STEPS.length;
+    var el=function(id){return document.getElementById(id);};
+    if(!el('sd-narr')) return;
+    var step=0, resolved={}, timer=null, playing=false, typeTimer=null, advanceTok=0, gateWait=0, endWait=0;
+
+    function statusOf(id,s,res){
+      var afterKeep=s>7||(s===7&&res[7]), afterUndo=s>8||(s===8&&res[8]), afterAll=s>9||(s===9&&res[9]);
+      if(id===1) return afterKeep?'kept':'pending';
+      if(id===2) return afterUndo?'undone':'pending';
+      return afterAll?'kept':'pending';
+    }
+    function landedEdits(s){return EDITS.slice(0,STEPS[s].landed);}
+
+    function render(){
+      var st=STEPS[step], res=resolved;
+      el('sd-narr').innerHTML=st.narr;
+      el('sd-hint').textContent=(st.gate&&!res[step])?st.hint:'';
+      el('sd-count').textContent=('0'+(step+1)).slice(-2)+' / '+('0'+N).slice(-2);
+      el('sd-back').disabled=step===0;
+      el('sd-next').disabled=(step===N-1)||(!!st.gate&&!res[step]);
+      var dots=el('sd-dots');
+      if(!dots.childElementCount){
+        STEPS.forEach(function(_,k){
+          var d=document.createElement('button');
+          d.className='dot';d.type='button';d.setAttribute('aria-label','Step '+(k+1));
+          d.addEventListener('click',function(){stopPlay();go(k);});
+          dots.appendChild(d);
+        });
+      }
+      [].slice.call(dots.children).forEach(function(d,j){d.setAttribute('aria-current',j===step?'true':'false');});
+
+      var ed=st.ed, lines, fn, chip=null, lens=null;
+      if(ed==='seed'){fn='src/features.py';lines=SEED;}
+      else{
+        var e=EDITS[ed-1];fn=e.file;
+        var status=statusOf(e.id,step,res);
+        lines=e.code.map(function(l){return {n:l.n,t:l.t,c:l.c==='add'&&status==='undone'?'undone':l.c};});
+        chip=status;
+        lens={e:e,status:status,gated:st.gate==='keep'||st.gate==='undo'};
+      }
+      el('sd-fn').textContent=fn;
+      var chipEl=el('sd-chip');
+      if(chip){chipEl.hidden=false;chipEl.className='edchip '+chip;chipEl.textContent=chip==='pending'?'● pending':chip==='kept'?'✓ kept':'⤺ undone';}
+      else {chipEl.hidden=true;chipEl.textContent='';}
+      if(typeTimer){clearInterval(typeTimer);typeTimer=null;}
+      if(st.typing&&!reduce){
+        el('sd-prompt').textContent='';el('sd-caret').hidden=false;
+        var ti=0;
+        typeTimer=setInterval(function(){
+          ti+=2;el('sd-prompt').textContent=PROMPT.slice(0,ti);
+          if(ti>=PROMPT.length){clearInterval(typeTimer);typeTimer=null;el('sd-caret').hidden=true;}
+        },24);
+      }else{el('sd-prompt').textContent=PROMPT;el('sd-caret').hidden=true;}
+      var html='';
+      lines.forEach(function(l,ix){
+        if(lens&&ix===lens.e.lensAt){
+          html+='<div class="lens"><span class="sp">✨ #'+lens.e.id+' · +'+lens.e.plus+' −'+lens.e.minus+'</span>';
+          if(lens.gated&&!res[step]){
+            // Only the scripted action is a live button — the rest stay inert display text.
+            if(STEPS[step].gate==='keep') html+='<button id="sd-lens-keep" class="hint">✓ Keep</button><span class="a">↩ Undo</span>';
+            else html+='<span class="a">✓ Keep</span><button id="sd-lens-undo" class="hint">↩ Undo</button>';
+            html+='<span class="a">💬 Chat</span><span class="a">⧉ View diff</span>';
+          }else{
+            html+='<span class="a">✓ Keep</span><span class="a">↩ Undo</span><span class="a">💬 Chat</span><span class="a">⧉ View diff</span>';
+          }
+          html+='</div>';
+        }
+        var star=l.c==='add'?'<span class="star">✨</span>':l.c==='undone'?'<span class="star" style="color:var(--undone)">⤺</span>':'';
+        html+='<div class="ln '+l.c+'"><span class="n">'+l.n+'</span><span class="t">'+(star?star+l.t:l.t)+'</span></div>';
+      });
+      el('sd-code').innerHTML=html;
+      var kb=el('sd-lens-keep'),ub=el('sd-lens-undo');
+      if(kb)kb.addEventListener('click',function(){resolveGate(false);});
+      if(ub)ub.addEventListener('click',function(){resolveGate(false);});
+
+      var landed=landedEdits(step), rows='';
+      for(var k=landed.length-1;k>=0;k--){
+        var o=landed[k];
+        rows+='<div class="or"><div class="top"><span class="of">'+esc(o.file.split('/').pop())+'</span>'+
+          '<span class="od"><span class="p">+'+o.plus+'</span> <span class="m">−'+o.minus+'</span></span>'+
+          (o.agent?'<span class="badge">'+o.agent+'</span>':'')+'</div>'+
+          '<div class="ow">'+esc(o.why)+'</div></div>';
+      }
+      if(st.plan||landed.length) rows+='<div class="or"><div class="top"><span class="of">Pipeline: scaling, validation, tests</span><span class="badge">session</span></div><div class="ow">'+esc(PROMPT)+'</div></div>';
+      el('sd-obs').innerHTML=rows||'<div class="empty">The timeline fills in as the session runs.</div>';
+      el('sd-obsn').textContent=landed.length?landed.length+' edit'+(landed.length===1?'':'s'):'';
+
+      var showPlan=st.plan||landed.length>0||step>1, rib='';
+      if(showPlan){
+        CHAPTERS.forEach(function(ch){
+          var chEdits=landed.filter(function(e){return ch.edits.indexOf(e.id)>=0;});
+          var pend=chEdits.filter(function(e){return statusOf(e.id,step,res)==='pending';}).length;
+          var dot,cls;
+          if(!chEdits.length){dot='○';cls='todo';}
+          else if(pend>0){dot='◐';cls='part';}
+          else{dot='●';cls='done';}
+          var plus=chEdits.reduce(function(a,e){return a+e.plus;},0),minus=chEdits.reduce(function(a,e){return a+e.minus;},0);
+          rib+='<div class="rr"><span class="rd '+cls+'">'+dot+'</span><span class="rt">'+esc(ch.title)+'</span>'+
+            '<span class="rc">'+(chEdits.length?('+'+plus+' −'+minus+(pend?' · '+pend+' pending':' · reviewed')):'planned')+'</span></div>';
+        });
+      }
+      el('sd-ribbon').innerHTML=rib||'<div class="empty">Claude’s to-dos become the chapter ribbon.</div>';
+      var strip=el('sd-strip');
+      var mods={};landed.forEach(function(e){mods[e.module]=(mods[e.module]||0)+e.plus+e.minus;});
+      var modKeys=Object.keys(mods);
+      if(modKeys.length){
+        strip.hidden=false;
+        var tot=modKeys.reduce(function(a,m){return a+mods[m];},0);
+        strip.innerHTML=modKeys.map(function(m){
+          var pct=Math.round(100*mods[m]/tot);
+          return '<span class="seg" style="width:'+pct+'%" title="'+m+' — '+pct+'% of churn">'+m+'</span>';
+        }).join('');
+      }else{strip.hidden=true;strip.innerHTML='';}
+      var maxChurn=landed.reduce(function(a,e){return Math.max(a,e.plus+e.minus);},1);
+      el('sd-ledger').innerHTML=landed.slice().sort(function(a,b){return (b.plus+b.minus)-(a.plus+a.minus);}).map(function(e){
+        var s2=statusOf(e.id,step,res);
+        return '<div class="lr"><span class="sd '+s2+'"></span><span class="lf">'+esc(e.file)+'</span>'+
+          '<span class="lb"><i style="width:'+Math.round(100*(e.plus+e.minus)/maxChurn)+'%"></i></span>'+
+          '<span class="lc"><span class="p">+'+e.plus+'</span> <span class="m">−'+e.minus+'</span></span></div>';
+      }).join('');
+      var acceptBtn=el('sd-acceptall');
+      if(st.gate==='acceptall'&&!res[step]){acceptBtn.hidden=false;acceptBtn.classList.add('hint');}
+      else {acceptBtn.hidden=true;acceptBtn.classList.remove('hint');}
+
+      var p=0,kk=0,u=0;
+      landed.forEach(function(e){var s3=statusOf(e.id,step,res);if(s3==='pending')p++;else if(s3==='kept')kk++;else u++;});
+      el('sd-p').textContent=p;el('sd-k').textContent=kk;el('sd-u').textContent=u;
+      var tot2=landed.length,rev=kk+u;
+      el('sd-fill').style.width=tot2?Math.round(100*rev/tot2)+'%':'0%';
+      el('sd-note').textContent=rev+' of '+tot2+' reviewed'+(tot2&&rev===tot2?' — session clean':'');
+    }
+
+    function resolveGate(auto){
+      if(!auto) stopPlay();
+      resolved[step]=true;
+      render();
+      var tok=++advanceTok, s=step;
+      setTimeout(function(){ if(tok===advanceTok&&step===s&&resolved[s]&&s<N-1) go(s+1); }, reduce?250:1000);
+    }
+    function go(k){
+      advanceTok++;
+      var target=Math.max(0,Math.min(N-1,k));
+      if(target!==step){ delete resolved[target]; step=target; }
+      render();
+    }
+    function autoResolve(){
+      var g=STEPS[step].gate;
+      var btn=g==='keep'?el('sd-lens-keep'):g==='undo'?el('sd-lens-undo'):el('sd-acceptall');
+      if(btn) resolveGate(true);
+    }
+    el('sd-acceptall').addEventListener('click',function(){if(STEPS[step].gate==='acceptall')resolveGate(false);});
+    el('sd-back').addEventListener('click',function(){stopPlay();go(step-1);});
+    el('sd-next').addEventListener('click',function(){stopPlay();go(step+1);});
+    el('sd-restart').addEventListener('click',function(){stopPlay();resolved={};step=0;render();});
+    function stopPlay(){playing=false;gateWait=0;endWait=0;if(timer){clearInterval(timer);timer=null;}el('sd-play').classList.remove('playing');el('sd-play').textContent='▸';}
+    function startPlay(){
+      if(playing)return;
+      playing=true;el('sd-play').classList.add('playing');el('sd-play').textContent='❚❚';
+      timer=setInterval(function(){
+        var st=STEPS[step];
+        if(st.gate&&!resolved[step]){ gateWait++; if(gateWait>=2){gateWait=0;autoResolve();} return; }
+        gateWait=0;
+        if(step>=N-1){ endWait++; if(endWait>=2){endWait=0;resolved={};step=0;render();} return; }
+        go(step+1);
+      },3400);
+    }
+    el('sd-play').addEventListener('click',function(){ if(playing)stopPlay(); else startPlay(); });
+    render();
+    if(!reduce) startPlay(); else stopPlay();
   })();
 </script>
 </body>

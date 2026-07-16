@@ -96,6 +96,7 @@
     <a class="brand" href="showcase.html"><span class="m">🔬</span> Claude Observatory</a>
     <div class="links">
       <a href="showcase.html">← Overview</a>
+      <a href="demo.html">Demo</a>
       <a href="getting-started.html">Getting started</a>
       <a href="https://github.com/cell-observatory/claude-observatory/blob/main/docs/DEMO.md">Walkthrough</a>
       <a href="https://github.com/cell-observatory/claude-observatory/blob/main/docs/ARCHITECTURE.md">How it works</a>
@@ -139,7 +140,7 @@
         <div class="panel rv" style="margin-top:18px">
           <div style="padding:20px 22px;font-family:var(--mono);font-size:.82rem;line-height:1.85;color:var(--ink-soft)">
             <div style="font-size:.68rem;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-faint);margin-bottom:12px">Workflows · this session</div>
-            <div>▾ refactor-auth-flow <span style="border:1px solid var(--line);border-radius:999px;padding:1px 8px;font-size:.68rem;color:var(--accent-ink)">running</span> <span style="color:var(--ink-faint)">3 agents · 5m 12s · 94k tok</span></div>
+            <div>▾ pipeline-tests-docs <span style="border:1px solid var(--line);border-radius:999px;padding:1px 8px;font-size:.68rem;color:var(--accent-ink)">running</span> <span style="color:var(--ink-faint)">3 agents · 5m 12s · 94k tok</span></div>
             <div style="padding-left:20px">Phase 1 · Explore <span style="color:#4a9d63">●●● done</span></div>
             <div style="padding-left:20px">Phase 2 · Implement <span style="color:var(--ink-faint)">●●○ 2/3</span></div>
             <div style="padding-left:40px;color:var(--ink)">coder <span style="color:var(--ink-faint)">2m 18s · 48k tok · 7 edits</span> <span style="color:var(--accent-ink)">▁▃▇▇▅</span></div>
@@ -200,7 +201,7 @@
         <div style="padding:20px 22px;font-family:var(--mono);font-size:.82rem;line-height:1.85;color:var(--ink-soft)">
           <div style="font-size:.68rem;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-faint);margin-bottom:12px">Claude Edits · Actions</div>
           <div>▾ Edits <span style="color:var(--ink-faint)">(12)</span></div>
-          <div style="padding-left:20px;color:var(--ink)">app/config.ts <span style="color:var(--accent-ink)">→ review</span></div>
+          <div style="padding-left:20px;color:var(--ink)">src/features.py <span style="color:var(--accent-ink)">→ review</span></div>
           <div>▸ Commands <span style="color:var(--ink-faint)">(8)</span> <span style="color:#d0563f">✕ 1 error</span></div>
           <div>▸ Web <span style="color:var(--ink-faint)">(3)</span></div>
           <div>▸ Subagents <span style="color:var(--ink-faint)">(2)</span></div>
@@ -218,8 +219,8 @@
           <div style="font-size:.68rem;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-faint);margin-bottom:12px">Actions · subagents</div>
           <div>▾ Subagents <span style="color:var(--ink-faint)">(3 · 12m 47s · 182k tok)</span></div>
           <div style="padding-left:20px">▾ code-reviewer <span style="color:var(--ink-faint)">5m 15s · 47k tok · 33 actions</span></div>
-          <div style="padding-left:40px;color:var(--ink)">Read src/app.ts</div>
-          <div style="padding-left:40px;color:var(--ink)">Grep "useEffect"</div>
+          <div style="padding-left:40px;color:var(--ink)">Read src/features.py</div>
+          <div style="padding-left:40px;color:var(--ink)">Grep "def scale"</div>
           <div style="padding-left:20px">▸ code-adversary <span style="color:var(--ink-faint)">7m 57s · 107k tok · 39 actions</span></div>
           <div style="padding-left:20px">▸ code-reviewer <span style="color:var(--ink-faint)">3m 25s · 38k tok · 19 actions</span></div>
         </div>
@@ -272,14 +273,14 @@
 
   <section class="feature">
     <div class="wrap grid">
-      <div class="copy"><div class="num">13</div><span class="eyebrow">Stats</span><h2>Progress, tokens, and usage</h2><p>A top bar names the active Claude Code session and carries a Search-edits box that filters the edit list. Below it, a live review scoreboard tracks pending (clicking the count jumps to the oldest edit awaiting review), accepted, and reverted, with a progress bar, a token step-line plot over Today / 7 days / 30 days, and context plus 5h / week plan-usage bars.</p></div>
+      <div class="copy"><div class="num">13</div><span class="eyebrow">Stats</span><h2>Progress, tokens, and usage</h2><p>A top bar names the active Claude Code session; searching edits lives on the review nav bar. Below it, a live review scoreboard tracks pending (clicking the count jumps to the oldest edit awaiting review), accepted, and reverted, with a progress bar, a token step-line plot over Today / 7 days / 30 days, and context plus 5h / week plan-usage bars.</p></div>
       <div class="panel rv"><img src="media/stats.png" loading="lazy" alt="Stats: review scoreboard, token step-line trends, and live usage bars"></div>
     </div>
   </section>
 
   <section class="feature flip">
     <div class="wrap grid">
-      <div class="copy"><div class="num">14</div><span class="eyebrow">Navigation bar</span><h2>Review controls on four surfaces</h2><p>One review bar appears on four surfaces: the status bar, the editor's title bar, a floating bubble over the live edit, and the <b>Overview</b> panel's title bar. Diff n/m steps through the open file's pending edits, File n/m steps across every file that has them, and the counters follow the active editor. The bar is two-tier: the File axis plus Clear, Spotlight, and Search appear whenever anything is pending, while the Diff axis and per-edit Keep / Undo / Accept File / Reject File appear only when the open file has edits. The <code>⌥⌘</code> shortcuts work throughout.</p></div>
+      <div class="copy"><div class="num">14</div><span class="eyebrow">Navigation bar</span><h2>Review controls on four surfaces</h2><p>One review bar appears on four surfaces: the status bar, the editor's title bar, a floating bubble over the live edit, and the <b>Overview</b> panel's title bar. Diff n/m steps through the open file's pending edits, File n/m steps across every file that has them, and the counters follow the active editor. The bar is two-tier: the File axis plus Spotlight and Search appear whenever anything is pending, while the Diff axis and the per-edit Keep / Undo and Accept / Reject File appear only when the open file has edits. The clear button is scoped per surface — file-scoped Clear File on the <b>Overview</b> title bar, session-wide Clear Resolved on the status bar. The <code>⌥⌘</code> shortcuts work throughout.</p></div>
       <div class="panel rv">
         <div style="padding:24px 22px;display:flex;flex-direction:column;gap:14px">
           <div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px;font-family:var(--mono);font-size:.84rem;background:var(--surface-2);border:1px solid var(--line);border-radius:10px;padding:11px 15px;color:var(--ink-soft)">
@@ -291,7 +292,7 @@
             <span style="color:var(--ink-faint)">·</span>
             <span title="Keep · Undo · Accept File · Reject File">✓ ↩ ✓✓ ✕</span>
             <span style="color:var(--ink-faint)">·</span>
-            <span title="Clear resolved · Spotlight · Search">🧹 💡 🔍</span>
+            <span title="Clear File · Spotlight · Search">🧹 💡 🔍</span>
           </div>
           <div style="display:flex;flex-wrap:wrap;gap:8px;font-family:var(--mono);font-size:.68rem;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-faint)">
             <span>Status bar</span><span>·</span><span>Editor title</span><span>·</span><span>Review bubble</span><span>·</span><span>Overview title bar</span>
@@ -317,7 +318,7 @@
 
   <section class="feature">
     <div class="wrap grid">
-      <div class="copy"><div class="num">17</div><span class="eyebrow">Live demo</span><h2>The built-in demo</h2><p><code>claude-observatory demo</code> replays a scripted session through the <b>real pipeline</b> (a genuine transcript, edits captured by the same hook logic, a subagent with its own timeline, and a workflow run) inside an isolated demo session and an <code>observatory-demo/</code> folder. Chapters, fleet rows, and observations fill in live in the Overview, and the review works normally: Accept and Reject act on real records. Nothing leaks — a fully reviewed demo session clears its own store, and <code>demo --clean</code> removes every trace.</p></div>
+      <div class="copy"><div class="num">17</div><span class="eyebrow">Live demo</span><h2>The built-in demo</h2><p><code>claude-observatory demo</code> replays a scripted session through the <b>real pipeline</b> (a genuine transcript, edits captured by the same hook logic, a subagent with its own timeline, and a workflow run) inside an isolated demo session and an <code>observatory-demo/</code> folder. Chapters, fleet rows, and observations fill in live in the Overview, and the review works normally: Accept and Reject act on real records. Nothing leaks — a fully reviewed demo session clears its own store, and <code>demo --clean</code> removes every trace. The same scenario is clickable in the browser on the <a href="demo.html" style="color:var(--accent-ink);text-decoration:underline">interactive demo</a> page.</p></div>
       <div class="panel rv"><figure><img src="media/demo-live.gif" loading="lazy" alt="Recording of the live demo: the actual Overview webview filling in as the scripted session runs — chapters, fleet rows, a subagent, and a workflow"><figcaption style="font-family:var(--mono);font-size:.7rem;color:var(--ink-faint);padding:8px 12px;text-align:center">claude-observatory demo, recorded from the Overview panel; no Claude session required</figcaption></figure></div>
     </div>
   </section>

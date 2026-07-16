@@ -97,12 +97,14 @@ class DemoClock {
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-/** The demo app the scenario edits — a tiny greeter (the same story demo/src and the docs mockups tell). */
+/** The demo app the scenario edits — a tiny ML training pipeline (the same story the docs mockups
+ *  tell). Stdlib-only Python, so the demo files actually run. */
 const SEED_FILES: Record<string, string> = {
-  'src/greeter.js': 'function greet(name) {\n  return `Hello, ${name}!`;\n}\n\nmodule.exports = { greet };\n',
-  'src/index.js': "const { greet } = require('./greeter');\n\nconsole.log(greet('Ada'));\n",
-  'src/models/User.js':
-    'class User {\n  constructor(name, email) {\n    this.name = name;\n    this.email = email;\n  }\n}\n\nmodule.exports = { User };\n',
+  'src/features.py':
+    'from statistics import mean\n\n\ndef summarize(values):\n    return {"count": len(values), "mean": mean(values)}\n',
+  'src/train.py': 'from features import summarize\n\nprint(summarize([1.0, 2.0, 3.0]))\n',
+  'src/models/dataset.py':
+    'class Dataset:\n    def __init__(self, features, labels):\n        self.features = features\n        self.labels = labels\n',
 };
 
 /**
@@ -199,63 +201,63 @@ export async function runDemo(opts: DemoOptions = {}): Promise<DemoResult> {
 
   // ---------- the story: a prompt, a plan, three chapters, a subagent, a workflow, a recap ----------
 
-  await beat('▸ prompt — asking Claude to extend the greeter app');
+  await beat('▸ prompt — asking Claude to extend the training pipeline');
   append({
     type: 'user',
     sessionId: session,
     cwd,
-    gitBranch: 'demo/greeter',
+    gitBranch: 'demo/pipeline',
     timestamp: clock.iso(),
-    message: { role: 'user', content: 'Add farewell support and input validation to the greeter app, then bring in tests and docs.' },
+    message: { role: 'user', content: 'Add feature scaling and dataset validation to the training pipeline, then bring in tests and docs.' },
   });
-  append({ type: 'ai-title', aiTitle: 'Greeter: farewell, validation, tests', timestamp: clock.iso() });
-  assistant([{ type: 'text', text: 'I will plan this as three tasks: farewell support, input validation, then tests and docs via a subagent and a workflow.' }]);
+  append({ type: 'ai-title', aiTitle: 'Pipeline: scaling, validation, tests', timestamp: clock.iso() });
+  assistant([{ type: 'text', text: 'I will plan this as three tasks: feature scaling, dataset validation, then tests and docs via a subagent and a workflow.' }]);
 
   await beat('▸ plan — three to-dos (the Overview chapters)');
   todos([
-    { content: 'Add farewell support to the greeter', status: 'in_progress' },
-    { content: 'Validate user input', status: 'pending' },
+    { content: 'Add feature scaling to the pipeline', status: 'in_progress' },
+    { content: 'Validate the training dataset', status: 'pending' },
     { content: 'Tests and docs', status: 'pending' },
   ]);
 
-  await beat('▸ chapter 1 — farewell support (2 edits)');
+  await beat('▸ chapter 1 — feature scaling (2 edits)');
   edit(
-    'src/greeter.js',
-    'function greet(name) {\n  return `Hello, ${name}!`;\n}\n\nfunction farewell(name) {\n  return `Goodbye, ${name} — see you soon.`;\n}\n\nmodule.exports = { greet, farewell };\n',
-    'Adding a farewell() alongside greet() so the app can close conversations too.'
+    'src/features.py',
+    'from statistics import mean, stdev\n\n\ndef summarize(values):\n    return {"count": len(values), "mean": mean(values)}\n\n\ndef scale(values):\n    mu, sigma = mean(values), stdev(values)\n    return [(v - mu) / sigma for v in values]\n',
+    'Adding scale() — z-score standardization so features share a range before training.'
   );
   await beat('  … wiring it into the entrypoint');
   edit(
-    'src/index.js',
-    "const { greet, farewell } = require('./greeter');\n\nconsole.log(greet('Ada'));\nconsole.log(farewell('Ada'));\n",
-    'Wiring farewell() into the entrypoint next to the existing greet() call.'
-  );
-
-  await beat('▸ chapter 2 — input validation');
-  todos([
-    { content: 'Add farewell support to the greeter', status: 'completed' },
-    { content: 'Validate user input', status: 'in_progress' },
-    { content: 'Tests and docs', status: 'pending' },
-  ]);
-  edit(
-    'src/models/User.js',
-    "class User {\n  constructor(name, email) {\n    this.name = name;\n    this.email = email;\n  }\n\n  validate() {\n    if (!this.name || !this.name.trim()) return { ok: false, error: 'name is required' };\n    if (!/^[^@\\s]+@[^@\\s]+$/.test(this.email)) return { ok: false, error: 'invalid email' };\n    return { ok: true };\n  }\n}\n\nmodule.exports = { User };\n",
-    'Adding User.validate() — a required name and a plausible email, returned as {ok, error}.'
+    'src/train.py',
+    'from features import summarize, scale\n\nfeatures = scale([1.0, 2.0, 3.0])\nprint(summarize(features))\n',
+    'Scaling the features in the training entrypoint before they reach the model.'
   );
   {
     // A shell action for the timeline (transcript-only: Bash capture diffs the whole tree — overkill here).
     const id = tid();
     assistant([
-      { type: 'text', text: 'Quick sanity run of the app before moving on.' },
-      { type: 'tool_use', id, name: 'Bash', input: { command: 'node src/index.js', description: 'Run the greeter app' } },
+      { type: 'text', text: 'Quick sanity run of the pipeline before moving on.' },
+      { type: 'tool_use', id, name: 'Bash', input: { command: 'python src/train.py', description: 'Run the training entrypoint' } },
     ]);
     result(id);
   }
 
+  await beat('▸ chapter 2 — dataset validation');
+  todos([
+    { content: 'Add feature scaling to the pipeline', status: 'completed' },
+    { content: 'Validate the training dataset', status: 'in_progress' },
+    { content: 'Tests and docs', status: 'pending' },
+  ]);
+  edit(
+    'src/models/dataset.py',
+    'class Dataset:\n    def __init__(self, features, labels):\n        self.features = features\n        self.labels = labels\n\n    def validate(self):\n        if len(self.features) != len(self.labels):\n            return {"ok": False, "error": "features/labels length mismatch"}\n        if not self.features:\n            return {"ok": False, "error": "empty dataset"}\n        return {"ok": True}\n',
+    'Adding Dataset.validate() — matching feature/label lengths and a non-empty check, returned as {ok, error}.'
+  );
+
   await beat('▸ chapter 3 — tests, written by a subagent');
   todos([
-    { content: 'Add farewell support to the greeter', status: 'completed' },
-    { content: 'Validate user input', status: 'completed' },
+    { content: 'Add feature scaling to the pipeline', status: 'completed' },
+    { content: 'Validate the training dataset', status: 'completed' },
     { content: 'Tests and docs', status: 'in_progress' },
   ]);
   const subDir = path.join(proj, session, 'subagents');
@@ -263,11 +265,11 @@ export async function runDemo(opts: DemoOptions = {}): Promise<DemoResult> {
   const spawnId = tid();
   assistant([
     { type: 'text', text: 'Handing the test-writing to a subagent while I prepare the docs workflow.' },
-    { type: 'tool_use', id: spawnId, name: 'Task', input: { description: 'Write greeter tests', subagent_type: 'general-purpose', prompt: 'Write tests for greet/farewell/validate.' } },
+    { type: 'tool_use', id: spawnId, name: 'Task', input: { description: 'Write pipeline tests', subagent_type: 'general-purpose', prompt: 'Write tests for scale/summarize/validate.' } },
   ]);
   fs.writeFileSync(
     path.join(subDir, 'agent-demosub1.meta.json'),
-    JSON.stringify({ agentType: 'general-purpose', description: 'Write greeter tests', toolUseId: spawnId, spawnDepth: 1 })
+    JSON.stringify({ agentType: 'general-purpose', description: 'Write pipeline tests', toolUseId: spawnId, spawnDepth: 1 })
   );
   const subFile = path.join(subDir, 'agent-demosub1.jsonl');
   const subLine = (blocks: unknown[]) =>
@@ -298,19 +300,19 @@ export async function runDemo(opts: DemoOptions = {}): Promise<DemoResult> {
     );
   {
     const t = tid();
-    subLine([{ type: 'tool_use', id: t, name: 'TodoWrite', input: { todos: [{ content: 'Write tests for greet/farewell/validate', status: 'in_progress' }] } }]);
+    subLine([{ type: 'tool_use', id: t, name: 'TodoWrite', input: { todos: [{ content: 'Write tests for scale/summarize/validate', status: 'in_progress' }] } }]);
     subResult(t);
   }
   await beat('  … the subagent\'s edit lands, attributed by its action window');
   {
     // The subagent's edit: captured under the parent session (exactly like real Claude Code — hooks
     // carry the parent session_id), attributed to the subagent by its transcript ts-window.
-    const rel = 'test/greeter.test.js';
+    const rel = 'tests/test_pipeline.py';
     const file = path.join(workspace, rel);
     const content =
-      "const assert = require('node:assert');\nconst { greet, farewell } = require('../src/greeter');\nconst { User } = require('../src/models/User');\n\nassert.match(greet('Ada'), /Hello, Ada/);\nassert.match(farewell('Ada'), /Goodbye, Ada/);\nassert.equal(new User('Ada', 'ada@lovelace.dev').validate().ok, true);\nassert.equal(new User('', 'nope').validate().ok, false);\nconsole.log('greeter tests: all assertions pass');\n";
+      'import sys, pathlib\n\nsys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))\nfrom features import scale, summarize\nfrom models.dataset import Dataset\n\nscaled = scale([1.0, 2.0, 3.0])\nassert abs(sum(scaled)) < 1e-9\nassert summarize(scaled)["count"] == 3\nassert Dataset([[1.0]], [0]).validate()["ok"] is True\nassert Dataset([[1.0]], []).validate()["ok"] is False\nprint("pipeline tests: all assertions pass")\n';
     const writeId = tid();
-    subLine([{ type: 'text', text: 'Covering greet, farewell, and both validate branches.' }, { type: 'tool_use', id: writeId, name: 'Write', input: { file_path: file, content } }]);
+    subLine([{ type: 'text', text: 'Covering scale, summarize, and both validate branches.' }, { type: 'tool_use', id: writeId, name: 'Write', input: { file_path: file, content } }]);
     const hook = (event: string) => ({ session_id: session, cwd, hook_event_name: event, tool_name: 'Write', tool_input: { file_path: file } });
     handleHookPayload(hook('PreToolUse'));
     fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -329,7 +331,7 @@ export async function runDemo(opts: DemoOptions = {}): Promise<DemoResult> {
   fs.mkdirSync(scriptsDir, { recursive: true });
   fs.writeFileSync(
     path.join(scriptsDir, 'demo-docs-wf_demo.js'),
-    "export const meta = {\n  name: 'Demo Docs',\n  description: 'Write usage docs for the greeter app',\n  phases: [{ title: 'Docs' }],\n}\nphase('Docs')\n"
+    "export const meta = {\n  name: 'Demo Docs',\n  description: 'Write usage docs for the training pipeline',\n  phases: [{ title: 'Docs' }],\n}\nphase('Docs')\n"
   );
   fs.writeFileSync(path.join(wfDir, 'agent-demowf1.meta.json'), JSON.stringify({ agentType: 'workflow-subagent', spawnDepth: 1 }));
   fs.writeFileSync(path.join(wfDir, 'journal.jsonl'), JSON.stringify({ type: 'started', key: 'Docs', agentId: 'demowf1' }) + '\n');
@@ -356,7 +358,7 @@ export async function runDemo(opts: DemoOptions = {}): Promise<DemoResult> {
     );
   {
     const t = tid();
-    wfLine([{ type: 'tool_use', id: t, name: 'Read', input: { file_path: path.join(workspace, 'src/greeter.js') } }]);
+    wfLine([{ type: 'tool_use', id: t, name: 'Read', input: { file_path: path.join(workspace, 'src/features.py') } }]);
     wfResult(t);
   }
   await beat('  … the workflow agent writes the documentation');
@@ -364,7 +366,7 @@ export async function runDemo(opts: DemoOptions = {}): Promise<DemoResult> {
     const rel = 'docs/USAGE.md';
     const file = path.join(workspace, rel);
     const content =
-      '# Greeter usage\n\n```js\nconst { greet, farewell } = require("./src/greeter");\n\ngreet("Ada"); // Hello, Ada!\nfarewell("Ada"); // Goodbye, Ada — see you soon.\n```\n\nValidate users before greeting them:\n\n```js\nnew User(name, email).validate(); // { ok } | { ok: false, error }\n```\n';
+      '# Pipeline usage\n\n```python\nfrom features import scale, summarize\nsummarize(scale([1.0, 2.0, 3.0]))  # {"count": 3, "mean": 0.0}\n```\n\nValidate a dataset before training:\n\n```python\nDataset(features, labels).validate()  # {"ok": True} | {"ok": False, "error": ...}\n```\n';
     const writeId = tid();
     wfLine([{ type: 'text', text: 'Documenting the public API with runnable examples.' }, { type: 'tool_use', id: writeId, name: 'Write', input: { file_path: file, content } }]);
     const hook = (event: string) => ({ session_id: session, cwd, hook_event_name: event, tool_name: 'Write', tool_input: { file_path: file } });
@@ -384,7 +386,7 @@ export async function runDemo(opts: DemoOptions = {}): Promise<DemoResult> {
     path.join(stateDir, 'wf_demo.json'),
     JSON.stringify({
       workflowName: 'Demo Docs',
-      summary: 'Write usage docs for the greeter app',
+      summary: 'Write usage docs for the training pipeline',
       phases: [{ title: 'Docs', detail: 'usage docs' }],
       workflowProgress: [
         { type: 'workflow_phase', index: 0, title: 'Docs' },
@@ -401,15 +403,15 @@ export async function runDemo(opts: DemoOptions = {}): Promise<DemoResult> {
 
   await beat('▸ recap — plan complete, next steps surfaced');
   todos([
-    { content: 'Add farewell support to the greeter', status: 'completed' },
-    { content: 'Validate user input', status: 'completed' },
+    { content: 'Add feature scaling to the pipeline', status: 'completed' },
+    { content: 'Validate the training dataset', status: 'completed' },
     { content: 'Tests and docs', status: 'completed' },
   ]);
   assistant([
     {
       type: 'text',
       text:
-        'Done. The greeter now supports farewells, User input is validated, a subagent wrote the tests, and a workflow produced the usage docs.\n\nNext steps:\n- Review the pending edits in the Overview (try Accept on a chapter)\n- Run `node observatory-demo/test/greeter.test.js`\n- Remove the demo with `claude-observatory demo --clean`',
+        'Done. The pipeline now scales its features, datasets are validated before training, a subagent wrote the tests, and a workflow produced the usage docs.\n\nNext steps:\n- Review the pending edits in the Overview (try Accept on a chapter)\n- Run `python observatory-demo/tests/test_pipeline.py`\n- Remove the demo with `claude-observatory demo --clean`',
     },
   ]);
 

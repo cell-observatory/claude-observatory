@@ -5,6 +5,59 @@ All notable changes to Claude Observatory are recorded here, following
 Per-tag release artifacts and auto-generated notes are on the
 [Releases page](https://github.com/cell-observatory/claude-observatory/releases).
 
+## [0.8.1] — 2026-07-16
+
+PyCharm parity fixes and an interactive web demo. No store or `--json` shape changes.
+
+### Added
+
+- **Interactive web demos**: the [showcase](https://cell-observatory.github.io/claude-observatory/)
+  now leads with a compact, autoplaying in-browser replay of the bundled demo scenario (gates
+  self-resolve while it autoplays; any click hands over control), and a detailed
+  [demo page](https://cell-observatory.github.io/claude-observatory/demo.html) lays the same session
+  out the way the panels sit in the editor — the file on top, the Observations / Overview
+  (Fleet nav + chapter ribbon + module strip + churn ledger) / Stats dashboards docked below, with the
+  visitor keeping one edit, reverting another, and accepting the rest. Pure client-side; nothing calls
+  a model. The stale local `demo/` scratch folder is gone (the CLI simulator's `observatory-demo/`
+  folder is unchanged).
+
+### Changed
+
+- **The demo scenario is now a Python training pipeline** everywhere it appears — the bundled
+  `claude-observatory demo` simulator, both web demos, the site mockups, the recorded GIFs and
+  screenshots, and the README / walkthrough examples: `src/features.py` gains z-score scaling,
+  `src/train.py` wires it in, `src/models/dataset.py` gains `validate()`, a subagent writes
+  `tests/test_pipeline.py`, and a workflow writes `docs/USAGE.md`.
+
+### Fixed
+
+- **Live workflow runs show real agent labels again** (CLI + both editors). Newer Claude Code runtimes
+  journal only a content-hash key per agent — no label or phase — so a running fan-out degraded to
+  `workflow-subagent <id>` rows until completion. Core now derives each live agent's label from its own
+  prompt (the first line not shared with its siblings — fan-out prompts share a preamble and diverge at
+  the task line), marked with the `~` heuristic convention; the runner's real labels still replace them
+  when the run's state file lands.
+
+### Fixed (JetBrains)
+
+- **Blank Overview detail pane**: `JBList` wraps its cell renderer, so reading `cellRenderer` back and
+  casting it threw a `ClassCastException` mid-construction and left the master–detail right side
+  permanently empty. The renderer is now held directly, and a detail-render failure now paints a visible
+  error label instead of a blank pane.
+- **Invisible sidebar tabs**: the Edits / Diffs / File History / Actions tabs were icon-only (empty
+  display name), which the new UI renders as blank tabs — they now carry their names.
+
+### Changed (JetBrains, VS Code parity)
+
+- **Stats navbar drops the Search-edits box** — VS Code's Stats bar names the session only; searching
+  edits lives on the review nav bar (Overview toolbar + status bar).
+- **Review nav bar reordered to the VS Code order** — File axis before Diff axis, then Keep / Undo,
+  Accept / Reject File, a clear button, Spotlight, Search. The clear button is scoped per host, as in
+  VS Code: the Overview title bar carries the new file-scoped **Clear File**, while the status bar keeps
+  the session-wide Clear Resolved. The Overview toolbar now leads with the session selector and
+  Active-only toggle, with bulk Accept / Revert / Clear Resolved and Refresh after the nav bar and the
+  fleet filters last.
+
 ## [0.8.0] — 2026-07-15
 
 Real-time multi-agent observability. Observatory now shows *everything Claude is doing across parallel
