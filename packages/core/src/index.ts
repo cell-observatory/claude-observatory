@@ -26,5 +26,6 @@ export { clearFsCache } from './fscache';
 export * from './metrics';
 export * from './changemap';
 export * from './taskLog';
+export * from './tasks';
 export { runCapture, handleHookPayload } from './capture';
 export * from './demo';

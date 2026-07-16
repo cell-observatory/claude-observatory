@@ -51,13 +51,13 @@ class LensRenderer(
     private val segments: List<Seg> = buildList {
         // "✨ #N" opens the inline diff (mirrors the gutter star); then the spaced-out quick actions.
         // Reasoning is NOT shown here — it lives in the diff's title. Icons/spacing match VS Code.
-        add(Seg("✨ #${rec.id}$posLabel  view changes") { Diffs.show(project, session, rec) })
+        add(Seg("✦ #${rec.id}$posLabel  view changes") { Diffs.show(project, session, rec) })
         add(Seg("      ", null))
         add(Seg("✓ Keep") { ReviewOps.keep(project, session, rec.id) })
         add(Seg("      ", null))
         add(Seg("↩ Undo") { ReviewOps.undoOrRedo(project, session, rec, redo = false) })
         add(Seg("      ", null))
-        add(Seg("💬 Chat") { ReviewOps.chatAbout(project, session, rec.id) })
+        add(Seg("Chat") { ReviewOps.chatAbout(project, session, rec.id) })
         add(Seg("      ", null))
         add(Seg("⧉ View diff") { Diffs.show(project, session, rec) })
     }

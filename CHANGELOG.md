@@ -5,6 +5,75 @@ All notable changes to Claude Observatory are recorded here, following
 Per-tag release artifacts and auto-generated notes are on the
 [Releases page](https://github.com/cell-observatory/claude-observatory/releases).
 
+## [0.8.3] — 2026-07-16
+
+### Added
+
+- **The Overview tracks Claude's task list — fully linked to chapters and edits** (CLI + both
+  editors). A third left-nav tab — Fleet · Workflows · **Tasks** — shows the session's numbered tasks
+  (Claude Code's newer TaskCreate/TaskUpdate system). Task events are mined from the transcript and
+  merged into the same snapshot stream as the TodoWrite to-dos (todos win duplicate titles), so a
+  task-planned session gets **real chapters with edit attribution and per-task Accept / Reject /
+  Clear** — work that used to pile into the synthesized session chapter now lands under its task. Tab
+  rows join their chapters (`chapterId`) to carry live `+added −removed · edits · pending` counts,
+  statuses show with a done badge / spinner label / strikethrough, and the transcript history keeps
+  archived tasks visible after the runtime prunes their files. `multitask --json` gains the `tasks`
+  array (additive), TaskCreate/TaskUpdate classify under To-dos in the Actions timeline, and the
+  bundled demo seeds three linked tasks (removed without residue by `demo --clean`). The tab lists
+  newest first, completed tasks fold behind a "N done · show all" row (the fleet's dismiss pattern),
+  and the Active-only toggle hides them outright. The chapter-row chip buttons also switched to the
+  same codicons the Overview toolbar uses.
+
+### Changed
+
+- **Live conflicts moved to the Actions panel** (both editors): the cross-agent contested-files list
+  now leads the session's audit surface — expanded by default, orange, click a file to open it — and
+  the Overview's fleet nav dropped its conflicts strip. Fleet rows keep their per-agent ⛒ collision
+  badges.
+- **Revert All warns like it means it** (both editors): the confirmation is now a warning-grade
+  dialog stating the full blast radius — "Revert N edit(s) across M file(s)… this rewrites the files
+  on disk" — with an explicit count-bearing button, replacing the softer question-style prompt.
+- **Nav-bar overhaul** (both editors — the review nav bar on every surface, the Overview toolbar,
+  and every panel toolbar/context menu):
+  - **Color-coded by action**: keep/accept green · undo/reject red · nav chevrons blue · clear
+    orange · search/spotlight/chat purple (the shared chart palette), applied consistently wherever
+    an action icon appears — toolbars, chapter chips, context menus, the editor banner, the floating
+    lens.
+  - **Labeled status bar**: every action button in the bottom status bar carries its short label
+    beside its tinted icon; the chevrons stay arrow-only, framing the live File n/m / Diff n/m
+    counters.
+  - **One icon per action, no glyph reuse**: the session-wide bulk pair got their own glyphs —
+    Accept All is now a checklist (VS Code `checklist`, JetBrains commit-check) and Revert All a
+    history-rewind (`timeline-view-icon` / VCS history) — so they no longer share icons with the
+    file-scoped Accept File (double-check) / Reject File (✕) or the per-edit Keep (✓) / Undo (↩).
+    Chapter chips use the bulk glyphs (they ARE the bulk actions scoped to a chapter).
+  - **Chat has a real icon**: `comment-discussion` in VS Code (chips, subagent rows, the CodeLens)
+    and a speech balloon in JetBrains — replacing the 💬 emoji and JetBrains' lightbulb collision
+    with Spotlight. Action icons no longer use emoji anywhere (the 🔬 brand mark stays).
+  - **Clear File removed** everywhere: the session-wide Clear Resolved covers it (it was the only
+    duplicate-icon action left, and redundant — kept/undone rows clear regardless of file).
+  - **The Overview toolbar arranges into five spaced groups** (both editors): Search · session ·
+    Active only | Diff axis · Keep · Undo | File axis · Accept/Reject File | Accept All · Revert All ·
+    Clear Resolved | Spotlight · Refresh. The JetBrains status bar adopts VS Code's Diff-before-File
+    order, and its toolbar-only fleet filters (Clear Completed · Show Hidden · Clear Done Chapters)
+    are gone — Active only already hides completed rows, and chapter clearing lives in the chapter
+    context menu.
+  - **The JetBrains editor banner spells out its buttons**: the bare ↑ ↓ ◀ ▶ ✓ ↩ glyphs became
+    labeled, tinted buttons — Search · Prev/Next Edit · Prev/Next File · Accept File · Reject File ·
+    Clear · Spotlight — the same icons the nav bar wears.
+  - **The Panels reference page shows panels only**: the status-bar / tab-bar / bubble glyph legends
+    came off `panels.html` — the workspace map and the per-panel gallery remain, and the gallery
+    gains dedicated **Fleet / Workflows / Tasks** figures plus the five-group toolbar in the
+    Overview diagram.
+  - **All site mockups and GIFs regenerated emoji-free**: the demo/media mockups draw the real
+    codicon shapes (mini SVGs) with the product's labels, tints, and the current toolbar — no more
+    emoji stand-ins (the 🔬 brand mark stays). The ledger's pending marker likewise switched from
+    the ⏳ emoji to the monochrome ⧗ glyph in both editors.
+- **Per-platform CI badges**: the CI matrix split into per-OS workflows (Linux · macOS · Windows)
+  plus dedicated VS Code (.vsix build) and JetBrains (Gradle suite + plugin zip) workflows, so the
+  README now carries live status badges for each platform and editor alongside CodeQL, Pages,
+  Release, Dependabot, the latest release, and the license.
+
 ## [0.8.2] — 2026-07-16
 
 Presentation fixes across the JetBrains Overview and the web demos.

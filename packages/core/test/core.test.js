@@ -2523,6 +2523,27 @@ test('workflows: a RUNNING run whose journal keys are per-agent HASHES shows NO 
   }
 });
 
+test('tasks: readSessionTasks reads the session task dir (numeric order, malformed skipped, unsafe id refused) + summarizeTasks counts (0.8.3)', () => {
+  const home = freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'task-sess-1';
+  const dir = path.join(home, '.claude', 'tasks', S);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, '2.json'), JSON.stringify({ id: '2', subject: 'Ship it', status: 'in_progress', activeForm: 'Shipping', blocks: [], blockedBy: ['1'] }));
+  fs.writeFileSync(path.join(dir, '10.json'), JSON.stringify({ id: '10', subject: 'Follow-up', status: 'pending' }));
+  fs.writeFileSync(path.join(dir, '1.json'), JSON.stringify({ id: '1', subject: 'Build it', status: 'completed' }));
+  fs.writeFileSync(path.join(dir, '3.json'), '{not json'); // one bad write must not blank the tab
+  fs.writeFileSync(path.join(dir, 'notes.txt'), 'ignored'); // only <digits>.json are tasks
+  const ts = core.readSessionTasks(S);
+  assert.deepEqual(ts.map((t) => t.id), ['1', '2', '10'], 'numeric id order (not lexicographic), malformed + non-task files skipped');
+  assert.equal(ts[1].activeForm, 'Shipping');
+  assert.deepEqual(ts[1].blockedBy, ['1']);
+  assert.equal(ts[2].activeForm, null, 'absent activeForm → null');
+  assert.deepEqual(core.summarizeTasks(ts), { total: 3, completed: 1, inProgress: 1, pending: 1 });
+  assert.deepEqual(core.readSessionTasks('../escape'), [], 'a path-shaped session id is refused, not joined');
+  assert.deepEqual(core.readSessionTasks('no-such-session'), [], 'missing dir → [] (session never used tasks)');
+});
+
 test('workflows: LIVE runs derive per-agent labels from the first distinguishing prompt line (hash-key journal, no state file) — marked labelDerived (0.8.1)', () => {
   // Newer runtimes journal only {type, key: "v2:<hash>", agentId} — no label/phaseTitle — so a running
   // fan-out used to render as "workflow-subagent <id>" rows. The agents' prompts share their preamble
@@ -3948,6 +3969,59 @@ test('undo: keepTask accepts the whole DISPLAYED chapter — a partial accept ne
   // Accepting the chapter leaves NOTHING pending under it (the bug-feel this rule fixes).
   const m = core.buildChangeMap(f.cwd, f.S, { root: f.cwd });
   assert.equal(m.chapters.find((c) => c.id === f.taskId).pending, 0, 'the chapter row reads fully accepted');
+});
+
+test('changemap: TaskCreate/TaskUpdate tasks become CHAPTERS — span attribution, WYSIWYG resolution, tab join, TodoWrite dedupe (0.8.3)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'tasklink';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  core.ensureStore(S);
+  const seedAt = (file, before, after, ts) => {
+    const b = core.writeBlob(S, Buffer.from(before));
+    const a = core.writeBlob(S, Buffer.from(after));
+    return core.appendLog(S, { ts, tool: 'Edit', file, beforeBlob: b, afterBlob: a, status: 'pending' }).id;
+  };
+  const F = (n) => path.join(cwd, `t${n}.py`);
+  seedAt(F(1), 'a\n', 'a\nb\n', 500); // before the first flip → back-extends onto task #1
+  seedAt(F(2), 'a\n', 'a\nc\n', 1500); // inside #1's span
+  seedAt(F(3), 'a\n', 'a\nd\n', 3500); // inside #2's span
+  const tu = (ts, blocks) => JSON.stringify({ timestamp: new Date(ts).toISOString(), message: { role: 'assistant', content: blocks } });
+  const tr = (ts, tuid, text) => JSON.stringify({ type: 'user', timestamp: new Date(ts).toISOString(), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: tuid, content: text }] } });
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), [
+    tu(900, [{ type: 'tool_use', id: 'c1', name: 'TaskCreate', input: { subject: 'Wire the reader', description: 'core reader', activeForm: 'Wiring the reader' } }]),
+    tr(950, 'c1', 'Task #1 created successfully: Wire the reader'),
+    tu(960, [{ type: 'tool_use', id: 'c2', name: 'TaskCreate', input: { subject: 'Render the tab' } }]),
+    tr(970, 'c2', 'Task #2 created successfully: Render the tab'),
+    tu(1000, [{ type: 'tool_use', id: 'u1', name: 'TaskUpdate', input: { taskId: '1', status: 'in_progress' } }]),
+    tu(3000, [
+      { type: 'tool_use', id: 'u2', name: 'TaskUpdate', input: { taskId: '1', status: 'completed' } },
+      { type: 'tool_use', id: 'u3', name: 'TaskUpdate', input: { taskId: '2', status: 'in_progress' } },
+    ]),
+    tu(4000, [{ type: 'tool_use', id: 'u4', name: 'TaskUpdate', input: { taskId: '2', status: 'completed' } }]),
+    // The demo plans BOTH ways: a TodoWrite naming the same title must NOT mint a twin chapter.
+    tu(4100, [{ type: 'tool_use', id: 'td', name: 'TodoWrite', input: { todos: [{ content: 'Wire the reader', status: 'completed' }] } }]),
+  ].join('\n'));
+  const cm = core.buildChangeMap(cwd, S, { root: cwd });
+  const byTitle = new Map(cm.chapters.map((c) => [c.title, c]));
+  assert.equal(byTitle.size, cm.chapters.length, 'no twin chapters — todos win duplicate titles in the merged plan');
+  const c1 = byTitle.get('Wire the reader');
+  const c2 = byTitle.get('Render the tab');
+  assert.equal(c1.edits, 2, 'task #1 claims the back-extended head edit + its in-span edit');
+  assert.equal(c2.edits, 1, 'task #2 claims its in-span edit');
+  assert.equal(c1.status, 'done');
+  // fromTask: the ribbon leaves task-born chapters to the Tasks tab. 'Wire the reader' is claimed by
+  // the TodoWrite occurrence in the merged plan (todos win), so only the task-only chapter is flagged.
+  assert.equal(c2.fromTask, true, 'a task-only chapter is marked fromTask (ribbons skip it)');
+  assert.equal(c1.fromTask, false, 'a title the todos also carry stays a todo chapter');
+  assert.equal(core.chapterEditIds(cwd, S, c1.id).length, 2, 'WYSIWYG review resolves the same set the chapter displays');
+  // The tab join: rows come from transcript HISTORY (no task dir exists) with the chapter's own id.
+  const rows = core.sessionTaskRows(cwd, S);
+  assert.deepEqual(rows.map((r) => r.id), ['2', '1'], 'history mined from the transcript, NEWEST first');
+  assert.equal(rows[1].chapterId, c1.id, 'taskChapterId joins the tab row to its chapter');
+  assert.equal(rows[1].activeForm, 'Wiring the reader');
 });
 
 test('changemap: chapterEditIds partitions the RAW log exactly as the display attribution (drift guard)', () => {

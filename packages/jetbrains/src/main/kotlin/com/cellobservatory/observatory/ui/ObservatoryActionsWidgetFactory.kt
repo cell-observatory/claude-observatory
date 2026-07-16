@@ -37,7 +37,9 @@ private class ObservatoryActionsWidget(private val project: Project) : CustomSta
 
     private val toolbar = ActionManager.getInstance()
         // sessionClear: the status bar carries the session-wide Clear Resolved (VS Code status-bar parity).
-        .createActionToolbar("ClaudeObservatoryNavBar", navBar.buildGroup(sessionClear = true), true)
+        // showText: every action button carries its short label (user rule 2026-07-16 — the icon-only
+        // status bar read as cryptic; VS Code's status-bar buttons carry the same labels).
+        .createActionToolbar("ClaudeObservatoryNavBar", navBar.buildGroup(sessionClear = true, showText = true), true)
         .apply {
             isReservePlaceAutoPopupIcon = false
             targetComponent = component

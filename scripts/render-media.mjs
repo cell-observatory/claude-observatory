@@ -139,18 +139,18 @@ const microscope = '🔬';
 const editsTree = `
   <div class="viewhead">EDITS <span style="float:right;color:var(--faint)">session 0c396c6b</span></div>
   <div class="trow"><span class="tw">▾</span><span class="ic">📁</span>src</div>
-  <div class="trow" style="padding-left:26px"><span class="tw">▾</span><span class="ic">📄</span>features.py<span class="meta">1 edit · 1 pending</span></div>
+  <div class="trow" style="padding-left:26px"><span class="tw">▾</span><span class="ic">🗎</span>features.py<span class="meta">1 edit · 1 pending</span></div>
   <div class="trow mono" style="padding-left:60px"><span class="dot" style="background:var(--pending)"></span>&nbsp;#1&nbsp; +6 −1<span class="meta"><span class="pill p-pending">pending</span></span></div>
-  <div class="trow" style="padding-left:26px"><span class="tw">▾</span><span class="ic">📄</span>train.py<span class="meta">1 edit · 1 pending</span></div>
+  <div class="trow" style="padding-left:26px"><span class="tw">▾</span><span class="ic">🗎</span>train.py<span class="meta">1 edit · 1 pending</span></div>
   <div class="trow mono" style="padding-left:60px"><span class="dot" style="background:var(--pending)"></span>&nbsp;#2&nbsp; +3 −2<span class="meta"><span class="pill p-pending">pending</span></span></div>
   <div class="trow" style="padding-left:26px"><span class="tw">▾</span><span class="ic">📁</span>models</div>
-  <div class="trow" style="padding-left:42px"><span class="tw">▾</span><span class="ic">📄</span>dataset.py<span class="meta">1 edit · 1 pending</span></div>
+  <div class="trow" style="padding-left:42px"><span class="tw">▾</span><span class="ic">🗎</span>dataset.py<span class="meta">1 edit · 1 pending</span></div>
   <div class="trow" style="padding-left:58px"><span class="tw">▾</span><span class="ic" style="color:var(--orange)">◆</span>class Dataset<span class="meta">1 edit · 1 pending</span></div>
   <div class="trow mono" style="padding-left:76px"><span class="dot" style="background:var(--pending)"></span>&nbsp;#3&nbsp; +7 −0<span class="meta"><span class="pill p-pending">pending</span></span></div>`;
 
 const editorCode = () => `
   <div style="background:var(--bg);padding:10px 0 14px;">
-    <div class="codelens"><a>✨ #1 +6 −1 view changes</a><a>✓ Keep</a><a>↩ Undo</a><a>💬 Chat</a><a>⧉ View diff</a></div>
+    <div class="codelens"><a>✦ #1 +6 −1 view changes</a><a>✓ Keep</a><a>↩ Undo</a><a>${icoChat} Chat</a><a>⧉ View diff</a></div>
     <div class="codeline hl"><span class="ln">1</span><span><span class="tok-k">from</span> <span class="tok-v">statistics</span> <span class="tok-k">import</span> <span class="tok-v">mean</span>, <span class="tok-v">stdev</span></span></div>
     <div class="codeline"><span class="ln">2</span><span></span></div>
     <div class="codeline"><span class="ln">3</span><span></span></div>
@@ -158,7 +158,7 @@ const editorCode = () => `
     <div class="codeline"><span class="ln">5</span><span>    <span class="tok-k">return</span> {<span class="tok-s">"count"</span>: <span class="tok-f">len</span>(values), <span class="tok-s">"mean"</span>: <span class="tok-f">mean</span>(values)}</span></div>
     <div class="codeline"><span class="ln">6</span><span></span></div>
     <div class="codeline hl"><span class="ln">7</span><span></span></div>
-    <div class="codeline hl"><span class="ln">8</span><span class="gutstar">✨</span><span><span class="tok-k">def</span> <span class="tok-f">scale</span>(<span class="tok-v">values</span>):</span></div>
+    <div class="codeline hl"><span class="ln">8</span><span class="gutstar">✦</span><span><span class="tok-k">def</span> <span class="tok-f">scale</span>(<span class="tok-v">values</span>):</span></div>
     <div class="codeline hl"><span class="ln">9</span><span>    mu, sigma = <span class="tok-f">mean</span>(values), <span class="tok-f">stdev</span>(values)</span></div>
     <div class="codeline hl"><span class="ln">10</span><span>    <span class="tok-k">return</span> [(v - mu) / sigma <span class="tok-k">for</span> v <span class="tok-k">in</span> values]</span></div>
   </div>`;
@@ -166,8 +166,8 @@ const editorCode = () => `
 // inline frame showing a single edit that BOTH adds (green) and deletes (red rule) — feature closeup
 const editorCodeCombined = () => `
   <div style="background:var(--bg);padding:10px 0 14px;">
-    <div class="codelens"><a>✨ #2 +3 −2 view changes</a><a>✓ Keep</a><a>↩ Undo</a><a>💬 Chat</a><a>⧉ View diff</a></div>
-    <div class="codeline hl"><span class="ln">1</span><span class="gutstar">✨</span><span><span class="tok-k">from</span> <span class="tok-v">features</span> <span class="tok-k">import</span> <span class="tok-v">summarize</span>, <span class="tok-v">scale</span></span></div>
+    <div class="codelens"><a>✦ #2 +3 −2 view changes</a><a>✓ Keep</a><a>↩ Undo</a><a>${icoChat} Chat</a><a>⧉ View diff</a></div>
+    <div class="codeline hl"><span class="ln">1</span><span class="gutstar">✦</span><span><span class="tok-k">from</span> <span class="tok-v">features</span> <span class="tok-k">import</span> <span class="tok-v">summarize</span>, <span class="tok-v">scale</span></span></div>
     <div class="codeline"><span class="ln">2</span><span></span></div>
     <div class="codeline hl"><span class="ln">3</span><span>features = <span class="tok-f">scale</span>([<span class="tok-v">1.0</span>, <span class="tok-v">2.0</span>, <span class="tok-v">3.0</span>])</span></div>
     <div class="codeline del"><span class="ln">4</span><span><span class="tok-f">print</span>(<span class="tok-f">summarize</span>(features))<span class="delnote">− print(summarize([1.0, 2.0, 3.0]))</span></span></div>
@@ -179,10 +179,10 @@ const dl = (kind, text) => `<span class="dl ${kind}">${text}</span>`;
 const reviewBubble = () => `
   <div class="bubble">
     <div class="bb-head">
-      <span class="bb-title">✨ Claude edit <span class="bb-id">#2</span></span>
+      <span class="bb-title">✦ Claude edit <span class="bb-id">#2</span></span>
       <span class="bb-id">+3 −2</span>
       <span class="bb-why">💭 scaling the features in the training entrypoint before they reach the model</span>
-      <span class="bb-tools"><span>✓ Accept</span><span>↩ Revert</span><span>💬 Chat</span><span>↑ Prev</span><span>↓ Next</span></span>
+      <span class="bb-tools"><span>✓ Accept</span><span>↩ Revert</span><span>${icoChat} Chat</span><span>↑ Prev</span><span>↓ Next</span></span>
     </div>
     <div class="bb-diff">
       ${dl('hunk', '@@ -1,3 +1,4 @@')}
@@ -311,7 +311,7 @@ const conflictBody = () => `
 const diffTabBody = () => `
   <div class="difftab">
     <div class="tab">train.py  ⟷  Claude #2</div>
-    <div class="acts"><span>⧉ #2 +3 −2</span><span>✓ Keep</span><span>↩ Undo</span><span>💬 Chat</span><span>↑ Prev</span><span>↓ Next</span></div>
+    <div class="acts"><span>⧉ #2 +3 −2</span><span>✓ Keep</span><span>↩ Undo</span><span>${icoChat} Chat</span><span>↑ Prev</span><span>↓ Next</span></div>
   </div>
   <div class="bb-diff" style="background:var(--bg);padding:12px 0;font-size:12.5px;line-height:1.85;">
     ${dl('hunk', '@@ -1,3 +1,4 @@')}
@@ -323,10 +323,10 @@ const diffTabBody = () => `
     ${dl('add', '+print(summarize(features))')}
   </div>`;
 
-// file heatmap — unmodified lines dimmed so the edit is a spotlight (📄 toggle)
+// file heatmap — unmodified lines dimmed so the edit is a spotlight (the Spotlight toggle)
 const heatmapEditor = () => `
   <div style="background:var(--bg);padding:10px 0 14px;">
-    <div class="codelens"><a>✨ #1 +6 −1 view changes</a><a>✓ Keep</a><a>↩ Undo</a><a>💬 Chat</a><a>⧉ View diff</a><a style="color:var(--coral)">📄 Heatmap</a></div>
+    <div class="codelens"><a>✦ #1 +6 −1 view changes</a><a>✓ Keep</a><a>↩ Undo</a><a>${icoChat} Chat</a><a>⧉ View diff</a><a style="color:var(--coral)">${icoBulb} Spotlight</a></div>
     <div class="codeline hl"><span class="ln">1</span><span><span class="tok-k">from</span> <span class="tok-v">statistics</span> <span class="tok-k">import</span> <span class="tok-v">mean</span>, <span class="tok-v">stdev</span></span></div>
     <div class="codeline dim"><span class="ln">2</span><span></span></div>
     <div class="codeline dim"><span class="ln">3</span><span></span></div>
@@ -334,7 +334,7 @@ const heatmapEditor = () => `
     <div class="codeline dim"><span class="ln">5</span><span>    <span class="tok-k">return</span> {<span class="tok-s">"count"</span>: <span class="tok-f">len</span>(values), <span class="tok-s">"mean"</span>: <span class="tok-f">mean</span>(values)}</span></div>
     <div class="codeline dim"><span class="ln">6</span><span></span></div>
     <div class="codeline hl"><span class="ln">7</span><span></span></div>
-    <div class="codeline hl"><span class="ln">8</span><span class="gutstar">✨</span><span><span class="tok-k">def</span> <span class="tok-f">scale</span>(<span class="tok-v">values</span>):</span></div>
+    <div class="codeline hl"><span class="ln">8</span><span class="gutstar">✦</span><span><span class="tok-k">def</span> <span class="tok-f">scale</span>(<span class="tok-v">values</span>):</span></div>
     <div class="codeline hl"><span class="ln">9</span><span>    mu, sigma = <span class="tok-f">mean</span>(values), <span class="tok-f">stdev</span>(values)</span></div>
     <div class="codeline hl"><span class="ln">10</span><span>    <span class="tok-k">return</span> [(v - mu) / sigma <span class="tok-k">for</span> v <span class="tok-k">in</span> values]</span></div>
   </div>`;
@@ -367,6 +367,15 @@ const winDiag = (title, mock, notes) => `
 // Phase badge — colored by agent state (working blue · awaiting orange · errored red · done green · idle grey).
 const phase = (label, color) => `<span style="font-size:9px;font-weight:700;letter-spacing:.02em;padding:1.5px 7px;border-radius:9px;color:${color};border:1px solid ${color};white-space:nowrap;text-transform:uppercase">${label}</span>`;
 // A tiny activity sparkline (bars), like the real per-agent one.
+// Emoji-free mini icons — tiny inline SVGs approximating the real codicons the product uses
+// (search / lightbulb / comment-discussion / clear-all / checklist / timeline-view-icon).
+const ico = (d, size = 13) => `<svg width="${size}" height="${size}" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px">${d}</svg>`;
+const icoSearch = ico('<circle cx="6.8" cy="6.8" r="4.5"/><path d="M10.2 10.2L14 14"/>');
+const icoBulb = ico('<path d="M6 12.5h4M6.7 14.5h2.6M8 1.8a4.4 4.4 0 0 0-2.6 7.9c.7.5 1.1 1.1 1.1 1.8v.5h3v-.5c0-.7.4-1.3 1.1-1.8A4.4 4.4 0 0 0 8 1.8z"/>');
+const icoChat = ico('<path d="M1.5 3h8.5v5.5H6L4 10.5V8.5H1.5z"/><path d="M12 6h2.5v5.5H13V13l-2-1.5H8.5"/>');
+const icoClear = ico('<path d="M2 3.5h11M2 7h7M2 10.5h5"/><path d="M10.5 9l4 4M14.5 9l-4 4"/>');
+const icoChecklist = ico('<path d="M2 4.2l1.3 1.3L5.6 3"/><path d="M2 9.2l1.3 1.3L5.6 8"/><path d="M8 5h6M8 10h6M4 13.5h10"/>');
+const icoHistory = ico('<path d="M2.5 8a5.5 5.5 0 1 1 1.6 3.9"/><path d="M2.5 8L1.2 6.5M2.5 8L4 6.8"/><path d="M8 5.2V8l2.2 1.6"/>');
 const spark = (bars, color) => `<span style="display:inline-flex;align-items:flex-end;gap:1.5px;height:13px">${bars.map(h => `<span style="width:2.5px;height:${Math.max(2, Math.round(h * 13))}px;background:${color};border-radius:1px"></span>`).join('')}</span>`;
 const gADD = '#7ee787', gREM = '#ffa198';
 // A compact fleet row for the Overview's LEFT master rail: phase dot · worktree ⑂branch · sparkline.
@@ -384,6 +393,7 @@ const changeMapCol = `
       <div style="display:flex;gap:11px;font-size:9.5px;letter-spacing:.04em;margin-bottom:6px">
         <span style="color:var(--ink);border-bottom:1.5px solid var(--accent);padding-bottom:3px">Fleet</span>
         <span style="color:var(--faint)">Workflows</span>
+        <span style="color:var(--faint)">Tasks 2/3</span>
       </div>
       ${cmFleetRow('var(--blue)', 'demo', 'demo/pipeline', [.3, .6, .4, .8, .5, .9, .7, 1], true)}
       ${cmFleetRow('var(--pending)', 'demo', 'feat-x', [.5, .7, .3, .6, .8, .4, .6, .5], false)}
@@ -397,9 +407,9 @@ const changeMapCol = `
         ${cmSeg('var(--kept)', 'docs')}${cmSeg('var(--pending)', 'tests')}${cmSeg('var(--pending)', 'src')}${cmSeg('var(--kept)', 'src/models')}
       </div>
       ${cmRow('var(--kept)', 'USAGE.md', 'docs', 100, '+12', '')}
-      ${cmRow('var(--pending)', 'test_pipeline.py', 'tests', 96, '+12', '1⏳')}
+      ${cmRow('var(--pending)', 'test_pipeline.py', 'tests', 96, '+12', '1⧗')}
       ${cmRow('var(--kept)', 'dataset.py', 'src/models', 58, '+7', '')}
-      ${cmRow('var(--pending)', 'features.py', 'src', 55, '+6', '1⏳')}
+      ${cmRow('var(--pending)', 'features.py', 'src', 55, '+6', '1⧗')}
     </div>
   </div>`;
 // One agent (worktree) row: badge · worktree ⑂branch · self tag · sparkline · ± · ⚠risk · ⇄collisions.
@@ -416,7 +426,7 @@ const agentRow = (badge, name, branch, self, bars, sparkColor, added, removed, r
       ${coll != null ? `<span style="font-size:11px;color:var(--dim);white-space:nowrap">⇄ ${coll}</span>` : ''}
     </span>
   </div>`;
-// A nested subagent row under an agent: badge · agentType + italic description · current task · ± · 💬.
+// A nested subagent row under an agent: badge · agentType + italic description · current task · ± · chat.
 const subRow = (badge, type, desc, task, added, removed) => `
   <div style="display:flex;align-items:center;gap:8px;padding:4px 16px 4px 42px;font-size:11.5px">
     <span style="color:var(--faint)">└</span>
@@ -426,7 +436,7 @@ const subRow = (badge, type, desc, task, added, removed) => `
     <span style="color:var(--dim);font-size:10.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto">${task}</span>
     <span style="margin-left:auto;display:flex;align-items:center;gap:11px;white-space:nowrap">
       <span class="mono" style="font-size:10.5px"><span style="color:${gADD}">+${added}</span> <span style="color:${gREM}">−${removed}</span></span>
-      <span style="color:var(--dim)">💬</span>
+      <span style="color:var(--purple)">${icoChat}</span>
     </span>
   </div>`;
 // The FILE COLLISIONS strip — files touched by more than one agent, with agent count + pending state.
@@ -447,6 +457,7 @@ const multitaskingBody = `
   <div style="display:flex;align-items:center;gap:14px;padding:9px 16px 0;border-bottom:1px solid var(--border);font-size:12px">
     <span style="color:var(--ink);border-bottom:1.5px solid var(--accent);padding-bottom:8px">Fleet</span>
     <span style="color:var(--faint);padding-bottom:8px">Workflows</span>
+    <span style="color:var(--faint);padding-bottom:8px">Tasks 2/3</span>
     <span style="color:var(--faint)">·</span><span style="color:var(--dim)">3 agents</span>
     <span style="color:var(--blue)">1 active</span>
     <span style="color:var(--pending)">1 conflict</span>
@@ -474,7 +485,7 @@ const chapterRow = (glyph, color, title, delta, pending, actable, synthetic) => 
     <span style="color:var(--${synthetic ? 'faint' : 'ink'});white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${title}</span>
     ${synthetic ? '<span style="font-size:9.5px;color:var(--faint);border:1px solid var(--border2);border-radius:8px;padding:0 6px;flex:none">session</span>' : ''}
     <span class="mono" style="margin-left:auto;color:var(--faint);font-size:10.5px;flex:none">${delta}${pending ? ` · <span style="color:var(--pending)">${pending}</span>` : ''}</span>
-    ${actable ? `<span style="display:flex;gap:8px;font-size:11.5px;flex:none"><span style="color:var(--kept)">✓</span><span style="color:var(--pending)">↩</span><span style="color:var(--dim)">🧹</span></span>` : '<span style="width:44px;flex:none"></span>'}
+    ${actable ? `<span style="display:flex;gap:8px;align-items:center;flex:none"><span style="color:var(--kept)">${icoChecklist}</span><span style="color:#e5534b">${icoHistory}</span><span style="color:#d9822b">${icoClear}</span></span>` : '<span style="width:44px;flex:none"></span>'}
   </div>`;
 // Overview MASTER-DETAIL — a left nav (Fleet · Workflows: agent rows + workflow runs) drives the right
 // change-map detail (session chip + task ribbon + module strip + file ledger). Self/orchestrator selected.
@@ -491,6 +502,7 @@ const overviewTabsBody = `
       <div style="display:flex;gap:12px;padding:9px 12px 7px;border-bottom:1px solid var(--border);font-size:11.5px">
         <span style="color:var(--ink);border-bottom:1.5px solid var(--accent);padding-bottom:6px;margin-bottom:-8px">Fleet</span>
         <span style="color:var(--faint)">Workflows</span>
+        <span style="color:var(--faint)">Tasks 2/3</span>
       </div>
       ${ovAgentRow('var(--blue)', 'demo/pipeline', true, [.3, .6, .4, .8, .5, .9, .7, 1], 40, 3, true)}
       ${ovAgentRow('var(--pending)', 'feat-x', false, [.5, .7, .3, .6, .8, .4, .6, .5], 42, 7, false)}
@@ -508,7 +520,7 @@ const overviewTabsBody = `
           <span class="mono" style="color:var(--ink)">demo <span style="color:var(--faint)">⑂demo/pipeline</span></span>
           <span style="color:var(--faint)">·</span><span>${microscope}</span><span class="mono" style="color:var(--coral)">0c396c6b</span>
           <span style="color:var(--faint)">·</span><span style="color:var(--dim)">5 edits</span>
-          <span style="color:var(--pending)">2⏳</span><span style="color:var(--kept)">3✓</span>
+          <span style="color:var(--pending)">2⧗</span><span style="color:var(--kept)">3✓</span>
           <span style="color:var(--faint)">·</span><span style="color:var(--ink)">60%</span>
         </span>
       </div>
@@ -520,13 +532,82 @@ const overviewTabsBody = `
         ${cmSeg('var(--pending)', 'docs')}${cmSeg('var(--pending)', 'tests')}${cmSeg('var(--kept)', 'src')}${cmSeg('var(--kept)', 'src/models')}
       </div>
       <div style="padding:0 16px 8px">
-        ${cmRow('var(--pending)', 'USAGE.md', 'docs', 100, '+12', '1⏳')}
-        ${cmRow('var(--pending)', 'test_pipeline.py', 'tests', 96, '+12', '1⏳')}
+        ${cmRow('var(--pending)', 'USAGE.md', 'docs', 100, '+12', '1⧗')}
+        ${cmRow('var(--pending)', 'test_pipeline.py', 'tests', 96, '+12', '1⧗')}
         ${cmRow('var(--kept)', 'dataset.py', 'src/models', 58, '+7', '')}
         ${cmRow('var(--kept)', 'features.py', 'src', 55, '+6', '')}
       </div>
     </div>
   </div>`;
+
+// The Overview's title-bar toolbar — FIVE spaced groups (the 0.8.3 layout), labeled + color-coded.
+const ovtGrp = (inner) => `<span style="display:flex;gap:9px;align-items:center;white-space:nowrap">${inner}</span>`;
+const ovtSep = `<span style="width:1px;align-self:stretch;background:var(--border2);margin:1px 2px"></span>`;
+const ovToolbar = `
+  <div style="display:flex;align-items:center;gap:10px;padding:7px 14px;border-bottom:1px solid var(--border);font-size:11px;color:var(--dim);flex-wrap:wrap">
+    ${ovtGrp(`<span style="color:#9a6ac2">${icoSearch} Search</span><span class="mono">${microscope} 0c396c6b ▾</span><span>✓ Active only</span>`)}${ovtSep}
+    ${ovtGrp(`<span style="color:#4c8bf5">⌃</span><span class="mono">Diff 1/2</span><span style="color:#4c8bf5">⌄</span><span style="color:#3fb950">✓ Keep</span><span style="color:#e5534b">↩ Undo</span>`)}${ovtSep}
+    ${ovtGrp(`<span style="color:#4c8bf5">‹</span><span class="mono">File 2/5</span><span style="color:#4c8bf5">›</span><span style="color:#3fb950">✓✓ Accept File</span><span style="color:#e5534b">✕ Reject File</span>`)}${ovtSep}
+    ${ovtGrp(`<span style="color:#3fb950">${icoChecklist} Accept All</span><span style="color:#e5534b">${icoHistory} Revert All</span><span style="color:#d9822b">${icoClear} Clear Resolved</span>`)}${ovtSep}
+    ${ovtGrp(`<span style="color:#9a6ac2">${icoBulb} Spotlight</span><span>⟳ Refresh</span>`)}
+  </div>`;
+
+// The Overview's Workflows tab — one row per multi-agent workflow run (informative name, state,
+// per-phase progress groups, agents with tokens·time·edits) over a matching sparkline.
+const wfRunRow = (dot, name, state, meta, bars, color) => `
+  <div style="display:flex;align-items:center;gap:9px;padding:7px 16px;font-size:12.5px">
+    <span class="dot" style="background:${dot};flex:none"></span>
+    <span style="color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${name}</span>
+    ${state}
+    <span style="margin-left:auto;display:flex;align-items:center;gap:13px;flex:none">
+      <span class="mono" style="font-size:11px;color:var(--dim);white-space:nowrap">${meta}</span>
+      ${spark(bars, color)}
+    </span>
+  </div>`;
+const wfSubRow = (glyph, text, meta) => `
+  <div style="display:flex;align-items:center;gap:8px;padding:3px 16px 3px 42px;font-size:11.5px">
+    <span style="color:var(--faint)">└</span>${glyph}
+    <span style="color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${text}</span>
+    <span class="mono" style="margin-left:auto;color:var(--faint);font-size:10.5px;white-space:nowrap">${meta}</span>
+  </div>`;
+const workflowsBody = `
+  <div style="display:flex;align-items:center;gap:14px;padding:9px 16px 0;border-bottom:1px solid var(--border);font-size:12px">
+    <span style="color:var(--faint);padding-bottom:8px">Fleet</span>
+    <span style="color:var(--ink);border-bottom:1.5px solid var(--accent);padding-bottom:8px">Workflows</span>
+    <span style="color:var(--faint);padding-bottom:8px">Tasks 2/3</span>
+    <span style="color:var(--faint)">·</span><span style="color:var(--dim)">2 runs</span><span style="color:var(--blue)">1 running</span>
+    <span style="margin-left:auto;color:var(--faint);font-size:11px;padding-bottom:8px">✓ Active only</span>
+  </div>
+  ${wfRunRow('var(--blue)', 'review-changes', phase('running', 'var(--blue)'), '3/5 phases · 41k tok · 12m', [.4, .5, .7, .6, .9, .5, .8, .6], 'var(--blue)')}
+  ${wfSubRow(`<span style="color:var(--kept);font-size:10px">●</span>`, 'Review — 2 agents', '✓ done · 18k tok · 6 edits')}
+  ${wfSubRow(`<span style="color:var(--blue);font-size:10px">●</span>`, 'Verify — verify:pipeline.py', 'running · 8k tok · 2m')}
+  ${wfRunRow('var(--kept)', 'seed-demo-tasks', phase('done', 'var(--kept)'), '2/2 phases · 23k tok · 4m', [.6, .8, .4, .7, .5, .3, .2, .1], 'var(--kept)')}
+  ${wfSubRow(`<span style="color:var(--kept);font-size:10px">●</span>`, 'Seed — 3 agents', '✓ done · 23k tok · 9 edits')}`;
+
+// The Overview's Tasks tab — the session's numbered task list (TaskCreate/TaskUpdate), newest first,
+// each row joined to its chapter for live ± / edit counts; completed rows fold behind "N done".
+const taskRow = (glyph, color, num, title, sub, meta, strike) => `
+  <div style="display:flex;align-items:center;gap:9px;padding:6px 16px;font-size:12.5px">
+    <span style="color:${color};flex:none">${glyph}</span>
+    <span class="mono" style="color:var(--faint);font-size:11px;flex:none">#${num}</span>
+    <span style="color:var(--${strike ? 'faint' : 'ink'});${strike ? 'text-decoration:line-through;' : ''}white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${title}</span>
+    ${sub ? `<span style="color:var(--faint);font-style:italic;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto">${sub}</span>` : ''}
+    <span class="mono" style="margin-left:auto;color:var(--faint);font-size:10.5px;flex:none;white-space:nowrap">${meta}</span>
+  </div>`;
+const tasksBody = `
+  <div style="display:flex;align-items:center;gap:14px;padding:9px 16px 0;border-bottom:1px solid var(--border);font-size:12px">
+    <span style="color:var(--faint);padding-bottom:8px">Fleet</span>
+    <span style="color:var(--faint);padding-bottom:8px">Workflows</span>
+    <span style="color:var(--ink);border-bottom:1.5px solid var(--accent);padding-bottom:8px">Tasks 2/3</span>
+    <span style="color:var(--faint)">·</span><span style="color:var(--dim)">3 tasks</span><span style="color:var(--blue)">1 in progress</span>
+    <span style="margin-left:auto;color:var(--faint);font-size:11px;padding-bottom:8px">✓ Active only</span>
+  </div>
+  ${taskRow('◐', 'var(--blue)', 3, 'Write pipeline tests', 'Writing pipeline tests…', '<span style="color:' + gADD + '">+12</span> −0 · 1⧗', false)}
+  <div style="display:flex;align-items:center;gap:8px;padding:5px 16px;font-size:11px;color:var(--faint);border-top:1px solid var(--border)">
+    <span>2 done · hide</span>
+  </div>
+  ${taskRow('✓', 'var(--kept)', 2, 'Dataset validation', '', '<span style="color:' + gADD + '">+7</span> −0 · 3 edits', true)}
+  ${taskRow('✓', 'var(--kept)', 1, 'Feature scaling', '', '<span style="color:' + gADD + '">+6</span> <span style="color:' + gREM + '">−1</span> · 2 edits', true)}`;
 
 // ---------- scenes ----------
 const scenes = {
@@ -540,12 +621,12 @@ const scenes = {
             <span style="color:var(--coral);font-family:'SF Mono',Menlo,monospace;font-size:12.5px;">Claude edit #1</span>
             <span style="color:var(--dim);font-family:'SF Mono',Menlo,monospace;font-size:12px;">·  +6 −1  ·  <b style="color:var(--ink)">Diff 1/1</b>  ·  <b style="color:var(--ink)">File 4/5</b></span>
             <span style="margin-left:auto;display:flex;gap:12px;font-size:13px;color:var(--dim);white-space:nowrap;">
-              <span>↑</span><span>↓</span><span>←</span><span>→</span><span style="color:var(--kept)">✓</span><span style="color:var(--pending)">↩</span><span style="color:var(--kept)">✓✓</span><span style="color:#f85149">✕</span><span>💬</span><span>🧹</span><span>💡</span><span>🔍</span>
+              <span style="color:var(--kept)">✓</span><span style="color:#e5534b">↩</span><span>${icoChat}</span><span>↑</span><span>↓</span>
             </span>
           </div>
           <div style="padding:12px 16px;">
             <div style="font-weight:600;margin-bottom:7px;font-size:13px;">Claude Observatory</div>
-            <div style="font-family:'SF Mono',Menlo,monospace;font-size:12.5px;color:var(--ink);margin-bottom:8px;">✨ <b>Claude edit #1</b>  ·  +6 −1  ·  Edit  ·  <b>Diff 1/1</b>  ·  <b>File 4/5</b></div>
+            <div style="font-family:'SF Mono',Menlo,monospace;font-size:12.5px;color:var(--ink);margin-bottom:8px;">✦ <b>Claude edit #1</b>  ·  +6 −1  ·  Edit  ·  <b>Diff 1/1</b>  ·  <b>File 4/5</b></div>
             <div style="color:var(--faint);font-style:italic;font-size:12.5px;margin-bottom:11px;">💭 I'm positioning the changeMapShell function to insert after the statsData closing brace at line 152…</div>
             <div style="font-family:'SF Mono',Menlo,monospace;font-size:12px;line-height:1.75;">
               ${dl('hunk', '@@ −461,9 +461,14 @@')}
@@ -561,17 +642,18 @@ const scenes = {
       <div style="display:flex;flex-direction:column;gap:13px;padding-top:6px;">
         <div style="font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--coral);font-weight:700;">Inline review bubble</div>
         ${note('1', 'Title', 'The edit id, its ± delta, and the live <b style="color:var(--ink)">Diff&nbsp;n/m · File&nbsp;i/k</b> position.')}
-        ${note('2', 'Toolbar', 'Mirrors the status-bar nav bar: ↑↓ prev/next&nbsp;edit · ←→ prev/next&nbsp;file · <span style="color:#3fb950">✓</span>&nbsp;Keep · <span style="color:#d9a441">↩</span>&nbsp;Undo · <span style="color:#3fb950">✓✓</span>&nbsp;Accept&nbsp;File · <span style="color:#f85149">✕</span>&nbsp;Reject&nbsp;File · 💬&nbsp;Chat · 🧹&nbsp;Clear · 💡&nbsp;Spotlight · 🔍&nbsp;Search.')}
+        ${note('2', 'Toolbar', 'The bubble&rsquo;s buttons: <span style="color:#3fb950">✓</span>&nbsp;Accept · <span style="color:#e5534b">↩</span>&nbsp;Revert · Chat · ↑↓&nbsp;prev/next&nbsp;edit.')}
         ${note('3', 'Reasoning', 'Claude&rsquo;s own words for this edit, mined from the transcript (💭).')}
         ${note('4', 'Diff', 'The edit&rsquo;s before ⟷ after, in git&rsquo;s red/green.')}
       </div>
     </div>`),
   // Anatomy — a labelled outline of every surface, so each section can be referred to by name.
   // Per-window diagrams — the real panel mockup + a numbered legend of its parts.
-  'win-overview': scene(1200, winDiag('OVERVIEW', changeMapCol, [
-    note('1', 'Fleet · Workflows nav', 'The left rail — running agents across git worktrees + workflow runs, each with phase · sparkline · ± · tokens · time. Pick one to drive the detail.'),
-    note('2', 'Chapter ribbon', 'The selected item&rsquo;s to-dos across the top (● done · ◐ in progress · ○ planned). Click one to <b style="color:var(--ink)">brush</b> the map to just its files.'),
-    note('3', 'Module strip + ledger', 'One equal-width segment per module (click to filter), then every file ranked by churn with a bar. Hover for the class + reasoning; click to open the diff.'),
+  'win-overview': scene(1200, winDiag('OVERVIEW', ovToolbar + changeMapCol, [
+    note('1', 'Toolbar — five groups', 'Search · session · Active&nbsp;only&nbsp;|&nbsp;Diff&nbsp;axis · Keep · Undo&nbsp;|&nbsp;File&nbsp;axis · Accept/Reject&nbsp;File&nbsp;|&nbsp;Accept&nbsp;All · Revert&nbsp;All · Clear&nbsp;Resolved&nbsp;|&nbsp;Spotlight · Refresh — labeled, color-coded, one icon per action.'),
+    note('2', 'Fleet · Workflows · Tasks nav', 'The left rail — running agents across git worktrees, workflow runs, and the session&rsquo;s numbered tasks. Pick one to drive the detail.'),
+    note('3', 'Chapter ribbon', 'The selected item&rsquo;s to-dos across the top (● done · ◐ in progress · ○ planned). Click one to <b style="color:var(--ink)">brush</b> the map to just its files.'),
+    note('4', 'Module strip + ledger', 'One equal-width segment per module (click to filter), then every file ranked by churn with a bar. Hover for the class + reasoning; click to open the diff.'),
   ].join(''))),
   'win-actions': scene(1200, winDiag('ACTIONS', actionsCol, [
     note('1', 'Category groups', 'Now a sidebar tab (moved from the panel), collapsed by default — Edits · Commands · Reads · Searches · To-dos. Curated; errors always surface.'),
@@ -580,7 +662,7 @@ const scenes = {
     note('4', 'Review links', 'A row with an edit links straight to its inline review.'),
   ].join(''))),
   'win-observations': scene(1180, winDiag('OBSERVATIONS', observationsCol, [
-    note('1', 'Session recap', 'Claude Code&rsquo;s own title for the session (zero-token; ✨ to refine).'),
+    note('1', 'Session recap', 'Claude Code&rsquo;s own title for the session (zero-token; ✦ to refine).'),
     note('2', 'Change-feed + reasoning', 'The former Timeline folds in here: same-file edits coalesce into a <b style="color:var(--ink)">×N</b> run, above one row per edit with Claude&rsquo;s actual words + file-memory (🧠) across sessions.'),
   ].join(''))),
   'win-stats': scene(1120, winDiag('STATS', statsCol(40, 40), [
@@ -601,11 +683,11 @@ const scenes = {
         </div>
         <div style="width:320px;background:var(--side);border-right:1px solid var(--border);padding:12px 14px;">
           <div style="font-size:9.5px;font-weight:700;color:var(--coral);letter-spacing:.05em;margin-bottom:7px;">② SIDEBAR · Claude Edits</div>
-          <div style="font-size:12px;color:var(--dim);line-height:1.55;"><b style="color:var(--ink)">Edits</b> (folder → file → class) · <b style="color:var(--ink)">Diffs</b> · <b style="color:var(--ink)">File&nbsp;History</b> · <b style="color:var(--ink)">Actions</b>.<br>Per-row Keep&nbsp;/&nbsp;Undo. Title bar: Search · Review&nbsp;◄► · Accept/Revert&nbsp;All · Clear · Switch&nbsp;session.</div>
+          <div style="font-size:12px;color:var(--dim);line-height:1.55;"><b style="color:var(--ink)">Edits</b> (folder → file → class) · <b style="color:var(--ink)">Diffs</b> · <b style="color:var(--ink)">File&nbsp;History</b> · <b style="color:var(--ink)">Actions</b>.<br>Per-row Keep&nbsp;/&nbsp;Undo. Title bar: Search · Review&nbsp;◄► · Accept/Revert&nbsp;All · Clear&nbsp;Resolved · Switch&nbsp;session.</div>
         </div>
         <div style="flex:1;padding:12px 16px;">
           <div style="font-size:9.5px;font-weight:700;color:var(--coral);letter-spacing:.05em;margin-bottom:7px;">③ EDITOR</div>
-          <div style="font-size:12px;color:var(--dim);line-height:1.6;"><b style="color:var(--ink)">Inline review</b> — ✨ markers + tinted lines on Claude&rsquo;s edits, with a <b style="color:var(--ink)">CodeLens</b> per edit (Keep&nbsp;/&nbsp;Undo&nbsp;/&nbsp;Chat&nbsp;/&nbsp;diff, showing the Diff&nbsp;·&nbsp;File position).<br><br><b style="color:var(--ink)">Tab-bar toolbar</b> (on a file with pending edits): ◄►&nbsp;Diff · Keep · Undo · Clear · 💡&nbsp;Spotlight · 🔍&nbsp;Search · ⇄&nbsp;Session.</div>
+          <div style="font-size:12px;color:var(--dim);line-height:1.6;"><b style="color:var(--ink)">Inline review</b> — ✦ markers + tinted lines on Claude&rsquo;s edits, with a <b style="color:var(--ink)">CodeLens</b> per edit (Keep&nbsp;/&nbsp;Undo&nbsp;/&nbsp;Chat&nbsp;/&nbsp;diff, showing the Diff&nbsp;·&nbsp;File position).<br><br><b style="color:var(--ink)">Tab-bar toolbar</b> (on a file with pending edits): ◄►&nbsp;Diff · Keep · Undo · Clear&nbsp;Resolved · Spotlight · Search · ⇄&nbsp;Session.</div>
         </div>
       </div>
       <div style="border-top:1px solid var(--border);background:var(--panel);">
@@ -618,7 +700,7 @@ const scenes = {
           <div class="col" style="flex:1.5;border-right:1px solid var(--border);">
             <div class="colhead" style="color:var(--coral)">OVERVIEW</div>
             <div style="font-size:11px;color:var(--dim);padding:2px 16px;line-height:1.55;">Master–detail — a left nav drives the change-map:
-              <div style="margin-top:5px;"><b style="color:var(--blue)">ⓐ Fleet · Workflows</b> — running agents / workflow runs</div>
+              <div style="margin-top:5px;"><b style="color:var(--blue)">ⓐ Fleet · Workflows · Tasks</b> — agents / workflow runs / the task list</div>
               <div><b style="color:var(--kept)">ⓑ chapter ribbon</b> — the selection&rsquo;s to-dos; click to brush</div>
               <div><b style="color:var(--pending)">ⓒ module strip + ledger</b> — files ranked by churn</div>
             </div>
@@ -629,7 +711,7 @@ const scenes = {
       <div class="statusbar">
         <span class="sb-warn">${microscope} 3</span>
         <span style="color:var(--coral);font-size:10px;font-weight:700;letter-spacing:.05em;">⑤ STATUS BAR</span>
-        <span style="color:var(--dim);font-size:11px;">navigation bar: File&nbsp;◄► · Diff&nbsp;◄► · Keep · Undo · Accept&nbsp;/&nbsp;Reject&nbsp;File · Clear · 💡&nbsp;Spotlight · 🔍&nbsp;Search</span>
+        <span style="color:var(--dim);font-size:11px;">navigation bar (labeled + color-coded): Search · Diff&nbsp;◄► · File&nbsp;◄► · Keep · Undo · Accept&nbsp;/&nbsp;Reject&nbsp;File · Clear&nbsp;Resolved · Spotlight</span>
       </div>
     </div>`),
   // A. the full observatory layout
@@ -640,7 +722,7 @@ const scenes = {
       <div class="row" style="align-items:stretch; height:392px;">
         <div style="position:relative;width:60px;background:var(--side);border-right:1px solid var(--border);display:flex;flex-direction:column;align-items:center;padding-top:20px;gap:20px;box-shadow:inset 0 0 0 2px var(--coral);">
           <span style="position:absolute;top:-8px;left:6px;background:var(--coral);color:#fff;font-size:10px;font-weight:700;padding:1.5px 6px;border-radius:4px;z-index:5;">①</span>
-          <span style="opacity:.4">🗎</span><span style="opacity:.4">🔍</span>
+          <span style="opacity:.4">🗎</span><span style="opacity:.4">${icoSearch}</span>
           <span style="position:relative;font-size:18px">${microscope}<span style="position:absolute;right:-7px;bottom:-5px;background:var(--accent);color:#fff;border-radius:8px;font-size:9px;padding:0 4px;">3</span></span>
           <span style="opacity:.4">⚙</span>
         </div>
@@ -656,7 +738,7 @@ const scenes = {
           <div style="position:relative;display:flex;align-items:center;background:var(--side);border-bottom:1px solid var(--border);box-shadow:inset 0 0 0 2px var(--coral);">
             ${clabel('③ EDITOR TAB BAR')}
             <div style="padding:8px 18px;background:var(--bg);border-right:1px solid var(--border);font-size:12.5px;">features.py</div>
-            <span style="margin-left:auto;display:flex;gap:12px;padding-right:14px;color:var(--dim);font-size:13px;">‹ › <span style="color:var(--kept)">✓</span> <span style="color:var(--pending)">↩</span> 🧹 💡 🔍 ⇄</span>
+            <span style="margin-left:auto;display:flex;gap:12px;padding-right:14px;color:var(--dim);font-size:13px;">‹ › ✓ ↩ ${icoClear} ${icoBulb} ${icoSearch} ⇄</span>
           </div>
           ${editorCode()}
         </div>
@@ -672,7 +754,7 @@ const scenes = {
       <div class="statusbar" style="position:relative;box-shadow:inset 0 0 0 2px var(--coral);">
         ${clabel('⑤ STATUS BAR · navigation bar')}
         <span class="sb-warn">${microscope} 3</span>
-        <span style="display:flex;gap:9px;color:var(--dim);font-size:11px;font-family:'SF Mono',Menlo,monospace;">⌃ 2/3 ⌄ · ‹ 1/3 › · <span style="color:#3fb950">✓</span> <span style="color:#d9a441">↩</span> <span style="color:#3fb950">✓✓</span> <span style="color:#f85149">✕</span> · 🧹 💡 🔍</span>
+        <span style="display:flex;gap:9px;color:var(--dim);font-size:11px;font-family:'SF Mono',Menlo,monospace;"><span style="color:#9a6ac2">${icoSearch} Search</span> · <span style="color:#4c8bf5">⌃</span> 2/3 <span style="color:#4c8bf5">⌄</span> <span style="color:#4c8bf5">‹</span> 1/3 <span style="color:#4c8bf5">›</span> · <span style="color:#3fb950">✓ Keep</span> <span style="color:#e5534b">↩ Undo</span> <span style="color:#3fb950">✓✓ Accept File</span> <span style="color:#e5534b">✕ Reject File</span> · <span style="color:#d9822b">${icoClear} Clear Resolved</span> <span style="color:#9a6ac2">${icoBulb} Spotlight</span></span>
         <span style="margin-left:auto">⎇ main</span>
       </div>
     </div>`),
@@ -681,7 +763,7 @@ const scenes = {
       <div class="titlebar"><span class="tl" style="background:#ff5f57"></span><span class="tl" style="background:#febc2e"></span><span class="tl" style="background:#28c840"></span><span class="t">demo — Visual Studio Code</span></div>
       <div class="row" style="align-items:stretch; height:472px;">
         <div style="width:48px;background:var(--side);border-right:1px solid var(--border);display:flex;flex-direction:column;align-items:center;padding-top:12px;gap:20px;">
-          <span style="opacity:.4">🗎</span><span style="opacity:.4">🔍</span>
+          <span style="opacity:.4">🗎</span><span style="opacity:.4">${icoSearch}</span>
           <span style="position:relative;font-size:18px">${microscope}<span style="position:absolute;right:-7px;bottom:-5px;background:var(--accent);color:#fff;border-radius:8px;font-size:9px;padding:0 4px;">3</span></span>
           <span style="opacity:.4">⚙</span>
         </div>
@@ -791,6 +873,8 @@ const scenes = {
     </div>`),
 
   // K. 0.8.0 — Overview master-detail: Fleet · Workflows left nav + the change-map detail (right).
+  'overview-workflows': scene(820, workflowsBody),
+  'overview-tasks': scene(820, tasksBody),
   'overview-tabs': scene(760, `
     <div class="window" style="padding-bottom:10px;">
       ${overviewTabsBody}
@@ -804,11 +888,11 @@ const scenes = {
       <div class="viewhead" style="padding-top:12px;">OVERVIEW · CHAPTERS <span style="float:right;color:var(--faint)">session 0c396c6b</span></div>
       ${chapterRow('●', 'var(--kept)', 'Add feature scaling to the pipeline', '+9 −3', '', true)}
       ${chapterRow('●', 'var(--kept)', 'Validate the training dataset', '+7 −0', '', true)}
-      ${chapterRow('◐', 'var(--pending)', 'Tests and docs', '+24 −0', '2⏳', true)}
+      ${chapterRow('◐', 'var(--pending)', 'Tests and docs', '+24 −0', '2⧗', true)}
       ${chapterRow('◐', 'var(--pending)', 'Pipeline: scaling, validation, tests', '', '', true, true)}
       <div style="display:flex;align-items:center;gap:8px;padding:6px 16px 2px;font-size:11.5px;color:var(--dim)">
         <span style="width:9px;height:9px;border-radius:50%;background:var(--kept)"></span>2 done ▸
-        <span style="margin-left:auto;color:var(--faint)">🧹 clear completed</span>
+        <span style="margin-left:auto;color:var(--faint)">${icoClear} clear completed</span>
       </div>
     </div>`),
 
@@ -858,11 +942,12 @@ const scenes = {
 // per-scene capture viewport (width = sceneW + 48px body padding; height tuned to content)
 const SIZE = {
   layout: '1808,860', anatomy: '1808,700', map: '1808,706', bubble: '1248,368',
-  'win-overview': '1248,320', 'win-actions': '1248,300', 'win-observations': '1228,288', 'win-stats': '1168,420',
+  'win-actions': '1248,300', 'win-observations': '1228,288', 'win-stats': '1168,420',
   stats: '808,478', 'inline-review': '1028,440', observations: '1028,368',
   cli: '948,540', conflict: '928,290', diffs: '1028,330', heatmap: '1028,400',
   'file-history': '768,130',
   multitasking: '868,352', 'overview-tabs': '808,248',
+  'overview-workflows': '868,196', 'overview-tasks': '868,168', 'win-overview': '1248,368',
   chapters: '768,224', chat: '908,440', demo: '928,392',
 };
 const tmp = join(tmpdir(), 'obs-media');
@@ -871,7 +956,7 @@ for (const [name, html] of Object.entries(scenes)) {
   const src = join(tmp, `${name}.html`);
   writeFileSync(src, html);
   execFileSync(CHROME, [
-    '--headless', '--disable-gpu', '--default-background-color=00000000',
+    '--headless', '--disable-gpu', '--use-mock-keychain', '--password-store=basic', '--default-background-color=00000000',
     '--force-device-scale-factor=2', '--hide-scrollbars',
     `--screenshot=${join(OUT, `${name}.png`)}`,
     `--window-size=${SIZE[name] || '1028,344'}`,
@@ -884,7 +969,7 @@ for (const [name, html] of Object.entries(scenes)) {
 // which the shared VS Code scene bits above don't cover). Each sets its own 1568x830 body size.
 for (const name of ['pyc-layout']) {
   execFileSync(CHROME, [
-    '--headless', '--disable-gpu', '--default-background-color=00000000',
+    '--headless', '--disable-gpu', '--use-mock-keychain', '--password-store=basic', '--default-background-color=00000000',
     '--force-device-scale-factor=2', '--hide-scrollbars',
     `--screenshot=${join(OUT, `${name}.png`)}`,
     '--window-size=1900,860',

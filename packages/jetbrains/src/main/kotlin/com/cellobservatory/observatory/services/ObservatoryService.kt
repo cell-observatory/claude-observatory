@@ -84,6 +84,10 @@ class ObservatoryService(private val project: Project) : Disposable {
     // buttons, the ⌥⌘N/⌥⌘P actions, the status-bar cluster, and the editor banner.
     @Volatile private var reviewCursorId: Int? = null
 
+    /** The pending edit the review cursor is parked on (null when unset or no longer pending) —
+     *  the anchor for the editor banner's per-edit Keep/Undo. */
+    fun currentPendingEdit(): EditRecord? = reviewCursorId?.let { id -> log().find { it.id == id && it.pending } }
+
     /** Next pending edit in the review loop, advancing the cursor. Returns null when none are pending. */
     fun nextPendingEdit(): EditRecord? = stepPendingEdit(1)
 

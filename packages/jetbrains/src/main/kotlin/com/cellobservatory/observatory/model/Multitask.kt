@@ -121,6 +121,24 @@ data class MultitaskResult(
     val actions: MtActions?,
     /** Claude Code Workflow runs, newest-first — empty for an older CLI without the field. */
     val workflows: List<WorkflowRun>,
+    /** The ACTIVE session's task list (TaskCreate/TaskUpdate — the numbered system next to TodoWrite),
+     *  for the Overview's Tasks tab. Empty for sessions that never used it, or an older CLI. */
+    val tasks: List<SessionTask>,
+)
+
+/** One task from the session's task list (~/.claude/tasks/<session>/<id>.json, read by core). */
+data class SessionTask(
+    val id: String,
+    val subject: String,
+    val description: String,
+    /** 'pending' | 'in_progress' | 'completed'. */
+    val status: String,
+    /** Present-continuous spinner label while in_progress; null when absent. */
+    val activeForm: String?,
+    val blocks: List<String>,
+    val blockedBy: List<String>,
+    /** Joins this task to its change-map chapter (tasks ARE chapters, 0.8.3) — '' for an older CLI. */
+    val chapterId: String,
 )
 
 object MultitaskParser {
@@ -140,6 +158,19 @@ object MultitaskParser {
                 )
             },
             workflows = arr(o, "workflows").map { workflow(it.asJsonObject) },
+            tasks = arr(o, "tasks").map { t ->
+                val to = t.asJsonObject
+                SessionTask(
+                    id = str(to, "id") ?: "",
+                    subject = str(to, "subject") ?: "",
+                    description = str(to, "description") ?: "",
+                    status = str(to, "status") ?: "pending",
+                    activeForm = str(to, "activeForm"),
+                    blocks = arr(to, "blocks").mapNotNull { it.takeIf { e -> !e.isJsonNull }?.asString },
+                    blockedBy = arr(to, "blockedBy").mapNotNull { it.takeIf { e -> !e.isJsonNull }?.asString },
+                    chapterId = str(to, "chapterId") ?: "",
+                )
+            },
         )
     } catch (_: Exception) {
         null

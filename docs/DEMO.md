@@ -21,8 +21,10 @@ claude-observatory demo          # run it in an open workspace and watch every p
 ```
 
 Open the Overview while it runs: the chapter ribbon fills chapter by chapter, the Fleet nav gains a
-subagent and a workflow, and Observations streams the reasoning. The edits are real store records on
-real files, so Accept / Reject / task-scoped review all genuinely work. When you're done:
+subagent and a workflow, the Tasks tab counts down three numbered tasks linked to those same chapters
+(live statuses + per-task edit counts), and Observations streams the reasoning. The edits are real
+store records on real files, so Accept / Reject / task-scoped review all genuinely work. When you're
+done:
 
 ```bash
 claude-observatory demo --clean  # removes the demo session, its store, and the demo folder
@@ -288,13 +290,22 @@ Comments API) parked over the edit you're on, and — new in 0.8.0 — the **Ove
 it rides alongside the session selector and the bulk actions.
 
 ```text
-🔬 3  ▲ Diff 1/2 ▼  ◀ File 1/3 ▶  ✓ ↩ ✓✓ ✕  🧹 💡 🔍
+🔬 3  Search  ▲ Diff 1/2 ▼  ◀ File 1/3 ▶  ✓ Keep  ↩ Undo  ✓✓ Accept File  ✕ Reject File  Clear Resolved  Spotlight
 ```
 
 The bar steps on **two axes**: the **Diff axis** (`Diff n/m`, ▲/▼) walks the open file's pending
 edits; the **File axis** (`File n/m`, ◀/▶) walks every file that still has one. On the open file it
-also carries **✓ Keep** / **↩ Undo** this edit, **✓✓ Accept File** / **✕ Reject File**, **🧹 Clear
-resolved**, a **💡 Spotlight** (spotlight) toggle, and **🔍 Search**.
+also carries **✓ Keep** / **↩ Undo** this edit, **✓✓ Accept File** / **✕ Reject File**, the
+session-wide **Clear Resolved** (status bar), a **Spotlight** toggle, and **Search**.
+
+The buttons are **color-coded by what they do** (0.8.3, both editors): keep/accept **green**,
+undo/reject **red**, the nav chevrons **blue**, clear **orange**, search/spotlight **purple** — the
+same chart palette the Overview uses, so the destructive half of the bar never reads like the safe half.
+No icon serves two actions: the session-wide bulk pair get their own glyphs (Accept All a checklist,
+Revert All a history-rewind), distinct from the file-scoped double-check / ✕ and the per-edit ✓ / ↩.
+On the **Overview title bar** the same controls arrange into **five spaced groups**: Search · session ·
+Active only | Diff ◄► · Keep · Undo | File ◄► · Accept/Reject File | Accept All · Revert All · Clear
+Resolved | Spotlight · Refresh.
 
 It's **two-tier**. The File axis plus Clear / Spotlight / Search show whenever *any* edit is pending
 anywhere; the Diff axis and the per-edit / per-file actions appear only when the **open** file has
@@ -417,7 +428,7 @@ one's **change-map**. A **title bar** across the top carries a session selector,
 bar, and the session-wide bulk actions. It answers two questions at once — *what is my whole fleet doing
 right now* and *where did the work land, what still needs my eyes*.
 
-![Overview — the master-detail panel: a left nav with Fleet and Workflows tabs feeding the right-hand change-map detail (task ribbon, module proportion strip, file ledger), under a title bar with the review nav bar and bulk actions](media/overview-tabs.png)
+![Overview — the master-detail panel: a left nav with Fleet, Workflows, and Tasks tabs feeding the right-hand change-map detail (task ribbon, module proportion strip, file ledger), under a title bar with the review nav bar and bulk actions](media/overview-tabs.png)
 
 #### Left nav → **Fleet** — every running agent, live
 
@@ -492,9 +503,9 @@ session.)
 🔬 ad93a29f   185 edits · 20 pending · 27 kept · 57% reviewed · 3 agents · 2 err · 🛰 13 · ⇅ 3
 ● 1. Scaffold subagent tracking   ◐ 2. Risk + Egress audit   ○ 3. Update docs + showcase
 [██████████ core ██████████|████ vscode ████|██ docs ██|cli]
-extension.ts    vscode   ████████████  +751   6⏳
+extension.ts    vscode   ████████████  +751   6⧗
 changemap.ts    core     █████         +285   ✓
-README.md       docs     █              +44   2⏳
+README.md       docs     █              +44   2⧗
 ```
 
 Three layers, top to bottom:

@@ -19,6 +19,9 @@ data class ChangeMapChapter(
     val taskId: String?,
     /** True for the fallback session chapter that claims work outside any to-do. */
     val synthetic: Boolean,
+    /** True when born from the numbered task list (0.8.3) — the Tasks tab is its home; the ribbon
+     *  never draws it (attribution, review, and the tab's count join still use it). */
+    val fromTask: Boolean,
     val index: Int,
     val title: String,
     /** "done" | "wip" | "todo" — from Claude's own to-do status. */
@@ -247,6 +250,7 @@ object ChangeMapParser {
         // taskId, so fall back to it. An explicit JSON null (synthetic/duplicate row) must stay null.
         if (o.has("taskId")) str(o, "taskId") else str(o, "id"),
         bool(o, "synthetic"),
+        bool(o, "fromTask"),
         int(o, "index"), str(o, "title") ?: "", str(o, "status") ?: "todo",
         int(o, "edits"), int(o, "added"), int(o, "removed"),
         int(o, "kept"), int(o, "pending"), int(o, "undone"), bool(o, "agent"),

@@ -145,7 +145,9 @@ Copy this shape for any new structured view.
 | Check/bump version | `node scripts/version.mjs [<x.y.z>]` |
 | Refresh screenshots/media | `node scripts/render-media.mjs` |
 
-CI (`.github/workflows/ci.yml`) runs `npm test` + e2e across `{ubuntu, macos, windows} × node {20,22}`
+CI (`.github/workflows/{linux,macos,windows}.yml` — one workflow per OS so each carries its own
+README badge) runs `npm test` across `node {20,22}` plus e2e on Linux/macOS, while `vscode.yml`
+builds the release artifacts and `jetbrains.yml` runs the Gradle suite + `buildPlugin`
 (e2e is skipped on Windows), plus a `jetbrains` job that runs `gradle test buildPlugin`.
 
 ## Cross-platform parity checklist

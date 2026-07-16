@@ -12,6 +12,7 @@ import com.cellobservatory.observatory.model.ChangeMapWorkflow
 import com.cellobservatory.observatory.model.Collision
 import com.cellobservatory.observatory.model.MtSubagent
 import com.cellobservatory.observatory.model.MultitaskResult
+import com.cellobservatory.observatory.model.SessionTask
 import com.cellobservatory.observatory.model.MultitaskFilter
 import com.cellobservatory.observatory.model.RunningAgent
 import com.cellobservatory.observatory.model.WorkflowAgent
@@ -160,12 +161,18 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         emptyText.text = "No workflow runs — Claude Code Workflow orchestrations appear here"
         cellRenderer = SparklineTreeRenderer(WorkflowRenderer())
     }
-    private val collisionStrip = JBLabel().apply {
-        font = JBUI.Fonts.miniFont()
-        border = JBUI.Borders.empty(3, 8)
+    // --- LEFT NAV, third tab: the session's numbered task list (TaskCreate/TaskUpdate) ---
+    /** One Tasks-tab row: the task + its change-map chapter (per-task ±/edit counts), when it has one. */
+    private data class TaskRow(val task: SessionTask, val chapter: ChangeMapChapter?)
+    /** The "N done · show all" collapse row — completed tasks fold behind it (fleet dismiss pattern). */
+    private data class DoneTasksToggle(val count: Int, val open: Boolean)
+    private var tasksOpen = false
+    private var lastTasks: List<SessionTask> = emptyList()
+    private val tasksModel = javax.swing.DefaultListModel<Any>()
+    private val tasksList = JBList(tasksModel).apply {
+        emptyText.text = "No tasks — this session plans with a task list only when Claude creates one"
+        cellRenderer = TaskRowRenderer()
     }
-    /** The collisions behind the strip — kept so a click can open the contested file(s). */
-    private var lastCollisions: List<Collision> = emptyList()
 
     // --- RIGHT DETAIL: the change-map for the selected nav item ---
     private val detailHost = JPanel(BorderLayout())
@@ -189,15 +196,14 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
     private lateinit var navTabs: JBTabbedPane
 
     init {
-        val fleetTab = OnePixelSplitter(true, 0.82f).apply {
-            firstComponent = JBScrollPane(fleetTree)
-            secondComponent = JBScrollPane(collisionStrip)
-        }
+        // (Live conflicts moved to the Actions panel in 0.8.3 — the fleet tab is just the tree now.)
         navTabs = JBTabbedPane().apply {
-            addTab("Fleet", fleetTab)
+            addTab("Fleet", JBScrollPane(fleetTree))
             setToolTipTextAt(0, "Running agents across every worktree — siblings + their subagents — with the live file-conflict strip below. Select one to map its changes.")
             addTab("Workflows", JBScrollPane(workflowsTree))
             setToolTipTextAt(1, "Claude Code Workflow runs — agents grouped by phase, with tokens/time/edits per run. Select one to map its changes.")
+            addTab("Tasks", JBScrollPane(tasksList))
+            setToolTipTextAt(2, "The session's task list (Claude's numbered TaskCreate/TaskUpdate tasks) — live statuses; completed tasks leave the list when the runtime archives them.")
         }
         // Left nav (Fleet · Workflows) = 25% of the panel; the change-map detail takes the remaining 75%.
         val split = OnePixelSplitter(false, 0.25f).apply {
@@ -206,50 +212,46 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         }
         setContent(split)
 
-        // Top navbar — VS Code Overview toolbar order (parity): session · Active only | the step-through
-        // review nav bar | bulk Accept/Revert/Clear · Refresh | the JetBrains-only fleet filters last.
-        // showText: this toolbar renders each button's label beside its icon, like VS Code's Overview.
+        // Top navbar — FIVE spaced groups (user layout 2026-07-16, VS Code Overview parity):
+        // Search · session · Active only | Diff axis · Keep · Undo | File axis · Accept/Reject File |
+        // bulk Accept All · Revert All · Clear Resolved | Spotlight · Refresh. The nav-bar actions come
+        // from the shared ReviewNavBar (labels shown, like VS Code); the toolbar-only fleet filters
+        // (Clear Completed / Show Hidden / Clear Done Chapters) were REMOVED 2026-07-16 — Active only
+        // already hides completed rows, and chapter clearing lives in the chapter context menu.
         val group = DefaultActionGroup(
+            reviewNavBar.searchAction(),
             action("Switch Session", AllIcons.Vcs.Branch) { ReviewOps.chooseSession(project, fleetTree) },
             activeOnlyToggle(),
             Separator.getInstance(),
-            // The compact step-through review nav bar (File/Diff axes + counters, Keep/Undo, Accept/Reject/
-            // Clear File, Spotlight, Search) — the same controls the status-bar nav bar shows.
-            reviewNavBar.buildGroup(showText = true),
-            Separator.getInstance(),
+        ).apply {
+            reviewNavBar.diffAxis().forEach(::add)
+            add(reviewNavBar.keepAction())
+            add(reviewNavBar.undoAction())
+            addSeparator()
+            reviewNavBar.fileAxis().forEach(::add)
+            add(reviewNavBar.acceptFileAction())
+            add(reviewNavBar.rejectFileAction())
+            addSeparator()
             // Bulk actions RETARGET to the picked ribbon chapter when one is selected (task-keep/undo/clear
             // on chapter.id), else run session-wide; the presentation text reflects the scope.
-            bulkAction("Accept All", Icons.CheckAll, { "Accept All in “$it”" },
+            add(bulkAction("Accept All", NavTint.ACCEPT_ALL, { "Accept All in “$it”" },
                 { withSession { s -> ReviewOps.keepAll(project, s) } },
-                { p -> ReviewOps.keepTask(project, p.session, p.id, p.title) }),
-            bulkAction("Revert All", AllIcons.Actions.Rollback, { "Revert All in “$it”" },
+                { p -> ReviewOps.keepTask(project, p.session, p.id, p.title) }))
+            add(bulkAction("Revert All", NavTint.REVERT_ALL, { "Revert All in “$it”" },
                 { withSession { s -> ReviewOps.undoAll(project, s, service().log(), "this session") } },
-                { p -> ReviewOps.undoTask(project, p.session, p.id, p.title) }),
-            bulkAction("Clear Resolved", AllIcons.Actions.GC, { "Clear in “$it”" },
+                { p -> ReviewOps.undoTask(project, p.session, p.id, p.title) }))
+            add(bulkAction("Clear Resolved", NavTint.CLEAR, { "Clear in “$it”" },
                 {
                     withSession { s ->
                         val resolved = service().log().count { !it.pending }
                         if (resolved > 0) ReviewOps.clearResolved(project, s, resolved) else ReviewOps.notify(project, "No resolved edits to clear")
                     }
                 },
-                { p -> ReviewOps.clearTask(project, p.session, p.id, p.title) }),
-            action("Refresh", AllIcons.Actions.Refresh) { rebuild(force = true) },
-            Separator.getInstance(),
-            clearCompletedAction(),
-            showHiddenAction(),
-            action("Clear Done Chapters", AllIcons.Vcs.Remove, "Clear reviewed edits in completed chapters") {
-                // Scope to the session whose change-map the detail is showing — an Agent tab targets that
-                // agent, Main/Workflow fall back to the orchestrator. (Distinct from the nav "Clear Completed"
-                // above, which only DISMISSES rows from the fleet list.)
-                val session = (selected as? NavSel.Agent)?.session
-                    ?: ObservatoryService.getInstance(project).currentSession()
-                if (session == null) {
-                    ReviewOps.notify(project, "No active Claude Code session for this project", com.intellij.notification.NotificationType.WARNING)
-                } else {
-                    ReviewOps.clearCompletedChapters(project, session)
-                }
-            },
-        )
+                { p -> ReviewOps.clearTask(project, p.session, p.id, p.title) }))
+            addSeparator()
+            add(reviewNavBar.spotlightAction())
+            add(action("Refresh", AllIcons.Actions.Refresh) { rebuild(force = true) })
+        }
         val tb = ActionManager.getInstance().createActionToolbar("ClaudeObservatoryOverview", group, true)
         tb.targetComponent = fleetTree
         overviewToolbar = tb
@@ -283,9 +285,15 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             }
         })
 
-        // Clicking the conflict strip opens the contested file (a chooser when several collide).
-        collisionStrip.addMouseListener(object : MouseAdapter() {
-            override fun mouseClicked(e: MouseEvent) = openCollision()
+        // Clicking the Tasks tab's "N done · show all" row folds/unfolds the completed tasks.
+        tasksList.addMouseListener(object : MouseAdapter() {
+            override fun mouseClicked(e: MouseEvent) {
+                val i = tasksList.locationToIndex(e.point)
+                if (i >= 0 && tasksModel.get(i) is DoneTasksToggle) {
+                    tasksOpen = !tasksOpen
+                    repaintTasks(lastTasks)
+                }
+            }
         })
 
         ObservatoryService.getInstance(project).addListener { rebuild() }
@@ -380,10 +388,29 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         }
         fleetModel.reload()
         TreeUtil.expandAll(fleetTree)
-        updateCollisionStrip(res?.collisions ?: emptyList())
         repaintWorkflows(res?.workflows)
+        repaintTasks(res?.tasks ?: emptyList())
         restoreSelection()
         suppressSel = false
+    }
+
+    /** Paint the Tasks tab (the session's numbered task list, newest first) and badge the tab with
+     *  done/total. Each row joins its change-map chapter by chapterId (tasks ARE chapters) for per-task
+     *  ±/edits. Completed tasks fold behind a "N done · show all" row; Active-only hides them outright
+     *  (the same semantics the fleet's filters use). */
+    private fun repaintTasks(tasks: List<SessionTask>) {
+        lastTasks = tasks
+        val chBy = map?.chapters?.associateBy { it.id } ?: emptyMap()
+        val (done, active) = tasks.partition { it.status == "completed" }
+        tasksModel.clear()
+        active.forEach { tasksModel.addElement(TaskRow(it, chBy[it.chapterId])) }
+        if (!activeOnly && done.isNotEmpty()) {
+            tasksModel.addElement(DoneTasksToggle(done.size, tasksOpen))
+            if (tasksOpen) done.forEach { tasksModel.addElement(TaskRow(it, chBy[it.chapterId])) }
+        }
+        if (::navTabs.isInitialized && navTabs.tabCount > 2) {
+            navTabs.setTitleAt(2, if (tasks.isEmpty()) "Tasks" else "Tasks ${done.size}/${tasks.size}")
+        }
     }
 
     /** Paint the Workflows tab: one node per run — its INFORMATIVE name (description/summary) · agents ·
@@ -431,40 +458,7 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         return null
     }
 
-    private fun updateCollisionStrip(collisions: List<Collision>) {
-        lastCollisions = collisions
-        collisionStrip.cursor = if (collisions.isEmpty()) Cursor.getDefaultCursor() else Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
-        if (collisions.isEmpty()) {
-            collisionStrip.text = "No live file conflicts"
-            collisionStrip.foreground = UIUtil.getContextHelpForeground()
-            collisionStrip.toolTipText = "No file is being touched by more than one active agent right now"
-            return
-        }
-        val pending = collisions.count { it.anyPending }
-        collisionStrip.text = "⚠ ${collisions.size} live conflict${if (collisions.size == 1) "" else "s"}" +
-            if (pending > 0) " · $pending with pending edits" else ""
-        collisionStrip.foreground = MT_ATTENTION
-        collisionStrip.toolTipText = "<html>" + collisions.take(20).joinToString("<br>") { c ->
-            shortFile(c.file) + " — " + c.agents.joinToString(", ") { it.take(8) } + (if (c.anyPending) " ⏳" else "")
-        } + (if (collisions.size > 20) "<br>+${collisions.size - 20} more" else "") + "<br>Click to open</html>"
-    }
 
-    /** Open a contested file from the conflict strip — directly for one collision, via a chooser for
-     *  several (VS Code parity: its conflict rows open the file on click). */
-    private fun openCollision() {
-        val cols = lastCollisions
-        if (cols.isEmpty()) return
-        fun open(path: String) {
-            val vf = com.intellij.openapi.vfs.LocalFileSystem.getInstance().refreshAndFindFileByPath(path)
-            if (vf == null) ReviewOps.notify(project, "File not found: $path", com.intellij.notification.NotificationType.WARNING)
-            else com.intellij.openapi.fileEditor.FileEditorManager.getInstance(project).openFile(vf, true)
-        }
-        if (cols.size == 1) return open(cols.first().file)
-        JPopupMenu().apply {
-            cols.take(20).forEach { c -> add(menuItem(shortFile(c.file)) { open(c.file) }) }
-            show(collisionStrip, 0, collisionStrip.height)
-        }
-    }
 
     // --- the right detail: change-map for the selected nav item ---
 
@@ -578,9 +572,6 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
     // Kotlin port of VS Code's canonical multitaskFilter (pinned by MultitaskFilterTest, no drift).
     private fun agentActive(a: RunningAgent) = MultitaskFilter.agentActive(a)
 
-    private fun hiddenCount(res: MultitaskResult?): Int =
-        MultitaskFilter.hiddenCount(res, dismissedAgents, dismissedWorkflows)
-
     private fun activeOnlyToggle(): ToggleAction = object : ToggleAction(
         "Active Only",
         "Show only active agents (working / awaiting input / awaiting permission, or with an active subagent) and running workflows",
@@ -592,44 +583,6 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         override fun isSelected(e: AnActionEvent) = activeOnly
         override fun setSelected(e: AnActionEvent, state: Boolean) {
             activeOnly = state
-            repaintNav(lastResult)
-        }
-    }
-
-    private fun clearCompletedAction(): AnAction = object : AnAction(
-        "Clear Completed",
-        "Hide completed agents (idle / done / errored, no active subagent) and finished workflows — a dismiss, never a delete",
-        AllIcons.Actions.GC,
-    ), DumbAware {
-        override fun getActionUpdateThread() = ActionUpdateThread.EDT
-        override fun update(e: AnActionEvent) {
-            val res = lastResult
-            e.presentation.isEnabled = res != null && (
-                res.agents.any { !agentActive(it) && it.session !in dismissedAgents } ||
-                    res.workflows.any { !it.running && it.id !in dismissedWorkflows })
-        }
-
-        override fun actionPerformed(e: AnActionEvent) {
-            val res = lastResult ?: return
-            res.agents.filter { !agentActive(it) }.forEach { dismissedAgents.add(it.session) }
-            res.workflows.filter { !it.running }.forEach { dismissedWorkflows.add(it.id) }
-            repaintNav(res)
-        }
-    }
-
-    private fun showHiddenAction(): AnAction = object : AnAction(
-        "Show Hidden", "Un-dismiss everything cleared with Clear Completed", AllIcons.Actions.Show,
-    ), DumbAware {
-        override fun getActionUpdateThread() = ActionUpdateThread.EDT
-        override fun update(e: AnActionEvent) {
-            val n = hiddenCount(lastResult)
-            e.presentation.isEnabledAndVisible = n > 0
-            e.presentation.text = "Show Hidden ($n)"
-        }
-
-        override fun actionPerformed(e: AnActionEvent) {
-            dismissedAgents.clear()
-            dismissedWorkflows.clear()
             repaintNav(lastResult)
         }
     }
@@ -801,6 +754,42 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         }
     }
 
+    /** Paints one Tasks-tab row: status glyph (the fleet's state colors) · #id · subject (struck through
+     *  when completed) · per-task ±/edits from its chapter · the in-progress activeForm · a blocked-by
+     *  note. Tooltip = the description. */
+    private class TaskRowRenderer : com.intellij.ui.ColoredListCellRenderer<Any>() {
+        override fun customizeCellRenderer(
+            list: javax.swing.JList<out Any>, value: Any?, index: Int, selected: Boolean, hasFocus: Boolean,
+        ) {
+            if (value is DoneTasksToggle) {
+                append("${value.count} done · ${if (value.open) "hide" else "show all"}", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                toolTipText = "Completed tasks fold here — click to ${if (value.open) "hide" else "show"} them"
+                return
+            }
+            val row = value as? TaskRow ?: return
+            val t = row.task
+            val done = t.status == "completed"
+            val wip = t.status == "in_progress"
+            append(
+                if (done) "● " else if (wip) "◐ " else "○ ",
+                SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, if (done) MT_DONE else if (wip) MT_WORKING else JBColor.GRAY),
+            )
+            append("#${t.id}  ", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
+            append(
+                clip(t.subject, 64),
+                if (done) SimpleTextAttributes(SimpleTextAttributes.STYLE_STRIKEOUT, JBColor.GRAY) else SimpleTextAttributes.REGULAR_ATTRIBUTES,
+            )
+            row.chapter?.takeIf { it.edits > 0 }?.let { ch ->
+                append("  +${ch.added}", MT_ADD)
+                append(" −${ch.removed}", MT_REM)
+                append(" · ${ch.edits} edit${if (ch.edits == 1) "" else "s"}" + if (ch.pending > 0) " · ${ch.pending} pending" else "", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
+            }
+            if (wip && t.activeForm != null) append("  ${t.activeForm}…", SimpleTextAttributes(SimpleTextAttributes.STYLE_ITALIC, MT_WORKING))
+            if (t.blockedBy.isNotEmpty()) append("  blocked ×${t.blockedBy.size}", SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, MT_ATTENTION))
+            toolTipText = t.description.ifBlank { t.subject }
+        }
+    }
+
     /** Wraps a tree cell renderer so rows that carry activity bins — fleet agents, workflow runs + their
      *  agents — get a painted [SparklineIcon] on the row's right edge. The panel stays non-opaque so the
      *  tree's wide-selection background shows through; the inner renderer's tooltip is forwarded. */
@@ -925,6 +914,10 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             ribbon.removeAll()
             val done = ArrayList<ChangeMapChapter>()
             data.chapters.forEach { ch ->
+                // Task-born chapters live on the Tasks tab — never duplicate them here (VS Code parity);
+                // and planned zero-edit rows stay hidden like VS Code's ribbon filter.
+                if (ch.fromTask) return@forEach
+                if (ch.edits == 0 && ch.status != "wip") return@forEach
                 if (ch.edits > 0 && ch.pending == 0 && ch.undone == 0) done.add(ch) else ribbon.add(chapterRow(ch))
             }
             if (done.isNotEmpty()) {
@@ -1054,9 +1047,11 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
                 row.add(JBLabel("+${ch.added} −${ch.removed}").apply { font = JBUI.Fonts.miniFont(); foreground = UIUtil.getContextHelpForeground() })
             }
             if (actable) {
-                row.add(miniButton(AllIcons.Actions.Checked, "Accept — keep the pending edits shown in this chapter") { withSession { s -> ReviewOps.keepTask(project, s, ch.id, title) } })
-                row.add(miniButton(AllIcons.Actions.Rollback, "Reject — revert the pending edits shown in this chapter") { withSession { s -> ReviewOps.undoTask(project, s, ch.id, title) } })
-                row.add(miniButton(AllIcons.Actions.GC, "Clear — drop this chapter's resolved edits") { withSession { s -> ReviewOps.clearTask(project, s, ch.id, title) } })
+                // The chips ARE the bulk actions retargeted to this chapter — same glyphs + tints as the
+                // toolbar's Accept All / Revert All / Clear Resolved (VS Code chip parity, one icon per action).
+                row.add(miniButton(NavTint.ACCEPT_ALL, "Accept — keep the pending edits shown in this chapter") { withSession { s -> ReviewOps.keepTask(project, s, ch.id, title) } })
+                row.add(miniButton(NavTint.REVERT_ALL, "Reject — revert the pending edits shown in this chapter") { withSession { s -> ReviewOps.undoTask(project, s, ch.id, title) } })
+                row.add(miniButton(NavTint.CLEAR, "Clear — drop this chapter's resolved edits") { withSession { s -> ReviewOps.clearTask(project, s, ch.id, title) } })
             }
             return row
         }
@@ -1210,7 +1205,7 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
                 selected = isSelected
                 toolTipText = buildString {
                     append(v.rel)
-                    append("\n+${v.churn} · ${v.cnt} unit(s) · ${v.kept}✓ ${v.pending}⏳ ${v.undone}↩")
+                    append("\n+${v.churn} · ${v.cnt} unit(s) · ${v.kept}✓ ${v.pending}⧗ ${v.undone}↩")
                     if (v.classes.isNotEmpty()) append("\n" + v.classes.take(4).joinToString(", "))
                     v.reason?.let { append("\n“$it”") }
                     v.risk?.let { append("\n⚠ $it") }
@@ -1264,7 +1259,7 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
                 g2.drawString(num, x + numW - g2.fontMetrics.stringWidth(num), mid + JBUI.scale(3))
                 x += numW + JBUI.scale(4)
 
-                val pend = if (v.pending > 0) "${v.pending}⏳" else "✓"
+                val pend = if (v.pending > 0) "${v.pending}⧗" else "✓"
                 g2.color = if (v.pending > 0) CM_PENDING else CM_KEPT
                 g2.drawString(pend, x + pendW - g2.fontMetrics.stringWidth(pend), mid + JBUI.scale(3))
             }

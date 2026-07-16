@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Claude Observatory — interface reference</title>
-<meta name="description" content="A visual reference for Claude Observatory — the name of every window, tab, and toolbar button across the sidebar, editor, bottom panel, status bar, and the inline review bubble.">
+<title>Claude Observatory — panels reference</title>
+<meta name="description" content="A visual reference for Claude Observatory — every panel across the sidebar and the bottom dashboards dock, named and annotated.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%AC%3C/text%3E%3C/svg%3E">
 <style>
   :root{
@@ -133,7 +133,7 @@
 <header class="hero"><div class="wrap">
   <p class="eyebrow">Panels</p>
   <h1>Interface reference</h1>
-  <p>Every window, tab, and toolbar button in the observatory, named and annotated — so documentation, issues, and support can refer to each control precisely. Screens are from VS Code; JetBrains mirrors them.</p>
+  <p>The observatory&rsquo;s panels, named and annotated — so documentation, issues, and support can refer to each view precisely. Screens are from VS Code; JetBrains mirrors them.</p>
 </div></header>
 
 <!-- 01 · the workspace (master map) -->
@@ -150,103 +150,17 @@
   <div class="sechead"><span class="n">02</span><h2>The panel views in detail</h2></div>
   <p class="lede">The observatory&rsquo;s own views, with every part named: the Observations · Overview · Stats panes of the &ldquo;Claude&nbsp;Observatory&rdquo; bottom panel, plus <b>Actions</b>, which lives in the Claude&nbsp;Edits sidebar.</p>
   <div class="diagrams">
-    <figure id="overview"><h3 class="dh">Overview <span class="id">master-detail · the fleet and the change-map</span></h3><div class="panel plain"><img src="media/overview-tabs.png" loading="lazy" alt="Overview panel, master-detail. LEFT NAV (~25%), two tabs: 1 Fleet — every running agent across the repo's git worktrees, each with a live phase badge (working / awaiting-input / awaiting-permission / idle / errored / done; heuristic phases carry a ~ marker — inferred from inactivity), worktree + branch, an activity sparkline, ±diff, tokens·time, risk and a collision badge, unfolding to nested subagents (agentType/description, phase, current task + to-dos, ±lines, a chat button); 2 Workflows — each multi-agent workflow run, with an informative name, running/done, per-phase progress groups and its agents (tokens·time·edits) over a matching sparkline; plus an Active-only toggle, Clear-completed (dismisses, never deletes) and a cross-agent conflicts strip. RIGHT DETAIL (~75%): 3 the selected agent's change-map — a named-chapter task ribbon (Claude's to-dos as stable content-hash chapters, click one to scope the bulk actions; chapters are total — work outside any to-do appears as a dimmed synthesized session chapter titled from the session's goal, reviewable like any other; each chapter's Accept/Reject/Clear act on exactly the edits its row shows; duplicate to-do titles render as separate rows), a one-row module proportion strip, and a file ledger ranked by churn (±line bars colored by review status). TITLE BAR: 4 a session selector, the combined review nav bar, and bulk actions (Accept All · Revert All · Clear Resolved · Refresh)"></div><figcaption>Phases marked ~ are inferred from inactivity, never asserted. The chapter ribbon is total — work outside any to-do lands in a dimmed session chapter, reviewable like any other; a chapter's Accept / Reject / Clear act on exactly the edits its row shows.</figcaption></figure>
+    <figure id="overview"><h3 class="dh">Overview <span class="id">master-detail · the fleet and the change-map</span></h3><div class="panel plain"><img src="media/overview-tabs.png" loading="lazy" alt="Overview panel, master-detail. LEFT NAV (~25%), three tabs: 1 Fleet — every running agent across the repo's git worktrees, each with a live phase badge (working / awaiting-input / awaiting-permission / idle / errored / done; heuristic phases carry a ~ marker — inferred from inactivity), worktree + branch, an activity sparkline, ±diff, tokens·time, risk and a collision badge, unfolding to nested subagents (agentType/description, phase, current task + to-dos, ±lines, a chat button); 2 Workflows — each multi-agent workflow run, with an informative name, running/done, per-phase progress groups and its agents (tokens·time·edits) over a matching sparkline; 2b Tasks — the session's numbered task list (Claude's TaskCreate/TaskUpdate tasks) with live statuses, a done badge, and strikethrough on completion; plus an Active-only toggle (which also hides completed tasks) and Clear-completed (dismisses, never deletes). RIGHT DETAIL (~75%): 3 the selected agent's change-map — a named-chapter task ribbon (Claude's to-dos as stable content-hash chapters, click one to scope the bulk actions; chapters are total — work outside any to-do appears as a dimmed synthesized session chapter titled from the session's goal, reviewable like any other; each chapter's Accept/Reject/Clear act on exactly the edits its row shows; duplicate to-do titles render as separate rows), a one-row module proportion strip, and a file ledger ranked by churn (±line bars colored by review status). TITLE BAR: 4 the review toolbar in five spaced groups — Search · session · Active only | Diff axis · Keep · Undo | File axis · Accept/Reject File | Accept All · Revert All · Clear Resolved | Spotlight · Refresh — labeled, color-coded, one icon per action"></div><figcaption>Phases marked ~ are inferred from inactivity, never asserted. The chapter ribbon is total — work outside any to-do lands in a dimmed session chapter, reviewable like any other; a chapter's Accept / Reject / Clear act on exactly the edits its row shows.</figcaption></figure>
     <figure id="fleet"><h3 class="dh">Overview &rarr; Fleet <span class="id">every running agent, live</span></h3><div class="panel plain"><img src="media/multitasking.png" loading="lazy" alt="The Overview's Fleet left-nav tab (formerly the Multitasking window): 1 per-agent rows — each running agent across the repo's git worktrees, with a live phase badge (heuristic phases carry a ~ marker), worktree + branch, an activity sparkline, ±diff, tokens·time, risk and a collision badge; 2 nested subagents (agentType/description, phase, current task + to-dos, ±lines, a chat button); 3 a cross-agent file-conflicts strip"></div></figure>
+    <figure id="workflows"><h3 class="dh">Overview &rarr; Workflows <span class="id">multi-agent orchestration runs</span></h3><div class="panel plain"><img src="media/overview-workflows.png" loading="lazy" alt="The Overview's Workflows left-nav tab: one row per multi-agent workflow run — an informative name, a running/done badge, phase progress with tokens and elapsed time, and an activity sparkline — unfolding to per-phase groups and their agents (tokens · time · edits). Selecting a run drives the right-hand change-map detail with that run's chapter rollup and files"></div><figcaption>Each workflow run maps its agents&rsquo; edits into the same change-map detail as any fleet agent.</figcaption></figure>
+    <figure id="tasks"><h3 class="dh">Overview &rarr; Tasks <span class="id">the session&rsquo;s numbered task list</span></h3><div class="panel plain"><img src="media/overview-tasks.png" loading="lazy" alt="The Overview's Tasks left-nav tab: the session's numbered TaskCreate/TaskUpdate tasks, newest first — a status glyph (in-progress / done with strikethrough), the task number and subject, the in-progress task's active form in italics, and per-task +added −removed and edit counts joined from the task's chapter. Completed tasks fold behind an 'N done · show all' row, and the Active-only toggle hides them outright"></div><figcaption>Tasks link to chapters: each task&rsquo;s row carries the live &plusmn; and edit counts of the chapter it planned, and reviewing that chapter reviews the task&rsquo;s edits.</figcaption></figure>
     <figure id="observations"><h3 class="dh">Observations <span class="id">the change feed · Claude's reasoning</span></h3><div class="panel plain"><img src="media/win-observations.png" loading="lazy" alt="Observations panel: 1 session recap, 2 the coalesced change feed (files ordered by recent activity; adjacent same-file edits collapse into a ×N run) — the former Timeline is folded in here, 3 per-edit reasoning rows with flags and file-memory, 4 next steps"></div></figure>
     <figure id="stats"><h3 class="dh">Stats <span class="id">progress &amp; usage</span></h3><div class="panel plain"><img src="media/win-stats.png" loading="lazy" alt="Stats panel: 1 review scoreboard, 2 range toggle, 3 token plot, 4 usage bars"></div></figure>
-    <figure id="actions"><h3 class="dh">Actions <span class="id">every tool call &mdash; in the sidebar</span></h3><div class="panel plain"><img src="media/win-actions.png" loading="lazy" alt="Actions view — now in the Claude Edits sidebar, not the bottom panel: every tool call Claude made, grouped by category (Edits · Commands · Reads · Searches · Web · To-dos · Egress) and collapsed by default; errors always surface, a Show-all toggle reveals the low-signal categories, and edit rows link to their review. The Risk and Egress audits ride the same timeline"></div></figure>
+    <figure id="actions"><h3 class="dh">Actions <span class="id">every tool call &mdash; in the sidebar</span></h3><div class="panel plain"><img src="media/win-actions.png" loading="lazy" alt="Actions view — now in the Claude Edits sidebar, not the bottom panel: every tool call Claude made, grouped by category (Edits · Commands · Reads · Searches · Web · To-dos · Egress) and collapsed by default — led by a Live-conflicts section (files touched by 2+ active agents, click to open) that starts expanded; errors always surface, a Show-all toggle reveals the low-signal categories, and edit rows link to their review. The Risk and Egress audits ride the same timeline"></div></figure>
   </div>
 </div></section>
 
-<!-- 04 · status bar nav bar -->
-<section id="navbar"><div class="wrap">
-  <div class="sechead"><span class="n">03</span><h2>Status bar &mdash; navigation bar</h2></div>
-  <p class="lede">The compact review toolbar beside the 🔬 microscope, shown whenever edits await review. The status bar is the only surface that shows live counters, and its clear button is the session-wide Clear resolved. The <b>Overview</b> panel&rsquo;s title bar carries the same combined review nav bar (Search first on every surface, then File&nbsp;◄► / Diff&nbsp;◄► step-through, Keep · Undo · Accept/Reject File · the file-scoped Clear File · Spotlight) alongside its session selector and bulk actions.</p>
-  <div class="strip" aria-hidden="true">
-    <span class="g">🔬</span><span class="num">3</span><span class="sep">·</span>
-    <span class="g">⌃</span><span class="num">2/3</span><span class="g">⌄</span><span class="sep">·</span>
-    <span class="g">‹</span><span class="num">1/3</span><span class="g">›</span><span class="sep">·</span>
-    <span class="g k-kept">✓</span><span class="g k-pending">↩</span><span class="g k-kept">✓✓</span><span class="g k-rev">✕</span><span class="sep">·</span>
-    <span class="g">🧹</span><span class="g">💡</span><span class="g">🔍</span>
-  </div>
-  <div class="legend">
-    <div class="item"><span class="key">🔬</span><div class="t"><div class="name">Microscope <span class="num">N</span></div><div class="desc">Pending-edit count. Click → jump to the next edit to review.</div></div></div>
-    <div class="item"><span class="key">⌃ ⌄</span><div class="t"><div class="name">Diff axis <span class="k-acc">n/m</span></div><div class="desc">Step the pending edits <em>in this file</em>; the counter opens the review bubble.</div></div></div>
-    <div class="item"><span class="key">‹ ›</span><div class="t"><div class="name">File axis <span class="k-acc">i/k</span></div><div class="desc">Step across every file with pending edits; the counter opens the Edits view.</div></div></div>
-    <div class="item"><span class="key k-kept">✓</span><div class="t"><div class="name">Keep</div><div class="desc">Accept this edit.</div></div></div>
-    <div class="item"><span class="key k-pending">↩</span><div class="t"><div class="name">Undo</div><div class="desc">Revert this edit (surgically — later edits are preserved).</div></div></div>
-    <div class="item"><span class="key k-kept">✓✓</span><div class="t"><div class="name">Accept File</div><div class="desc">Keep every pending edit in the open file.</div></div></div>
-    <div class="item"><span class="key k-rev">✕</span><div class="t"><div class="name">Reject File</div><div class="desc">Revert every pending edit in the open file.</div></div></div>
-    <div class="item"><span class="key">🧹</span><div class="t"><div class="name">Clear resolved</div><div class="desc">Drop the kept / reverted rows from the list.</div></div></div>
-    <div class="item"><span class="key">💡</span><div class="t"><div class="name">Spotlight</div><div class="desc">Dim every unmodified line so Claude&rsquo;s edits read at full contrast.</div></div></div>
-    <div class="item"><span class="key">🔍</span><div class="t"><div class="name">Search edits</div><div class="desc">Filter the edit list by path.</div></div></div>
-  </div>
-</div></section>
-
-<!-- 05 · inline review bubble -->
-<section id="bubble"><div class="wrap">
-  <div class="sechead"><span class="n">04</span><h2>Inline review bubble</h2></div>
-  <p class="lede">Opens from <em>view changes</em>: the edit&rsquo;s before ⟷ after in the editor, with a title showing <span class="num">Diff n/m · File i/k</span>. Its toolbar mirrors the navigation bar.</p>
-  <figure><div class="panel plain"><img src="media/bubble.png" loading="lazy" alt="The inline review bubble: 1 title (edit id, delta, Diff n/m · File i/k), 2 toolbar (prev/next edit and file, Keep, Undo, Accept/Reject File, Chat, Clear, Spotlight, Search), 3 reasoning, 4 diff"></div></figure>
-</div></section>
-
-<!-- 06 · editor tab bar -->
-<section id="tabbar"><div class="wrap">
-  <div class="sechead"><span class="n">05</span><h2>Editor tab bar</h2></div>
-  <p class="lede">Shown on a file with pending edits. Icon buttons only; the live counters appear in the CodeLens on each edit and in the status-bar navigation bar.</p>
-  <div class="strip" aria-hidden="true">
-    <span class="g">‹</span><span class="g">›</span><span class="sep">·</span>
-    <span class="g k-kept">✓</span><span class="g k-pending">↩</span><span class="sep">·</span>
-    <span class="g">🧹</span><span class="g">💡</span><span class="g">🔍</span><span class="g">⇄</span><span class="sep">·</span>
-    <span class="g">‹‹</span><span class="g">››</span><span class="g k-kept">✓✓</span><span class="g k-rev">✕</span>
-  </div>
-  <div class="legend">
-    <div class="item"><span class="key">‹ ›</span><div class="t"><div class="name">Prev / Next edit</div><div class="desc">Step the pending edits in this file (Diff axis).</div></div></div>
-    <div class="item"><span class="key k-kept">✓</span><div class="t"><div class="name">Keep</div><div class="desc">Accept this edit.</div></div></div>
-    <div class="item"><span class="key k-pending">↩</span><div class="t"><div class="name">Undo</div><div class="desc">Revert this edit.</div></div></div>
-    <div class="item"><span class="key">🧹</span><div class="t"><div class="name">Clear resolved</div><div class="desc">Drop kept / reverted rows.</div></div></div>
-    <div class="item"><span class="key">💡</span><div class="t"><div class="name">Spotlight</div><div class="desc">Dim unmodified lines.</div></div></div>
-    <div class="item"><span class="key">🔍</span><div class="t"><div class="name">Search edits</div><div class="desc">Filter by path.</div></div></div>
-    <div class="item"><span class="key">⇄</span><div class="t"><div class="name">Switch session</div><div class="desc">Pick which capture session the observatory shows.</div></div></div>
-    <div class="item"><span class="key">‹‹ ››</span><div class="t"><div class="name">Prev / Next file</div><div class="desc">Step across changed files (File axis).</div></div></div>
-    <div class="item"><span class="key k-kept">✓✓</span><div class="t"><div class="name">Accept File</div><div class="desc">Keep every pending edit in this file.</div></div></div>
-    <div class="item"><span class="key k-rev">✕</span><div class="t"><div class="name">Revert File</div><div class="desc">Revert every pending edit in this file.</div></div></div>
-  </div>
-</div></section>
-
-<!-- 07 · sidebar title bar -->
-<section id="sidebar"><div class="wrap">
-  <div class="sechead"><span class="n">06</span><h2>Claude Edits sidebar &mdash; title bar</h2></div>
-  <p class="lede">On the Edits / Diffs views. Per-file Accept / Revert lives on the tab bar and status bar, not here.</p>
-  <div class="strip" aria-hidden="true">
-    <span class="g">🔍</span><span class="sep">·</span><span class="g">‹</span><span class="g">›</span><span class="sep">·</span>
-    <span class="g k-kept">✓✓</span><span class="g k-pending">↩↩</span><span class="g">🧹</span><span class="sep">·</span>
-    <span class="g">⇄</span><span class="g">🗄</span><span class="g">⟳</span>
-  </div>
-  <div class="legend">
-    <div class="item"><span class="key">🔍</span><div class="t"><div class="name">Search edits</div><div class="desc">Filter the tree by path.</div></div></div>
-    <div class="item"><span class="key">‹ ›</span><div class="t"><div class="name">Review prev / next</div><div class="desc">Walk the pending edits (⌥⌘P / ⌥⌘N).</div></div></div>
-    <div class="item"><span class="key k-kept">✓✓</span><div class="t"><div class="name">Accept all</div><div class="desc">Keep every pending edit in the session.</div></div></div>
-    <div class="item"><span class="key k-pending">↩↩</span><div class="t"><div class="name">Revert all</div><div class="desc">Revert every pending edit in the session.</div></div></div>
-    <div class="item"><span class="key">🧹</span><div class="t"><div class="name">Clear resolved</div><div class="desc">Drop the kept / reverted rows.</div></div></div>
-    <div class="item"><span class="key">⇄</span><div class="t"><div class="name">Switch session</div><div class="desc">Change which session is shown.</div></div></div>
-    <div class="item"><span class="key">🗄</span><div class="t"><div class="name">Clean store</div><div class="desc">Reclaim disk / drop a session&rsquo;s snapshots.</div></div></div>
-    <div class="item"><span class="key">⟳</span><div class="t"><div class="name">Refresh</div><div class="desc">Re-read the store now.</div></div></div>
-  </div>
-</div></section>
-
-<!-- 08 · inline review in the editor -->
-<section id="inline"><div class="wrap">
-  <div class="sechead"><span class="n">07</span><h2>Inline review &mdash; in the editor body</h2></div>
-  <p class="lede">On each of Claude&rsquo;s pending edits, in the file itself.</p>
-  <div class="legend">
-    <div class="item"><span class="key k-acc">✨</span><div class="t"><div class="name">Edit marker</div><div class="desc">A gutter star + tinted line where Claude edited. Click → the before ⟷ after diff.</div></div></div>
-    <div class="item"><span class="key">◇</span><div class="t"><div class="name">CodeLens</div><div class="desc"><span class="num">✨ #12 +4 −0 · edit 2/3 in file · file 1/3</span> — the live Diff / File position, then Keep · Undo · Chat · View&nbsp;diff.</div></div></div>
-    <div class="item"><span class="key">▤</span><div class="t"><div class="name">Change bar</div><div class="desc">A coral bar in the overview ruler marks every line Claude touched.</div></div></div>
-  </div>
-</div></section>
-
-<footer><div class="wrap">Claude Observatory — visual reference. Glyphs approximate the VS Code codicons; JetBrains uses its own icon set for the same actions. Demo: every surface on this page can be populated without Claude — <code>claude-observatory demo</code> replays a scripted session through the real pipeline; <code>claude-observatory demo --clean</code> removes every trace. <a href="showcase.html">← Overview</a></div></footer>
+<footer><div class="wrap">Claude Observatory — panels reference. Demo: every panel on this page can be populated without Claude — <code>claude-observatory demo</code> replays a scripted session through the real pipeline; <code>claude-observatory demo --clean</code> removes every trace. <a href="showcase.html">← Overview</a></div></footer>
 
 <script>
   (function(){

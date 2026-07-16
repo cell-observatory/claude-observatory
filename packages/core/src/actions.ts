@@ -77,6 +77,11 @@ export function categoryOf(tool: string): ActionCategory {
     case 'Agent':
       return 'agent';
     case 'TodoWrite':
+    // The newer task system (numbered tasks with statuses) — same planning surface, same category.
+    case 'TaskCreate':
+    case 'TaskUpdate':
+    case 'TaskList':
+    case 'TaskGet':
       return 'todo';
     case 'AskUserQuestion':
     case 'ExitPlanMode':

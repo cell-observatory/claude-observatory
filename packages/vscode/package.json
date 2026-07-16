@@ -2,7 +2,7 @@
   "name": "claude-observatory-vscode",
   "displayName": "Claude Observatory",
   "description": "A running list of every file change Claude Code makes, each with its own Keep / Undo (surgical, git-free).",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "publisher": "claude-observatory",
   "private": true,
   "engines": {
@@ -168,12 +168,6 @@
         "icon": "$(close-all)"
       },
       {
-        "command": "claudeObservatory.clearOpenFile",
-        "title": "Clear resolved (kept/reverted) edits in this file",
-        "category": "Claude Observatory",
-        "icon": "$(clear-all)"
-      },
-      {
         "command": "claudeObservatory.setup",
         "title": "Show setup instructions",
         "category": "Claude Observatory"
@@ -309,13 +303,13 @@
         "command": "claudeObservatory.keepAll",
         "title": "Accept all edits",
         "category": "Claude Observatory",
-        "icon": "$(check-all)"
+        "icon": "$(checklist)"
       },
       {
         "command": "claudeObservatory.undoAll",
         "title": "Revert all edits",
         "category": "Claude Observatory",
-        "icon": "$(discard)"
+        "icon": "$(timeline-view-icon)"
       },
       {
         "command": "claudeObservatory.clearResolved",
@@ -914,7 +908,7 @@
     "package": "vsce package --no-dependencies -o claude-observatory.vsix"
   },
   "devDependencies": {
-    "@claude-observatory/core": "0.8.2",
+    "@claude-observatory/core": "0.8.3",
     "@types/node": "^22.0.0",
     "@types/vscode": "^1.85.0",
     "@vscode/codicons": "^0.0.45",

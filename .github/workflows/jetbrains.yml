@@ -1,0 +1,30 @@
+name: JetBrains
+
+# Gradle test + buildPlugin so the plugin's build health carries its own README badge and the
+# installable zip is downloadable per-commit.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  plugin:
+    name: gradle test + buildPlugin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+      - run: ./gradlew test buildPlugin --console=plain
+        working-directory: packages/jetbrains
+      - uses: actions/upload-artifact@v4
+        with:
+          name: claude-observatory-jetbrains
+          path: packages/jetbrains/build/distributions/*.zip

@@ -14,20 +14,57 @@ import com.intellij.openapi.project.DumbAware
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.wm.ToolWindowManager
+import com.intellij.ui.JBColor
+import com.intellij.util.IconUtil
+import java.awt.Color
 import java.io.File
 import javax.swing.Icon
 
 /**
- * The compact step-through review toolbar — File axis (◀ n/m ▶), Diff axis (▲ n/m ▼), Keep/Undo this edit,
- * Accept/Reject/Clear File, Spotlight, Search — the VS Code Overview toolbar order — shared VERBATIM by the
- * status-bar widget (ObservatoryActionsWidgetFactory) and the Overview title bar (ChangeMapPanel), so both
- * surfaces — and both editors — step through review identically (cross-editor parity, single implementation).
+ * Semantic tints for the nav-bar icons (the MT/chart palette — the same hexes the VS Code toolbar reads
+ * from --mt-*): keep/accept GREEN · undo/reject RED · nav chevrons BLUE · clear ORANGE · search/spotlight
+ * PURPLE. Shared by the review nav bar and the Overview's bulk actions so every surface color-groups
+ * identically (cross-editor parity — the VS Code webview tints the same buttons the same colors).
+ */
+internal object NavTint {
+    val GREEN = JBColor(Color(0x3FB950), Color(0x3FB950))
+    val RED = JBColor(Color(0xE5534B), Color(0xE5534B))
+    val BLUE = JBColor(Color(0x4C8BF5), Color(0x4C8BF5))
+    val ORANGE = JBColor(Color(0xD9822B), Color(0xD9822B))
+    val PURPLE = JBColor(Color(0x9A6AC2), Color(0x9A6AC2))
+    fun tint(icon: Icon, color: Color): Icon = IconUtil.colorize(icon, color)
+
+    // ONE glyph+tint per ACTION — and no glyph serves two different actions (user rule 2026-07-16).
+    // Used by every surface (nav bars, panel toolbars, context menus, the editor banner, the floating
+    // lens) so the same action always looks the same. Three scope tiers, mirroring the VS Code
+    // codicons: per-edit Keep ✓/Undo ↩ · scoped (file/folder) Accept ✓✓/Reject ✕ · session-wide
+    // Accept All (commit)/Revert All (history, VS Code $(timeline-view-icon)). Row STATE badges stay
+    // neutral except kept-green (a reverted STATE is not a destructive ACTION — it never wears red).
+    val KEEP: Icon = tint(AllIcons.Actions.Checked, GREEN)
+    val ACCEPT_FILE: Icon = tint(Icons.CheckAll, GREEN)
+    val ACCEPT_ALL: Icon = tint(AllIcons.Actions.Commit, GREEN)
+    val UNDO: Icon = tint(AllIcons.Actions.Rollback, RED)
+    val REJECT: Icon = tint(AllIcons.Actions.Cancel, RED)
+    val REVERT_ALL: Icon = tint(AllIcons.Vcs.History, RED)
+    val CLEAR: Icon = tint(AllIcons.Actions.GC, ORANGE)
+    val SEARCH: Icon = tint(AllIcons.Actions.Find, PURPLE)
+    val SPOTLIGHT: Icon = tint(AllIcons.Actions.IntentionBulb, PURPLE)
+    /** Chat = a speech balloon (VS Code's comment-discussion) — NOT the bulb, which is Spotlight's. */
+    val CHAT: Icon = tint(AllIcons.General.Balloon, PURPLE)
+}
+
+/**
+ * The compact step-through review toolbar — Search, Diff axis (▲ n/m ▼), File axis (◀ n/m ▶), Keep/Undo
+ * this edit, Accept/Reject File, Spotlight — the VS Code status-bar order. The status-bar widget
+ * (ObservatoryActionsWidgetFactory) consumes [buildGroup] flat; the Overview title bar (ChangeMapPanel)
+ * composes the SAME actions into its five spaced groups — one behavior, two compositions, and both
+ * editors step through review identically (cross-editor parity, single implementation).
  *
  * Tiers, driven by per-action visibility:
  *   • session tier     — File axis (◀ n/m ▶), Spotlight, Search — whenever any edit is pending.
  *   • active-file tier — Diff axis (▲ n/m ▼), Keep/Undo this edit, Accept/Reject File — when the OPEN file
- *     has pending edits — and Clear File when it has resolved edits to clear.
- * The one per-host difference is the clear button's scope — see [buildGroup]'s [sessionClear].
+ *     has pending edits.
+ * The one per-host difference is whether the session-wide clear rides along — see [buildGroup]'s [sessionClear].
  *
  * Each HOST owns its own instance and thus its own nav position ([navEditId]); [onNavChange] fires after a
  * Diff/File step so the host can refresh its toolbar immediately.
@@ -39,58 +76,78 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
     // The pending edit the Diff axis is parked on within the open file (mirrors the VS Code navEditId).
     @Volatile private var navEditId: Int? = null
 
-    /** [sessionClear] picks the bar's clear button per host (VS Code parity): the STATUS BAR carries the
-     *  session-wide Clear Resolved and no Clear File; the OVERVIEW title bar (default) carries the
-     *  file-scoped Clear File instead — its toolbar's bulk actions already include the session-wide clear.
-     *  [showText] renders each action button's SHORT label beside its icon (the Overview title bar — VS
-     *  Code shows these labels); the status bar keeps icon-only compactness. The four nav chevrons stay
-     *  icon-only on BOTH hosts (VS Code parity — its chevrons carry no label either). */
-    fun buildGroup(sessionClear: Boolean = false, showText: Boolean = false) = DefaultActionGroup(
+    /** [sessionClear] gates the bar's ONLY clear button (VS Code parity): the STATUS BAR carries the
+     *  session-wide Clear Resolved; the OVERVIEW title bar (default) carries none — its toolbar's bulk
+     *  actions already include the session-wide clear. (The file-scoped Clear File was REMOVED
+     *  2026-07-16 — the session-wide Clear Resolved covers it.)
+     *  [showText] renders each action button's SHORT label beside its icon — BOTH hosts pass true now
+     *  (user rule 2026-07-16: the icon-only status bar read as cryptic; VS Code labels both surfaces
+     *  too). The four nav chevrons stay icon-only on BOTH hosts (VS Code parity — its chevrons carry
+     *  no label either; they frame the labeled File/Diff counters). */
+    fun buildGroup(sessionClear: Boolean = false, showText: Boolean = false) = DefaultActionGroup().apply { listOfNotNull(
         // Search leads every nav bar (user rule 2026-07-16 — same position on every surface).
-        labelAct(showText, "Search", "Search Edits", AllIcons.Actions.Find, ::sessionHasPending) { searchEdits() },
-        // File axis — steps across every file with pending edits; the counter opens the Edits tool window.
-        iconAct("Previous changed file", AllIcons.Actions.Back, ::sessionHasPending) { navFile(-1) },
+        searchAction(showText),
+        // Diff axis before File axis — the VS Code status-bar order.
+        *diffAxis().toTypedArray(),
+        *fileAxis().toTypedArray(),
+        keepAction(showText), undoAction(showText), acceptFileAction(showText), rejectFileAction(showText),
+        if (sessionClear) clearResolvedAction(showText) else null,
+        spotlightAction(showText),
+    ).forEach(::add) }
+
+    // --- the individual actions, exposed so the Overview title bar can compose its own five-group
+    //     layout (ChangeMapPanel) while the status bar keeps buildGroup's flat order — one behavior,
+    //     two compositions (cross-editor parity: VS Code groups its Overview toolbar the same way). ---
+
+    fun searchAction(showText: Boolean = true): AnAction =
+        labelAct(showText, "Search", "Search Edits", NavTint.SEARCH, ::sessionHasPending) { searchEdits() }
+
+    /** File axis — steps across every file with pending edits; the counter opens the Edits tool window. */
+    fun fileAxis(): List<AnAction> = listOf(
+        iconAct("Previous changed file", NavTint.tint(AllIcons.Actions.Back, NavTint.BLUE), ::sessionHasPending) { navFile(-1) },
         textAct(::fileCounterText) { ToolWindowManager.getInstance(project).getToolWindow("Claude Observatory")?.activate(null) },
-        iconAct("Next changed file", AllIcons.Actions.Forward, ::sessionHasPending) { navFile(1) },
-        // Diff axis — steps the OPEN file's pending edits; the counter opens the current edit's diff.
-        iconAct("Previous edit in this file", AllIcons.Actions.PreviousOccurence, ::activeHasPending) { navDiff(-1) },
-        textAct(::diffCounterText) { currentNavRec()?.let { rec -> session()?.let { Diffs.show(project, it, rec) } } },
-        iconAct("Next edit in this file", AllIcons.Actions.NextOccurence, ::activeHasPending) { navDiff(1) },
-        // Per-edit + per-file actions on the OPEN file.
-        labelAct(showText, "Keep", "Keep This Edit", AllIcons.Actions.Checked, ::activeHasPending) {
-            currentNavRec()?.let { rec -> withSession { s -> ReviewOps.keep(project, s, rec.id) } }
-        },
-        labelAct(showText, "Undo", "Undo This Edit", AllIcons.Actions.Rollback, ::activeHasPending) {
-            currentNavRec()?.let { rec -> withSession { s -> ReviewOps.undoOrRedo(project, s, rec, redo = false) } }
-        },
-        labelAct(showText, "Accept File", "Accept every pending edit in this file", Icons.CheckAll, ::activeHasPending) {
-            activeFilePath()?.let { f -> withSession { s -> ReviewOps.keepAll(project, s, service.log().filter { it.file == f }, File(f).name) } }
-        },
-        labelAct(showText, "Reject File", "Reject (revert) every pending edit in this file", AllIcons.Actions.Cancel, ::activeHasPending) {
-            activeFilePath()?.let { f -> withSession { s -> ReviewOps.undoAll(project, s, service.log().filter { it.file == f }, File(f).name, f) } }
-        },
-        if (sessionClear)
-            labelAct(showText, "Clear Resolved", "Clear Resolved Edits", AllIcons.Actions.GC, ::sessionHasPending) {
-                withSession { s ->
-                    val resolved = service.log().count { !it.pending }
-                    if (resolved > 0) ReviewOps.clearResolved(project, s, resolved) else ReviewOps.notify(project, "No resolved edits to clear")
-                }
-            }
-        else
-            // Clear File — the file-scoped clear (VS Code ov-clearfile parity).
-            labelAct(showText, "Clear File", "Clear File — clear this file's resolved edits", AllIcons.Actions.GC, ::activeHasResolved) {
-                activeFilePath()?.let { f ->
-                    withSession { s ->
-                        val resolved = service.log().count { !it.pending && it.file == f }
-                        ReviewOps.clearResolvedScoped(project, s, resolved, File(f).name, f)
-                    }
-                }
-            },
-        // Session-wide utilities.
-        labelAct(showText, "Spotlight", "Toggle Spotlight — dim unedited lines", AllIcons.Actions.IntentionBulb, ::sessionHasPending) {
-            InlineOverlay.getInstance(project).toggleHeatmap()
-        },
+        iconAct("Next changed file", NavTint.tint(AllIcons.Actions.Forward, NavTint.BLUE), ::sessionHasPending) { navFile(1) },
     )
+
+    /** Diff axis — steps the OPEN file's pending edits; the counter opens the current edit's diff. */
+    fun diffAxis(): List<AnAction> = listOf(
+        iconAct("Previous edit in this file", NavTint.tint(AllIcons.Actions.PreviousOccurence, NavTint.BLUE), ::activeHasPending) { navDiff(-1) },
+        textAct(::diffCounterText) { currentNavRec()?.let { rec -> session()?.let { Diffs.show(project, it, rec) } } },
+        iconAct("Next edit in this file", NavTint.tint(AllIcons.Actions.NextOccurence, NavTint.BLUE), ::activeHasPending) { navDiff(1) },
+    )
+
+    fun keepAction(showText: Boolean = true): AnAction =
+        labelAct(showText, "Keep", "Keep This Edit", NavTint.KEEP, ::activeHasPending) {
+            currentNavRec()?.let { rec -> withSession { s -> ReviewOps.keep(project, s, rec.id) } }
+        }
+
+    fun undoAction(showText: Boolean = true): AnAction =
+        labelAct(showText, "Undo", "Undo This Edit", NavTint.UNDO, ::activeHasPending) {
+            currentNavRec()?.let { rec -> withSession { s -> ReviewOps.undoOrRedo(project, s, rec, redo = false) } }
+        }
+
+    fun acceptFileAction(showText: Boolean = true): AnAction =
+        labelAct(showText, "Accept File", "Accept every pending edit in this file", NavTint.ACCEPT_FILE, ::activeHasPending) {
+            activeFilePath()?.let { f -> withSession { s -> ReviewOps.keepAll(project, s, service.log().filter { it.file == f }, File(f).name) } }
+        }
+
+    fun rejectFileAction(showText: Boolean = true): AnAction =
+        labelAct(showText, "Reject File", "Reject (revert) every pending edit in this file", NavTint.REJECT, ::activeHasPending) {
+            activeFilePath()?.let { f -> withSession { s -> ReviewOps.undoAll(project, s, service.log().filter { it.file == f }, File(f).name, f) } }
+        }
+
+    fun clearResolvedAction(showText: Boolean = true): AnAction =
+        labelAct(showText, "Clear Resolved", "Clear Resolved Edits", NavTint.CLEAR, ::sessionHasPending) {
+            withSession { s ->
+                val resolved = service.log().count { !it.pending }
+                if (resolved > 0) ReviewOps.clearResolved(project, s, resolved) else ReviewOps.notify(project, "No resolved edits to clear")
+            }
+        }
+
+    fun spotlightAction(showText: Boolean = true): AnAction =
+        labelAct(showText, "Spotlight", "Toggle Spotlight — dim unedited lines", NavTint.SPOTLIGHT, ::sessionHasPending) {
+            InlineOverlay.getInstance(project).toggleHeatmap()
+        }
 
     // --- nav-bar state (mirrors the VS Code helpers) ---
 
@@ -103,10 +160,6 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
         return service.log().filter { it.pending && it.file == f }.sortedBy { it.id }
     }
     private fun activeHasPending(): Boolean = pendingInActiveFile().isNotEmpty()
-    private fun activeHasResolved(): Boolean {
-        val f = activeFilePath() ?: return false
-        return service.log().any { !it.pending && it.file == f }
-    }
 
     /** The pending edit the Diff axis is parked on, anchoring navEditId to a still-pending edit. */
     private fun currentNavRec(): EditRecord? {

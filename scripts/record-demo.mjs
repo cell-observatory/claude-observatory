@@ -150,7 +150,7 @@ const renderFrame = (f, opts = {}) => {
   // tolerates headless Chrome's occasional written-the-shot-but-never-exits wedge (the PNG is the truth).
   try {
     execFileSync(CHROME, [
-      '--headless', '--disable-gpu', '--hide-scrollbars', '--force-device-scale-factor=1',
+      '--headless', '--disable-gpu', '--use-mock-keychain', '--password-store=basic', '--hide-scrollbars', '--force-device-scale-factor=1',
       '--no-first-run', '--no-default-browser-check', `--user-data-dir=${path.join(tmp, 'chrome-profile')}`,
       `--screenshot=${png}`, `--window-size=${W},${H}`, `file://${file}`,
     ], { stdio: 'pipe', timeout: 20_000, killSignal: 'SIGKILL' });

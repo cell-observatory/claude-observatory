@@ -219,7 +219,7 @@ class EditsProvider implements vscode.TreeDataProvider<Node> {
     const base = session ? `session ${shortId(session)}` : undefined;
     // Timeline isn't filtered by Search, so only the Edits/Diffs views advertise the active filter.
     const showFilter = editFilter && this.mode !== 'timeline';
-    this.view.description = showFilter ? `🔍 ${editFilter}${base ? ` · ${base}` : ''}` : base;
+    this.view.description = showFilter ? `search “${editFilter}”${base ? ` · ${base}` : ''}` : base;
   }
 
   getChildren(node?: Node): Node[] {
@@ -444,7 +444,7 @@ class EditPeek implements vscode.Disposable {
     md.supportHtml = true; // the colored <span>s below survive the sanitizer only with this on
     md.isTrusted = true;
     md.appendMarkdown(
-      `**✨ Claude edit #${id}**  ·  \`+${d.added} −${d.removed}\`  ·  ${rec.tool}` +
+      `**✦ Claude edit #${id}**  ·  \`+${d.added} −${d.removed}\`  ·  ${rec.tool}` +
         (diffPos ? `  ·  ${diffPos}` : '') +
         (filePos ? `  ·  ${filePos}` : '') +
         `\n\n`
@@ -912,12 +912,13 @@ async function undoAllSession(session: string): Promise<void> {
     );
     return;
   }
+  const fileCount = new Set(targets.map((t) => t.file)).size;
   const choice = await vscode.window.showWarningMessage(
-    `Revert all ${targets.length} edit(s) in this session? Overlapping edits may conflict.`,
-    { modal: true },
-    'Revert all'
+    `Revert all ${targets.length} edit(s) across ${fileCount} file(s) in this session?`,
+    { modal: true, detail: 'This rewrites the files on disk. Overlapping edits may conflict (revert those individually to force-restore).' },
+    `Revert ${targets.length} edits`
   );
-  if (choice !== 'Revert all') return;
+  if (choice !== `Revert ${targets.length} edits`) return;
   const res = core.undoScope(session);
   vscode.window.showInformationMessage(
     `Reverted ${res.undone} edit(s)` +
@@ -1263,10 +1264,10 @@ class InlineLensProvider implements vscode.CodeLensProvider {
       const editPos = editIdx >= 0 ? `  ·  edit ${editIdx + 1}/${filePending.length} in file` : '';
       // "view changes" opens the review bubble (reasoning rides there); per-edit keep/undo is also on
       // ⌥⌘Y / ⌥⌘U and the Edits tree.
-      lenses.push(new vscode.CodeLens(range, { title: `✨ #${id}  +${g.added} −${g.removed}${editPos}${filePos}  view changes`, command: 'claudeObservatory.viewChanges', arguments: [id] }));
+      lenses.push(new vscode.CodeLens(range, { title: `✦ #${id}  +${g.added} −${g.removed}${editPos}${filePos}  view changes`, command: 'claudeObservatory.viewChanges', arguments: [id] }));
       lenses.push(new vscode.CodeLens(range, { title: `✓ Keep`, command: 'claudeObservatory.inlineKeep', arguments: [id] }));
       lenses.push(new vscode.CodeLens(range, { title: `↩ Undo`, command: 'claudeObservatory.inlineUndo', arguments: [id] }));
-      lenses.push(new vscode.CodeLens(range, { title: `💬 Chat`, command: 'claudeObservatory.chatEdit', arguments: [id] }));
+      lenses.push(new vscode.CodeLens(range, { title: `$(comment-discussion) Chat`, command: 'claudeObservatory.chatEdit', arguments: [id] }));
       lenses.push(new vscode.CodeLens(range, { title: `⧉ View diff`, command: 'claudeObservatory.openDiff', arguments: [{ kind: 'edit', rec: g.rec }] }));
     }
     return lenses;
@@ -1353,7 +1354,7 @@ class ObservationsProvider implements vscode.TreeDataProvider<ObsNode> {
     const cwd = workspaceRoot();
     const generated = session ? core.cachedAnalysis(session, 'recap')?.text : undefined;
     const title = cwd && session ? cachedTranscript(cwd, session).insights.title : null;
-    return (generated || title || 'No recap yet — hit ✨ to generate one.').trim();
+    return (generated || title || 'No recap yet — hit ✦ to generate one.').trim();
   }
   getTreeItem(node: ObsNode): vscode.TreeItem {
     const session = currentSession();
@@ -1365,7 +1366,7 @@ class ObservationsProvider implements vscode.TreeDataProvider<ObsNode> {
       item.iconPath = new vscode.ThemeIcon('compass', new vscode.ThemeColor('charts.blue'));
       item.description = 'session recap';
       const tip = new vscode.MarkdownString(
-        `**Session recap**\n\n${this.recapText()}\n\n---\n\n_✨ refreshes this with a Claude-generated "what you did + where you left off" one-liner._`
+        `**Session recap**\n\n${this.recapText()}\n\n---\n\n_✦ refreshes this with a Claude-generated "what you did + where you left off" one-liner._`
       );
       item.tooltip = tip;
       item.contextValue = 'recap';
@@ -1458,8 +1459,10 @@ class ObservationsProvider implements vscode.TreeDataProvider<ObsNode> {
 type ActNode =
   | { kind: 'agroup'; label: string; count: number; errors: number; icon: string; actions: core.ActionRecord[] }
   | { kind: 'egroup'; channels: core.EgressChannel[] }
+  | { kind: 'cgroup'; collisions: core.FileCollision[] }
   | { kind: 'arow'; rec: core.ActionRecord }
-  | { kind: 'erow'; ch: core.EgressChannel };
+  | { kind: 'erow'; ch: core.EgressChannel }
+  | { kind: 'crow'; c: core.FileCollision };
 
 /** Category → codicon for the timeline's collapsible subsection headers + rows. */
 const ACTION_ICON: Record<string, string> = {
@@ -1478,29 +1481,33 @@ class ActionsProvider implements vscode.TreeDataProvider<ActNode> {
       this.view.description = session ? `session ${shortId(session)}` : undefined;
     }
   }
-  /** Curated groups (Subagents dropped — they're the Overview fleet) + the egress sub-report, from core. */
-  private groups(): { groups: core.ActionGroup[]; egress: core.EgressChannel[] } {
+  /** Curated groups (Subagents dropped — they're the Overview fleet) + egress + the live cross-agent
+   *  file conflicts (moved here from the Overview's fleet nav — this is the audit surface). */
+  private groups(): { groups: core.ActionGroup[]; egress: core.EgressChannel[]; collisions: core.FileCollision[] } {
     const session = currentSession();
     const cwd = workspaceRoot();
-    if (!session || !cwd) return { groups: [], egress: [] };
+    if (!session || !cwd) return { groups: [], egress: [], collisions: [] };
     const actions = core.parseActions(cwd, session);
     return {
       groups: core.buildActionGroups(actions).filter((g) => g.category !== 'agent'),
       egress: core.buildEgressReport(actions),
+      collisions: core.fleetConflicts(core.listRepoSiblings(cwd, session)),
     };
   }
   getChildren(node?: ActNode): ActNode[] {
     if (!node) {
-      const { groups, egress } = this.groups();
+      const { groups, egress, collisions } = this.groups();
       const feed: ActNode[] = groups.map((g): ActNode => ({
         kind: 'agroup', label: g.label, count: g.count, errors: g.errors,
         icon: ACTION_ICON[g.category] ?? 'circle-small', actions: g.actions,
       }));
       if (egress.length) feed.push({ kind: 'egroup', channels: egress });
+      if (collisions.length) feed.unshift({ kind: 'cgroup', collisions }); // conflicts lead — they need eyes NOW
       return feed;
     }
     if (node.kind === 'agroup') return node.actions.slice().reverse().map((rec): ActNode => ({ kind: 'arow', rec })); // newest-first
     if (node.kind === 'egroup') return node.channels.map((ch): ActNode => ({ kind: 'erow', ch }));
+    if (node.kind === 'cgroup') return node.collisions.map((c): ActNode => ({ kind: 'crow', c }));
     return [];
   }
   getTreeItem(node: ActNode): vscode.TreeItem {
@@ -1518,6 +1525,23 @@ class ActionsProvider implements vscode.TreeDataProvider<ActNode> {
       item.description = `${node.channels.length}`;
       item.iconPath = new vscode.ThemeIcon('radio-tower');
       item.contextValue = 'actionGroup';
+      return item;
+    }
+    if (node.kind === 'cgroup') {
+      // Live cross-agent conflicts — expanded (unlike the calm categories): they need eyes NOW.
+      const item = new vscode.TreeItem('Live conflicts', vscode.TreeItemCollapsibleState.Expanded);
+      const pend = node.collisions.filter((c) => c.anyPending).length;
+      item.description = `${node.collisions.length}${pend ? ` · ${pend} pending` : ''}`;
+      item.iconPath = new vscode.ThemeIcon('warning', new vscode.ThemeColor('charts.orange'));
+      return item;
+    }
+    if (node.kind === 'crow') {
+      const c = node.c;
+      const item = new vscode.TreeItem(path.basename(c.file), vscode.TreeItemCollapsibleState.None);
+      item.description = `${c.agents.length} agents${c.anyPending ? ' · pending' : ''}`;
+      item.tooltip = `${c.file}\ntouched by ${c.agents.map((a) => a.slice(0, 8)).join(', ')} — click to open`;
+      item.iconPath = new vscode.ThemeIcon('files', new vscode.ThemeColor('charts.orange'));
+      item.command = { command: 'vscode.open', title: 'Open', arguments: [vscode.Uri.file(c.file), { preview: true }] };
       return item;
     }
     if (node.kind === 'erow') {
@@ -1873,7 +1897,7 @@ function changeMapShell(): string {
   * { box-sizing: border-box; }
   body { margin:0; padding:0; font-family: var(--vscode-font-family); font-size:11px; color: var(--vscode-foreground); height:100vh; display:flex; flex-direction:column; }
   /* top navbar — session selector + session-wide review actions (mirrors the Observations toolbar) */
-  .ov-toolbar { flex:none; display:flex; align-items:center; gap:6px; padding:5px 8px; border-bottom:1px solid var(--cm-border); flex-wrap:wrap; }
+  .ov-toolbar { flex:none; display:flex; align-items:center; gap:10px; padding:6px 10px; border-bottom:1px solid var(--cm-border); flex-wrap:wrap; }
   .ov-tb { display:inline-flex; align-items:center; gap:5px; background:transparent; border:1px solid var(--cm-border); border-radius:5px; color: var(--vscode-descriptionForeground); font:inherit; font-size:11px; padding:3px 9px; cursor:pointer; white-space:nowrap; }
   .ov-tb:hover { background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.12)); color: var(--vscode-foreground); }
   .ov-tb.sess { font-family: var(--cm-mono); color: var(--vscode-foreground); }
@@ -1885,11 +1909,19 @@ function changeMapShell(): string {
   /* compact step-through review nav bar (mirrors the status-bar nav bar) — File/Diff axes + per-edit/file actions */
   /* codicons (status-bar-matched glyphs) in the toolbar buttons — sized down to sit with the 11px labels */
   .ov-toolbar .codicon { font-size:14px; line-height:1; }
-  .ov-navgrp { display:inline-flex; align-items:center; gap:5px; flex-wrap:wrap; }
+  .ov-navgrp { display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap; }
   .ov-nb { display:inline-flex; align-items:center; justify-content:center; gap:4px; background:transparent; border:1px solid var(--cm-border); border-radius:4px; color: var(--vscode-descriptionForeground); font:inherit; font-size:11px; line-height:1; padding:3px 9px; cursor:pointer; white-space:nowrap; }
   .ov-nb:hover { background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.12)); color: var(--vscode-foreground); }
   .ov-nc { font-family: var(--cm-mono); font-size:10px; color: var(--vscode-descriptionForeground); font-variant-numeric:tabular-nums; white-space:nowrap; padding:0 3px; }
-  .ov-nbsep { width:1px; align-self:stretch; background: var(--cm-border); margin:1px 5px; }
+  .ov-nbsep { width:1px; align-self:stretch; background: var(--cm-border); margin:1px 4px; }
+  /* semantic tints on the nav-bar ICONS (labels stay neutral) — the --mt-/chart palette, matching the
+     JetBrains ReviewNavBar: keep/accept GREEN · undo/reject RED · nav chevrons BLUE · clear ORANGE ·
+     search/spotlight PURPLE. Same glance-grouping as the mockups/screenshots. */
+  #ov-navkeep .codicon, #ov-acceptfile .codicon, #ov-keepall .codicon { color: var(--mt-done); }
+  #ov-navundo .codicon, #ov-rejectfile .codicon, #ov-undoall .codicon { color: var(--mt-warn); }
+  #ov-fileprev .codicon, #ov-filenext .codicon, #ov-diffprev .codicon, #ov-diffnext .codicon { color: var(--mt-working); }
+  #ov-clearres .codicon { color: var(--mt-attn); }
+  #ov-search .codicon, #ov-spotlight .codicon { color: var(--mt-agent); }
   /* master–detail: left NAV (Fleet · Workflows) | right change-map DETAIL for the selected nav item */
   .ov { display:flex; flex:1; min-height:0; align-items:stretch; }
   .ov-nav { flex:0 0 25%; min-width:180px; max-width:40%; display:flex; flex-direction:column; border-right:1px solid var(--cm-border); padding:6px 8px 7px; overflow:hidden; }
@@ -1943,13 +1975,21 @@ function changeMapShell(): string {
   .mt-todo { font-size:9px; color: var(--vscode-descriptionForeground); flex:none; }
   .mt-chat { margin-left:auto; background:transparent; border:0; cursor:pointer; font-size:11px; padding:0 2px; flex:none; opacity:0.75; }
   .mt-chat:hover { opacity:1; }
-  .mt-collisions { flex:none; margin-top:6px; border-top:1px solid var(--cm-border); padding-top:5px; max-height:32%; overflow-y:auto; }
   .mt-chead { font-family: var(--cm-mono); text-transform:uppercase; letter-spacing:0.08em; font-size:9px; color: var(--vscode-descriptionForeground); margin-bottom:4px; }
-  .mt-crow { display:flex; align-items:center; gap:8px; font-size:10px; padding:1px 2px; cursor:pointer; border-radius:3px; }
-  .mt-crow:hover { background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.18)); }
-  .mt-cf { font-family: var(--cm-mono); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:0 1 auto; }
-  .mt-ca { color: var(--vscode-descriptionForeground); flex:none; }
-  .mt-cp { color: var(--mt-attn); flex:none; margin-left:auto; }
+  /* Tasks tab — the session's numbered task list */
+  .mt-trow { display:flex; align-items:baseline; gap:7px; font-size:11px; padding:2px 2px; border-radius:3px; }
+  .mt-trow .mt-tg { flex:none; }
+  .mt-trow.done .mt-tg { color: var(--mt-done); }
+  .mt-trow.wip .mt-tg { color: var(--mt-working); }
+  .mt-trow.open .mt-tg { color: var(--vscode-descriptionForeground); }
+  .mt-trow .mt-tid { flex:none; font-family: var(--cm-mono); color: var(--vscode-descriptionForeground); font-size:10px; }
+  .mt-trow .mt-ts { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .mt-trow.done .mt-ts { text-decoration: line-through; color: var(--vscode-descriptionForeground); }
+  .mt-trow .mt-taf { flex:none; font-style:italic; color: var(--mt-working); font-size:10px; }
+  .mt-trow .mt-tct { flex:none; font-family: var(--cm-mono); color: var(--vscode-descriptionForeground); font-size:10px; }
+  .mt-ttog { display:block; background:transparent; border:1px dashed var(--cm-border); border-radius:99px; color: var(--vscode-descriptionForeground); font:inherit; font-size:10px; padding:2px 9px; margin:4px 0 2px; cursor:pointer; }
+  .mt-ttog:hover { color: var(--vscode-foreground); }
+  .mt-trow .mt-tdep { flex:none; color: var(--mt-attn); font-size:10px; }
   .mt-none { padding:10px 2px; color: var(--vscode-descriptionForeground); font-size:11px; }
   /* Workflows: one row per run — informative name, per-phase progress, tokens/time/edits; selected outlined */
   .mt-wf { border:1px solid var(--cm-border); border-radius:5px; margin-bottom:5px; padding:5px 7px; cursor:pointer; }
@@ -2000,6 +2040,12 @@ function changeMapShell(): string {
   .cm-tbtns { display:flex; align-items:center; gap:1px; flex:none; margin-left:1px; opacity:0.55; }
   .cm-task:hover .cm-tbtns { opacity:1; }
   .cm-tb { background:transparent; border:0; color:inherit; font:inherit; font-size:14px; line-height:1; padding:2px 5px; cursor:pointer; opacity:0.85; }
+  .cm-tb .codicon { font-size:14px; vertical-align:middle; }
+  /* chips carry the bulk actions' tints (they ARE those actions scoped to the chapter) */
+  .cm-tb.ok .codicon { color: var(--mt-done); }
+  .cm-tb.rj .codicon { color: var(--mt-warn); }
+  .cm-tb.cl .codicon { color: var(--mt-attn); }
+  .cm-tb.ch .codicon, .mt-chat .codicon { color: var(--mt-agent); font-size:12px; vertical-align:middle; }
   .cm-tb:hover { opacity:1; }
   .cm-tb.ok:hover { color: var(--cm-kept); }
   .cm-tb.rj:hover { color: var(--cm-risk); }
@@ -2045,36 +2091,41 @@ function changeMapShell(): string {
 </style>`;
   const body =
     `<div class="ov-toolbar">` +
-    // Search leads every nav bar (user rule 2026-07-16 — same position on every surface).
+    // FIVE spaced groups (user layout 2026-07-16): search·session·active | diff·keep·undo |
+    // file·accept/reject file | bulk | spotlight·refresh. Search still leads (user rule 2026-07-16).
+    `<span class="ov-navgrp">` +
     `<button class="ov-nb" id="ov-search" title="Search edits"><i class="codicon codicon-search"></i> Search</button>` +
     `<button class="ov-tb sess" id="ov-sess" title="Switch session — choose which capture session the Overview shows">🔬 <span id="ov-sess-label">session —</span> <span class="cm-caret">▾</span></button>` +
     // Active-only toggle — mirrors the left-nav checkbox: scopes the fleet/workflow nav AND the change-map
     // detail to work still awaiting review (pending edits / active agents / running workflows).
     `<button class="ov-tb ov-toggle" id="ov-activeonly" aria-pressed="false" title="Show only what's still active — agents/workflows running and edits awaiting review"><i class="codicon codicon-check"></i> Active only</button>` +
-    // The step-through review nav bar — File/Diff axes with live n/m position counters + per-edit / per-file
-    // actions, the same controls the status-bar nav bar shows. Posts to the existing nav commands.
+    `</span><span class="ov-nbsep"></span>` +
+    // Diff axis + the per-edit pair it steps: n/m counters post to the existing nav commands.
+    `<span class="ov-navgrp">` +
+    `<button class="ov-nb" id="ov-diffprev" title="Previous edit in this file"><i class="codicon codicon-chevron-up"></i></button>` +
+    `<span class="ov-nc" id="ov-diffcount">Diff –/–</span>` +
+    `<button class="ov-nb" id="ov-diffnext" title="Next edit in this file"><i class="codicon codicon-chevron-down"></i></button>` +
+    `<button class="ov-nb" id="ov-navkeep" title="Keep this edit"><i class="codicon codicon-check"></i> Keep</button>` +
+    `<button class="ov-nb" id="ov-navundo" title="Undo this edit"><i class="codicon codicon-discard"></i> Undo</button>` +
+    `</span><span class="ov-nbsep"></span>` +
+    // File axis + the per-file pair it steps.
     `<span class="ov-navgrp">` +
     `<button class="ov-nb" id="ov-fileprev" title="Previous changed file"><i class="codicon codicon-chevron-left"></i></button>` +
     `<span class="ov-nc" id="ov-filecount">File –/–</span>` +
     `<button class="ov-nb" id="ov-filenext" title="Next changed file"><i class="codicon codicon-chevron-right"></i></button>` +
-    `<span class="ov-nbsep"></span>` +
-    `<button class="ov-nb" id="ov-diffprev" title="Previous edit in this file"><i class="codicon codicon-chevron-up"></i></button>` +
-    `<span class="ov-nc" id="ov-diffcount">Diff –/–</span>` +
-    `<button class="ov-nb" id="ov-diffnext" title="Next edit in this file"><i class="codicon codicon-chevron-down"></i></button>` +
-    `<span class="ov-nbsep"></span>` +
-    `<button class="ov-nb" id="ov-navkeep" title="Keep this edit"><i class="codicon codicon-check"></i> Keep</button>` +
-    `<button class="ov-nb" id="ov-navundo" title="Undo this edit"><i class="codicon codicon-discard"></i> Undo</button>` +
     `<button class="ov-nb" id="ov-acceptfile" title="Accept every pending edit in this file"><i class="codicon codicon-check-all"></i> Accept File</button>` +
     `<button class="ov-nb" id="ov-rejectfile" title="Reject (revert) every pending edit in this file"><i class="codicon codicon-close-all"></i> Reject File</button>` +
-    `<button class="ov-nb" id="ov-clearfile" title="Clear resolved (kept / reverted) edits in this file"><i class="codicon codicon-clear-all"></i> Clear File</button>` +
-    `<span class="ov-nbsep"></span>` +
-    `<button class="ov-nb" id="ov-spotlight" title="Toggle spotlight — dim unedited lines to highlight Claude’s changes"><i class="codicon codicon-lightbulb"></i> Spotlight</button>` +
-    `</span>` +
-    `<span class="ov-nbsep"></span>` +
-    `<button class="ov-tb" id="ov-keepall" title="Accept all edits in this session"><i class="codicon codicon-check-all"></i> Accept All</button>` +
-    `<button class="ov-tb" id="ov-undoall" title="Revert all edits in this session"><i class="codicon codicon-discard"></i> Revert All</button>` +
+    `</span><span class="ov-nbsep"></span>` +
+    // Session-wide bulk (retargets to the picked chapter — see relabelBulk).
+    `<span class="ov-navgrp">` +
+    `<button class="ov-tb" id="ov-keepall" title="Accept all edits in this session"><i class="codicon codicon-checklist"></i> Accept All</button>` +
+    `<button class="ov-tb" id="ov-undoall" title="Revert all edits in this session"><i class="codicon codicon-timeline-view-icon"></i> Revert All</button>` +
     `<button class="ov-tb" id="ov-clearres" title="Clear resolved (kept / reverted) edits"><i class="codicon codicon-clear-all"></i> Clear Resolved</button>` +
+    `</span><span class="ov-nbsep"></span>` +
+    `<span class="ov-navgrp">` +
+    `<button class="ov-nb" id="ov-spotlight" title="Toggle spotlight — dim unedited lines to highlight Claude’s changes"><i class="codicon codicon-lightbulb"></i> Spotlight</button>` +
     `<button class="ov-tb" id="ov-refresh" title="Refresh the Overview"><i class="codicon codicon-refresh"></i> Refresh</button>` +
+    `</span>` +
     `</div>` +
     `<div class="ov">` +
     `<div class="ov-nav">` +
@@ -2086,9 +2137,10 @@ function changeMapShell(): string {
     `<div class="ov-empty" id="ov-empty" style="display:none"></div>` +
     `<div class="ov-pane" id="ov-pane-fleet">` +
     `<div class="ov-list" id="ov-fleet"></div>` +
-    `<div class="mt-collisions" id="ov-collisions"></div>` +
     `</div>` +
     `<div class="ov-pane" id="ov-pane-workflows" style="display:none"><div class="ov-list" id="ov-workflows"></div></div>` +
+    // The session's TASK LIST (TaskCreate/TaskUpdate — the newer numbered system next to TodoWrite).
+    `<div class="ov-pane" id="ov-pane-tasks" style="display:none"><div class="ov-list" id="ov-tasks"></div></div>` +
     `</div>` +
     `<div class="ov-detail">` +
     `<div class="cm-ribbon" id="cm-ribbon" style="display:none"></div>` +
@@ -2323,7 +2375,6 @@ class ChangeMapViewProvider implements vscode.WebviewViewProvider {
       else if (m.type === 'navUndo') void vscode.commands.executeCommand('claudeObservatory.navUndo');
       else if (m.type === 'keepOpenFile') void vscode.commands.executeCommand('claudeObservatory.keepOpenFile');
       else if (m.type === 'undoOpenFile') void vscode.commands.executeCommand('claudeObservatory.undoOpenFile');
-      else if (m.type === 'clearOpenFile') void vscode.commands.executeCommand('claudeObservatory.clearOpenFile');
       else if (m.type === 'toggleHeatmap') void vscode.commands.executeCommand('claudeObservatory.toggleHeatmap');
       else if (m.type === 'searchEdits') void vscode.commands.executeCommand('claudeObservatory.searchEdits');
     });
@@ -2578,11 +2629,14 @@ const OVERVIEW_SCRIPT = `
     var cid = esc(it.id==null?'':it.id);
     var tid = esc(it.taskId==null?'':it.taskId);
     var isSel = selectable && SEL_CH && SEL_CH.id===String(it.id);
+    // The SAME codicons as the toolbar BULK buttons (checklist / timeline-view-icon / clear-all /
+    // comment-discussion) — the chips ARE those actions retargeted to this chapter, and no icon may
+    // serve two different actions.
     var btns = (canAct || it.taskId!=null) ? ('<span class="cm-tbtns">'+
-        (it.taskId!=null?'<button class="cm-tb ch" data-chat="'+tid+'" title="Chat about this chapter — copies context, opens your Claude">💬</button>':'')+
-        (canAct?('<button class="cm-tb ok" data-keep="'+cid+'" title="Accept — keep all pending edits shown in this chapter">✓</button>'+
-          '<button class="cm-tb rj" data-undo="'+cid+'" title="Reject — undo all pending edits shown in this chapter">↩</button>'+
-          '<button class="cm-tb cl" data-clear="'+cid+'" title="Clear — drop resolved (kept/undone) edits in this chapter">🧹</button>'):'')+
+        (it.taskId!=null?'<button class="cm-tb ch" data-chat="'+tid+'" title="Chat about this chapter — copies context, opens your Claude"><i class="codicon codicon-comment-discussion"></i></button>':'')+
+        (canAct?('<button class="cm-tb ok" data-keep="'+cid+'" title="Accept — keep all pending edits shown in this chapter"><i class="codicon codicon-checklist"></i></button>'+
+          '<button class="cm-tb rj" data-undo="'+cid+'" title="Reject — undo all pending edits shown in this chapter"><i class="codicon codicon-timeline-view-icon"></i></button>'+
+          '<button class="cm-tb cl" data-clear="'+cid+'" title="Clear — drop resolved (kept/undone) edits in this chapter"><i class="codicon codicon-clear-all"></i></button>'):'')+
         '</span>') : '';
     return '<span class="cm-task'+(it.syn?' syn':'')+(isSel?' sel':'')+'"'+(selectable?' data-sel="'+cid+'"':'')+' title="'+esc(it.label)+' — '+it.r.edits+' edit(s) · '+it.st+(it.syn?' · work outside any to-do, attributed to the session':'')+(selectable?' · click to scope the bulk actions to this chapter':'')+'">'+
       '<span class="cm-cg '+it.st+'"></span>'+
@@ -2598,8 +2652,8 @@ const OVERVIEW_SCRIPT = `
   function relabelBulk(){ var nm=SEL_CH? clipCh(SEL_CH.label):'';
     // innerHTML (not textContent) so the codicon <i> survives; esc() the label since it's user content.
     function set(id, icon, base, scoped, tip, tipScoped){ var b=document.getElementById(id); if(!b) return; b.innerHTML='<i class="codicon codicon-'+icon+'"></i> '+esc(SEL_CH?scoped:base); b.title=SEL_CH?tipScoped:tip; }
-    set('ov-keepall','check-all','Accept All','Accept All in '+nm,'Accept all edits in this session','Accept all pending edits in the “'+nm+'” chapter');
-    set('ov-undoall','discard','Revert All','Revert All in '+nm,'Revert all edits in this session','Revert all pending edits in the “'+nm+'” chapter');
+    set('ov-keepall','checklist','Accept All','Accept All in '+nm,'Accept all edits in this session','Accept all pending edits in the “'+nm+'” chapter');
+    set('ov-undoall','timeline-view-icon','Revert All','Revert All in '+nm,'Revert all edits in this session','Revert all pending edits in the “'+nm+'” chapter');
     set('ov-clearres','clear-all','Clear Resolved','Clear in '+nm,'Clear resolved (kept / reverted) edits','Clear resolved edits in the “'+nm+'” chapter');
   }
   // Toggle a ribbon chip's selection: pick it (scoping the bulk actions), or deselect if already picked.
@@ -2617,6 +2671,7 @@ const OVERVIEW_SCRIPT = `
     // Active-only: keep only chapters with pending (unreviewed) edits — drops resolved AND wip-but-idle
     // chapters (e.g. a still-open to-do whose edits were all cleared), so clearing everything empties the ribbon.
     for(var c=0;c<chs.length;c++){ var ch=chs[c];
+      if(ch.fromTask) continue; // task-born chapters live on the Tasks tab — never duplicate them here
       if(ACTIVE_ONLY ? !(ch.pending>0) : !(ch.edits>0 || ch.status==='wip')) continue;
       items.push({ id:ch.id, taskId:(ch.taskId!=null?ch.taskId:null), label:ch.title, syn:!!ch.synthetic, r:{edits:ch.edits,added:ch.added,removed:ch.removed,pending:ch.pending,kept:ch.kept,undone:ch.undone}, wip:ch.status==='wip' }); }
     // Keep the chapter selection valid against the current slice (refresh its label; drop it if it vanished).
@@ -2631,7 +2686,7 @@ const OVERVIEW_SCRIPT = `
     for(var i=0;i<active.length;i++) h+=taskChip(active[i]);
     if(done.length){ h+='<div class="cm-done-row">'+
       '<button class="cm-done-tog" title="'+done.length+' completed chapter(s)"><span class="cm-cg kept"></span>'+done.length+' done <span class="cm-caret">'+(RIB_OPEN?'▾':'▸')+'</span></button>'+
-      '<button class="cm-clear-done" title="Clear resolved (kept/undone) edits of every completed chapter">🧹 clear completed</button></div>'; }
+      '<button class="cm-clear-done" title="Clear resolved (kept/undone) edits of every completed chapter"><i class="codicon codicon-clear-all"></i> clear completed</button></div>'; }
     h+='</div>';
     if(done.length && RIB_OPEN){ h+='<div class="cm-rwrap cm-done-list">'; for(var d=0;d<done.length;d++) h+=taskChip(done[d]); h+='</div>'; }
     host.innerHTML=h;
@@ -2686,13 +2741,13 @@ const OVERVIEW_SCRIPT = `
         '<span class="cm-md">'+esc(f.moduleLabel)+'</span>'+
         '<span class="cm-bar"><span class="cm-fill" style="width:'+w+'%;background:'+colorOf(f.status)+'"></span></span>'+
         '<span class="cm-n">+'+f.churn+'</span>'+
-        '<span class="cm-pd">'+(f.pending?('<span style="color:'+PAL.pending+'">'+f.pending+'⏳</span>'):('<span style="color:'+PAL.kept+'">✓</span>'))+'</span>'+
+        '<span class="cm-pd">'+(f.pending?('<span style="color:'+PAL.pending+'">'+f.pending+'⧗</span>'):('<span style="color:'+PAL.kept+'">✓</span>'))+'</span>'+
         '</button>';
     }
     var host=document.getElementById('cm-ledger');
     host.innerHTML=h||'<div class="cm-none">nothing matches this filter</div>';
     // An active Search filter narrows this ledger too — say so, or an emptied list reads as a bug.
-    if(FILTER) document.getElementById('cm-readout').innerHTML='🔍 search “'+esc(FILTER)+'” · '+shown.length+' file(s) — Search again (empty) to clear';
+    if(FILTER) document.getElementById('cm-readout').innerHTML='search “'+esc(FILTER)+'” · '+shown.length+' file(s) — Search again (empty) to clear';
     var rs=host.querySelectorAll('.cm-row');
     for(var r=0;r<rs.length;r++){
       rs[r].addEventListener('click', function(){ var f=ROWS[+this.getAttribute('data-idx')]; if(f&&f.maxId>=0){ vscode.postMessage({type:'openEdit', id:f.maxId}); document.getElementById('cm-readout').innerHTML='→ <b>open diff</b> · '+esc(f.file)+' (edit #'+f.maxId+')'; } });
@@ -2704,7 +2759,7 @@ const OVERVIEW_SCRIPT = `
     var clsline=cls.length? cls.slice(0,4).join(', ')+(cls.length>4?' +'+(cls.length-4):'') : 'file scope';
     return '<div class="tf">'+(f.agent?'<span class="ag">●</span> ':'')+esc(f.file)+(f.risk?' <span class="rk">⌐risk</span>':'')+'</div>'+
       '<div class="tm">'+esc(f.rel)+'</div>'+
-      '<div class="tm">+'+f.churn+' · '+f.cnt+' unit'+(f.cnt===1?'':'s')+' · '+f.kept+'✓ '+f.pending+'⏳ '+f.undone+'↩</div>'+
+      '<div class="tm">+'+f.churn+' · '+f.cnt+' unit'+(f.cnt===1?'':'s')+' · '+f.kept+'✓ '+f.pending+'⧗ '+f.undone+'↩</div>'+
       '<div class="tc">'+esc(clsline)+'</div>'+
       (f.reason?'<div class="tw">“'+esc(f.reason)+'”</div>':'')+
       (f.risk?'<div class="trk">⚠ '+esc(f.risk)+'</div>':'')+
@@ -2780,20 +2835,14 @@ const OVERVIEW_SCRIPT = `
         if(su.currentTask) h+='<span class="mt-cur" title="'+esc(su.currentTask)+'">▶ '+esc(su.currentTask)+'</span>';
         var td=su.todos||[]; if(td.length) h+='<span class="mt-todo">'+td.length+' todo'+(td.length===1?'':'s')+'</span>';
         h+='<span class="mt-diff sm"><span class="mt-add">+'+(su.added||0)+'</span> <span class="mt-rem">−'+(su.removed||0)+'</span></span>';
-        h+='<button class="mt-chat" data-agent="'+esc(su.agentId)+'" title="Chat about this subagent — copies context, opens your Claude">💬</button>';
+        h+='<button class="mt-chat" data-agent="'+esc(su.agentId)+'" title="Chat about this subagent — copies context, opens your Claude"><i class="codicon codicon-comment-discussion"></i></button>';
         h+='</div>';
       }
       h+='</div>';
     }
     if(!vis.length) h+='<div class="mt-none">'+(ACTIVE_ONLY?'No active agents.':'No agents to show.')+'</div>';
     host.innerHTML=h; wireFilterBar(host);
-    var c=(MT&&MT.collisions)||[], ch='';
-    for(var m=0;m<c.length;m++){ var cc=c[m];
-      ch+='<div class="mt-crow" data-path="'+esc(cc.file)+'" title="'+esc(cc.file)+' — click to open"><span class="mt-cf">'+esc(base(cc.file))+'</span><span class="mt-ca">'+((cc.agents&&cc.agents.length)||0)+' agents</span>'+(cc.anyPending?'<span class="mt-cp">pending</span>':'')+'</div>';
-    }
-    document.getElementById('ov-collisions').innerHTML = c.length? ('<div class="mt-chead">Live conflicts ('+c.length+')</div>'+ch) : '';
-    var crows=document.querySelectorAll('#ov-collisions .mt-crow');
-    for(var cr=0;cr<crows.length;cr++) crows[cr].addEventListener('click', function(){ vscode.postMessage({type:'openPath', path:this.getAttribute('data-path')}); });
+    // Live conflicts moved to the Actions panel (0.8.3) — the audit surface owns them now.
     var rows=host.querySelectorAll('.mt-agent');
     for(var r=0;r<rows.length;r++) rows[r].addEventListener('click', function(ev){ if(ev.target && String(ev.target.className||'').indexOf('mt-chat')>=0) return; var s=this.getAttribute('data-sess'); SEL={kind:'agent', session:s}; paint(); });
     var bs=host.querySelectorAll('.mt-chat');
@@ -2853,21 +2902,54 @@ const OVERVIEW_SCRIPT = `
     for(var q=0;q<wrows.length;q++) wrows[q].addEventListener('click', function(){ var id=this.getAttribute('data-wf'); if(id){ SEL={kind:'workflow', id:id}; WF_OPEN[id]=true; paint(); } });
   }
 
-  // --- nav sub-tabs (Fleet · Workflows) --------------------------------------------------------------
-  function navCounts(){ return { fleet:((MT&&MT.agents)||[]).length, workflows:((MT&&MT.workflows)||[]).length }; }
-  function applyPanes(){ document.getElementById('ov-pane-fleet').style.display=(NAV==='fleet')?'flex':'none'; document.getElementById('ov-pane-workflows').style.display=(NAV==='workflows')?'flex':'none'; }
-  function renderNavTabs(){ var c=navCounts(); var defs=[['fleet','Fleet',c.fleet],['workflows','Workflows',c.workflows]];
+  // --- Tasks: the session's numbered task list (TaskCreate/TaskUpdate), live from the task dir ------
+  var TASKS_OPEN=false; // the "N done · show all" collapse — same dismiss pattern the fleet uses
+  function renderTasks(){ var host=document.getElementById('ov-tasks');
+    var ts=(MT&&MT.tasks)||[];
+    if(!ts.length){ host.innerHTML='<div class="mt-none">No tasks — this session plans with a task list only when Claude creates one.</div>'; return; }
+    // Tasks ARE chapters (0.8.3): join each row to its change-map chapter for per-task edit counts.
+    var chBy={}; var chs=(CM&&CM.chapters)||[]; for(var c=0;c<chs.length;c++) chBy[chs[c].id]=chs[c];
+    function trow(t){
+      var st=t.status==='completed'?'done':(t.status==='in_progress'?'wip':'open');
+      var glyph=st==='done'?'●':(st==='wip'?'◐':'○');
+      var ch=t.chapterId?chBy[t.chapterId]:null;
+      var counts=(ch&&ch.edits>0)?('<span class="mt-tct">+'+ch.added+' −'+ch.removed+' · '+ch.edits+' edit'+(ch.edits===1?'':'s')+(ch.pending?' · '+ch.pending+'⧗':'')+'</span>'):'';
+      var dep=(t.blockedBy&&t.blockedBy.length)?'<span class="mt-tdep" title="blocked by #'+esc(t.blockedBy.join(', #'))+'">⛓ '+t.blockedBy.length+'</span>':'';
+      return '<div class="mt-trow '+st+'" title="'+esc(t.description||t.subject)+'">'+
+        '<span class="mt-tg">'+glyph+'</span><span class="mt-tid">#'+esc(t.id)+'</span>'+
+        '<span class="mt-ts">'+esc(t.subject)+'</span>'+counts+dep+
+        (st==='wip'&&t.activeForm?'<span class="mt-taf">'+esc(t.activeForm)+'…</span>':'')+
+        '</div>';
+    }
+    var act=[], done=[];
+    for(var i=0;i<ts.length;i++) (ts[i].status==='completed'?done:act).push(ts[i]);
+    var h='<div class="mt-chead">'+ts.length+' task'+(ts.length===1?'':'s')+' · '+done.length+' done</div>';
+    for(var a2=0;a2<act.length;a2++) h+=trow(act[a2]);
+    // Active-only hides completed entirely (fleet semantics); otherwise they collapse behind a toggle.
+    if(!ACTIVE_ONLY && done.length){
+      h+='<button class="mt-ttog">'+done.length+' done · '+(TASKS_OPEN?'hide':'show all')+'</button>';
+      if(TASKS_OPEN) for(var d2=0;d2<done.length;d2++) h+=trow(done[d2]);
+    }
+    host.innerHTML=h;
+    var tog=host.querySelector('.mt-ttog');
+    if(tog) tog.addEventListener('click', function(){ TASKS_OPEN=!TASKS_OPEN; renderTasks(); });
+  }
+
+  // --- nav sub-tabs (Fleet · Workflows · Tasks) ------------------------------------------------------
+  function navCounts(){ return { fleet:((MT&&MT.agents)||[]).length, workflows:((MT&&MT.workflows)||[]).length, tasks:((MT&&MT.tasks)||[]).length }; }
+  function applyPanes(){ document.getElementById('ov-pane-fleet').style.display=(NAV==='fleet')?'flex':'none'; document.getElementById('ov-pane-workflows').style.display=(NAV==='workflows')?'flex':'none'; document.getElementById('ov-pane-tasks').style.display=(NAV==='tasks')?'flex':'none'; }
+  function renderNavTabs(){ var c=navCounts(); var defs=[['fleet','Fleet',c.fleet],['workflows','Workflows',c.workflows],['tasks','Tasks',c.tasks]];
     var h=''; for(var i=0;i<defs.length;i++){ var d=defs[i]; h+='<button class="ov-tab'+(d[0]===NAV?' on':'')+'" data-nav="'+d[0]+'">'+d[1]+'<span class="ov-tn">'+d[2]+'</span></button>'; }
     var host=document.getElementById('ov-navtabs'); host.innerHTML=h;
     var bs=host.querySelectorAll('.ov-tab'); for(var b=0;b<bs.length;b++) bs[b].addEventListener('click', function(){ NAV=this.getAttribute('data-nav'); renderNavTabs(); applyPanes(); }); }
 
   function paint(){
     var empty=document.getElementById('ov-empty');
-    if(MT && MT.agents){ empty.style.display='none'; renderNavTabs(); applyPanes(); renderFleet(); renderWorkflows(); }
+    if(MT && MT.agents){ empty.style.display='none'; renderNavTabs(); applyPanes(); renderFleet(); renderWorkflows(); renderTasks(); }
     else {
       renderNavTabs(); applyPanes();
       if(!CM){ empty.style.display='block'; empty.innerHTML='No agents yet. <span style="opacity:.75">This fills in as Claude works across your worktrees.</span>';
-        document.getElementById('ov-fleet').innerHTML=''; document.getElementById('ov-workflows').innerHTML=''; document.getElementById('ov-collisions').innerHTML=''; }
+        document.getElementById('ov-fleet').innerHTML=''; document.getElementById('ov-workflows').innerHTML=''; document.getElementById('ov-tasks').innerHTML=''; }
       else empty.style.display='none';
     }
     ensureSel();
@@ -2899,7 +2981,7 @@ const OVERVIEW_SCRIPT = `
     else if(m.type==='navpos'){ NAVPOS=m.pos||null; renderNavPos(); }
     else if(m.type==='error'){ CM=null; MT=null; var em=document.getElementById('ov-empty'); em.style.display='block';
       em.innerHTML='Needs the <b>claude-observatory</b> CLI, which was not found. <span style="opacity:.75">Install it (./install.sh), then reload.</span>';
-      document.getElementById('ov-fleet').innerHTML=''; document.getElementById('ov-workflows').innerHTML=''; document.getElementById('ov-collisions').innerHTML='';
+      document.getElementById('ov-fleet').innerHTML=''; document.getElementById('ov-workflows').innerHTML='';
       document.getElementById('cm-ribbon').style.display='none'; document.getElementById('cm-strip').innerHTML=''; document.getElementById('cm-ledger').innerHTML=''; document.getElementById('cm-detail-empty').style.display='none'; document.getElementById('cm-readout').innerHTML=''; }
   });
 
@@ -2918,7 +3000,7 @@ const OVERVIEW_SCRIPT = `
     tbtn('ov-fileprev','navFilePrev'); tbtn('ov-filenext','navFileNext');
     tbtn('ov-diffprev','navDiffPrev'); tbtn('ov-diffnext','navDiffNext');
     tbtn('ov-navkeep','navKeep'); tbtn('ov-navundo','navUndo');
-    tbtn('ov-acceptfile','keepOpenFile'); tbtn('ov-rejectfile','undoOpenFile'); tbtn('ov-clearfile','clearOpenFile');
+    tbtn('ov-acceptfile','keepOpenFile'); tbtn('ov-rejectfile','undoOpenFile');
     tbtn('ov-spotlight','toggleHeatmap'); tbtn('ov-search','searchEdits');
     // clicking empty ribbon space clears the chapter scope (back to session-wide). Wired once (not per-render).
     var rib=document.getElementById('cm-ribbon');
@@ -3145,31 +3227,36 @@ export function activate(context: vscode.ExtensionContext): void {
   //     has pending edits (mirrors the per-file bar Void pins at the bottom of the editor).
   // navEditId is the pending edit the Diff axis is parked on within the open file.
   let navEditId: number | undefined;
-  const mkStatusBtn = (text: string, tooltip: string, command: string, priority: number) => {
+  // Every action button carries its SHORT label beside the icon (the icon-only bar read as cryptic)
+  // plus the nav bar's semantic tint (keep/accept green · undo/reject red · chevrons blue · clear
+  // orange · search/spotlight purple — the Overview toolbar's palette). The four chevrons stay
+  // arrow-only: they frame the labeled File n/m / Diff n/m counters (same treatment as the Overview).
+  const mkStatusBtn = (text: string, tooltip: string, command: string, priority: number, tint?: string) => {
     const b = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, priority);
     b.text = text;
     b.tooltip = tooltip;
     b.command = command;
+    if (tint) b.color = new vscode.ThemeColor(tint);
     return b;
   };
   // Search leads every nav bar (user rule 2026-07-16 — same position on every surface).
-  const searchBtn = mkStatusBtn('$(search)', 'Claude Observatory: search edits', 'claudeObservatory.searchEdits', 90);
+  const searchBtn = mkStatusBtn('$(search) Search', 'Claude Observatory: search edits', 'claudeObservatory.searchEdits', 90, 'charts.purple');
   // Diff axis — steps the OPEN file's pending edits; the counter opens the current edit's diff.
-  const diffPrevBtn = mkStatusBtn('$(chevron-up)', 'Claude Observatory: previous edit in this file', 'claudeObservatory.navDiffPrev', 89);
+  const diffPrevBtn = mkStatusBtn('$(chevron-up)', 'Claude Observatory: previous edit in this file', 'claudeObservatory.navDiffPrev', 89, 'charts.blue');
   const diffCountBtn = mkStatusBtn('', 'Claude Observatory: this file’s pending edits — click to open the floating review bubble', 'claudeObservatory.navViewDiff', 88);
-  const diffNextBtn = mkStatusBtn('$(chevron-down)', 'Claude Observatory: next edit in this file', 'claudeObservatory.navDiffNext', 87);
+  const diffNextBtn = mkStatusBtn('$(chevron-down)', 'Claude Observatory: next edit in this file', 'claudeObservatory.navDiffNext', 87, 'charts.blue');
   // File axis — steps across every file with pending edits; the counter opens the Edits view.
-  const filePrevBtn = mkStatusBtn('$(chevron-left)', 'Claude Observatory: previous changed file', 'claudeObservatory.navFilePrev', 86);
+  const filePrevBtn = mkStatusBtn('$(chevron-left)', 'Claude Observatory: previous changed file', 'claudeObservatory.navFilePrev', 86, 'charts.blue');
   const fileCountBtn = mkStatusBtn('', 'Claude Observatory: files with pending edits — click to open the Edits view', 'claudeObservatory.edits.focus', 85);
-  const fileNextBtn = mkStatusBtn('$(chevron-right)', 'Claude Observatory: next changed file', 'claudeObservatory.navFileNext', 84);
+  const fileNextBtn = mkStatusBtn('$(chevron-right)', 'Claude Observatory: next changed file', 'claudeObservatory.navFileNext', 84, 'charts.blue');
   // Per-edit + per-file actions on the OPEN file.
-  const keepEditBtn = mkStatusBtn('$(check)', 'Claude Observatory: keep this edit', 'claudeObservatory.navKeep', 83);
-  const undoEditBtn = mkStatusBtn('$(discard)', 'Claude Observatory: undo this edit', 'claudeObservatory.navUndo', 82);
-  const acceptFileBtn = mkStatusBtn('$(check-all)', 'Claude Observatory: accept every pending edit in this file', 'claudeObservatory.keepOpenFile', 81);
-  const rejectFileBtn = mkStatusBtn('$(close-all)', 'Claude Observatory: reject (revert) every pending edit in this file', 'claudeObservatory.undoOpenFile', 80);
+  const keepEditBtn = mkStatusBtn('$(check) Keep', 'Claude Observatory: keep this edit', 'claudeObservatory.navKeep', 83, 'charts.green');
+  const undoEditBtn = mkStatusBtn('$(discard) Undo', 'Claude Observatory: undo this edit', 'claudeObservatory.navUndo', 82, 'charts.red');
+  const acceptFileBtn = mkStatusBtn('$(check-all) Accept File', 'Claude Observatory: accept every pending edit in this file', 'claudeObservatory.keepOpenFile', 81, 'charts.green');
+  const rejectFileBtn = mkStatusBtn('$(close-all) Reject File', 'Claude Observatory: reject (revert) every pending edit in this file', 'claudeObservatory.undoOpenFile', 80, 'charts.red');
   // Session-wide utilities.
-  const clearBtn = mkStatusBtn('$(clear-all)', 'Claude Observatory: clear resolved (kept/reverted) edits', 'claudeObservatory.clearResolved', 79);
-  const spotlightBtn = mkStatusBtn('$(lightbulb)', 'Claude Observatory: toggle spotlight — dim unedited lines to highlight Claude’s changes', 'claudeObservatory.toggleHeatmap', 78);
+  const clearBtn = mkStatusBtn('$(clear-all) Clear Resolved', 'Claude Observatory: clear resolved (kept/reverted) edits', 'claudeObservatory.clearResolved', 79, 'charts.orange');
+  const spotlightBtn = mkStatusBtn('$(lightbulb) Spotlight', 'Claude Observatory: toggle spotlight — dim unedited lines to highlight Claude’s changes', 'claudeObservatory.toggleHeatmap', 78, 'charts.purple');
   const activeFileBtns = [diffPrevBtn, diffCountBtn, diffNextBtn, keepEditBtn, undoEditBtn, acceptFileBtn, rejectFileBtn];
   const sessionBtns = [searchBtn, filePrevBtn, fileCountBtn, fileNextBtn, clearBtn, spotlightBtn];
   const navCluster = [...activeFileBtns, ...sessionBtns];
@@ -3735,13 +3822,6 @@ export function activate(context: vscode.ExtensionContext): void {
         const file = vscode.window.activeTextEditor?.document.uri.fsPath;
         if (!file) return void vscode.window.showInformationMessage('Claude Observatory: no active file.');
         await undoEditsInFile(s, file, cachedLog(s).filter((r) => r.file === file));
-      })()
-    ),
-    vscode.commands.registerCommand('claudeObservatory.clearOpenFile', () =>
-      withSession((s) => {
-        const file = vscode.window.activeTextEditor?.document.uri.fsPath;
-        if (!file) return void vscode.window.showInformationMessage('Claude Observatory: no active file.');
-        clearResolvedUnder(s, file, path.basename(file));
       })()
     )
   );

@@ -727,6 +727,10 @@ function cmdMultitask(args: string[]): void {
     worktrees: [...wtBy.values()],
     // Workflow runs (one level above subagents) for the ACTIVE session — aggregated in core, rendered thin.
     workflows: core.parseWorkflows(cwd, session),
+    // The ACTIVE session's task list (TaskCreate/TaskUpdate — the newer system next to TodoWrite),
+    // for the Overview's Tasks tab: transcript history ∪ live dir state, each row carrying the
+    // chapterId that joins it to its change-map chapter. [] for sessions that never used tasks.
+    tasks: core.sessionTaskRows(cwd, session),
     actions,
     summary: { active: fleet.active, conflicts: fleet.conflicts },
   });

@@ -1,0 +1,29 @@
+name: VS Code
+
+# Builds the release artifacts (the CLI .tgz + the VS Code .vsix — no publish, no account) so the
+# extension's build health carries its own README badge and the bundle is downloadable per-commit.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: build .vsix + CLI .tgz
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: claude-observatory-release
+          path: release/*

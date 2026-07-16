@@ -1,6 +1,16 @@
 # 🔬 Claude Observatory
 
-[![CI](https://github.com/cell-observatory/claude-observatory/actions/workflows/ci.yml/badge.svg)](https://github.com/cell-observatory/claude-observatory/actions/workflows/ci.yml)
+[![Linux](https://github.com/cell-observatory/claude-observatory/actions/workflows/linux.yml/badge.svg)](https://github.com/cell-observatory/claude-observatory/actions/workflows/linux.yml)
+[![macOS](https://github.com/cell-observatory/claude-observatory/actions/workflows/macos.yml/badge.svg)](https://github.com/cell-observatory/claude-observatory/actions/workflows/macos.yml)
+[![Windows](https://github.com/cell-observatory/claude-observatory/actions/workflows/windows.yml/badge.svg)](https://github.com/cell-observatory/claude-observatory/actions/workflows/windows.yml)
+[![VS Code](https://github.com/cell-observatory/claude-observatory/actions/workflows/vscode.yml/badge.svg)](https://github.com/cell-observatory/claude-observatory/actions/workflows/vscode.yml)
+[![JetBrains](https://github.com/cell-observatory/claude-observatory/actions/workflows/jetbrains.yml/badge.svg)](https://github.com/cell-observatory/claude-observatory/actions/workflows/jetbrains.yml)
+[![CodeQL](https://github.com/cell-observatory/claude-observatory/actions/workflows/codeql.yml/badge.svg)](https://github.com/cell-observatory/claude-observatory/actions/workflows/codeql.yml)
+[![Pages](https://github.com/cell-observatory/claude-observatory/actions/workflows/pages.yml/badge.svg)](https://github.com/cell-observatory/claude-observatory/actions/workflows/pages.yml)
+[![Release](https://github.com/cell-observatory/claude-observatory/actions/workflows/release.yml/badge.svg)](https://github.com/cell-observatory/claude-observatory/actions/workflows/release.yml)
+[![Dependabot](https://img.shields.io/badge/dependabot-enabled-025E8C?logo=dependabot&logoColor=white)](https://github.com/cell-observatory/claude-observatory/blob/main/.github/dependabot.yml)
+[![Version](https://img.shields.io/badge/version-v0.8.3-blue)](https://github.com/cell-observatory/claude-observatory/releases/latest)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/cell-observatory/claude-observatory/blob/main/LICENSE)
 &nbsp;·&nbsp; **[🔬 Live showcase →](https://cell-observatory.github.io/claude-observatory/)**
 &nbsp;·&nbsp; **[Interactive demo →](https://cell-observatory.github.io/claude-observatory/demo.html)**
 &nbsp;·&nbsp; [Changelog](CHANGELOG.md)
@@ -24,8 +34,9 @@ repo and the observatory unifies them into a single **fleet**, right inside the 
 **master–detail** panel. Its **Fleet** tab lists every running agent with a live **phase** (working /
 awaiting-input / awaiting-permission / idle / errored / done; `~` marks an inferred one), an activity
 sparkline, its ±diff, risk, and a cross-agent file-collision strip; nested **subagents** show their task
-and to-dos. A companion **Workflows** tab tracks Claude Code's multi-agent orchestration runs; the right
-pane is the selected item's **change-map**. Still **zero extra Claude tokens**, still fully **local**, and
+and to-dos. A companion **Workflows** tab tracks Claude Code's multi-agent orchestration runs, and a **Tasks**
+tab shows the session's numbered task list — each task linked to its chapter, with live statuses and
+per-task edit counts; the right pane is the selected item's **change-map**. Still **zero extra Claude tokens**, still fully **local**, and
 the worktree correlation is **git-free** — it reads the `.git` pointer files, never the git binary.
 
 ![The Overview's Fleet tab: one row per running agent across the repo's git worktrees — a live phase badge (working / awaiting / done), branch, an activity sparkline, ±lines, risk and collision counts; nested subagents with their task, to-dos and a chat button; and a cross-agent File Collisions strip](docs/media/multitasking.png)
@@ -99,7 +110,7 @@ Built for **surgical Claude usage on critical infrastructure**: you see every ch
 
 | View | What you get |
 | --- | --- |
-| **Overview** | *(the flagship 0.8.0 surface — a **master–detail** map of the whole fleet)* A left nav (~25%) has two tabs. **Fleet**: every running agent across the repo's git **worktrees**, each with a live **phase** (working / awaiting-input / awaiting-permission / idle / errored / done; `~` marks an inferred one), its worktree + branch, an activity **sparkline**, **±diff**, tokens·time, **risk**, and a **collision** badge — unfolding to nested **subagents** (`agentType` / description, phase, current task + todos, ±lines, a **💬 chat** button). **Workflows**: each multi-agent **workflow run** (Claude Code's deterministic orchestration), running / done, with per-**phase** progress and its agents' tokens·time·edits. An **Active only** toggle, **Clear completed** (dismisses / hides, never deletes), and a live cross-agent **conflicts** strip (it flags a live agent overlapping an idle agent's unreviewed work too). The detail pane (~75%) is the selected agent / workflow's **change-map**: a named-chapter **task ribbon** (Claude's to-dos become stable content-hash chapters — click one to scope the bulk actions to it; chapters are **total** — work outside any to-do lands in a synthesized session chapter, and every chapter's Accept / Reject / Clear act **WYSIWYG** on exactly the edits its row shows), a one-row **module proportion strip** (click a segment to filter), and a **file ledger** ranked by churn (±line bars, coloured by review status, worst-unreviewed-wins). Up top: a **session selector**, a combined **review nav bar** (File ◄► / Diff ◄► with live n/m counters · Keep · Undo · Accept / Reject / Clear File · Spotlight · Search), and **bulk actions** (Accept All · Revert All · Clear Resolved · Refresh). |
+| **Overview** | *(the flagship 0.8.0 surface — a **master–detail** map of the whole fleet)* A left nav (~25%) has two tabs. **Fleet**: every running agent across the repo's git **worktrees**, each with a live **phase** (working / awaiting-input / awaiting-permission / idle / errored / done; `~` marks an inferred one), its worktree + branch, an activity **sparkline**, **±diff**, tokens·time, **risk**, and a **collision** badge — unfolding to nested **subagents** (`agentType` / description, phase, current task + todos, ±lines, a **💬 chat** button). **Workflows**: each multi-agent **workflow run** (Claude Code's deterministic orchestration), running / done, with per-**phase** progress and its agents' tokens·time·edits. An **Active only** toggle, **Clear completed** (dismisses / hides, never deletes), and a live cross-agent **conflicts** strip (it flags a live agent overlapping an idle agent's unreviewed work too). The detail pane (~75%) is the selected agent / workflow's **change-map**: a named-chapter **task ribbon** (Claude's to-dos become stable content-hash chapters — click one to scope the bulk actions to it; chapters are **total** — work outside any to-do lands in a synthesized session chapter, and every chapter's Accept / Reject / Clear act **WYSIWYG** on exactly the edits its row shows), a one-row **module proportion strip** (click a segment to filter), and a **file ledger** ranked by churn (±line bars, coloured by review status, worst-unreviewed-wins). Up top, a **review toolbar** in five spaced groups: Search · session · Active only | Diff ◄► · Keep · Undo | File ◄► · Accept / Reject File | Accept All · Revert All · Clear Resolved | Spotlight · Refresh — color-coded by action (green keep/accept, red undo/reject, blue chevrons, orange clear, purple search/spotlight), every icon unique to its action, live n/m counters on both axes. |
 | **Observations** | A **session recap** on top (Claude Code's own title — zero token; ✨ to refine via `claude -p --resume`), then a coalesced **change feed** — files ordered by most-recent activity, each expanding to its edits (id + a small dimmed time + delta, adjacent same-file edits collapsing into a **×N** run) — with Claude's actual reasoning per row. Each row carries the observatory's **memory of that file** — cross-session accept/revert history and prior analyses; files whose edits get reverted repeatedly are flagged. |
 | **Stats** | A **top navbar** — the active Claude Code session; a **clickable pending count** that jumps to the first edit list (the same filter the Edits / Diffs trees use) — over a live **review scoreboard** (pending / accepted / reverted + a progress bar; the **pending** count is clickable, jumping to the first / oldest edit to review), a **tokens** step-line plot (total / input / output, log axis, Today / 7 days / 30 days), and live **Usage** bars — context fill plus 5h / week plan usage (from [claude-statusline](https://github.com/cell-observatory/claude-statusline)). |
 
@@ -127,7 +138,7 @@ Built for **surgical Claude usage on critical infrastructure**: you see every ch
 green whole-line highlight on added lines and a red one on deletions (removed text shown as red ghost
 text) — each carrying a **bold change-bar** in the gutter, green for added and red for removed — plus a
 **Claude-coral marker** on the scrollbar. Above each
-edit sits an **inline menu**: **✨ #N · +A −R · view changes**, then **✓ Keep · ↩ Undo · 💬 Chat · ⧉ View
+edit sits an **inline menu**: **✦ #N · +A −R · view changes**, then **✓ Keep · ↩ Undo · Chat · ⧉ View
 diff**. Kept edits grey out; reverted edits stay struck through everywhere.
 
 ![Inline review: the ✨ gutter star, a clearly-visible green/red whole-line highlight with matching change-bars, the inline menu (✨ #N view changes · Keep · Undo · Chat · View diff), and the edit's before ⟷ after with the reasoning in the title](docs/media/inline-review.png)
@@ -152,7 +163,7 @@ diff on the lens; reasoning in the title).
   or the buttons atop **File History**.
 - **Per-file review** — **Accept all / Revert all in this file** from the Edits toolbar, the editor banner,
   and the File-History toolbar.
-- **Chat handoff** — 💬 on any action, edit, subagent, or task hands your own Claude a
+- **Chat handoff** — the chat button on any action, edit, subagent, or task hands your own Claude a
   **context-preloaded** prompt: the target, Claude's own reasoning, and the before/after diff or
   command/result, assembled by `chat-context`. **Zero-token** — Observatory never calls a model.
 - **Toggle inline review** — hide/show the whole overlay with one button (👁).
