@@ -1897,7 +1897,7 @@ function changeMapShell(): string {
   * { box-sizing: border-box; }
   body { margin:0; padding:0; font-family: var(--vscode-font-family); font-size:11px; color: var(--vscode-foreground); height:100vh; display:flex; flex-direction:column; }
   /* top navbar — session selector + session-wide review actions (mirrors the Observations toolbar) */
-  .ov-toolbar { flex:none; display:flex; align-items:center; gap:10px; padding:6px 10px; border-bottom:1px solid var(--cm-border); flex-wrap:wrap; }
+  .ov-toolbar { flex:none; display:flex; align-items:center; justify-content:space-between; gap:10px; padding:6px 10px; border-bottom:1px solid var(--cm-border); flex-wrap:wrap; }
   .ov-tb { display:inline-flex; align-items:center; gap:5px; background:transparent; border:1px solid var(--cm-border); border-radius:5px; color: var(--vscode-descriptionForeground); font:inherit; font-size:11px; padding:3px 9px; cursor:pointer; white-space:nowrap; }
   .ov-tb:hover { background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.12)); color: var(--vscode-foreground); }
   .ov-tb.sess { font-family: var(--cm-mono); color: var(--vscode-foreground); }
@@ -1922,6 +1922,8 @@ function changeMapShell(): string {
   #ov-fileprev .codicon, #ov-filenext .codicon, #ov-diffprev .codicon, #ov-diffnext .codicon { color: var(--mt-working); }
   #ov-clearres .codicon { color: var(--mt-attn); }
   #ov-search .codicon, #ov-spotlight .codicon { color: var(--mt-agent); }
+  /* The theme's dark charts-orange is muddy / low-contrast; brighten the Clear tint on dark themes. */
+  body.vscode-dark #ov-clearres .codicon, body.vscode-dark .cm-tb.cl .codicon { color: #e6a44c; }
   /* master–detail: left NAV (Fleet · Workflows) | right change-map DETAIL for the selected nav item */
   .ov { display:flex; flex:1; min-height:0; align-items:stretch; }
   .ov-nav { flex:0 0 25%; min-width:180px; max-width:40%; display:flex; flex-direction:column; border-right:1px solid var(--cm-border); padding:6px 8px 7px; overflow:hidden; }
@@ -2119,7 +2121,7 @@ function changeMapShell(): string {
     // Session-wide bulk (retargets to the picked chapter — see relabelBulk).
     `<span class="ov-navgrp">` +
     `<button class="ov-tb" id="ov-keepall" title="Accept all edits in this session"><i class="codicon codicon-checklist"></i> Accept All</button>` +
-    `<button class="ov-tb" id="ov-undoall" title="Revert all edits in this session"><i class="codicon codicon-timeline-view-icon"></i> Revert All</button>` +
+    `<button class="ov-tb" id="ov-undoall" title="Revert all edits in this session"><i class="codicon codicon-history"></i> Revert All</button>` +
     `<button class="ov-tb" id="ov-clearres" title="Clear resolved (kept / reverted) edits"><i class="codicon codicon-clear-all"></i> Clear Resolved</button>` +
     `</span><span class="ov-nbsep"></span>` +
     `<span class="ov-navgrp">` +
@@ -2629,13 +2631,13 @@ const OVERVIEW_SCRIPT = `
     var cid = esc(it.id==null?'':it.id);
     var tid = esc(it.taskId==null?'':it.taskId);
     var isSel = selectable && SEL_CH && SEL_CH.id===String(it.id);
-    // The SAME codicons as the toolbar BULK buttons (checklist / timeline-view-icon / clear-all /
+    // The SAME codicons as the toolbar BULK buttons (checklist / history / clear-all /
     // comment-discussion) — the chips ARE those actions retargeted to this chapter, and no icon may
     // serve two different actions.
     var btns = (canAct || it.taskId!=null) ? ('<span class="cm-tbtns">'+
         (it.taskId!=null?'<button class="cm-tb ch" data-chat="'+tid+'" title="Chat about this chapter — copies context, opens your Claude"><i class="codicon codicon-comment-discussion"></i></button>':'')+
         (canAct?('<button class="cm-tb ok" data-keep="'+cid+'" title="Accept — keep all pending edits shown in this chapter"><i class="codicon codicon-checklist"></i></button>'+
-          '<button class="cm-tb rj" data-undo="'+cid+'" title="Reject — undo all pending edits shown in this chapter"><i class="codicon codicon-timeline-view-icon"></i></button>'+
+          '<button class="cm-tb rj" data-undo="'+cid+'" title="Reject — undo all pending edits shown in this chapter"><i class="codicon codicon-history"></i></button>'+
           '<button class="cm-tb cl" data-clear="'+cid+'" title="Clear — drop resolved (kept/undone) edits in this chapter"><i class="codicon codicon-clear-all"></i></button>'):'')+
         '</span>') : '';
     return '<span class="cm-task'+(it.syn?' syn':'')+(isSel?' sel':'')+'"'+(selectable?' data-sel="'+cid+'"':'')+' title="'+esc(it.label)+' — '+it.r.edits+' edit(s) · '+it.st+(it.syn?' · work outside any to-do, attributed to the session':'')+(selectable?' · click to scope the bulk actions to this chapter':'')+'">'+
@@ -2653,7 +2655,7 @@ const OVERVIEW_SCRIPT = `
     // innerHTML (not textContent) so the codicon <i> survives; esc() the label since it's user content.
     function set(id, icon, base, scoped, tip, tipScoped){ var b=document.getElementById(id); if(!b) return; b.innerHTML='<i class="codicon codicon-'+icon+'"></i> '+esc(SEL_CH?scoped:base); b.title=SEL_CH?tipScoped:tip; }
     set('ov-keepall','checklist','Accept All','Accept All in '+nm,'Accept all edits in this session','Accept all pending edits in the “'+nm+'” chapter');
-    set('ov-undoall','timeline-view-icon','Revert All','Revert All in '+nm,'Revert all edits in this session','Revert all pending edits in the “'+nm+'” chapter');
+    set('ov-undoall','history','Revert All','Revert All in '+nm,'Revert all edits in this session','Revert all pending edits in the “'+nm+'” chapter');
     set('ov-clearres','clear-all','Clear Resolved','Clear in '+nm,'Clear resolved (kept / reverted) edits','Clear resolved edits in the “'+nm+'” chapter');
   }
   // Toggle a ribbon chip's selection: pick it (scoping the bulk actions), or deselect if already picked.
@@ -3222,7 +3224,7 @@ export function activate(context: vscode.ExtensionContext): void {
   statusItem.command = 'claudeObservatory.reviewNext';
   // The nav bar: a compact review toolbar beside the microscope, shown only while edits await review so
   // the bottom bar stays quiet when you're caught up. Two tiers (adopted from Void's editor review bar):
-  //   • session tier  — File axis (← n/m →), Clear resolved, Spotlight, Search — whenever ANY edit is pending
+  //   • session tier  — Search, File axis (← n/m →), Accept All / Revert All, Clear resolved, Spotlight — whenever ANY edit is pending
   //   • active-file tier — Diff axis (↑ n/m ↓), Keep/Undo this edit, Accept/Reject File — when the OPEN file
   //     has pending edits (mirrors the per-file bar Void pins at the bottom of the editor).
   // navEditId is the pending edit the Diff axis is parked on within the open file.
@@ -3239,27 +3241,55 @@ export function activate(context: vscode.ExtensionContext): void {
     if (tint) b.color = new vscode.ThemeColor(tint);
     return b;
   };
+  // A passive group divider — mirrors the Overview navbar's .ov-nbsep so the status-bar nav bar reads as
+  // the SAME spaced groups. No command (non-interactive); the padding widens the gap between groups.
+  const mkStatusSep = (priority: number) => {
+    const s = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, priority);
+    s.text = '  │  ';
+    s.color = new vscode.ThemeColor('descriptionForeground');
+    return s;
+  };
+  // ORDER + GROUPING mirror the Overview navbar (higher priority = further left):
+  //   Search │ Diff axis · Keep · Undo │ File axis · Accept/Reject File │ Accept All · Revert All · Clear │ Spotlight
   // Search leads every nav bar (user rule 2026-07-16 — same position on every surface).
-  const searchBtn = mkStatusBtn('$(search) Search', 'Claude Observatory: search edits', 'claudeObservatory.searchEdits', 90, 'charts.purple');
-  // Diff axis — steps the OPEN file's pending edits; the counter opens the current edit's diff.
-  const diffPrevBtn = mkStatusBtn('$(chevron-up)', 'Claude Observatory: previous edit in this file', 'claudeObservatory.navDiffPrev', 89, 'charts.blue');
-  const diffCountBtn = mkStatusBtn('', 'Claude Observatory: this file’s pending edits — click to open the floating review bubble', 'claudeObservatory.navViewDiff', 88);
-  const diffNextBtn = mkStatusBtn('$(chevron-down)', 'Claude Observatory: next edit in this file', 'claudeObservatory.navDiffNext', 87, 'charts.blue');
-  // File axis — steps across every file with pending edits; the counter opens the Edits view.
-  const filePrevBtn = mkStatusBtn('$(chevron-left)', 'Claude Observatory: previous changed file', 'claudeObservatory.navFilePrev', 86, 'charts.blue');
-  const fileCountBtn = mkStatusBtn('', 'Claude Observatory: files with pending edits — click to open the Edits view', 'claudeObservatory.edits.focus', 85);
-  const fileNextBtn = mkStatusBtn('$(chevron-right)', 'Claude Observatory: next changed file', 'claudeObservatory.navFileNext', 84, 'charts.blue');
-  // Per-edit + per-file actions on the OPEN file.
-  const keepEditBtn = mkStatusBtn('$(check) Keep', 'Claude Observatory: keep this edit', 'claudeObservatory.navKeep', 83, 'charts.green');
-  const undoEditBtn = mkStatusBtn('$(discard) Undo', 'Claude Observatory: undo this edit', 'claudeObservatory.navUndo', 82, 'charts.red');
-  const acceptFileBtn = mkStatusBtn('$(check-all) Accept File', 'Claude Observatory: accept every pending edit in this file', 'claudeObservatory.keepOpenFile', 81, 'charts.green');
-  const rejectFileBtn = mkStatusBtn('$(close-all) Reject File', 'Claude Observatory: reject (revert) every pending edit in this file', 'claudeObservatory.undoOpenFile', 80, 'charts.red');
-  // Session-wide utilities.
-  const clearBtn = mkStatusBtn('$(clear-all) Clear Resolved', 'Claude Observatory: clear resolved (kept/reverted) edits', 'claudeObservatory.clearResolved', 79, 'charts.orange');
-  const spotlightBtn = mkStatusBtn('$(lightbulb) Spotlight', 'Claude Observatory: toggle spotlight — dim unedited lines to highlight Claude’s changes', 'claudeObservatory.toggleHeatmap', 78, 'charts.purple');
-  const activeFileBtns = [diffPrevBtn, diffCountBtn, diffNextBtn, keepEditBtn, undoEditBtn, acceptFileBtn, rejectFileBtn];
-  const sessionBtns = [searchBtn, filePrevBtn, fileCountBtn, fileNextBtn, clearBtn, spotlightBtn];
+  const searchBtn = mkStatusBtn('$(search) Search', 'Claude Observatory: search edits', 'claudeObservatory.searchEdits', 100, 'charts.purple');
+  // Diff group (Overview G2) — the OPEN file's edit axis + per-edit Keep/Undo.
+  const diffPrevBtn = mkStatusBtn('$(chevron-up)', 'Claude Observatory: previous edit in this file', 'claudeObservatory.navDiffPrev', 98, 'charts.blue');
+  const diffCountBtn = mkStatusBtn('', 'Claude Observatory: this file’s pending edits — click to open the floating review bubble', 'claudeObservatory.navViewDiff', 97);
+  const diffNextBtn = mkStatusBtn('$(chevron-down)', 'Claude Observatory: next edit in this file', 'claudeObservatory.navDiffNext', 96, 'charts.blue');
+  const keepEditBtn = mkStatusBtn('$(check) Keep', 'Claude Observatory: keep this edit', 'claudeObservatory.navKeep', 95, 'charts.green');
+  const undoEditBtn = mkStatusBtn('$(discard) Undo', 'Claude Observatory: undo this edit', 'claudeObservatory.navUndo', 94, 'charts.red');
+  // File group (Overview G3) — the pending-file axis + per-file Accept/Reject.
+  const filePrevBtn = mkStatusBtn('$(chevron-left)', 'Claude Observatory: previous changed file', 'claudeObservatory.navFilePrev', 92, 'charts.blue');
+  const fileCountBtn = mkStatusBtn('', 'Claude Observatory: files with pending edits — click to open the Edits view', 'claudeObservatory.edits.focus', 91);
+  const fileNextBtn = mkStatusBtn('$(chevron-right)', 'Claude Observatory: next changed file', 'claudeObservatory.navFileNext', 90, 'charts.blue');
+  const acceptFileBtn = mkStatusBtn('$(check-all) Accept File', 'Claude Observatory: accept every pending edit in this file', 'claudeObservatory.keepOpenFile', 89, 'charts.green');
+  const rejectFileBtn = mkStatusBtn('$(close-all) Reject File', 'Claude Observatory: reject (revert) every pending edit in this file', 'claudeObservatory.undoOpenFile', 88, 'charts.red');
+  // Bulk group (Overview G4) — session-wide Accept All · Revert All · Clear Resolved.
+  const acceptAllBtn = mkStatusBtn('$(checklist) Accept All', 'Claude Observatory: accept all edits in this session', 'claudeObservatory.keepAll', 86, 'charts.green');
+  const revertAllBtn = mkStatusBtn('$(history) Revert All', 'Claude Observatory: revert all edits in this session', 'claudeObservatory.undoAll', 85, 'charts.red');
+  const clearBtn = mkStatusBtn('$(clear-all) Clear Resolved', 'Claude Observatory: clear resolved (kept/reverted) edits', 'claudeObservatory.clearResolved', 84);
+  // Spotlight (Overview G5).
+  const spotlightBtn = mkStatusBtn('$(lightbulb) Spotlight', 'Claude Observatory: toggle spotlight — dim unedited lines to highlight Claude’s changes', 'claudeObservatory.toggleHeatmap', 82, 'charts.purple');
+  // Four dividers slot between the five groups (priority lands each between the groups it separates).
+  // sep1/sep3/sep4 ride the session tier (always flanked by a visible group when pending); sep2 rides
+  // the active-file tier, so it hides together with the Diff group when no changed file is open.
+  const sep1 = mkStatusSep(99); // Search | Diff
+  const sep2 = mkStatusSep(93); // Diff | File
+  const sep3 = mkStatusSep(87); // File | bulk
+  const sep4 = mkStatusSep(83); // bulk | Spotlight
+  const activeFileBtns = [diffPrevBtn, diffCountBtn, diffNextBtn, keepEditBtn, undoEditBtn, acceptFileBtn, rejectFileBtn, sep2];
+  const sessionBtns = [searchBtn, filePrevBtn, fileCountBtn, fileNextBtn, acceptAllBtn, revertAllBtn, clearBtn, spotlightBtn, sep1, sep3, sep4];
   const navCluster = [...activeFileBtns, ...sessionBtns];
+  // Clear Resolved keeps the amber "attention" tint, but the theme's dark charts-orange reads muddy —
+  // use the brighter amber on dark themes (parity with the Overview webview), the theme orange on light.
+  const applyClearTint = () => {
+    const k = vscode.window.activeColorTheme.kind;
+    const dark = k === vscode.ColorThemeKind.Dark || k === vscode.ColorThemeKind.HighContrast;
+    clearBtn.color = dark ? '#e6a44c' : new vscode.ThemeColor('charts.orange');
+  };
+  applyClearTint();
+  context.subscriptions.push(vscode.window.onDidChangeActiveColorTheme(applyClearTint));
 
   const updateStatusItem = () => {
     const session = currentSession();

@@ -25,7 +25,6 @@ import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.DefaultActionGroup
-import com.intellij.openapi.actionSystem.Separator
 import com.intellij.openapi.actionSystem.ToggleAction
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.diagnostic.Logger
@@ -52,9 +51,12 @@ import java.awt.Dimension
 import java.awt.FlowLayout
 import java.awt.Graphics
 import java.awt.Graphics2D
+import java.awt.GridBagConstraints
+import java.awt.GridBagLayout
 import java.awt.RenderingHints
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
+import javax.swing.Box
 import javax.swing.BoxLayout
 import javax.swing.DefaultListModel
 import javax.swing.Icon
@@ -63,6 +65,7 @@ import javax.swing.JLabel
 import javax.swing.JList
 import javax.swing.JPanel
 import javax.swing.JPopupMenu
+import javax.swing.JSeparator
 import javax.swing.JTree
 import javax.swing.ListCellRenderer
 import javax.swing.ScrollPaneConstants
@@ -137,8 +140,9 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
     private var selected: NavSel = NavSel.Main
     private var pickedChapter: PickedChapter? = null
 
-    /** The Overview title-bar toolbar, kept so a chapter pick / nav step can refresh its labels + counters. */
-    private var overviewToolbar: ActionToolbar? = null
+    /** The Overview title-bar toolbars (one ActionToolbar per group), kept so a chapter pick / nav step can
+     *  refresh their scoped labels + counters. */
+    private var overviewToolbars: List<ActionToolbar> = emptyList()
     /** The shared step-through review nav bar (parity with the status-bar widget), hosted in this toolbar. */
     private val reviewNavBar = ReviewNavBar(project) { refreshOverviewToolbar() }
 
@@ -218,22 +222,29 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         // from the shared ReviewNavBar (labels shown, like VS Code); the toolbar-only fleet filters
         // (Clear Completed / Show Hidden / Clear Done Chapters) were REMOVED 2026-07-16 — Active only
         // already hides completed rows, and chapter clearing lives in the chapter context menu.
-        val group = DefaultActionGroup(
+        // FIVE groups mirroring the VS Code Overview, each its own ActionToolbar so they can be spread to
+        // fill the panel width. ActionToolbarImpl packs children at preferred width and can't distribute
+        // leftover space itself, so the groups sit in a GridBagLayout host where weighted glue cells absorb
+        // the slack — the five groups spread edge-to-edge with a divider centred in each gap (parity with
+        // .ov-toolbar { justify-content: space-between } + .ov-nbsep).
+        val g1 = DefaultActionGroup(
             reviewNavBar.searchAction(),
             action("Switch Session", AllIcons.Vcs.Branch) { ReviewOps.chooseSession(project, fleetTree) },
             activeOnlyToggle(),
-            Separator.getInstance(),
-        ).apply {
+        )
+        val g2 = DefaultActionGroup().apply {
             reviewNavBar.diffAxis().forEach(::add)
             add(reviewNavBar.keepAction())
             add(reviewNavBar.undoAction())
-            addSeparator()
+        }
+        val g3 = DefaultActionGroup().apply {
             reviewNavBar.fileAxis().forEach(::add)
             add(reviewNavBar.acceptFileAction())
             add(reviewNavBar.rejectFileAction())
-            addSeparator()
-            // Bulk actions RETARGET to the picked ribbon chapter when one is selected (task-keep/undo/clear
-            // on chapter.id), else run session-wide; the presentation text reflects the scope.
+        }
+        // Bulk actions RETARGET to the picked ribbon chapter when one is selected (task-keep/undo/clear on
+        // chapter.id), else run session-wide; the presentation text reflects the scope.
+        val g4 = DefaultActionGroup().apply {
             add(bulkAction("Accept All", NavTint.ACCEPT_ALL, { "Accept All in “$it”" },
                 { withSession { s -> ReviewOps.keepAll(project, s) } },
                 { p -> ReviewOps.keepTask(project, p.session, p.id, p.title) }))
@@ -248,14 +259,29 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
                     }
                 },
                 { p -> ReviewOps.clearTask(project, p.session, p.id, p.title) }))
-            addSeparator()
-            add(reviewNavBar.spotlightAction())
-            add(action("Refresh", AllIcons.Actions.Refresh) { rebuild(force = true) })
         }
-        val tb = ActionManager.getInstance().createActionToolbar("ClaudeObservatoryOverview", group, true)
-        tb.targetComponent = fleetTree
-        overviewToolbar = tb
-        toolbar = tb.component
+        val g5 = DefaultActionGroup(
+            reviewNavBar.spotlightAction(),
+            action("Refresh", AllIcons.Actions.Refresh) { rebuild(force = true) },
+        )
+        val tbs = listOf(g1, g2, g3, g4, g5).mapIndexed { i, g ->
+            ActionManager.getInstance().createActionToolbar("ClaudeObservatoryOverview$i", g, true).apply {
+                targetComponent = fleetTree
+                component.isOpaque = false
+            }
+        }
+        overviewToolbars = tbs
+        toolbar = JPanel(GridBagLayout()).apply {
+            isOpaque = false
+            border = JBUI.Borders.empty(0, 2)
+            var col = 0
+            fun natural() = GridBagConstraints().apply { gridx = col++; gridy = 0; fill = GridBagConstraints.NONE; anchor = GridBagConstraints.CENTER }
+            fun glue() = add(Box.createHorizontalGlue(), GridBagConstraints().apply { gridx = col++; gridy = 0; weightx = 1.0; fill = GridBagConstraints.HORIZONTAL })
+            tbs.forEachIndexed { i, tb ->
+                if (i > 0) { glue(); add(navDivider(), natural()); glue() }
+                add(tb.component, natural())
+            }
+        }
 
         // Single-click a Fleet row → map that agent (a subagent maps its parent agent); a Workflows run →
         // map that workflow. Ignore programmatic reloads (suppressSel) and non-item rows (the filter banner).
@@ -310,7 +336,15 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
     /** Force the Overview toolbar to recompute its labels (chapter scope) + nav counters immediately. */
     @Suppress("DEPRECATION") // updateActionsImmediately: still the way to force a toolbar refresh
     private fun refreshOverviewToolbar() {
-        overviewToolbar?.updateActionsImmediately()
+        overviewToolbars.forEach { it.updateActionsImmediately() }
+    }
+
+    /** A thin, fixed-height divider between the Overview toolbar groups — the Swing echo of .ov-nbsep. */
+    private fun navDivider(): JComponent = JSeparator(SwingConstants.VERTICAL).apply {
+        val d = Dimension(JBUI.scale(1), JBUI.scale(18))
+        preferredSize = d
+        minimumSize = d
+        maximumSize = d
     }
 
     private fun popupFor(node: Any?): JPopupMenu? = when (node) {

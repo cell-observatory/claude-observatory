@@ -30,7 +30,7 @@ internal object NavTint {
     val GREEN = JBColor(Color(0x3FB950), Color(0x3FB950))
     val RED = JBColor(Color(0xE5534B), Color(0xE5534B))
     val BLUE = JBColor(Color(0x4C8BF5), Color(0x4C8BF5))
-    val ORANGE = JBColor(Color(0xD9822B), Color(0xD9822B))
+    val ORANGE = JBColor(Color(0xD9822B), Color(0xE6A44C)) // brighter on dark — the dull dark orange read poorly
     val PURPLE = JBColor(Color(0x9A6AC2), Color(0x9A6AC2))
     fun tint(icon: Icon, color: Color): Icon = IconUtil.colorize(icon, color)
 

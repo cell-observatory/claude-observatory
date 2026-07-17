@@ -11,9 +11,10 @@
 [![Dependabot](https://img.shields.io/badge/dependabot-enabled-025E8C?logo=dependabot&logoColor=white)](https://github.com/cell-observatory/claude-observatory/blob/main/.github/dependabot.yml)
 [![Version](https://img.shields.io/badge/version-v0.8.3-blue)](https://github.com/cell-observatory/claude-observatory/releases/latest)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/cell-observatory/claude-observatory/blob/main/LICENSE)
-&nbsp;·&nbsp; **[🔬 Live showcase →](https://cell-observatory.github.io/claude-observatory/)**
-&nbsp;·&nbsp; **[Interactive demo →](https://cell-observatory.github.io/claude-observatory/demo.html)**
-&nbsp;·&nbsp; [Changelog](CHANGELOG.md)
+
+
+
+**[🔬 Live showcase →](https://cell-observatory.github.io/claude-observatory/)** &nbsp;·&nbsp; **[Interactive demo →](https://cell-observatory.github.io/claude-observatory/demo.html)** &nbsp;·&nbsp; [Changelog](CHANGELOG.md)
 
 **Per-edit Keep / Undo for [Claude Code](https://claude.com/claude-code).** Every file change Claude makes
 becomes a reviewable entry with its own surgical undo — in your **terminal**, **VS Code**, and **JetBrains
