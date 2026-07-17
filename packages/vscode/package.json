@@ -2,7 +2,7 @@
   "name": "claude-observatory-vscode",
   "displayName": "Claude Observatory",
   "description": "A running list of every file change Claude Code makes, each with its own Keep / Undo (surgical, git-free).",
-  "version": "0.8.3",
+  "version": "0.8.4",
   "publisher": "claude-observatory",
   "private": true,
   "engines": {
@@ -81,11 +81,28 @@
     "viewsWelcome": [
       {
         "view": "claudeObservatory.edits",
+        "when": "!claudeObservatory.hooksInstalled",
         "contents": "No tracked Claude edits in this workspace yet.\nInstall the capture hooks, then let Claude edit a file.\n[Show setup instructions](command:claudeObservatory.setup)"
       },
       {
+        "view": "claudeObservatory.edits",
+        "when": "claudeObservatory.hooksInstalled && claudeObservatory.priorSessionWithEdits",
+        "contents": "No edits in this session yet — the hooks are working.\n[Switch to previous session](command:claudeObservatory.switchToPreviousSession)\n[Pick a session…](command:claudeObservatory.switchSession)"
+      },
+      {
+        "view": "claudeObservatory.edits",
+        "when": "claudeObservatory.hooksInstalled && !claudeObservatory.priorSessionWithEdits",
+        "contents": "No edits in this session yet.\nLet Claude edit a file and it will appear here."
+      },
+      {
         "view": "claudeObservatory.diffs",
+        "when": "!claudeObservatory.hooksInstalled",
         "contents": "No tracked Claude edits in this workspace yet."
+      },
+      {
+        "view": "claudeObservatory.diffs",
+        "when": "claudeObservatory.hooksInstalled",
+        "contents": "No edits in this session yet."
       },
       {
         "view": "claudeObservatory.fileHistory",
@@ -93,7 +110,17 @@
       },
       {
         "view": "claudeObservatory.observations",
+        "when": "!claudeObservatory.hooksInstalled",
         "contents": "No tracked Claude edits in this workspace yet."
+      },
+      {
+        "view": "claudeObservatory.observations",
+        "when": "claudeObservatory.hooksInstalled",
+        "contents": "No edits in this session yet."
+      },
+      {
+        "view": "claudeObservatory.actions",
+        "contents": "No tool calls in this session yet.\nEdits, commands, reads, searches, egress, and to-dos appear here as Claude works."
       }
     ],
     "commands": [
@@ -300,6 +327,12 @@
         "icon": "$(versions)"
       },
       {
+        "command": "claudeObservatory.switchToPreviousSession",
+        "title": "Switch to previous session with edits",
+        "category": "Claude Observatory",
+        "icon": "$(history)"
+      },
+      {
         "command": "claudeObservatory.keepAll",
         "title": "Accept all edits",
         "category": "Claude Observatory",
@@ -394,6 +427,16 @@
         "icon": "$(chevron-right)"
       },
       {
+        "command": "claudeObservatory.navChapterPrev",
+        "title": "Previous edit in this chapter",
+        "category": "Claude Observatory"
+      },
+      {
+        "command": "claudeObservatory.navChapterNext",
+        "title": "Next edit in this chapter",
+        "category": "Claude Observatory"
+      },
+      {
         "command": "claudeObservatory.navViewDiff",
         "title": "Nav bar: view current edit diff",
         "category": "Claude Observatory",
@@ -456,12 +499,6 @@
         "title": "Check for updates",
         "category": "Claude Observatory",
         "icon": "$(cloud-download)"
-      },
-      {
-        "command": "claudeObservatory.clearFile",
-        "title": "Clear resolved edits in file",
-        "category": "Claude Observatory",
-        "icon": "$(clear-all)"
       },
       {
         "command": "claudeObservatory.keepFolder",
@@ -527,6 +564,18 @@
         "command": "claudeObservatory.diffNextRevision",
         "key": "ctrl+alt+]",
         "mac": "alt+cmd+]",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "claudeObservatory.navChapterPrev",
+        "key": "ctrl+alt+,",
+        "mac": "alt+cmd+,",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "claudeObservatory.navChapterNext",
+        "key": "ctrl+alt+.",
+        "mac": "alt+cmd+.",
         "when": "editorTextFocus"
       }
     ],
@@ -849,11 +898,6 @@
           "group": "inline@2"
         },
         {
-          "command": "claudeObservatory.clearFile",
-          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.observations) && viewItem == file",
-          "group": "inline@3"
-        },
-        {
           "command": "claudeObservatory.keepFolder",
           "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs) && viewItem == folder",
           "group": "inline@1"
@@ -908,7 +952,7 @@
     "package": "vsce package --no-dependencies -o claude-observatory.vsix"
   },
   "devDependencies": {
-    "@claude-observatory/core": "0.8.3",
+    "@claude-observatory/core": "0.8.4",
     "@types/node": "^22.0.0",
     "@types/vscode": "^1.85.0",
     "@vscode/codicons": "^0.0.45",

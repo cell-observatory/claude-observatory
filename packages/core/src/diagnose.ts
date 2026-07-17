@@ -10,7 +10,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { claudeConfigDir } from './paths';
 import { settingsPath, hooksInstalled, installedHookCommand, HOOK_MARKER } from './install';
-import { resolveSessionId } from './session';
+import { resolveSessionId, hasAssistantRecord } from './session';
+import { findTranscript } from './observe';
 import { readLog } from './store';
 
 export type CheckLevel = 'ok' | 'warn' | 'fail';
@@ -178,16 +179,59 @@ export function diagnose(input: DiagnoseInput): Check[] {
   } else {
     const log = readLog(session);
     if (installed && log.length === 0) {
-      checks.push({
-        id: 'session',
-        label: 'capture activity',
-        level: 'warn',
-        detail: `session ${session} resolves, but no edits have been captured yet.`,
-        fix: 'If Claude has already edited files this session, the hooks were likely added mid-session — restart Claude Code.',
-      });
+      // Distinguish the two honest no-edits cases so the fix advice never points at working hooks:
+      // a session with no assistant reply yet (command-only stub / first turn in flight) vs a real
+      // session that simply hasn't run an Edit/Write yet.
+      const transcript = findTranscript(input.cwd, session);
+      if (transcript && !hasAssistantRecord(transcript)) {
+        checks.push({
+          id: 'session',
+          label: 'capture activity',
+          level: 'warn',
+          detail: `session ${session} resolves but has no assistant reply yet (command-only or just-started session).`,
+          fix: 'The hooks are fine. If an earlier session holds your edits, pick it explicitly (session picker in the sidebar, or the claudeObservatory.session setting).',
+        });
+      } else {
+        checks.push({
+          id: 'session',
+          label: 'capture activity',
+          level: 'warn',
+          detail: `session ${session} resolves, but no edits have been captured yet.`,
+          fix: 'Normal for a fresh or read-only session. If Claude HAS edited files this session, the hooks were likely added mid-session — restart Claude Code.',
+        });
+      }
     } else {
       checks.push({ id: 'session', label: 'capture activity', level: 'ok', detail: `session ${session} · ${log.length} edit(s)` });
     }
+  }
+
+  // Bash capture walks the real directory tree only: a symlinked subtree is skipped (loop safety),
+  // so its Bash-driven changes are invisible. Surface the blind spot instead of leaving it silent.
+  try {
+    const symDirs = fs
+      .readdirSync(input.cwd, { withFileTypes: true })
+      .filter((e) => {
+        // Per-entry guard: one dangling (ENOENT), circular (ELOOP), or unreadable (EACCES) link
+        // must not abort the whole check and silently drop warnings for the genuine ones.
+        if (!e.isSymbolicLink()) return false;
+        try {
+          return fs.statSync(path.join(input.cwd, e.name)).isDirectory();
+        } catch {
+          return false;
+        }
+      })
+      .map((e) => e.name);
+    if (symDirs.length > 0) {
+      checks.push({
+        id: 'symlink-subtrees',
+        label: 'symlinked subtrees',
+        level: 'warn',
+        detail: `${symDirs.slice(0, 3).join(', ')}${symDirs.length > 3 ? ', …' : ''} — Bash-driven changes under symlinked directories are not captured.`,
+        fix: 'Edit/Write captures still work everywhere; only the Bash tree diff skips symlinks (loop safety).',
+      });
+    }
+  } catch {
+    /* cwd unreadable — other checks already cover that */
   }
 
   // The status line powers the 5h/week usage bars — nice-to-have, not required.

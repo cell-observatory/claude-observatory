@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Claude Observatory — per-edit review for Claude Code</title>
-<meta name="description" content="Per-edit Keep and Undo review for Claude Code, in the terminal, VS Code, and JetBrains, at zero extra tokens. Standalone, git-free, and shareable.">
+<meta name="description" content="Per-edit Keep and Undo review for Claude Code, in the terminal, VS Code, and JetBrains, at zero extra tokens. Git-free, local-first, and reversible one change at a time.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%AC%3C/text%3E%3C/svg%3E">
 <style>
   :root{
@@ -52,7 +52,6 @@
   html{scroll-behavior:smooth;scroll-padding-top:80px;-webkit-text-size-adjust:100%}
   body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:17px;line-height:1.62;-webkit-font-smoothing:antialiased;overflow-x:hidden}
   .wrap{width:min(var(--col),90%);margin-inline:auto}
-  .hero-grid>*,.act-inner>*{min-width:0}
   a{color:inherit;text-decoration:none}
   h1,h2,h3{font-weight:640;letter-spacing:-.021em;line-height:1.08;text-wrap:balance;overflow-wrap:break-word}
   .hl{color:var(--accent)}
@@ -95,11 +94,10 @@
 
   /* hero */
   .hero{padding-top:clamp(40px,7vw,84px);padding-bottom:clamp(60px,9vh,120px)}
-  .hero-grid{display:grid;grid-template-columns:1.02fr 1.18fr;gap:clamp(32px,5vw,64px);align-items:center}
   .hero h1{font-size:clamp(2.6rem,7vw,5.2rem);margin:18px 0}
   .hero .cta{display:flex;gap:12px;flex-wrap:wrap;margin-top:28px}
   .hero .meta{margin-top:22px;font-family:var(--mono);font-size:.78rem;color:var(--ink-faint)}
-  @media (max-width:900px){.hero-grid{grid-template-columns:1fr;gap:36px}.hero .lede{max-width:46ch}}
+  @media (max-width:900px){.hero .lede{max-width:46ch}}
 
   /* editor mock (shared) */
   .editor{background:var(--ed-bg);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);overflow:hidden;font-family:var(--mono);color:var(--ed-ink)}
@@ -126,41 +124,12 @@
   .bubble .diff .c{color:var(--ink-faint)}
   .bubble .diff .h{color:var(--ed-fn)}
   @media (max-width:520px){.bubble .bh .tools{width:100%;margin-left:0}}
-
-  /* pinned review act */
-  .act-track{position:relative;height:260vh}
-  .act-stage{position:sticky;top:0;height:100vh;display:grid;place-items:center}
-  .act-inner{display:grid;grid-template-columns:1fr 1.1fr;gap:clamp(32px,5vw,72px);align-items:center}
-  .beats{position:relative;min-height:5.2rem;margin:12px 0 22px}
-  .beat{position:absolute;inset:0;font-size:clamp(1.5rem,2.9vw,2.2rem);font-weight:640;letter-spacing:-.02em;line-height:1.14;overflow-wrap:break-word;opacity:0;transform:translateY(10px);transition:opacity .5s ease,transform .5s ease}
-  .beat .hl{color:var(--accent)}
-  .act-sub{color:var(--ink-soft);max-width:42ch}
-  .act-stage[data-beat="0"] .b1,.act-stage[data-beat="1"] .b2,.act-stage[data-beat="2"] .b3{opacity:1;transform:none}
-  .act-editor .bar .chips{margin-left:auto;position:relative;width:96px;height:20px}
-  .chip{position:absolute;right:0;top:0;display:inline-flex;align-items:center;gap:5px;font-family:var(--sans);font-size:.72rem;padding:2px 9px;border-radius:999px;border:1px solid currentColor;opacity:0;transition:opacity .45s ease}
-  .chip.pending{color:var(--pending)} .chip.kept{color:var(--kept)} .chip.undone{color:var(--undone)}
-  .chip.kept .tk{color:var(--accent)}
-  .act-stage[data-beat="0"] .chip.pending,.act-stage[data-beat="1"] .chip.kept,.act-stage[data-beat="2"] .chip.undone{opacity:1}
-  .act-editor .add{transition:opacity .5s ease}
-  .act-stage[data-beat="2"] .act-editor .add{opacity:.38;box-shadow:none;background:transparent}
-  .act-stage[data-beat="2"] .act-editor .add .t{text-decoration:line-through}
-  @media (max-width:900px){.act-inner{grid-template-columns:1fr;gap:32px}.beats{min-height:auto;margin-bottom:16px}.beat{position:static;opacity:1;transform:none;display:none}.act-stage[data-beat="0"] .b1,.act-stage[data-beat="1"] .b2,.act-stage[data-beat="2"] .b3{display:block}}
-
   /* moments */
   .moment{text-align:center}
   .moment .lede{margin:16px auto 0;max-width:56ch}
   .panel{background:var(--surface);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);overflow:hidden;margin-top:clamp(36px,5vw,60px)}
   .panel .scroll{overflow-x:auto}
   .panel img{display:block;width:100%;height:auto}
-
-  /* specs */
-  .specs{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line-soft);border:1px solid var(--line-soft);border-radius:16px;overflow:hidden;margin-top:clamp(30px,4vw,48px)}
-  .specs .s{background:var(--bg);padding:26px 22px}
-  .specs .n{font-family:var(--mono);font-size:1.7rem;color:var(--accent);font-weight:600}
-  .specs .l{font-family:var(--mono);font-size:.68rem;text-transform:uppercase;letter-spacing:.09em;color:var(--ink-faint);margin:8px 0 8px}
-  .specs .d{font-size:.9rem;color:var(--ink-soft)}
-  @media (max-width:720px){.specs{grid-template-columns:1fr 1fr}}
-
   /* install */
   .cmd{display:flex;align-items:center;gap:12px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:13px 12px 13px 16px;font-family:var(--mono);font-size:.9rem;overflow-x:auto;max-width:640px;margin:26px auto 0}
   .cmd .pr{color:var(--accent);flex:none}
@@ -233,9 +202,6 @@
   @media (prefers-reduced-motion:reduce){
     html{scroll-behavior:auto}
     .rv,.rv.scale,.hero-v,.stagger>*{opacity:1;transform:none;transition:opacity .2s ease}
-    .act-track{height:auto}.act-stage{position:static;height:auto;padding-block:64px}
-    .beats{min-height:auto}.beat{position:static;opacity:1;transform:none;display:block;font-size:1.4rem;margin-bottom:6px}
-    .chip{position:static;opacity:0}.chip.kept{opacity:1;display:inline-flex}.act-editor .bar .chips{width:auto}
   }
   /* ---- lead interactive demo (hero) ---- */
   [hidden]{display:none!important}
@@ -311,6 +277,18 @@
   .tbtn:disabled{opacity:.35;cursor:default}
   .tbtn:disabled:hover{border-color:var(--line);color:var(--ink-soft)}
   @media (prefers-reduced-motion:reduce){.lens button.hint{animation:none;border-color:var(--accent)}.prompt-strip .caret{animation:none}.sd-progress i{transition:none}}
+  /* Manifesto sections folded into the page — left-aligned essay prose, tighter than the .moment showcases */
+  .essay{padding-block:clamp(72px,11vh,140px);text-align:center}
+  .essay .eyebrow{display:block;margin-bottom:10px}
+  .essay h2{letter-spacing:-.02em;line-height:1.12;margin-bottom:16px}
+  #credits h2{font-size:clamp(1.3rem,2.5vw,1.7rem)}
+  #credits{padding-block:clamp(40px,6vh,72px)}
+  .essay p{color:var(--ink-soft);max-width:66ch;line-height:1.6;margin:0 auto 14px}
+  .essay p:last-child{margin-bottom:0}
+  .essay ul{list-style:none;margin:8px auto 0;padding:0;max-width:62ch;text-align:left}
+  .essay li{color:var(--ink-soft);line-height:1.55;margin-bottom:12px;padding-left:24px;position:relative}
+  .essay li::before{content:"—" / "";position:absolute;left:0;color:var(--accent-ink)}
+  .essay li b{color:var(--ink);font-weight:640}
 </style>
 </head>
 <body>
@@ -337,22 +315,21 @@
 
 <aside class="gutter" aria-hidden="true">
   <a href="#hero" data-spy="hero">01</a>
-  <a href="#act" data-spy="act">02</a>
+  <a href="#manifesto" data-spy="manifesto">02</a>
   <a href="#everywhere" data-spy="everywhere">03</a>
-  <a href="#specs" data-spy="specs">04</a>
+  <a href="#tour" data-spy="tour">04</a>
   <a href="#install" data-spy="install">05</a>
 </aside>
 
 <header class="hero" id="hero">
   <div class="wrap">
     <div class="stagger hero-lead">
-      <span class="eyebrow" style="--i:0">A review tool for Claude Code</span>
-      <h1 style="--i:1">Per-edit review for <span class="hl">Claude Code</span></h1>
-      <p class="lede" style="--i:2">Each change Claude makes becomes a reviewable entry with its own Keep, Undo, and surgical revert — in the terminal, VS Code, and JetBrains, at zero extra tokens.</p>
+      <h1 style="--i:1">Claude Observatory</h1>
+      <p class="lede" style="--i:2">Coding agents now change code faster than anyone can read it. On established codebases and infrastructure you are accountable for, the hard part is no longer making a change but knowing what each one did — and being able to reverse any single one without unwinding the rest. Claude Observatory keeps that record as the agent works: a per-edit history, in your terminal and editor, that you review and reverse one change at a time. It is built for engineers accountable for the code they ship, not for throwaway prototypes.</p>
       <div class="cta" style="--i:3">
         <a class="btn primary" href="#install">Get started</a>
         <a class="btn line" href="demo.html">Full interactive demo →</a>
-        <a class="btn line" href="#act">How it works</a>
+        <a class="btn line" href="#how">How it works</a>
       </div>
       <div class="meta" style="--i:4">git-free · zero extra Claude tokens · terminal + VS Code + JetBrains</div>
     </div>
@@ -391,39 +368,35 @@
   </div>
 </header>
 
-<!-- SIGNATURE: the pinned review act -->
-<section class="act-track" id="act">
-  <div class="act-stage" data-beat="0">
-    <div class="wrap act-inner">
-      <div>
-        <span class="eyebrow">Per-edit review</span>
-        <div class="beats">
-          <p class="beat b1">Claude proposes a change.</p>
-          <p class="beat b2">You <span class="hl">keep</span> the edits that are correct,</p>
-          <p class="beat b3">and undo the rest, one edit at a time.</p>
-        </div>
-        <p class="act-sub">There is no end-of-session mega-diff. Every entry stands alone: accept it, revert it, or open its diff. Reverting one change never touches the others.</p>
-      </div>
-      <div class="editor act-editor" aria-hidden="true">
-        <div class="bar">
-          <span class="d" style="background:#ff5f57"></span><span class="d" style="background:#febc2e"></span><span class="d" style="background:#28c840"></span>
-          <span class="fn">src/models/dataset.py</span>
-          <span class="chips">
-            <span class="chip pending">● pending</span>
-            <span class="chip kept"><span class="tk">✓</span> kept</span>
-            <span class="chip undone">⤺ undone</span>
-          </span>
-        </div>
-        <div class="code">
-          <div class="ln"><span class="n">4</span><span class="t">        self.labels = labels</span></div>
-          <div class="ln"><span class="n">5</span><span class="t"></span></div>
-          <div class="ln add"><span class="n">6</span><span class="t"><span class="star">✨</span>    <span class="kw">def</span> <span class="fnm">validate</span>(self):</span></div>
-          <div class="ln add"><span class="n">7</span><span class="t">        <span class="kw">if</span> len(self.features) != len(self.labels):</span></div>
-          <div class="ln add"><span class="n">8</span><span class="t">            <span class="kw">return</span> {<span class="st">"ok"</span>: <span class="kw">False</span>, <span class="st">"error"</span>: <span class="st">"length mismatch"</span>}</span></div>
-          <div class="ln add"><span class="n">9</span><span class="t">        <span class="kw">return</span> {<span class="st">"ok"</span>: <span class="kw">True</span>}</span></div>
-        </div>
-      </div>
-    </div>
+<section class="essay" id="manifesto">
+  <div class="wrap rv">
+    <span class="eyebrow">The gap</span>
+    <h2>One change at a time</h2>
+    <p>A change accepted without being understood is a liability. A large diff reviewed only at the end of a session is understood too late to steer — by then the code is already in.</p>
+    <p>Existing tools address parts of this: Usage meters count tokens; log viewers replay a session; editor assistants and Claude Code's own <code>/rewind</code> roll back to a checkpoint; orchestrators launch fleets of agents and review each branch as a diff to merge. A checkpoint is coarse, though: it reverts a whole turn rather than one edit, does not track the files a shell command changed, and clears when the session does. None keeps a finer, longer-lived record you can act on one change at a time — accept or reverse any single edit while the rest stand, including the files a Bash command touched, from the terminal or either editor. That is the record Claude Observatory keeps.</p>
+  </div>
+</section>
+
+<section class="essay" id="how">
+  <div class="wrap rv">
+    <span class="eyebrow">How it runs</span>
+    <h2>Outside the model loop</h2>
+    <p>Capture runs in local hooks, outside the model loop: it costs no tokens and changes nothing about what the agent sees or the decisions it makes. The record builds itself as the agent works, so it is there before you need it — not something you reconstruct after the context is gone. Everything stays on your machine; nothing is sent anywhere.</p>
+  </div>
+</section>
+
+<section class="essay">
+  <div class="wrap rv">
+    <span class="eyebrow">What sets it apart</span>
+    <h2>From one edit to the whole trace</h2>
+    <ul>
+      <li><b>Any edit, reversible on its own.</b> Undo a single change while the edits around it stay — a position-anchored merge preserves them, and when a later edit genuinely overlaps, the undo is refused rather than applied blindly. No clean git state required, and never a silent clobber.</li>
+      <li><b>Review by the unit of work, not just the edit.</b> Follow a whole subtask — its edits in the order the agent made them, across files — as one coherent sequence, and scale the same review up to a chapter, a task, or a workflow run. Single edits when you want precision; traces when you want the shape of the work.</li>
+      <li><b>Every edit, recorded.</b> Each text edit is saved the moment an agent makes it — including the files a shell command changed. Anything it cannot snapshot, such as a binary or an oversized file, is marked as an explicit skip, never dropped silently.</li>
+      <li><b>Cross-platform support.</b> VS Code, JetBrains IDEs, and the terminal read the same local store, so review never depends on a particular editor or an outside service.</li>
+      <li><b>Every tool call, explained.</b> Reasoning, a timeline of each tool call, and flags of risky shell commands and off-machine network access — read from the transcript the session already produced.</li>
+      <li><b>Many agents, one view.</b> When several agents run in parallel across your git worktrees, it unifies them — who is working, on what, and where their changes collide.</li>
+    </ul>
   </div>
 </section>
 
@@ -432,28 +405,18 @@
   <div class="wrap rv">
     <span class="eyebrow">Terminal, VS Code, JetBrains</span>
     <h2>The same review in every editor</h2>
-    <p class="lede">One backend serves the CLI, VS Code, and JetBrains, so a review can start in the terminal and finish in either editor with nothing to reconcile. A Claude Edits sidebar holds Edits, Diffs, File History, and the Actions timeline; a bottom Observatory panel holds Observations, the multi-agent Overview, and Stats. A navigation bar steps through pending edits from the status bar, the editor tab, or a bubble over the change. The Actions timeline records every tool call Claude made, not just the edits: it flags risky commands, maps where a session reached off-machine, nests each subagent's timeline with per-agent metrics, and lists the fleet of agents at work across the repo's worktrees — all at zero extra tokens.</p>
+    <p class="lede">One backend serves the CLI, VS Code, and JetBrains, so a review can start in the terminal and finish in either editor with nothing to reconcile. A Claude Edits sidebar holds Edits, Diffs, File History, and the Actions timeline; a bottom Observatory panel holds Observations, the multi-agent Overview, and Stats. A navigation bar steps through pending edits from the status bar, the editor’s title bar, a bubble over the change, or the Overview panel — where it opens as two rows, session-wide controls above and, below, four axes that step the edits by diff, file, folder, and chapter. The Actions timeline records every tool call Claude made, not just the edits: it flags risky commands, maps where a session reached off-machine, nests each subagent's timeline with per-agent metrics, and lists the fleet of agents at work across the repo's worktrees — all at zero extra tokens.</p>
   </div>
   <div class="wrap"><a href="panels.html" title="Panels reference — every control named"><div class="panel rv scale"><img src="media/layout.png" loading="lazy" alt="The observatory in VS Code: sidebar edits, inline review, and the bottom dashboards"></div></a></div>
 </section>
 
 <!-- RECORDED DEMO: the Overview as a session runs -->
-<section class="moment" id="demo">
-  <div class="wrap rv">
-    <span class="eyebrow">Recorded demo</span>
-    <h2>The Overview as a session runs</h2>
-    <p class="lede">Recorded from the bundled demo: a session plans three chapters, edits land under each, a subagent and a workflow join, and the panel updates throughout. The <a href="getting-started.html" style="color:var(--accent-ink);text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:4px">full recorded walkthrough</a> covers the workflow view, PyCharm, and the chapter-by-chapter review.</p>
-    <div style="margin-top:22px"><a class="btn primary" href="demo.html">Try the interactive demo →</a></div>
-  </div>
-  <div class="wrap"><a href="getting-started.html" title="Getting started — the recorded walkthrough"><div class="panel rv scale"><img src="media/demo-live.gif" loading="lazy" alt="Recording of the Overview panel during the bundled demo: the chapter ribbon completing chapter by chapter, the module strip and file ledger growing with each edit, and the fleet agent's phase updating"></div></a></div>
-</section>
-
 <!-- FEATURE TOUR: every surface, one slide at a time -->
 <section class="moment" id="tour">
   <div class="wrap rv">
     <span class="eyebrow">Feature tour</span>
-    <h2><a href="features.html" style="text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:5px;text-decoration-color:var(--accent)">Features</a></h2>
-    <p class="lede" style="margin-inline:auto">Every surface, one slide at a time: inline, in the panel, in the terminal, and in both editors.</p>
+    <h2><a href="features.html">Everything it does, on every surface</a></h2>
+    <p class="lede">Every surface, one slide at a time: inline, in the panel, in the terminal, and in both editors.</p>
   </div>
   <div class="wrap">
     <div class="tour rv" role="region" aria-roledescription="carousel" aria-label="Feature tour">
@@ -463,16 +426,16 @@
           <article class="slide" role="group" aria-roledescription="slide" aria-label="Overview — master-detail multi-agent panel">
             <div class="slide-in">
               <div><span class="eyebrow">Overview</span><h3>Every agent and its changes in one panel</h3>
-                <p>A master-detail panel. The left nav lists every running agent across the repo's worktrees under the <b>Fleet</b> tab, plus every multi-agent Workflows run, each with a live phase and an activity sparkline; an interrupted run that never completed is not shown as running. Selecting one fills the right side with its change map: Claude's own to-dos as a task ribbon, a module-proportion strip, and every file ranked by churn with bars sized by ±lines. Clicking a chapter scopes Accept / Revert to that task; clicking a file opens its diff.</p></div>
-              <div class="panel"><img src="media/overview-tabs.png" loading="lazy" alt="The master-detail Overview: Fleet and Workflows in the left nav; the selected agent's change map — task ribbon, module strip, and churn-ranked file ledger — on the right"></div>
+                <p>A master-detail panel. The left nav lists every running agent across the repo's worktrees under the <b>Fleet</b> tab, plus every multi-agent Workflows run and a Tasks pane; each pane opens with a one-line description of what it holds, and its tabs and change-map sections carry hover descriptions. Fleet and Workflows rows each show a live phase and an activity sparkline; an interrupted run that never completed is not shown as running. Selecting one fills the right side with its change map, three labeled sections top to bottom: <b>Chapters</b>, a ribbon of subtask chips taken from Claude's own to-dos, each chip showing its lines, edits, and pending count; <b>Folders</b>, a proportional strip of tiles, one per changed directory, each tile's width set by the lines it changed and its color by review status; and <b>Files</b>, a churn-ranked ledger of every changed file. Clicking a Folder tile or a Chapter chip steps the matching nav-bar axis to that folder's or chapter's first pending edit; clicking a file opens its diff. A summary bar along the bottom reports the pending, accepted, and reverted edit counts with the file and folder totals for whatever is in scope, and names the current chapter or folder filter.</p></div>
+              <div class="panel"><img src="media/overview-tabs.png" loading="lazy" alt="The master-detail Overview: Fleet, Workflows, and Tasks in the left nav; the selected session's change map — the Chapters ribbon, the Folders strip, and the churn-ranked Files ledger — on the right, with a scope summary bar below"></div>
             </div>
           </article>
 
           <article class="slide" role="group" aria-roledescription="slide" aria-label="Multitasking across worktrees">
             <div class="slide-in">
               <div><span class="eyebrow">The fleet</span><h3>Multitasking across worktrees</h3>
-                <p>Every running Claude session appears in one live board, including sessions in separate git worktrees of one repo, correlated without the git binary. Each row carries a live phase (working · awaiting-input · awaiting-permission · idle · done, with heuristic phases marked ~), its worktree and branch, a sparkline, ±lines, tokens · time, risk, and a strip flagging any file two agents are touching. Tracking is path-only, at zero tokens.</p></div>
-              <div class="panel"><img src="media/multitasking.png" loading="lazy" alt="Multitasking: one row per running agent across the repo's git worktrees — live phase, branch, sparkline, ±lines, risk, nested subagents, and a cross-agent file-collision strip"></div>
+                <p>Every running Claude session appears in one live board, including sessions in separate git worktrees of one repo, correlated without the git binary. Each row carries a live phase (working · awaiting-input · awaiting-permission · idle · done, with heuristic phases marked ~), its worktree and branch, a sparkline, ±lines, tokens · time, risk, and live file conflicts (in the Actions view) flagging any file two agents are touching. Tracking is path-only, at zero tokens.</p></div>
+              <div class="panel"><img src="media/multitasking.png" loading="lazy" alt="Multitasking: one row per running agent across the repo's git worktrees — live phase, branch, sparkline, ±lines, risk, nested subagents, and live cross-agent file conflicts leading the Actions view"></div>
             </div>
           </article>
 
@@ -582,7 +545,7 @@
           <article class="slide" role="group" aria-roledescription="slide" aria-label="Stats">
             <div class="slide-in">
               <div><span class="eyebrow">Stats</span><h3>Progress, tokens, and usage</h3>
-                <p>A live scoreboard of pending / accepted / reverted edits, token plots by session and window, and context and plan usage.</p></div>
+                <p>A live scoreboard of pending / accepted / reverted edits, token plots by session and window, and context and plan usage. The session is identified by name rather than its raw id, and the 5-hour and weekly usage rows show an estimated used of total — the 100% figure inferred from the tokens spent divided by the percent reported.</p></div>
               <div class="panel"><img src="media/stats.png" loading="lazy" alt="Stats: review scoreboard, token plots, and usage bars"></div>
             </div>
           </article>
@@ -590,11 +553,12 @@
           <article class="slide" role="group" aria-roledescription="slide" aria-label="Navigation bar">
             <div class="slide-in">
               <div><span class="eyebrow">Navigation bar</span><h3>Review controls on four surfaces</h3>
-                <p>One review bar appears on four surfaces: the status bar, the editor's title bar, a floating bubble over the live edit, and the Overview panel's title bar.</p></div>
+                <p>One review bar appears on four surfaces: the status bar, the editor's title bar, a floating bubble over the live edit, and the Overview panel. On the Overview it opens as two rows. The top row holds the session controls: a selector that names the current session — its title or first prompt, with the raw id in the tooltip — then the session-wide Accept All, Revert All, Clear Resolved, and Export actions, and, on the right, Search, Active only, Spotlight, and Refresh. The bottom row holds four review axes that step the pending edits at four granularities. The <b>Diff</b> axis steps the open file's edits and carries Keep, Undo, Chat, View diff — which opens a real side-by-side diff editor — and the edit's relative time. The <b>File</b> axis steps changed files, showing each file's name and edit count with Accept File and Reject File. The <b>Folder</b> axis steps changed directories, showing a folder with its file and edit totals and acting on only that folder's edits. The <b>Chapter</b> axis steps the session's subtasks, showing each chapter's folder, file, and edit totals with Review, Accept Chapter, Reject Chapter, and Chat.</p></div>
               <div class="panel"><div class="mock">
-                <div class="mh">Review bar · four surfaces</div>
-                <div><span class="a">🔬 3</span> <span class="d">·</span> Search <span class="d">·</span> ▲ Diff 1/2 ▼ <span class="d">·</span> ◀ File 1/3 ▶ <span class="d">·</span> ✓ Keep ↩ Undo ✓✓ Accept File ✕ Reject File <span class="d">·</span> Clear Resolved · Spotlight</div>
-                <div class="d" style="margin-top:6px">Status bar · Editor title · Review bubble · Overview title bar</div>
+                <div class="mh">Overview review bar · two rows</div>
+                <div><b>demo-session</b> <span class="d">·</span> Accept All · Revert All · Clear Resolved · Export <span class="d">·</span> Search · Active only · Spotlight · Refresh</div>
+                <div style="margin-top:6px">▲ Diff 1/2 ▼ <span class="d">·</span> ◀ File 1/3 ▶ <span class="d">·</span> ◀ Folder 1/2 ▶ <span class="d">·</span> ◀ Chapter 1/3 ▶</div>
+                <div class="d" style="margin-top:6px">Also on the status bar, editor title, and review bubble</div>
               </div></div>
             </div>
           </article>
@@ -651,28 +615,6 @@
   </div>
 </section>
 
-<section class="moment" id="standalone">
-  <div class="wrap rv">
-    <span class="eyebrow">No repo required</span>
-    <h2>Standalone, git-free, and shareable</h2>
-    <p class="lede">A content-addressed snapshot store records every edit — no repo, no commits, and zero extra Claude tokens. A session can then be handed to a teammate.</p>
-  </div>
-  <div class="wrap"><div class="panel rv scale"><img src="media/file-history.png" loading="lazy" alt="File History: the active file's edits, newest first, following the editor"></div></div>
-</section>
-
-<section class="moment" id="specs">
-  <div class="wrap center rv">
-    <span class="eyebrow">By the numbers</span>
-    <h2>Key properties</h2>
-  </div>
-  <div class="wrap"><div class="specs rv">
-    <div class="s"><div class="n">0</div><div class="l">extra tokens</div><div class="d">Capture runs in local hooks, outside the model loop.</div></div>
-    <div class="s"><div class="n">1</div><div class="l">edit → 1 undo</div><div class="d">Revert one change; keep every later edit to the file.</div></div>
-    <div class="s"><div class="n">n</div><div class="l">agents → 1 panel</div><div class="d">Every agent · every worktree · one Overview.</div></div>
-    <div class="s"><div class="n">git</div><div class="l">not required</div><div class="d">A content-addressed snapshot store — no repo, no commits.</div></div>
-  </div></div>
-</section>
-
 <section class="moment center" id="install">
   <div class="wrap rv">
     <span class="eyebrow">Install</span>
@@ -693,6 +635,14 @@
       </div>
     </div>
     <p class="stay-current rv">To update an existing install, re-run the command above or run <code>claude-observatory update</code>; add <code>--check</code> to preview what's new.</p>
+  </div>
+</section>
+
+<section class="essay" id="credits">
+  <div class="wrap rv">
+    <span class="eyebrow">Open source</span>
+    <h2>License &amp; credits</h2>
+    <p>Claude Observatory is developed in the open by the <a href="https://github.com/cell-observatory" style="color:var(--accent-ink);text-decoration:underline">Cell Observatory</a> project, licensed under <a href="https://github.com/cell-observatory/claude-observatory/blob/main/LICENSE" style="color:var(--accent-ink);text-decoration:underline">Apache-2.0</a>, with a <a href="https://github.com/cell-observatory/claude-observatory/blob/main/CODE_OF_CONDUCT.md" style="color:var(--accent-ink);text-decoration:underline">Contributor Covenant</a> code of conduct. It is built with and for <a href="https://claude.com/claude-code" style="color:var(--accent-ink);text-decoration:underline">Claude Code</a>. Adjacent work informed its direction: <a href="https://github.com/matt1398/claude-devtools" style="color:var(--accent-ink);text-decoration:underline">claude-devtools</a> on reading the on-disk transcript, <a href="https://github.com/ryoppippi/ccusage" style="color:var(--accent-ink);text-decoration:underline">ccusage</a> and <a href="https://github.com/chiphuyen/sniffly" style="color:var(--accent-ink);text-decoration:underline">sniffly</a> on local-first analytics, and the worktree-fleet tools (<a href="https://www.conductor.build/" style="color:var(--accent-ink);text-decoration:underline">Conductor</a>, <a href="https://github.com/smtg-ai/claude-squad" style="color:var(--accent-ink);text-decoration:underline">claude-squad</a>, <a href="https://github.com/BloopAI/vibe-kanban" style="color:var(--accent-ink);text-decoration:underline">vibe-kanban</a>) on running agents in parallel — where Observatory adds the layer that observes them.</p>
   </div>
 </section>
 
@@ -798,21 +748,6 @@
     var onScroll=function(){nav.classList.toggle('condensed',window.scrollY>40);};
     window.addEventListener('scroll',onScroll,{passive:true});onScroll();
   })();
-  // pinned review act: scroll fraction -> 3 beats
-  (function(){
-    var track=document.getElementById('act'),stage=track&&track.querySelector('.act-stage');
-    if(!track||!stage)return;
-    var ticking=false;
-    function update(){
-      var total=track.offsetHeight-window.innerHeight;
-      var p=total>0?Math.min(1,Math.max(0,-track.getBoundingClientRect().top/total)):0;
-      var beat=p<0.34?0:(p<0.67?1:2);
-      if(stage.getAttribute('data-beat')!=beat)stage.setAttribute('data-beat',beat);
-      ticking=false;
-    }
-    window.addEventListener('scroll',function(){if(!ticking){requestAnimationFrame(update);ticking=true;}},{passive:true});
-    update();
-  })();
   // gutter index scroll-spy
   (function(){
     var links=document.querySelectorAll('.gutter a');if(!links.length||!('IntersectionObserver'in window))return;
@@ -821,7 +756,7 @@
       links.forEach(function(a){a.classList.remove('is-active');});
       var a=map[e.target.id];if(a)a.classList.add('is-active');
     }});},{rootMargin:'-45% 0px -50% 0px'});
-    ['hero','act','everywhere','specs','install'].forEach(function(id){var el=document.getElementById(id);if(el)io.observe(el);});
+    ['hero','manifesto','everywhere','tour','install'].forEach(function(id){var el=document.getElementById(id);if(el)io.observe(el);});
   })();
   (function(){
     var nav=document.getElementById('nav'),btn=document.getElementById('menu');

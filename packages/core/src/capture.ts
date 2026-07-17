@@ -28,8 +28,13 @@ import {
   writeBashManifest,
   readBashManifest,
   deleteBashManifest,
+  readBashStatCache,
+  writeBashStatCache,
+  blobPresence,
+  withBashPreLock,
   appendLog,
   appendSkip,
+  type BashStatCache,
 } from './store';
 
 const MAX_BYTES = 5 * 1024 * 1024; // skip files larger than 5 MB
@@ -184,28 +189,90 @@ function walkCandidates(root: string, onFile: (abs: string) => void): boolean {
   return true;
 }
 
-/** Bash Pre: snapshot the before-content of every candidate file under cwd into a manifest. */
+// git's "racily clean" rule: a same-size rewrite inside the same timestamp quantum as the cached
+// stat is invisible to (mtimeMs,size). Re-hash any file whose mtime lands within this window of
+// the cache's own write time — only files hot at cache-write time qualify, so the cost is ~zero.
+const RACY_EPSILON_MS = 2000;
+
+function statKey(st: fs.Stats): string {
+  return `${st.mtimeMs}:${st.size}`;
+}
+
+/**
+ * Content hash for a Bash-walk candidate via the stat cache: stat-only when (mtimeMs,size) is
+ * unchanged AND the blob still exists (never trust cache presence as blob existence — routine GC
+ * collects manifest-orphaned blobs, and a dangling beforeBlob would corrupt undo forever); read+
+ * hash+blob only what changed. Negative verdicts (binary/oversized) are cached too — 2/3 of the
+ * walked bytes are binaries the uncached path re-read on every single pass. Returns null for
+ * vanished/non-file/binary/oversized candidates.
+ */
+function cachedSnapshotHash(session: string, abs: string, cache: BashStatCache, blobs: Set<string>): string | null {
+  let st: fs.Stats;
+  try {
+    st = fs.statSync(abs);
+  } catch {
+    return null;
+  }
+  if (!st.isFile()) return null;
+  const k = statKey(st);
+  const hit = cache.files[abs];
+  const racy = cache.wroteMs > 0 && Math.abs(st.mtimeMs - cache.wroteMs) < RACY_EPSILON_MS;
+  if (hit && hit.k === k && !racy) {
+    if (hit.h === undefined) return null; // known binary/oversized — skip without reading
+    if (blobs.has(hit.h)) return hit.h; // GC-safe fast path
+  }
+  if (st.size > MAX_BYTES) {
+    cache.files[abs] = { k };
+    return null;
+  }
+  let buf: Buffer;
+  try {
+    buf = fs.readFileSync(abs);
+  } catch {
+    return null;
+  }
+  if (isBinary(buf)) {
+    cache.files[abs] = { k };
+    return null;
+  }
+  const h = writeBlob(session, buf);
+  blobs.add(h);
+  cache.files[abs] = { k, h };
+  return h;
+}
+
+/** Bash Pre: snapshot the before-content of every candidate file under cwd into a manifest.
+ *  Runs under the session lock so concurrent GC can't collect fresh blobs before the manifest
+ *  lands; appendSkip happens AFTER release (appendLog takes the same lock — never append inside). */
 function handlePreBash(session: string, payload: HookPayload): void {
   const cwd = payload.cwd;
   if (!cwd) return;
   ensureStore(session);
-  deleteBashManifest(session); // clear any stale manifest from an interrupted command
-  const files: Record<string, string | null> = {};
-  const ok = walkCandidates(cwd, (abs) => {
-    if (isSecretName(path.basename(abs))) return; // never sweep secrets into the store via the Bash walk
-    const s = snapshot(abs);
-    if (s.kind === 'text') files[abs] = writeBlob(session, s.content);
+  const truncated = withBashPreLock(session, () => {
+    deleteBashManifest(session); // clear any stale manifest from an interrupted command
+    const cache = readBashStatCache(session);
+    const blobs = blobPresence(session);
+    const files: Record<string, string | null> = {};
+    const ok = walkCandidates(cwd, (abs) => {
+      if (isSecretName(path.basename(abs))) return; // never sweep secrets into the store via the Bash walk
+      const h = cachedSnapshotHash(session, abs, cache, blobs);
+      if (h) files[abs] = h;
+    });
+    writeBashStatCache(session, cache); // verdicts are facts either way — persist even on truncation
+    if (!ok) return true;
+    writeBashManifest(session, { files, ts: Date.now() });
+    return false;
   });
-  if (!ok) {
+  if (truncated) {
     // Tree too large to snapshot reliably — record one marker for the whole command rather than
     // half-capture (no manifest → Post no-ops).
     appendSkip(session, '<bash-tree>', `Bash working tree exceeds ${BASH_MAX_FILES} files — changes not captured`);
-    return;
   }
-  writeBashManifest(session, { files, ts: Date.now() });
 }
 
-/** Bash Post: diff the tree against the manifest and log one edit per changed/created/deleted file. */
+/** Bash Post: diff the tree against the manifest and log one edit per changed/created/deleted file.
+ *  Unlocked like always: each changed file's blob is log-referenced by appendLog immediately after
+ *  it is written, so the unreferenced window stays microseconds. */
 function handlePostBash(session: string, payload: HookPayload): void {
   const cwd = payload.cwd;
   if (!cwd) return;
@@ -213,12 +280,13 @@ function handlePostBash(session: string, payload: HookPayload): void {
   if (!manifest) return; // Pre skipped/truncated — nothing reliable to diff
   const before = manifest.files;
   const seen = new Set<string>();
+  const cache = readBashStatCache(session);
+  const blobs = blobPresence(session);
   const ok = walkCandidates(cwd, (abs) => {
     if (isSecretName(path.basename(abs))) return; // symmetric with Pre: secrets are out of scope
     seen.add(abs);
-    const s = snapshot(abs);
-    if (s.kind !== 'text') return;
-    const afterBlob = writeBlob(session, s.content);
+    const afterBlob = cachedSnapshotHash(session, abs, cache, blobs);
+    if (afterBlob === null) return;
     const beforeBlob = Object.prototype.hasOwnProperty.call(before, abs) ? before[abs] : null;
     if (beforeBlob === afterBlob) return; // unchanged — no edit
     appendLog(session, { ts: Date.now(), tool: 'Bash', file: abs, beforeBlob, afterBlob, status: 'pending' });
@@ -230,6 +298,7 @@ function handlePostBash(session: string, payload: HookPayload): void {
       appendLog(session, { ts: Date.now(), tool: 'Bash', file: abs, beforeBlob: before[abs], afterBlob: null, status: 'pending' });
     }
   }
+  writeBashStatCache(session, cache);
   deleteBashManifest(session);
 }
 

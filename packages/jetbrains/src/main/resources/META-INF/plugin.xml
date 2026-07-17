@@ -64,6 +64,34 @@
         <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt U"/>
         <keyboard-shortcut keymap="Mac OS X 10.5+" first-keystroke="meta alt U" replace-all="true"/>
       </action>
+      <action id="ClaudeObservatory.ReviewPrevInChapter"
+              class="com.cellobservatory.observatory.actions.ReviewPrevInChapterAction"
+              text="Claude Observatory: Previous Edit in Chapter"
+              description="Step to the previous pending edit in the current edit's chapter (subtask)">
+        <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt COMMA"/>
+        <keyboard-shortcut keymap="Mac OS X 10.5+" first-keystroke="meta alt COMMA" replace-all="true"/>
+      </action>
+      <action id="ClaudeObservatory.ReviewNextInChapter"
+              class="com.cellobservatory.observatory.actions.ReviewNextInChapterAction"
+              text="Claude Observatory: Next Edit in Chapter"
+              description="Step to the next pending edit in the current edit's chapter (subtask)">
+        <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt PERIOD"/>
+        <keyboard-shortcut keymap="Mac OS X 10.5+" first-keystroke="meta alt PERIOD" replace-all="true"/>
+      </action>
+      <action id="ClaudeObservatory.KeepOpenFile"
+              class="com.cellobservatory.observatory.actions.KeepOpenFileAction"
+              text="Claude Observatory: Accept All Edits in File"
+              description="Accept every pending Claude edit in the active file">
+        <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt K"/>
+        <keyboard-shortcut keymap="Mac OS X 10.5+" first-keystroke="meta alt K" replace-all="true"/>
+      </action>
+      <action id="ClaudeObservatory.UndoOpenFile"
+              class="com.cellobservatory.observatory.actions.UndoOpenFileAction"
+              text="Claude Observatory: Revert All Edits in File"
+              description="Revert every pending Claude edit in the active file">
+        <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt R"/>
+        <keyboard-shortcut keymap="Mac OS X 10.5+" first-keystroke="meta alt R" replace-all="true"/>
+      </action>
       <action id="ClaudeObservatory.DiffPrevRevision"
               class="com.cellobservatory.observatory.actions.DiffPrevRevisionAction"
               text="Claude Observatory: Diff Previous Revision"

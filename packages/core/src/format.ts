@@ -15,7 +15,7 @@ function blobText(sessionId: string, sha: string | null): string {
   return sha === null ? '' : readBlob(sessionId, sha).toString('utf8');
 }
 
-/** Compact relative time, e.g. "5s ago", "12m ago", "3h ago", "2d ago". */
+/** Compact relative time, e.g. "5s ago", "12m ago", "3h ago", "2d ago", "3w ago", "2mo ago". */
 export function relTime(ts: number, now: number = Date.now()): string {
   const s = Math.max(0, Math.floor((now - ts) / 1000));
   if (s < 60) return `${s}s ago`;
@@ -23,7 +23,10 @@ export function relTime(ts: number, now: number = Date.now()): string {
   if (m < 60) return `${m}m ago`;
   const h = Math.floor(m / 60);
   if (h < 24) return `${h}h ago`;
-  return `${Math.floor(h / 24)}d ago`;
+  const d = Math.floor(h / 24);
+  if (d < 14) return `${d}d ago`;
+  if (d < 61) return `${Math.floor(d / 7)}w ago`;
+  return `${Math.floor(d / 30.44)}mo ago`;
 }
 
 /** Added/removed line counts for an edit. New-file = all added; deletion = all removed. */

@@ -33,6 +33,10 @@ data class ChangeMapChapter(
     val pending: Int,
     val undone: Int,
     val agent: Boolean,
+    /** Raw store edit ids DISPLAYED under this chapter, in capture order — the model the nav-bar CHAPTER
+     *  axis walks (mirrors core.chapterEditIds exactly). Empty for a planned zero-edit / duplicate row,
+     *  and for a workflow-slice chapter (core zeroes it there — the axis only reads the session's own). */
+    val editIds: List<Int>,
 )
 
 data class ChangeMapFile(
@@ -71,6 +75,9 @@ data class ChangeMapModule(
 
 data class ChangeMapSummary(
     val session: String,
+    /** Human-readable session name (Claude's ai-title, else the first user prompt; blank when neither) —
+     *  the Overview session selector + the Stats panel show this instead of the raw id. */
+    val title: String?,
     val units: Int,
     val pending: Int,
     val kept: Int,
@@ -239,10 +246,14 @@ object ChangeMapParser {
 
     private fun summary(o: JsonObject) = ChangeMapSummary(
         str(o, "session") ?: "",
+        str(o, "title"),
         int(o, "units"), int(o, "pending"), int(o, "kept"), int(o, "undone"),
         int(o, "added"), int(o, "removed"),
         int(o, "errors"), int(o, "subagents"), int(o, "fleet"), int(o, "egress"),
     )
+
+    private fun ints(o: JsonObject, k: String): List<Int> =
+        (o.getAsJsonArray(k) ?: com.google.gson.JsonArray()).mapNotNull { it.takeIf { e -> !e.isJsonNull }?.asInt }
 
     private fun chapter(o: JsonObject) = ChangeMapChapter(
         str(o, "id") ?: "",
@@ -254,6 +265,7 @@ object ChangeMapParser {
         int(o, "index"), str(o, "title") ?: "", str(o, "status") ?: "todo",
         int(o, "edits"), int(o, "added"), int(o, "removed"),
         int(o, "kept"), int(o, "pending"), int(o, "undone"), bool(o, "agent"),
+        ints(o, "editIds"),
     )
 
     private fun file(o: JsonObject) = ChangeMapFile(
@@ -326,4 +338,43 @@ object ChangeMapParser {
         rollupByTask = arr(o, "rollupByTask").map { taskRoll(it.asJsonObject) },
         rollupBySubagent = arr(o, "rollupBySubagent").map { subagentRoll(it.asJsonObject) },
     )
+}
+
+/**
+ * Kotlin mirror of core.moduleLabel — the change-map's module-bucket display label: '' → '(root)', an
+ * out-of-workspace path → '(external)', else strip the monorepo noise (a `packages/` prefix and a trailing
+ * `/src`). Kept here (not re-derived per surface) so the JetBrains Folder axis and the strip tiles agree
+ * on one identity, exactly as the VS Code webview does.
+ */
+fun moduleLabel(module: String): String {
+    if (module.isEmpty()) return "(root)"
+    if (module.startsWith("..")) return "(external)"
+    var s = module
+    if (s.startsWith("packages/")) s = s.substring("packages/".length)
+    if (s.endsWith("/src")) s = s.substring(0, s.length - "/src".length)
+    return s
+}
+
+/**
+ * A file's "folder" — the change-map module-bucket LABEL of its immediate parent dir (`(root)`,
+ * `(external)`, or the relative dir). Mirrors the VS Code `folderLabelOf`, so a Folder-axis position and a
+ * strip tile share one identity. [root] is the workspace root; [file] is an absolute path.
+ */
+fun folderLabelOf(file: String, root: String?): String {
+    val relDir: String = if (root != null && root.isNotBlank()) {
+        val rp = java.io.File(root).absoluteFile.toPath()
+        val fp = java.io.File(file).absoluteFile.toPath()
+        val rel = try {
+            rp.relativize(fp).toString().replace(java.io.File.separatorChar, '/')
+        } catch (_: Exception) {
+            file.replace(java.io.File.separatorChar, '/') // cross-root (e.g. different drive) → treat as external below
+        }
+        val slash = rel.lastIndexOf('/')
+        if (slash >= 0) rel.substring(0, slash) else "" // dirname; a bare basename → root file
+    } else {
+        val norm = file.replace(java.io.File.separatorChar, '/')
+        val slash = norm.lastIndexOf('/')
+        if (slash >= 0) norm.substring(0, slash) else ""
+    }
+    return moduleLabel(relDir)
 }

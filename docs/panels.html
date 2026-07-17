@@ -52,11 +52,14 @@
   .nav .row{display:flex;align-items:center;gap:16px;height:60px}
   .brand{display:flex;align-items:center;gap:9px;font-weight:640}
   .brand .m{font-size:20px}
-  .nav .links{display:flex;gap:22px;margin-left:auto;font-size:.95rem;color:var(--ink-soft);align-items:center}
-  .themebtn{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-soft);background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:6px 13px;cursor:pointer}
-  .themebtn:hover{border-color:var(--accent);color:var(--accent-ink)}
-  .themebtn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-  .menu-btn{display:none;font-family:var(--mono);font-size:14px;color:var(--ink-soft);background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:5px 12px;cursor:pointer;margin-left:auto}
+  .nav .links{display:flex;gap:22px;margin-inline:auto;font-size:.95rem;color:var(--ink-soft);align-items:center}
+  .nav .links a{transition:color .15s}
+  .nav .links a:hover{color:var(--ink)}
+  .nav .links a.more{color:var(--accent-ink)}
+  .nav .right{display:flex;align-items:center;gap:10px}
+  .icon-btn,.ghost{border:1px solid var(--line);background:var(--surface);color:var(--ink-soft);border-radius:999px;padding:7px 13px;font-size:.85rem;font-family:var(--mono);cursor:pointer;transition:.15s}
+  .icon-btn:hover,.ghost:hover{color:var(--ink);border-color:var(--ink-faint)}
+  .menu-btn{display:none}
   @media (max-width:720px){
     .menu-btn{display:inline-flex}
     .nav .links{display:none}
@@ -111,7 +114,13 @@
   .tab li{font-size:.82rem;color:var(--ink-soft);font-family:var(--mono)}
   .tab li b{color:var(--ink);font-weight:600}
 
-  footer{padding:40px 0 60px;border-top:1px solid var(--line-soft);color:var(--ink-faint);font-size:.86rem;font-family:var(--mono)}
+  .foot{padding:56px 0 68px;border-top:1px solid var(--line-soft);color:var(--ink-faint)}
+  .foot .row{display:flex;flex-wrap:wrap;gap:20px 30px;align-items:center;justify-content:space-between}
+  .foot .brand{display:flex;align-items:center;gap:9px;font-weight:640}
+  .foot .flinks{display:flex;flex-wrap:wrap;gap:20px;font-size:.92rem}
+  .foot .flinks a{color:var(--ink-soft)}
+  .foot .flinks a:hover{color:var(--ink)}
+  .foot .fine{font-family:var(--mono);font-size:.74rem;margin-top:16px}
   @media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
 </style>
 </head>
@@ -123,11 +132,14 @@
     <a href="showcase.html">Overview</a>
     <a href="demo.html">Demo</a>
     <a href="getting-started.html">Getting started</a>
-    <a href="features.html">Features</a>
+    <a class="more" href="features.html">Features&nbsp;→</a>
     <a href="https://github.com/cell-observatory/claude-observatory">GitHub</a>
-    <button class="themebtn" id="themebtn" type="button" aria-label="Toggle light and dark theme">◑ theme</button>
   </div>
-  <button class="icon-btn menu-btn" id="menu" aria-label="Toggle navigation menu" aria-expanded="false">☰</button>
+  <div class="right">
+    <button class="icon-btn menu-btn" id="menu" aria-label="Toggle navigation menu" aria-expanded="false">☰</button>
+    <button class="icon-btn" id="theme" aria-label="Toggle theme">◐</button>
+    <a class="ghost" href="https://github.com/cell-observatory/claude-observatory">GitHub&nbsp;↗</a>
+  </div>
 </div></nav>
 
 <header class="hero"><div class="wrap">
@@ -150,25 +162,42 @@
   <div class="sechead"><span class="n">02</span><h2>The panel views in detail</h2></div>
   <p class="lede">The observatory&rsquo;s own views, with every part named: the Observations · Overview · Stats panes of the &ldquo;Claude&nbsp;Observatory&rdquo; bottom panel, plus <b>Actions</b>, which lives in the Claude&nbsp;Edits sidebar.</p>
   <div class="diagrams">
-    <figure id="overview"><h3 class="dh">Overview <span class="id">master-detail · the fleet and the change-map</span></h3><div class="panel plain"><img src="media/overview-tabs.png" loading="lazy" alt="Overview panel, master-detail. LEFT NAV (~25%), three tabs: 1 Fleet — every running agent across the repo's git worktrees, each with a live phase badge (working / awaiting-input / awaiting-permission / idle / errored / done; heuristic phases carry a ~ marker — inferred from inactivity), worktree + branch, an activity sparkline, ±diff, tokens·time, risk and a collision badge, unfolding to nested subagents (agentType/description, phase, current task + to-dos, ±lines, a chat button); 2 Workflows — each multi-agent workflow run, with an informative name, running/done, per-phase progress groups and its agents (tokens·time·edits) over a matching sparkline; 2b Tasks — the session's numbered task list (Claude's TaskCreate/TaskUpdate tasks) with live statuses, a done badge, and strikethrough on completion; plus an Active-only toggle (which also hides completed tasks) and Clear-completed (dismisses, never deletes). RIGHT DETAIL (~75%): 3 the selected agent's change-map — a named-chapter task ribbon (Claude's to-dos as stable content-hash chapters, click one to scope the bulk actions; chapters are total — work outside any to-do appears as a dimmed synthesized session chapter titled from the session's goal, reviewable like any other; each chapter's Accept/Reject/Clear act on exactly the edits its row shows; duplicate to-do titles render as separate rows), a one-row module proportion strip, and a file ledger ranked by churn (±line bars colored by review status). TITLE BAR: 4 the review toolbar in five spaced groups — Search · session · Active only | Diff axis · Keep · Undo | File axis · Accept/Reject File | Accept All · Revert All · Clear Resolved | Spotlight · Refresh — labeled, color-coded, one icon per action"></div><figcaption>Phases marked ~ are inferred from inactivity, never asserted. The chapter ribbon is total — work outside any to-do lands in a dimmed session chapter, reviewable like any other; a chapter's Accept / Reject / Clear act on exactly the edits its row shows.</figcaption></figure>
-    <figure id="fleet"><h3 class="dh">Overview &rarr; Fleet <span class="id">every running agent, live</span></h3><div class="panel plain"><img src="media/multitasking.png" loading="lazy" alt="The Overview's Fleet left-nav tab (formerly the Multitasking window): 1 per-agent rows — each running agent across the repo's git worktrees, with a live phase badge (heuristic phases carry a ~ marker), worktree + branch, an activity sparkline, ±diff, tokens·time, risk and a collision badge; 2 nested subagents (agentType/description, phase, current task + to-dos, ±lines, a chat button); 3 a cross-agent file-conflicts strip"></div></figure>
+    <figure id="overview"><h3 class="dh">Overview <span class="id">master-detail · the fleet and the change-map</span></h3><div class="panel plain"><img src="media/overview-tabs.png" loading="lazy" alt="Overview panel, master-detail. LEFT NAV (~25%), three tabs, each opening with a one-line description of what it shows (tabs and change-map sections also carry hover descriptions): 1 Fleet — every running agent across the repo's git worktrees, each with a live phase badge (working / awaiting-input / awaiting-permission / idle / errored / done; heuristic phases carry a ~ marker — inferred from inactivity), worktree + branch, an activity sparkline, ±diff, tokens·time, risk and a collision badge, unfolding to nested subagents (agentType/description, phase, current task + to-dos, ±lines, a chat button); 2 Workflows — each multi-agent workflow run, with an informative name, running/done, per-phase progress groups and its agents (tokens·time·edits) over a matching sparkline; 2b Tasks — the session's numbered task list (Claude's TaskCreate/TaskUpdate tasks) with live statuses, a done badge, and strikethrough on completion; plus an Active-only toggle (which also hides completed tasks) and Clear-completed (dismisses, never deletes). RIGHT DETAIL (~75%): 3 the selected agent's change-map, in three labeled sections top to bottom — Chapters, a ribbon of subtask chips (each a to-do/task Claude worked, showing its lines / edits / pending; chapters are total — work outside any to-do appears as a dimmed synthesized session chapter titled from the session's goal, reviewable like any other; duplicate to-do titles render as separate rows); Folders, a proportional strip of tiles, one per changed folder (tile width = lines changed, color = review status); and Files, a churn-ranked ledger of every changed file (±line bars colored by review status). Clicking a Folder tile or a Chapter chip navigates the matching nav-bar axis, opening that folder's or chapter's first pending edit. A bottom summary bar reports the pending / accepted / reverted edit counts plus file and folder totals for whatever is currently in scope, and names the current chapter (or folder filter). NAV BAR: 4 the review toolbar, now two rows. Top row (controls): the session selector — showing the session's human-readable name, its title or first prompt, with the raw id in the tooltip — then the session-wide bulk actions Accept All · Revert All · Clear Resolved · Export, and on the right Search · Active only · Spotlight · Refresh. Bottom row: four review axes that step the pending edits at four granularities — Diff axis steps the open file's edits, carrying Keep, Undo, Chat (hands this edit's context to your Claude), View diff (opens a real side-by-side diff editor) and the current edit's relative time; File axis steps changed files, showing the filename and that file's edit count, with Accept/Reject File; Folder axis steps changed folders, showing the folder and its file/edit totals, with Accept/Reject Folder acting on that folder's edits only; Chapter axis steps the session's subtasks (chapters, from Claude's to-dos/tasks), showing the chapter's folder/file/edit totals, with Review, Accept Chapter, Reject Chapter and Chat — labeled, color-coded, one icon per action"></div><figcaption>Phases marked ~ are inferred from inactivity, never asserted. The nav bar carries the session controls on its top row and four review axes — Diff, File, Folder, Chapter — on the bottom; the change-map&rsquo;s Chapters, Folders, and Files sections mirror them, and clicking a folder tile or chapter chip drives the matching axis. The chapter ribbon is total — work outside any to-do lands in a dimmed session chapter, reviewable like any other.</figcaption></figure>
+    <figure id="fleet"><h3 class="dh">Overview &rarr; Fleet <span class="id">every running agent, live</span></h3><div class="panel plain"><img src="media/multitasking.png" loading="lazy" alt="The Overview's Fleet left-nav tab (formerly the Multitasking window): 1 per-agent rows — each running agent across the repo's git worktrees, with a live phase badge (heuristic phases carry a ~ marker), worktree + branch, an activity sparkline, ±diff, tokens·time, risk and a collision badge; 2 nested subagents (agentType/description, phase, current task + to-dos, ±lines, a chat button); 3 live cross-agent file conflicts (shown in the Actions view)"></div></figure>
     <figure id="workflows"><h3 class="dh">Overview &rarr; Workflows <span class="id">multi-agent orchestration runs</span></h3><div class="panel plain"><img src="media/overview-workflows.png" loading="lazy" alt="The Overview's Workflows left-nav tab: one row per multi-agent workflow run — an informative name, a running/done badge, phase progress with tokens and elapsed time, and an activity sparkline — unfolding to per-phase groups and their agents (tokens · time · edits). Selecting a run drives the right-hand change-map detail with that run's chapter rollup and files"></div><figcaption>Each workflow run maps its agents&rsquo; edits into the same change-map detail as any fleet agent.</figcaption></figure>
     <figure id="tasks"><h3 class="dh">Overview &rarr; Tasks <span class="id">the session&rsquo;s numbered task list</span></h3><div class="panel plain"><img src="media/overview-tasks.png" loading="lazy" alt="The Overview's Tasks left-nav tab: the session's numbered TaskCreate/TaskUpdate tasks, newest first — a status glyph (in-progress / done with strikethrough), the task number and subject, the in-progress task's active form in italics, and per-task +added −removed and edit counts joined from the task's chapter. Completed tasks fold behind an 'N done · show all' row, and the Active-only toggle hides them outright"></div><figcaption>Tasks link to chapters: each task&rsquo;s row carries the live &plusmn; and edit counts of the chapter it planned, and reviewing that chapter reviews the task&rsquo;s edits.</figcaption></figure>
     <figure id="observations"><h3 class="dh">Observations <span class="id">the change feed · Claude's reasoning</span></h3><div class="panel plain"><img src="media/win-observations.png" loading="lazy" alt="Observations panel: 1 session recap, 2 the coalesced change feed (files ordered by recent activity; adjacent same-file edits collapse into a ×N run) — the former Timeline is folded in here, 3 per-edit reasoning rows with flags and file-memory, 4 next steps"></div></figure>
-    <figure id="stats"><h3 class="dh">Stats <span class="id">progress &amp; usage</span></h3><div class="panel plain"><img src="media/win-stats.png" loading="lazy" alt="Stats panel: 1 review scoreboard, 2 range toggle, 3 token plot, 4 usage bars"></div></figure>
+    <figure id="stats"><h3 class="dh">Stats <span class="id">progress &amp; usage</span></h3><div class="panel plain"><img src="media/win-stats.png" loading="lazy" alt="Stats panel: 1 review scoreboard (the session shown by name, not its id), 2 range toggle, 3 token plot, 4 usage bars — the Usage 5h and weekly rows now show an estimated used / total, the 100% total inferred from tokens ÷ percent"></div></figure>
     <figure id="actions"><h3 class="dh">Actions <span class="id">every tool call &mdash; in the sidebar</span></h3><div class="panel plain"><img src="media/win-actions.png" loading="lazy" alt="Actions view — now in the Claude Edits sidebar, not the bottom panel: every tool call Claude made, grouped by category (Edits · Commands · Reads · Searches · Web · To-dos · Egress) and collapsed by default — led by a Live-conflicts section (files touched by 2+ active agents, click to open) that starts expanded; errors always surface, a Show-all toggle reveals the low-signal categories, and edit rows link to their review. The Risk and Egress audits ride the same timeline"></div></figure>
   </div>
 </div></section>
 
-<footer><div class="wrap">Claude Observatory — panels reference. Demo: every panel on this page can be populated without Claude — <code>claude-observatory demo</code> replays a scripted session through the real pipeline; <code>claude-observatory demo --clean</code> removes every trace. <a href="showcase.html">← Overview</a></div></footer>
+<footer class="foot" id="footer">
+  <div class="wrap">
+    <div class="row">
+      <span class="brand"><span class="m">🔬</span> Claude Observatory</span>
+      <div class="flinks">
+        <a href="features.html">Features</a>
+        <a href="https://github.com/cell-observatory/claude-observatory/blob/main/docs/DEMO.md">Demo</a>
+        <a href="https://github.com/cell-observatory/claude-observatory/blob/main/docs/ARCHITECTURE.md">How it works</a>
+        <a href="https://github.com/cell-observatory/claude-observatory/blob/main/docs/REMOTE.md">Remote</a>
+        <a href="https://github.com/cell-observatory/claude-observatory/blob/main/CONTRIBUTING.md">Contribute</a>
+        <a href="https://github.com/cell-observatory/claude-observatory">GitHub ↗</a>
+      </div>
+    </div>
+    <div class="fine">Apache-2.0 · git-free · zero extra Claude tokens · terminal + VS Code + JetBrains</div>
+    <div class="fine">Demo: every panel on this page can be populated without Claude — <code>claude-observatory demo</code> replays a scripted session through the real pipeline; <code>claude-observatory demo --clean</code> removes every trace.</div>
+  </div>
+</footer>
 
 <script>
   (function(){
-    var root=document.documentElement;
-    document.getElementById('themebtn').addEventListener('click',function(){
-      var cur=root.getAttribute('data-theme');
-      if(!cur) cur=matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';
-      root.setAttribute('data-theme',cur==='dark'?'light':'dark');
+    var root=document.documentElement,btn=document.getElementById('theme'),KEY='co-theme';
+    try{var s=localStorage.getItem(KEY);if(s)root.setAttribute('data-theme',s);}catch(e){}
+    btn.addEventListener('click',function(){
+      var cur=root.getAttribute('data-theme')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light');
+      var next=cur==='dark'?'light':'dark';root.setAttribute('data-theme',next);
+      try{localStorage.setItem(KEY,next);}catch(e){}
     });
   })();
   (function(){

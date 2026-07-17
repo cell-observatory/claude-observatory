@@ -38,6 +38,21 @@ function blobText(sessionId: string, sha: string | null): string | null {
   return b === null ? null : b.toString('utf8');
 }
 
+/** True iff `buf` survives a UTF-8 decode→encode round-trip. The 3-way merge is a text operation;
+ *  merging a file that does NOT round-trip (Latin-1, UTF-16, mixed encodings — capturable because
+ *  isBinary only screens for NUL) would silently rewrite its bytes as U+FFFD. Those inputs must
+ *  degrade to the conflict path instead: the explicit whole-file restore stays byte-exact. */
+function utf8RoundTrips(buf: Buffer): boolean {
+  try {
+    return Buffer.from(buf.toString('utf8'), 'utf8').equals(buf);
+  } catch {
+    // .toString('utf8') throws past V8's MAX_STRING_LENGTH (~512 MB). A file that large can't be
+    // line-merged anyway — treat it as "does not round-trip" so undo/redo returns conflict (the
+    // byte-exact whole-file restore) instead of crashing the whole bulk operation.
+    return false;
+  }
+}
+
 function sha256(buf: Buffer): string {
   return crypto.createHash('sha256').update(buf).digest('hex');
 }
@@ -226,8 +241,12 @@ export function undoEdit(sessionId: string, id: number): UndoResult {
 
   // Later edits exist -> position-anchored 3-way merge (base = after_N, ours = current, theirs = before).
   // Text-domain by necessity; the clean paths above already preserved bytes exactly.
+  const afterBuf = blobBuf(sessionId, rec.afterBlob) as Buffer;
+  if (!utf8RoundTrips(currentBuf) || !utf8RoundTrips(beforeBuf as Buffer) || !utf8RoundTrips(afterBuf)) {
+    return conflict(); // non-UTF-8 content: a text merge would corrupt it — refuse, offer --force
+  }
   const merged = threeWayMerge(
-    (blobText(sessionId, rec.afterBlob) as string),
+    afterBuf.toString('utf8'),
     currentBuf.toString('utf8'),
     (beforeBuf as Buffer).toString('utf8')
   );
@@ -345,6 +364,13 @@ export function redoEdit(sessionId: string, id: number): UndoResult {
     return { ok: true, status: 'redone', message: `re-applied edit #${id} (${rec.file})` };
   }
   // Later edits exist -> 3-way merge with before_N as the common base (text-domain by necessity).
+  if (
+    !utf8RoundTrips(currentBuf) ||
+    !utf8RoundTrips(beforeBuf as Buffer) ||
+    !utf8RoundTrips(afterBuf as Buffer)
+  ) {
+    return conflict(); // non-UTF-8 content: a text merge would corrupt it — refuse, offer --force
+  }
   const merged = threeWayMerge(
     (beforeBuf as Buffer).toString('utf8'),
     currentBuf.toString('utf8'),

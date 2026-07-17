@@ -261,7 +261,11 @@ const actionsCol = `
   <div class="obsrow"><span>▸</span><span class="id">Searches</span><span class="r">57</span></div>
   <div class="obsrow"><span>▸</span><span class="id">To-dos</span><span class="r">30</span></div>`;
 
-// Change Map — chapters on top, an equal-width module strip, then files ranked by churn
+// Change Map — three labeled sections (Chapters ribbon · Folders strip · Files ledger) + a bottom summary
+const cmCap = (label) => `<div style="font-size:9px;letter-spacing:.6px;text-transform:uppercase;color:var(--faint);margin:0 0 3px 1px">${label}</div>`;
+const cmSummary = (name, pending, accepted, files, folders) => `
+  <div style="border-top:1px solid var(--border);margin-top:8px;padding-top:6px;font-family:'SF Mono',Menlo,monospace;font-size:10.5px;color:var(--dim)">
+    <b style="color:var(--accent)">${name}</b> · <b style="color:var(--pending)">${pending}</b> pending · <b style="color:var(--kept)">${accepted}</b> accepted · <b style="color:var(--ink)">${files}</b> files · <b style="color:var(--ink)">${folders}</b> folders</div>`;
 const cmChapter = (glyph, color, name) => `<span style="white-space:nowrap"><span style="color:${color}">${glyph}</span> ${name}</span>`;
 const cmSeg = (color, name) => `<span style="flex:1;min-width:0;background:${color};box-shadow:inset 1px 0 0 var(--panel);display:flex;align-items:center;justify-content:center;font-size:9px;color:rgba(0,0,0,.78);font-weight:600;overflow:hidden">${name}</span>`;
 const cmRow = (color, file, mod, barPct, num, pend) => `
@@ -400,16 +404,20 @@ const changeMapCol = `
       ${cmFleetRow('var(--kept)', 'demo', 'hotfix', [.4, .8, .6, .3, .7, .5, .2, .4], false)}
     </div>
     <div style="flex:1;min-width:0;padding:2px 16px 8px 14px">
+      ${cmCap('Chapters')}
       <div style="display:flex;gap:9px;font-size:10px;color:var(--dim);margin-bottom:8px;flex-wrap:wrap">
         ${cmChapter('●', 'var(--kept)', '1 Feature scaling')}${cmChapter('◐', 'var(--pending)', '2 Dataset validation')}${cmChapter('○', 'var(--faint)', '3 Tests and docs')}
       </div>
+      ${cmCap('Folders')}
       <div style="display:flex;height:16px;border-radius:3px;overflow:hidden;margin-bottom:9px">
-        ${cmSeg('var(--kept)', 'docs')}${cmSeg('var(--pending)', 'tests')}${cmSeg('var(--pending)', 'src')}${cmSeg('var(--kept)', 'src/models')}
+        ${cmSeg('var(--kept)', 'src/models')}${cmSeg('var(--pending)', 'src')}${cmSeg('var(--pending)', 'tests')}${cmSeg('var(--kept)', 'docs')}
       </div>
+      ${cmCap('Files')}
       ${cmRow('var(--kept)', 'USAGE.md', 'docs', 100, '+12', '')}
       ${cmRow('var(--pending)', 'test_pipeline.py', 'tests', 96, '+12', '1⧗')}
       ${cmRow('var(--kept)', 'dataset.py', 'src/models', 58, '+7', '')}
       ${cmRow('var(--pending)', 'features.py', 'src', 55, '+6', '1⧗')}
+      ${cmSummary('2 Dataset validation', 2, 3, 4, 3)}
     </div>
   </div>`;
 // One agent (worktree) row: badge · worktree ⑂branch · self tag · sparkline · ± · ⚠risk · ⇄collisions.
@@ -518,38 +526,48 @@ const overviewTabsBody = `
       <div style="display:flex;align-items:center;gap:9px;padding:10px 16px 6px;font-size:11.5px">
         <span style="background:var(--side);border:1px solid var(--border2);border-radius:12px;padding:2px 11px;display:inline-flex;gap:9px;align-items:center;white-space:nowrap">
           <span class="mono" style="color:var(--ink)">demo <span style="color:var(--faint)">⑂demo/pipeline</span></span>
-          <span style="color:var(--faint)">·</span><span>${microscope}</span><span class="mono" style="color:var(--coral)">0c396c6b</span>
+          <span style="color:var(--faint)">·</span><span>${microscope}</span><span class="mono" style="color:var(--ink)">Debug /effort &amp; optimize</span>
           <span style="color:var(--faint)">·</span><span style="color:var(--dim)">5 edits</span>
           <span style="color:var(--pending)">2⧗</span><span style="color:var(--kept)">3✓</span>
           <span style="color:var(--faint)">·</span><span style="color:var(--ink)">60%</span>
         </span>
       </div>
-      <div style="display:flex;align-items:center;gap:5px;padding:4px 16px 10px;flex-wrap:wrap">
+      <div style="padding:0 16px">${cmCap('Chapters')}</div>
+      <div style="display:flex;align-items:center;gap:5px;padding:0 16px 10px;flex-wrap:wrap">
         ${taskPill('Tests and docs', '+24 −0', 'var(--pending)', false)}
         <span style="display:inline-flex;align-items:center;gap:6px;border:1px dashed var(--border2);border-radius:99px;padding:3px 10px;font-size:12px;color:var(--dim);white-space:nowrap"><span style="width:9px;height:9px;border-radius:50%;background:var(--kept)"></span>2 done ▸</span>
       </div>
+      <div style="padding:0 16px">${cmCap('Folders')}</div>
       <div style="display:flex;height:16px;border-radius:3px;overflow:hidden;margin:0 16px 10px">
-        ${cmSeg('var(--pending)', 'docs')}${cmSeg('var(--pending)', 'tests')}${cmSeg('var(--kept)', 'src')}${cmSeg('var(--kept)', 'src/models')}
+        ${cmSeg('var(--kept)', 'src/models')}${cmSeg('var(--kept)', 'src')}${cmSeg('var(--pending)', 'tests')}${cmSeg('var(--pending)', 'docs')}
       </div>
       <div style="padding:0 16px 8px">
+        ${cmCap('Files')}
         ${cmRow('var(--pending)', 'USAGE.md', 'docs', 100, '+12', '1⧗')}
         ${cmRow('var(--pending)', 'test_pipeline.py', 'tests', 96, '+12', '1⧗')}
         ${cmRow('var(--kept)', 'dataset.py', 'src/models', 58, '+7', '')}
         ${cmRow('var(--kept)', 'features.py', 'src', 55, '+6', '')}
+        ${cmSummary('Tests and docs', 2, 3, 4, 4)}
       </div>
     </div>
   </div>`;
 
-// The Overview's title-bar toolbar — FIVE spaced groups (the 0.8.3 layout), labeled + color-coded.
+// The Overview's title-bar toolbar — TWO rows (the 0.8.4 layout): a controls row on top (session name +
+// session-wide bulk + view controls), the four review AXES below. Labeled + color-coded, one icon/action.
 const ovtGrp = (inner) => `<span style="display:flex;gap:9px;align-items:center;white-space:nowrap">${inner}</span>`;
 const ovtSep = `<span style="width:1px;align-self:stretch;background:var(--border2);margin:1px 2px"></span>`;
 const ovToolbar = `
-  <div style="display:flex;align-items:center;gap:10px;padding:7px 14px;border-bottom:1px solid var(--border);font-size:11px;color:var(--dim);flex-wrap:wrap">
-    ${ovtGrp(`<span style="color:#9a6ac2">${icoSearch} Search</span><span class="mono">${microscope} 0c396c6b ▾</span><span>✓ Active only</span>`)}${ovtSep}
-    ${ovtGrp(`<span style="color:#4c8bf5">⌃</span><span class="mono">Diff 1/2</span><span style="color:#4c8bf5">⌄</span><span style="color:#3fb950">✓ Keep</span><span style="color:#e5534b">↩ Undo</span>`)}${ovtSep}
-    ${ovtGrp(`<span style="color:#4c8bf5">‹</span><span class="mono">File 2/5</span><span style="color:#4c8bf5">›</span><span style="color:#3fb950">✓✓ Accept File</span><span style="color:#e5534b">✕ Reject File</span>`)}${ovtSep}
-    ${ovtGrp(`<span style="color:#3fb950">${icoChecklist} Accept All</span><span style="color:#e5534b">${icoHistory} Revert All</span><span style="color:#d9822b">${icoClear} Clear Resolved</span>`)}${ovtSep}
-    ${ovtGrp(`<span style="color:#9a6ac2">${icoBulb} Spotlight</span><span>⟳ Refresh</span>`)}
+  <div style="display:flex;flex-direction:column;gap:6px;padding:7px 14px;border-bottom:1px solid var(--border);font-size:11px;color:var(--dim)">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
+      ${ovtGrp(`<span class="mono" style="color:var(--ink)">${microscope} Debug /effort &amp; optimize ▾</span><span style="color:#3fb950">${icoChecklist} Accept All</span><span style="color:#e5534b">${icoHistory} Revert All</span><span style="color:#d9822b">${icoClear} Clear Resolved</span><span style="color:#4c8bf5">↗ Export</span>`)}
+      ${ovtGrp(`<span style="color:#9a6ac2">${icoSearch} Search</span><span>✓ Active only</span>${ovtSep}<span style="color:#9a6ac2">${icoBulb} Spotlight</span><span>⟳ Refresh</span>`)}
+    </div>
+    <div style="display:flex;align-items:center;justify-content:center;gap:9px;flex-wrap:wrap">
+      ${ovtGrp(`<span style="color:#4c8bf5">⌃</span><span class="mono">Diff 1/2 · 5m</span><span style="color:#4c8bf5">⌄</span><span style="color:#3fb950">✓ Keep</span><span style="color:#e5534b">↩ Undo</span><span style="color:var(--accent)">${icoChat} Chat</span><span style="color:var(--accent)">⧉ View diff</span>`)}${ovtSep}
+      ${ovtGrp(`<span style="color:#4c8bf5">‹</span><span class="mono">File 2/5 · dataset.py · 1 edit</span><span style="color:#4c8bf5">›</span><span style="color:#3fb950">✓✓ Accept File</span><span style="color:#e5534b">✕ Reject File</span>`)}${ovtSep}
+      ${ovtGrp(`<span style="color:#4c8bf5">‹</span><span class="mono">Folder 1/3 · src/models · 2 files · 7 edits</span><span style="color:#4c8bf5">›</span><span style="color:#3fb950">✓✓ Accept Folder</span><span style="color:#e5534b">✕ Reject Folder</span>`)}${ovtSep}
+      ${ovtGrp(`<span style="color:#4c8bf5">‹</span><span class="mono">Chapter 2/3 · 3 folders · 4 files · 12 edits</span><span style="color:#4c8bf5">›</span><span style="color:var(--accent)">≡ Review</span><span style="color:#3fb950">${icoChecklist} Accept Chapter</span><span style="color:#e5534b">${icoHistory} Reject Chapter</span><span style="color:var(--accent)">${icoChat} Chat</span>`)}
+    </div>
   </div>`;
 
 // The Overview's Workflows tab — one row per multi-agent workflow run (informative name, state,
@@ -650,10 +668,10 @@ const scenes = {
   // Anatomy — a labelled outline of every surface, so each section can be referred to by name.
   // Per-window diagrams — the real panel mockup + a numbered legend of its parts.
   'win-overview': scene(1200, winDiag('OVERVIEW', ovToolbar + changeMapCol, [
-    note('1', 'Toolbar — five groups', 'Search · session · Active&nbsp;only&nbsp;|&nbsp;Diff&nbsp;axis · Keep · Undo&nbsp;|&nbsp;File&nbsp;axis · Accept/Reject&nbsp;File&nbsp;|&nbsp;Accept&nbsp;All · Revert&nbsp;All · Clear&nbsp;Resolved&nbsp;|&nbsp;Spotlight · Refresh — labeled, color-coded, one icon per action.'),
+    note('1', 'Toolbar — two rows', 'Controls on top (session name · Accept&nbsp;All · Revert&nbsp;All · Clear&nbsp;Resolved · Export&nbsp;|&nbsp;Search · Active&nbsp;only · Spotlight · Refresh); the four review AXES below — <b style="color:var(--ink)">Diff · File · Folder · Chapter</b>. Labeled, color-coded, one icon per action.'),
     note('2', 'Fleet · Workflows · Tasks nav', 'The left rail — running agents across git worktrees, workflow runs, and the session&rsquo;s numbered tasks. Pick one to drive the detail.'),
-    note('3', 'Chapter ribbon', 'The selected item&rsquo;s to-dos across the top (● done · ◐ in progress · ○ planned). Click one to <b style="color:var(--ink)">brush</b> the map to just its files.'),
-    note('4', 'Module strip + ledger', 'One equal-width segment per module (click to filter), then every file ranked by churn with a bar. Hover for the class + reasoning; click to open the diff.'),
+    note('3', 'Chapters · Folders · Files', 'Three labeled sections: the <b style="color:var(--ink)">Chapters</b> ribbon of subtask chips (● done · ◐ in progress · ○ planned), the <b style="color:var(--ink)">Folders</b> strip (one tile per changed directory), and the churn-ranked <b style="color:var(--ink)">Files</b> ledger. Click a folder tile or chapter chip to drive the matching axis.'),
+    note('4', 'Summary bar', 'Pending / accepted / reverted edit counts plus file and folder totals for whatever is in scope — named for the current chapter (or folder filter).'),
   ].join(''))),
   'win-actions': scene(1200, winDiag('ACTIONS', actionsCol, [
     note('1', 'Category groups', 'Now a sidebar tab (moved from the panel), collapsed by default — Edits · Commands · Reads · Searches · To-dos. Curated; errors always surface.'),

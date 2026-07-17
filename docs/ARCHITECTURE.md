@@ -141,7 +141,7 @@ they must never drift. The mirrors:
 | TS source | Kotlin mirror | What it holds |
 | --- | --- | --- |
 | `core/src/store.ts` (`EditRecord`, `readLog`, blobs) | `core/StoreReader.kt` + `model/Models.kt` | reads `log.jsonl` off disk, folds `{op:"status"}` ops, reads blobs |
-| `core/src/session.ts` (`resolveSessionId`, `mangleCwd`) | `core/SessionResolver.kt` | cwd-mangle → newest `<session>.jsonl` → parent-dir walk |
+| `core/src/session.ts` (`resolveSessionId`, `mangleCwd`, `hasAssistantRecord`) | `core/SessionResolver.kt` | cwd-mangle → newest `<session>.jsonl` **with an assistant record** (command-only `/effort`-style stubs and bridge-session records are demoted; newest wins only when no candidate has replied yet) → parent-dir walk |
 | `core/src/paths.ts` (`claudeConfigDir`) | `core/ClaudePaths.kt` | resolves the config dir + store paths |
 | `core/src/tree.ts` (`EditTree` et al.) | `model/Tree.kt` (`EditTree` + `TreeParser`) | parses `tree --json` into `TreeFolderNode`/`TreeFileNode`/`TreeClassNode`/`TreeEditNode` |
 | `cmdObserve` payload | `model/Observe.kt` (`ObservePayload` + `ObserveParser`) | parses `observe` |
@@ -152,7 +152,8 @@ they must never drift. The mirrors:
   asserts append-only `log.jsonl` semantics: `EditRecord` lines + `{op:"status"}` folding (last op
   wins), tolerance of unparseable lines, and blob reads, against fixtures written in the TS format.
 - `packages/jetbrains/src/test/kotlin/com/cellobservatory/observatory/core/SessionResolverTest.kt` —
-  asserts `session.ts` behaviour: cwd mangling, newest-`.jsonl` selection, and the parent-dir walk.
+  asserts `session.ts` behaviour: cwd mangling, stub-proof selection (command-only and bridge-session
+  transcripts never outrank a real session; all-stub dirs fall back to newest), and the parent-dir walk.
 
 If you change a store or session read, update the port **and** these tests in the same PR.
 
@@ -361,7 +362,7 @@ VS Code renderers key on them by name. Add fields; don't rename them. (`emitJson
 | `tasklog` (always JSON) | `TaskLogEntry[]` — `{ taskId, content, agentIds[], subagentIds[], firstTs, lastTs, edits, added, removed, status }`, one row per stable `taskId` unioned across worktrees + subagents (`unassigned` excluded) | Cross-agent task log — both editors |
 | `task-keep <id> --json` / `task-undo <id> --json` | `{ kept, total, ids }` / `{ undone, conflicts, total, ids }` — **WYSIWYG**: acts on the chapter's DISPLAYED edit set (`reviewEditIds`; the synthetic session chapter included), falling back to the strict span for analytics-only task ids | chapter-scoped Keep/Undo — both editors |
 | `demo [--fast] [--speed <n>] [--dir <d>] [--clean] [--json]` | `{ session, workspace, transcript, edits, steps }` (`--clean` → `{ sessions[], workspaces[] }`) — replays a scripted session through the REAL pipeline in an isolated `demo-<hex>` session + marked folder | Live showcase + the e2e fixture (`demo.ts`); a fully reviewed demo auto-clears its store (`autoClearDemo`) |
-| `chat-context [--tool-use-id <id> \| --edit <n> \| --agent <id> \| --task <id>]` | `{ prompt }` — a ready-to-paste chat prompt built by `assembleChatContext`; **never** spawns a process or calls a model | 💬 Chat handoff — both editors |
+| `chat-context [--tool-use-id <id> \| --edit <n> \| --agent <id> \| --task <id>]` | `{ prompt }` — a ready-to-paste chat prompt built by `assembleChatContext`; **never** spawns a process or calls a model | Chat handoff — both editors |
 | `locate --file <f>` (buffer on stdin) | `{ file, placements: [{ id, lines: [int] }] }` | inline overlays — JetBrains `ObservatoryCli.locate`; VS Code computes in-process via `core.locateEditInCurrent` |
 | `usage` | `{ ...UsageLine, staleMs }` (`staleMs` = `USAGE_STALE_MS`, 300000) | the 5h/week Usage bars |
 | `stats --json` | `StatsResult` (`{ daily[30], hourly[24], windows{session,day,week,month}, generatedAt }`) | Stats panel (both spawn a subprocess) |

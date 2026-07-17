@@ -81,8 +81,13 @@
   .doclinks a.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
   .doclinks a.primary:hover{background:var(--accent-ink)}
 
-  .foot{padding:48px 0 60px;border-top:1px solid var(--line-soft);color:var(--ink-faint)}
-  .foot .fine{font-family:var(--mono);font-size:.74rem}
+  .foot{padding:56px 0 68px;border-top:1px solid var(--line-soft);color:var(--ink-faint)}
+  .foot .row{display:flex;flex-wrap:wrap;gap:20px 30px;align-items:center;justify-content:space-between}
+  .foot .brand{display:flex;align-items:center;gap:9px;font-weight:640}
+  .foot .flinks{display:flex;flex-wrap:wrap;gap:20px;font-size:.92rem}
+  .foot .flinks a{color:var(--ink-soft)}
+  .foot .flinks a:hover{color:var(--ink)}
+  .foot .fine{font-family:var(--mono);font-size:.74rem;margin-top:16px}
 
   .rv{opacity:0;transform:translateY(20px) scale(.985);transition:opacity .6s cubic-bezier(.22,.61,.36,1),transform .7s cubic-bezier(.22,.61,.36,1)}
   .rv.in{opacity:1;transform:none}
@@ -104,7 +109,7 @@
     <div class="right">
       <button class="icon-btn menu-btn" id="menu" aria-label="Toggle navigation menu" aria-expanded="false">☰</button>
       <button class="icon-btn" id="theme" aria-label="Toggle theme">◐</button>
-      <a class="ghost" href="showcase.html">← Overview</a>
+      <a class="ghost" href="https://github.com/cell-observatory/claude-observatory">GitHub&nbsp;↗</a>
     </div>
   </div>
 </nav>
@@ -136,7 +141,7 @@
 
   <section class="feature">
     <div class="wrap grid">
-      <div class="copy"><div class="num">03</div><span class="eyebrow">PyCharm</span><h2>The same session in JetBrains IDEs</h2><p>The JetBrains plugin renders the same <code>multitask</code> and <code>changemap</code> payloads in native tool windows: the Fleet and Workflows nav, the chapter rows with their per-chapter ✓ ↩ 🧹, the module strip, and the ledger. Every rollup is computed once in core and rendered as given, so both editors show identical numbers.</p></div>
+      <div class="copy"><div class="num">03</div><span class="eyebrow">PyCharm</span><h2>The same session in JetBrains IDEs</h2><p>The JetBrains plugin renders the same <code>multitask</code> and <code>changemap</code> payloads in native tool windows: the Fleet and Workflows nav, the chapter rows with their per-chapter <code>✓ ↩ 🧹</code>, the module strip, and the ledger. Every rollup is computed once in core and rendered as given, so both editors show identical numbers.</p></div>
       <div class="panel rv"><figure><img src="media/demo-pyc.gif" loading="lazy" alt="The same demo session in PyCharm's Claude Observatory Dashboards tool window: the Fleet nav with the working agent and its subagent, chapters filling in with per-chapter review buttons, the workflow run with its Docs phase, and the review ending in a cleared store"><figcaption style="font-family:var(--mono);font-size:.7rem;color:var(--ink-faint);padding:8px 12px;text-align:center">The Overview in PyCharm — the same payloads rendered in native Swing panels.</figcaption></figure></div>
     </div>
   </section>
@@ -150,7 +155,7 @@
 
   <section class="feature">
     <div class="wrap grid">
-      <div class="copy"><div class="num">05</div><span class="eyebrow">Beyond the demo</span><h2>Working with real sessions</h2><p>Run <code>claude-observatory init</code> once, with Claude Code closed, and every later session is captured automatically — the same chapters, fleet, workflows, and review as the demo, in the 🔬 <b>Claude Edits</b> sidebar and the Claude Observatory panel in both editors. Sessions running in several git worktrees are unified into one fleet in the Overview, collision strip included; the Active only toggle narrows the list to work still in progress.</p></div>
+      <div class="copy"><div class="num">05</div><span class="eyebrow">Beyond the demo</span><h2>Working with real sessions</h2><p>Run <code>claude-observatory init</code> once, with Claude Code closed, and every later session is captured automatically — the same chapters, fleet, workflows, and review as the demo, in the 🔬 <b>Claude Edits</b> sidebar and the Claude Observatory panel in both editors. Sessions running in several git worktrees are unified into one fleet in the Overview, live conflicts included (in the Actions view); the Active only toggle narrows the list to work still in progress.</p></div>
       <div class="panel rv"><div class="scroll"><div class="two-up">
         <figure><img src="media/layout.png" loading="lazy" alt="Claude Observatory in VS Code: the Claude Edits sidebar and the Claude Observatory bottom panel"><figcaption>VS Code</figcaption></figure>
         <figure><img src="media/pyc-layout.png" loading="lazy" alt="Claude Observatory in PyCharm: the same two tool windows with icon-only tabs"><figcaption>PyCharm / JetBrains</figcaption></figure>
@@ -185,17 +190,33 @@
 <section class="deeper">
   <div class="wrap">
     <span class="eyebrow">Next</span>
-    <h2>Get started</h2>
+    <h2>Try it yourself</h2>
     <div class="doclinks">
-      <a class="primary" href="showcase.html">← Overview</a>
+      <a class="primary" href="https://github.com/cell-observatory/claude-observatory#quickstart">Install</a>
+      <a href="panels.html">Panels</a>
+      <a href="demo.html">Interactive demo</a>
+      <a href="showcase.html">← Overview</a>
       <a href="features.html">Features</a>
       <a href="https://github.com/cell-observatory/claude-observatory">GitHub</a>
     </div>
   </div>
 </section>
 
-<footer class="foot">
-  <div class="wrap"><span class="fine">Apache-2.0 · git-free · zero extra Claude tokens · terminal + VS Code + JetBrains</span></div>
+<footer class="foot" id="footer">
+  <div class="wrap">
+    <div class="row">
+      <span class="brand"><span class="m">🔬</span> Claude Observatory</span>
+      <div class="flinks">
+        <a href="features.html">Features</a>
+        <a href="https://github.com/cell-observatory/claude-observatory/blob/main/docs/DEMO.md">Demo</a>
+        <a href="https://github.com/cell-observatory/claude-observatory/blob/main/docs/ARCHITECTURE.md">How it works</a>
+        <a href="https://github.com/cell-observatory/claude-observatory/blob/main/docs/REMOTE.md">Remote</a>
+        <a href="https://github.com/cell-observatory/claude-observatory/blob/main/CONTRIBUTING.md">Contribute</a>
+        <a href="https://github.com/cell-observatory/claude-observatory">GitHub ↗</a>
+      </div>
+    </div>
+    <div class="fine">Apache-2.0 · git-free · zero extra Claude tokens · terminal + VS Code + JetBrains</div>
+  </div>
 </footer>
 
 <script>

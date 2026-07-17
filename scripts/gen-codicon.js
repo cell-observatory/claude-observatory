@@ -13,6 +13,10 @@ const glyphs = {
   'chevron-left': 'eab5', 'chevron-right': 'eab6', 'chevron-up': 'eab7', 'chevron-down': 'eab4',
   'check': 'eab2', 'discard': 'eae2', 'check-all': 'ebb1', 'close-all': 'eac1', 'clear-all': 'eabf',
   'lightbulb': 'ea61', 'search': 'ea6d', 'refresh': 'eb37',
+  'checklist': 'eab3', 'history': 'ea82', 'comment-discussion': 'eac7',
+  'list-ordered': 'eb16', // chapter chip: step through the chapter's edits in order
+  'diff': 'eae1', // nav bar: open the current edit as a full diff tab
+  'export': 'ebac', // nav bar: export a shareable review summary
 };
 
 let rules = '';

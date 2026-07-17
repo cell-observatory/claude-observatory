@@ -59,6 +59,7 @@ export interface ChangeMapChapter {
   kept: number;
   undone: number;
   agent: boolean; // any attributed edit was subagent-authored
+  editIds: number[]; // raw store edit ids DISPLAYED under this chapter, in capture order — the model the nav-bar CHAPTER axis walks; mirrors chapterEditIds/sessionChapters exactly ([] for a planned zero-edit row or a duplicate-content occurrence)
 }
 
 /** One touched file, rolled up — the row a "ranked ledger" renders. */
@@ -103,6 +104,7 @@ export interface ChangeMapModule {
 
 export interface ChangeMapSummary {
   session: string;
+  title?: string; // human-readable session name (Claude's ai-title, else the first user prompt; '' when neither) — the Overview session selector + the Stats panel show it instead of the raw id
   units: number; // edits after same-code collapse (what the map draws)
   rawEdits: number; // raw store edits
   pending: number;
@@ -712,6 +714,7 @@ export function buildChangeMap(cwd: string, session: string, opts: { root?: stri
       kept: 0,
       undone: 0,
       agent: false,
+      editIds: [], // filled in one pass below (raw-log capture order)
     };
   });
   const chapterByContent = new Map<string, ChangeMapChapter>();
@@ -778,6 +781,7 @@ export function buildChangeMap(cwd: string, session: string, opts: { root?: stri
       kept: 0,
       undone: 0,
       agent: false,
+      editIds: [], // filled in one pass below (raw-log capture order)
     });
   }
 
@@ -798,11 +802,31 @@ export function buildChangeMap(cwd: string, session: string, opts: { root?: stri
   const synth = chById.get(SYNTHETIC_CHAPTER_ID);
   if (synth) synth.status = synth.pending > 0 ? 'wip' : 'done';
 
+  // Per-chapter ordered edit ids (RAW store ids, capture order) — the model the nav-bar CHAPTER axis
+  // walks and the source it computes chapter-for-edit from, so the plugin needs no per-chapter CLI
+  // round-trip. Computed ONCE over the raw log with the SAME display attribution chapterEditIds /
+  // sessionChapters use (chapterForTs → the first-occurrence content chapter, else the synthetic
+  // session chapter), so `chapter.editIds` === `chapterEditIds(cwd, session, chapter.id)` and can't
+  // drift. A planned zero-edit or duplicate-content row gets [] (nothing attributes to it).
+  const editIdsByChapter = new Map<string, number[]>();
+  for (const r of log) {
+    const ch = chapterForTs(r.ts);
+    const cid = ch ? ch.id : SYNTHETIC_CHAPTER_ID;
+    let arr = editIdsByChapter.get(cid);
+    if (!arr) {
+      arr = [];
+      editIdsByChapter.set(cid, arr);
+    }
+    arr.push(r.id);
+  }
+  for (const c of chapters) c.editIds = editIdsByChapter.get(c.id) ?? [];
+
   // Summary — headline counts, all from pieces already parsed above (+ one action scan for errors/egress).
   const actions = parseActions(cwd, session);
   const aSum = summarizeActions(actions);
   const summary: ChangeMapSummary = {
     session,
+    title: (insights.title ?? insights.firstUserPrompt ?? '').replace(/\s+/g, ' ').trim(),
     units: edits.length,
     rawEdits: log.length,
     pending: edits.filter((e) => e.status === 'pending').length,
@@ -861,7 +885,9 @@ export function buildChangeMap(cwd: string, session: string, opts: { root?: stri
       if (!src) continue;
       let c = wfChapters.get(src.id);
       if (!c) {
-        c = { ...src, edits: 0, added: 0, removed: 0, pending: 0, kept: 0, undone: 0, agent: false };
+        // editIds: [] — the Chapter axis reads the session's own chapters, never a workflow slice's;
+        // carrying the full chapter's raw ids here (spread from src) would misrepresent the run's scope.
+        c = { ...src, edits: 0, added: 0, removed: 0, pending: 0, kept: 0, undone: 0, agent: false, editIds: [] };
         wfChapters.set(src.id, c);
       }
       c.edits++;
@@ -951,4 +977,105 @@ export function chapterEditIds(cwd: string, session: string, chapterId: string):
 export function reviewEditIds(cwd: string, session: string, id: string): number[] {
   const display = chapterEditIds(cwd, session, id);
   return display.length ? display : taskEditIds(cwd, session, id);
+}
+
+export interface EditChapter {
+  id: string; // the chapter (brush) id the edit belongs to; SYNTHETIC_CHAPTER_ID for unplanned work
+  title: string; // human-readable subtask name (Claude's to-do text; the session title for synthetic)
+  synthetic: boolean; // true = the residual 'session' bucket, not a real planned subtask
+  editIds: number[]; // every edit DISPLAYED under this chapter, in capture order (the WYSIWYG set)
+}
+
+/**
+ * Reverse lookup for the review-by-chapter ("cascaded edits") navigation: which chapter an edit
+ * belongs to, that chapter's human-readable title, and its ordered sibling edit ids. Mirrors the
+ * DISPLAY attribution of `chapterEditIds` (same gap-filled spans, first-occurrence → plain-hash id,
+ * synthetic fallback) so the axis walks exactly the set a chapter row's Accept/Reject acts on — and
+ * reuses `chapterEditIds` for the member list so the two can never diverge. Returns null for an edit
+ * id that names no record. Ordered by capture id = the order Claude made the edits. Zero token.
+ */
+export function chapterForEditId(cwd: string, session: string, editId: number): EditChapter | null {
+  const rec = readLog(session).find((r) => r.id === editId);
+  if (!rec) return null;
+  const transcript = findTranscript(cwd, session);
+  const snaps = transcript ? planSnaps(transcript) : [];
+  const spans = inProgressSpans(snaps);
+  const insights = transcriptInsights(cwd, session);
+  const finalPlan = snaps.length ? snaps[snaps.length - 1].todos : insights.todos;
+  const idByContent = new Map<string, string>();
+  const contentById = new Map<string, string>();
+  for (const td of finalPlan) {
+    if (!idByContent.has(td.content)) {
+      const cid = taskId(td.content, 0);
+      idByContent.set(td.content, cid);
+      contentById.set(cid, td.content);
+    }
+  }
+  let chapterId = SYNTHETIC_CHAPTER_ID;
+  if (rec.ts) {
+    for (const sp of spans) {
+      if (rec.ts >= sp.start && rec.ts < sp.end) {
+        chapterId = idByContent.get(sp.content) ?? SYNTHETIC_CHAPTER_ID;
+        break;
+      }
+    }
+  }
+  const synthetic = chapterId === SYNTHETIC_CHAPTER_ID;
+  const title = synthetic
+    ? insights.title ?? (insights.firstUserPrompt ? firstLine(insights.firstUserPrompt, 80) : 'Session work')
+    : firstLine(contentById.get(chapterId) ?? chapterId, 80);
+  return { id: chapterId, title, synthetic, editIds: chapterEditIds(cwd, session, chapterId) };
+}
+
+export interface SessionChapterRow extends EditChapter {
+  index: number; // plan order (synthetic session chapter sorts last)
+}
+
+/**
+ * The session's chapters in plan order, each with its ordered member edit ids — the model behind the
+ * nav-bar CHAPTER axis (step BETWEEN subtasks). Mirrors the same DISPLAY attribution as
+ * chapterForEditId/chapterEditIds so a chapter here holds exactly the edits its Accept/Reject acts on.
+ * Only chapters that actually claimed edits appear. The synthetic session chapter sorts last. Zero token.
+ */
+export function sessionChapters(cwd: string, session: string): SessionChapterRow[] {
+  const transcript = findTranscript(cwd, session);
+  const snaps = transcript ? planSnaps(transcript) : [];
+  const spans = inProgressSpans(snaps);
+  const insights = transcriptInsights(cwd, session);
+  const finalPlan = snaps.length ? snaps[snaps.length - 1].todos : insights.todos;
+  const idByContent = new Map<string, string>();
+  const contentById = new Map<string, string>();
+  const orderById = new Map<string, number>();
+  let order = 0;
+  for (const td of finalPlan) {
+    if (!idByContent.has(td.content)) {
+      const cid = taskId(td.content, 0);
+      idByContent.set(td.content, cid);
+      contentById.set(cid, td.content);
+      orderById.set(cid, order++);
+    }
+  }
+  const chapterOf = (ts: number): string => {
+    if (ts) for (const sp of spans) if (ts >= sp.start && ts < sp.end) return idByContent.get(sp.content) ?? SYNTHETIC_CHAPTER_ID;
+    return SYNTHETIC_CHAPTER_ID;
+  };
+  const members = new Map<string, number[]>();
+  for (const r of readLog(session)) {
+    const cid = chapterOf(r.ts);
+    (members.get(cid) ?? members.set(cid, []).get(cid)!).push(r.id);
+  }
+  const rows: SessionChapterRow[] = [];
+  for (const [cid, editIds] of members) {
+    const synthetic = cid === SYNTHETIC_CHAPTER_ID;
+    rows.push({
+      id: cid,
+      synthetic,
+      title: synthetic
+        ? insights.title ?? (insights.firstUserPrompt ? firstLine(insights.firstUserPrompt, 80) : 'Session work')
+        : firstLine(contentById.get(cid) ?? cid, 80),
+      editIds,
+      index: synthetic ? Number.MAX_SAFE_INTEGER : orderById.get(cid) ?? Number.MAX_SAFE_INTEGER - 1,
+    });
+  }
+  return rows.sort((a, b) => a.index - b.index);
 }

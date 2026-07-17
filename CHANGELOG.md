@@ -5,6 +5,75 @@ All notable changes to Claude Observatory are recorded here, following
 Per-tag release artifacts and auto-generated notes are on the
 [Releases page](https://github.com/cell-observatory/claude-observatory/releases).
 
+## [0.8.4] — 2026-07-17
+
+### Fixed
+
+- **Stub-proof session resolution** (both editors + CLI). Local commands (`/effort`, `/model`),
+  interrupted commands, abandoned prompts, and `/resume` boot-orphans write transcript files with no
+  assistant record; the newest-mtime rule let them displace the session under review, emptying every
+  panel behind a misleading "Install the capture hooks" prompt. The active session is now the newest
+  transcript **with an assistant record** — demoted, never skipped: an all-stub directory still falls
+  back to newest, so first-turn projects and the demo fixture keep resolving.
+- **Non-UTF-8 files can no longer be corrupted by a surgical undo/redo.** The 3-way merge path now
+  verifies all three inputs round-trip UTF-8 and refuses (conflict, with the byte-exact `--force`
+  restore offered) instead of silently rewriting bytes as U+FFFD.
+- `doctor` no longer blames working hooks for a fresh or command-only session, and now surfaces
+  symlinked subtrees (whose Bash-driven changes the tree diff skips for loop safety).
+- Removed the last leftover Clear File wiring (declared removed in 0.8.3; JetBrains never had it).
+
+### Added
+
+- **Four review axes in the Overview nav bar** (both editors). The step-through nav bar grew from two
+  axes to four — **Diff · File · Folder · Chapter** — so a reviewer can walk the pending edits at the
+  granularity that fits the change:
+    - **Folder axis** (new) steps between the changed directories (the change-map's folder buckets),
+      shows the folder with its file/edit totals, and accepts or reverts that folder's edits only.
+    - **Chapter axis** steps between the session's subtasks (chapters, from Claude's own to-dos/tasks),
+      shows the chapter's folder/file/edit totals, and carries Review · Accept · Reject · Chat. The
+      chapter's name is shown in the change-map's bottom summary rather than inline.
+  The Diff axis gains **Chat** (hand this edit to your Claude) and **View diff** (a real side-by-side
+  diff, not the floating lens) plus the edit's relative time; the File axis shows the filename and its
+  edit count. Grouping is by chapter (Claude's to-dos/tasks, unified), which is total, and members
+  come back in capture order; core adds `chapterForEditId` / `sessionChapters` and the CLI a
+  `chapter --of-edit <id> --json` verb. Zero token.
+- **The Overview nav bar is now two rows**: the review axes on the bottom, and on top the session
+  selector (which now shows the session's **human-readable name**, not its id), the session-wide bulk
+  actions (Accept All · Revert All · Clear Resolved · **Export**), and Search · Active only ·
+  Spotlight · Refresh pinned right.
+- **The change map is labeled and navigable.** Its three sections — **Chapters** (subtask chips),
+  **Folders** (the proportional strip), and **Files** (the churn-ranked ledger) — now carry captions
+  and hover descriptions, and clicking a folder tile or a chapter chip **navigates the matching nav-bar
+  axis**. A **bottom summary bar** reports the pending / accepted / reverted edit counts plus file and
+  folder totals for whatever is in scope, naming the current chapter (or folder filter).
+- **Hover descriptions** throughout the Overview: the Fleet / Workflows / Tasks panes each open with a
+  one-line description, and the tabs, sections, and usage rows explain themselves on hover.
+- **Overview panels no longer clip row text** (VS Code): Fleet worktree names, subagent descriptions
+  and current tasks, the Tasks list, and workflow agent names wrap to full text instead of ellipsis —
+  matching the workflow-name treatment.
+- **Honest empty states** (both editors): three mutually exclusive variants — hooks missing / fresh
+  session with prior work / fresh workspace — with a one-click **Switch to previous session** for the
+  newest same-workspace session that has edits. The Actions view gains an empty state in VS Code.
+- **JetBrains whole-file review shortcuts**: `⌃⌥K` / `⌘⌥K` accepts and `⌃⌥R` / `⌘⌥R` reverts every
+  pending edit in the active file (parity with VS Code).
+- **Manifesto** — a new site page on the philosophy, audience, design decisions, and credits.
+
+### Changed
+
+- **Bash capture is memoized.** A per-session `(mtimeMs, size)` stat cache makes the before/after
+  tree walks stat-only for unchanged files (binary verdicts cached too), with a GC-self-healing
+  blob-presence guard and a racily-clean 2 s epsilon. Steady state ≈145 ms per Bash call, down from
+  ≈200–260 ms; behavior (manifest, deletion detection, skip markers) is unchanged.
+- **JetBrains worktree discovery is gated**: the ~10 s `multitask` scan runs only when a new project
+  directory actually appears, not every 15 s.
+- `clean` reclaims log-less stub-session directories (staging-guarded — an in-flight capture is
+  never touched) and reports what it pruned.
+- Relative times gain week/month buckets (`3w ago`, `2mo ago`) in both editors.
+- Nav bars: grouped, labeled icons with full-width groups; status-bar parity; dark clear tint.
+- **Stats** shows the session by name (id in the tooltip), and the Usage **5h / weekly** bars now
+  report `~used / total`, projecting the 100% budget from the tokens observed against the reported
+  percent.
+
 ## [0.8.3] — 2026-07-16
 
 ### Added

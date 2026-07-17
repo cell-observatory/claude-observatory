@@ -39,4 +39,9 @@ object ClaudePaths {
     fun projectDir(cwd: String): Path = configDir().resolve("projects").resolve(mangleCwd(cwd))
 
     fun statuslineCache(): Path = configDir().resolve("statusline-last.json")
+
+    /** True if the capture hooks are wired into settings.json — same marker install.ts writes. */
+    fun hooksInstalled(): Boolean = runCatching {
+        java.nio.file.Files.readString(configDir().resolve("settings.json")).contains("claude-observatory-hook")
+    }.getOrDefault(false)
 }

@@ -59,4 +59,88 @@ class SessionResolverTest {
         assertEquals(proj.resolve("sess.jsonl"), SessionResolver.findTranscript("$cwd/nested", "sess"))
         assertNull(SessionResolver.findTranscript(cwd, "other"))
     }
+
+    // --- stub transcripts must never hijack resolution (port-fidelity with session.ts) ---------
+
+    private fun realTranscript(id: String, cwd: String): String =
+        """{"type":"user","sessionId":"$id","cwd":"$cwd","message":{"role":"user","content":"do the thing"}}
+          |{"type":"assistant","sessionId":"$id","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}
+          |""".trimMargin()
+
+    private fun effortStub(id: String, cwd: String): String =
+        """{"type":"user","sessionId":"$id","cwd":"$cwd","message":{"role":"user","content":"<command-name>/effort</command-name>"}}
+          |{"type":"user","sessionId":"$id","cwd":"$cwd","message":{"role":"user","content":"<local-command-stdout>Set effort level to xhigh</local-command-stdout>"}}
+          |""".trimMargin()
+
+    private fun write(proj: Path, id: String, content: String, mtime: Long): Path {
+        val p = proj.resolve("$id.jsonl")
+        Files.writeString(p, content)
+        p.toFile().setLastModified(mtime)
+        return p
+    }
+
+    @Test
+    fun `command-only stub with cwd never hijacks resolution`() {
+        val cwd = "/Users/x/proj3"
+        val proj = ClaudePaths.projectDir(cwd)
+        Files.createDirectories(proj)
+        write(proj, "real-one", realTranscript("real-one", cwd), 1_000_000)
+        write(proj, "effort-stub", effortStub("effort-stub", cwd), 2_000_000) // stub is NEWER
+        assertEquals("real-one", SessionResolver.resolveSessionId(cwd))
+    }
+
+    @Test
+    fun `bridge-session stub never hijacks resolution`() {
+        val cwd = "/Users/x/proj4"
+        val proj = ClaudePaths.projectDir(cwd)
+        Files.createDirectories(proj)
+        write(proj, "real-one", realTranscript("real-one", cwd), 1_000_000)
+        write(proj, "bridge", """{"type":"bridge-session","sessionId":"bridge","lastSequenceNum":0}""" + "\n", 2_000_000)
+        assertEquals("real-one", SessionResolver.resolveSessionId(cwd))
+    }
+
+    @Test
+    fun `all assistant-less transcripts fall back to newest`() {
+        val cwd = "/Users/x/proj5"
+        val proj = ClaudePaths.projectDir(cwd)
+        Files.createDirectories(proj)
+        write(proj, "older-stub", effortStub("older-stub", cwd), 1_000_000)
+        write(proj, "newer-stub", effortStub("newer-stub", cwd), 2_000_000)
+        assertEquals("newer-stub", SessionResolver.resolveSessionId(cwd))
+    }
+
+    @Test
+    fun `growing transcript flips from skipped to selected once the first assistant record lands`() {
+        val cwd = "/Users/x/proj6"
+        val proj = ClaudePaths.projectDir(cwd)
+        Files.createDirectories(proj)
+        write(proj, "real-old", realTranscript("real-old", cwd), 1_000_000)
+        val p = write(
+            proj, "real-new",
+            """{"type":"user","sessionId":"real-new","cwd":"$cwd","message":{"role":"user","content":"fresh prompt"}}""" + "\n",
+            2_000_000
+        )
+        assertEquals("real-old", SessionResolver.resolveSessionId(cwd))
+        Files.writeString(
+            p,
+            Files.readString(p) +
+                """{"type":"assistant","sessionId":"real-new","message":{"role":"assistant","content":[{"type":"text","text":"on it"}]}}""" + "\n"
+        )
+        p.toFile().setLastModified(3_000_000)
+        assertEquals("real-new", SessionResolver.resolveSessionId(cwd))
+    }
+
+    @Test
+    fun `pasted content containing an assistant type marker does not count`() {
+        val cwd = "/Users/x/proj7"
+        val proj = ClaudePaths.projectDir(cwd)
+        Files.createDirectories(proj)
+        write(proj, "real-one", realTranscript("real-one", cwd), 1_000_000)
+        write(
+            proj, "tricky-stub",
+            """{"type":"user","sessionId":"tricky-stub","cwd":"$cwd","message":{"role":"user","content":"look: {\"type\":\"assistant\",\"message\":{}}"}}""" + "\n",
+            2_000_000
+        )
+        assertEquals("real-one", SessionResolver.resolveSessionId(cwd))
+    }
 }

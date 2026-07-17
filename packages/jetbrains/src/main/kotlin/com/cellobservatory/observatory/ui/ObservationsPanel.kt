@@ -90,6 +90,19 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
     fun rebuild() {
         val service = ObservatoryService.getInstance(project)
         val session = service.currentSession()
+        // Same three-way honesty split as EditsTreePanel: never claim setup is missing when it isn't.
+        tree.emptyText.clear()
+        when {
+            !com.cellobservatory.observatory.core.ClaudePaths.hooksInstalled() -> {
+                tree.emptyText.appendLine("No tracked Claude edits in this project yet")
+                tree.emptyText.appendLine("Run `claude-observatory init`, then let Claude Code edit.")
+            }
+            session != null && service.log().isEmpty() -> {
+                tree.emptyText.appendLine("No edits in this session yet — the hooks are working.")
+                tree.emptyText.appendLine("Observations fill in as Claude edits files.")
+            }
+            else -> tree.emptyText.appendLine("No tracked Claude edits in this project yet")
+        }
         if (session == null) {
             data = null
             ApplicationManager.getApplication().invokeLater { if (!project.isDisposed) repaintTree() }
