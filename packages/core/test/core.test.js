@@ -1279,7 +1279,8 @@ test('contract 0.8.0: every machine surface the editors consume emits its docume
   // changemap — the Overview detail (ribbon · strip · ledger) + per-agent slices.
   const cm = runJson(['changemap', '--json']);
   hasKeys(cm, ['summary', 'edits', 'chapters', 'files', 'modules', 'tasks', 'rollupByTask', 'rollupBySubagent', 'rollupByWorkflow', 'workflows', 'rollupByAgent', 'agents', 'unassigned'], 'changemap');
-  hasKeys(cm.chapters[0], ['id', 'taskId', 'synthetic', 'index', 'title', 'status', 'startTs', 'endTs', 'edits', 'added', 'removed', 'pending', 'kept', 'undone', 'agent'], 'changemap.chapters[]');
+  hasKeys(cm.summary, ['session', 'title'], 'changemap.summary'); // title drives the Overview selector + Stats session name (JetBrains)
+  hasKeys(cm.chapters[0], ['id', 'taskId', 'synthetic', 'index', 'title', 'status', 'startTs', 'endTs', 'edits', 'added', 'removed', 'pending', 'kept', 'undone', 'agent', 'editIds'], 'changemap.chapters[]'); // editIds drives the JetBrains Chapter axis
   hasKeys(cm.edits[0], ['id', 'rel', 'module', 'file', 'added', 'removed', 'status', 'ts', 'agent', 'risk', 'reasoning', 'chapter', 'taskId', 'subagentId', 'workflowId'], 'changemap.edits[]');
   hasKeys(cm.workflows[0], ['id', 'name', 'running', 'rollup', 'files', 'taskIds', 'chapters'], 'changemap.workflows[]');
   hasKeys(cm.agents[0], ['session', 'worktree', 'gitBranch', 'phase', 'lastMs', 'summary', 'chapters', 'files', 'modules'], 'changemap.agents[]');
@@ -3006,6 +3007,14 @@ test('changemap: rolls edits into per-file/per-module rows + chapters from Claud
   assert.deepEqual(m.files.find((f) => f.file === 'b.ts').chapters, [ch0], 'attributed files carry the brush key');
   assert.equal(m.chapters[0].taskId, ch0, 'a real chapter exposes the strict taskId its destructive ops resolve to');
 
+  // --- editIds: the nav-bar Chapter axis model, computed once in buildChangeMap; must equal the
+  //     standalone chapterEditIds() (same display attribution) so the axis walks exactly the WYSIWYG set ---
+  assert.deepEqual(m.chapters[0].editIds, core.chapterEditIds(cwd, S, ch0), 'chapter.editIds === chapterEditIds (raw store ids, capture order)');
+  assert.deepEqual(m.chapters[1].editIds, core.chapterEditIds(cwd, S, ch1), 'the second chapter carries its own displayed edit ids too');
+  assert.deepEqual(m.chapters[0].editIds, [id1, id2, id3], 'first span (extended back to session start) holds edits #1/#2/#3 in capture order');
+  assert.deepEqual(m.chapters[1].editIds, [id4, id5, id6], 'second span + the trailing fill-forward edit #6');
+  assert.equal(typeof m.summary.title, 'string', 'summary.title is the human-readable session name (empty string when unknown)');
+
   // --- 0.8.0 fix: tasks[] (strict-span identities) unify the taskId space (rollupByTask + tasklog join) ---
   // Regression for the disjoint-id-space defect: chapters (latest plan) and rollupByTask (strict spans)
   // used to key differently, so tasklog content came up empty. tasks[] is the shared join+label source.
@@ -4603,4 +4612,241 @@ test('clean: stub-session husks are reclaimed; live and reviewed sessions are un
   assert.ok(fs.existsSync(path.join(core.storeDir(LIVE), 'blobs', liveBlob)), 'its before-blob survives (manifest-referenced)');
   assert.equal(core.readLog(REAL).length, 1, 'reviewed session untouched');
   core.deleteBashManifest(LIVE);
+});
+
+// --- round-2 sweep: shared predicates, formatting, bin resolution, and the UTF-8 merge guard -------
+
+test('filter: matchesQuery — case-insensitive substring; empty/whitespace query matches all', () => {
+  assert.equal(core.matchesQuery('src/Foo Bar.ts', 'foo'), true);
+  assert.equal(core.matchesQuery('src/Foo Bar.ts', 'BAR'), true);
+  assert.equal(core.matchesQuery('src/Foo Bar.ts', 'baz'), false);
+  assert.equal(core.matchesQuery('anything', ''), true);
+  assert.equal(core.matchesQuery('anything', '   '), true, 'whitespace-only query matches all');
+});
+
+test('format: relTime boundaries incl. the new week/month buckets', () => {
+  const now = 1_784_300_000_000;
+  const at = (deltaSec) => core.relTime(now - deltaSec * 1000, now);
+  assert.equal(at(59), '59s ago');
+  assert.equal(at(60), '1m ago');
+  assert.equal(at(59 * 60), '59m ago');
+  assert.equal(at(60 * 60), '1h ago');
+  assert.equal(at(23 * 3600), '23h ago');
+  assert.equal(at(24 * 3600), '1d ago');
+  assert.equal(at(13 * 86400), '13d ago');
+  assert.equal(at(14 * 86400), '2w ago', 'days cap at 13, then weeks');
+  assert.equal(at(60 * 86400), '8w ago');
+  assert.equal(at(62 * 86400), '2mo ago', 'weeks cap at ~2 months, then months');
+  assert.equal(core.relTime(now + 5000, now), '0s ago', 'future timestamps clamp to zero');
+});
+
+test('analyze: resolveClaudeBin precedence — configured > env > well-known paths > bare name', () => {
+  const home = freshHome();
+  const fakeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-bin-'));
+  const fakeBin = path.join(fakeDir, 'claude');
+  fs.writeFileSync(fakeBin, '#!/bin/sh\n', { mode: 0o755 });
+  const OLD = process.env.CLAUDE_BIN;
+  try {
+    process.env.CLAUDE_BIN = fakeBin;
+    assert.equal(core.resolveClaudeBin('/configured/claude-not-on-disk'), fakeBin,
+      'a configured path that does not exist falls through to the env candidate');
+    assert.equal(core.resolveClaudeBin(fakeBin), fakeBin, 'an existing configured path wins outright');
+    delete process.env.CLAUDE_BIN;
+    // fresh HOME has no ~/.local/bin etc. candidates; may still find a real system claude —
+    // accept either the bare-name fallback or an absolute existing path, never a bogus one.
+    const got = core.resolveClaudeBin();
+    assert.ok(got === 'claude' || fs.existsSync(got), `fallback is PATH name or a real file (got ${got})`);
+  } finally {
+    if (OLD === undefined) delete process.env.CLAUDE_BIN;
+    else process.env.CLAUDE_BIN = OLD;
+  }
+});
+
+test('tasks: taskSnaps anchors a create via its result text, then snapshots each update', () => {
+  freshHome();
+  const proj = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-tx-'));
+  const tx = path.join(proj, 't.jsonl');
+  fs.writeFileSync(tx, [
+    JSON.stringify({ type: 'assistant', timestamp: '2026-07-17T10:00:00Z', message: { role: 'assistant', content: [
+      { type: 'tool_use', id: 't1', name: 'TaskCreate', input: { subject: 'Fix the parser', description: '' } },
+    ] } }),
+    // the assigned id only appears in the tool_result text — the mining anchors on it
+    JSON.stringify({ type: 'user', timestamp: '2026-07-17T10:00:01Z', message: { role: 'user', content: [
+      { type: 'tool_result', tool_use_id: 't1', content: 'Task #1 created successfully: Fix the parser' },
+    ] } }),
+    JSON.stringify({ type: 'assistant', timestamp: '2026-07-17T10:00:02Z', message: { role: 'assistant', content: [
+      { type: 'tool_use', id: 't2', name: 'TaskUpdate', input: { taskId: '1', status: 'completed' } },
+    ] } }),
+  ].join('\n'));
+  const snaps = core.taskSnaps(tx);
+  assert.equal(snaps.length, 2, 'one snapshot at create-result, one at update');
+  assert.equal(snaps[0].todos[0].content, 'Fix the parser');
+  assert.equal(snaps[0].todos[0].status, 'pending');
+  assert.equal(snaps[1].todos[0].status, 'completed', 'update snapshot reflects the new status');
+  assert.equal(snaps[1].todos[0].src, 'task', 'task-born items are marked so ribbons skip them');
+});
+
+test('undo: non-UTF-8 file on the MERGE path refuses (conflict) instead of corrupting to U+FFFD', () => {
+  freshHome();
+  const S = 'latin1';
+  const F = path.join(tmpWork(), 'legacy.txt');
+  // Latin-1 content: "caf<0xE9>\n" — not valid UTF-8, but capturable (isBinary only screens NUL).
+  const v1 = Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x0a, 0x41, 0x0a]); // café\nA\n
+  const v2 = Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x0a, 0x42, 0x0a]); // café\nB\n  (edit #1: A->B)
+  const v3 = Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x0a, 0x42, 0x0a, 0x43, 0x0a]); // + C\n (edit #2)
+  core.ensureStore(S);
+  const b1 = core.writeBlob(S, v1), b2 = core.writeBlob(S, v2), b3 = core.writeBlob(S, v3);
+  core.appendLog(S, { ts: 1000, tool: 'Edit', file: F, beforeBlob: b1, afterBlob: b2, status: 'pending' });
+  core.appendLog(S, { ts: 2000, tool: 'Edit', file: F, beforeBlob: b2, afterBlob: b3, status: 'pending' });
+  fs.writeFileSync(F, v3);
+  const res = core.undoEdit(S, 1); // later edit #2 exists -> merge path
+  assert.equal(res.status, 'conflict', 'non-UTF-8 merge refuses rather than rewrites');
+  assert.ok(Buffer.compare(fs.readFileSync(F), v3) === 0, 'file bytes untouched — 0xE9 preserved');
+  // The byte-exact escape hatch still works: whole-file restore (drops later edits, raw bytes).
+  const forced = core.restoreFile(S, 1);
+  assert.ok(forced.ok, 'force restore succeeds');
+  assert.ok(Buffer.compare(fs.readFileSync(F), v1) === 0, 'restore path is byte-exact (0xE9 intact)');
+});
+
+test('undo: valid multibyte UTF-8 (emoji/CJK) still merges on the surgical path', () => {
+  freshHome();
+  const S = 'utf8ok';
+  const F = path.join(tmpWork(), 'i18n.txt');
+  const v1 = '日本語 🎉\nline A\n';
+  const v2 = '日本語 🎉\nline B\n';   // edit #1: A->B
+  const v3 = '日本語 🎉\nline B\nline C 世界\n'; // edit #2: append (different line)
+  core.ensureStore(S);
+  const b1 = core.writeBlob(S, Buffer.from(v1)), b2 = core.writeBlob(S, Buffer.from(v2)), b3 = core.writeBlob(S, Buffer.from(v3));
+  core.appendLog(S, { ts: 1000, tool: 'Edit', file: F, beforeBlob: b1, afterBlob: b2, status: 'pending' });
+  core.appendLog(S, { ts: 2000, tool: 'Edit', file: F, beforeBlob: b2, afterBlob: b3, status: 'pending' });
+  fs.writeFileSync(F, v3);
+  const res = core.undoEdit(S, 1); // merge path (later edit #2 exists)
+  assert.equal(res.status, 'undone', 'valid multibyte content merges — round-trip guard does not false-positive');
+  const after = fs.readFileSync(F, 'utf8');
+  assert.ok(after.includes('line A'), 'edit #1 undone');
+  assert.ok(after.includes('line C 世界'), 'later edit #2 preserved');
+  assert.ok(after.includes('🎉'), 'emoji intact');
+});
+
+test('diagnose: a broken/looping symlink does not suppress the warning for a real symlinked dir', () => {
+  freshHome();
+  const work = tmpWork();
+  core.installHooks('claude-observatory capture #' + core.HOOK_MARKER, core.settingsPath());
+  const realDir = path.join(work, 'realpkg');
+  fs.mkdirSync(realDir, { recursive: true });
+  fs.symlinkSync(realDir, path.join(work, 'goodlink'), 'dir');   // genuine symlinked dir -> should warn
+  fs.symlinkSync(path.join(work, 'nowhere'), path.join(work, 'deadlink')); // dangling -> statSync throws
+  const checks = core.diagnose({ cwd: work, binOnPath: true, jqPresent: true });
+  const c = checks.find((x) => x.id === 'symlink-subtrees');
+  assert.ok(c, 'the symlink warning still fires despite a sibling broken link');
+  assert.match(c.detail, /goodlink/, 'names the real symlinked directory');
+});
+
+test('undo: an oversized current file routes to conflict instead of throwing', () => {
+  freshHome();
+  const S = 'huge';
+  const F = path.join(tmpWork(), 'big.txt');
+  core.ensureStore(S);
+  const b1 = core.writeBlob(S, Buffer.from('a\n')), b2 = core.writeBlob(S, Buffer.from('b\n'));
+  const b3 = core.writeBlob(S, Buffer.from('c\n'));
+  core.appendLog(S, { ts: 1000, tool: 'Edit', file: F, beforeBlob: b1, afterBlob: b2, status: 'pending' });
+  core.appendLog(S, { ts: 2000, tool: 'Edit', file: F, beforeBlob: b2, afterBlob: b3, status: 'pending' });
+  // Real Buffer whose toString('utf8') throws — simulates a >512MB file without allocating one.
+  const realRead = fs.readFileSync;
+  const throwing = Buffer.from('c\n');
+  throwing.toString = () => { throw new RangeError('Cannot create a string longer than 0x1fffffe8 characters'); };
+  fs.readFileSync = (p, ...rest) => (p === F ? throwing : realRead(p, ...rest));
+  try {
+    const res = core.undoEdit(S, 1);
+    assert.equal(res.status, 'conflict', 'oversized file degrades to conflict, no throw');
+  } finally {
+    fs.readFileSync = realRead;
+  }
+});
+
+test('changemap: chapterForEditId maps an edit to its chapter + title + ordered cross-file members', () => {
+  freshHome();
+  const S = 'chfor';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const F1 = path.join(cwd, 'a.ts'), F2 = path.join(cwd, 'b.ts');
+  // Two chapters; the first spans two files. (Display attribution is TOTAL — the last chapter's span
+  // runs to +∞ — so there is no separate "gap" bucket here; synthetic is exercised below.)
+  const i1 = seedEdit(S, F1, 'a\n', 'a\nx\n'); // ts=1000 chapter "Add rate limiting"
+  const i2 = seedEdit(S, F2, 'b\n', 'b\ny\n'); // ts=2000 same chapter, DIFFERENT file
+  const i3 = seedEdit(S, F1, 'a\nx\n', 'a\nx\nz\n'); // ts=3000 chapter "Write tests"
+  const main = [
+    { timestamp: new Date(500).toISOString(), message: { role: 'user', content: 'add rate limiting and tests' } },
+    { timestamp: new Date(900).toISOString(), message: { role: 'assistant', content: [
+      { type: 'tool_use', id: 't1', name: 'TodoWrite', input: { todos: [
+        { content: 'Add rate limiting', status: 'in_progress' },
+        { content: 'Write tests', status: 'pending' }] } }] } },
+    { timestamp: new Date(2500).toISOString(), message: { role: 'assistant', content: [
+      { type: 'tool_use', id: 't2', name: 'TodoWrite', input: { todos: [
+        { content: 'Add rate limiting', status: 'completed' },
+        { content: 'Write tests', status: 'in_progress' }] } }] } },
+    { timestamp: new Date(3500).toISOString(), message: { role: 'assistant', content: [
+      { type: 'tool_use', id: 't3', name: 'TodoWrite', input: { todos: [
+        { content: 'Add rate limiting', status: 'completed' },
+        { content: 'Write tests', status: 'completed' }] } }] } },
+  ].map((o) => JSON.stringify(o)).join('\n');
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), main);
+
+  const c1 = core.chapterForEditId(cwd, S, i1);
+  assert.ok(c1, 'edit resolves to a chapter');
+  assert.equal(c1.title, 'Add rate limiting', 'human-readable subtask title from the to-do');
+  assert.equal(c1.synthetic, false);
+  assert.deepEqual(c1.editIds, [i1, i2], 'ordered members span files, in capture order');
+  // an edit in the SAME chapter but a different file resolves to the same chapter + member list
+  assert.deepEqual(core.chapterForEditId(cwd, S, i2).editIds, [i1, i2], 'cross-file sibling shares the chapter');
+
+  const c3 = core.chapterForEditId(cwd, S, i3);
+  assert.equal(c3.title, 'Write tests', 'second chapter title');
+  assert.deepEqual(c3.editIds, [i3], 'members are that chapter only');
+
+  assert.equal(core.chapterForEditId(cwd, S, 9999), null, 'unknown edit id → null');
+
+  // A session with edits but NO to-dos: every edit lands in the synthetic chapter, titled from the
+  // session goal (the first user prompt) — never a bare bucket label.
+  const S2 = 'chsyn';
+  const cwd2 = tmpWork();
+  const proj2 = core.projectDir(cwd2);
+  fs.mkdirSync(proj2, { recursive: true });
+  const G = path.join(cwd2, 'g.ts');
+  const j1 = seedEdit(S2, G, 'g\n', 'g\nh\n');
+  fs.writeFileSync(path.join(proj2, S2 + '.jsonl'), JSON.stringify(
+    { timestamp: new Date(500).toISOString(), message: { role: 'user', content: 'refactor the parser' } }
+  ));
+  const cs = core.chapterForEditId(cwd2, S2, j1);
+  assert.equal(cs.synthetic, true, 'no to-dos → synthetic session chapter');
+  assert.match(cs.title, /refactor the parser/i, 'synthetic chapter titled from the session goal');
+  assert.deepEqual(cs.editIds, [j1], 'synthetic chapter still returns its ordered members');
+});
+
+test('changemap: sessionChapters lists chapters in plan order with their edit ids', () => {
+  freshHome();
+  const S = 'schaps';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const F1 = path.join(cwd, 'a.ts'), F2 = path.join(cwd, 'b.ts');
+  const i1 = seedEdit(S, F1, 'a\n', 'a\nx\n');   // ts=1000  chapter A
+  const i2 = seedEdit(S, F2, 'b\n', 'b\ny\n');   // ts=2000  chapter A (other file)
+  const i3 = seedEdit(S, F1, 'a\nx\n', 'a\nx\nz\n'); // ts=3000  chapter B
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), [
+    { timestamp: new Date(900).toISOString(), message: { role: 'assistant', content: [
+      { type: 'tool_use', id: 't1', name: 'TodoWrite', input: { todos: [
+        { content: 'Add rate limiting', status: 'in_progress' }, { content: 'Write tests', status: 'pending' }] } }] } },
+    { timestamp: new Date(2500).toISOString(), message: { role: 'assistant', content: [
+      { type: 'tool_use', id: 't2', name: 'TodoWrite', input: { todos: [
+        { content: 'Add rate limiting', status: 'completed' }, { content: 'Write tests', status: 'in_progress' }] } }] } },
+  ].map((o) => JSON.stringify(o)).join('\n'));
+
+  const chaps = core.sessionChapters(cwd, S);
+  assert.equal(chaps.length, 2, 'two chapters');
+  assert.equal(chaps[0].title, 'Add rate limiting', 'plan order: first chapter first');
+  assert.deepEqual(chaps[0].editIds, [i1, i2], 'first chapter spans files, capture order');
+  assert.equal(chaps[1].title, 'Write tests');
+  assert.deepEqual(chaps[1].editIds, [i3]);
 });

@@ -858,24 +858,34 @@ function cmdKeep(args: string[]): void {
 function cmdUndo(args: string[]): void {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const session = getSessionId(args);
-  // Bulk: --all (every pending in the session), --file <substr> (pending edits in matching files), or
-  // --under <path> (pending edits at-or-beneath a file/folder path — the editors' folder/file Revert).
+  // Bulk: --all (every pending in the session), --file <substr> (pending edits in matching files),
+  // --under <path> (pending edits at-or-beneath a file/folder path — the editors' folder/file Revert),
+  // or --ids <a,b,c> (an explicit pending-edit id set — the Overview's Folder-axis Reject, which acts
+  // on ONE module bucket's exact edits, not the recursive subtree a path scope would catch).
   // Already-Accepted (kept) edits are left on disk — revert those individually. All share core.undoScope,
   // the single scoped-revert implementation both editors also use.
   const fi = args.indexOf('--file');
   const ui = args.indexOf('--under');
-  if (args.includes('--all') || fi >= 0 || ui >= 0) {
+  const idi = args.indexOf('--ids');
+  if (args.includes('--all') || fi >= 0 || ui >= 0 || idi >= 0) {
     const fileSub = fi >= 0 ? args[fi + 1] : undefined;
     if (fi >= 0 && !fileSub) fail('`undo --file <substr>` requires a value');
     const under = ui >= 0 ? args[ui + 1] : undefined;
     if (ui >= 0 && !under) fail('`undo --under <path>` requires a value');
-    const res = core.undoScope(session, { under, fileSubstr: fileSub });
+    let ids: number[] | undefined;
+    if (idi >= 0) {
+      const raw = args[idi + 1];
+      if (!raw) fail('`undo --ids <a,b,c>` requires a comma-separated id list');
+      ids = raw.split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => Number.isInteger(n));
+      if (!ids.length) fail('`undo --ids <a,b,c>` got no valid integer ids');
+    }
+    const res = core.undoScope(session, { under, fileSubstr: fileSub, ids });
     core.autoClearDemo(session); // a fully reviewed demo session leaves no residue
     if (args.includes('--json')) {
       emitJson({ undone: res.undone, conflicts: res.conflicts, total: res.total });
       return;
     }
-    const scope = fileSub ? ` in files matching "${fileSub}"` : under ? ` under ${relFile(under)}` : '';
+    const scope = fileSub ? ` in files matching "${fileSub}"` : under ? ` under ${relFile(under)}` : ids ? ` in ${ids.length} selected edit(s)` : '';
     process.stdout.write(
       (res.conflicts ? c.yellow('⚠ ') : c.green('✓ ')) +
         `reverted ${res.undone} edit(s)${scope}` +
@@ -1014,6 +1024,34 @@ function cmdTaskClear(args: string[]): void {
     return;
   }
   process.stdout.write(c.green('✓ ') + `cleared ${res.cleared} resolved edit(s) in task ${taskId}\n`);
+}
+
+/** `chapter --of-edit <id>` (cascaded edits) — the chapter an edit belongs to, its human-readable
+ *  title, and its ordered sibling edit ids (capture order, across files). Backs the JetBrains
+ *  "review this chapter" flow + Chapter nav axis, which shell out to the CLI. Zero token. */
+function cmdChapter(args: string[]): void {
+  const core = require('@claude-observatory/core') as Core;
+  const session = getSessionId(args);
+  const raw = flagValue(args, '--of-edit');
+  const editId = raw ? parseInt(raw, 10) : NaN;
+  if (!Number.isFinite(editId)) {
+    fail('expected `claude-observatory chapter --of-edit <editId> [--json]`');
+  }
+  const ch = core.chapterForEditId(process.cwd(), session, editId);
+  if (args.includes('--json')) {
+    emitJson(ch); // null when the edit id names no record — the caller degrades
+    return;
+  }
+  if (!ch) {
+    process.stdout.write(c.dim(`no edit #${editId} in this session\n`));
+    return;
+  }
+  process.stdout.write(
+    c.bold(ch.title) +
+      c.dim(`${ch.synthetic ? ' (session)' : ''} — ${ch.editIds.length} edit(s): `) +
+      ch.editIds.join(', ') +
+      '\n'
+  );
 }
 
 /** `demo` (0.8.0) — the live simulator: replays a scripted Claude session through the REAL pipeline
@@ -2053,6 +2091,9 @@ function main(): void {
       break;
     case 'task-clear':
       cmdTaskClear(rest);
+      break;
+    case 'chapter':
+      cmdChapter(rest);
       break;
     case 'demo':
       void cmdDemo(rest);

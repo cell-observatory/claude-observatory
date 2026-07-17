@@ -117,6 +117,10 @@
         "view": "claudeObservatory.observations",
         "when": "claudeObservatory.hooksInstalled",
         "contents": "No edits in this session yet."
+      },
+      {
+        "view": "claudeObservatory.actions",
+        "contents": "No tool calls in this session yet.\nEdits, commands, reads, searches, egress, and to-dos appear here as Claude works."
       }
     ],
     "commands": [
@@ -423,6 +427,16 @@
         "icon": "$(chevron-right)"
       },
       {
+        "command": "claudeObservatory.navChapterPrev",
+        "title": "Previous edit in this chapter",
+        "category": "Claude Observatory"
+      },
+      {
+        "command": "claudeObservatory.navChapterNext",
+        "title": "Next edit in this chapter",
+        "category": "Claude Observatory"
+      },
+      {
         "command": "claudeObservatory.navViewDiff",
         "title": "Nav bar: view current edit diff",
         "category": "Claude Observatory",
@@ -485,12 +499,6 @@
         "title": "Check for updates",
         "category": "Claude Observatory",
         "icon": "$(cloud-download)"
-      },
-      {
-        "command": "claudeObservatory.clearFile",
-        "title": "Clear resolved edits in file",
-        "category": "Claude Observatory",
-        "icon": "$(clear-all)"
       },
       {
         "command": "claudeObservatory.keepFolder",
@@ -556,6 +564,18 @@
         "command": "claudeObservatory.diffNextRevision",
         "key": "ctrl+alt+]",
         "mac": "alt+cmd+]",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "claudeObservatory.navChapterPrev",
+        "key": "ctrl+alt+,",
+        "mac": "alt+cmd+,",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "claudeObservatory.navChapterNext",
+        "key": "ctrl+alt+.",
+        "mac": "alt+cmd+.",
         "when": "editorTextFocus"
       }
     ],
@@ -876,11 +896,6 @@
           "command": "claudeObservatory.undoFile",
           "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.observations) && viewItem == file",
           "group": "inline@2"
-        },
-        {
-          "command": "claudeObservatory.clearFile",
-          "when": "(view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.observations) && viewItem == file",
-          "group": "inline@3"
         },
         {
           "command": "claudeObservatory.keepFolder",

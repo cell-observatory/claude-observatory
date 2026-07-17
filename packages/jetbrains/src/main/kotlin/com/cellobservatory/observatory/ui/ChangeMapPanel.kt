@@ -1,6 +1,7 @@
 package com.cellobservatory.observatory.ui
 
 import com.cellobservatory.observatory.core.ChatRef
+import com.cellobservatory.observatory.core.ObservatoryCli
 import com.cellobservatory.observatory.core.StoreReader
 import com.cellobservatory.observatory.model.ChangeMap
 import com.cellobservatory.observatory.model.ChangeMapAgent
@@ -144,7 +145,16 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
      *  refresh their scoped labels + counters. */
     private var overviewToolbars: List<ActionToolbar> = emptyList()
     /** The shared step-through review nav bar (parity with the status-bar widget), hosted in this toolbar. */
-    private val reviewNavBar = ReviewNavBar(project) { refreshOverviewToolbar() }
+    private val reviewNavBar = ReviewNavBar(project) { onNavChanged() }
+    /** The live detail panel — kept so a nav step can refresh its bottom summary without a full rebuild. */
+    private var currentDetail: AgentDetail? = null
+
+    /** A Diff/File/Folder/Chapter nav step landed — refresh the scoped toolbar labels + counters AND the
+     *  change-map bottom summary (which names the current chapter / folder scope). */
+    private fun onNavChanged() {
+        refreshOverviewToolbar()
+        currentDetail?.refreshSummary()
+    }
 
     // --- LEFT NAV: Fleet (agents + subagents) + Workflows (runs), over multitask --json ---
     private val fleetRoot = DefaultMutableTreeNode()
@@ -202,11 +212,12 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
     init {
         // (Live conflicts moved to the Actions panel in 0.8.3 — the fleet tab is just the tree now.)
         navTabs = JBTabbedPane().apply {
-            addTab("Fleet", JBScrollPane(fleetTree))
+            // Each pane leads with a one-line description (VS Code .ov-desc parity) above its tree/list.
+            addTab("Fleet", descPane("Every Claude agent working in this repo’s worktrees — live phase, tokens, and risk. Select one to map just its edits.", JBScrollPane(fleetTree)))
             setToolTipTextAt(0, "Running agents across every worktree — siblings + their subagents — with the live file-conflict strip below. Select one to map its changes.")
-            addTab("Workflows", JBScrollPane(workflowsTree))
+            addTab("Workflows", descPane("Multi-agent runs (an orchestrator and its subagents) — each run’s phases and the edits attributed to it.", JBScrollPane(workflowsTree)))
             setToolTipTextAt(1, "Claude Code Workflow runs — agents grouped by phase, with tokens/time/edits per run. Select one to map its changes.")
-            addTab("Tasks", JBScrollPane(tasksList))
+            addTab("Tasks", descPane("This session’s numbered task list (Claude’s TaskCreate/TaskUpdate plan) — with live statuses; each row joins its change-map chapter.", JBScrollPane(tasksList)))
             setToolTipTextAt(2, "The session's task list (Claude's numbered TaskCreate/TaskUpdate tasks) — live statuses; completed tasks leave the list when the runtime archives them.")
         }
         // Left nav (Fleet · Workflows) = 25% of the panel; the change-map detail takes the remaining 75%.
@@ -216,35 +227,44 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         }
         setContent(split)
 
-        // Top navbar — FIVE spaced groups (user layout 2026-07-16, VS Code Overview parity):
-        // Search · session · Active only | Diff axis · Keep · Undo | File axis · Accept/Reject File |
-        // bulk Accept All · Revert All · Clear Resolved | Spotlight · Refresh. The nav-bar actions come
-        // from the shared ReviewNavBar (labels shown, like VS Code); the toolbar-only fleet filters
-        // (Clear Completed / Show Hidden / Clear Done Chapters) were REMOVED 2026-07-16 — Active only
-        // already hides completed rows, and chapter clearing lives in the chapter context menu.
-        // FIVE groups mirroring the VS Code Overview, each its own ActionToolbar so they can be spread to
-        // fill the panel width. ActionToolbarImpl packs children at preferred width and can't distribute
-        // leftover space itself, so the groups sit in a GridBagLayout host where weighted glue cells absorb
-        // the slack — the five groups spread edge-to-edge with a divider centred in each gap (parity with
-        // .ov-toolbar { justify-content: space-between } + .ov-nbsep).
-        val g1 = DefaultActionGroup(
-            reviewNavBar.searchAction(),
-            action("Switch Session", AllIcons.Vcs.Branch) { ReviewOps.chooseSession(project, fleetTree) },
-            activeOnlyToggle(),
-        )
-        val g2 = DefaultActionGroup().apply {
+        // Feed the shared nav bar the current session's change-map chapters — their editIds drive the
+        // Chapter axis + the bottom summary's chapter scope (the status-bar host leaves this empty).
+        reviewNavBar.chaptersProvider = { map?.chapters ?: emptyList() }
+        // The Overview shows the RICH Diff/File counters (edit time · filename · edit count); the status bar
+        // stays terse (VS Code parity — that detail rides only the Overview's counters).
+        reviewNavBar.richCounters = true
+
+        // TWO rows (user swap 2026-07-17, VS Code parity — its .ov-toolbar is a flex column-reverse):
+        //   BOTTOM row = the review AXES: Diff · File · Folder · Chapter (one centered cluster, dividers between).
+        //   TOP row (split) = controls: LEFT cluster = session selector + Accept All + Revert All +
+        //     Clear Resolved + Export ; RIGHT cluster = Search · Active only | Spotlight · Refresh.
+        // The nav-bar actions come from the shared ReviewNavBar (labels shown, like VS Code). Each cluster is
+        // its own ActionToolbar so a chapter pick / nav step can refresh its scoped labels + counters.
+
+        // --- BOTTOM row: the four review axes ---
+        val diffGroup = DefaultActionGroup().apply {
             reviewNavBar.diffAxis().forEach(::add)
-            add(reviewNavBar.keepAction())
-            add(reviewNavBar.undoAction())
+            add(reviewNavBar.keepAction()); add(reviewNavBar.undoAction())
+            add(reviewNavBar.chatEditAction()); add(reviewNavBar.viewDiffAction())
         }
-        val g3 = DefaultActionGroup().apply {
+        val fileGroup = DefaultActionGroup().apply {
             reviewNavBar.fileAxis().forEach(::add)
-            add(reviewNavBar.acceptFileAction())
-            add(reviewNavBar.rejectFileAction())
+            add(reviewNavBar.acceptFileAction()); add(reviewNavBar.rejectFileAction())
         }
-        // Bulk actions RETARGET to the picked ribbon chapter when one is selected (task-keep/undo/clear on
-        // chapter.id), else run session-wide; the presentation text reflects the scope.
-        val g4 = DefaultActionGroup().apply {
+        val folderGroup = DefaultActionGroup().apply {
+            reviewNavBar.folderAxis().forEach(::add)
+            add(reviewNavBar.acceptFolderAction()); add(reviewNavBar.rejectFolderAction())
+        }
+        val chapterGroup = DefaultActionGroup().apply {
+            reviewNavBar.chapterAxis().forEach(::add)
+            add(reviewNavBar.reviewChapterAction()); add(reviewNavBar.acceptChapterAction())
+            add(reviewNavBar.rejectChapterAction()); add(reviewNavBar.chatChapterAction())
+        }
+
+        // --- TOP row LEFT cluster: session selector + session-wide bulk + Export. Bulk actions RETARGET to
+        //     the picked ribbon chapter when one is selected (task-keep/undo/clear on chapter.id). ---
+        val leftGroup = DefaultActionGroup().apply {
+            add(sessionSelectorAction())
             add(bulkAction("Accept All", NavTint.ACCEPT_ALL, { "Accept All in “$it”" },
                 { withSession { s -> ReviewOps.keepAll(project, s) } },
                 { p -> ReviewOps.keepTask(project, p.session, p.id, p.title) }))
@@ -259,28 +279,60 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
                     }
                 },
                 { p -> ReviewOps.clearTask(project, p.session, p.id, p.title) }))
+            add(exportAction())
         }
-        val g5 = DefaultActionGroup(
-            reviewNavBar.spotlightAction(),
-            action("Refresh", AllIcons.Actions.Refresh) { rebuild(force = true) },
-        )
-        val tbs = listOf(g1, g2, g3, g4, g5).mapIndexed { i, g ->
-            ActionManager.getInstance().createActionToolbar("ClaudeObservatoryOverview$i", g, true).apply {
+        // --- TOP row RIGHT cluster: Search · Active only | Spotlight · Refresh ---
+        val rightGroup = DefaultActionGroup().apply {
+            add(reviewNavBar.searchAction())
+            add(activeOnlyToggle())
+            addSeparator()
+            add(reviewNavBar.spotlightAction())
+            add(action("Refresh", AllIcons.Actions.Refresh) { rebuild(force = true) })
+        }
+
+        fun mkTb(name: String, g: DefaultActionGroup): ActionToolbar =
+            ActionManager.getInstance().createActionToolbar("ClaudeObservatoryOverview$name", g, true).apply {
                 targetComponent = fleetTree
                 component.isOpaque = false
             }
-        }
-        overviewToolbars = tbs
-        toolbar = JPanel(GridBagLayout()).apply {
+        val diffTb = mkTb("Diff", diffGroup)
+        val fileTb = mkTb("File", fileGroup)
+        val folderTb = mkTb("Folder", folderGroup)
+        val chapterTb = mkTb("Chapter", chapterGroup)
+        val leftTb = mkTb("Left", leftGroup)
+        val rightTb = mkTb("Right", rightGroup)
+        overviewToolbars = listOf(diffTb, fileTb, folderTb, chapterTb, leftTb, rightTb)
+
+        // TOP row: left cluster pinned LEFT, right cluster pinned RIGHT (a weighted glue cell absorbs the
+        // slack — .ov-tbrow.split { justify-content: space-between }).
+        val topRow = JPanel(GridBagLayout()).apply {
             isOpaque = false
-            border = JBUI.Borders.empty(0, 2)
+            alignmentX = Component.LEFT_ALIGNMENT
+            add(leftTb.component, GridBagConstraints().apply { gridx = 0; gridy = 0; anchor = GridBagConstraints.WEST })
+            add(Box.createHorizontalGlue(), GridBagConstraints().apply { gridx = 1; gridy = 0; weightx = 1.0; fill = GridBagConstraints.HORIZONTAL })
+            add(rightTb.component, GridBagConstraints().apply { gridx = 2; gridy = 0; anchor = GridBagConstraints.EAST })
+        }
+        // BOTTOM row: the four axes as ONE centered cluster with a divider between each (glue on both ends).
+        val bottomRow = JPanel(GridBagLayout()).apply {
+            isOpaque = false
+            alignmentX = Component.LEFT_ALIGNMENT
             var col = 0
             fun natural() = GridBagConstraints().apply { gridx = col++; gridy = 0; fill = GridBagConstraints.NONE; anchor = GridBagConstraints.CENTER }
             fun glue() = add(Box.createHorizontalGlue(), GridBagConstraints().apply { gridx = col++; gridy = 0; weightx = 1.0; fill = GridBagConstraints.HORIZONTAL })
-            tbs.forEachIndexed { i, tb ->
-                if (i > 0) { glue(); add(navDivider(), natural()); glue() }
+            glue()
+            listOf(diffTb, fileTb, folderTb, chapterTb).forEachIndexed { i, tb ->
+                if (i > 0) add(navDivider(), natural())
                 add(tb.component, natural())
             }
+            glue()
+        }
+        toolbar = JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.Y_AXIS)
+            isOpaque = false
+            border = JBUI.Borders.empty(2, 2)
+            add(topRow)
+            add(Box.createVerticalStrut(JBUI.scale(3)))
+            add(bottomRow)
         }
 
         // Single-click a Fleet row → map that agent (a subagent maps its parent agent); a Workflows run →
@@ -498,13 +550,16 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
 
     private fun renderDetail() {
         detailHost.removeAll()
+        currentDetail = null
         try {
             val m = map
             val td = if (m == null) null else (tabDataFor(selected, m) ?: tabDataFor(NavSel.Main, m))
             if (td == null) {
                 detailHost.add(emptyLabel("No edits in this session yet — this fills in as Claude edits files"), BorderLayout.CENTER)
             } else {
-                detailHost.add(AgentDetail(td), BorderLayout.CENTER)
+                val detail = AgentDetail(td)
+                currentDetail = detail
+                detailHost.add(detail, BorderLayout.CENTER)
             }
         } catch (t: Throwable) {
             // Never leave the detail blank — a paint failure must be visible here, not only in idea.log.
@@ -540,7 +595,7 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
     private fun workflowTabData(w: ChangeMapWorkflow, m: ChangeMap): TabData {
         val r = w.rollup
         val summary = ChangeMapSummary(
-            session = m.summary?.session ?: "", units = r.edits, pending = r.pending, kept = r.kept, undone = r.undone,
+            session = m.summary?.session ?: "", title = m.summary?.title, units = r.edits, pending = r.pending, kept = r.kept, undone = r.undone,
             added = r.added, removed = r.removed, errors = 0, subagents = 0, fleet = 0, egress = 0,
         )
         return TabData(
@@ -554,6 +609,44 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         border = JBUI.Borders.empty(12)
         foreground = UIUtil.getContextHelpForeground()
     }
+
+    /** A left-nav pane with a one-line muted description above its content (the VS Code .ov-desc). */
+    private fun descPane(desc: String, content: JComponent): JComponent = JPanel(BorderLayout()).apply {
+        val label = JBLabel("<html>$desc</html>").apply {
+            font = JBUI.Fonts.smallFont()
+            foreground = UIUtil.getContextHelpForeground()
+            border = JBUI.Borders.empty(4, 6, 5, 6)
+        }
+        add(label, BorderLayout.NORTH)
+        add(content, BorderLayout.CENTER)
+    }
+
+    /** The session selector — shows the human-readable session NAME in FULL (title / first prompt), the
+     *  raw id in the tooltip (VS Code parity, 2026-07-17); clicking it opens the Switch-session chooser. */
+    private fun sessionSelectorAction(): AnAction = object : AnAction("Session", null, AllIcons.Vcs.Branch), DumbAware {
+        override fun getActionUpdateThread() = ActionUpdateThread.EDT
+        @Suppress("OVERRIDE_DEPRECATION") // displayTextInToolbar: still honored; renders the session name
+        override fun displayTextInToolbar() = true
+        override fun update(e: AnActionEvent) {
+            val title = map?.summary?.title?.takeIf { it.isNotBlank() }
+            val sess = map?.summary?.session?.takeIf { it.isNotBlank() } ?: service().currentSession()
+            e.presentation.text = title ?: ("session " + (sess?.take(8) ?: "—"))
+            e.presentation.description = (title?.let { "$it — " } ?: "") + "session ${sess ?: "—"} · click to switch"
+        }
+        override fun actionPerformed(e: AnActionEvent) = ReviewOps.chooseSession(project, fleetTree)
+    }
+
+    /** Export — a shareable review summary (kept / reverted per file) as markdown, opened in an editor tab
+     *  (mirrors the VS Code exportSummary; core.reviewSummaryMarkdown via `summary --markdown`). */
+    private fun exportAction(): AnAction =
+        action("Export", NavTint.tint(AllIcons.ToolbarDecorator.Export, NavTint.BLUE), "Export a shareable review summary (kept / reverted per file) as markdown") {
+            withSession { s ->
+                ReviewOps.openMarkdown(
+                    project, "claude-observatory-review-summary",
+                    "Could not export the review summary (is the claude-observatory CLI installed?)",
+                ) { ObservatoryCli.summaryMarkdown(s, project.basePath) }
+            }
+        }
 
     /** An Overview-toolbar button: [text] renders beside the icon (VS Code shows these labels), with an
      *  optional longer [description] as the tooltip. */
@@ -900,22 +993,52 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         }
         private val readout = JBLabel().apply { font = JBUI.Fonts.label(); foreground = UIUtil.getContextHelpForeground() }
 
+        // Section captions (VS Code .cm-caption) + the bottom summary bar. The caption tooltips describe
+        // each section; the summary names the current scope's pending/accepted/file/folder totals.
+        private val capChapters = caption("Chapters", "Chapters — the subtasks (Claude’s to-dos / tasks) this work fell under. Each chip shows ±lines · edits · pending; click it to review that chapter in the nav bar.")
+        private val capFolders = caption("Folders", "Folders — the directories Claude changed. Color = review status (amber pending · green kept · red reverted); click a tile to filter the files below and open that folder in the nav bar.")
+        private val capFiles = caption("Files", "Files — every changed file, ranked by churn. Dot = review status, bar = relative churn, +N = lines, ⧗/✓ = pending/reviewed; click a row to open the edit.")
+        private val summaryLabel = JBLabel().apply { font = JBUI.Fonts.miniFont(); border = JBUI.Borders.empty(2, 4, 2, 4) }
+        private var lastShown: List<ChangeMapFile> = emptyList()
+
+        private fun caption(text: String, tip: String): JBLabel = JBLabel(text).apply {
+            font = JBUI.Fonts.miniFont()
+            foreground = UIUtil.getContextHelpForeground()
+            border = JBUI.Borders.empty(3, 1, 2, 0)
+            toolTipText = tip
+            alignmentX = Component.LEFT_ALIGNMENT
+        }
+
         init {
             ribbonScroll.alignmentX = Component.LEFT_ALIGNMENT
             strip.alignmentX = Component.LEFT_ALIGNMENT
             val north = JPanel().apply {
                 layout = BoxLayout(this, BoxLayout.Y_AXIS)
                 border = JBUI.Borders.empty(2, 4)
+                add(capChapters)   // above the Chapters ribbon
                 add(ribbonScroll)
+                add(capFolders)    // above the Folders strip
                 add(strip)
+                add(capFiles)      // above the Files ledger (which is the CENTER list below)
             }
             add(north, BorderLayout.NORTH)
             add(JBScrollPane(list), BorderLayout.CENTER)
-            add(readout, BorderLayout.SOUTH)
+            val south = JPanel().apply {
+                layout = BoxLayout(this, BoxLayout.Y_AXIS)
+                readout.alignmentX = Component.LEFT_ALIGNMENT
+                summaryLabel.alignmentX = Component.LEFT_ALIGNMENT
+                add(readout)
+                add(summaryLabel)
+            }
+            add(south, BorderLayout.SOUTH)
 
+            // Click a folder tile → filter the ledger to it AND jump the nav-bar Folder axis there (open its
+            // first pending edit) — VS Code parity (revealFolder).
             strip.onClick = { mod ->
-                modFilter = if (modFilter == mod) null else mod
+                val selecting = modFilter != mod
+                modFilter = if (selecting) mod else null
                 paintTab()
+                if (selecting) reviewNavBar.revealFolder(mod)
             }
             list.addMouseListener(object : MouseAdapter() {
                 override fun mouseClicked(e: MouseEvent) {
@@ -959,8 +1082,10 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
                 if (ribOpen) done.forEach { ribbon.add(chapterRow(it)) }
             }
             ribbonScroll.isVisible = ribbon.componentCount > 0
+            capChapters.isVisible = ribbonScroll.isVisible
 
             strip.isVisible = data.modules.isNotEmpty()
+            capFolders.isVisible = strip.isVisible
             strip.update(data.modules, modFilter)
 
             // The Search-edits filter narrows this ledger too (parity with the sidebar trees + VS Code).
@@ -969,6 +1094,8 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
                 (modFilter == null || it.moduleLabel == modFilter) &&
                     (q.isBlank() || it.rel.contains(q, ignoreCase = true))
             }
+            lastShown = shown
+            capFiles.isVisible = shown.isNotEmpty()
             listModel.clear()
             val max = shown.maxOfOrNull { maxOf(1, it.churn) } ?: 1
             ledgerRenderer.configure(max.coerceAtLeast(1))
@@ -980,9 +1107,42 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             if (q.isNotBlank()) notes.add("search “$q” · ${shown.size} file(s) — Search again (empty) to clear")
             readout.text = notes.joinToString("  ·  ")
 
+            refreshSummary()
             ribbon.revalidate(); ribbon.repaint()
             strip.repaint()
             revalidate(); repaint()
+        }
+
+        /** The bottom summary bar: for the CURRENT scope, `[name ·] N pending · N accepted · [N reverted ·]
+         *  N files · N folders`. Scope precedence (VS Code renderSummary): a picked chapter chip → else the
+         *  nav-bar Chapter axis's current chapter (unless a folder tile filters) → else an active folder
+         *  filter → else the whole visible view. A chapter/folder scope is NAMED; the whole view is unnamed. */
+        fun refreshSummary() {
+            val chapters = data.chapters
+            val navCh = if (modFilter == null) reviewNavBar.currentChapterId() else null
+            val chId = pickedChapter?.id ?: navCh
+            val ch = chId?.let { id -> chapters.firstOrNull { it.id == id } }
+            val sp: Int; val sk: Int; val su: Int; val nfiles: Int; val folders: Set<String>; val name: String?
+            if (ch != null) {
+                val seen = HashSet<String>()
+                val fol = HashSet<String>()
+                var nf = 0
+                for (f in data.files) if (f.chapters.contains(ch.id) && seen.add(f.rel)) { nf++; fol.add(f.moduleLabel) }
+                sp = ch.pending; sk = ch.kept; su = ch.undone; nfiles = nf; folders = fol
+                name = ch.title.ifBlank { null }
+            } else {
+                sp = lastShown.sumOf { it.pending }; sk = lastShown.sumOf { it.kept }; su = lastShown.sumOf { it.undone }
+                nfiles = lastShown.size; folders = lastShown.map { it.moduleLabel }.toHashSet(); name = modFilter
+            }
+            if (name == null && nfiles == 0) { summaryLabel.text = ""; return }
+            val parts = mutableListOf<String>()
+            name?.let { parts.add("<b style='color:#4C8BF5'>${escHtml(it)}</b>") }
+            parts.add("<b style='color:#D9A441'>$sp</b> pending")
+            parts.add("<b style='color:#3FB950'>$sk</b> accepted")
+            if (su > 0) parts.add("<b style='color:#8C8C8C'>$su</b> reverted")
+            parts.add("<b>$nfiles</b> file${if (nfiles == 1) "" else "s"}")
+            parts.add("<b>${folders.size}</b> folder${if (folders.size == 1) "" else "s"}")
+            summaryLabel.text = "<html>${parts.joinToString(" · ")}</html>"
         }
 
         private fun rowPanel(): JPanel = JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(4), JBUI.scale(1))).apply {
@@ -1020,6 +1180,7 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
                     return
                 }
                 pickedChapter = PickedChapter(sess, id, title)
+                reviewNavBar.revealChapter(id) // jump the nav-bar Chapter axis to this chapter (VS Code parity)
             }
             paintTab()
             refreshOverviewToolbar()
@@ -1372,3 +1533,7 @@ private fun shortFile(path: String): String {
 private fun clip(s: String, n: Int): String = if (s.length <= n) s else s.take(n - 1) + "…"
 
 private fun clipText(s: String, n: Int): String = if (s.length <= n) s else s.take(n - 1) + "…"
+
+/** Minimal HTML escape for text interpolated into a JBLabel's <html> body (the bottom summary name). */
+private fun escHtml(s: String): String =
+    s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")

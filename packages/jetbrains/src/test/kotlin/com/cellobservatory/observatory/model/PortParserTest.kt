@@ -181,11 +181,11 @@ class PortParserTest {
         // Mirrors `changemap --json`. The rollups (churn, worst-unreviewed-wins status, moduleLabel,
         // maxId) are computed in core — the plugin must read them, never recompute them.
         val json = """
-            {"summary":{"session":"s1","units":3,"rawEdits":4,"pending":2,"kept":1,"undone":0,
+            {"summary":{"session":"s1","title":"Wire the change map","units":3,"rawEdits":4,"pending":2,"kept":1,"undone":0,
                         "added":40,"removed":5,"actions":9,"errors":1,"subagents":2,"fleet":3,"egress":1,"spanMs":1000},
              "edits":[],
              "chapters":[{"id":"ch0","index":0,"title":"Scaffold it","status":"done","startTs":10,"endTs":20,
-                          "edits":2,"added":30,"removed":5,"pending":1,"kept":1,"undone":0,"agent":true},
+                          "edits":2,"added":30,"removed":5,"pending":1,"kept":1,"undone":0,"agent":true,"editIds":[3,7]},
                          {"id":"ch1","index":1,"title":"Ship it","status":"todo","startTs":0,"endTs":0,
                           "edits":0,"added":0,"removed":0,"pending":0,"kept":0,"undone":0,"agent":false}],
              "files":[{"rel":"packages/core/src/a.ts","module":"packages/core/src","moduleLabel":"core","file":"a.ts",
@@ -201,6 +201,7 @@ class PortParserTest {
         """.trimIndent()
         val m = ChangeMapParser.parse(json)!!
         assertEquals("s1", m.summary?.session)
+        assertEquals("Wire the change map", m.summary?.title) // the Overview selector + Stats show this, not the id
         assertEquals(3, m.summary?.units)
         assertEquals(1, m.summary?.errors)
         assertEquals(3, m.summary?.fleet)   // the 🛰 chip — parity with the VS Code panel
@@ -211,6 +212,8 @@ class PortParserTest {
         assertEquals("Scaffold it", m.chapters[0].title)
         assertEquals("done", m.chapters[0].status) // drives the glyph
         assertEquals(2, m.chapters[0].edits)
+        assertEquals(listOf(3, 7), m.chapters[0].editIds) // the Chapter axis walks these
+        assertEquals(emptyList<Int>(), m.chapters[1].editIds) // a planned zero-edit row carries none
         assertTrue(m.chapters[0].agent)
         assertEquals("todo", m.chapters[1].status) // a planned to-do with no attributed edits
         // Version skew: this payload predates chapter.taskId (0.8.0 totality) — there chapter.id WAS the

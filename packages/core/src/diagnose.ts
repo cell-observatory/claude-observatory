@@ -205,6 +205,35 @@ export function diagnose(input: DiagnoseInput): Check[] {
     }
   }
 
+  // Bash capture walks the real directory tree only: a symlinked subtree is skipped (loop safety),
+  // so its Bash-driven changes are invisible. Surface the blind spot instead of leaving it silent.
+  try {
+    const symDirs = fs
+      .readdirSync(input.cwd, { withFileTypes: true })
+      .filter((e) => {
+        // Per-entry guard: one dangling (ENOENT), circular (ELOOP), or unreadable (EACCES) link
+        // must not abort the whole check and silently drop warnings for the genuine ones.
+        if (!e.isSymbolicLink()) return false;
+        try {
+          return fs.statSync(path.join(input.cwd, e.name)).isDirectory();
+        } catch {
+          return false;
+        }
+      })
+      .map((e) => e.name);
+    if (symDirs.length > 0) {
+      checks.push({
+        id: 'symlink-subtrees',
+        label: 'symlinked subtrees',
+        level: 'warn',
+        detail: `${symDirs.slice(0, 3).join(', ')}${symDirs.length > 3 ? ', …' : ''} — Bash-driven changes under symlinked directories are not captured.`,
+        fix: 'Edit/Write captures still work everywhere; only the Bash tree diff skips symlinks (loop safety).',
+      });
+    }
+  } catch {
+    /* cwd unreadable — other checks already cover that */
+  }
+
   // The status line powers the 5h/week usage bars — nice-to-have, not required.
   const statuslineOn = fs.existsSync(path.join(cfg, 'statusline-last.json'));
   checks.push(

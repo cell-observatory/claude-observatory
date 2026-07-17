@@ -84,6 +84,18 @@ private fun ago(ms: Long): String {
 }
 
 /**
+ * `~used/total` for a plan window (5h / weekly), where total is the 100%-estimate inferred from the
+ * used tokens ÷ the percent used — mirrors the VS Code `usedOfTotal`: `pct>0.5 ? '~'+human(tok)+'/'+
+ * human(round(tok/pct*100)) : '~'+human(tok)`. Below pct 0.5% the total estimate is too noisy, so just
+ * `~used`. Returns null when there are no tokens (so it drops out of the detail column).
+ */
+private fun usedOfTotal(tok: Double?, pct: Double?): String? {
+    if (tok == null || tok == 0.0) return null
+    val p = pct ?: 0.0
+    return if (p > 0.5) "~${human(tok)}/${human(Math.round(tok / p * 100).toDouble())}" else "~${human(tok)}"
+}
+
+/**
  * Stats + Usage, painted natively in Swing (deliberately no JCEF — fragile under Gateway/remote
  * dev, and the plots are simple step-lines). Edits (linear) + Tokens (log) with a Today/7d/30d
  * toggle and crosshair tooltips; below, the ctx/5h/wk usage bars with reset countdowns, ~token
@@ -197,8 +209,11 @@ class StatsPanel(private val project: Project) : JPanel(BorderLayout()), com.int
 
     fun refresh() {
         val session = ObservatoryService.getInstance(project).currentSession()
-        sessionLabel.text = "🔬 " + (session?.take(8) ?: "—")
-        sessionLabel.toolTipText = session?.let { "Active session: $it" } ?: "No active Claude Code session"
+        // Show the human-readable session NAME (title / first prompt) — reuses the change-map summary the
+        // service already caches (no extra CLI spawn); the raw id stays in the tooltip. VS Code parity.
+        val title = ObservatoryService.getInstance(project).changemap()?.summary?.title?.takeIf { it.isNotBlank() }
+        sessionLabel.text = "🔬 " + (title ?: session?.take(8) ?: "—")
+        sessionLabel.toolTipText = session?.let { (title?.let { t -> "$t — " } ?: "") + "Active session: $it" } ?: "No active Claude Code session"
         // Live review scoreboard from the in-memory folded log (cheap; cached on the log's mtime/size).
         scoreboard.update(ObservatoryService.getInstance(project).counts())
         fetchUsage()
@@ -545,8 +560,8 @@ private class UsageBars : JComponent() {
             val stale = if (age != null && age > usage.staleMs) " · ${ago(age)} ago" else ""
             listOf(
                 Triple("ctx", usage.ctxPct, usage.ctxTokens?.let { t -> "${human(t)}/${human(usage.ctxSize ?: 0.0)}" } ?: ""),
-                Triple("5h", usage.fivePct, listOfNotNull(until(usage.fiveReset).ifBlank { null }, usage.fiveTok?.let { "~${human(it)}" }).joinToString(" · ") + stale),
-                Triple("wk", usage.weekPct, listOfNotNull(until(usage.weekReset).ifBlank { null }, usage.weekTok?.let { "~${human(it)}" }).joinToString(" · ") + stale),
+                Triple("5h", usage.fivePct, listOfNotNull(until(usage.fiveReset).ifBlank { null }, usedOfTotal(usage.fiveTok, usage.fivePct)).joinToString(" · ") + stale),
+                Triple("wk", usage.weekPct, listOfNotNull(until(usage.weekReset).ifBlank { null }, usedOfTotal(usage.weekTok, usage.weekPct)).joinToString(" · ") + stale),
             )
         }
         // Full-width responsive rows (same idea as the charts tracking the viewport): per row the

@@ -33,5 +33,8 @@ fun relTime(ts: Long, now: Long = System.currentTimeMillis()): String {
     if (m < 60) return "${m}m ago"
     val h = m / 60
     if (h < 24) return "${h}h ago"
-    return "${h / 24}d ago"
+    val d = h / 24
+    if (d < 14) return "${d}d ago"
+    if (d < 61) return "${d / 7}w ago"
+    return "${(d / 30.44).toInt()}mo ago" // parity: core format.ts relTime
 }

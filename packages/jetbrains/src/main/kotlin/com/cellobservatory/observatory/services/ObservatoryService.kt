@@ -112,6 +112,20 @@ class ObservatoryService(private val project: Project) : Disposable {
         return next
     }
 
+    /** Cascaded edits: step the review cursor to the previous/next PENDING edit WITHIN a chapter's edit
+     *  set (given in capture order), wrapping at the ends. Returns null when the chapter has nothing
+     *  left to review. */
+    fun stepInChapter(dir: Int, chapterEditIds: List<Int>): EditRecord? {
+        val order = chapterEditIds.withIndex().associate { (i, id) -> id to i }
+        val pending = log().filter { it.pending && it.id in order }.sortedBy { order[it.id] }
+        if (pending.isEmpty()) return null
+        val cursor = reviewCursorId
+        val idx = pending.indexOfFirst { it.id == cursor }
+        val next = if (idx >= 0) pending[(idx + dir + pending.size) % pending.size] else pending.first()
+        reviewCursorId = next.id
+        return next
+    }
+
     // Active "Search edits" filter — shared across the Edits and Diffs trees so they filter together
     // (parity with the VS Code module-level filter). Matches on workspace-relative path.
     @Volatile var filterQuery: String = ""

@@ -150,6 +150,22 @@ object ObservatoryCli {
         }
     }
 
+    /** Revert an EXPLICIT pending-edit id set in ONE call (`undo --ids <a,b,c>`, backed by
+     *  core.undoScope({ ids }) — the same set VS Code's Folder-axis Reject uses). Unlike `undoScope(under)`
+     *  this targets a module bucket's EXACT edits, never the recursive subtree a path scope would catch.
+     *  Accepted edits are left on disk. Returns null if the CLI call failed. */
+    fun undoScopeIds(session: String, ids: List<Int>, workDir: String?): UndoScopeResult? {
+        if (ids.isEmpty()) return UndoScopeResult(0, 0, 0)
+        val r = run(listOf("undo", "--ids", ids.joinToString(","), "--session", session, "--json"), workDir)
+        if (!r.ok) return null
+        return try {
+            val o = JsonParser.parseString(r.stdout).asJsonObject
+            UndoScopeResult(o.get("undone").asInt, o.get("conflicts").asInt, o.get("total").asInt)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     fun clearResolved(session: String, workDir: String?, under: String? = null): Boolean =
         run(
             listOf("clean", "--resolved", "--session", session) + (under?.let { listOf("--under", it) } ?: emptyList()),
@@ -227,6 +243,7 @@ object ObservatoryCli {
     }
 
     data class TaskClearCompletedResult(val cleared: Int, val chapters: Int)
+    data class ChapterOfEdit(val id: String, val title: String, val synthetic: Boolean, val editIds: List<Int>)
 
     /** `task-clear --completed` — clear the resolved edits of EVERY settled chapter (all edits kept).
      *  Returns {cleared, chapters}, or null if the CLI call failed. */
@@ -236,6 +253,27 @@ object ObservatoryCli {
         return try {
             val o = JsonParser.parseString(r.stdout).asJsonObject
             TaskClearCompletedResult(o.get("cleared").asInt, o.getAsJsonArray("chapters")?.size() ?: 0)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** Cascaded edits: the chapter an edit belongs to — its id, human-readable title, whether it is the
+     *  synthetic session bucket, and its ordered sibling edit ids (capture order, across files). Backs
+     *  the JetBrains Chapter review axis. Returns null when the edit id names no record. */
+    fun chapterForEdit(session: String, editId: Int, workDir: String?): ChapterOfEdit? {
+        val r = run(listOf("chapter", "--of-edit", editId.toString(), "--session", session, "--json"), workDir)
+        if (!r.ok) return null
+        return try {
+            val el = JsonParser.parseString(r.stdout)
+            if (el.isJsonNull) return null
+            val o = el.asJsonObject
+            ChapterOfEdit(
+                id = o.get("id").asString,
+                title = o.get("title").asString,
+                synthetic = o.get("synthetic")?.asBoolean ?: false,
+                editIds = o.getAsJsonArray("editIds").map { it.asInt },
+            )
         } catch (_: Exception) {
             null
         }
