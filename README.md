@@ -9,7 +9,7 @@
 [![Pages](https://github.com/cell-observatory/claude-observatory/actions/workflows/pages.yml/badge.svg)](https://github.com/cell-observatory/claude-observatory/actions/workflows/pages.yml)
 [![Release](https://github.com/cell-observatory/claude-observatory/actions/workflows/release.yml/badge.svg)](https://github.com/cell-observatory/claude-observatory/actions/workflows/release.yml)
 [![Dependabot](https://img.shields.io/badge/dependabot-enabled-025E8C?logo=dependabot&logoColor=white)](https://github.com/cell-observatory/claude-observatory/blob/main/.github/dependabot.yml)
-[![Version](https://img.shields.io/badge/version-v0.8.3-blue)](https://github.com/cell-observatory/claude-observatory/releases/latest)
+[![Version](https://img.shields.io/badge/version-v0.8.4-blue)](https://github.com/cell-observatory/claude-observatory/releases/latest)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/cell-observatory/claude-observatory/blob/main/LICENSE)
 
 
@@ -291,6 +291,7 @@ template, and relocating `CLAUDE_CONFIG_DIR` — is in **[docs/REMOTE.md](docs/R
 | --- | --- |
 | **Capture hook** (`capture`) | PreToolUse snapshots the file before an edit, PostToolUse commits before + after. Zero-dep, always `exit 0`, never writes to the model context. Captures `Edit` / `Write` / `MultiEdit` / `NotebookEdit` — and files changed by `Bash` (set `CLAUDE_OBSERVATORY_NO_BASH=1` to opt out). |
 | **Store** | `~/.claude/claude-observatory/<session_id>/` — `log.jsonl` (append-only) + content-addressed `blobs/`. No network. |
+| **Session resolution** | The active session is the newest transcript **that holds a real conversation**. Local commands (`/effort`, `/model`), interrupted commands, and bridge records write command-only transcript stubs; those never displace the session under review (0.8.4). When the current session has no edits yet, the panels say so honestly and offer a one-click switch to the previous session's work. |
 | **Undo engine** | Position-anchored 3-way line merge (base = the file right after the edit; sides = current on-disk content and the pre-edit content). Later edits to other lines survive; a genuine overlap → clear conflict + per-file restore. Anchoring on line positions (not fuzzy text search) keeps it safe against duplicated content. |
 | **Observations** | Correlates each edit with Claude's real reasoning + to-dos parsed from the session transcript — zero token. |
 | **Front-ends** | The CLI (in-process), the VS Code sidebar (in-process `core`), and the JetBrains plugin (over the CLI + store) — all on the same store + engine. |
@@ -311,6 +312,11 @@ Built to add **zero overhead** to your Claude sessions:
 - **Heavy scans never touch the UI thread** — Stats aggregation runs in a `claude-observatory stats`
   subprocess with an incremental on-disk cache (first scan ~0.4 s, steady-state ~0.05 s).
 - **Refreshes are debounced** — a burst of capture events produces one re-render.
+- **The Bash capture walk is memoized (0.8.4)** — a per-session `(mtime, size)` stat cache makes the
+  before/after tree snapshots stat-only for unchanged files (binary verdicts cached too), roughly
+  halving steady-state hook latency; a self-healing blob-presence guard keeps undo safe across GC.
+- **Worktree discovery is gated (0.8.4)** — the JetBrains plugin re-runs sibling discovery only when
+  a new project dir actually appears, instead of spawning a full `multitask` scan every 15 s.
 
 ## Packages
 

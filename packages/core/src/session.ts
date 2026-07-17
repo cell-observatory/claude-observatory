@@ -5,8 +5,9 @@
  * where <mangled-cwd> is the ABSOLUTE launch cwd with every non-alphanumeric char replaced by '-'.
  * Verified: /Users/thayer/Github -> -Users-thayer-Github  (leading '/' becomes a leading '-').
  *
- * The newest .jsonl in that dir is the current session. Capture never needs this (the hook payload
- * supplies session_id directly) — it exists for the CLI and the VS Code sidebar.
+ * The newest .jsonl in that dir that holds a real conversation (see hasAssistantRecord) is the
+ * current session. Capture never needs this (the hook payload supplies session_id directly) — it
+ * exists for the CLI and the VS Code sidebar.
  */
 import * as fs from 'fs';
 import * as path from 'path';
@@ -26,7 +27,14 @@ export function projectDir(cwd: string): string {
   return path.join(claudeConfigDir(), 'projects', mangleCwd(cwd));
 }
 
-/** Newest session id in a specific project dir, or null if none / the dir doesn't exist. */
+/**
+ * Newest REAL session id in a specific project dir, or null if none / the dir doesn't exist.
+ * Local commands (/effort, /model), interrupted commands, and bridge-session records write
+ * transcript .jsonl files that never gain an assistant record; those stubs must not win the
+ * newest-mtime race over the real session (they often carry a real cwd line, so the fleet.ts
+ * firstCwdLine guard cannot screen them). When NO candidate has an assistant record yet (a
+ * brand-new project whose first turn is still in flight), fall back to the newest as before.
+ */
 function newestSessionIn(dir: string): string | null {
   let entries: string[];
   try {
@@ -34,20 +42,24 @@ function newestSessionIn(dir: string): string | null {
   } catch {
     return null;
   }
-  let newest: { id: string; mtime: number } | null = null;
+  const candidates: { id: string; mtime: number; file: string }[] = [];
   for (const name of entries) {
     if (!name.endsWith('.jsonl')) continue;
+    const file = path.join(dir, name);
     let mtime: number;
     try {
-      mtime = fs.statSync(path.join(dir, name)).mtimeMs;
+      mtime = fs.statSync(file).mtimeMs;
     } catch {
       continue;
     }
-    if (!newest || mtime > newest.mtime) {
-      newest = { id: name.slice(0, -'.jsonl'.length), mtime };
-    }
+    candidates.push({ id: name.slice(0, -'.jsonl'.length), mtime, file });
   }
-  return newest ? newest.id : null;
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => b.mtime - a.mtime);
+  for (const c of candidates) {
+    if (hasAssistantRecord(c.file)) return c.id;
+  }
+  return candidates[0].id;
 }
 
 /**
@@ -236,6 +248,81 @@ export function firstCwdLine(transcriptPath: string): FirstCwdLine | null {
       return tail;
     }
     return null;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+// Positive results are sticky (transcripts are append-only: once a session has replied it stays
+// real forever). A negative is keyed on (mtimeMs,size) so a still-growing brand-new transcript is
+// re-scanned when it changes, while a dead stub costs one stat() per lookup.
+const assistantSeen = new Set<string>();
+const assistantNegKey = new Map<string, string>();
+
+/** True iff a parsed transcript line is an actual assistant record (not pasted look-alike text). */
+function isAssistantLine(line: string): boolean {
+  // Substring prefilter, then parse-confirm: a user record can EMBED the literal '"type":"assistant"'
+  // in pasted content — only a record whose own type field is 'assistant' counts.
+  if (!line.includes('"type":"assistant"') && !line.includes('"type": "assistant"')) return false;
+  try {
+    return JSON.parse(line)?.type === 'assistant';
+  } catch {
+    return false; // partial/corrupt line — a real record will parse on a later scan
+  }
+}
+
+/**
+ * True iff the transcript contains at least one `type:"assistant"` record — the discriminator
+ * between a real session and a command-only/bridge stub. A real session gains its assistant record
+ * when the first reply starts streaming, BEFORE any capture hook can fire (the tool_use assistant
+ * message precedes Pre/PostToolUse), so filtering on this can never hide a session that has edits.
+ * Scanning mirrors firstCwdLine: incremental chunked read, bounded by MAX_SCAN.
+ */
+export function hasAssistantRecord(transcriptPath: string): boolean {
+  if (assistantSeen.has(transcriptPath)) return true;
+  let st: fs.Stats;
+  try {
+    st = fs.statSync(transcriptPath);
+  } catch {
+    return false;
+  }
+  const negKey = `${st.mtimeMs}:${st.size}`;
+  if (assistantNegKey.get(transcriptPath) === negKey) return false;
+  let fd: number;
+  try {
+    fd = fs.openSync(transcriptPath, 'r');
+  } catch {
+    return false;
+  }
+  try {
+    const CHUNK = 256 * 1024;
+    const MAX_SCAN = 32 * 1024 * 1024; // same bound as firstCwdLine — never load a whole 20-56MB file
+    const buf = Buffer.alloc(CHUNK);
+    const decoder = new StringDecoder('utf8');
+    let offset = 0;
+    let carry = '';
+    while (offset < MAX_SCAN) {
+      const n = fs.readSync(fd, buf, 0, CHUNK, offset);
+      if (n === 0) break; // EOF
+      offset += n;
+      carry += decoder.write(buf.subarray(0, n));
+      let nl: number;
+      while ((nl = carry.indexOf('\n')) !== -1) {
+        const line = carry.slice(0, nl);
+        carry = carry.slice(nl + 1);
+        if (isAssistantLine(line)) {
+          assistantSeen.add(transcriptPath);
+          return true;
+        }
+      }
+      if (n < CHUNK) break; // short read => EOF
+    }
+    if (isAssistantLine(carry + decoder.end())) {
+      assistantSeen.add(transcriptPath);
+      return true;
+    }
+    assistantNegKey.set(transcriptPath, negKey);
+    return false;
   } finally {
     fs.closeSync(fd);
   }

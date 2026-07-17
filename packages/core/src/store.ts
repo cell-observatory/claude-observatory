@@ -265,6 +265,66 @@ export function deleteBashManifest(sessionId: string): void {
   }
 }
 
+// --- bash stat cache (memo for the whole-tree Bash walk; consumed by capture.ts) ---
+
+export interface BashStatEntry {
+  k: string; // `${mtimeMs}:${size}` at last read
+  h?: string; // content blob sha; ABSENT ⇒ binary/oversized verdict (negative results cached too)
+}
+export interface BashStatCache {
+  v: 1;
+  wroteMs: number; // when this cache was written — drives the racily-clean re-hash epsilon
+  files: Record<string, BashStatEntry>;
+}
+
+// Lives in the storeDir ROOT: staging/*.json is JSON-parsed as StagingRecords by gcSessionCore,
+// and removeSession reaps the whole dir, so no separate lifecycle is needed.
+const BASH_STATCACHE = 'statcache.json';
+
+export function readBashStatCache(sessionId: string): BashStatCache {
+  try {
+    const c = JSON.parse(fs.readFileSync(path.join(storeDir(sessionId), BASH_STATCACHE), 'utf8'));
+    if (c && c.v === 1 && c.files && typeof c.files === 'object') return c as BashStatCache;
+  } catch {
+    /* absent or corrupt — cold cache */
+  }
+  return { v: 1, wroteMs: 0, files: {} };
+}
+
+export function writeBashStatCache(sessionId: string, cache: BashStatCache): void {
+  cache.wroteMs = Date.now();
+  const dest = path.join(storeDir(sessionId), BASH_STATCACHE);
+  const tmp = `${dest}.tmp-${process.pid}`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(cache), { mode: 0o600 });
+    fs.renameSync(tmp, dest); // atomic: a concurrent reader sees old-or-new, never a torn file
+  } catch {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      /* nothing to clean */
+    }
+  }
+}
+
+/** Blob names present right now — one readdir beats a per-cached-file existsSync by ~10x. */
+export function blobPresence(sessionId: string): Set<string> {
+  try {
+    return new Set(fs.readdirSync(blobsDir(sessionId)));
+  } catch {
+    return new Set();
+  }
+}
+
+/**
+ * Session lock for the Bash Pre walk: holding it across snapshot+manifest-write means a concurrent
+ * GC (clearResolved/clean, which takes the same lock) can never collect just-written before-blobs
+ * in the gap before the manifest lands. NOTE appendLog takes this same lock — never append inside.
+ */
+export function withBashPreLock<T>(sessionId: string, fn: () => T): T {
+  return withLock(sessionId, APPEND_LOCK_BUDGET_MS, fn);
+}
+
 // --- log (append-only, source of truth) ---
 
 interface StatusOp {
@@ -501,6 +561,43 @@ function gcSessionCore(sessionId: string): { removed: number; bytes: number } {
 /** Delete blobs in a session not referenced by any log record (or in-flight capture). Freed count + bytes. */
 export function gcSession(sessionId: string): { removed: number; bytes: number } {
   return withLock(sessionId, MAINT_LOCK_BUDGET_MS, () => gcSessionCore(sessionId));
+}
+
+/** Every session dir present in the store — INCLUDING log-less stub dirs that listSessions skips
+ *  (whole-tree Bash snapshots from sessions that never edited). `clean` iterates THIS so those
+ *  dirs are reclaimable; every other consumer keeps the listSessions view. */
+export function allStoreSessionIds(): string[] {
+  try {
+    return fs.readdirSync(rootDir()).filter((id) => {
+      if (!isSafeSessionId(id)) return false;
+      try {
+        return fs.statSync(path.join(rootDir(), id)).isDirectory();
+      } catch {
+        return false;
+      }
+    });
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Remove a session dir that holds no reviewable state: no log.jsonl, empty staging, no blobs left
+ * after GC. This reclaims stub-session husks; a live capture is protected by its staging entries
+ * (pre-snapshot or bash manifest), and any blob surviving gcSession means a live reference — keep.
+ */
+export function pruneEmptySession(sessionId: string): boolean {
+  try {
+    if (fs.existsSync(logPath(sessionId))) return false; // has (or had) review state — keep
+    const sdir = stagingDir(sessionId);
+    if (fs.existsSync(sdir) && fs.readdirSync(sdir).length > 0) return false; // in-flight capture
+    const bdir = blobsDir(sessionId);
+    if (fs.existsSync(bdir) && fs.readdirSync(bdir).length > 0) return false; // live-referenced blobs
+    removeSession(sessionId);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Remove an entire session directory from the store. */

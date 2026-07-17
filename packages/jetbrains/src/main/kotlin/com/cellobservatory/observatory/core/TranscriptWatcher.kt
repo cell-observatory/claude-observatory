@@ -95,13 +95,22 @@ class TranscriptWatcher(private val project: Project) : Disposable {
         kickDiscovery() // async: fold in the worktree siblings
     }
 
+    @Volatile private var lastProjectsSig: String? = null
+
     /** Discover the repo's worktree-sibling dirs on the POOLED thread (the CLI spawn is heavy and must
      *  never stall the poll), then UNION them in and (nio) register the new ones. Union-not-replace so a
-     *  transient CLI failure never drops a sibling we were watching. */
+     *  transient CLI failure never drops a sibling we were watching.
+     *
+     *  The `multitask` spawn costs ~10s of CPU, and this runs every DISCOVER_MS forever — so gate it:
+     *  a new worktree sibling ALWAYS surfaces as a new dir under <config>/projects, so until that
+     *  listing changes there is nothing new to discover and the spawn is pure waste. */
     private fun kickDiscovery() {
         ApplicationManager.getApplication().executeOnPooledThread {
             if (project.isDisposed) return@executeOnPooledThread
+            val sig = projectsDirSignature(ClaudePaths.configDir().resolve("projects"))
+            if (sig == lastProjectsSig) return@executeOnPooledThread
             val merged = (projectDirs + discoverSiblingDirs()).distinct()
+            lastProjectsSig = sig
             if (merged.toSet() == projectDirs.toSet()) return@executeOnPooledThread
             projectDirs = merged
             watcher?.let { ws -> watchDirsFor(merged).forEach { registerDir(ws, it) } }
@@ -258,3 +267,9 @@ class TranscriptWatcher(private val project: Project) : Disposable {
         }
     }
 }
+
+/** Order-independent fingerprint of the project-dir listing — the cheap gate for sibling discovery.
+ *  Internal (not private) so the gate is unit-testable without mocking the CLI. */
+internal fun projectsDirSignature(projectsDir: Path): String = runCatching {
+    projectsDir.listDirectoryEntries().map { it.name }.sorted().joinToString("\n")
+}.getOrDefault("")

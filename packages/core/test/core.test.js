@@ -4361,3 +4361,246 @@ test('demo: runDemo replays a real-pipeline session — named total chapters, at
   core.cleanDemo({ cwd: ws, dir: precious });
   assert.ok(fs.existsSync(path.join(precious, 'keep.txt')), 'an unmarked directory is never touched');
 });
+
+// --- session resolution: stub transcripts must never hijack the current session ------------------
+// Local commands (/effort, /model) and bridge-session records write transcript .jsonl files that
+// never gain an assistant record. They must not win newest-mtime resolution over the real session.
+
+function writeResolverTranscript(proj, id, lines, mtimeMs) {
+  const p = path.join(proj, id + '.jsonl');
+  fs.writeFileSync(p, lines.map((o) => JSON.stringify(o)).join('\n') + '\n');
+  fs.utimesSync(p, new Date(mtimeMs), new Date(mtimeMs));
+  return p;
+}
+function realLines(id, cwd) {
+  return [
+    { type: 'user', sessionId: id, cwd, message: { role: 'user', content: 'do the thing' } },
+    { type: 'assistant', sessionId: id, message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }] } },
+  ];
+}
+function effortStubLines(id, cwd) {
+  // faithful to a real /effort stub: user records WITH a cwd line, no assistant record ever
+  return [
+    { type: 'user', sessionId: id, cwd, message: { role: 'user', content: '<local-command-caveat>Caveat: local commands</local-command-caveat>' } },
+    { type: 'user', sessionId: id, cwd, message: { role: 'user', content: '<command-name>/effort</command-name>' } },
+    { type: 'user', sessionId: id, cwd, message: { role: 'user', content: '<local-command-stdout>Set effort level to xhigh</local-command-stdout>' } },
+  ];
+}
+
+test('session: /effort-style command-only stub (with cwd) never hijacks resolution', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const T = Date.now();
+  writeResolverTranscript(proj, 'real-one', realLines('real-one', cwd), T);
+  writeResolverTranscript(proj, 'effort-stub', effortStubLines('effort-stub', cwd), T + 5000); // stub is NEWER
+  assert.equal(core.resolveSessionId(cwd), 'real-one', 'newer command-only stub is skipped');
+});
+
+test('session: bridge-session stub never hijacks resolution', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const T = Date.now();
+  writeResolverTranscript(proj, 'real-one', realLines('real-one', cwd), T);
+  writeResolverTranscript(proj, 'bridge', [{ type: 'bridge-session', sessionId: 'bridge', bridgeSessionId: 'cse_x', lastSequenceNum: 0 }], T + 5000);
+  assert.equal(core.resolveSessionId(cwd), 'real-one', 'bridge stub is skipped');
+});
+
+test('session: when ALL transcripts are assistant-less, fall back to the newest (never regress)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const T = Date.now();
+  writeResolverTranscript(proj, 'older-stub', effortStubLines('older-stub', cwd), T);
+  writeResolverTranscript(proj, 'newer-stub', effortStubLines('newer-stub', cwd), T + 5000);
+  assert.equal(core.resolveSessionId(cwd), 'newer-stub', 'first-turn-in-flight project still resolves');
+});
+
+test('session: a growing transcript flips from skipped to selected once the first assistant record lands', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const T = Date.now();
+  writeResolverTranscript(proj, 'real-old', realLines('real-old', cwd), T);
+  // brand-new session: user prompt written, Claude has not replied yet
+  const newP = writeResolverTranscript(proj, 'real-new', [
+    { type: 'user', sessionId: 'real-new', cwd, message: { role: 'user', content: 'fresh prompt' } },
+  ], T + 5000);
+  assert.equal(core.resolveSessionId(cwd), 'real-old', 'not-yet-replied session defers to previous real session');
+  // first assistant record lands (append -> mtime+size change invalidates the negative cache)
+  fs.appendFileSync(newP, JSON.stringify({ type: 'assistant', sessionId: 'real-new', message: { role: 'assistant', content: [{ type: 'text', text: 'on it' }] } }) + '\n');
+  fs.utimesSync(newP, new Date(T + 10000), new Date(T + 10000));
+  assert.equal(core.resolveSessionId(cwd), 'real-new', 'resolution flips to the new session on first reply');
+});
+
+test('session: pasted content containing "type":"assistant" inside a user record does not count', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const T = Date.now();
+  writeResolverTranscript(proj, 'real-one', realLines('real-one', cwd), T);
+  writeResolverTranscript(proj, 'tricky-stub', [
+    { type: 'user', sessionId: 'tricky-stub', cwd, message: { role: 'user', content: 'look at this jsonl: {"type":"assistant","message":{}}' } },
+  ], T + 5000);
+  assert.equal(core.resolveSessionId(cwd), 'real-one', 'substring inside pasted content is parse-rejected');
+});
+
+test('diagnose: no-assistant-yet session gets honest advice, never "restart Claude Code"', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const work = tmpWork();
+  const byId = (checks, id) => checks.find((c) => c.id === id);
+  core.installHooks('claude-observatory capture #' + core.HOOK_MARKER, core.settingsPath());
+
+  // Only a command-only stub resolves (fresh project, /effort ran first): hooks must not be blamed.
+  const proj = core.projectDir(work);
+  fs.mkdirSync(proj, { recursive: true });
+  writeResolverTranscript(proj, 'stub-only', effortStubLines('stub-only', work), Date.now());
+  let checks = core.diagnose({ cwd: work, binOnPath: true, jqPresent: true });
+  let c = byId(checks, 'session');
+  assert.equal(c.level, 'warn');
+  assert.match(c.detail, /no assistant reply yet/, 'names the real state');
+  assert.match(c.fix, /hooks are fine/i, 'does not blame the hooks');
+  assert.doesNotMatch(c.fix, /restart Claude Code/, 'no bogus restart advice for a stub');
+
+  // A real session with zero edits keeps the fresh/read-only framing first.
+  writeResolverTranscript(proj, 'real-one', realLines('real-one', work), Date.now() + 5000);
+  checks = core.diagnose({ cwd: work, binOnPath: true, jqPresent: true });
+  c = byId(checks, 'session');
+  assert.equal(c.level, 'warn');
+  assert.match(c.fix, /Normal for a fresh or read-only session/, 'fresh real session is not an error state');
+});
+
+// --- bash capture stat-cache memo: stat-only steady state, GC self-heal, racy-clean guard ---------
+
+function bashHook(session, cwd, event) {
+  core.handleHookPayload({ session_id: session, cwd, tool_name: 'Bash', tool_input: { command: 'x' }, hook_event_name: event });
+}
+const blobCount = (S) => fs.readdirSync(path.join(core.storeDir(S), 'blobs')).length;
+
+test('capture: bash memo — steady-state Pre is stat-only (zero file reads, zero new blobs)', () => {
+  freshHome();
+  const S = 'memo1';
+  const cwd = tmpWork();
+  fs.writeFileSync(path.join(cwd, 'a.txt'), 'alpha\n');
+  fs.writeFileSync(path.join(cwd, 'b.bin'), Buffer.from([0, 1, 2, 0, 3])); // binary — negative verdict must be cached too
+  // Age the files out of the racily-clean epsilon: files touched within ~2s of a cache write are
+  // deliberately re-read (git's rule); steady state means files older than that.
+  const aged = new Date(Date.now() - 10_000);
+  fs.utimesSync(path.join(cwd, 'a.txt'), aged, aged);
+  fs.utimesSync(path.join(cwd, 'b.bin'), aged, aged);
+  bashHook(S, cwd, 'PreToolUse');
+  bashHook(S, cwd, 'PostToolUse'); // no changes — warms the cache for the next call
+  const blobsAfterFirst = blobCount(S);
+
+  // Count reads of workdir files during the second Pre: the memo must not read ANY of them.
+  const realRead = fs.readFileSync;
+  let reads = 0;
+  fs.readFileSync = function (p, ...rest) {
+    if (typeof p === 'string' && p.startsWith(cwd + path.sep)) reads++;
+    return realRead.call(fs, p, ...rest);
+  };
+  try {
+    bashHook(S, cwd, 'PreToolUse');
+  } finally {
+    fs.readFileSync = realRead;
+  }
+  assert.equal(reads, 0, 'unchanged tree: no candidate file is read (binary included)');
+  assert.equal(blobCount(S), blobsAfterFirst, 'no new blobs on a warm Pre');
+  assert.ok(core.readBashManifest(S), 'manifest still written from cached hashes');
+  core.deleteBashManifest(S);
+});
+
+test('capture: bash memo self-heals a GC-collected blob (no dangling beforeBlob ever)', () => {
+  freshHome();
+  const S = 'memo2';
+  const cwd = tmpWork();
+  const F = path.join(cwd, 'f.txt');
+  fs.writeFileSync(F, 'v1\n');
+  bashHook(S, cwd, 'PreToolUse');
+  bashHook(S, cwd, 'PostToolUse'); // cache warm, blob for v1 exists but is manifest-orphaned
+  // Simulate routine GC: remove ALL blobs (nothing references them — the log is empty).
+  const bdir = path.join(core.storeDir(S), 'blobs');
+  for (const b of fs.readdirSync(bdir)) fs.unlinkSync(path.join(bdir, b));
+  // Next command changes the file: Pre must re-write the before-blob despite the warm cache.
+  bashHook(S, cwd, 'PreToolUse');
+  fs.writeFileSync(F, 'v2\n');
+  bashHook(S, cwd, 'PostToolUse');
+  const rec = core.readLog(S).find((r) => r.file === F && r.afterBlob !== null);
+  assert.ok(rec, 'the change was recorded');
+  assert.ok(rec.beforeBlob, 'record carries a before-blob');
+  assert.ok(fs.existsSync(path.join(bdir, rec.beforeBlob)), 'beforeBlob content exists on disk (undo works)');
+  assert.ok(fs.existsSync(path.join(bdir, rec.afterBlob)), 'afterBlob content exists on disk');
+});
+
+test('capture: bash deletion detection survives the memo', () => {
+  freshHome();
+  const S = 'memo3';
+  const cwd = tmpWork();
+  const F = path.join(cwd, 'gone.txt');
+  fs.writeFileSync(F, 'bye\n');
+  bashHook(S, cwd, 'PreToolUse');
+  bashHook(S, cwd, 'PostToolUse'); // warm
+  bashHook(S, cwd, 'PreToolUse');
+  fs.unlinkSync(F);
+  bashHook(S, cwd, 'PostToolUse');
+  const rec = core.readLog(S).find((r) => r.file === F);
+  assert.ok(rec, 'deletion recorded');
+  assert.equal(rec.afterBlob, null, 'deletion has null afterBlob');
+  assert.ok(fs.existsSync(path.join(core.storeDir(S), 'blobs', rec.beforeBlob)), 'restore content preserved');
+});
+
+test('capture: racily-clean same-size rewrite inside the epsilon is still detected', () => {
+  freshHome();
+  const S = 'memo4';
+  const cwd = tmpWork();
+  const F = path.join(cwd, 'r.txt');
+  fs.writeFileSync(F, 'AAAA\n');
+  const st0 = fs.statSync(F);
+  bashHook(S, cwd, 'PreToolUse'); // cache written NOW; F's mtime is within the 2s epsilon
+  // Same-size rewrite with the ORIGINAL mtime restored — (mtimeMs,size) alone cannot see this.
+  fs.writeFileSync(F, 'BBBB\n');
+  fs.utimesSync(F, st0.atime, st0.mtime);
+  bashHook(S, cwd, 'PostToolUse');
+  const rec = core.readLog(S).find((r) => r.file === F);
+  assert.ok(rec, 'epsilon re-hash caught the same-size same-mtime rewrite');
+});
+
+test('clean: stub-session husks are reclaimed; live and reviewed sessions are untouched', () => {
+  freshHome();
+  // A stub husk: blobs from a Bash walk, no log ever (the /effort-session shape).
+  const STUB = 'stub-husk';
+  core.ensureStore(STUB);
+  core.writeBlob(STUB, Buffer.from('walk snapshot A'));
+  core.writeBlob(STUB, Buffer.from('walk snapshot B'));
+  // A live first-turn session: bash manifest in staging (command running right now).
+  const LIVE = 'live-midbash';
+  core.ensureStore(LIVE);
+  const liveBlob = core.writeBlob(LIVE, Buffer.from('before content'));
+  core.writeBashManifest(LIVE, { files: { '/w/f.txt': liveBlob }, ts: Date.now() });
+  // A real session with a reviewable edit.
+  const REAL = 'real-edits';
+  seedEdit(REAL, '/w/app.js', 'a\n', 'b\n');
+
+  for (const id of core.allStoreSessionIds()) {
+    core.gcSession(id);
+    core.pruneEmptySession(id);
+  }
+  assert.ok(!fs.existsSync(core.storeDir(STUB)), 'stub husk removed entirely');
+  assert.ok(fs.existsSync(core.storeDir(LIVE)), 'mid-bash session kept');
+  assert.ok(core.readBashManifest(LIVE), 'its manifest survives');
+  assert.ok(fs.existsSync(path.join(core.storeDir(LIVE), 'blobs', liveBlob)), 'its before-blob survives (manifest-referenced)');
+  assert.equal(core.readLog(REAL).length, 1, 'reviewed session untouched');
+  core.deleteBashManifest(LIVE);
+});

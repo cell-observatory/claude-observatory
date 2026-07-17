@@ -1108,19 +1108,26 @@ function cmdClean(args: string[]): void {
     process.stdout.write(c.green('✓ ') + `dropped all ${all.length} session(s)\n`);
     return;
   }
-  // Safe default: garbage-collect orphaned blobs (optionally scoped to --session <id>).
+  // Safe default: garbage-collect orphaned blobs (optionally scoped to --session <id>), then
+  // reclaim stub-session husks — dirs with no log that hold only Bash-walk snapshots. Iterates the
+  // store root directly: listSessions skips log-less dirs, which made stubs unreclaimable.
   const si = args.indexOf('--session');
   const only = si >= 0 ? args[si + 1] : undefined;
-  const targets = only ? [only] : core.listSessions().map((s) => s.id);
+  const targets = only ? [only] : core.allStoreSessionIds();
   let removed = 0;
   let bytes = 0;
+  let pruned = 0;
   for (const id of targets) {
     const r = core.gcSession(id);
     removed += r.removed;
     bytes += r.bytes;
+    if (core.pruneEmptySession(id)) pruned++;
   }
   process.stdout.write(
-    c.green('✓ ') + `garbage-collected ${removed} orphaned blob(s), freed ${fmtBytes(bytes)}\n`
+    c.green('✓ ') +
+      `garbage-collected ${removed} orphaned blob(s), freed ${fmtBytes(bytes)}` +
+      (pruned ? `, pruned ${pruned} empty stub session(s)` : '') +
+      '\n'
   );
 }
 

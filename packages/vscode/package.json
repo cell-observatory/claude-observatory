@@ -2,7 +2,7 @@
   "name": "claude-observatory-vscode",
   "displayName": "Claude Observatory",
   "description": "A running list of every file change Claude Code makes, each with its own Keep / Undo (surgical, git-free).",
-  "version": "0.8.3",
+  "version": "0.8.4",
   "publisher": "claude-observatory",
   "private": true,
   "engines": {
@@ -81,11 +81,28 @@
     "viewsWelcome": [
       {
         "view": "claudeObservatory.edits",
+        "when": "!claudeObservatory.hooksInstalled",
         "contents": "No tracked Claude edits in this workspace yet.\nInstall the capture hooks, then let Claude edit a file.\n[Show setup instructions](command:claudeObservatory.setup)"
       },
       {
+        "view": "claudeObservatory.edits",
+        "when": "claudeObservatory.hooksInstalled && claudeObservatory.priorSessionWithEdits",
+        "contents": "No edits in this session yet — the hooks are working.\n[Switch to previous session](command:claudeObservatory.switchToPreviousSession)\n[Pick a session…](command:claudeObservatory.switchSession)"
+      },
+      {
+        "view": "claudeObservatory.edits",
+        "when": "claudeObservatory.hooksInstalled && !claudeObservatory.priorSessionWithEdits",
+        "contents": "No edits in this session yet.\nLet Claude edit a file and it will appear here."
+      },
+      {
         "view": "claudeObservatory.diffs",
+        "when": "!claudeObservatory.hooksInstalled",
         "contents": "No tracked Claude edits in this workspace yet."
+      },
+      {
+        "view": "claudeObservatory.diffs",
+        "when": "claudeObservatory.hooksInstalled",
+        "contents": "No edits in this session yet."
       },
       {
         "view": "claudeObservatory.fileHistory",
@@ -93,7 +110,13 @@
       },
       {
         "view": "claudeObservatory.observations",
+        "when": "!claudeObservatory.hooksInstalled",
         "contents": "No tracked Claude edits in this workspace yet."
+      },
+      {
+        "view": "claudeObservatory.observations",
+        "when": "claudeObservatory.hooksInstalled",
+        "contents": "No edits in this session yet."
       }
     ],
     "commands": [
@@ -298,6 +321,12 @@
         "title": "Switch session",
         "category": "Claude Observatory",
         "icon": "$(versions)"
+      },
+      {
+        "command": "claudeObservatory.switchToPreviousSession",
+        "title": "Switch to previous session with edits",
+        "category": "Claude Observatory",
+        "icon": "$(history)"
       },
       {
         "command": "claudeObservatory.keepAll",
@@ -908,7 +937,7 @@
     "package": "vsce package --no-dependencies -o claude-observatory.vsix"
   },
   "devDependencies": {
-    "@claude-observatory/core": "0.8.3",
+    "@claude-observatory/core": "0.8.4",
     "@types/node": "^22.0.0",
     "@types/vscode": "^1.85.0",
     "@vscode/codicons": "^0.0.45",

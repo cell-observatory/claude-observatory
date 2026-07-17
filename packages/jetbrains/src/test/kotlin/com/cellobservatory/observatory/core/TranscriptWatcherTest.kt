@@ -96,4 +96,19 @@ class TranscriptWatcherTest {
         assertEquals(0L, TranscriptWatcher.transcriptStamp(emptyList()))
         assertFalse(TranscriptWatcher.watchDirsFor(emptyList()).iterator().hasNext())
     }
+
+    @Test
+    fun `projectsDirSignature changes only when the project-dir listing changes`() {
+        val root = Files.createTempDirectory("co-projects")
+        Files.createDirectories(root.resolve("-Users-x-repoA"))
+        val s1 = projectsDirSignature(root)
+        // Touching a file INSIDE a project dir must not change the signature (no rediscovery churn).
+        Files.writeString(root.resolve("-Users-x-repoA").resolve("s.jsonl"), "{}")
+        assertEquals("content churn inside a dir must not trip the gate", s1, projectsDirSignature(root))
+        // A new project dir (a new worktree sibling) MUST change it.
+        Files.createDirectories(root.resolve("-Users-x-repoA-wt2"))
+        assertNotEquals("a new project dir must open the gate", s1, projectsDirSignature(root))
+        // Missing dir degrades to a stable empty signature (gate then always opens vs null start).
+        assertEquals("", projectsDirSignature(root.resolve("does-not-exist")))
+    }
 }

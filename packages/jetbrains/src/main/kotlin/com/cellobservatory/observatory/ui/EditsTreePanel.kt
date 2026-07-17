@@ -103,8 +103,52 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
         val vm = service().editTree()
         val q = service().filterQuery
         tree.emptyText.clear()
-        tree.emptyText.appendLine(if (q.isNotBlank()) "No edits match \"$q\"" else "No tracked Claude edits yet")
-        if (q.isBlank()) tree.emptyText.appendLine("Run `claude-observatory init`, then let Claude Code edit.")
+        when {
+            q.isNotBlank() -> tree.emptyText.appendLine("No edits match \"$q\"")
+            !com.cellobservatory.observatory.core.ClaudePaths.hooksInstalled() -> {
+                tree.emptyText.appendLine("No tracked Claude edits yet")
+                tree.emptyText.appendLine("Run `claude-observatory init`, then let Claude Code edit.")
+            }
+            else -> {
+                // Hooks are fine — never imply otherwise. A fresh session with prior work gets a
+                // one-click switch (parity with the VS Code welcome-view split).
+                val current = service().currentSession()
+                // listSessions() is store-GLOBAL: intersect with THIS project's transcript ids or
+                // the empty state would advertise an unrelated repo's session (parity: extension.ts).
+                val here: Set<String> = project.basePath?.let { base ->
+                    runCatching {
+                        java.nio.file.Files.list(com.cellobservatory.observatory.core.ClaudePaths.projectDir(base)).use { s ->
+                            s.map { it.fileName.toString() }
+                                .filter { it.endsWith(".jsonl") }
+                                .map { it.removeSuffix(".jsonl") }
+                                .toList()
+                                .toSet()
+                        }
+                    }.getOrNull()
+                } ?: emptySet()
+                val prior = com.cellobservatory.observatory.core.StoreReader.listSessions()
+                    .firstOrNull { it.id != current && it.edits > 0 && it.id in here }
+                if (prior != null) {
+                    tree.emptyText.appendLine("No edits in this session yet — the hooks are working.")
+                    tree.emptyText.appendLine(
+                        "Switch to previous session (${prior.id.take(8)} · ${prior.edits} edits)",
+                        com.intellij.ui.SimpleTextAttributes.LINK_ATTRIBUTES
+                    ) {
+                        com.cellobservatory.observatory.settings.ObservatorySettings.instance.state.session = prior.id
+                        for (p in com.intellij.openapi.project.ProjectManager.getInstance().openProjects) {
+                            com.cellobservatory.observatory.services.ObservatoryService.getInstance(p).refresh()
+                        }
+                    }
+                    tree.emptyText.appendLine(
+                        "Pick a session…",
+                        com.intellij.ui.SimpleTextAttributes.LINK_ATTRIBUTES
+                    ) { ReviewOps.chooseSession(project, tree) }
+                } else {
+                    tree.emptyText.appendLine("No edits in this session yet.")
+                    tree.emptyText.appendLine("Let Claude edit a file and it will appear here.")
+                }
+            }
+        }
         root.removeAllChildren()
         if (vm != null) {
             for (f in vm.folders) addFolderNode(root, f)

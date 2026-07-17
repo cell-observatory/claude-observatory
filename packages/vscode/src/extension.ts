@@ -1017,6 +1017,8 @@ function installHooksFromExtension(): void {
       vscode.window.showInformationMessage('Claude Observatory: capture hooks are already installed.');
       return;
     }
+    // The welcome views key on claudeObservatory.hooksInstalled — recompute without waiting for a reload.
+    void vscode.commands.executeCommand('claudeObservatory.refresh');
     vscode.window
       .showInformationMessage(
         'Claude Observatory: capture hooks installed. Reload the window so Claude Code picks them up.',
@@ -3386,12 +3388,51 @@ export function activate(context: vscode.ExtensionContext): void {
     await openFileAtEdit({ kind: 'edit', rec: next });
   };
 
+  /** Newest OTHER session with tracked edits — the switch target when this session is empty.
+   *  listSessions() is store-GLOBAL, so intersect with THIS workspace's transcript ids or the
+   *  empty state would advertise (and one-click-pin) an unrelated repo's session. */
+  const previousSessionWithEdits = (session: string | undefined) => {
+    const root = workspaceRoot();
+    if (!root) return undefined;
+    let here: Set<string>;
+    try {
+      here = new Set(
+        fs
+          .readdirSync(core.projectDir(root))
+          .filter((n) => n.endsWith('.jsonl'))
+          .map((n) => n.slice(0, -'.jsonl'.length))
+      );
+    } catch {
+      return undefined; // no project dir ⇒ no prior sessions for this workspace
+    }
+    return core
+      .listSessions()
+      .filter((s) => s.id !== session && s.edits > 0 && here.has(s.id))
+      .sort((a, b) => b.lastMs - a.lastMs)[0];
+  };
+
+  // The empty state must never claim the hooks are broken when they're not: three mutually
+  // exclusive viewsWelcome variants keyed on these contexts (hooks missing / fresh session with
+  // prior work / fresh workspace), plus a dynamic message naming the actual switch target.
+  const updateEmptyStateContext = () => {
+    const session = currentSession();
+    const log = session ? cachedLog(session) : [];
+    const prior = log.length === 0 ? previousSessionWithEdits(session) : undefined;
+    void vscode.commands.executeCommand('setContext', 'claudeObservatory.hooksInstalled', core.hooksInstalled());
+    void vscode.commands.executeCommand('setContext', 'claudeObservatory.priorSessionWithEdits', !!prior);
+    editsView.message = prior
+      ? `Session ${session ? session.slice(0, 8) : '—'} is fresh; last session ${prior.id.slice(0, 8)} has ${prior.edits} tracked edit(s).`
+      : undefined;
+  };
+  updateEmptyStateContext(); // correct welcome variant from activation, matching updateStatusItem above
+
   const refreshAll = () => {
     // Demo sessions leave no residue (0.8.0): once every demo edit is reviewed (e.g. Accept All), the
     // resolved records are dropped so the panels empty out. No-op for real sessions; the resulting
     // store change re-enters here once and then no-ops (the log is empty).
     const s = currentSession();
     if (s) core.autoClearDemo(s);
+    updateEmptyStateContext();
     editsProvider.refresh();
     diffsProvider.refresh();
     insightsProvider.refresh();
@@ -3601,6 +3642,19 @@ export function activate(context: vscode.ExtensionContext): void {
         pick.id ? `Claude Observatory: showing session ${pick.id}` : 'Claude Observatory: session set to auto',
         3000
       );
+    }),
+    // One-click escape from a fresh session's empty panel: pin the newest session that HAS edits.
+    vscode.commands.registerCommand('claudeObservatory.switchToPreviousSession', async () => {
+      const prior = previousSessionWithEdits(currentSession());
+      if (!prior) {
+        void vscode.window.showInformationMessage('Claude Observatory: no previous session with tracked edits.');
+        return;
+      }
+      await vscode.workspace
+        .getConfiguration('claudeObservatory')
+        .update('session', prior.id, vscode.ConfigurationTarget.Workspace);
+      refreshAll();
+      vscode.window.setStatusBarMessage(`Claude Observatory: showing session ${prior.id}`, 3000);
     }),
     // A hand-edited `claudeObservatory.session` in settings.json should re-render immediately.
     vscode.workspace.onDidChangeConfiguration((e) => {

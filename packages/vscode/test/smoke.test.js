@@ -26,11 +26,12 @@ test('extension: three views, click commands, inline annotations, chat, status s
   const AG = 'sa0000000001';
   fs.writeFileSync(path.join(proj, S + '.jsonl'), [
     JSON.stringify({ type: 'ai-title', aiTitle: 'Reviewing app.txt edits' }),
-    JSON.stringify({ message: { role: 'assistant', content: [
+    // top-level type:'assistant' so resolution passes via hasAssistantRecord, not the all-stub fallback
+    JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [
       { type: 'text', text: 'Operation 1 — introduce feature scaling' },
       { type: 'tool_use', name: 'Edit', input: { file_path: F } },
     ] } }),
-    JSON.stringify({ message: { role: 'assistant', content: [
+    JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [
       { type: 'text', text: 'Operation 2 — add a validate() method' },
       { type: 'tool_use', name: 'Edit', input: { file_path: F } },
     ] } }),
@@ -56,6 +57,14 @@ test('extension: three views, click commands, inline annotations, chat, status s
   fs.writeFileSync(path.join(proj, SIB + '.jsonl'), JSON.stringify({ message: { role: 'assistant', content: [] } }));
   const old = Math.floor(Date.now() / 1000) - 3600;
   fs.utimesSync(path.join(proj, SIB + '.jsonl'), old, old);
+  // a NEWER command-only stub (an /effort run): must NOT hijack resolution away from S — the
+  // whole extension smoke below only passes if the resolver demotes this assistant-less file.
+  fs.writeFileSync(path.join(proj, 'stubEffort01.jsonl'), [
+    JSON.stringify({ type: 'user', sessionId: 'stubEffort01', cwd: ws, message: { role: 'user', content: '<command-name>/effort</command-name>' } }),
+    JSON.stringify({ type: 'user', sessionId: 'stubEffort01', cwd: ws, message: { role: 'user', content: '<local-command-stdout>Set effort level to xhigh</local-command-stdout>' } }),
+  ].join('\n'));
+  const fresh = Math.floor(Date.now() / 1000) + 60;
+  fs.utimesSync(path.join(proj, 'stubEffort01.jsonl'), fresh, fresh);
   core.ensureStore(S);
   const b0 = core.writeBlob(S, Buffer.from('a\nb\nc\nd\n'));
   const a1 = core.writeBlob(S, Buffer.from('AAA\nb\nc\nd\n'));
@@ -123,6 +132,7 @@ test('extension: three views, click commands, inline annotations, chat, status s
     Uri,
     TreeItemCollapsibleState: { None: 0, Collapsed: 1, Expanded: 2 },
     StatusBarAlignment: { Left: 1, Right: 2 },
+    ColorThemeKind: { Light: 1, Dark: 2, HighContrast: 3, HighContrastLight: 4 },
     OverviewRulerLane: { Left: 1, Center: 2, Right: 4, Full: 7 },
     ProgressLocation: { Notification: 15, Window: 10, SourceControl: 1 },
     ConfigurationTarget: { Global: 1, Workspace: 2, WorkspaceFolder: 3 },
@@ -153,6 +163,8 @@ test('extension: three views, click commands, inline annotations, chat, status s
       withProgress: (_o, task) => task({ report() {} }),
       onDidChangeWindowState: () => ({ dispose() {} }),
       onDidChangeActiveTextEditor: () => ({ dispose() {} }),
+      activeColorTheme: { kind: 2 }, // Dark — exercises the dark clear-tint branch
+      onDidChangeActiveColorTheme: () => ({ dispose() {} }),
       onDidChangeTextEditorSelection: () => ({ dispose() {} }),
       activeTextEditor: mockEditor,
       visibleTextEditors: [mockEditor],
