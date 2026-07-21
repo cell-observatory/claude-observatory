@@ -5,6 +5,16 @@ All notable changes to Claude Observatory are recorded here, following
 Per-tag release artifacts and auto-generated notes are on the
 [Releases page](https://github.com/cell-observatory/claude-observatory/releases).
 
+## [0.8.6] — Unreleased
+
+### Fixed
+
+- **JetBrains: `claude-observatory update --check` no longer reports a current plugin as perpetually
+  out of date.** The installed version is now read from the plugin's own jar
+  (`lib/claude-observatory-jetbrains-<ver>.jar` — present for every install method: the bootstrap
+  script, the IDE's **Install Plugin from Disk**, and `update`), instead of a `.observatory-version`
+  sentinel that only `update` ever wrote. The sentinel remains a fallback.
+
 ## [0.8.5] — 2026-07-21
 
 ### Added

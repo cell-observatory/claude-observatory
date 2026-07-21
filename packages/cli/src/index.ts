@@ -1809,6 +1809,30 @@ function extractZip(zip: string, destDir: string): boolean {
   return cp.spawnSync('unzip', ['-qo', zip, '-d', destDir], { stdio: 'ignore' }).status === 0;
 }
 
+/** The installed JetBrains plugin version, read from its own jar (`lib/claude-observatory-jetbrains-
+ *  <version>.jar`, laid down by every install method — `install-jetbrains.sh`, the IDE's "Install Plugin
+ *  from Disk", and `update`), falling back to the `.observatory-version` sentinel that `update` also
+ *  writes. Returns null only when neither is present. `pluginDir` = `.../plugins/claude-observatory-jetbrains`.
+ *  (Before this, only `update` wrote the sentinel, so script/IDE installs read as null → perpetually "stale".) */
+function jbInstalledVersion(pluginDir: string): string | null {
+  const fs = require('fs');
+  const path = require('path');
+  try {
+    for (const f of fs.readdirSync(path.join(pluginDir, 'lib'))) {
+      if (f.includes('searchableOptions')) continue; // the -searchableOptions.jar carries the version too
+      const m = /^claude-observatory-jetbrains-(\d+\.\d+\.\d+(?:[-.+][0-9A-Za-z.-]+)?)\.jar$/.exec(f);
+      if (m) return m[1];
+    }
+  } catch {
+    /* no lib/ dir — fall through to the sentinel */
+  }
+  try {
+    return fs.readFileSync(path.join(pluginDir, JB_VERSION_SENTINEL), 'utf8').trim() || null;
+  } catch {
+    return null;
+  }
+}
+
 /** One-time setup line that turns a side-loaded JetBrains plugin into an auto-updating one: once
  *  JB_PLUGIN_REPO_URL is registered as a custom plugin repository, the IDE polls it for new releases. */
 function jetbrainsAutoUpdateHint(): string {
@@ -1829,13 +1853,10 @@ async function refreshJetbrainsPlugin(
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const fs = require('fs');
   const path = require('path');
-  const sentinelVer = (d: string): string | null => {
-    try { return fs.readFileSync(path.join(d, JB_PLUGIN_DIRNAME, JB_VERSION_SENTINEL), 'utf8').trim(); } catch { return null; }
-  };
   const holders = jetbrainsPluginDirs().filter((d) => fs.existsSync(path.join(d, JB_PLUGIN_DIRNAME)));
   if (holders.length === 0) return 'absent';
   const stale = holders.filter((d) => {
-    const v = sentinelVer(d);
+    const v = jbInstalledVersion(path.join(d, JB_PLUGIN_DIRNAME));
     return force || v === null || core.isNewer(latest, v);
   });
   if (stale.length === 0) {
@@ -1910,8 +1931,7 @@ async function cmdUpdate(args: string[]): Promise<void> {
       const jb = jetbrainsPluginDirs().filter((d) => fs.existsSync(path.join(d, JB_PLUGIN_DIRNAME)));
       if (jb.length === 0) process.stdout.write(c.dim('JetBrains: plugin not detected\n'));
       else for (const d of jb) {
-        let v: string | null = null;
-        try { v = fs.readFileSync(path.join(d, JB_PLUGIN_DIRNAME, JB_VERSION_SENTINEL), 'utf8').trim(); } catch { /* no sentinel */ }
+        const v = jbInstalledVersion(path.join(d, JB_PLUGIN_DIRNAME));
         process.stdout.write(v && !core.isNewer(latest, v) ? c.green(`JetBrains: up to date (${v})\n`) : c.yellow(`JetBrains: ${v || 'installed'} → ${latest} (${d})\n`));
       }
     }
