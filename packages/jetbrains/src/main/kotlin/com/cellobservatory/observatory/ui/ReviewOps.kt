@@ -17,6 +17,9 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VfsUtil
+import com.intellij.openapi.wm.WindowManager
+import com.intellij.util.concurrency.EdtScheduledExecutorService
+import java.util.concurrent.TimeUnit
 
 /**
  * The keep/undo/redo flows shared by tree actions, editor actions, and (later) inline lenses.
@@ -39,7 +42,8 @@ object ReviewOps {
 
     fun keep(project: Project, session: String, id: Int) {
         runBg(project, "Keeping edit #$id") {
-            if (ObservatoryCli.keep(session, id, project.basePath)) done(project, "Kept edit #$id")
+            // Routine single-edit keep → transient status bar (no Event Log pile-up); failures stay balloons.
+            if (ObservatoryCli.keep(session, id, project.basePath)) doneQuiet(project, "Kept edit #$id")
             else done(project, cliFailMsg("keep edit #$id"), NotificationType.ERROR)
         }
     }
@@ -109,7 +113,9 @@ object ReviewOps {
         }
         refreshFile(rec.file)
         ObservatoryService.getInstance(project).refresh()
-        notify(project, res.message, if (res.ok) NotificationType.INFORMATION else NotificationType.ERROR)
+        // Routine single-edit undo/redo confirmation → transient status bar (no Event Log pile-up);
+        // failures stay as balloons. Parity with VS Code's setStatusBarMessage.
+        if (res.ok) status(project, res.message) else notify(project, res.message, NotificationType.ERROR)
     }
 
     /** Undo all PENDING edits in scope, newest-first — with a dirty-buffer guard + confirm. Accepted
@@ -119,7 +125,10 @@ object ReviewOps {
      *  reverts a file or folder (everything beneath). */
     fun undoAll(project: Project, session: String, targets: List<EditRecord>, scope: String, under: String? = null) {
         val list = targets.filter { it.pending }.sortedByDescending { it.id }
-        if (list.isEmpty()) return
+        if (list.isEmpty()) {
+            notify(project, "Nothing to revert in $scope.")
+            return
+        }
         val dirty = list.map { it.file }.distinct().filter { isDirty(it) }
         if (dirty.isNotEmpty()) {
             if (!confirmSaveAll(project, dirty)) return
@@ -318,16 +327,17 @@ object ReviewOps {
         app.executeOnPooledThread {
             val md = produce()
             app.invokeLater {
-                if (md.isNullOrBlank()) {
-                    notify(project, errorMsg)
-                } else {
-                    val tmp = java.io.File.createTempFile(name, ".md")
-                    tmp.writeText(md)
-                    LocalFileSystem.getInstance().refreshAndFindFileByPath(tmp.path)?.let { vf ->
-                        FileEditorManager.getInstance(project).openFile(vf, true)
-                    }
-                }
+                if (md.isNullOrBlank()) notify(project, errorMsg) else openMarkdownTab(project, name, md)
             }
+        }
+    }
+
+    /** Write [text] to a temp `.md` and open it in an editor tab (shared by Export / Doctor / Analyze). */
+    private fun openMarkdownTab(project: Project, name: String, text: String) {
+        val tmp = java.io.File.createTempFile(name, ".md")
+        tmp.writeText(text)
+        LocalFileSystem.getInstance().refreshAndFindFileByPath(tmp.path)?.let { vf ->
+            FileEditorManager.getInstance(project).openFile(vf, true)
         }
     }
 
@@ -338,9 +348,96 @@ object ReviewOps {
         }
     }
 
+    /** Opt-in `claude -p` deep analysis of one edit — spends tokens, can run for minutes (parity with VS
+     *  Code's analyzeEdit). Runs the CLI's `analyze` (honoring the `claudeBin` setting) and opens its
+     *  result as a markdown tab. */
+    fun analyzeEdit(project: Project, session: String, id: Int) {
+        runBg(project, "Analyzing edit #$id with Claude…") {
+            val text = ObservatoryCli.analyze(session, id, project.basePath)
+            ApplicationManager.getApplication().invokeLater {
+                if (text.isNullOrBlank()) {
+                    notify(project, "Could not analyze edit #$id — is the claude CLI installed? Set its path in Settings → Tools → Claude Observatory.", NotificationType.ERROR)
+                } else {
+                    openMarkdownTab(project, "claude-observatory-analysis-$id", text)
+                }
+            }
+        }
+    }
+
+    /** Opt-in `claude -p` recap: regenerate the session recap — spends tokens, can run for minutes (parity
+     *  with VS Code's refreshRecap). Hands the fresh text back on the EDT so the caller repaints. */
+    fun refreshRecap(project: Project, session: String, onRecap: (String) -> Unit) {
+        runBg(project, "Refreshing the session recap with Claude…") {
+            val text = ObservatoryCli.recap(session, fresh = true, project.basePath)
+            ApplicationManager.getApplication().invokeLater {
+                if (text.isNullOrBlank()) {
+                    notify(project, "Could not refresh the recap — is the claude CLI installed? Set its path in Settings → Tools → Claude Observatory.", NotificationType.ERROR)
+                } else {
+                    onRecap(text)
+                }
+            }
+        }
+    }
+
+    /** Install the PreToolUse/PostToolUse capture hooks (`claude-observatory init`). Shared by the
+     *  Observations panel toolbar and the registered Install Hooks action. */
+    fun installHooks(project: Project) {
+        runBg(project, "Installing capture hooks…") {
+            val r = ObservatoryCli.init(project.basePath)
+            ApplicationManager.getApplication().invokeLater {
+                if (r.ok) {
+                    notify(project, "Capture hooks installed. Quit Claude Code and relaunch it — hooks are snapshotted at session start.")
+                } else {
+                    notify(project, "Install failed — is the claude-observatory CLI installed? ${r.stderr.take(200)}", NotificationType.ERROR)
+                }
+            }
+        }
+    }
+
+    /** Store maintenance (parity with the CLI `clean`): GC orphaned blobs, or drop the whole session.
+     *  Shared by the Observations panel toolbar and the registered Clean Store action; the chooser popup
+     *  centers on [anchor], or in the current window when invoked from Find Action / a keymap. */
+    fun cleanStore(project: Project, anchor: javax.swing.JComponent? = null) {
+        val session = ObservatoryService.getInstance(project).currentSession()
+            ?: return notify(project, "No active Claude Code session for this project", NotificationType.WARNING)
+        val gcOpt = "Reclaim disk — garbage-collect orphaned blobs"
+        val dropOpt = "Drop this session — delete its edits + blobs (files on disk are unchanged)"
+        val popup = com.intellij.openapi.ui.popup.JBPopupFactory.getInstance()
+            .createPopupChooserBuilder(listOf(gcOpt, dropOpt))
+            .setTitle("Clean the store")
+            .setItemChosenCallback { chosen ->
+                val drop = chosen == dropOpt
+                if (drop) {
+                    val ok = Messages.showYesNoDialog(
+                        project, "Drop session $session? This deletes its captured edits + blobs. Files on disk are NOT changed.",
+                        "Claude Observatory", "Drop Session", "Cancel", Messages.getWarningIcon(),
+                    )
+                    if (ok != Messages.YES) return@setItemChosenCallback
+                }
+                runBg(project, "Cleaning store…") {
+                    val r = if (drop) ObservatoryCli.dropSession(session, project.basePath) else ObservatoryCli.gc(session, project.basePath)
+                    ApplicationManager.getApplication().invokeLater {
+                        if (r.ok) {
+                            ObservatoryService.getInstance(project).refresh()
+                            notify(project, if (drop) "Dropped session $session." else "Reclaimed disk (GC complete).")
+                        } else {
+                            notify(project, "Clean failed — ${r.stderr.take(160)}", NotificationType.ERROR)
+                        }
+                    }
+                }
+            }
+            .createPopup()
+        if (anchor != null) popup.showInCenterOf(anchor) else popup.showCenteredInCurrentWindow(project)
+    }
+
+    /** Switch Session with no explicit anchor (Find Action / keymap) — centers the chooser in the window. */
+    fun chooseSession(project: Project) = chooseSessionPopup(project).showCenteredInCurrentWindow(project)
+
     /** Pin which capture session the observatory shows (e.g. the demo-showcase fixture) instead of the
      *  auto-resolved newest one — a chooser over every session in the store, centered on [anchor]. */
-    fun chooseSession(project: Project, anchor: javax.swing.JComponent) {
+    fun chooseSession(project: Project, anchor: javax.swing.JComponent) = chooseSessionPopup(project).showInCenterOf(anchor)
+
+    private fun chooseSessionPopup(project: Project): com.intellij.openapi.ui.popup.JBPopup {
         val settings = com.cellobservatory.observatory.settings.ObservatorySettings.instance
         val pinned = settings.state.session?.takeIf { it.isNotBlank() }
         val auto = project.basePath?.let { com.cellobservatory.observatory.core.SessionResolver.resolveSessionId(it) }
@@ -351,7 +448,7 @@ object ReviewOps {
             val autoTag = if (s.id == auto) " · auto" else ""
             labelToId["$mark${s.id}  —  ${s.pending} pending · ${com.cellobservatory.observatory.model.relTime(s.lastMs)}$autoTag"] = s.id
         }
-        com.intellij.openapi.ui.popup.JBPopupFactory.getInstance()
+        return com.intellij.openapi.ui.popup.JBPopupFactory.getInstance()
             .createPopupChooserBuilder(labelToId.keys.toList())
             .setTitle("Review which session?")
             .setItemChosenCallback { chosen ->
@@ -361,7 +458,6 @@ object ReviewOps {
                 }
             }
             .createPopup()
-            .showInCenterOf(anchor)
     }
 
     // --- shared plumbing ---
@@ -424,6 +520,26 @@ object ReviewOps {
         ApplicationManager.getApplication().invokeLater {
             ObservatoryService.getInstance(project).refresh()
             notify(project, msg, type)
+        }
+    }
+
+    /** A transient status-bar message (bottom-left) that auto-clears — for routine confirmations that
+     *  should NOT pile up in the Event Log. Parity with VS Code's setStatusBarMessage; balloons stay
+     *  reserved for errors/conflicts. Call on the EDT. */
+    fun status(project: Project, text: String) {
+        val bar = WindowManager.getInstance().getStatusBar(project) ?: return
+        bar.info = text
+        EdtScheduledExecutorService.getInstance().schedule(
+            Runnable { if (!project.isDisposed && bar.info == text) bar.info = "" },
+            4, TimeUnit.SECONDS,
+        )
+    }
+
+    /** Like [done] but routes the confirmation through the transient status bar instead of a balloon. */
+    private fun doneQuiet(project: Project, msg: String) {
+        ApplicationManager.getApplication().invokeLater {
+            ObservatoryService.getInstance(project).refresh()
+            status(project, msg)
         }
     }
 }

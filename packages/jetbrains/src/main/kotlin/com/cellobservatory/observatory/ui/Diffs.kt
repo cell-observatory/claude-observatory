@@ -3,6 +3,7 @@ package com.cellobservatory.observatory.ui
 import com.cellobservatory.observatory.core.StoreReader
 import com.cellobservatory.observatory.model.EditRecord
 import com.cellobservatory.observatory.services.ObserveCache
+import com.cellobservatory.observatory.services.ObservatoryService
 import com.cellobservatory.observatory.settings.ObservatorySettings
 import com.intellij.diff.DiffContentFactory
 import com.intellij.diff.DiffManager
@@ -36,6 +37,16 @@ object Diffs {
             override fun actionPerformed(e: AnActionEvent) = run()
         }
 
+    /** Step to the previous (dir=-1) / next (dir=+1) edit in the SAME file (by id, wrapping) and reopen
+     *  the diff on it — the diff viewer's own edit navigation. */
+    private fun stepInFile(project: Project, session: String, rec: EditRecord, dir: Int) {
+        val inFile = ObservatoryService.getInstance(project).log().filter { it.file == rec.file }.sortedBy { it.id }
+        if (inFile.isEmpty()) return
+        val idx = inFile.indexOfFirst { it.id == rec.id }.let { if (it < 0) 0 else it }
+        val target = inFile[(idx + dir + inFile.size) % inFile.size]
+        show(project, session, target)
+    }
+
     fun show(project: Project, session: String, rec: EditRecord) {
         val app = ApplicationManager.getApplication()
         // Read the (potentially large) before/after blobs OFF the EDT — this is invoked from
@@ -66,6 +77,10 @@ object Diffs {
                         action("Keep #${rec.id}", NavTint.KEEP) { ReviewOps.keep(project, session, rec.id) },
                         action("Undo #${rec.id}", NavTint.UNDO) { ReviewOps.undoOrRedo(project, session, rec, redo = false) },
                         action("Chat About #${rec.id}", AllIcons.General.Balloon) { ReviewOps.chatAbout(project, session, rec.id) },
+                        // Step to the previous / next edit in THIS file and reopen the diff (parity with VS
+                        // Code's diff-title Previous/Next edit); reuses the same tinted chevrons as the nav bar.
+                        action("Previous edit in this file", NavTint.tint(AllIcons.Actions.PreviousOccurence, NavTint.BLUE)) { stepInFile(project, session, rec, -1) },
+                        action("Next edit in this file", NavTint.tint(AllIcons.Actions.NextOccurence, NavTint.BLUE)) { stepInFile(project, session, rec, 1) },
                     ),
                 )
                 DiffManager.getInstance().showDiff(project, request.preferUnified())

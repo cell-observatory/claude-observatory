@@ -40,6 +40,7 @@ class ObservatoryConfigurable : Configurable {
     private val observatoryBin = JBTextField()
     private val claudeBin = JBTextField()
     private val configDir = JBTextField()
+    private val session = JBTextField()
     private val inlineReview = JBCheckBox("Inline review overlay (lenses and line highlights in the editor)")
     private val unifiedDiff = JBCheckBox("Show edit diffs in the unified (inline) viewer instead of side-by-side")
     private var panel: JPanel? = null
@@ -51,6 +52,7 @@ class ObservatoryConfigurable : Configurable {
             .addLabeledComponent("claude-observatory CLI path (blank = auto-detect):", observatoryBin, 1, false)
             .addLabeledComponent("claude CLI path for Analyze (blank = auto-detect):", claudeBin, 1, false)
             .addLabeledComponent("Claude config dir (blank = \$CLAUDE_CONFIG_DIR, then ~/.claude):", configDir, 1, false)
+            .addLabeledComponent("Pinned session (blank = auto-resolve newest):", session, 1, false)
             .addComponent(inlineReview)
             .addComponent(unifiedDiff)
             .addComponentFillVertically(JPanel(), 0)
@@ -64,6 +66,7 @@ class ObservatoryConfigurable : Configurable {
         return observatoryBin.text != (s.observatoryBin ?: "") ||
             claudeBin.text != (s.claudeBin ?: "") ||
             configDir.text != (s.configDir ?: "") ||
+            session.text != (s.session ?: "") ||
             inlineReview.isSelected != s.inlineReview ||
             unifiedDiff.isSelected != s.unifiedDiff
     }
@@ -73,6 +76,7 @@ class ObservatoryConfigurable : Configurable {
         s.observatoryBin = observatoryBin.text.ifBlank { null }
         s.claudeBin = claudeBin.text.ifBlank { null }
         s.configDir = configDir.text.ifBlank { null }
+        s.session = session.text.ifBlank { null }
         s.inlineReview = inlineReview.isSelected
         s.unifiedDiff = unifiedDiff.isSelected
         // Re-render every open project so a config-dir change or overlay toggle applies immediately.
@@ -86,6 +90,7 @@ class ObservatoryConfigurable : Configurable {
         observatoryBin.text = s.observatoryBin ?: ""
         claudeBin.text = s.claudeBin ?: ""
         configDir.text = s.configDir ?: ""
+        session.text = s.session ?: ""
         inlineReview.isSelected = s.inlineReview
         unifiedDiff.isSelected = s.unifiedDiff
     }
