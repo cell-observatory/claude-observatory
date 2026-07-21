@@ -1545,6 +1545,10 @@ const VSCODE_EDITORS: { label: string; extDirs: string[]; cli: string; app: stri
 // sentinel beside it so a later `update` can tell whether the installed plugin is already current.
 const JB_PLUGIN_DIRNAME = 'claude-observatory-jetbrains';
 const JB_VERSION_SENTINEL = '.observatory-version';
+// The self-hosted JetBrains plugin repository, regenerated + attached to every GitHub Release by
+// .github/workflows/release.yml. Add it ONCE under Settings → Plugins → ⚙ → Manage Plugin
+// Repositories and the IDE auto-updates the plugin natively from then on (no more Install-from-Disk).
+const JB_PLUGIN_REPO_URL = `https://github.com/${RELEASE_REPO}/releases/latest/download/updatePlugins.xml`;
 
 type ReleaseAsset = { name: string; browser_download_url: string; digest?: string };
 
@@ -1805,6 +1809,15 @@ function extractZip(zip: string, destDir: string): boolean {
   return cp.spawnSync('unzip', ['-qo', zip, '-d', destDir], { stdio: 'ignore' }).status === 0;
 }
 
+/** One-time setup line that turns a side-loaded JetBrains plugin into an auto-updating one: once
+ *  JB_PLUGIN_REPO_URL is registered as a custom plugin repository, the IDE polls it for new releases. */
+function jetbrainsAutoUpdateHint(): string {
+  return (
+    c.dim('  Auto-update future releases (one time): Settings → Plugins → ⚙ → Manage Plugin Repositories → +\n') +
+    c.dim(`    → paste ${JB_PLUGIN_REPO_URL}\n`)
+  );
+}
+
 /** Refresh the JetBrains plugin in every IDE plugins dir that already has it, by unzipping the release
  *  zip in place (the plugin can't hot-swap — the IDE must fully restart). Idempotent via a version
  *  sentinel written beside the plugin. */
@@ -1852,7 +1865,10 @@ async function refreshJetbrainsPlugin(
       process.stdout.write(c.yellow(`  ! could not install the JetBrains plugin into ${d}: ${e?.message || e}\n`));
     }
   }
-  if (installed) process.stdout.write(c.dim('  fully restart the IDE (⌘Q → reopen) — a running JVM can’t hot-swap plugin classes.\n'));
+  if (installed) {
+    process.stdout.write(c.dim('  fully restart the IDE (⌘Q → reopen) — a running JVM can’t hot-swap plugin classes.\n'));
+    process.stdout.write(jetbrainsAutoUpdateHint());
+  }
   return installed === stale.length ? 'updated' : 'blocked'; // any dir that failed to extract → surface it
 }
 
@@ -1931,6 +1947,37 @@ async function cmdUpdate(args: string[]): Promise<void> {
   }
 }
 
+/** `version` — print the installed CLI version; with `--check` (or `--latest`), also fetch the newest
+ *  GitHub Release live (not the daily cache) and say whether an update is available. The flag forms
+ *  `-v` / `--version` stay a pure one-line print so scripts can rely on them. */
+async function cmdVersion(args: string[]): Promise<void> {
+  const cur = version();
+  if (!(args.includes('--check') || args.includes('--latest'))) {
+    process.stdout.write(`claude-observatory ${cur}\n`);
+    return;
+  }
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  let latest = '';
+  try {
+    const release = JSON.parse(
+      (await httpGet(`https://api.github.com/repos/${RELEASE_REPO}/releases/latest`)).toString('utf8')
+    );
+    latest = String(release.tag_name || '').replace(/^v/i, '');
+  } catch (e: any) {
+    fail(`could not fetch the latest release (installed ${cur}; need network access to github.com): ${e?.message || e}`);
+  }
+  if (!latest) fail('no published release found for the repository.');
+  writeUpdateCache({ checkedMs: Date.now(), latestTag: latest }); // an explicit check also freshens the daily nudge
+  const newer = core.isNewer(latest, cur);
+  process.stdout.write(
+    `installed   ${c.bold(cur)}\n` +
+      `latest      ${c.bold(latest)}   ${newer ? c.yellow('← update available') : c.green('✓ up to date')}\n`
+  );
+  if (newer) {
+    process.stdout.write(c.dim('run `claude-observatory update` to apply, or `update --check` to see every surface.\n'));
+  }
+}
+
 function usage(): void {
   process.stdout.write(
     `claude-observatory — per-edit Keep/Undo for Claude Code\n\n` +
@@ -1997,8 +2044,99 @@ function usage(): void {
       `  recap                one-line session recap   [--json --fresh --claude-bin <path>]\n` +
       `  suggest              next-steps + suggestions [--json --fresh --claude-bin <path>]\n\n` +
       `  --session <id>       target a specific session instead of the newest\n` +
-      `  --version            print version\n`
+      `  version [--check]    print the installed version; --check also shows the latest release\n` +
+      `  --version            print the installed CLI version\n`
   );
+}
+
+// --- once-a-day "update available" nudge -------------------------------------------------------
+// Cache-first + detached refresh (like npm's update-notifier): reading the cache is synchronous and
+// offline-safe, so a real command is NEVER delayed; the network check runs in a detached child that
+// fills the cache for the NEXT run. Only for interactive (TTY) human invocations — never the capture
+// hot path, `--json` output, or the JetBrains plugin. Opt out: CLAUDE_OBSERVATORY_NO_UPDATE_CHECK=1.
+
+type UpdateCache = { checkedMs: number; latestTag: string | null };
+
+function updateCachePath(): string {
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  return require('path').join(core.rootDir(), '.update-check');
+}
+
+function readUpdateCache(): UpdateCache | null {
+  try {
+    const j = JSON.parse(require('fs').readFileSync(updateCachePath(), 'utf8'));
+    if (typeof j?.checkedMs === 'number') {
+      return { checkedMs: j.checkedMs, latestTag: typeof j.latestTag === 'string' ? j.latestTag : null };
+    }
+  } catch {
+    /* no cache yet / unreadable — treated as "never checked" */
+  }
+  return null;
+}
+
+function writeUpdateCache(v: UpdateCache): void {
+  try {
+    const fs = require('fs');
+    const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+    fs.mkdirSync(core.rootDir(), { recursive: true });
+    fs.writeFileSync(updateCachePath(), JSON.stringify(v));
+  } catch {
+    /* best-effort — the nudge is non-essential, never fail a command over it */
+  }
+}
+
+/** The internal `__update-check` command (spawned detached): fetch the latest release tag and cache it.
+ *  Prints nothing; failures are swallowed so an offline machine just keeps the previous cached tag. */
+async function refreshUpdateCache(): Promise<void> {
+  try {
+    const release = JSON.parse(
+      (await httpGet(`https://api.github.com/repos/${RELEASE_REPO}/releases/latest`)).toString('utf8')
+    );
+    const tag = String(release.tag_name || '').replace(/^v/i, '') || null;
+    writeUpdateCache({ checkedMs: Date.now(), latestTag: tag });
+  } catch {
+    /* offline / rate-limited: the parent already wrote a throttle timestamp; keep the old tag */
+  }
+}
+
+function shouldCheckUpdates(cmd: string | undefined, rest: string[]): boolean {
+  if (process.env.CLAUDE_OBSERVATORY_NO_UPDATE_CHECK) return false;
+  if (!process.stderr.isTTY) return false; // pipes, the JetBrains plugin, CI, cron — never nudged
+  if (rest.includes('--json')) return false; // a machine-readable invocation
+  // The capture hot path, self/redundant commands, and non-work invocations get no nudge.
+  const SKIP = new Set(['capture', '__update-check', 'update', 'demo', 'version', '--version', '-v', 'help', '--help', '-h']);
+  return cmd !== undefined && !SKIP.has(cmd);
+}
+
+/** Register the once-a-day update nudge (which prints on the NEXT run, after the command's own output)
+ *  and kick a detached refresh if the cached check is older than a day. Cheap and non-blocking. */
+function maybeCheckForUpdate(cmd: string | undefined, rest: string[]): void {
+  if (!shouldCheckUpdates(cmd, rest)) return;
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  const cache = readUpdateCache();
+  const cur = version();
+  if (cache?.latestTag && core.isNewer(cache.latestTag, cur)) {
+    const latest = cache.latestTag;
+    // Print AFTER the command's output, once, to stderr — never pollutes stdout / --json consumers.
+    process.on('exit', () => {
+      try {
+        process.stderr.write(c.dim(`\nupdate available (${cur} → ${latest}) — run \`claude-observatory update\`\n`));
+      } catch {
+        /* stream already closed */
+      }
+    });
+  }
+  const DAY = 24 * 60 * 60 * 1000;
+  if (!cache || Date.now() - cache.checkedMs > DAY) {
+    writeUpdateCache({ checkedMs: Date.now(), latestTag: cache?.latestTag ?? null }); // optimistic throttle
+    try {
+      require('child_process')
+        .spawn(process.execPath, [__filename, '__update-check'], { detached: true, stdio: 'ignore' })
+        .unref();
+    } catch {
+      /* couldn't spawn the background check — no nudge this cycle, no harm */
+    }
+  }
 }
 
 function main(): void {
@@ -2012,6 +2150,7 @@ function main(): void {
   const argv = process.argv.slice(2);
   const cmd = argv[0];
   const rest = argv.slice(1);
+  maybeCheckForUpdate(cmd, rest); // register a once-a-day "update available" nudge (never blocks)
   switch (cmd) {
     case 'capture': {
       // Hot path: load only the zero-dep capture module, never the diff-based engine.
@@ -2143,13 +2282,19 @@ function main(): void {
     case 'update':
       cmdUpdate(rest).catch((e) => fail(String(e?.message || e)));
       break;
+    case '__update-check':
+      // Internal, hidden: spawned detached by maybeCheckForUpdate to refresh the update cache.
+      void refreshUpdateCache();
+      break;
     case 'suggest':
       cmdSuggest(rest).catch((e) => fail(String(e?.message || e)));
       break;
     case '--version':
     case '-v':
-    case 'version':
       process.stdout.write(`claude-observatory ${version()}\n`);
+      break;
+    case 'version':
+      cmdVersion(rest).catch((e) => fail(String(e?.message || e)));
       break;
     case undefined:
     case '-h':

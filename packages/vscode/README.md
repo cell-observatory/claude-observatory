@@ -19,6 +19,10 @@ Think of it as the Cursor "keep/undo each change" experience, but for Claude Cod
 
 > **Remote-SSH / devcontainers / WSL:** this extension runs on the **workspace host**, so install it — along with the `claude-observatory` CLI, the status line, and the capture hooks — **on the remote**, where `~/.claude` lives (not on your laptop). See the main repo's [Remote development guide](https://github.com/cell-observatory/claude-observatory#remote-development-ssh--devcontainers).
 
+## Updates
+
+The extension checks GitHub Releases in the background (at most once a day) and offers a one-click **Update now** when a newer version ships — no Marketplace required. Trigger it anytime from the Command Palette: **“Claude Observatory: Check for updates.”** The downloaded `.vsix` is sha256-verified before it installs. (The bundled `claude-observatory update` CLI updates this extension too.)
+
 ## Views
 
 The **review surfaces** live in the Activity Bar (icon-only tabs; the microscope icon is badged with the pending count); the **observatory dashboards** live side-by-side in the bottom panel (like Terminal/Problems). A **status-bar microscope** shows the pending count in realtime (amber while anything awaits review), with the full **review scoreboard** in its tooltip.

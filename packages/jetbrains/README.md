@@ -33,6 +33,22 @@ The script covers macOS (`~/Library/Application Support/JetBrains`), desktop Lin
 (`~/.local/share/JetBrains`), Windows via Git Bash (`%APPDATA%\JetBrains`), and JetBrains Remote
 Development backends (`~/.config/JetBrains/RemoteDev-*`), so it also works when run on an SSH host.
 
+## Auto-updates
+
+Install-from-Disk (and `install-jetbrains.sh`) is a one-time side-load — it does **not** auto-update.
+To have the IDE keep the plugin current on its own, add the self-hosted plugin repository **once**:
+
+**Settings → Plugins → ⚙ → Manage Plugin Repositories → +**, then paste:
+
+```
+https://github.com/cell-observatory/claude-observatory/releases/latest/download/updatePlugins.xml
+```
+
+New releases then appear under **Settings → Plugins → Updates**, exactly like a Marketplace plugin —
+this repository descriptor is regenerated and attached to every GitHub Release. (Prefer the terminal?
+`claude-observatory update` refreshes the plugin in place from the newest release; restart the IDE
+afterward.)
+
 ## Remote development (Gateway / Toolbox over SSH)
 
 The plugin runs **on the host** — platform-only APIs, no JCEF — which is exactly where `~/.claude`,
