@@ -9,7 +9,7 @@
 [![Pages](https://github.com/cell-observatory/claude-observatory/actions/workflows/pages.yml/badge.svg)](https://github.com/cell-observatory/claude-observatory/actions/workflows/pages.yml)
 [![Release](https://github.com/cell-observatory/claude-observatory/actions/workflows/release.yml/badge.svg)](https://github.com/cell-observatory/claude-observatory/actions/workflows/release.yml)
 [![Dependabot](https://img.shields.io/badge/dependabot-enabled-025E8C?logo=dependabot&logoColor=white)](https://github.com/cell-observatory/claude-observatory/blob/main/.github/dependabot.yml)
-[![Version](https://img.shields.io/badge/version-v0.8.4-blue)](https://github.com/cell-observatory/claude-observatory/releases/latest)
+[![Version](https://img.shields.io/badge/version-v0.8.5-blue)](https://github.com/cell-observatory/claude-observatory/releases/latest)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/cell-observatory/claude-observatory/blob/main/LICENSE)
 
 
@@ -217,9 +217,9 @@ claude-observatory changemap       # the Overview view-model: to-do task ribbon 
 claude-observatory metrics         # session rollup: per-edit diff stats · action/error counts · per-subagent duration/tokens · tool latency (median/p95/max); --json
 claude-observatory summary         # per-session review recap (kept/reverted per file); --markdown to export
 claude-observatory clean           # GC orphaned blobs; --resolved [--under <path>] | --drop <id> | --older-than 30d | --all
-claude-observatory update          # self-update the CLI to the latest release (--check to only report)
+claude-observatory update          # update the CLI + installed editor extensions to the latest release (--check to only report)
 claude-observatory uninstall       # remove the capture hooks (--all also reverts the bundled status line)
-claude-observatory --version
+claude-observatory version [--check]  # print the installed version; --check also shows the latest release
 ```
 
 The active session is resolved from your workspace; override with `--session <id>` or `CLAUDE_OBSERVATORY_SESSION`.
@@ -228,7 +228,22 @@ The active session is resolved from your workspace; override with `--session <id
 
 The one-liner in [Quickstart](#quickstart) covers most people. The details:
 
-**Update** any time by re-running the one-liner, or `claude-observatory update`.
+### Keeping up to date
+
+`claude-observatory update` refreshes **everything installed** — the CLI, the VS Code extension, and
+the JetBrains plugin — from the [latest release](https://github.com/cell-observatory/claude-observatory/releases/latest)
+(add `--check` to preview without installing); re-running the [one-liner](#quickstart) does the same.
+The CLI also nudges you once a day when a newer release exists (opt out with
+`CLAUDE_OBSERVATORY_NO_UPDATE_CHECK=1`). Beyond that, each surface can keep **itself** current:
+
+- **CLI** — `claude-observatory update`, or the daily nudge above; `claude-observatory version --check`
+  shows your installed version next to the latest release at any time.
+- **VS Code** — a background check (once a day) offers a one-click **Update now**; or run
+  **“Claude Observatory: Check for updates”** from the Command Palette. Downloads are sha256-verified.
+- **JetBrains** — add the self-hosted plugin repository **once** and the IDE auto-updates the plugin
+  like any Marketplace plugin (see [the JetBrains guide](packages/jetbrains/README.md#auto-updates)):
+  **Settings → Plugins → ⚙ → Manage Plugin Repositories → +**, then paste
+  `https://github.com/cell-observatory/claude-observatory/releases/latest/download/updatePlugins.xml`.
 
 **Platforms:** macOS and Linux work as-is. On **Windows**, the CLI, capture hooks, and both editor plugins
 run natively (npm's `.cmd` shims are handled) — but the installer and the bundled status line are bash, so
@@ -265,7 +280,9 @@ cd packages/vscode && npm run package     # -> claude-observatory.vsix
 code --install-extension claude-observatory.vsix
 ```
 
-Fully quit VS Code (⌘Q) once after installing so the activity-bar icon refreshes.
+Fully quit VS Code (⌘Q) once after installing so the activity-bar icon refreshes. The extension then
+keeps itself current — a daily background check offers a one-click **Update now** (see [Keeping up to
+date](#keeping-up-to-date)).
 
 **JetBrains / PyCharm plugin** (optional; needs JDK 21 + Gradle to build — or grab the `.zip` from a
 [Release](https://github.com/cell-observatory/claude-observatory/releases)):
@@ -275,7 +292,8 @@ Fully quit VS Code (⌘Q) once after installing so the activity-bar icon refresh
 ```
 
 Or manually: **Settings → Plugins → ⚙ → Install Plugin from Disk…** with the built/downloaded zip. Works in
-every JetBrains IDE (platform-only APIs — PyCharm CE/Pro, IntelliJ, WebStorm, …). Details:
+every JetBrains IDE (platform-only APIs — PyCharm CE/Pro, IntelliJ, WebStorm, …). For hands-off updates
+afterward, add the [plugin repository](packages/jetbrains/README.md#auto-updates) once. Details:
 [packages/jetbrains/README.md](packages/jetbrains/README.md).
 
 **Teams:** run `claude-observatory init --project` to write the hook into the repo's `./.claude/settings.json`

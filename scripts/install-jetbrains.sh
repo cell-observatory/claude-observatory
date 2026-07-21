@@ -48,3 +48,6 @@ done
   echo "~/.local/share/JetBrains, ~/.config/JetBrains/RemoteDev-*, and %APPDATA%/JetBrains)"; exit 1; }
 echo
 echo "Now FULLY restart the IDE (⌘Q → reopen) — or the remote-dev backend — to load the new version."
+echo
+echo "▸ Auto-update future releases (one time): Settings → Plugins → ⚙ → Manage Plugin Repositories → +"
+echo "  → paste https://github.com/cell-observatory/claude-observatory/releases/latest/download/updatePlugins.xml"

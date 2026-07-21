@@ -55,6 +55,8 @@ if [ -n "$ZIP_URL" ]; then
   curl -fsSL "$ZIP_URL" -o "$DEST"
   say "JetBrains plugin downloaded: $DEST"
   printf '  %sInstall in any JetBrains IDE: Settings → Plugins → ⚙ → Install Plugin from Disk → pick that file → restart.%s\n' "$c_dim" "$c_off"
+  printf '  %sThen auto-update future releases (one time): Settings → Plugins → ⚙ → Manage Plugin Repositories → +%s\n' "$c_dim" "$c_off"
+  printf '  %s→ paste https://github.com/%s/releases/latest/download/updatePlugins.xml%s\n' "$c_dim" "$REPO" "$c_off"
 fi
 
 # --- status line (usage bars) ---

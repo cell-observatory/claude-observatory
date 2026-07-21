@@ -11,6 +11,7 @@ import * as fs from 'fs';
 import * as cp from 'child_process';
 import * as https from 'https';
 import * as os from 'os';
+import * as crypto from 'crypto';
 import * as core from '@claude-observatory/core';
 import { CODICON_STYLE } from './codicon';
 
@@ -3327,10 +3328,23 @@ function downloadFile(url: string, dest: string): Promise<void> {
   });
 }
 
+/** Verify a downloaded .vsix against GitHub's per-asset sha256 `digest` before we install it — parity
+ *  with the CLI's assertDigest. Throws on mismatch (the caller catches it and offers a manual download);
+ *  a release that published no checksum is allowed through with a console note, same as the CLI. */
+function verifyVsixDigest(file: string, digest?: string): void {
+  const expected = typeof digest === 'string' && digest.startsWith('sha256:') ? digest.slice(7) : null;
+  if (!expected) {
+    console.warn('[claude-observatory] no published checksum for the .vsix — skipping integrity check');
+    return;
+  }
+  const actual = crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+  if (actual !== expected) throw new Error(`integrity check failed (sha256 ${actual} ≠ ${expected})`);
+}
+
 /** Download the .vsix and install it via VS Code's own extension service (no `code` CLI needed — works
  *  regardless of PATH), then offer a window reload. Falls back to opening the download in a browser if
  *  anything fails. */
-async function installVsixUpdate(url: string, latest: string): Promise<void> {
+async function installVsixUpdate(url: string, latest: string, digest?: string): Promise<void> {
   try {
     await vscode.window.withProgress(
       { location: vscode.ProgressLocation.Notification, title: `Installing Claude Observatory ${latest}…` },
@@ -3338,6 +3352,7 @@ async function installVsixUpdate(url: string, latest: string): Promise<void> {
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-observatory-'));
         const dest = path.join(dir, `claude-observatory-${latest}.vsix`);
         await downloadFile(url, dest);
+        verifyVsixDigest(dest, digest); // sha256 parity with the CLI — refuse a tampered .vsix
         // VS Code's built-in installer accepts a .vsix file Uri — no dependency on the `code` CLI.
         await vscode.commands.executeCommand('workbench.extensions.installExtension', vscode.Uri.file(dest));
       }
@@ -3390,9 +3405,9 @@ async function checkForUpdate(context: vscode.ExtensionContext, manual: boolean)
   if (!manual && context.globalState.get<string>('updateCheck.skip') === latest) return; // dismissed
   const vsix = (release.assets || []).find((a: any) => /\.vsix$/i.test(a.name));
   const downloadUrl = vsix?.browser_download_url || release.html_url;
-  // Prefer a real one-click install when we can drive the `code` CLI; otherwise fall back to opening
-  // the .vsix in a browser + manual "Install from VSIX…".
-  const canInstall = Boolean(vsix); // installed via VS Code's own service — no `code` CLI needed
+  // One-click install goes through VS Code's own extension service (no `code` CLI needed); if the
+  // release has no .vsix asset we fall back to opening the download + manual "Install from VSIX…".
+  const canInstall = Boolean(vsix);
   const primary = canInstall ? 'Update now' : 'Download .vsix';
   const choice = await vscode.window.showInformationMessage(
     `Claude Observatory ${latest} is available (you have ${current}).`,
@@ -3401,7 +3416,7 @@ async function checkForUpdate(context: vscode.ExtensionContext, manual: boolean)
     'Skip this version'
   );
   if (choice === 'Update now') {
-    await installVsixUpdate(vsix.browser_download_url, latest);
+    await installVsixUpdate(vsix.browser_download_url, latest, vsix.digest);
   } else if (choice === 'Download .vsix') {
     vscode.env.openExternal(vscode.Uri.parse(downloadUrl));
     vscode.window.showInformationMessage(

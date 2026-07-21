@@ -5,6 +5,38 @@ All notable changes to Claude Observatory are recorded here, following
 Per-tag release artifacts and auto-generated notes are on the
 [Releases page](https://github.com/cell-observatory/claude-observatory/releases).
 
+## [0.8.5] — 2026-07-21
+
+### Added
+
+- **The self-hosted auto-update paths are now surfaced and wired — getting the latest is effortless on
+  every surface, still with no marketplace.** The machinery already shipped; this release makes it
+  discoverable and turns every install into an auto-updating one.
+    - **JetBrains auto-update, documented at last.** The self-hosted plugin repository (regenerated and
+      attached to every GitHub Release) is now printed by every install path — `scripts/bootstrap.sh`,
+      `scripts/install-jetbrains.sh`, and `claude-observatory update` — and documented in the README,
+      the JetBrains plugin README, and the docs site. Add
+      `…/releases/latest/download/updatePlugins.xml` once under **Settings → Plugins → ⚙ → Manage Plugin
+      Repositories** and the IDE keeps the plugin current like any Marketplace plugin.
+    - **A once-a-day "update available" nudge in the CLI.** Any interactive command now checks (at most
+      once per day, in a detached background process) whether a newer release exists and prints a single
+      one-line notice — cache-first so it never delays a command, silent when offline, and skipped for
+      the capture hot path, `--json` output, and non-interactive callers. Opt out with
+      `CLAUDE_OBSERVATORY_NO_UPDATE_CHECK=1`.
+    - **`claude-observatory version --check`** prints your installed version next to the latest release
+      (a live check; bare `version` / `-v` / `--version` stay a plain one-line print for scripts).
+    - A canonical **"Keeping up to date"** section in the README (with a direct `releases/latest` link)
+      plus per-surface notes in the VS Code and JetBrains package READMEs and the docs site.
+
+### Changed
+
+- **The VS Code in-editor updater now verifies the download.** The one-click **Update now** notifier
+  checks the `.vsix` against the release's published **sha256** before installing (parity with the CLI's
+  integrity check) and refuses a mismatch. The notifier itself — a daily background check with
+  **Update now** / **Check for updates** — is now documented outside the changelog.
+- `claude-observatory update` is described accurately as refreshing the CLI **and** the installed editor
+  extensions, not just the CLI.
+
 ## [0.8.4] — 2026-07-17
 
 ### Fixed
