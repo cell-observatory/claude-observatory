@@ -271,7 +271,7 @@ function cmdDoctor(args: string[]): void {
     process.stdout.write(core.diagnoseMarkdown(checks));
     return;
   }
-  const icon = (l: string) => (l === 'ok' ? c.green('✓') : l === 'warn' ? c.yellow('!') : c.red('✗'));
+  const icon = (l: string) => (l === 'ok' ? c.green('✓') : l === 'warn' ? c.yellow('⚠') : c.red('✗'));
   process.stdout.write(c.bold(`claude-observatory doctor`) + c.dim(`  v${version()}\n\n`));
   for (const ch of checks) {
     process.stdout.write(`${icon(ch.level)} ${ch.label}\n    ${c.dim(ch.detail)}\n`);
@@ -285,7 +285,7 @@ function cmdDoctor(args: string[]): void {
         ? c.red(`${fails} problem(s) to fix`) + (warns ? c.yellow(` · ${warns} warning(s)`) : '') + '\n'
         : warns
           ? c.yellow(`critical checks passed · ${warns} warning(s)`) + '\n'
-          : c.green('all checks passed 🎉') + '\n')
+          : c.green('all checks passed') + '\n')
   );
   process.exit(fails ? 1 : 0);
 }
@@ -322,7 +322,7 @@ function relFile(file: string): string {
 function statusLabel(s: string): string {
   if (s === 'pending') return c.yellow('pending');
   if (s === 'kept') return c.green('kept');
-  return c.dim('undone');
+  return c.dim('reverted');
 }
 
 function cmdList(args: string[]): void {
@@ -808,6 +808,7 @@ function cmdDiff(args: string[]): void {
   const rec = core.findRecord(session, id);
   if (!rec) fail(`no edit #${id} in session ${session}`);
   process.stdout.write(core.coloredDiff(session, rec as EditRecord, isTTY()) + '\n');
+  process.stdout.write(c.dim(`keep #${id} · undo #${id}\n`));
 }
 
 function cmdKeep(args: string[]): void {
@@ -839,6 +840,11 @@ function cmdKeep(args: string[]): void {
       return;
     }
     const scope = fileSub ? ` in files matching "${fileSub}"` : under ? ` under ${relFile(under)}` : '';
+    if (targets.length === 0) {
+      // Nothing matched the scope — an honest "nothing to do", never a green ✓ 0 that reads as success.
+      process.stdout.write(c.dim(`no pending edits to keep${scope}\n`));
+      return;
+    }
     process.stdout.write(c.green('✓ ') + `kept ${targets.length} edit(s)${scope}\n`);
     return;
   }
@@ -886,6 +892,11 @@ function cmdUndo(args: string[]): void {
       return;
     }
     const scope = fileSub ? ` in files matching "${fileSub}"` : under ? ` under ${relFile(under)}` : ids ? ` in ${ids.length} selected edit(s)` : '';
+    if (res.total === 0) {
+      // No pending edits matched the scope — an honest "nothing to do", never a green ✓ 0.
+      process.stdout.write(c.dim(`no pending edits to revert${scope}\n`));
+      return;
+    }
     process.stdout.write(
       (res.conflicts ? c.yellow('⚠ ') : c.green('✓ ')) +
         `reverted ${res.undone} edit(s)${scope}` +
@@ -1108,6 +1119,7 @@ function fmtBytes(b: number): string {
 
 function cmdClean(args: string[]): void {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  const json = args.includes('--json'); // structured results for front-ends/scripts (sibling to keep/undo)
   // Drop resolved (kept/undone) edits in the active session, keep pending. --under <path> scopes it to
   // a file/folder (the editors' folder/file Clear action).
   if (args.includes('--resolved')) {
@@ -1115,6 +1127,10 @@ function cmdClean(args: string[]): void {
     const under = ui >= 0 ? args[ui + 1] : undefined;
     if (ui >= 0 && !under) fail('`clean --resolved --under <path>` requires a value');
     const n = core.clearResolved(getSessionId(args), under);
+    if (json) {
+      emitJson({ cleared: n, under: under ?? null });
+      return;
+    }
     process.stdout.write(c.green('✓ ') + `cleared ${n} resolved edit(s)${under ? ` under ${relFile(under)}` : ''}\n`);
     return;
   }
@@ -1125,6 +1141,10 @@ function cmdClean(args: string[]): void {
     if (!id) fail('`--drop <session-id>` requires a session id');
     if (!core.isSafeSessionId(id)) fail(`invalid session id "${id}" — refusing to delete.`);
     core.removeSession(id);
+    if (json) {
+      emitJson({ dropped: [id] });
+      return;
+    }
     process.stdout.write(c.green('✓ ') + `dropped session ${id}\n`);
     return;
   }
@@ -1136,6 +1156,10 @@ function cmdClean(args: string[]): void {
     if (ms === null) fail(`bad --older-than value "${spec ?? ''}" (use e.g. 30d or 12h)`);
     const stale = core.listSessions().filter((s) => s.lastMs < Date.now() - ms);
     for (const s of stale) core.removeSession(s.id);
+    if (json) {
+      emitJson({ dropped: stale.map((s) => s.id), olderThan: spec });
+      return;
+    }
     process.stdout.write(c.green('✓ ') + `dropped ${stale.length} session(s) inactive > ${spec}\n`);
     return;
   }
@@ -1143,6 +1167,10 @@ function cmdClean(args: string[]): void {
   if (args.includes('--all')) {
     const all = core.listSessions();
     for (const s of all) core.removeSession(s.id);
+    if (json) {
+      emitJson({ dropped: all.map((s) => s.id) });
+      return;
+    }
     process.stdout.write(c.green('✓ ') + `dropped all ${all.length} session(s)\n`);
     return;
   }
@@ -1160,6 +1188,10 @@ function cmdClean(args: string[]): void {
     removed += r.removed;
     bytes += r.bytes;
     if (core.pruneEmptySession(id)) pruned++;
+  }
+  if (json) {
+    emitJson({ removed, bytes, pruned });
+    return;
   }
   process.stdout.write(
     c.green('✓ ') +
@@ -1181,8 +1213,11 @@ function cmdStats(args: string[]): void {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   let sid: string | undefined;
   const i = args.indexOf('--session');
-  if (i >= 0 && args[i + 1]) sid = args[i + 1];
-  else sid = core.resolveSessionId(process.cwd()) || undefined;
+  if (i >= 0 && args[i + 1]) {
+    sid = args[i + 1];
+    // Guard a user-provided id like getSessionId does — computeStats derives a store path from it.
+    if (!core.isSafeSessionId(sid)) fail(`invalid session id "${sid}" (letters, digits, dot, dash, underscore only).`);
+  } else sid = core.resolveSessionId(process.cwd()) || undefined; // no session → global/default window
   const stats = core.computeStats(sid);
   if (args.includes('--json')) {
     process.stdout.write(JSON.stringify(stats));
@@ -1444,7 +1479,10 @@ function cmdInsights(args: string[]): void {
 function cmdUsage(args: string[]): void {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const si = args.indexOf('--session');
-  const sid = (si >= 0 && args[si + 1]) || core.resolveSessionId(process.cwd()) || '';
+  const provided = si >= 0 && args[si + 1] ? args[si + 1] : undefined;
+  // Guard a user-provided id like getSessionId does — usageLine derives a store path from it.
+  if (provided && !core.isSafeSessionId(provided)) fail(`invalid session id "${provided}" (letters, digits, dot, dash, underscore only).`);
+  const sid = provided || core.resolveSessionId(process.cwd()) || '';
   emitJson({ ...core.usageLine(process.cwd(), sid), staleMs: core.USAGE_STALE_MS });
 }
 
@@ -1588,7 +1626,7 @@ function assertDigest(bytes: Buffer, asset: ReleaseAsset): void {
   const expected =
     typeof asset.digest === 'string' && asset.digest.startsWith('sha256:') ? asset.digest.slice(7) : null;
   if (!expected) {
-    process.stdout.write(c.yellow(`  ! no published checksum for ${asset.name} — skipping integrity check\n`));
+    process.stdout.write(c.yellow(`  ⚠ no published checksum for ${asset.name} — skipping integrity check\n`));
     return;
   }
   const actual = crypto.createHash('sha256').update(bytes).digest('hex');
@@ -1716,7 +1754,7 @@ async function refreshVscodeExtension(
   const noCli = stale.filter((h) => !h.cli);
   for (const h of noCli) {
     process.stdout.write(
-      c.yellow('  ! ') +
+      c.yellow('  ⚠ ') +
         `${h.label} extension ${h.version} is installed, but its CLI wasn't found on PATH or in the usual app locations — can't auto-update it.\n` +
         c.dim(`    Fix: in ${h.label}, ⇧⌘P → "Shell Command: Install 'code' command in PATH", then re-run \`claude-observatory update\`;\n`) +
         c.dim(`    or install claude-observatory-vscode-v${latest}.vsix from the release manually.\n`)
@@ -1727,7 +1765,7 @@ async function refreshVscodeExtension(
   if (actionable.length) {
     const vsix = assets.find((a) => /\.vsix$/i.test(a.name));
     if (!vsix) {
-      process.stdout.write(c.yellow(`  ! release v${latest} has no .vsix asset — could not update the VS Code extension\n`));
+      process.stdout.write(c.yellow(`  ⚠ release v${latest} has no .vsix asset — could not update the VS Code extension\n`));
     } else {
       const cp = require('child_process');
       const dest = await downloadAsset(vsix);
@@ -1737,7 +1775,7 @@ async function refreshVscodeExtension(
           process.stdout.write(c.green('✓ ') + `${h.label} extension ${h.version} → ${latest}\n`);
           installed++;
         } else {
-          process.stdout.write(c.yellow(`  ! ${h.label} --install-extension failed — install the .vsix manually from the release\n`));
+          process.stdout.write(c.yellow(`  ⚠ ${h.label} --install-extension failed — install the .vsix manually from the release\n`));
         }
       }
       if (installed) process.stdout.write(c.dim('  fully quit the editor (⌘Q) once so the activity-bar icon refreshes.\n'));
@@ -1864,12 +1902,12 @@ async function refreshJetbrainsPlugin(
     return 'current';
   }
   if (process.platform !== 'win32' && !onPath('unzip')) {
-    process.stdout.write(c.yellow(`  ! JetBrains plugin is out of date but \`unzip\` was not found — can't update it (install unzip, then re-run)\n`));
+    process.stdout.write(c.yellow(`  ⚠ JetBrains plugin is out of date but \`unzip\` was not found — can't update it (install unzip, then re-run)\n`));
     return 'blocked';
   }
   const zip = assets.find((a) => /jetbrains.*\.zip$/i.test(a.name));
   if (!zip) {
-    process.stdout.write(c.yellow(`  ! release v${latest} has no JetBrains .zip asset — could not update the plugin\n`));
+    process.stdout.write(c.yellow(`  ⚠ release v${latest} has no JetBrains .zip asset — could not update the plugin\n`));
     return 'blocked';
   }
   const dest = await downloadAsset(zip);
@@ -1883,7 +1921,7 @@ async function refreshJetbrainsPlugin(
       process.stdout.write(c.green('✓ ') + `JetBrains plugin → ${latest} (${d})\n`);
       installed++;
     } catch (e: any) {
-      process.stdout.write(c.yellow(`  ! could not install the JetBrains plugin into ${d}: ${e?.message || e}\n`));
+      process.stdout.write(c.yellow(`  ⚠ could not install the JetBrains plugin into ${d}: ${e?.message || e}\n`));
     }
   }
   if (installed) {
@@ -2009,7 +2047,8 @@ function usage(): void {
       `                       remove the capture hooks (--all also reverts the bundled status line +\n` +
       `                       prints teardown steps; --purge-store also deletes the stored edits)\n` +
       `  status               show hooks + hook-path health + session + edit counts\n` +
-      `  doctor [--json]      diagnose setup (hooks, PATH, config dir, session, status line) with fixes\n` +
+      `  doctor [--json]      diagnose setup (hooks, PATH, config dir, session, status line) with fixes;\n` +
+      `                       --markdown (--md) emits the report as Markdown\n` +
       `  update [--check] [--cli-only] [--force]\n` +
       `                       update the CLI AND refresh the locally-installed editor extensions from\n` +
       `                       the latest GitHub Release (VS Code via \`code --install-extension\`;\n` +
@@ -2019,10 +2058,10 @@ function usage(): void {
       `  list [filters]       list edits (grouped by file); filters: --pending|--kept|--undone, --file <substr>\n` +
       `  timeline [--json]    edits newest-first as a chronological feed (time · id · Δ · file)\n` +
       `  actions [--json]     the full action timeline: EVERY tool call Claude made (reads, greps, bash,\n` +
-      `                       web, subagents, to-dos), each with its result; --category <c> | --errors | --limit <n>\n` +
+      `                       web, subagents, to-dos), each with its result (alias: trace); --category <c> | --errors | --limit <n>\n` +
       `  risk [--json]        flag shell commands that can destroy data / escalate privilege / touch secrets\n` +
       `  egress [--json]      what this session touched off-machine (web / MCP / network-shell destinations)\n` +
-      `  subagents [--json]   every subagent this session spawned, each with its own action timeline + metrics\n` +
+      `  subagents [--json]   every subagent this session spawned, each with its own action timeline + metrics (alias: agents)\n` +
       `  siblings [--json]    the other Claude Code sessions in THIS project (active/idle · pending · files · risk);\n` +
       `                       agent-facing digest for cross-agent awareness (alias: fleet); --all includes self;\n` +
       `                       --repo widens to every WORKTREE of the repo (adds worktree/branch/phase + conflicts)\n` +
@@ -2033,7 +2072,7 @@ function usage(): void {
       `  diff <id>            show before/after for an edit\n` +
       `  keep <id>            mark an edit kept; bulk: --all | --file <substr> | --under <path>\n` +
       `  undo <id> [--force]  surgically undo an edit (--force = per-file restore);\n` +
-      `                       bulk (pending only): --all | --file <substr> | --under <path>\n` +
+      `                       bulk (pending only): --all | --file <substr> | --under <path> | --ids <a,b,c>\n` +
       `  redo <id> [--force]  re-apply an undone edit\n` +
       `  task-keep <taskId>   keep every pending edit in a task's strict in_progress span (--json)\n` +
       `  task-undo <taskId>   revert every pending edit in a task's strict in_progress span (--json)\n` +
@@ -2044,7 +2083,8 @@ function usage(): void {
       `                       subagent + a workflow in an isolated demo-* session and folder) — watch\n` +
       `                       every panel update, then review/undo for real; --fast for scripts/tests;\n` +
       `                       demo --clean removes every trace (sessions, store, demo folder)\n` +
-      `  clean [opts]         GC orphaned blobs; --drop <id> | --older-than <Nd> | --all | --resolved [--under <path>]\n` +
+      `  clean [opts]         GC orphaned blobs (--session <id> scopes; --json for structured output);\n` +
+      `                       --drop <id> | --older-than <Nd> | --all | --resolved [--under <path>]\n` +
       `  stats [--json]       usage stats (edits/tokens/messages/thinking/output) by session & window\n` +
       `  summary [--markdown] per-session review recap (kept/reverted per file); --markdown to export\n` +
       `  insights [--json]    Observations view: recap + per-edit reasoning/flags/file-memory + next steps\n\n` +
@@ -2052,6 +2092,7 @@ function usage(): void {
       `  blob <sha>           raw blob bytes to stdout\n` +
       `  tree [--root <d>] [--filter <q>]   folder→file→class→edit view-model as JSON (both editors)\n` +
       `  changemap [--root <d>]             session change-map (edits + total to-do chapters + per-agent slices) as JSON\n` +
+      `  chapter --of-edit <n>              the chapter an edit belongs to: title + ordered sibling edit ids [--json]\n` +
       `  chat-context [--tool-use-id <id> | --edit <n> | --agent <id> | --task <id>]\n` +
       `                       assemble a zero-token, ready-to-paste chat prompt about an action/edit/subagent/task\n` +
       `  locate --file <f>    per-pending-edit line indices in the live buffer (text on stdin; JSON out)\n` +
@@ -2064,7 +2105,7 @@ function usage(): void {
       `  recap                one-line session recap   [--json --fresh --claude-bin <path>]\n` +
       `  suggest              next-steps + suggestions [--json --fresh --claude-bin <path>]\n\n` +
       `  --session <id>       target a specific session instead of the newest\n` +
-      `  version [--check]    print the installed version; --check also shows the latest release\n` +
+      `  version [--check]    print the installed version; --check (or --latest) also shows the latest release\n` +
       `  --version            print the installed CLI version\n`
   );
 }
@@ -2170,7 +2211,17 @@ function main(): void {
   const argv = process.argv.slice(2);
   const cmd = argv[0];
   const rest = argv.slice(1);
+  // A subcommand invoked with --help/-h prints usage instead of erroring on a missing positional arg
+  // (e.g. `diff --help`, `task-keep --help`); do it before the nudge so a help invocation stays quiet.
+  if (cmd !== undefined && (rest.includes('--help') || rest.includes('-h'))) {
+    usage();
+    return;
+  }
   maybeCheckForUpdate(cmd, rest); // register a once-a-day "update available" nudge (never blocks)
+  // A throw from a SYNC command should surface as `claude-observatory: <msg>`, not a raw Node stack.
+  // process.exit() throws nothing, so a command's own exit is never caught here; async commands keep
+  // their own .catch(fail) below.
+  try {
   switch (cmd) {
     case 'capture': {
       // Hot path: load only the zero-dep capture module, never the diff-based engine.
@@ -2324,6 +2375,9 @@ function main(): void {
       break;
     default:
       fail(`unknown command "${cmd}". Run \`claude-observatory help\`.`);
+  }
+  } catch (e: any) {
+    fail(String(e?.message || e));
   }
 }
 
