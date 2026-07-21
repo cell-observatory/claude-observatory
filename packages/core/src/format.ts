@@ -12,7 +12,12 @@ const CYAN = '\x1b[36m';
 const DIM = '\x1b[2m';
 
 function blobText(sessionId: string, sha: string | null): string {
-  return sha === null ? '' : readBlob(sessionId, sha).toString('utf8');
+  if (sha === null) return '';
+  try {
+    return readBlob(sessionId, sha).toString('utf8');
+  } catch {
+    return ''; // a GC'd/deleted blob must not crash lineDelta/coloredDiff (matches groups.ts/tree.ts)
+  }
 }
 
 /** Compact relative time, e.g. "5s ago", "12m ago", "3h ago", "2d ago", "3w ago", "2mo ago". */

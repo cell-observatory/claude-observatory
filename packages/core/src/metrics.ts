@@ -7,7 +7,7 @@
  * timeline, subagents from their transcripts, latency from the main transcript. No model calls.
  */
 import * as fs from 'fs';
-import { readLog } from './store';
+import { readLog, maxOf } from './store';
 import { lineDelta } from './format';
 import { findTranscript } from './observe';
 import { parseActions, summarizeActions } from './actions';
@@ -171,7 +171,7 @@ export function sessionMetrics(cwd: string, sessionId: string): SessionMetrics {
     count: lat.length,
     medianMs: Math.round(percentile(lat, 0.5)),
     p95Ms: Math.round(percentile(lat, 0.95)),
-    maxMs: lat.length ? Math.max(...lat) : 0,
+    maxMs: lat.length ? maxOf(lat) : 0,
   };
 
   return {

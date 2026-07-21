@@ -10,7 +10,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import { EditStatus, EditRecord, readLog } from './store';
+import { EditStatus, EditRecord, readLog, minOf } from './store';
 import { buildEditTree, EditTree, TreeEdit, TreeFolder, TreeFile } from './tree';
 import { reasoningByEdit, transcriptInsights, findTranscript, flagsFor } from './observe';
 import { parseActions, summarizeActions } from './actions';
@@ -18,7 +18,7 @@ import { parseSubagents } from './subagents';
 import { buildEgressReport } from './egress';
 import { projectSessionIds } from './fleet';
 import { parseWorkflows, workflowWindows, workflowForTs } from './workflows';
-import { taskSnaps } from './tasks';
+import { taskSnaps, digest12 } from './tasks';
 import { cachedByFiles } from './fscache';
 
 /** One edit (review unit) placed in the map: where it landed, how big, how reviewed, why, and which goal. */
@@ -490,10 +490,12 @@ export type TaskIdentity = { taskId: string; content: string; firstTs: number };
  * never shifts it, and two to-dos with identical text deterministically share ONE id (an honest
  * collision → one task) instead of the old last-wins. `firstSeenTs` pins a task's first-seen time in
  * the identity map so its `firstTs` doesn't drift if the to-do reappears later; it does NOT enter the
- * hash (identical text must stay one id).
+ * hash (identical text must stay one id). The hash core is shared with tasks.taskChapterId() via
+ * digest12(), so the two can't drift; `firstSeenTs` stays in the signature (callers + tests pass it
+ * positionally) but remains intentionally unhashed.
  */
 export function taskId(content: string, firstSeenTs: number): string {
-  return crypto.createHash('sha1').update(content).digest('hex').slice(0, 12);
+  return digest12(content);
 }
 
 /**
@@ -772,7 +774,7 @@ export function buildChangeMap(cwd: string, session: string, opts: { root?: stri
       index: chapters.length,
       title: insights.title ?? (insights.firstUserPrompt ? firstLine(insights.firstUserPrompt, 80) : 'Session work'),
       status: 'wip', // refined to 'done' below once counts are folded
-      startTs: orphanTs.length ? Math.min(...orphanTs) : 0,
+      startTs: orphanTs.length ? minOf(orphanTs) : 0,
       endTs: 0,
       edits: 0,
       added: 0,

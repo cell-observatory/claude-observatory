@@ -11,6 +11,7 @@ import * as path from 'path';
 import { cachedByFiles } from './fscache';
 import { findTranscript } from './observe';
 import { claudeConfigDir } from './paths';
+import { isSafeSessionId } from './store';
 
 /** One task from the session's task list, as Claude Code wrote it. */
 export interface SessionTask {
@@ -42,8 +43,9 @@ const asStrArray = (v: unknown): string[] =>
 /** Read the session's task list, ordered numerically by id. Missing dir (a session that never used
  *  the task system) → []. A malformed task file is skipped — one bad write must not blank the tab. */
 export function readSessionTasks(sessionId: string): SessionTask[] {
-  // Task dirs are keyed by the RAW session id — never a path. Refuse anything that could traverse.
-  if (!/^[A-Za-z0-9._-]+$/.test(sessionId)) return [];
+  // Task dirs are keyed by the RAW session id — never a path. Refuse anything that could traverse;
+  // isSafeSessionId also rejects '.'/'..' (and caps length), which the bare class would let through.
+  if (!isSafeSessionId(sessionId)) return [];
   const dir = path.join(claudeConfigDir(), 'tasks', sessionId);
   let files: string[];
   try {
@@ -88,10 +90,19 @@ interface MinedTask {
   status: string;
 }
 
+/** The single sha1→12-hex digest core, shared with changemap.taskId() so the two can't drift on
+ *  algorithm or truncation. changemap imports this; importing changemap back here would be a cycle. */
+export function digest12(s: string): string {
+  return crypto.createHash('sha1').update(s).digest('hex').slice(0, 12);
+}
+
 /** The same digest changemap.taskId() computes for a chapter's content — kept in LOCKSTEP so a task
- *  row can join its chapter (changemap imports this module; importing back would be a cycle). */
+ *  row can join its chapter. Both now route through digest12(), so the hash core stays in one place.
+ *  The `.trim()` is deliberate and NOT shared: taskId() hashes the raw content, so the two ids match
+ *  only for already-trimmed text; folding the trim into the core would change one hash, so it stays
+ *  each function's own pre-processing. */
 export function taskChapterId(subject: string): string {
-  return crypto.createHash('sha1').update(subject.trim()).digest('hex').slice(0, 12);
+  return digest12(subject.trim());
 }
 
 /** TaskCreate/TaskUpdate events mined from the MAIN transcript → (a) full-list snapshots for the

@@ -516,7 +516,7 @@ export function undoTask(cwd: string, session: string, taskId: string): UndoScop
 
 export interface KeepScopeResult {
   kept: number; // edits flipped to kept
-  total: number; // edits in the task's strict-span set (any status)
+  total: number; // edits in the chapter's DISPLAYED review set (reviewEditIds), any status
   ids: number[]; // the kept edit ids
 }
 

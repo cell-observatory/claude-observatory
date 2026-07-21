@@ -6,7 +6,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { diffArrays } from 'diff';
-import { EditRecord, EditStatus, readLog, readBlob, logPath } from './store';
+import { EditRecord, EditStatus, readLog, readBlob, logPath, maxOf } from './store';
 import { lineDelta } from './format';
 import { projectDir } from './session';
 import { claudeConfigDir } from './paths';
@@ -405,7 +405,7 @@ export function buildObservations(cwd: string, sessionId: string, opts: { root?:
   }
   for (const r of runs) r.status = runStatus(r.edits);
   // Most-recent activity first: the run's newest member ts (falls back to id order for ts-less records).
-  const runTs = (r: ObservationRun): number => Math.max(...r.edits.map((e) => e.ts || e.id));
+  const runTs = (r: ObservationRun): number => maxOf(r.edits.map((e) => e.ts || e.id));
   runs.sort((a, b) => runTs(b) - runTs(a));
   return { recap, runs, nextSteps };
 }
@@ -428,6 +428,10 @@ export interface UsageLine {
 
 /** Statusline cache older than this ⇒ the UI should surface its age and the terminal remedy. */
 export const USAGE_STALE_MS = 5 * 60 * 1000;
+
+/** Bytes read from the transcript's END when estimating context fill from its latest usage line —
+ *  generous enough to clear a large trailing tool_result, yet a tiny slice of a 20-56MB file. */
+const USAGE_TAIL_BYTES = 2 * 1024 * 1024;
 
 /** Claude Code sends `resets_at` as either epoch seconds (a number) or an ISO string → epoch ms. */
 function toEpochMs(v: unknown): number | null {
@@ -494,11 +498,24 @@ export function usageLine(cwd: string, sessionId: string): UsageLine {
   if (!out.ctx || transcriptNewer) {
     if (transcript) {
       try {
-        // Only the LATEST usage-bearing line matters, so scan from the END and JSON.parse just the
-        // first hit (not thousands). NOTE: the file is still fully read into memory here; a transcript
-        // over Node's ~512MB max string length would throw and be swallowed below (silent empty ctx).
+        // Only the LATEST usage-bearing line matters, and it sits at the very end of the transcript
+        // (the final assistant turn). Read a BOUNDED tail from EOF — never the whole 20-56MB file —
+        // then scan it backwards for the first usage hit. If the last usage line happens to sit beyond
+        // the tail window we keep the prior ctx (same as finding no usage line), rather than read it all.
         let latest: any = null;
-        const lines = fs.readFileSync(transcript, 'utf8').split('\n');
+        let tail = '';
+        const fd = fs.openSync(transcript, 'r');
+        try {
+          const size = fs.fstatSync(fd).size;
+          const start = Math.max(0, size - USAGE_TAIL_BYTES);
+          const buf = Buffer.alloc(size - start);
+          const n = fs.readSync(fd, buf, 0, buf.length, start);
+          tail = buf.toString('utf8', 0, n);
+          if (start > 0) tail = tail.slice(tail.indexOf('\n') + 1); // started mid-file: drop the partial line
+        } finally {
+          fs.closeSync(fd);
+        }
+        const lines = tail.split('\n');
         for (let i = lines.length - 1; i >= 0 && !latest; i--) {
           const t = lines[i].trim();
           if (!t || !t.includes('"usage"')) continue;

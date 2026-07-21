@@ -159,6 +159,18 @@ export function commonDir(cwd: string): string | null {
   return isBareGitDir(key) ? null : key;
 }
 
+// The module caches below memoize stable / append-only facts, but a long-lived editor host that
+// scans many sessions would grow them without bound — so cap them (insertion-order eviction) like
+// fscache. An evicted entry simply re-derives on its next lookup (these are pure memoizations).
+const SESSION_CACHE_CAP = 128;
+function boundCache<K>(c: { size: number; keys(): IterableIterator<K>; delete(k: K): boolean }): void {
+  while (c.size >= SESSION_CACHE_CAP) {
+    const oldest = c.keys().next().value as K | undefined;
+    if (oldest === undefined) break;
+    c.delete(oldest);
+  }
+}
+
 // Cache the repo key by sessionId so grouping survives a worktree being pruned after first
 // resolution (commonDir needs the live `.git` on disk). Only successful resolutions are cached —
 // a transient miss (worktree not yet on disk) can be retried.
@@ -169,7 +181,10 @@ export function repoKeyForSession(sessionId: string, cwd: string): string | null
   const hit = repoKeyCache.get(sessionId);
   if (hit !== undefined) return hit;
   const key = commonDir(cwd);
-  if (key !== null) repoKeyCache.set(sessionId, key);
+  if (key !== null) {
+    boundCache(repoKeyCache);
+    repoKeyCache.set(sessionId, key);
+  }
   return key;
 }
 
@@ -236,6 +251,7 @@ export function firstCwdLine(transcriptPath: string): FirstCwdLine | null {
         const hit = parseCwdLine(carry.slice(0, nl));
         carry = carry.slice(nl + 1);
         if (hit) {
+          boundCache(firstCwdCache);
           firstCwdCache.set(transcriptPath, hit);
           return hit;
         }
@@ -244,6 +260,7 @@ export function firstCwdLine(transcriptPath: string): FirstCwdLine | null {
     }
     const tail = parseCwdLine(carry + decoder.end()); // final line with no trailing newline
     if (tail) {
+      boundCache(firstCwdCache);
       firstCwdCache.set(transcriptPath, tail);
       return tail;
     }
@@ -311,6 +328,7 @@ export function hasAssistantRecord(transcriptPath: string): boolean {
         const line = carry.slice(0, nl);
         carry = carry.slice(nl + 1);
         if (isAssistantLine(line)) {
+          boundCache(assistantSeen);
           assistantSeen.add(transcriptPath);
           return true;
         }
@@ -318,9 +336,11 @@ export function hasAssistantRecord(transcriptPath: string): boolean {
       if (n < CHUNK) break; // short read => EOF
     }
     if (isAssistantLine(carry + decoder.end())) {
+      boundCache(assistantSeen);
       assistantSeen.add(transcriptPath);
       return true;
     }
+    boundCache(assistantNegKey);
     assistantNegKey.set(transcriptPath, negKey);
     return false;
   } finally {

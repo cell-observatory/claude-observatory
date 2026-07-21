@@ -17,6 +17,23 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { claudeConfigDir } from './paths';
 
+/**
+ * Loop-based min/max over a numeric array — the call-stack-safe replacement for `Math.min(...xs)` /
+ * `Math.max(...xs)`, which spread the entire array as call arguments and throw `RangeError` once it
+ * exceeds the engine's argument cap (~65-125k elements). Empty input yields Math's identity value
+ * (Infinity / -Infinity), so an existing `xs.length ? minOf(xs) : fallback` guard keeps its fallback.
+ */
+export function minOf(nums: number[]): number {
+  let m = Infinity;
+  for (const n of nums) if (n < m) m = n;
+  return m;
+}
+export function maxOf(nums: number[]): number {
+  let m = -Infinity;
+  for (const n of nums) if (n > m) m = n;
+  return m;
+}
+
 export type EditStatus = 'pending' | 'kept' | 'undone';
 
 export interface EditRecord {

@@ -11,7 +11,7 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
-import { readLog, readBlob, findRecord, EditRecord } from './store';
+import { readLog, readBlob, findRecord, EditRecord, minOf, maxOf } from './store';
 import { findTranscript } from './observe';
 import { findSubagentsDir } from './subagents';
 import { scoreCommand, CommandRisk } from './risk';
@@ -454,8 +454,8 @@ export function summarizeActions(actions: ActionRecord[]): ActionSummary {
     total: actions.length,
     byCategory,
     errors,
-    firstTs: ts.length ? Math.min(...ts) : 0,
-    lastTs: ts.length ? Math.max(...ts) : 0,
+    firstTs: ts.length ? minOf(ts) : 0,
+    lastTs: ts.length ? maxOf(ts) : 0,
   };
 }
 
