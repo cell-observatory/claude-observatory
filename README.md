@@ -62,7 +62,7 @@ tokens** — capture runs in local hooks, entirely outside the model loop.
 ## Quickstart
 
 **1 — Install** the CLI + editor extensions from the latest [release](https://github.com/cell-observatory/claude-observatory/releases)
-(no build toolchain, no accounts):
+(requires Node.js 18+; no build toolchain, no accounts):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/cell-observatory/claude-observatory/main/scripts/bootstrap.sh | bash
@@ -80,7 +80,8 @@ Observatory** view in your editor (or run `claude-observatory list`) to review.
 **Try it without Claude** — the same scenario is clickable in the browser on the
 **[interactive demo](https://cell-observatory.github.io/claude-observatory/demo.html)** page, nothing to
 install. Locally, `claude-observatory demo` replays a scripted session through the real
-pipeline in an isolated `demo-*` session and an `observatory-demo/` folder: open the Overview and watch
+pipeline in an isolated `demo-*` session and an `observatory-demo/` folder it creates in the current
+directory: open the Overview and watch
 chapters, fleet rows, and observations fill in live, then review the edits for real.
 `claude-observatory demo --clean` removes every trace.
 
@@ -191,6 +192,7 @@ The `claude-observatory` CLI is a first-class front-end — review without leavi
 
 ```text
 claude-observatory status          # hooks + hook-path health + active session + counts
+claude-observatory doctor          # diagnose setup (hooks, PATH, config dir, session, status line) with fixes
 claude-observatory sessions        # list all sessions in the store (● = current dir)
 claude-observatory list            # edits in the active session (grouped by file, ±lines, status)
 claude-observatory list --pending  # filters: --pending | --kept | --undone, and --file <substr>
@@ -265,8 +267,9 @@ claude-observatory init --with-statusline   # capture hooks + the bundled status
 ```
 
 The [claude-statusline](https://github.com/cell-observatory/claude-statusline) status line is **bundled**
-— `claude-observatory statusline` installs/refreshes it with no network (it powers the Usage bars). Refresh
-the vendored copy with `scripts/sync-statusline.sh`.
+— `claude-observatory statusline` installs/refreshes it with no network (it powers the Usage bars; it's a
+bash script and needs `jq` on the PATH, on every platform). Refresh the vendored copy with
+`scripts/sync-statusline.sh`.
 
 > **Important — install hooks _before_ launching Claude Code.** Claude Code snapshots your hooks at session
 > start, so hooks added to a **running** session get reverted. Run `claude-observatory init` with Claude
@@ -299,7 +302,9 @@ afterward, add the [plugin repository](packages/jetbrains/README.md#auto-updates
 **Teams:** run `claude-observatory init --project` to write the hook into the repo's `./.claude/settings.json`
 (checked in). Teammates then only need `claude-observatory` on their PATH.
 
-**Remote development (SSH & devcontainers):** the extension runs on the **remote host** (where Claude, the
+### Remote development (SSH & devcontainers)
+
+The extension runs on the **remote host** (where Claude, the
 transcripts, and the store live). Full setup — Remote-SSH, JetBrains Gateway/Toolbox, the devcontainer
 template, and relocating `CLAUDE_CONFIG_DIR` — is in **[docs/REMOTE.md](docs/REMOTE.md)**.
 

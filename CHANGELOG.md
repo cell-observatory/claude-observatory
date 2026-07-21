@@ -7,6 +7,41 @@ Per-tag release artifacts and auto-generated notes are on the
 
 ## [0.8.6] — Unreleased
 
+A quality-of-life sweep across the CLI, core, both editors, and the docs.
+
+### Added
+
+- **JetBrains parity — the opt-in Claude-insight feature is now reachable**: "Refresh Recap (Claude)"
+  on the Observations toolbar and "Analyze Edit with Claude" on an edit (previously the `analyze`/`recap`
+  backend and the `claudeBin` setting were wired to nothing).
+- **JetBrains parity — 10 session actions registered** (Setup Check, Export Review Summary, Switch
+  Session, Clean Store, Install Hooks, Accept All, Revert All, Clear Resolved, Spotlight, Search), so
+  they appear in Find Action and can be keybound.
+- **JetBrains parity** — Previous/Next edit stepping from inside the diff viewer, and a "Pinned session"
+  field in Settings → Tools → Claude Observatory.
+- **CLI** — `clean --json`, per-command `--help`, and a `keep #<id> · undo #<id>` next-step footer after
+  `diff`. `help` now documents the `chapter` command, `undo --ids`, the `trace`/`agents` aliases,
+  `doctor --markdown`, `version --latest`, and `clean --session`.
+
+### Changed
+
+- **Consistent terminology & emoji-free copy** — unified the Keep/Undo verbs across the CLI and VS Code
+  (the stored/JSON `status` value is unchanged), standardized the CLI warning glyph on `⚠`, and dropped
+  decorative 🎉/✨/💡 from output and settings descriptions.
+- **VS Code** — rebound `⌥⌘[` / `⌥⌘]` off the built-in Fold/Unfold (→ `⌥⌘-` / `⌥⌘=`); scoped
+  `reviewNext/Prev` to `!terminalFocus`; hid context-only commands from the Command Palette; de-conflicted
+  the review/spotlight/heatmap icons; fixed the blank "Revert all edits" icon and unified the revert-scope
+  glyph; replaced a persistent inline-toggle toast with transient status text.
+- **JetBrains** — routine Keep/Undo confirmations now use a transient status bar instead of piling
+  balloons into the Event Log; the inline-lens Chat action got a glyph; File History's prev/next diff
+  buttons are now directionally distinct.
+- **Core robustness** — `settings.json` and the hooks file are written atomically (temp + rename);
+  `usageLine` reads a bounded transcript tail instead of loading the whole file; the session-resolution
+  caches are capped (like `fscache`); `stats` skips out-of-window sessions.
+- **Docs** — documented the Node 18+ and `jq` prerequisites; the Remote/SSH guide now leads with the
+  bootstrap one-liner; `bootstrap.sh` continues past an npm global-install permission error (instead of
+  aborting the rest of the install) and only downloads the JetBrains plugin when a JetBrains IDE is present.
+
 ### Fixed
 
 - **JetBrains: `claude-observatory update --check` no longer reports a current plugin as perpetually
@@ -14,6 +49,19 @@ Per-tag release artifacts and auto-generated notes are on the
   (`lib/claude-observatory-jetbrains-<ver>.jar` — present for every install method: the bootstrap
   script, the IDE's **Install Plugin from Disk**, and `update`), instead of a `.observatory-version`
   sentinel that only `update` ever wrote. The sentinel remains a fallback.
+- **CLI** — bulk `keep`/`undo` no longer print a false-green `✓ … 0 edit(s)` when nothing matched; an
+  unexpected error in a synchronous command now surfaces as `claude-observatory: <message>` instead of a
+  raw Node stack trace; and `stats`/`usage` validate a provided `--session` like the other commands.
+- **Core** — a garbage-collected or externally-deleted blob no longer crashes the metrics / review /
+  Overview rollups (it degrades to an empty diff, matching the other readers); unguarded
+  `Math.min/max(...array)` at five sites are replaced with loop-based helpers, so a very large session
+  can't blow the call stack while building the Overview; and `init` on a malformed `settings.json` points
+  at the `.bak` instead of dumping a raw `SyntaxError`.
+- **JetBrains** — session-wide **Revert All** and the Edits-tree **Clear Resolved** now report "Nothing
+  to revert" / "No resolved edits to clear" instead of silently doing nothing (no-silent-fail parity).
+- **Docs** — the "Remote development" guide link (referenced from the VS Code, JetBrains, and devcontainer
+  READMEs) now resolves — its target is a real heading; the `status` sample output and a demo file-path
+  inconsistency in DEMO.md are corrected.
 
 ## [0.8.5] — 2026-07-21
 

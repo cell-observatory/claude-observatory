@@ -14,7 +14,8 @@ Don't want to burn a session just to see the panels move? The
 **[interactive demo](https://cell-observatory.github.io/claude-observatory/demo.html)** replays the
 scenario in the browser — no editor needed. Locally, the built-in simulator replays the same scripted
 session through the **real pipeline** — a genuine transcript, edits captured by the same hooks, a
-subagent, and a workflow run — inside an isolated `demo-…` session and an `observatory-demo/` folder:
+subagent, and a workflow run — inside an isolated `demo-…` session and an `observatory-demo/` folder it
+creates in the current directory:
 
 ```bash
 claude-observatory demo          # run it in an open workspace and watch every panel update live
@@ -64,6 +65,7 @@ Confirm it's live:
 ```console
 $ claude-observatory status
 capture hooks:   installed
+hook script:     claude-observatory (on PATH) [ok]
 active session:  0c396c6b-2da9-4be2-9c6d-c8c5797de7a5
 store:           ~/.claude/claude-observatory/0c396c6b-2da9-4be2-9c6d-c8c5797de7a5
 last capture:    1m ago
@@ -140,10 +142,10 @@ survive untouched (a **position-anchored 3-way line merge**, not a whole-file re
 
 ```console
 $ claude-observatory undo 2
-✓ undid edit #2 (observatory-demo/src/models/dataset.py)
+✓ undid edit #2 (src/models/dataset.py)
 
 $ claude-observatory redo 2
-✓ re-applied edit #2 (observatory-demo/src/models/dataset.py)
+✓ re-applied edit #2 (src/models/dataset.py)
 ```
 
 **Redo** re-applies an undone edit; `--force` on either falls back to a whole-file restore.

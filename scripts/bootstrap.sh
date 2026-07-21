@@ -34,7 +34,7 @@ ZIP_URL="$(urls | grep -E 'jetbrains.*\.zip$' | head -1 || true)"
 [ -n "$CLI_URL" ] || { warn "release $TAG has no CLI tarball."; exit 1; }
 say "Installing the claude-observatory CLI…"
 curl -fsSL "$CLI_URL" -o "$TMP/cli.tgz"
-npm i -g "$TMP/cli.tgz" --silent || { warn "Global install failed (permissions?). Try: sudo npm i -g $TMP/cli.tgz"; exit 1; }
+npm i -g "$TMP/cli.tgz" --silent || warn "Global install failed (permissions?). Try: sudo npm i -g $TMP/cli.tgz — continuing so the other components still install."
 CLI="$(command -v claude-observatory || true)"
 [ -n "$CLI" ] && ok "CLI ready: $CLI" || warn "claude-observatory not on PATH — check your npm global bin dir (npm prefix -g)."
 
@@ -48,8 +48,17 @@ elif [ -n "$VSIX_URL" ]; then
   warn "VS Code 'code' CLI not found — skipped the extension. Later: download the .vsix from the $TAG release and 'code --install-extension' it."
 fi
 
-# --- JetBrains plugin (download; install is one step in the IDE) ---
-if [ -n "$ZIP_URL" ]; then
+# --- JetBrains plugin (only when a JetBrains IDE is present; install is one step in the IDE) ---
+# Detect an install the same way install-jetbrains.sh finds its plugin dirs, so terminal-only /
+# VS-Code-only setups don't get an unwanted download and three setup lines.
+jetbrains_present() {
+  [ -d "$HOME/Library/Application Support/JetBrains" ] && return 0            # macOS
+  [ -d "$HOME/.local/share/JetBrains" ] && return 0                          # desktop Linux
+  [ -n "${APPDATA:-}" ] && [ -d "${APPDATA//\\//}/JetBrains" ] && return 0    # Windows (Git Bash)
+  for d in "$HOME/.config/JetBrains/RemoteDev-"*; do [ -d "$d" ] && return 0; done  # remote-dev backend
+  return 1
+}
+if [ -n "$ZIP_URL" ] && jetbrains_present; then
   DEST="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/claude-observatory-jetbrains.zip"
   mkdir -p "$(dirname "$DEST")"
   curl -fsSL "$ZIP_URL" -o "$DEST"
@@ -57,6 +66,8 @@ if [ -n "$ZIP_URL" ]; then
   printf '  %sInstall in any JetBrains IDE: Settings → Plugins → ⚙ → Install Plugin from Disk → pick that file → restart.%s\n' "$c_dim" "$c_off"
   printf '  %sThen auto-update future releases (one time): Settings → Plugins → ⚙ → Manage Plugin Repositories → +%s\n' "$c_dim" "$c_off"
   printf '  %s→ paste https://github.com/%s/releases/latest/download/updatePlugins.xml%s\n' "$c_dim" "$REPO" "$c_off"
+elif [ -n "$ZIP_URL" ]; then
+  say "No JetBrains IDE detected — skipped its plugin. Add it later from the $TAG release (claude-observatory-jetbrains-*.zip → Settings → Plugins → ⚙ → Install Plugin from Disk)."
 fi
 
 # --- status line (usage bars) ---

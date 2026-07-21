@@ -10,9 +10,15 @@ install and run **on the remote**. Everything below is about installing on that 
 ## Over SSH (no container)
 
 1. Connect the Remote-SSH window to the host.
-2. In the **remote** terminal, install the CLI + hooks: clone and run `./install.sh` (or copy a release
-   `.tgz` and `npm i -g ./claude-observatory-<ver>.tgz`), then run `claude-observatory init` with Claude
-   Code closed.
+2. In the **remote** terminal, install the CLI + hooks with the bootstrap one-liner (it pulls the latest
+   release — no build toolchain needed on the host):
+
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/cell-observatory/claude-observatory/main/scripts/bootstrap.sh | bash
+   ```
+
+   Then run `claude-observatory init` with Claude Code closed. (Prefer not to pipe curl to bash? Clone and
+   run `./install.sh`, or copy a release `.tgz` and `npm i -g ./claude-observatory-<ver>.tgz`.)
 3. Install the status line **on the remote** so the Usage bars populate — it's bundled with the CLI:
    `claude-observatory statusline` in the remote terminal (no network needed).
 4. Install the extension **into the remote**: Extensions view → the `.vsix` → **"Install in SSH: \<host\>"**,
