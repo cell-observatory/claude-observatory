@@ -927,6 +927,41 @@ function cmdUndo(args: string[]): void {
 function cmdRedo(args: string[]): void {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const session = getSessionId(args);
+  // Bulk: --all (every undone in the session) | --file <substr> | --under <path> | --ids <a,b,c> —
+  // the forward mirror of `undo`'s selectors, via the shared core.redoScope.
+  const fi = args.indexOf('--file');
+  const ui = args.indexOf('--under');
+  const idi = args.indexOf('--ids');
+  if (args.includes('--all') || fi >= 0 || ui >= 0 || idi >= 0) {
+    const fileSub = fi >= 0 ? args[fi + 1] : undefined;
+    if (fi >= 0 && !fileSub) fail('`redo --file <substr>` requires a value');
+    const under = ui >= 0 ? args[ui + 1] : undefined;
+    if (ui >= 0 && !under) fail('`redo --under <path>` requires a value');
+    let bulkIds: number[] | undefined;
+    if (idi >= 0) {
+      const raw = args[idi + 1];
+      if (!raw) fail('`redo --ids <a,b,c>` requires a comma-separated id list');
+      bulkIds = raw.split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => Number.isInteger(n));
+      if (!bulkIds.length) fail('`redo --ids <a,b,c>` got no valid integer ids');
+    }
+    const bulk = core.redoScope(session, { under, fileSubstr: fileSub, ids: bulkIds });
+    if (args.includes('--json')) {
+      emitJson({ redone: bulk.redone, conflicts: bulk.conflicts, total: bulk.total });
+      return;
+    }
+    const scope = fileSub ? ` in files matching "${fileSub}"` : under ? ` under ${relFile(under)}` : bulkIds ? ` in ${bulkIds.length} selected edit(s)` : '';
+    if (bulk.total === 0) {
+      process.stdout.write(c.dim(`no undone edits to redo${scope}\n`));
+      return;
+    }
+    process.stdout.write(
+      (bulk.conflicts ? c.yellow('⚠ ') : c.green('✓ ')) +
+        `re-applied ${bulk.redone} edit(s)${scope}` +
+        (bulk.conflicts ? ` · ${bulk.conflicts} conflict(s) left (redo individually with --force)` : '') +
+        '\n'
+    );
+    return;
+  }
   const id = requireId(args);
   const force = args.includes('--force');
   const res = force ? core.reapplyFile(session, id) : core.redoGroup(session, id);
@@ -2073,7 +2108,8 @@ function usage(): void {
       `  keep <id>            mark an edit kept; bulk: --all | --file <substr> | --under <path>\n` +
       `  undo <id> [--force]  surgically undo an edit (--force = per-file restore);\n` +
       `                       bulk (pending only): --all | --file <substr> | --under <path> | --ids <a,b,c>\n` +
-      `  redo <id> [--force]  re-apply an undone edit\n` +
+      `  redo <id> [--force]  re-apply an undone edit;\n` +
+      `                       bulk (undone only): --all | --file <substr> | --under <path> | --ids <a,b,c>\n` +
       `  task-keep <taskId>   keep every pending edit in a task's strict in_progress span (--json)\n` +
       `  task-undo <taskId>   revert every pending edit in a task's strict in_progress span (--json)\n` +
       `  task-clear <taskId>  drop the resolved (kept/undone) edits of a task's strict span (--json);\n` +

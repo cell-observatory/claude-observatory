@@ -234,6 +234,9 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
             action("Revert All Edits", NavTint.REVERT_ALL) {
                 withSession { s -> ReviewOps.undoAll(project, s, service().log(), "this session") }
             },
+            action("Redo All Edits", AllIcons.Actions.Redo) {
+                withSession { s -> ReviewOps.redoAll(project, s, service().log(), "this session") }
+            },
             fileScopedAction("Accept All Edits in Current File", NavTint.ACCEPT_FILE) { s, vf ->
                 ReviewOps.keepAll(project, s, service().log().filter { it.file == vf.path }, vf.name)
             },

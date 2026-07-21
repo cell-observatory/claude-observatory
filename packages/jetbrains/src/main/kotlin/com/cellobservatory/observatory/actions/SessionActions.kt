@@ -92,6 +92,15 @@ class RevertAllEditsAction : SessionAction() {
     }
 }
 
+/** Re-apply every undone Claude edit in the session (the forward mirror of Revert All). */
+class RedoAllEditsAction : SessionAction() {
+    override fun actionPerformed(e: AnActionEvent) {
+        val project = e.project ?: return
+        val s = sessionOrNotify(project) ?: return
+        ReviewOps.redoAll(project, s, ObservatoryService.getInstance(project).log(), "this session")
+    }
+}
+
 /** Clear the resolved (kept/undone) edits from the session log; pending edits are kept. */
 class ClearResolvedEditsAction : SessionAction() {
     override fun actionPerformed(e: AnActionEvent) {

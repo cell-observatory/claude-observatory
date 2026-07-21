@@ -979,6 +979,38 @@ async function undoAllSession(session: string): Promise<void> {
   );
 }
 
+/** Re-apply every UNDONE edit in the session (the forward mirror of undoAllSession). */
+async function redoAllSession(session: string): Promise<void> {
+  const targets = core.readLog(session).filter((r) => r.status === 'undone').sort((a, b) => a.id - b.id);
+  if (targets.length === 0) {
+    vscode.window.showInformationMessage('Nothing to redo.');
+    return;
+  }
+  const dirty = [...new Set(targets.map((t) => t.file))].filter((f) =>
+    vscode.workspace.textDocuments.some((d) => d.uri.fsPath === f && d.isDirty)
+  );
+  if (dirty.length) {
+    await vscode.window.showWarningMessage(
+      `Save or revert unsaved changes first: ${dirty.map((f) => path.basename(f)).join(', ')}.`,
+      { modal: true }
+    );
+    return;
+  }
+  const fileCount = new Set(targets.map((t) => t.file)).size;
+  const choice = await vscode.window.showWarningMessage(
+    `Re-apply all ${targets.length} undone edit(s) across ${fileCount} file(s)?`,
+    { modal: true, detail: 'This rewrites the files on disk. Overlapping edits may conflict (redo those individually to force).' },
+    `Redo ${targets.length} edits`
+  );
+  if (choice !== `Redo ${targets.length} edits`) return;
+  const res = core.redoScope(session);
+  vscode.window.showInformationMessage(
+    `Re-applied ${res.redone} edit(s)` +
+      (res.conflicts ? ` · ${res.conflicts} conflict(s) left (redo individually to force)` : '') +
+      '.'
+  );
+}
+
 // --- Chapter review actions (0.8.0) — the Overview ribbon's per-chip Accept / Reject / Clear.
 // Each resolves the chapter's DISPLAYED edit set (core.reviewEditIds via keepTask/undoTask) — WYSIWYG:
 // the buttons act on exactly the edits the chapter row shows (incl. gap-filled members and the
@@ -4182,6 +4214,7 @@ export function activate(context: vscode.ExtensionContext): void {
     // Session-wide bulk actions (view-title buttons).
     vscode.commands.registerCommand('claudeObservatory.keepAll', () => withSession((s) => keepAllSession(s))()),
     vscode.commands.registerCommand('claudeObservatory.undoAll', () => withSession((s) => undoAllSession(s))()),
+    vscode.commands.registerCommand('claudeObservatory.redoAll', () => withSession((s) => redoAllSession(s))()),
     // Chapter (task) review actions — the Overview ribbon's per-chip Accept / Reject / Clear + a
     // "clear every completed chapter" affordance. The webview posts {taskKeep|taskUndo|taskClear,taskId}.
     vscode.commands.registerCommand('claudeObservatory.taskKeep', (taskId: string) => withSession((s) => keepChapter(s, taskId))()),

@@ -160,6 +160,45 @@ object ReviewOps {
         }
     }
 
+    /** Re-apply all UNDONE edits in scope, oldest-first — the forward mirror of [undoAll]. Same dirty-buffer
+     *  guard + confirm; the redo is ONE CLI call backed by core.redoScope (`redo --all` / `--under`), not a
+     *  per-id loop, so the three front-ends can't drift. `under` = null re-applies the whole session. */
+    fun redoAll(project: Project, session: String, targets: List<EditRecord>, scope: String, under: String? = null) {
+        val list = targets.filter { it.undone }.sortedBy { it.id }
+        if (list.isEmpty()) {
+            notify(project, "Nothing to redo in $scope.")
+            return
+        }
+        val dirty = list.map { it.file }.distinct().filter { isDirty(it) }
+        if (dirty.isNotEmpty()) {
+            if (!confirmSaveAll(project, dirty)) return
+        }
+        val fileCount = list.map { it.file }.distinct().size
+        val ok = Messages.showYesNoDialog(
+            project,
+            "Re-apply ${list.size} undone edit(s) across $fileCount file(s) in $scope?\n\n" +
+                "This rewrites the files on disk. Overlapping edits may conflict " +
+                "(redo those individually to force).",
+            "Redo Claude's Edits",
+            "Redo ${list.size} Edit(s)", "Cancel", Messages.getWarningIcon(),
+        )
+        if (ok != Messages.YES) return
+        val files = list.map { it.file }.distinct()
+        runBg(project, "Re-applying ${list.size} edit(s)") {
+            val res = ObservatoryCli.redoScope(session, under, project.basePath)
+            files.forEach { refreshFile(it) }
+            under?.let { refreshRecursive(it) }
+            if (res == null) {
+                done(project, cliFailMsg("redo edits"), NotificationType.ERROR)
+            } else {
+                done(
+                    project,
+                    "Re-applied ${res.redone} edit(s)" + if (res.conflicts > 0) " · ${res.conflicts} conflict(s) — redo those individually to force" else "",
+                )
+            }
+        }
+    }
+
     /** Reject (revert) every PENDING edit in ONE module bucket — the Overview Folder-axis Reject. Acts on
      *  the bucket's EXACT edits (by id), never the recursive subtree a path scope would catch — mirrors VS
      *  Code's `undoEditsInFolder` (core.undoScope({ ids })). Same dirty-buffer guard + confirm + refresh as

@@ -136,6 +136,10 @@
               class="com.cellobservatory.observatory.actions.RevertAllEditsAction"
               text="Claude Observatory: Revert All Edits"
               description="Revert every pending Claude edit in this session"/>
+      <action id="ClaudeObservatory.RedoAll"
+              class="com.cellobservatory.observatory.actions.RedoAllEditsAction"
+              text="Claude Observatory: Redo All Edits"
+              description="Re-apply every undone Claude edit in this session"/>
       <action id="ClaudeObservatory.ClearResolved"
               class="com.cellobservatory.observatory.actions.ClearResolvedEditsAction"
               text="Claude Observatory: Clear Resolved Edits"

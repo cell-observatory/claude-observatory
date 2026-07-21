@@ -345,6 +345,12 @@
         "icon": "$(close-all)"
       },
       {
+        "command": "claudeObservatory.redoAll",
+        "title": "Redo all edits",
+        "category": "Claude Observatory",
+        "icon": "$(redo)"
+      },
+      {
         "command": "claudeObservatory.clearResolved",
         "title": "Clear resolved edits",
         "category": "Claude Observatory",
@@ -713,6 +719,11 @@
           "command": "claudeObservatory.undoAll",
           "when": "view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.observations",
           "group": "navigation@5"
+        },
+        {
+          "command": "claudeObservatory.redoAll",
+          "when": "view == claudeObservatory.edits || view == claudeObservatory.diffs || view == claudeObservatory.observations",
+          "group": "navigation@6"
         },
         {
           "command": "claudeObservatory.clearResolved",

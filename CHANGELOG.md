@@ -11,6 +11,10 @@ A quality-of-life sweep across the CLI, core, both editors, and the docs.
 
 ### Added
 
+- **Bulk "redo all" across every surface** — the forward mirror of Revert All: `claude-observatory redo
+  --all` (plus `--file <substr>` / `--under <path>` / `--ids <a,b,c>` and `--json`, matching `undo`), a
+  **Redo all edits** command + toolbar button in VS Code, and a **Redo All Edits** action in JetBrains
+  (also registered for Find Action), all backed by a shared `core.redoScope` (oldest-first re-apply).
 - **JetBrains parity — the opt-in Claude-insight feature is now reachable**: "Refresh Recap (Claude)"
   on the Observations toolbar and "Analyze Edit with Claude" on an edit (previously the `analyze`/`recap`
   backend and the `claudeBin` setting were wired to nothing).
