@@ -47,6 +47,7 @@ import com.intellij.util.ui.tree.TreeUtil
 import java.awt.BorderLayout
 import java.awt.Color
 import java.awt.Component
+import java.awt.Container
 import java.awt.Cursor
 import java.awt.Dimension
 import java.awt.FlowLayout
@@ -54,7 +55,10 @@ import java.awt.Graphics
 import java.awt.Graphics2D
 import java.awt.GridBagConstraints
 import java.awt.GridBagLayout
+import java.awt.LayoutManager2
 import java.awt.RenderingHints
+import java.awt.event.ComponentAdapter
+import java.awt.event.ComponentEvent
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import javax.swing.Box
@@ -303,14 +307,22 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         val rightTb = mkTb("Right", rightGroup)
         overviewToolbars = listOf(diffTb, fileTb, folderTb, chapterTb, leftTb, rightTb)
 
-        // TOP row: left cluster pinned LEFT, right cluster pinned RIGHT (a weighted glue cell absorbs the
-        // slack — .ov-tbrow.split { justify-content: space-between }).
-        val topRow = JPanel(GridBagLayout()).apply {
+        // TOP row: left cluster pinned LEFT, right cluster pinned RIGHT while both fit; when the tool
+        // window is too narrow for both, the right cluster WRAPS onto a second line (VS Code's
+        // .ov-tbrow.split is flex-wrap: wrap + space-between). SplitWrapLayout does the fit-or-stack; the
+        // width-change revalidate lets the host toolbar grow the extra row instead of clipping.
+        val topRow = JPanel(SplitWrapLayout(JBUI.scale(3))).apply {
             isOpaque = false
             alignmentX = Component.LEFT_ALIGNMENT
-            add(leftTb.component, GridBagConstraints().apply { gridx = 0; gridy = 0; anchor = GridBagConstraints.WEST })
-            add(Box.createHorizontalGlue(), GridBagConstraints().apply { gridx = 1; gridy = 0; weightx = 1.0; fill = GridBagConstraints.HORIZONTAL })
-            add(rightTb.component, GridBagConstraints().apply { gridx = 2; gridy = 0; anchor = GridBagConstraints.EAST })
+            add(leftTb.component)  // child 0 = LEFT cluster
+            add(rightTb.component) // child 1 = RIGHT cluster
+            addComponentListener(object : ComponentAdapter() {
+                private var lastWidth = -1
+                override fun componentResized(e: ComponentEvent) {
+                    val c = e.component
+                    if (c.width != lastWidth) { lastWidth = c.width; c.revalidate() }
+                }
+            })
         }
         // BOTTOM row: the four axes as ONE centered cluster with a divider between each (glue on both ends).
         val bottomRow = JPanel(GridBagLayout()).apply {
@@ -1537,3 +1549,62 @@ private fun clipText(s: String, n: Int): String = if (s.length <= n) s else s.ta
 /** Minimal HTML escape for text interpolated into a JBLabel's <html> body (the bottom summary name). */
 private fun escHtml(s: String): String =
     s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+/**
+ * A two-cluster toolbar row that mirrors CSS `flex-wrap: wrap; justify-content: space-between`
+ * (VS Code's `.ov-tbrow.split`): the LEFT cluster (child 0) pins to the left edge and the RIGHT cluster
+ * (child 1) pins to the right edge while both fit on one line; when the row is too narrow for both, the
+ * right cluster wraps onto a second line (left-aligned) so nothing is clipped. The preferred height
+ * tracks the current width — the host row's width-change listener revalidates so the toolbar grows the
+ * extra row rather than cutting the right cluster off (as the old fixed GridBagLayout did).
+ */
+internal class SplitWrapLayout(private val vgap: Int) : LayoutManager2 {
+    override fun addLayoutComponent(name: String?, comp: Component?) {}
+    override fun addLayoutComponent(comp: Component?, constraints: Any?) {}
+    override fun removeLayoutComponent(comp: Component?) {}
+    override fun getLayoutAlignmentX(target: Container?): Float = 0f
+    override fun getLayoutAlignmentY(target: Container?): Float = 0.5f
+    override fun invalidateLayout(target: Container?) {}
+    // Width MAX so a BoxLayout Y_AXIS host stretches this row to the full toolbar width (the right
+    // cluster must be able to reach the true right edge); the host caps height to preferred.
+    override fun maximumLayoutSize(target: Container): Dimension = Dimension(Int.MAX_VALUE, Int.MAX_VALUE)
+
+    private fun kids(parent: Container): List<Component> =
+        (0 until parent.componentCount).map { parent.getComponent(it) }.filter { it.isVisible }
+
+    /** True when the two clusters can't sit side by side within [avail] px. */
+    private fun wraps(left: Component?, right: Component?, avail: Int): Boolean =
+        left != null && right != null && avail > 0 &&
+            left.preferredSize.width + right.preferredSize.width > avail
+
+    override fun preferredLayoutSize(parent: Container): Dimension {
+        val ins = parent.insets
+        val k = kids(parent)
+        val left = k.getOrNull(0); val right = k.getOrNull(1)
+        val lp = left?.preferredSize ?: Dimension()
+        val rp = right?.preferredSize ?: Dimension()
+        val avail = parent.width - ins.left - ins.right
+        return if (wraps(left, right, avail))
+            Dimension(maxOf(lp.width, rp.width) + ins.left + ins.right, lp.height + vgap + rp.height + ins.top + ins.bottom)
+        else
+            Dimension(lp.width + rp.width + ins.left + ins.right, maxOf(lp.height, rp.height) + ins.top + ins.bottom)
+    }
+
+    override fun minimumLayoutSize(parent: Container): Dimension = preferredLayoutSize(parent)
+
+    override fun layoutContainer(parent: Container) {
+        val ins = parent.insets
+        val k = kids(parent)
+        val left = k.getOrNull(0); val right = k.getOrNull(1)
+        val lp = left?.preferredSize ?: Dimension()
+        val rp = right?.preferredSize ?: Dimension()
+        val avail = parent.width - ins.left - ins.right
+        if (wraps(left, right, avail)) {
+            left?.setBounds(ins.left, ins.top, minOf(lp.width, avail), lp.height)
+            right?.setBounds(ins.left, ins.top + lp.height + vgap, minOf(rp.width, avail), rp.height)
+        } else {
+            left?.setBounds(ins.left, ins.top, lp.width, lp.height)
+            right?.setBounds(parent.width - ins.right - rp.width, ins.top, rp.width, rp.height)
+        }
+    }
+}

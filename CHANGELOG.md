@@ -37,6 +37,14 @@ Per-tag release artifacts and auto-generated notes are on the
 - `claude-observatory update` is described accurately as refreshing the CLI **and** the installed editor
   extensions, not just the CLI.
 
+### Fixed
+
+- **PyCharm/JetBrains: the Overview toolbar no longer clips on a narrow tool window.** The top row
+  (session + Accept All / Revert All / Clear Resolved / Export on the left; Search / Active Only /
+  Spotlight / Refresh on the right) keeps its left/right split when there's room and now **wraps** the
+  right cluster onto a second line when the window is too narrow — mirroring the VS Code toolbar's
+  `flex-wrap`. A headless geometry test locks the fit-vs-wrap behavior in.
+
 ## [0.8.4] — 2026-07-17
 
 ### Fixed
