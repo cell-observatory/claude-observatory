@@ -862,7 +862,7 @@ async function undoEditsInFolder(session: string, folder: string): Promise<void>
     .filter((r) => r.status === 'pending' && folderLabelOf(r.file) === folder)
     .sort((a, b) => b.id - a.id);
   if (targets.length === 0) {
-    vscode.window.showInformationMessage(`Nothing to revert in ${label}.`);
+    vscode.window.showInformationMessage(`Nothing to undo in ${label}.`);
     return;
   }
   const dirty = [...new Set(targets.map((t) => t.file))].filter((f) =>
@@ -4350,13 +4350,13 @@ export function activate(context: vscode.ExtensionContext): void {
       const next = !cfg.get<boolean>('inlineReview', true);
       await cfg.update('inlineReview', next, vscode.ConfigurationTarget.Global);
       refreshInline();
-      vscode.window.showInformationMessage(`Claude Observatory: inline review ${next ? 'on' : 'off'}.`);
+      vscode.window.setStatusBarMessage(`Claude Observatory: inline review ${next ? 'on' : 'off'}`, 2500);
     }),
     // Spotlight: dim every unmodified line so only Claude's edits read at full contrast.
     vscode.commands.registerCommand('claudeObservatory.toggleHeatmap', () => {
       heatmapOn = !heatmapOn;
       refreshInline();
-      vscode.window.setStatusBarMessage(`Claude Observatory: spotlight ${heatmapOn ? 'on 💡' : 'off'}`, 2500);
+      vscode.window.setStatusBarMessage(`Claude Observatory: spotlight ${heatmapOn ? 'on' : 'off'}`, 2500);
     }),
     vscode.commands.registerCommand('claudeObservatory.keepFile', (n: FileNode) =>
       withSession((s) => keepEditsInFile(s, n.file, n.edits))()

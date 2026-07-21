@@ -132,7 +132,7 @@
       },
       {
         "command": "claudeObservatory.clearCompletedChapters",
-        "title": "Clear completed chapters (drop resolved edits of every settled chapter)",
+        "title": "Clear completed chapters",
         "category": "Claude Observatory",
         "icon": "$(clear-all)"
       },
@@ -180,17 +180,17 @@
         "command": "claudeObservatory.undoFile",
         "title": "Undo all edits in file",
         "category": "Claude Observatory",
-        "icon": "$(close)"
+        "icon": "$(close-all)"
       },
       {
         "command": "claudeObservatory.keepOpenFile",
-        "title": "Accept all edits in this file",
+        "title": "Keep all edits in this file",
         "category": "Claude Observatory",
         "icon": "$(check-all)"
       },
       {
         "command": "claudeObservatory.undoOpenFile",
-        "title": "Revert all edits in this file",
+        "title": "Undo all edits in this file",
         "category": "Claude Observatory",
         "icon": "$(close-all)"
       },
@@ -318,7 +318,7 @@
         "command": "claudeObservatory.toggleHeatmap",
         "title": "Toggle spotlight (dim unmodified lines)",
         "category": "Claude Observatory",
-        "icon": "$(lightbulb)"
+        "icon": "$(color-mode)"
       },
       {
         "command": "claudeObservatory.switchSession",
@@ -342,7 +342,7 @@
         "command": "claudeObservatory.undoAll",
         "title": "Revert all edits",
         "category": "Claude Observatory",
-        "icon": "$(timeline-view-icon)"
+        "icon": "$(close-all)"
       },
       {
         "command": "claudeObservatory.clearResolved",
@@ -352,7 +352,7 @@
       },
       {
         "command": "claudeObservatory.cleanStore",
-        "title": "Clean store (reclaim disk / drop session)",
+        "title": "Clean store",
         "category": "Claude Observatory",
         "icon": "$(database)"
       },
@@ -394,35 +394,35 @@
         "command": "claudeObservatory.reviewPrev",
         "title": "Review previous pending edit",
         "category": "Claude Observatory",
-        "icon": "$(debug-step-back)"
+        "icon": "$(arrow-up)"
       },
       {
         "command": "claudeObservatory.reviewNext",
         "title": "Review next pending edit",
         "category": "Claude Observatory",
-        "icon": "$(debug-step-over)"
+        "icon": "$(arrow-down)"
       },
       {
         "command": "claudeObservatory.navDiffPrev",
-        "title": "Nav bar: previous edit in this file",
+        "title": "Previous edit in this file",
         "category": "Claude Observatory",
         "icon": "$(chevron-up)"
       },
       {
         "command": "claudeObservatory.navDiffNext",
-        "title": "Nav bar: next edit in this file",
+        "title": "Next edit in this file",
         "category": "Claude Observatory",
         "icon": "$(chevron-down)"
       },
       {
         "command": "claudeObservatory.navFilePrev",
-        "title": "Nav bar: previous changed file",
+        "title": "Previous changed file",
         "category": "Claude Observatory",
         "icon": "$(chevron-left)"
       },
       {
         "command": "claudeObservatory.navFileNext",
-        "title": "Nav bar: next changed file",
+        "title": "Next changed file",
         "category": "Claude Observatory",
         "icon": "$(chevron-right)"
       },
@@ -438,19 +438,19 @@
       },
       {
         "command": "claudeObservatory.navViewDiff",
-        "title": "Nav bar: view current edit diff",
+        "title": "View current edit diff",
         "category": "Claude Observatory",
         "icon": "$(diff)"
       },
       {
         "command": "claudeObservatory.navKeep",
-        "title": "Nav bar: keep this edit",
+        "title": "Keep this edit",
         "category": "Claude Observatory",
         "icon": "$(check)"
       },
       {
         "command": "claudeObservatory.navUndo",
-        "title": "Nav bar: undo this edit",
+        "title": "Undo this edit",
         "category": "Claude Observatory",
         "icon": "$(discard)"
       },
@@ -510,7 +510,7 @@
         "command": "claudeObservatory.undoFolder",
         "title": "Revert all edits in folder",
         "category": "Claude Observatory",
-        "icon": "$(discard)"
+        "icon": "$(close-all)"
       },
       {
         "command": "claudeObservatory.clearFolder",
@@ -523,12 +523,14 @@
       {
         "command": "claudeObservatory.reviewNext",
         "key": "ctrl+alt+n",
-        "mac": "alt+cmd+n"
+        "mac": "alt+cmd+n",
+        "when": "!terminalFocus"
       },
       {
         "command": "claudeObservatory.reviewPrev",
         "key": "ctrl+alt+p",
-        "mac": "alt+cmd+p"
+        "mac": "alt+cmd+p",
+        "when": "!terminalFocus"
       },
       {
         "command": "claudeObservatory.keepAtCursor",
@@ -556,14 +558,14 @@
       },
       {
         "command": "claudeObservatory.diffPrevRevision",
-        "key": "ctrl+alt+[",
-        "mac": "alt+cmd+[",
+        "key": "ctrl+alt+-",
+        "mac": "alt+cmd+-",
         "when": "editorTextFocus"
       },
       {
         "command": "claudeObservatory.diffNextRevision",
-        "key": "ctrl+alt+]",
-        "mac": "alt+cmd+]",
+        "key": "ctrl+alt+=",
+        "mac": "alt+cmd+=",
         "when": "editorTextFocus"
       },
       {
@@ -580,6 +582,50 @@
       }
     ],
     "menus": {
+      "commandPalette": [
+        { "command": "claudeObservatory.openDiff", "when": "false" },
+        { "command": "claudeObservatory.openFileAtEdit", "when": "false" },
+        { "command": "claudeObservatory.openFile", "when": "false" },
+        { "command": "claudeObservatory.keep", "when": "false" },
+        { "command": "claudeObservatory.undo", "when": "false" },
+        { "command": "claudeObservatory.redo", "when": "false" },
+        { "command": "claudeObservatory.keepFile", "when": "false" },
+        { "command": "claudeObservatory.undoFile", "when": "false" },
+        { "command": "claudeObservatory.inlineDiff", "when": "false" },
+        { "command": "claudeObservatory.viewChanges", "when": "false" },
+        { "command": "claudeObservatory.peekKeep", "when": "false" },
+        { "command": "claudeObservatory.peekUndo", "when": "false" },
+        { "command": "claudeObservatory.peekChat", "when": "false" },
+        { "command": "claudeObservatory.peekPrev", "when": "false" },
+        { "command": "claudeObservatory.peekNext", "when": "false" },
+        { "command": "claudeObservatory.peekPrevFile", "when": "false" },
+        { "command": "claudeObservatory.peekNextFile", "when": "false" },
+        { "command": "claudeObservatory.peekAcceptFile", "when": "false" },
+        { "command": "claudeObservatory.peekRejectFile", "when": "false" },
+        { "command": "claudeObservatory.inlineKeep", "when": "false" },
+        { "command": "claudeObservatory.inlineUndo", "when": "false" },
+        { "command": "claudeObservatory.diffKeep", "when": "false" },
+        { "command": "claudeObservatory.diffUndo", "when": "false" },
+        { "command": "claudeObservatory.diffChat", "when": "false" },
+        { "command": "claudeObservatory.diffPrevEdit", "when": "false" },
+        { "command": "claudeObservatory.diffNextEdit", "when": "false" },
+        { "command": "claudeObservatory.chatEdit", "when": "false" },
+        { "command": "claudeObservatory.chatAction", "when": "false" },
+        { "command": "claudeObservatory.showObservation", "when": "false" },
+        { "command": "claudeObservatory.analyzeEdit", "when": "false" },
+        { "command": "claudeObservatory.navDiffPrev", "when": "false" },
+        { "command": "claudeObservatory.navDiffNext", "when": "false" },
+        { "command": "claudeObservatory.navFilePrev", "when": "false" },
+        { "command": "claudeObservatory.navFileNext", "when": "false" },
+        { "command": "claudeObservatory.navChapterPrev", "when": "false" },
+        { "command": "claudeObservatory.navChapterNext", "when": "false" },
+        { "command": "claudeObservatory.navViewDiff", "when": "false" },
+        { "command": "claudeObservatory.navKeep", "when": "false" },
+        { "command": "claudeObservatory.navUndo", "when": "false" },
+        { "command": "claudeObservatory.keepFolder", "when": "false" },
+        { "command": "claudeObservatory.undoFolder", "when": "false" },
+        { "command": "claudeObservatory.clearFolder", "when": "false" }
+      ],
       "comments/commentThread/title": [
         {
           "command": "claudeObservatory.peekPrev",
@@ -925,7 +971,7 @@
         "claudeObservatory.inlineReview": {
           "type": "boolean",
           "default": true,
-          "description": "Show Claude's pending edits inline in the editor (gutter change-bars + a per-edit ✨ marker with Keep/Undo/Diff/Chat on hover)."
+          "description": "Show Claude's pending edits inline in the editor (gutter change-bars + a per-edit marker with Keep/Undo/Diff/Chat on hover)."
         },
         "claudeObservatory.inlineDiffView": {
           "type": "boolean",
