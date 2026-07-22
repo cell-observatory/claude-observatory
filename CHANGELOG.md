@@ -5,7 +5,7 @@ All notable changes to Claude Observatory are recorded here, following
 Per-tag release artifacts and auto-generated notes are on the
 [Releases page](https://github.com/cell-observatory/claude-observatory/releases).
 
-## [0.8.6] — Unreleased
+## [0.8.6] — 2026-07-22
 
 A quality-of-life sweep across the CLI, core, both editors, and the docs, plus four new lenses on a
 session: what it ran on, what happened to its context, what it reached for, and what shaped it.
