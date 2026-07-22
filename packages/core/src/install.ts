@@ -48,6 +48,28 @@ function readSettings(file: string): { path: string; exists: boolean; data: any 
   return { path: file, exists: true, data };
 }
 
+/** readSettings for the WRITE paths: a malformed settings.json becomes a GUIDING error (naming the
+ *  file and pointing at the .bak) instead of a raw SyntaxError. The read-only probes above degrade
+ *  quietly, but a mutation must stop loudly so the user repairs the JSON before we rewrite it. */
+function readSettingsForWrite(file: string): { path: string; exists: boolean; data: any } {
+  try {
+    return readSettings(file);
+  } catch (e) {
+    throw new Error(
+      `Cannot parse ${file}: ${(e as Error).message}. Fix the JSON (a backup may exist at ${file}.bak) and retry.`
+    );
+  }
+}
+
+/** Atomically replace the settings file: write a temp sibling, then rename it into place, so a crash
+ *  mid-write can never truncate the user's settings.json. Mirrors the cache writers (store/analyze).
+ *  Callers write the .bak first, so a rare rename failure still leaves a recovery copy. */
+function writeSettingsFile(p: string, data: any): void {
+  const tmp = `${p}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n');
+  fs.renameSync(tmp, p); // atomic: a concurrent reader sees old-or-new, never a torn file
+}
+
 /** Coerce a possibly-mangled settings value into a HookGroup[] (a hand-edited file may hold the
  *  wrong shape — e.g. an object where an array is expected). Never throws. */
 function hookGroups(data: any, event: string): HookGroup[] {
@@ -129,7 +151,7 @@ export interface InstallResult {
 
 /** Install both hook entries. `command` is the exact shell command Claude Code will run. */
 export function installHooks(command: string, file: string = settingsPath()): InstallResult {
-  const { path: p, exists, data } = readSettings(file);
+  const { path: p, exists, data } = readSettingsForWrite(file);
   if (!exists) fs.mkdirSync(path.dirname(p), { recursive: true });
   const hooks = (data.hooks = data.hooks || {});
   const migrated = migrateMatchers(hooks);
@@ -144,14 +166,14 @@ export function installHooks(command: string, file: string = settingsPath()): In
       backupPath = p + '.bak';
       fs.writeFileSync(backupPath, fs.readFileSync(p));
     }
-    fs.writeFileSync(p, JSON.stringify(data, null, 2) + '\n');
+    writeSettingsFile(p, data);
   }
   return { changed, settingsPath: p, backupPath };
 }
 
 /** Remove any of our capture hooks. */
 export function uninstallHooks(file: string = settingsPath()): InstallResult {
-  const { path: p, exists, data } = readSettings(file);
+  const { path: p, exists, data } = readSettingsForWrite(file);
   if (!exists || !data.hooks) return { changed: false, settingsPath: p };
   const hooks = data.hooks as Record<string, HookGroup[]>;
   let changed = false;
@@ -168,7 +190,7 @@ export function uninstallHooks(file: string = settingsPath()): InstallResult {
   }
   if (changed) {
     fs.writeFileSync(p + '.bak', fs.readFileSync(p));
-    fs.writeFileSync(p, JSON.stringify(data, null, 2) + '\n');
+    writeSettingsFile(p, data);
   }
   return { changed, settingsPath: p };
 }
@@ -183,7 +205,7 @@ export function uninstallStatusline(file: string = settingsPath()): {
   settingsPath: string;
   scriptRemoved: boolean;
 } {
-  const { path: p, exists, data } = readSettings(file);
+  const { path: p, exists, data } = readSettingsForWrite(file);
   const ourScript = path.join(claudeConfigDir(), 'statusline.sh');
   let changed = false;
   const sl = data.statusLine as { command?: string } | undefined;
@@ -191,7 +213,7 @@ export function uninstallStatusline(file: string = settingsPath()): {
     delete data.statusLine;
     changed = true;
     fs.writeFileSync(p + '.bak', fs.readFileSync(p));
-    fs.writeFileSync(p, JSON.stringify(data, null, 2) + '\n');
+    writeSettingsFile(p, data);
   }
   let scriptRemoved = false;
   for (const f of [ourScript, path.join(claudeConfigDir(), 'statusline-last.json')]) {

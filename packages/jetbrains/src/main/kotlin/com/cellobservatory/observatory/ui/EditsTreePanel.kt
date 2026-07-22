@@ -234,6 +234,9 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
             action("Revert All Edits", NavTint.REVERT_ALL) {
                 withSession { s -> ReviewOps.undoAll(project, s, service().log(), "this session") }
             },
+            action("Redo All Edits", AllIcons.Actions.Redo) {
+                withSession { s -> ReviewOps.redoAll(project, s, service().log(), "this session") }
+            },
             fileScopedAction("Accept All Edits in Current File", NavTint.ACCEPT_FILE) { s, vf ->
                 ReviewOps.keepAll(project, s, service().log().filter { it.file == vf.path }, vf.name)
             },
@@ -244,6 +247,7 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
                 withSession { s ->
                     val resolved = service().log().count { !it.pending }
                     if (resolved > 0) ReviewOps.clearResolved(project, s, resolved)
+                    else ReviewOps.notify(project, "No resolved edits to clear")
                 }
             },
             action("Switch Session", AllIcons.Vcs.Branch) { ReviewOps.chooseSession(project, tree) },
@@ -253,7 +257,8 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
                 { on ->
                     ObservatorySettings.instance.state.inlineReview = on
                     InlineOverlay.getInstance(project).refreshAll()
-                    ReviewOps.notify(project, "Inline review " + (if (on) "on" else "off"))
+                    // Transient status text, not a persistent balloon (parity with VS Code's toggle).
+                    ReviewOps.status(project, "Inline review " + (if (on) "on" else "off"))
                 }),
             action("Export Review Summary", AllIcons.ToolbarDecorator.Export) { exportSummary() },
             action("Setup Check (doctor)", AllIcons.General.Information) { ReviewOps.openDoctor(project) },
@@ -271,6 +276,10 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
         },
         action("Show Diff", AllIcons.Actions.Diff) {
             selectedEdit()?.let { rec -> withSession { s -> Diffs.show(project, s, rec) } }
+        },
+        // Opt-in `claude -p` deep analysis (spends tokens): open the result as a markdown tab.
+        action("Analyze Edit with Claude", Icons.Star) {
+            selectedEdit()?.let { rec -> withSession { s -> ReviewOps.analyzeEdit(project, s, rec.id) } }
         },
         action("Keep", NavTint.KEEP) {
             selectedEdit()?.takeIf { it.pending }?.let { rec -> withSession { s -> ReviewOps.keep(project, s, rec.id) } }

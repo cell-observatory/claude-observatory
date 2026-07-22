@@ -271,7 +271,7 @@ function cmdDoctor(args: string[]): void {
     process.stdout.write(core.diagnoseMarkdown(checks));
     return;
   }
-  const icon = (l: string) => (l === 'ok' ? c.green('✓') : l === 'warn' ? c.yellow('!') : c.red('✗'));
+  const icon = (l: string) => (l === 'ok' ? c.green('✓') : l === 'warn' ? c.yellow('⚠') : c.red('✗'));
   process.stdout.write(c.bold(`claude-observatory doctor`) + c.dim(`  v${version()}\n\n`));
   for (const ch of checks) {
     process.stdout.write(`${icon(ch.level)} ${ch.label}\n    ${c.dim(ch.detail)}\n`);
@@ -285,14 +285,15 @@ function cmdDoctor(args: string[]): void {
         ? c.red(`${fails} problem(s) to fix`) + (warns ? c.yellow(` · ${warns} warning(s)`) : '') + '\n'
         : warns
           ? c.yellow(`critical checks passed · ${warns} warning(s)`) + '\n'
-          : c.green('all checks passed 🎉') + '\n')
+          : c.green('all checks passed') + '\n')
   );
   process.exit(fails ? 1 : 0);
 }
 
 function cmdSessions(args: string[] = []): void {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
-  const sessions = core.listSessions();
+  // Titles ride along so pickers (and humans) see session NAMES — the raw id stays for --session.
+  const sessions = core.listSessionsWithTitles(process.cwd());
   if (args.includes('--json')) {
     emitJson({ active: core.resolveSessionId(process.cwd()), sessions });
     return;
@@ -304,8 +305,9 @@ function cmdSessions(args: string[] = []): void {
   const active = core.resolveSessionId(process.cwd());
   for (const s of sessions) {
     const mark = s.id === active ? c.green('● ') : '  ';
+    const name = s.title ? `${c.bold(s.title)}  ${c.dim(s.id)}` : c.bold(s.id);
     process.stdout.write(
-      `${mark}${c.bold(s.id)}  ${c.dim(`${s.edits} edit(s) · ${s.pending} pending · ${core.relTime(s.lastMs)}`)}\n`
+      `${mark}${name}  ${c.dim(`${s.edits} edit(s) · ${s.pending} pending · ${core.relTime(s.lastMs)}`)}\n`
     );
   }
   process.stdout.write(c.dim('\n● = resolves for this directory · use `--session <id>` to target another\n'));
@@ -322,7 +324,7 @@ function relFile(file: string): string {
 function statusLabel(s: string): string {
   if (s === 'pending') return c.yellow('pending');
   if (s === 'kept') return c.green('kept');
-  return c.dim('undone');
+  return c.dim('reverted');
 }
 
 function cmdList(args: string[]): void {
@@ -524,6 +526,42 @@ function cmdEgress(args: string[]): void {
   }
 }
 
+/** `capabilities` — what this session actually reached for: files outside the workspace, shell
+ *  commands (with risk tiers), MCP servers, the network, subagent spawns. Reads EXERCISED capability,
+ *  never granted permission: Claude Code writes nothing to the transcript when it asks for approval,
+ *  so "auto-approved vs prompted" is unknowable from the outside — this counts what ran. */
+function cmdCapabilities(args: string[]): void {
+  const core = require('@claude-observatory/core') as Core;
+  const session = getSessionId(args);
+  const ri = args.indexOf('--root'); // classify in/out-of-workspace against the editor's workspace
+  const root = ri >= 0 && args[ri + 1] ? args[ri + 1] : process.cwd();
+  const cap = core.buildCapabilities(core.parseActions(process.cwd(), session), { root });
+  if (args.includes('--json')) {
+    emitJson({ session, capabilities: cap });
+    return;
+  }
+  process.stdout.write(c.bold('Capabilities') + c.dim(`  exercised this session · ${session}\n\n`));
+  const fileLine = (label: string, b: { count: number; outOfRoot: number; samples: string[] }): void => {
+    if (b.count === 0) return;
+    const out = b.outOfRoot > 0 ? c.yellow(` · ${b.outOfRoot} outside the workspace`) : '';
+    process.stdout.write(`  ${c.cyan(label.padEnd(9))} ${b.count}${out}\n`);
+    for (const s of b.samples) process.stdout.write(c.dim(`              ${s}\n`));
+  };
+  fileLine('reads', cap.reads);
+  fileLine('edits', cap.edits);
+  if (cap.exec.count) {
+    const risk = cap.exec.risky ? c.yellow(` · ${cap.exec.risky} risky`) + (cap.exec.high ? c.red(` (${cap.exec.high} high)`) : '') : '';
+    process.stdout.write(`  ${c.cyan('commands'.padEnd(9))} ${cap.exec.count}${risk}\n`);
+  }
+  if (cap.mcp.calls) process.stdout.write(`  ${c.cyan('mcp'.padEnd(9))} ${cap.mcp.calls} call(s) · ${cap.mcp.servers.join(', ')}\n`);
+  if (cap.web.calls) process.stdout.write(`  ${c.cyan('web'.padEnd(9))} ${cap.web.calls} call(s)${cap.web.hosts.length ? ` · ${cap.web.hosts.slice(0, 5).join(', ')}` : ''}\n`);
+  if (cap.agents.spawns) process.stdout.write(`  ${c.cyan('agents'.padEnd(9))} ${cap.agents.spawns} spawn(s)\n`);
+  if (!cap.reads.count && !cap.edits.count && !cap.exec.count && !cap.mcp.calls && !cap.web.calls && !cap.agents.spawns) {
+    process.stdout.write(c.dim('  nothing exercised yet\n'));
+  }
+  process.stdout.write(c.dim(`\n${core.CAPABILITIES_NOTE}\n`));
+}
+
 /** ms → compact human duration (450ms / 3.2s / 2m 5s). */
 function fmtDur(ms: number): string {
   if (!Number.isFinite(ms) || ms <= 0) return '0ms';
@@ -663,7 +701,12 @@ function cmdMultitask(args: string[]): void {
       ? core.agentPhaseDetail(transcript)
       : { phase: 'idle' as const, confidence: 'heuristic' as const };
     // Full (slow-tier) payload: whole-file builds per agent — aggregated HERE so renderers stay thin.
-    const map = core.buildChangeMap(sib.worktree, sib.id, { root: sib.worktree });
+    // The ACTIVE session is always rebuilt (its transcript is still growing, and its live counts are
+    // what the user is watching); every other sibling comes from the on-disk map cache.
+    const map =
+      sib.id === session
+        ? core.buildChangeMap(sib.worktree, sib.id, { root: sib.worktree })
+        : core.siblingChangeMap(sib.worktree, sib.id, { root: sib.worktree });
     // Per-sibling tokens + wall-clock (one light transcript pass) — so Fleet shows the same metric style
     // as Workflows already do. Cached on this slow tier alongside buildChangeMap.
     const usage = core.sessionUsage(sib.worktree, sib.id);
@@ -695,9 +738,12 @@ function cmdMultitask(args: string[]): void {
       subagents,
       files: sib.files,
       diff: { added: map.summary.added, removed: map.summary.removed },
-      tokens: usage.tokens,
+      tokens: usage.total,
       durationMs: usage.durationMs,
       risk: sib.risk,
+      // Read off the map just built — never a second action scan.
+      capabilities: map.capabilities,
+      compactions: map.summary.compactions,
     };
   });
 
@@ -727,10 +773,11 @@ function cmdMultitask(args: string[]): void {
     worktrees: [...wtBy.values()],
     // Workflow runs (one level above subagents) for the ACTIVE session — aggregated in core, rendered thin.
     workflows: core.parseWorkflows(cwd, session),
-    // The ACTIVE session's task list (TaskCreate/TaskUpdate — the newer system next to TodoWrite),
-    // for the Overview's Tasks tab: transcript history ∪ live dir state, each row carrying the
-    // chapterId that joins it to its change-map chapter. [] for sessions that never used tasks.
-    tasks: core.sessionTaskRows(cwd, session),
+    // The ACTIVE session's task list for the Overview's Tasks tab, across BOTH task generations:
+    // the legacy numbered TaskCreate/TaskUpdate list (transcript history ∪ live dir state) unioned
+    // with one row per background Agent run — the current harness's task system. Each row carries the
+    // chapterId that joins it to its change-map chapter. [] for sessions with neither.
+    tasks: core.allSessionTaskRows(cwd, session),
     actions,
     summary: { active: fleet.active, conflicts: fleet.conflicts },
   });
@@ -808,6 +855,7 @@ function cmdDiff(args: string[]): void {
   const rec = core.findRecord(session, id);
   if (!rec) fail(`no edit #${id} in session ${session}`);
   process.stdout.write(core.coloredDiff(session, rec as EditRecord, isTTY()) + '\n');
+  process.stdout.write(c.dim(`keep #${id} · undo #${id}\n`));
 }
 
 function cmdKeep(args: string[]): void {
@@ -839,6 +887,11 @@ function cmdKeep(args: string[]): void {
       return;
     }
     const scope = fileSub ? ` in files matching "${fileSub}"` : under ? ` under ${relFile(under)}` : '';
+    if (targets.length === 0) {
+      // Nothing matched the scope — an honest "nothing to do", never a green ✓ 0 that reads as success.
+      process.stdout.write(c.dim(`no pending edits to keep${scope}\n`));
+      return;
+    }
     process.stdout.write(c.green('✓ ') + `kept ${targets.length} edit(s)${scope}\n`);
     return;
   }
@@ -886,6 +939,11 @@ function cmdUndo(args: string[]): void {
       return;
     }
     const scope = fileSub ? ` in files matching "${fileSub}"` : under ? ` under ${relFile(under)}` : ids ? ` in ${ids.length} selected edit(s)` : '';
+    if (res.total === 0) {
+      // No pending edits matched the scope — an honest "nothing to do", never a green ✓ 0.
+      process.stdout.write(c.dim(`no pending edits to revert${scope}\n`));
+      return;
+    }
     process.stdout.write(
       (res.conflicts ? c.yellow('⚠ ') : c.green('✓ ')) +
         `reverted ${res.undone} edit(s)${scope}` +
@@ -916,6 +974,41 @@ function cmdUndo(args: string[]): void {
 function cmdRedo(args: string[]): void {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const session = getSessionId(args);
+  // Bulk: --all (every undone in the session) | --file <substr> | --under <path> | --ids <a,b,c> —
+  // the forward mirror of `undo`'s selectors, via the shared core.redoScope.
+  const fi = args.indexOf('--file');
+  const ui = args.indexOf('--under');
+  const idi = args.indexOf('--ids');
+  if (args.includes('--all') || fi >= 0 || ui >= 0 || idi >= 0) {
+    const fileSub = fi >= 0 ? args[fi + 1] : undefined;
+    if (fi >= 0 && !fileSub) fail('`redo --file <substr>` requires a value');
+    const under = ui >= 0 ? args[ui + 1] : undefined;
+    if (ui >= 0 && !under) fail('`redo --under <path>` requires a value');
+    let bulkIds: number[] | undefined;
+    if (idi >= 0) {
+      const raw = args[idi + 1];
+      if (!raw) fail('`redo --ids <a,b,c>` requires a comma-separated id list');
+      bulkIds = raw.split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => Number.isInteger(n));
+      if (!bulkIds.length) fail('`redo --ids <a,b,c>` got no valid integer ids');
+    }
+    const bulk = core.redoScope(session, { under, fileSubstr: fileSub, ids: bulkIds });
+    if (args.includes('--json')) {
+      emitJson({ redone: bulk.redone, conflicts: bulk.conflicts, total: bulk.total });
+      return;
+    }
+    const scope = fileSub ? ` in files matching "${fileSub}"` : under ? ` under ${relFile(under)}` : bulkIds ? ` in ${bulkIds.length} selected edit(s)` : '';
+    if (bulk.total === 0) {
+      process.stdout.write(c.dim(`no undone edits to redo${scope}\n`));
+      return;
+    }
+    process.stdout.write(
+      (bulk.conflicts ? c.yellow('⚠ ') : c.green('✓ ')) +
+        `re-applied ${bulk.redone} edit(s)${scope}` +
+        (bulk.conflicts ? ` · ${bulk.conflicts} conflict(s) left (redo individually with --force)` : '') +
+        '\n'
+    );
+    return;
+  }
   const id = requireId(args);
   const force = args.includes('--force');
   const res = force ? core.reapplyFile(session, id) : core.redoGroup(session, id);
@@ -1108,6 +1201,7 @@ function fmtBytes(b: number): string {
 
 function cmdClean(args: string[]): void {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  const json = args.includes('--json'); // structured results for front-ends/scripts (sibling to keep/undo)
   // Drop resolved (kept/undone) edits in the active session, keep pending. --under <path> scopes it to
   // a file/folder (the editors' folder/file Clear action).
   if (args.includes('--resolved')) {
@@ -1115,6 +1209,10 @@ function cmdClean(args: string[]): void {
     const under = ui >= 0 ? args[ui + 1] : undefined;
     if (ui >= 0 && !under) fail('`clean --resolved --under <path>` requires a value');
     const n = core.clearResolved(getSessionId(args), under);
+    if (json) {
+      emitJson({ cleared: n, under: under ?? null });
+      return;
+    }
     process.stdout.write(c.green('✓ ') + `cleared ${n} resolved edit(s)${under ? ` under ${relFile(under)}` : ''}\n`);
     return;
   }
@@ -1125,6 +1223,10 @@ function cmdClean(args: string[]): void {
     if (!id) fail('`--drop <session-id>` requires a session id');
     if (!core.isSafeSessionId(id)) fail(`invalid session id "${id}" — refusing to delete.`);
     core.removeSession(id);
+    if (json) {
+      emitJson({ dropped: [id] });
+      return;
+    }
     process.stdout.write(c.green('✓ ') + `dropped session ${id}\n`);
     return;
   }
@@ -1136,6 +1238,10 @@ function cmdClean(args: string[]): void {
     if (ms === null) fail(`bad --older-than value "${spec ?? ''}" (use e.g. 30d or 12h)`);
     const stale = core.listSessions().filter((s) => s.lastMs < Date.now() - ms);
     for (const s of stale) core.removeSession(s.id);
+    if (json) {
+      emitJson({ dropped: stale.map((s) => s.id), olderThan: spec });
+      return;
+    }
     process.stdout.write(c.green('✓ ') + `dropped ${stale.length} session(s) inactive > ${spec}\n`);
     return;
   }
@@ -1143,6 +1249,10 @@ function cmdClean(args: string[]): void {
   if (args.includes('--all')) {
     const all = core.listSessions();
     for (const s of all) core.removeSession(s.id);
+    if (json) {
+      emitJson({ dropped: all.map((s) => s.id) });
+      return;
+    }
     process.stdout.write(c.green('✓ ') + `dropped all ${all.length} session(s)\n`);
     return;
   }
@@ -1160,6 +1270,10 @@ function cmdClean(args: string[]): void {
     removed += r.removed;
     bytes += r.bytes;
     if (core.pruneEmptySession(id)) pruned++;
+  }
+  if (json) {
+    emitJson({ removed, bytes, pruned });
+    return;
   }
   process.stdout.write(
     c.green('✓ ') +
@@ -1181,8 +1295,11 @@ function cmdStats(args: string[]): void {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   let sid: string | undefined;
   const i = args.indexOf('--session');
-  if (i >= 0 && args[i + 1]) sid = args[i + 1];
-  else sid = core.resolveSessionId(process.cwd()) || undefined;
+  if (i >= 0 && args[i + 1]) {
+    sid = args[i + 1];
+    // Guard a user-provided id like getSessionId does — computeStats derives a store path from it.
+    if (!core.isSafeSessionId(sid)) fail(`invalid session id "${sid}" (letters, digits, dot, dash, underscore only).`);
+  } else sid = core.resolveSessionId(process.cwd()) || undefined; // no session → global/default window
   const stats = core.computeStats(sid);
   if (args.includes('--json')) {
     process.stdout.write(JSON.stringify(stats));
@@ -1319,7 +1436,9 @@ function cmdChangeMap(args: string[]): void {
   const agents = (sibs.length ? sibs : [{ id: session, worktree: cwd, gitBranch: null, phase: null }]).map((sib) => ({
     ...(sib.id === session && sib.worktree === cwd && root === cwd
       ? base
-      : core.buildChangeMap(sib.worktree, sib.id, { root: sib.worktree })),
+      : // A finished sibling's map is memoized on disk (keyed by its transcript + log stamps), so a
+        // repo with dozens of past sessions doesn't re-derive all of them on every Overview refresh.
+        core.siblingChangeMap(sib.worktree, sib.id, { root: sib.worktree })),
     session: sib.id,
     worktree: sib.worktree,
     gitBranch: sib.gitBranch ?? null,
@@ -1440,12 +1559,26 @@ function cmdInsights(args: string[]): void {
   }
 }
 
-/** The UsageLine snapshot (ctx / 5h / week) + the shared staleness threshold; always JSON. */
+/** The UsageLine snapshot (ctx / 5h / week) + the session's input/output/cache token split + its
+ *  model/effort/compaction vitals + the shared staleness threshold; always JSON. Both editors' Stats
+ *  panels consume this. */
 function cmdUsage(args: string[]): void {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const si = args.indexOf('--session');
-  const sid = (si >= 0 && args[si + 1]) || core.resolveSessionId(process.cwd()) || '';
-  emitJson({ ...core.usageLine(process.cwd(), sid), staleMs: core.USAGE_STALE_MS });
+  const provided = si >= 0 && args[si + 1] ? args[si + 1] : undefined;
+  // Guard a user-provided id like getSessionId does — usageLine derives a store path from it.
+  if (provided && !core.isSafeSessionId(provided)) fail(`invalid session id "${provided}" (letters, digits, dot, dash, underscore only).`);
+  const sid = provided || core.resolveSessionId(process.cwd()) || '';
+  // sessionTokens = the session's cumulative input/output/cache split (+ cache hit rate), which the
+  // editors' stats panels render under the session title; ctx/5h/week above are point-in-time limits.
+  // vitals = which model/effort served the session, its compactions, and the context-fill series —
+  // free here, since it shares the cursor sessionUsage just advanced.
+  emitJson({
+    ...core.usageLine(process.cwd(), sid),
+    sessionTokens: core.sessionUsage(process.cwd(), sid),
+    vitals: core.sessionVitals(process.cwd(), sid),
+    staleMs: core.USAGE_STALE_MS,
+  });
 }
 
 // --- opt-in `claude -p` analysis (token-spending; cached results are returned unless --fresh) ---
@@ -1532,7 +1665,11 @@ const RELEASE_REPO = 'cell-observatory/claude-observatory';
 // The VS Code-family extension id (publisher.name). We detect the extension by its install DIR (like
 // the JetBrains plugin dirs) so detection never depends on the editor CLI being on PATH; the CLI is
 // only needed to APPLY the update, and is resolved from app-bundle locations when it's off PATH.
-const VSCODE_EXT_ID = 'claude-observatory.claude-observatory-vscode';
+const VSCODE_EXT_ID = 'cell-observatory.claude-observatory-vscode';
+// The id before 0.8.6, when the publisher changed (claude-observatory → cell-observatory). Editors
+// treat it as a separate extension, so old-id installs must still be detected — and removed after a
+// successful update to the renamed .vsix, or every migrated editor ends up with two Observatories.
+const VSCODE_EXT_ID_OLD = 'claude-observatory.claude-observatory-vscode';
 // One row per VS Code-family editor: where it keeps installed extensions (relative to $HOME), the CLI
 // that drives `--install-extension`, and the macOS .app name used to locate that CLI when off PATH.
 const VSCODE_EDITORS: { label: string; extDirs: string[]; cli: string; app: string }[] = [
@@ -1588,7 +1725,7 @@ function assertDigest(bytes: Buffer, asset: ReleaseAsset): void {
   const expected =
     typeof asset.digest === 'string' && asset.digest.startsWith('sha256:') ? asset.digest.slice(7) : null;
   if (!expected) {
-    process.stdout.write(c.yellow(`  ! no published checksum for ${asset.name} — skipping integrity check\n`));
+    process.stdout.write(c.yellow(`  ⚠ no published checksum for ${asset.name} — skipping integrity check\n`));
     return;
   }
   const actual = crypto.createHash('sha256').update(bytes).digest('hex');
@@ -1657,8 +1794,8 @@ function resolveEditorCli(cli: string, app: string): string | null {
 
 /** Parse the version out of a VS Code extension folder named `<id>-<version>` (fallback: its
  *  package.json). Returns null if neither yields a semver. */
-function versionFromExtFolder(folderPath: string, folderName: string): string | null {
-  const suffix = folderName.slice(VSCODE_EXT_ID.length + 1); // drop the `<id>-` prefix
+function versionFromExtFolder(folderPath: string, folderName: string, id: string): string | null {
+  const suffix = folderName.slice(id.length + 1); // drop the `<id>-` prefix
   if (/^\d+\.\d+\.\d+/.test(suffix)) return suffix;
   try {
     const fs = require('fs');
@@ -1670,31 +1807,48 @@ function versionFromExtFolder(folderPath: string, folderName: string): string | 
 }
 
 /** VS Code-family installs of our extension, detected by their extensions DIR (CLI-independent, like
- *  the JetBrains plugin dirs). `version` = the newest install folder for that editor; `cli` = the
- *  resolved absolute CLI path to apply an update, or null if none was found. */
-function vscodeInstalls(): { label: string; version: string; cli: string | null }[] {
+ *  the JetBrains plugin dirs). `version` = the newest install folder for that editor (old or new id);
+ *  `cli` = the resolved absolute CLI path to apply an update, or null if none was found; `hasOld` =
+ *  an install under the pre-0.8.6 id is present and should be removed once the renamed one is in. */
+function vscodeInstalls(): { label: string; version: string; cli: string | null; extDirs: string[]; hasOld: boolean }[] {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const fs = require('fs');
   const path = require('path');
   const os = require('os');
   const home = os.homedir();
-  const out: { label: string; version: string; cli: string | null }[] = [];
+  const out: { label: string; version: string; cli: string | null; extDirs: string[]; hasOld: boolean }[] = [];
   for (const ed of VSCODE_EDITORS) {
     let best: string | null = null; // newest version across this editor's extension dirs
+    let hasOld = false;
     for (const rel of ed.extDirs) {
       const dir = path.join(home, rel);
       let entries: string[] = [];
       try { entries = fs.readdirSync(dir); } catch { continue; }
       for (const e of entries) {
         // VS Code names extension folders `<publisher>.<name>-<version>` (lowercased).
-        if (!e.toLowerCase().startsWith(VSCODE_EXT_ID + '-')) continue;
-        const v = versionFromExtFolder(path.join(dir, e), e);
+        const id = [VSCODE_EXT_ID, VSCODE_EXT_ID_OLD].find((i) => e.toLowerCase().startsWith(i + '-'));
+        if (!id) continue;
+        if (id === VSCODE_EXT_ID_OLD) hasOld = true;
+        const v = versionFromExtFolder(path.join(dir, e), e, id);
         if (v && (best === null || core.isNewer(v, best))) best = v;
       }
     }
-    if (best !== null) out.push({ label: ed.label, version: best, cli: resolveEditorCli(ed.cli, ed.app) });
+    if (best !== null) out.push({ label: ed.label, version: best, cli: resolveEditorCli(ed.cli, ed.app), extDirs: ed.extDirs, hasOld });
   }
   return out;
+}
+
+/** Whether any of an editor's extension dirs (home-relative) holds an install folder of `id`. */
+function hasExtFolder(extDirs: string[], id: string): boolean {
+  const fs = require('fs');
+  const path = require('path');
+  const home = require('os').homedir();
+  for (const rel of extDirs) {
+    let entries: string[] = [];
+    try { entries = fs.readdirSync(path.join(home, rel)); } catch { continue; }
+    if (entries.some((e: string) => e.toLowerCase().startsWith(id + '-'))) return true;
+  }
+  return false;
 }
 
 /** Refresh the VS Code-family extension in every editor that already has it (never installs into an
@@ -1716,7 +1870,7 @@ async function refreshVscodeExtension(
   const noCli = stale.filter((h) => !h.cli);
   for (const h of noCli) {
     process.stdout.write(
-      c.yellow('  ! ') +
+      c.yellow('  ⚠ ') +
         `${h.label} extension ${h.version} is installed, but its CLI wasn't found on PATH or in the usual app locations — can't auto-update it.\n` +
         c.dim(`    Fix: in ${h.label}, ⇧⌘P → "Shell Command: Install 'code' command in PATH", then re-run \`claude-observatory update\`;\n`) +
         c.dim(`    or install claude-observatory-vscode-v${latest}.vsix from the release manually.\n`)
@@ -1727,7 +1881,7 @@ async function refreshVscodeExtension(
   if (actionable.length) {
     const vsix = assets.find((a) => /\.vsix$/i.test(a.name));
     if (!vsix) {
-      process.stdout.write(c.yellow(`  ! release v${latest} has no .vsix asset — could not update the VS Code extension\n`));
+      process.stdout.write(c.yellow(`  ⚠ release v${latest} has no .vsix asset — could not update the VS Code extension\n`));
     } else {
       const cp = require('child_process');
       const dest = await downloadAsset(vsix);
@@ -1736,8 +1890,15 @@ async function refreshVscodeExtension(
         if (r.status === 0) {
           process.stdout.write(c.green('✓ ') + `${h.label} extension ${h.version} → ${latest}\n`);
           installed++;
+          // Publisher change (0.8.6): drop the old-id install, but only once the renamed extension is
+          // confirmed on disk — a --force reinstall of a pre-rename .vsix must not uninstall itself.
+          if (h.hasOld && hasExtFolder(h.extDirs, VSCODE_EXT_ID)) {
+            const u = cp.spawnSync(h.cli as string, ['--uninstall-extension', VSCODE_EXT_ID_OLD], { stdio: 'pipe' });
+            if (u.status === 0) process.stdout.write(c.dim(`  removed the old ${VSCODE_EXT_ID_OLD} install (publisher changed in 0.8.6).\n`));
+            else process.stdout.write(c.yellow(`  ⚠ ${h.label} still has the pre-0.8.6 install — uninstall the older "Claude Observatory" entry in its Extensions view.\n`));
+          }
         } else {
-          process.stdout.write(c.yellow(`  ! ${h.label} --install-extension failed — install the .vsix manually from the release\n`));
+          process.stdout.write(c.yellow(`  ⚠ ${h.label} --install-extension failed — install the .vsix manually from the release\n`));
         }
       }
       if (installed) process.stdout.write(c.dim('  fully quit the editor (⌘Q) once so the activity-bar icon refreshes.\n'));
@@ -1809,6 +1970,30 @@ function extractZip(zip: string, destDir: string): boolean {
   return cp.spawnSync('unzip', ['-qo', zip, '-d', destDir], { stdio: 'ignore' }).status === 0;
 }
 
+/** The installed JetBrains plugin version, read from its own jar (`lib/claude-observatory-jetbrains-
+ *  <version>.jar`, laid down by every install method — `install-jetbrains.sh`, the IDE's "Install Plugin
+ *  from Disk", and `update`), falling back to the `.observatory-version` sentinel that `update` also
+ *  writes. Returns null only when neither is present. `pluginDir` = `.../plugins/claude-observatory-jetbrains`.
+ *  (Before this, only `update` wrote the sentinel, so script/IDE installs read as null → perpetually "stale".) */
+function jbInstalledVersion(pluginDir: string): string | null {
+  const fs = require('fs');
+  const path = require('path');
+  try {
+    for (const f of fs.readdirSync(path.join(pluginDir, 'lib'))) {
+      if (f.includes('searchableOptions')) continue; // the -searchableOptions.jar carries the version too
+      const m = /^claude-observatory-jetbrains-(\d+\.\d+\.\d+(?:[-.+][0-9A-Za-z.-]+)?)\.jar$/.exec(f);
+      if (m) return m[1];
+    }
+  } catch {
+    /* no lib/ dir — fall through to the sentinel */
+  }
+  try {
+    return fs.readFileSync(path.join(pluginDir, JB_VERSION_SENTINEL), 'utf8').trim() || null;
+  } catch {
+    return null;
+  }
+}
+
 /** One-time setup line that turns a side-loaded JetBrains plugin into an auto-updating one: once
  *  JB_PLUGIN_REPO_URL is registered as a custom plugin repository, the IDE polls it for new releases. */
 function jetbrainsAutoUpdateHint(): string {
@@ -1829,13 +2014,10 @@ async function refreshJetbrainsPlugin(
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const fs = require('fs');
   const path = require('path');
-  const sentinelVer = (d: string): string | null => {
-    try { return fs.readFileSync(path.join(d, JB_PLUGIN_DIRNAME, JB_VERSION_SENTINEL), 'utf8').trim(); } catch { return null; }
-  };
   const holders = jetbrainsPluginDirs().filter((d) => fs.existsSync(path.join(d, JB_PLUGIN_DIRNAME)));
   if (holders.length === 0) return 'absent';
   const stale = holders.filter((d) => {
-    const v = sentinelVer(d);
+    const v = jbInstalledVersion(path.join(d, JB_PLUGIN_DIRNAME));
     return force || v === null || core.isNewer(latest, v);
   });
   if (stale.length === 0) {
@@ -1843,12 +2025,12 @@ async function refreshJetbrainsPlugin(
     return 'current';
   }
   if (process.platform !== 'win32' && !onPath('unzip')) {
-    process.stdout.write(c.yellow(`  ! JetBrains plugin is out of date but \`unzip\` was not found — can't update it (install unzip, then re-run)\n`));
+    process.stdout.write(c.yellow(`  ⚠ JetBrains plugin is out of date but \`unzip\` was not found — can't update it (install unzip, then re-run)\n`));
     return 'blocked';
   }
   const zip = assets.find((a) => /jetbrains.*\.zip$/i.test(a.name));
   if (!zip) {
-    process.stdout.write(c.yellow(`  ! release v${latest} has no JetBrains .zip asset — could not update the plugin\n`));
+    process.stdout.write(c.yellow(`  ⚠ release v${latest} has no JetBrains .zip asset — could not update the plugin\n`));
     return 'blocked';
   }
   const dest = await downloadAsset(zip);
@@ -1862,7 +2044,7 @@ async function refreshJetbrainsPlugin(
       process.stdout.write(c.green('✓ ') + `JetBrains plugin → ${latest} (${d})\n`);
       installed++;
     } catch (e: any) {
-      process.stdout.write(c.yellow(`  ! could not install the JetBrains plugin into ${d}: ${e?.message || e}\n`));
+      process.stdout.write(c.yellow(`  ⚠ could not install the JetBrains plugin into ${d}: ${e?.message || e}\n`));
     }
   }
   if (installed) {
@@ -1910,8 +2092,7 @@ async function cmdUpdate(args: string[]): Promise<void> {
       const jb = jetbrainsPluginDirs().filter((d) => fs.existsSync(path.join(d, JB_PLUGIN_DIRNAME)));
       if (jb.length === 0) process.stdout.write(c.dim('JetBrains: plugin not detected\n'));
       else for (const d of jb) {
-        let v: string | null = null;
-        try { v = fs.readFileSync(path.join(d, JB_PLUGIN_DIRNAME, JB_VERSION_SENTINEL), 'utf8').trim(); } catch { /* no sentinel */ }
+        const v = jbInstalledVersion(path.join(d, JB_PLUGIN_DIRNAME));
         process.stdout.write(v && !core.isNewer(latest, v) ? c.green(`JetBrains: up to date (${v})\n`) : c.yellow(`JetBrains: ${v || 'installed'} → ${latest} (${d})\n`));
       }
     }
@@ -1989,20 +2170,23 @@ function usage(): void {
       `                       remove the capture hooks (--all also reverts the bundled status line +\n` +
       `                       prints teardown steps; --purge-store also deletes the stored edits)\n` +
       `  status               show hooks + hook-path health + session + edit counts\n` +
-      `  doctor [--json]      diagnose setup (hooks, PATH, config dir, session, status line) with fixes\n` +
+      `  doctor [--json]      diagnose setup (hooks, PATH, config dir, session, status line) with fixes;\n` +
+      `                       --markdown (--md) emits the report as Markdown\n` +
       `  update [--check] [--cli-only] [--force]\n` +
       `                       update the CLI AND refresh the locally-installed editor extensions from\n` +
       `                       the latest GitHub Release (VS Code via \`code --install-extension\`;\n` +
       `                       JetBrains by unzip into plugin dirs). --check reports only; --cli-only\n` +
       `                       skips the extensions; --force reinstalls even if already current\n` +
-      `  sessions             list all sessions in the store (● = current dir)\n` +
+      `  sessions             list all sessions in the store, by name (● = current dir)\n` +
       `  list [filters]       list edits (grouped by file); filters: --pending|--kept|--undone, --file <substr>\n` +
       `  timeline [--json]    edits newest-first as a chronological feed (time · id · Δ · file)\n` +
       `  actions [--json]     the full action timeline: EVERY tool call Claude made (reads, greps, bash,\n` +
-      `                       web, subagents, to-dos), each with its result; --category <c> | --errors | --limit <n>\n` +
+      `                       web, subagents, to-dos), each with its result (alias: trace); --category <c> | --errors | --limit <n>\n` +
       `  risk [--json]        flag shell commands that can destroy data / escalate privilege / touch secrets\n` +
       `  egress [--json]      what this session touched off-machine (web / MCP / network-shell destinations)\n` +
-      `  subagents [--json]   every subagent this session spawned, each with its own action timeline + metrics\n` +
+      `  capabilities [--json]  what this session reached for: files outside the workspace, shell commands\n` +
+      `                       (with risk tiers), MCP servers, network, subagents — exercised, not approved\n` +
+      `  subagents [--json]   every subagent this session spawned, each with its own action timeline + metrics (alias: agents)\n` +
       `  siblings [--json]    the other Claude Code sessions in THIS project (active/idle · pending · files · risk);\n` +
       `                       agent-facing digest for cross-agent awareness (alias: fleet); --all includes self;\n` +
       `                       --repo widens to every WORKTREE of the repo (adds worktree/branch/phase + conflicts)\n` +
@@ -2013,8 +2197,9 @@ function usage(): void {
       `  diff <id>            show before/after for an edit\n` +
       `  keep <id>            mark an edit kept; bulk: --all | --file <substr> | --under <path>\n` +
       `  undo <id> [--force]  surgically undo an edit (--force = per-file restore);\n` +
-      `                       bulk (pending only): --all | --file <substr> | --under <path>\n` +
-      `  redo <id> [--force]  re-apply an undone edit\n` +
+      `                       bulk (pending only): --all | --file <substr> | --under <path> | --ids <a,b,c>\n` +
+      `  redo <id> [--force]  re-apply an undone edit;\n` +
+      `                       bulk (undone only): --all | --file <substr> | --under <path> | --ids <a,b,c>\n` +
       `  task-keep <taskId>   keep every pending edit in a task's strict in_progress span (--json)\n` +
       `  task-undo <taskId>   revert every pending edit in a task's strict in_progress span (--json)\n` +
       `  task-clear <taskId>  drop the resolved (kept/undone) edits of a task's strict span (--json);\n` +
@@ -2024,7 +2209,8 @@ function usage(): void {
       `                       subagent + a workflow in an isolated demo-* session and folder) — watch\n` +
       `                       every panel update, then review/undo for real; --fast for scripts/tests;\n` +
       `                       demo --clean removes every trace (sessions, store, demo folder)\n` +
-      `  clean [opts]         GC orphaned blobs; --drop <id> | --older-than <Nd> | --all | --resolved [--under <path>]\n` +
+      `  clean [opts]         GC orphaned blobs (--session <id> scopes; --json for structured output);\n` +
+      `                       --drop <id> | --older-than <Nd> | --all | --resolved [--under <path>]\n` +
       `  stats [--json]       usage stats (edits/tokens/messages/thinking/output) by session & window\n` +
       `  summary [--markdown] per-session review recap (kept/reverted per file); --markdown to export\n` +
       `  insights [--json]    Observations view: recap + per-edit reasoning/flags/file-memory + next steps\n\n` +
@@ -2032,19 +2218,21 @@ function usage(): void {
       `  blob <sha>           raw blob bytes to stdout\n` +
       `  tree [--root <d>] [--filter <q>]   folder→file→class→edit view-model as JSON (both editors)\n` +
       `  changemap [--root <d>]             session change-map (edits + total to-do chapters + per-agent slices) as JSON\n` +
+      `  chapter --of-edit <n>              the chapter an edit belongs to: title + ordered sibling edit ids [--json]\n` +
       `  chat-context [--tool-use-id <id> | --edit <n> | --agent <id> | --task <id>]\n` +
       `                       assemble a zero-token, ready-to-paste chat prompt about an action/edit/subagent/task\n` +
       `  locate --file <f>    per-pending-edit line indices in the live buffer (text on stdin; JSON out)\n` +
       `  observe              recap + per-edit reasoning/flags/memory as JSON\n` +
       `  observations [--root <d>]   Observations view-model: recap + timeline runs (adjacent same-file\n` +
       `                       edits coalesced ×N, each with reasoning) + next steps, as JSON\n` +
-      `  usage                ctx / 5h / week usage snapshot as JSON\n\n` +
+      `  usage                ctx / 5h / week snapshot + session token split + model/effort/compaction\n` +
+      `                       vitals, as JSON\n\n` +
       `opt-in, token-spending (runs \`claude -p\`; returns the cached result unless --fresh):\n` +
       `  analyze <id>         deep-analyze one edit    [--json --fresh --claude-bin <path>]\n` +
       `  recap                one-line session recap   [--json --fresh --claude-bin <path>]\n` +
       `  suggest              next-steps + suggestions [--json --fresh --claude-bin <path>]\n\n` +
       `  --session <id>       target a specific session instead of the newest\n` +
-      `  version [--check]    print the installed version; --check also shows the latest release\n` +
+      `  version [--check]    print the installed version; --check (or --latest) also shows the latest release\n` +
       `  --version            print the installed CLI version\n`
   );
 }
@@ -2150,7 +2338,17 @@ function main(): void {
   const argv = process.argv.slice(2);
   const cmd = argv[0];
   const rest = argv.slice(1);
+  // A subcommand invoked with --help/-h prints usage instead of erroring on a missing positional arg
+  // (e.g. `diff --help`, `task-keep --help`); do it before the nudge so a help invocation stays quiet.
+  if (cmd !== undefined && (rest.includes('--help') || rest.includes('-h'))) {
+    usage();
+    return;
+  }
   maybeCheckForUpdate(cmd, rest); // register a once-a-day "update available" nudge (never blocks)
+  // A throw from a SYNC command should surface as `claude-observatory: <msg>`, not a raw Node stack.
+  // process.exit() throws nothing, so a command's own exit is never caught here; async commands keep
+  // their own .catch(fail) below.
+  try {
   switch (cmd) {
     case 'capture': {
       // Hot path: load only the zero-dep capture module, never the diff-based engine.
@@ -2192,6 +2390,9 @@ function main(): void {
       break;
     case 'egress':
       cmdEgress(rest);
+      break;
+    case 'capabilities':
+      cmdCapabilities(rest);
       break;
     case 'subagents':
     case 'agents':
@@ -2304,6 +2505,9 @@ function main(): void {
       break;
     default:
       fail(`unknown command "${cmd}". Run \`claude-observatory help\`.`);
+  }
+  } catch (e: any) {
+    fail(String(e?.message || e));
   }
 }
 

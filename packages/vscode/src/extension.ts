@@ -862,7 +862,7 @@ async function undoEditsInFolder(session: string, folder: string): Promise<void>
     .filter((r) => r.status === 'pending' && folderLabelOf(r.file) === folder)
     .sort((a, b) => b.id - a.id);
   if (targets.length === 0) {
-    vscode.window.showInformationMessage(`Nothing to revert in ${label}.`);
+    vscode.window.showInformationMessage(`Nothing to undo in ${label}.`);
     return;
   }
   const dirty = [...new Set(targets.map((t) => t.file))].filter((f) =>
@@ -975,6 +975,38 @@ async function undoAllSession(session: string): Promise<void> {
   vscode.window.showInformationMessage(
     `Reverted ${res.undone} edit(s)` +
       (res.conflicts ? ` · ${res.conflicts} conflict(s) left (revert individually to force)` : '') +
+      '.'
+  );
+}
+
+/** Re-apply every UNDONE edit in the session (the forward mirror of undoAllSession). */
+async function redoAllSession(session: string): Promise<void> {
+  const targets = core.readLog(session).filter((r) => r.status === 'undone').sort((a, b) => a.id - b.id);
+  if (targets.length === 0) {
+    vscode.window.showInformationMessage('Nothing to redo.');
+    return;
+  }
+  const dirty = [...new Set(targets.map((t) => t.file))].filter((f) =>
+    vscode.workspace.textDocuments.some((d) => d.uri.fsPath === f && d.isDirty)
+  );
+  if (dirty.length) {
+    await vscode.window.showWarningMessage(
+      `Save or revert unsaved changes first: ${dirty.map((f) => path.basename(f)).join(', ')}.`,
+      { modal: true }
+    );
+    return;
+  }
+  const fileCount = new Set(targets.map((t) => t.file)).size;
+  const choice = await vscode.window.showWarningMessage(
+    `Re-apply all ${targets.length} undone edit(s) across ${fileCount} file(s)?`,
+    { modal: true, detail: 'This rewrites the files on disk. Overlapping edits may conflict (redo those individually to force).' },
+    `Redo ${targets.length} edits`
+  );
+  if (choice !== `Redo ${targets.length} edits`) return;
+  const res = core.redoScope(session);
+  vscode.window.showInformationMessage(
+    `Re-applied ${res.redone} edit(s)` +
+      (res.conflicts ? ` · ${res.conflicts} conflict(s) left (redo individually to force)` : '') +
       '.'
   );
 }
@@ -1369,8 +1401,15 @@ type ObsNode =
   | { kind: 'recap' }
   | { kind: 'steps' }
   | { kind: 'suggestion'; text: string }
+  | { kind: 'ctxhead'; count: number; note: string }
+  | { kind: 'ctxsrc'; src: core.ContextSource }
   | EditNode
   | TlRunNode;
+
+/** Context-source kind → codicon (tree icons: VS Code's full built-in set, not the webview subset). */
+const CTX_ICON: Record<core.ContextSourceKind, string> = {
+  'claude-md': 'book', memory: 'library', plan: 'checklist', skill: 'sparkle', 'compact-summary': 'fold-down',
+};
 
 function firstLine(s: string): string {
   const l = s.split('\n').find((x) => x.trim()) ?? '';
@@ -1423,6 +1462,18 @@ class ObservationsProvider implements vscode.TreeDataProvider<ObsNode> {
       feed.push({ kind: 'steps' });
       for (const text of suggestions) feed.push({ kind: 'suggestion', text });
     }
+    // What shaped this session — skills, plans, memory, instruction files. Called straight into core
+    // rather than read off `observations --json`, because this view builds its whole feed in-process;
+    // core memoizes the transcript fold, so what's left is a handful of existsSync probes.
+    if (cwd) {
+      try {
+        const ctx = core.contextSources(cwd, session);
+        if (ctx.sources.length) {
+          feed.push({ kind: 'ctxhead', count: ctx.sources.length, note: ctx.note });
+          for (const src of ctx.sources) feed.push({ kind: 'ctxsrc', src });
+        }
+      } catch { /* unreadable transcript — the section simply doesn't appear */ }
+    }
     return feed;
   }
   /** Zero-token: Claude Code's own session title, or a Claude-refined recap once generated. */
@@ -1462,6 +1513,40 @@ class ObservationsProvider implements vscode.TreeDataProvider<ObsNode> {
       item.iconPath = new vscode.ThemeIcon('arrow-small-right');
       item.tooltip = node.text;
       item.command = { command: 'claudeObservatory.showSuggestions', title: 'Suggestions' };
+      return item;
+    }
+    if (node.kind === 'ctxhead') {
+      const item = new vscode.TreeItem('Context', vscode.TreeItemCollapsibleState.None);
+      item.iconPath = new vscode.ThemeIcon('book');
+      item.description = node.note; // the caveat belongs next to the section, not buried in a hover
+      item.tooltip = `${node.count} context source${node.count === 1 ? '' : 's'}\n${node.note}`;
+      item.contextValue = 'ctxhead';
+      return item;
+    }
+    if (node.kind === 'ctxsrc') {
+      const src = node.src;
+      const item = new vscode.TreeItem(src.label, vscode.TreeItemCollapsibleState.None);
+      // The evidence tier leads the description: "transcript" rows are things the session demonstrably
+      // did, "file-present" rows are files that merely sit where Claude Code auto-loads them. Blurring
+      // the two would present an assumption as an observation.
+      const seen = src.evidence === 'transcript' ? `transcript${src.count > 1 ? ` ×${src.count}` : ''}` : 'file-present';
+      item.description = [seen, src.detail].filter(Boolean).join(' · ');
+      item.iconPath = new vscode.ThemeIcon(
+        CTX_ICON[src.kind] ?? 'file',
+        src.evidence === 'transcript' ? new vscode.ThemeColor('charts.blue') : undefined
+      );
+      item.tooltip = [
+        src.label,
+        src.evidence === 'transcript'
+          ? 'Recorded in this session’s transcript.'
+          : 'Present where Claude Code auto-loads it — the injection itself is never recorded.',
+        src.detail,
+        src.path ? `${src.path} — click to open` : null,
+      ]
+        .filter(Boolean)
+        .join('\n');
+      item.contextValue = 'ctxsrc';
+      if (src.path) item.command = { command: 'vscode.open', title: 'Open', arguments: [vscode.Uri.file(src.path), { preview: true }] };
       return item;
     }
     // Coalesced ×N run: adjacent same-file edits as one row (combined delta + the newest edit's reasoning).
@@ -1544,7 +1629,8 @@ type ActNode =
 /** Category → codicon for the timeline's collapsible subsection headers + rows. */
 const ACTION_ICON: Record<string, string> = {
   edit: 'edit', exec: 'terminal', read: 'file', search: 'search', web: 'globe',
-  agent: 'organization', todo: 'checklist', mcp: 'plug', meta: 'gear', other: 'circle-small',
+  agent: 'organization', todo: 'checklist', mcp: 'plug', meta: 'gear', compact: 'fold-down',
+  other: 'circle-small',
 };
 
 class ActionsProvider implements vscode.TreeDataProvider<ActNode> {
@@ -1754,14 +1840,16 @@ function combinedShell(): string {
     { id: 'tokens', name: 'Tokens', scale: 'log', series: [['tokensTotal', 'total', 'var(--c-total)'], ['tokensInput', 'input', 'var(--c-input)'], ['tokensOutput', 'output', 'var(--c-output)']] },
   ];
   const style = `<style>
-  :root { --acc: var(--vscode-charts-blue, #4c8bf5); --c-pending: var(--vscode-charts-yellow, #d9a441); --c-kept: var(--vscode-charts-green, #3fb950); --c-reverted: var(--vscode-descriptionForeground, #9aa0aa); --c-total: var(--vscode-charts-blue, #4c8bf5); --c-input: var(--vscode-charts-purple, #9a6ac2); --c-output: var(--vscode-charts-orange, #c9713f); }
+  :root { --acc: var(--vscode-charts-blue, #4c8bf5); --c-pending: var(--vscode-charts-yellow, #d9a441); --c-kept: var(--vscode-charts-green, #3fb950); --c-reverted: var(--vscode-descriptionForeground, #9aa0aa); --c-total: var(--vscode-charts-blue, #4c8bf5); --c-input: var(--vscode-charts-purple, #9a6ac2); --c-output: var(--vscode-charts-orange, #c9713f); --c-cached: var(--vscode-charts-green, #3fb950); }
   body { margin:0; padding:8px 12px 12px; font-family: var(--vscode-font-family); font-size:11px; color: var(--vscode-foreground); position:relative; }
   .dim { opacity:.75; }
   .empty { padding:12px 2px; color: var(--vscode-descriptionForeground); line-height:1.5; }
   .review { margin-bottom:14px; }
+  .toksec { margin-bottom:14px; }
   .navbar { display:flex; align-items:center; gap:8px; padding:5px 0 9px; margin-bottom:9px; border-bottom:1px solid var(--vscode-widget-border, rgba(127,127,127,0.25)); }
   .nb-session { display:inline-flex; align-items:center; gap:4px; font-family: var(--vscode-editor-font-family, monospace); font-size:9.5px; color: var(--vscode-descriptionForeground); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .nb-session::before { content:"🔬"; font-size:10px; }
+  .nb-chip { flex:none; border:1px solid var(--vscode-widget-border, rgba(127,127,127,0.25)); border-radius:99px; padding:1px 6px; font-size:9.5px; color: var(--vscode-descriptionForeground); white-space:nowrap; }
   .rvc-click { cursor:pointer; }
   .rvc-click:hover { border-color: var(--c-pending); background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.08)); }
   .rvcounts { display:flex; gap:6px; margin-bottom:9px; }
@@ -1786,6 +1874,11 @@ function combinedShell(): string {
   .chart .ln { fill:none; stroke-width:1.6; vector-effect:non-scaling-stroke; stroke-linejoin:round; }
   .chart .base { stroke: var(--vscode-widget-border, rgba(127,127,127,0.35)); stroke-width:1; vector-effect:non-scaling-stroke; }
   .chart .cross { stroke: var(--vscode-foreground); stroke-width:1; vector-effect:non-scaling-stroke; }
+  .spark { height:22px; margin-top:1px; }
+  .spark svg { display:block; width:100%; height:22px; }
+  .spark .cfill { stroke:none; fill: var(--c-input); opacity:0.18; }
+  .spark .cline { fill:none; stroke: var(--c-input); stroke-width:1.2; vector-effect:non-scaling-stroke; stroke-linejoin:round; }
+  .spark .ctick { stroke: var(--c-pending); stroke-width:1; vector-effect:non-scaling-stroke; opacity:0.85; }
   .yt { position:absolute; left:0; width:30px; text-align:right; font-size:8.5px; color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; transform:translateY(-50%); line-height:1; white-space:nowrap; }
   .pax { display:flex; justify-content:space-between; font-size:9px; color: var(--vscode-descriptionForeground); margin:3px 0 0 34px; font-variant-numeric: tabular-nums; }
   .divider { border-top:1px solid var(--vscode-widget-border, rgba(127,127,127,0.25)); margin:2px 0 10px; }
@@ -1875,9 +1968,53 @@ function combinedShell(): string {
       document.getElementById('rv-progress').textContent = total ? (reviewed+' of '+total+' reviewed ('+pct+'%)') : 'no edits yet';
       document.getElementById('rv-rate').textContent = reviewed ? (Math.round(c.kept/reviewed*100)+'% accepted') : '';
     }
+    function renderTokens(t){
+      var i=document.getElementById('tk-in'), o=document.getElementById('tk-out'), c=document.getElementById('tk-cached'), l=document.getElementById('tk-cached-lbl');
+      if(!i) return;
+      if(!t){ i.textContent='—'; o.textContent='—'; c.textContent='—'; l.textContent='cached'; return; }
+      i.textContent=human(t.input); o.textContent=human(t.output); c.textContent=human(t.cacheRead);
+      l.textContent = t.hitPct==null ? 'cached' : 'cached · '+Math.round(t.hitPct)+'% hit';
+      var cc=document.getElementById('tk-cached-cell');
+      if(cc) cc.title = 'cache reads '+human(t.cacheRead)+' · cache writes '+human(t.cacheCreation)+(t.hitPct==null?'':' · hit rate = reads ÷ all context sent');
+    }
+    // Model + effort are structural facts the harness records, so an unknown one is left blank rather
+    // than defaulted: no model recorded yet (fresh session) hides the chip outright, and an undeclared
+    // effort simply drops its half — the default differs by build, so guessing it would be a fiction.
+    function renderVitals(v){
+      var el=document.getElementById('nb-model'); if(!el) return;
+      if(!v||!v.model){ el.style.display='none'; el.textContent=''; el.title=''; return; }
+      var ms=(v&&v.models)||[], more=ms.length>1 ? ' +'+(ms.length-1) : '';
+      el.style.display='';
+      el.textContent = v.model.label + (v.effort ? ' · '+v.effort.level+' effort' : '') + more;
+      var tip=[];
+      for(var i=0;i<ms.length;i++) tip.push(ms[i].label+' '+ms[i].turns+' turn'+(ms[i].turns===1?'':'s'));
+      if(!tip.length) tip.push(v.model.label);
+      if(v.effort) tip.push('effort '+v.effort.level+(v.effort.source==='stub'?' (from an /effort command in the transcript)':''));
+      el.title = (ms.length>1 ? 'Models this session ran on: ' : 'Model serving this session: ')+tip.join(' · ');
+    }
+    // Context fill per turn: the saw-tooth IS the story (each compaction drops the line off a cliff), so
+    // x is mapped by timestamp, not by index — that keeps the compaction ticks over the cliffs they caused.
+    function renderFill(v){
+      var host=document.getElementById('tk-fill'), meta=document.getElementById('tk-fill-meta');
+      if(!host) return;
+      var pts=(v&&v.context)||[], n=pts.length;
+      if(n<2){ host.style.display='none'; if(meta) meta.style.display='none'; return; }
+      host.style.display=''; if(meta) meta.style.display='';
+      var W=100,H=22,max=1,t0=pts[0][0],span=pts[n-1][0]-t0,i;
+      for(i=0;i<n;i++) if(pts[i][1]>max) max=pts[i][1];
+      function px(ts,idx){ return span>0 ? (ts-t0)/span*W : idx*W/(n-1); }
+      var d='';
+      for(i=0;i<n;i++){ d+=(i===0?'M':'L')+px(pts[i][0],i).toFixed(2)+','+(H-pts[i][1]/max*(H-2)).toFixed(2); }
+      var ticks='', cs=(v&&v.compactions)||[];
+      for(i=0;i<cs.length;i++){ var cx=px(cs[i].ts,n-1); if(cx<0||cx>W) continue; ticks+='<line class="ctick" x1="'+cx.toFixed(2)+'" y1="0" x2="'+cx.toFixed(2)+'" y2="'+H+'"/>'; }
+      host.innerHTML='<svg viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none"><path class="cfill" d="'+d+'L'+W+','+H+'L0,'+H+'Z"/><path class="cline" d="'+d+'"/>'+ticks+'</svg>';
+      var lbl=document.getElementById('tk-fill-lbl'), mx=document.getElementById('tk-fill-max');
+      if(lbl) lbl.textContent = cs.length ? ('compacted ×'+cs.length+' · last dropped '+human(cs[cs.length-1].droppedTokens)) : 'context per turn';
+      if(mx) mx.textContent = 'peak '+human(max);
+    }
     window.addEventListener('message', function(e){ var m=e.data||{};
       if(m.type==='usage'){ renderUsage(m.u); }
-      else if(m.type==='counts'){ renderCounts(m.c);
+      else if(m.type==='counts'){ renderCounts(m.c); renderTokens(m.t); renderVitals(m.v); renderFill(m.v);
         // Show the human-readable session NAME (title / first prompt); the raw id stays in the tooltip.
         var se=document.getElementById('nb-session'); if(se && m.session!==undefined){ var nm=(m.sessionTitle||'').trim();
           se.textContent = nm || (m.session ? String(m.session).slice(0,8) : '—');
@@ -1890,9 +2027,24 @@ function combinedShell(): string {
       var pc=document.getElementById('rv-pending-cell'); if(pc){ pc.addEventListener('click',function(){ vscode.postMessage({type:'reviewFirst'}); }); }
       drawStats(); vscode.postMessage({type:'ready'}); })();
   `;
+  // This session's cumulative token split, updated live with the counts. "Session tokens" (not
+  // "Tokens"/"Usage" — both already name other sections of this panel): the chart below is the
+  // machine-wide day/hour series, the plan bars at the bottom are point-in-time limits.
+  const tokensHtml =
+    `<div class="toksec">` +
+    `<div class="uhead" title="This session’s cumulative tokens, split the way the API bills them. hit rate = cache reads ÷ all context sent (input + cache reads + cache writes).">Session tokens</div>` +
+    `<div class="rvcounts">` +
+    `<div class="rvc" title="Uncached input tokens sent this session"><span class="rvn" id="tk-in" style="color:var(--c-input)">—</span><span class="rvl">input</span></div>` +
+    `<div class="rvc" title="Output tokens generated this session"><span class="rvn" id="tk-out" style="color:var(--acc)">—</span><span class="rvl">output</span></div>` +
+    `<div class="rvc" id="tk-cached-cell" title="Input tokens served from the prompt cache; hit rate = reads ÷ all context sent"><span class="rvn" id="tk-cached" style="color:var(--c-cached)">—</span><span class="rvl" id="tk-cached-lbl">cached</span></div>` +
+    `</div>` +
+    `<div class="spark" id="tk-fill" style="display:none" title="Context sent to the model on each turn. Each vertical tick is a compaction — the point where Claude Code summarised the conversation and dropped the rest."></div>` +
+    `<div class="rvmeta" id="tk-fill-meta" style="display:none"><span id="tk-fill-lbl"></span><span id="tk-fill-max"></span></div>` +
+    `</div>`;
   // Live review scoreboard (independent of the time range): current pending/accepted/reverted counts
   // and a progress bar that fills as edits get reviewed — updated on every store change via postMessage.
   const reviewHtml =
+    `<div class="uhead" title="This session’s captured edits, by review status">Edits</div>` +
     `<div class="review">` +
     `<div class="rvcounts">` +
     `<div class="rvc rvc-click" id="rv-pending-cell" title="Jump to the first edit to review"><span class="rvn" id="rv-pending" style="color:var(--c-pending)">0</span><span class="rvl">pending</span></div>` +
@@ -1905,9 +2057,11 @@ function combinedShell(): string {
   const navbarHtml =
     `<div class="navbar">` +
     `<span class="nb-session" id="nb-session" title="Active Claude Code session">—</span>` +
+    `<span class="nb-chip" id="nb-model" style="display:none"></span>` +
     `</div>`;
   const body =
     navbarHtml +
+    tokensHtml +
     reviewHtml +
     `<div class="divider"></div>` +
     `<div class="ranges"><button class="seg" data-r="today">Today</button><button class="seg" data-r="week">7 days</button><button class="seg" data-r="month">30 days</button></div>` +
@@ -2123,6 +2277,14 @@ function changeMapShell(): string {
   .cm-caption { flex:none; font-size:9px; letter-spacing:.6px; text-transform:uppercase; color: var(--vscode-descriptionForeground); opacity:.85; margin:0 0 3px 1px; }
   .cm-ribbon { flex:none; margin-bottom:6px; max-height:34%; overflow-y:auto; }
   .cm-rwrap { display:flex; flex-direction:column; gap:2px; }
+  /* a compaction between two chapters — a rule, not a chip: it happened TO the session, it isn't work */
+  .cm-compact { font-size:9px; color: var(--vscode-descriptionForeground); border-top:1px dashed var(--cm-border); padding:3px 3px 1px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .cm-caps { flex:none; display:flex; flex-wrap:wrap; gap:4px; margin-bottom:6px; }
+  .cm-cap { font-size:9px; color: var(--vscode-descriptionForeground); border:1px solid var(--cm-border); border-radius:99px; padding:1px 6px; white-space:nowrap; }
+  .cm-cap[data-attn] { color: var(--mt-attn); border-color: var(--mt-attn); }
+  .cm-cap[data-high] { color: var(--mt-warn); border-color: var(--mt-warn); font-weight:600; }
+  .mt-cap { font-size:9px; color: var(--vscode-descriptionForeground); flex:none; }
+  .mt-cap[data-attn] { color: var(--mt-attn); }
   .cm-done-list { margin-top:2px; }
   .cm-done-row { display:flex; gap:6px; margin-top:3px; }
   .cm-task { display:flex; align-items:center; gap:8px; width:100%; background: var(--vscode-editorWidget-background, rgba(127,127,127,0.10)); border:1px solid var(--cm-border); border-radius:5px; color:inherit; font:inherit; padding:3px 9px; cursor:default; text-align:left; }
@@ -2280,6 +2442,10 @@ function changeMapShell(): string {
     `<div class="ov-pane" id="ov-pane-tasks" style="display:none"><div class="ov-desc">This session’s numbered task list (Claude’s TaskCreate/TaskUpdate plan) — with live statuses; each row joins its change-map chapter.</div><div class="ov-list" id="ov-tasks"></div></div>` +
     `</div>` +
     `<div class="ov-detail">` +
+    // Capabilities — what the session REACHED FOR. Exercised, never granted: approvals are not written
+    // to the transcript, so nothing here says a permission was or wasn't asked for.
+    `<div class="cm-caption" id="cm-cap-caps" style="display:none" title="Capabilities — what this session actually exercised: files read and edited (in and outside the workspace), shell commands, MCP servers, web hosts, subagents. Permission prompts aren’t recorded in transcripts, so this is not a record of what was allowed.">Capabilities</div>` +
+    `<div class="cm-caps" id="cm-caps" style="display:none"></div>` +
     // Chapters (subtasks) — shown/hidden with the ribbon; click a chip to jump the nav-bar Chapter axis.
     `<div class="cm-caption" id="cm-cap-chapters" style="display:none" title="Chapters — the subtasks (Claude’s to-dos / tasks) this work fell under. Each chip shows ±lines · edits · pending; click it to review that chapter in the nav bar.">Chapters</div>` +
     `<div class="cm-ribbon" id="cm-ribbon" style="display:none"></div>` +
@@ -2388,14 +2554,28 @@ class StatsUsageViewProvider implements vscode.WebviewViewProvider {
       undone: log.filter((r) => r.status === 'undone').length,
     };
     let sessionTitle = '';
+    // Session-total token split for the "Session tokens" cells. sessionUsage keeps an incremental
+    // per-transcript cursor, so this is a stat() when nothing changed and a delta-parse otherwise —
+    // cheap enough to ride along with every counts push.
+    let t: core.SessionTokens | null = null;
+    // Model / effort / compactions / context-fill ride the SAME cursor sessionUsage just advanced, so
+    // this second call re-reads nothing — but it stays its own try below, since a throw here must not
+    // take the token cells down with it.
+    let v: core.SessionVitals | null = null;
     const cwd = workspaceRoot();
     if (session && cwd) {
       try {
         const ins = core.transcriptInsights(cwd, session);
         sessionTitle = (ins.title ?? ins.firstUserPrompt ?? '').replace(/\s+/g, ' ').trim();
       } catch { /* fall back to the id */ }
+      try {
+        t = core.sessionUsage(cwd, session);
+      } catch { /* unreadable transcript — the cells stay "—" */ }
+      try {
+        v = core.sessionVitals(cwd, session);
+      } catch { /* unknown — the chip and the fill line stay hidden */ }
     }
-    this.view.webview.postMessage({ type: 'counts', c, session: session ?? '', sessionTitle });
+    this.view.webview.postMessage({ type: 'counts', c, session: session ?? '', sessionTitle, t, v });
   }
   /** Cheap + sync: post the current usage snapshot for the bars. */
   private postUsage(): void {
@@ -2830,6 +3010,15 @@ const OVERVIEW_SCRIPT = `
       btns+
       '</span>';
   }
+  // A compaction marker. The label is built once in core ("auto · 1M→14k · 986k dropped · 2m 5s") and
+  // printed verbatim here, never re-derived, so no surface can word the same event differently.
+  function compactMark(ce){
+    return '<span class="cm-compact" title="Context compacted here — Claude Code summarised the conversation and dropped the rest.">⤺ compacted · '+esc(ce.label)+'</span>';
+  }
+  // The fallback for compactions whose chapter isn't drawn: one marker carrying every such event.
+  function compactHeader(list){ var t=[]; for(var i=0;i<list.length;i++) t.push(list[i].label);
+    return '<span class="cm-compact" title="Context compacted outside the chapters shown here — '+esc(t.join(' | '))+'">⤺ compacted ×'+list.length+(list.length===1?' · '+esc(t[0]):'')+'</span>';
+  }
   // Truncate a chapter name for the scoped bulk-button labels.
   function clipCh(s){ s=String(s==null?'':s); return s.length>16? s.slice(0,15)+'…' : s; }
   // Relabel the top-navbar bulk buttons to reflect the current scope: a selected chapter → "…in <chapter>",
@@ -2864,20 +3053,40 @@ const OVERVIEW_SCRIPT = `
     // Keep the chapter selection valid against the current slice (refresh its label; drop it if it vanished).
     if(SEL_CH){ var f=null; for(var v=0;v<items.length;v++){ if(items[v].id!=null && String(items[v].id)===SEL_CH.id){ f=items[v]; break; } } if(f) SEL_CH.label=f.label; else SEL_CH=null; }
     var cap=document.getElementById('cm-cap-chapters');
-    if(!items.length){ host.style.display='none'; host.innerHTML=''; if(cap) cap.style.display='none'; relabelBulk(); return; }
+    // Compactions between chapters. Core already resolved each event to the chapter whose window CONTAINS
+    // it, but this ribbon drops chapters (task-born, zero-edit, the collapsed "done" rows, and sometimes
+    // all of them) — so an event whose chapter isn't drawn falls back to one header marker instead of
+    // vanishing, which would hide the single biggest thing that happened to the session's context.
+    var comps=(a&&a.compactions&&a.compactions.length)?a.compactions:[];
+    if(!items.length){
+      if(cap) cap.style.display='none';
+      if(comps.length){ host.style.display='block'; host.innerHTML='<div class="cm-rwrap">'+compactHeader(comps)+'</div>'; }
+      else { host.style.display='none'; host.innerHTML=''; }
+      relabelBulk(); return;
+    }
     if(cap) cap.style.display='block';
     var active=[], done=[];
     for(var k=0;k<items.length;k++){ var it=items[k];
       it.st = it.r.pending>0?'pending':(it.r.undone>0?'undone':(it.r.edits>0?'kept':'todo'));
       (it.wip || it.r.pending>0 || it.r.undone>0 ? active : done).push(it);
     }
+    var byCh={}, orphan=[];
+    if(comps.length){ var vis={}, p;
+      for(p=0;p<active.length;p++) if(active[p].id!=null) vis[String(active[p].id)]=1;
+      if(RIB_OPEN) for(p=0;p<done.length;p++) if(done[p].id!=null) vis[String(done[p].id)]=1;
+      for(p=0;p<comps.length;p++){ var key=comps[p].afterChapterId==null?'':String(comps[p].afterChapterId);
+        if(key && vis[key]){ if(!byCh[key]) byCh[key]=[]; byCh[key].push(comps[p]); } else orphan.push(comps[p]); } }
+    function marks(id){ var m=byCh[id==null?'':String(id)]; if(!m) return ''; var s='';
+      for(var z=0;z<m.length;z++) s+=compactMark(m[z]);
+      return s; }
     host.style.display='block'; var h='<div class="cm-rwrap">';
-    for(var i=0;i<active.length;i++) h+=taskChip(active[i]);
+    if(orphan.length) h+=compactHeader(orphan);
+    for(var i=0;i<active.length;i++) h+=taskChip(active[i])+marks(active[i].id);
     if(done.length){ h+='<div class="cm-done-row">'+
       '<button class="cm-done-tog" title="'+done.length+' completed chapter(s)"><span class="cm-cg kept"></span>'+done.length+' done <span class="cm-caret">'+(RIB_OPEN?'▾':'▸')+'</span></button>'+
       '<button class="cm-clear-done" title="Clear resolved (kept/undone) edits of every completed chapter"><i class="codicon codicon-clear-all"></i> clear completed</button></div>'; }
     h+='</div>';
-    if(done.length && RIB_OPEN){ h+='<div class="cm-rwrap cm-done-list">'; for(var d=0;d<done.length;d++) h+=taskChip(done[d]); h+='</div>'; }
+    if(done.length && RIB_OPEN){ h+='<div class="cm-rwrap cm-done-list">'; for(var d=0;d<done.length;d++) h+=taskChip(done[d])+marks(done[d].id); h+='</div>'; }
     host.innerHTML=h;
     var tog=host.querySelector('.cm-done-tog');
     if(tog) tog.addEventListener('click', function(){ RIB_OPEN=!RIB_OPEN; renderRibbon(); });
@@ -2898,6 +3107,39 @@ const OVERVIEW_SCRIPT = `
     var cl=host.querySelectorAll('.cm-tb.cl');
     for(var q=0;q<cl.length;q++) cl[q].addEventListener('click', function(ev){ ev.stopPropagation(); var id=this.getAttribute('data-clear'); if(id) vscode.postMessage({type:'taskClear', taskId:id}); });
     relabelBulk();
+  }
+  // Capability footprint — what the slice EXERCISED, never what it was allowed to do: approvals are not
+  // written to transcripts, so no badge or tooltip may imply a permission was granted. Read defensively
+  // off the existing payload (an older CLI on PATH simply has no capabilities key, and the section hides).
+  var CAP_EX = ' — ${core.CAPABILITIES_NOTE}';
+  function capBadge(out, txt, tip, attn, high){
+    out.push('<span class="cm-cap"'+(high?' data-high="1"':(attn?' data-attn="1"':''))+' title="'+esc(tip)+'">'+esc(txt)+'</span>');
+  }
+  function renderCaps(){
+    var host=document.getElementById('cm-caps'), cap=document.getElementById('cm-cap-caps');
+    if(!host) return;
+    var c=(detailSlice()||{}).capabilities||null, b=[];
+    if(c){
+      // Reads / edits carry the same shape; the out-of-workspace half is the part worth a tint.
+      var pairs=[['reads',c.reads,'file read'],['edits',c.edits,'file edit']];
+      for(var i=0;i<pairs.length;i++){ var k=pairs[i][0], f=pairs[i][1]||{count:0,outOfRoot:0,samples:[]};
+        if(!f.count) continue;
+        var samp=(f.samples&&f.samples.length)?' e.g. '+f.samples.join(', '):'';
+        capBadge(b, k+' '+f.count+(f.outOfRoot?' · '+f.outOfRoot+' outside':''),
+          f.count+' '+pairs[i][2]+'(s)'+(f.outOfRoot? ', '+f.outOfRoot+' outside this workspace'+samp : '')+CAP_EX, f.outOfRoot>0, false);
+      }
+      var ex=c.exec||{count:0,risky:0,high:0};
+      if(ex.count) capBadge(b, 'commands '+ex.count+(ex.high?' · '+ex.high+' high':(ex.risky?' · '+ex.risky+' risky':'')),
+        ex.count+' shell command(s)'+(ex.risky? ', '+ex.risky+' flagged risky':'')+(ex.high? ' ('+ex.high+' high risk)':'')+CAP_EX, ex.risky>0, ex.high>0);
+      var mc=c.mcp||{calls:0,servers:[]};
+      if(mc.calls) capBadge(b, 'mcp '+mc.calls, mc.calls+' MCP tool call(s)'+((mc.servers&&mc.servers.length)?' via '+mc.servers.join(', '):'')+CAP_EX, false, false);
+      var wb=c.web||{calls:0,hosts:[]};
+      if(wb.calls) capBadge(b, 'web '+wb.calls, wb.calls+' web fetch/search call(s)'+((wb.hosts&&wb.hosts.length)?' · '+wb.hosts.join(', '):'')+CAP_EX, false, false);
+      var ag=c.agents||{spawns:0};
+      if(ag.spawns) capBadge(b, 'agents '+ag.spawns, ag.spawns+' subagent spawn(s)'+CAP_EX, false, false);
+    }
+    if(!b.length){ host.style.display='none'; host.innerHTML=''; if(cap) cap.style.display='none'; return; }
+    host.innerHTML=b.join(''); host.style.display='flex'; if(cap) cap.style.display='block';
   }
   function renderStrip(){ var mods=rankedModules();
     // Cap the strip: a busy session can span dozens of modules, which squeezes every segment (and its
@@ -3009,9 +3251,10 @@ const OVERVIEW_SCRIPT = `
       empty.innerHTML=(SEL&&SEL.kind==='workflow')? 'No attributed edits for this workflow yet.' : 'No edits for this agent yet. <span style="opacity:.75">This fills in as Claude edits files.</span>';
       document.getElementById('cm-ribbon').style.display='none'; document.getElementById('cm-strip').innerHTML=''; document.getElementById('cm-ledger').innerHTML=''; document.getElementById('cm-readout').innerHTML='';
       document.getElementById('cm-cap-chapters').style.display='none'; document.getElementById('cm-cap-folders').style.display='none'; document.getElementById('cm-cap-files').style.display='none'; document.getElementById('cm-summary').innerHTML='';
+      document.getElementById('cm-cap-caps').style.display='none'; document.getElementById('cm-caps').style.display='none';
       SEL_CH=null; relabelBulk(); return; }
     empty.style.display='none';
-    renderRibbon(); renderStrip(); renderLedger(); updateReadout();
+    renderCaps(); renderRibbon(); renderStrip(); renderLedger(); updateReadout();
   }
 
   // --- left NAV: display filter (shared by Fleet + Workflows) ----------------------------------------
@@ -3038,6 +3281,21 @@ const OVERVIEW_SCRIPT = `
     paint();
   }
 
+  // A fleet row is one line wide, so only the capabilities worth noticing at a glance get a suffix:
+  // touches outside the workspace, high-risk commands, network/MCP reach, and compaction count.
+  function capSuffix(a){
+    var c=(a&&a.capabilities)||null, parts=[], tips=[];
+    var out=c? (((c.reads&&c.reads.outOfRoot)||0)+((c.edits&&c.edits.outOfRoot)||0)) : 0;
+    var high=c&&c.exec? (c.exec.high||0) : 0;
+    if(out){ parts.push('↗'+out); tips.push(out+' file(s) touched outside this workspace'); }
+    if(high){ parts.push('⚠'+high); tips.push(high+' high-risk command(s)'); }
+    if(c&&c.mcp&&c.mcp.calls){ parts.push('mcp'); tips.push(c.mcp.calls+' MCP call(s)'+((c.mcp.servers&&c.mcp.servers.length)?' via '+c.mcp.servers.join(', '):'')); }
+    if(c&&c.web&&c.web.calls){ parts.push('web'); tips.push(c.web.calls+' web call(s)'+((c.web.hosts&&c.web.hosts.length)?' · '+c.web.hosts.join(', '):'')); }
+    var nc=a&&a.compactions; nc=(typeof nc==='number')? nc : ((nc&&nc.length)||0);
+    if(nc){ parts.push('⤺'+nc); tips.push('context compacted ×'+nc); }
+    if(!parts.length) return '';
+    return '<span class="mt-cap"'+((out||high)?' data-attn="1"':'')+' title="'+esc(tips.join(' · ')+CAP_EX)+'">'+esc(parts.join(' · '))+'</span>';
+  }
   // --- Fleet: running agents (worktree-siblings) + nested subagents; click selects the DETAIL ---------
   function renderFleet(){ var host=document.getElementById('ov-fleet');
     var F=MTFILTER(MT, fstate()); var vis=F.agents; syncControls(F);
@@ -3052,6 +3310,7 @@ const OVERVIEW_SCRIPT = `
       h+='<span class="mt-meta">'+fmtTok(a.tokens)+' tok · '+fmtDur(a.durationMs)+'</span>';
       var rc=riskCount(a.risk); if(rc) h+='<span class="mt-risk"'+(riskHigh(a.risk)?' data-high="1"':'')+' title="'+rc+' risk flag(s)">⚠ '+rc+'</span>';
       if(col) h+='<span class="mt-col" title="'+col+' file(s) also touched by another agent">⇄ '+col+'</span>';
+      h+=capSuffix(a);
       h+='</div>';
       var subs=a.subagents||[];
       for(var k=0;k<subs.length;k++){ var su=subs[k];
@@ -3228,7 +3487,8 @@ const OVERVIEW_SCRIPT = `
       em.innerHTML='Needs the <b>claude-observatory</b> CLI, which was not found. <span style="opacity:.75">Install it (./install.sh), then reload.</span>';
       document.getElementById('ov-fleet').innerHTML=''; document.getElementById('ov-workflows').innerHTML='';
       document.getElementById('cm-ribbon').style.display='none'; document.getElementById('cm-strip').innerHTML=''; document.getElementById('cm-ledger').innerHTML=''; document.getElementById('cm-detail-empty').style.display='none'; document.getElementById('cm-readout').innerHTML='';
-      document.getElementById('cm-cap-chapters').style.display='none'; document.getElementById('cm-cap-folders').style.display='none'; document.getElementById('cm-cap-files').style.display='none'; document.getElementById('cm-summary').innerHTML=''; }
+      document.getElementById('cm-cap-chapters').style.display='none'; document.getElementById('cm-cap-folders').style.display='none'; document.getElementById('cm-cap-files').style.display='none'; document.getElementById('cm-summary').innerHTML='';
+      document.getElementById('cm-cap-caps').style.display='none'; document.getElementById('cm-caps').style.display='none'; }
   });
 
   (function wireControls(){
@@ -3430,6 +3690,30 @@ async function checkForUpdate(context: vscode.ExtensionContext, manual: boolean)
 }
 
 export function activate(context: vscode.ExtensionContext): void {
+  // 0.8.6 changed the publisher (claude-observatory → cell-observatory), which changed the extension
+  // id — editors treat the pre-rename install as a SEPARATE extension, so both can be installed at
+  // once, racing to register the same commands and views (the loser's activate() throws). Don't
+  // fight it: BEFORE registering anything, remove the old id, ask for one reload, and let whichever
+  // build owns this window keep serving it until then. Must stay ahead of every registerCommand /
+  // createTreeView call. (Optional chain: the smoke-test mock has no `extensions` namespace.)
+  const OLD_EXT_ID = 'claude-observatory.claude-observatory-vscode';
+  if (vscode.extensions?.getExtension?.(OLD_EXT_ID)) {
+    void (async () => {
+      try {
+        await vscode.commands.executeCommand('workbench.extensions.uninstallExtension', OLD_EXT_ID);
+        const pick = await vscode.window.showInformationMessage(
+          'Claude Observatory moved to the cell-observatory publisher — the old install was removed. Reload to finish.',
+          'Reload Window'
+        );
+        if (pick === 'Reload Window') void vscode.commands.executeCommand('workbench.action.reloadWindow');
+      } catch {
+        void vscode.window.showWarningMessage(
+          'Claude Observatory is installed twice (the publisher changed in 0.8.6). Please uninstall the older "Claude Observatory" entry in the Extensions view, then reload.'
+        );
+      }
+    })();
+    return; // activate for real on the next load — this window stays with the already-active build
+  }
   const editsProvider = new EditsProvider('edits');
   const diffsProvider = new EditsProvider('diffs');
   const editsView = vscode.window.createTreeView('claudeObservatory.edits', { treeDataProvider: editsProvider });
@@ -4106,11 +4390,14 @@ export function activate(context: vscode.ExtensionContext): void {
       const root = workspaceRoot();
       const auto = root ? core.resolveSessionId(root) ?? undefined : undefined;
       type Item = vscode.QuickPickItem & { id: string };
+      // Items lead with the session NAME (title / first prompt); the raw id demotes to the description
+      // (QuickPick filtering matches both, so pasting an id still finds its row).
       const items: Item[] = [
         { label: '$(sync) Auto — newest for this workspace', description: auto ?? 'none', id: '' },
-        ...core.listSessions().map((s) => ({
-          label: s.id,
-          description: `${s.pending} pending · ${core.relTime(s.lastMs)}` + (s.id === auto ? ' · auto' : ''),
+        ...core.listSessionsWithTitles(root ?? process.cwd()).map((s) => ({
+          label: s.title || `session ${s.id.slice(0, 8)}`,
+          description:
+            `${s.id} · ${s.pending} pending · ${core.relTime(s.lastMs)}` + (s.id === auto ? ' · auto' : ''),
           picked: s.id === pinned,
           id: s.id,
         })),
@@ -4182,6 +4469,7 @@ export function activate(context: vscode.ExtensionContext): void {
     // Session-wide bulk actions (view-title buttons).
     vscode.commands.registerCommand('claudeObservatory.keepAll', () => withSession((s) => keepAllSession(s))()),
     vscode.commands.registerCommand('claudeObservatory.undoAll', () => withSession((s) => undoAllSession(s))()),
+    vscode.commands.registerCommand('claudeObservatory.redoAll', () => withSession((s) => redoAllSession(s))()),
     // Chapter (task) review actions — the Overview ribbon's per-chip Accept / Reject / Clear + a
     // "clear every completed chapter" affordance. The webview posts {taskKeep|taskUndo|taskClear,taskId}.
     vscode.commands.registerCommand('claudeObservatory.taskKeep', (taskId: string) => withSession((s) => keepChapter(s, taskId))()),
@@ -4350,13 +4638,13 @@ export function activate(context: vscode.ExtensionContext): void {
       const next = !cfg.get<boolean>('inlineReview', true);
       await cfg.update('inlineReview', next, vscode.ConfigurationTarget.Global);
       refreshInline();
-      vscode.window.showInformationMessage(`Claude Observatory: inline review ${next ? 'on' : 'off'}.`);
+      vscode.window.setStatusBarMessage(`Claude Observatory: inline review ${next ? 'on' : 'off'}`, 2500);
     }),
     // Spotlight: dim every unmodified line so only Claude's edits read at full contrast.
     vscode.commands.registerCommand('claudeObservatory.toggleHeatmap', () => {
       heatmapOn = !heatmapOn;
       refreshInline();
-      vscode.window.setStatusBarMessage(`Claude Observatory: spotlight ${heatmapOn ? 'on 💡' : 'off'}`, 2500);
+      vscode.window.setStatusBarMessage(`Claude Observatory: spotlight ${heatmapOn ? 'on' : 'off'}`, 2500);
     }),
     vscode.commands.registerCommand('claudeObservatory.keepFile', (n: FileNode) =>
       withSession((s) => keepEditsInFile(s, n.file, n.edits))()
@@ -4417,8 +4705,39 @@ export function activate(context: vscode.ExtensionContext): void {
   const transcriptWatcher = vscode.workspace.createFileSystemWatcher(
     new vscode.RelativePattern(base, 'projects/**/*.jsonl')
   );
+  // ~/.claude/projects holds EVERY project on the machine, so that pattern also fires for repos this
+  // window knows nothing about — and each spurious wake costs a full refreshAll (two CLI spawns). Keep
+  // the broad pattern (worktrees come and go, so re-registering watchers would be its own bug) and
+  // filter arrivals instead: only this workspace's project dir and those of its worktree siblings are
+  // this window's business. The set is cached, and any failure to compute it falls back to accepting
+  // everything — a stale extra refresh is far better than a panel that stops updating.
+  let relevantDirs: Set<string> | null = null;
+  let relevantAt = 0;
+  const relevantProjectDirs = (): Set<string> | null => {
+    const now = Date.now();
+    if (relevantDirs && now - relevantAt < 30_000) return relevantDirs;
+    const cwd = workspaceRoot();
+    if (!cwd) return null;
+    try {
+      const dirs = new Set<string>([path.resolve(core.projectDir(cwd))]);
+      for (const sib of core.listRepoSiblings(cwd, currentSession() ?? '')) dirs.add(path.resolve(core.projectDir(sib.worktree)));
+      relevantDirs = dirs;
+      relevantAt = now;
+      return dirs;
+    } catch {
+      return null; // can't tell → treat every transcript as ours
+    }
+  };
   let txDebounce: ReturnType<typeof setTimeout> | undefined;
-  const scheduleTxRefresh = () => {
+  const scheduleTxRefresh = (uri?: vscode.Uri) => {
+    if (uri) {
+      const dirs = relevantProjectDirs();
+      // Containment, not equality: a session's subagent and workflow transcripts live NESTED under the
+      // project dir (<project>/<session>/subagents/**.jsonl), and those are exactly the writes that keep
+      // a live agent fleet's phase current.
+      const p = path.resolve(uri.fsPath);
+      if (dirs && ![...dirs].some((d) => p === d || p.startsWith(d + path.sep))) return; // another project's session
+    }
     if (txDebounce) clearTimeout(txDebounce);
     txDebounce = setTimeout(refreshAll, 700);
   };

@@ -104,8 +104,9 @@ class FileHistoryPanel(private val project: Project) : SimpleToolWindowPanel(tru
         val group = DefaultActionGroup(
             action("Accept All Edits in File", NavTint.ACCEPT_FILE) { acceptFile() },
             action("Revert All Edits in File", NavTint.REJECT) { revertFile() },
-            action("Diff Previous Revision", AllIcons.Actions.Diff) { stepRevision(-1) },
-            action("Diff Next Revision", AllIcons.Actions.Diff) { stepRevision(1) },
+            // Directional icons so prev/next read at a glance without hovering (they shared one Diff icon).
+            action("Diff Previous Revision", AllIcons.Actions.Back) { stepRevision(-1) },
+            action("Diff Next Revision", AllIcons.Actions.Forward) { stepRevision(1) },
             action("Refresh", AllIcons.Actions.Refresh) { service().refresh() },
         )
         val tb = ActionManager.getInstance().createActionToolbar("ClaudeObservatoryFileHistory", group, true)

@@ -502,6 +502,49 @@ export function undoScope(
   return { undone, conflicts, total: targets.length, ids };
 }
 
+export interface RedoScopeResult {
+  redone: number;
+  conflicts: number;
+  total: number; // UNDONE edits in scope
+  ids: number[]; // the re-applied edit ids
+}
+
+/**
+ * The forward mirror of undoScope: re-apply every UNDONE edit in scope, OLDEST-first (so a later edit
+ * re-merges onto the earlier ones it built on). Same single-implementation rationale — the CLI's
+ * `redo --all|--file|--under|--ids`, VS Code's "Redo all", and (via those flags) JetBrains all route
+ * here. On a per-edit overlap the edit stays undone and is counted as a conflict (redo it with --force).
+ * Scope: no opts = the whole session; `under` = a file/folder (isUnderPath); `fileSubstr` = a filename
+ * substring; `ids` = an explicit id set.
+ */
+export function redoScope(
+  sessionId: string,
+  opts: { under?: string; fileSubstr?: string; ids?: number[] } = {}
+): RedoScopeResult {
+  const idSet = opts.ids ? new Set(opts.ids) : null;
+  const targets = readLog(sessionId)
+    .filter(
+      (r) =>
+        r.status === 'undone' &&
+        (opts.under === undefined || isUnderPath(r.file, opts.under)) &&
+        (opts.fileSubstr === undefined || r.file.includes(opts.fileSubstr)) &&
+        (idSet === null || idSet.has(r.id))
+    )
+    .sort((a, b) => a.id - b.id); // oldest-first: re-apply in original order
+  let redone = 0;
+  let conflicts = 0;
+  const ids: number[] = [];
+  for (const t of targets) {
+    const r = redoEdit(sessionId, t.id);
+    if (r.status === 'conflict') conflicts++;
+    else if (r.ok) {
+      redone++;
+      ids.push(t.id);
+    }
+  }
+  return { redone, conflicts, total: targets.length, ids };
+}
+
 /**
  * Chapter-scoped revert: undo every PENDING edit in the chapter's DISPLAYED set (reviewEditIds — the
  * WYSIWYG rule: the ↩ button reverts exactly the edits the chapter row shows, so a partial accept
@@ -516,7 +559,7 @@ export function undoTask(cwd: string, session: string, taskId: string): UndoScop
 
 export interface KeepScopeResult {
   kept: number; // edits flipped to kept
-  total: number; // edits in the task's strict-span set (any status)
+  total: number; // edits in the chapter's DISPLAYED review set (reviewEditIds), any status
   ids: number[]; // the kept edit ids
 }
 

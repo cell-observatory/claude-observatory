@@ -9,7 +9,7 @@
 [![Pages](https://github.com/cell-observatory/claude-observatory/actions/workflows/pages.yml/badge.svg)](https://github.com/cell-observatory/claude-observatory/actions/workflows/pages.yml)
 [![Release](https://github.com/cell-observatory/claude-observatory/actions/workflows/release.yml/badge.svg)](https://github.com/cell-observatory/claude-observatory/actions/workflows/release.yml)
 [![Dependabot](https://img.shields.io/badge/dependabot-enabled-025E8C?logo=dependabot&logoColor=white)](https://github.com/cell-observatory/claude-observatory/blob/main/.github/dependabot.yml)
-[![Version](https://img.shields.io/badge/version-v0.8.5-blue)](https://github.com/cell-observatory/claude-observatory/releases/latest)
+[![Version](https://img.shields.io/badge/version-v0.8.6-blue)](https://github.com/cell-observatory/claude-observatory/releases/latest)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/cell-observatory/claude-observatory/blob/main/LICENSE)
 
 
@@ -36,7 +36,8 @@ repo and the observatory unifies them into a single **fleet**, right inside the 
 awaiting-input / awaiting-permission / idle / errored / done; `~` marks an inferred one), an activity
 sparkline, its ±diff, risk, and a cross-agent file-collision strip; nested **subagents** show their task
 and to-dos. A companion **Workflows** tab tracks Claude Code's multi-agent orchestration runs, and a **Tasks**
-tab shows the session's numbered task list — each task linked to its chapter, with live statuses and
+tab shows the session's task list — numbered tasks or, on newer Claude Code builds, its background
+**Agent runs** — each linked to its chapter, with live statuses and
 per-task edit counts; the right pane is the selected item's **change-map**. Still **zero extra Claude tokens**, still fully **local**, and
 the worktree correlation is **git-free** — it reads the `.git` pointer files, never the git binary.
 
@@ -62,7 +63,7 @@ tokens** — capture runs in local hooks, entirely outside the model loop.
 ## Quickstart
 
 **1 — Install** the CLI + editor extensions from the latest [release](https://github.com/cell-observatory/claude-observatory/releases)
-(no build toolchain, no accounts):
+(requires Node.js 18+; no build toolchain, no accounts):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/cell-observatory/claude-observatory/main/scripts/bootstrap.sh | bash
@@ -80,7 +81,8 @@ Observatory** view in your editor (or run `claude-observatory list`) to review.
 **Try it without Claude** — the same scenario is clickable in the browser on the
 **[interactive demo](https://cell-observatory.github.io/claude-observatory/demo.html)** page, nothing to
 install. Locally, `claude-observatory demo` replays a scripted session through the real
-pipeline in an isolated `demo-*` session and an `observatory-demo/` folder: open the Overview and watch
+pipeline in an isolated `demo-*` session and an `observatory-demo/` folder it creates in the current
+directory: open the Overview and watch
 chapters, fleet rows, and observations fill in live, then review the edits for real.
 `claude-observatory demo --clean` removes every trace.
 
@@ -111,15 +113,15 @@ Built for **surgical Claude usage on critical infrastructure**: you see every ch
 
 | View | What you get |
 | --- | --- |
-| **Overview** | *(the flagship 0.8.0 surface — a **master–detail** map of the whole fleet)* A left nav (~25%) has three tabs, each opening with a one-line description (the tabs and the change-map's sections also carry hover descriptions). **Fleet**: every running agent across the repo's git **worktrees**, each with a live **phase** (working / awaiting-input / awaiting-permission / idle / errored / done; `~` marks an inferred one), its worktree + branch, an activity **sparkline**, **±diff**, tokens·time, **risk**, and a **collision** badge — unfolding to nested **subagents** (`agentType` / description, phase, current task + todos, ±lines, a **💬 chat** button). **Workflows**: each multi-agent **workflow run** (Claude Code's deterministic orchestration), running / done, with per-**phase** progress and its agents' tokens·time·edits. **Tasks**: the session's numbered task list, each task linked to its chapter with a live status and per-task edit count. An **Active only** toggle, **Clear completed** (dismisses / hides, never deletes), and a live cross-agent **conflicts** strip (it flags a live agent overlapping an idle agent's unreviewed work too). The detail pane (~75%) is the selected item's **change-map**, in three labeled sections top to bottom: **Chapters** — a ribbon of subtask chips (each a to-do Claude worked, showing its lines / edits / pending; chapters are **total**, so work outside any to-do lands in a synthesized session chapter, and every chapter's Accept / Reject / Clear act **WYSIWYG** on exactly the edits its row shows); **Folders** — a proportional strip of tiles, one per changed directory (tile width = lines changed, colour = review status); and **Files** — a churn-ranked ledger of every changed file (±line bars, coloured by review status, worst-unreviewed-wins). Clicking a **Folder** tile or a **Chapter** chip navigates the matching nav-bar axis, opening that folder's or chapter's first pending edit. A **summary bar** along the bottom shows the pending / accepted / reverted edit counts plus file and folder totals for whatever is in scope, and names the current chapter (or folder filter). Up top, the **review nav bar** is two rows. The **controls** row carries the **session selector** (the session's human-readable **name** — its title or first prompt, with the raw id in the tooltip), the session-wide **Accept All · Revert All · Clear Resolved · Export**, and, at the right, **Search · Active only · Spotlight · Refresh**. The **axes** row steps the pending edits at four granularities: **Diff** ◄► across the open file's edits (Keep · Undo · Chat · View diff — opens a real side-by-side diff editor — and the edit's relative time); **File** ◄► across changed files (filename + that file's edit count; Accept / Reject File); **Folder** ◄► across changed directories (folder + its file / edit totals; Accept / Reject Folder, acting on that folder's edits only); and **Chapter** ◄► across the session's subtasks (the chapter's folder / file / edit totals; Review · Accept Chapter · Reject Chapter · Chat). Actions are color-coded (green keep/accept, red undo/reject, blue chevrons, orange clear, purple search/spotlight), every icon unique to its action, with live n/m counters on each axis. |
-| **Observations** | A **session recap** on top (Claude Code's own title — zero token; ✨ to refine via `claude -p --resume`), then a coalesced **change feed** — files ordered by most-recent activity, each expanding to its edits (id + a small dimmed time + delta, adjacent same-file edits collapsing into a **×N** run) — with Claude's actual reasoning per row. Each row carries the observatory's **memory of that file** — cross-session accept/revert history and prior analyses; files whose edits get reverted repeatedly are flagged. |
-| **Stats** | A **top navbar** — the active Claude Code session, shown by **name** (its title or first prompt, not the raw id); a **clickable pending count** that jumps to the first edit list (the same filter the Edits / Diffs trees use) — over a live **review scoreboard** (pending / accepted / reverted + a progress bar; the **pending** count is clickable, jumping to the first / oldest edit to review), a **tokens** step-line plot (total / input / output, log axis, Today / 7 days / 30 days), and live **Usage** bars — context fill plus 5h / week plan usage (from [claude-statusline](https://github.com/cell-observatory/claude-statusline)), the 5h and weekly rows now showing an estimated **used / total** (the 100 % total inferred from tokens ÷ percent). |
+| **Overview** | *(the flagship 0.8.0 surface — a **master–detail** map of the whole fleet)* A left nav (~25%) has three tabs, each opening with a one-line description (the tabs and the change-map's sections also carry hover descriptions). **Fleet**: every running agent across the repo's git **worktrees**, each with a live **phase** (working / awaiting-input / awaiting-permission / idle / errored / done; `~` marks an inferred one — background agents and workflow fleets count as live activity), its worktree + branch, an activity **sparkline**, **±diff**, tokens·time, **risk**, and a **collision** badge — unfolding to nested **subagents** (`agentType` / description, phase, current task + todos, ±lines, a **💬 chat** button). **Workflows**: each multi-agent **workflow run** (Claude Code's deterministic orchestration), running / done, with per-**phase** progress and its agents' tokens·time·edits. **Tasks**: the session's task list — numbered tasks or, on newer builds, its background **Agent runs** — each linked to its chapter with a live status and per-task edit count. An **Active only** toggle, **Clear completed** (dismisses / hides, never deletes), and a live cross-agent **conflicts** strip (it flags a live agent overlapping an idle agent's unreviewed work too). The detail pane (~75%) is the selected item's **change-map**, in three labeled sections top to bottom: **Chapters** — a ribbon of subtask chips (each a to-do Claude worked, showing its lines / edits / pending; chapters are **total**, so work outside any to-do lands in a synthesized session chapter, and every chapter's Accept / Reject / Clear act **WYSIWYG** on exactly the edits its row shows); **Folders** — a proportional strip of tiles, one per changed directory (tile width = lines changed, colour = review status); and **Files** — a churn-ranked ledger of every changed file (±line bars, coloured by review status, worst-unreviewed-wins). Clicking a **Folder** tile or a **Chapter** chip navigates the matching nav-bar axis, opening that folder's or chapter's first pending edit. A **summary bar** along the bottom shows the pending / accepted / reverted edit counts plus file and folder totals for whatever is in scope, and names the current chapter (or folder filter). A **capability row** above the chapters says what the session reached for — reads and edits split by whether they landed **outside the workspace**, shell commands with their risk tiers, MCP servers, network hosts, subagent spawns — counting what was **exercised, never what was approved** (Claude Code writes nothing to the transcript when it prompts for permission, so the two are indistinguishable from outside). **Compaction markers** sit between the chapter chips wherever the harness ran out of context and summarized the conversation away. Up top, the **review nav bar** is two rows. The **controls** row carries the **session selector** (the session's human-readable **name** — its title or first prompt, with the raw id in the tooltip; the switch-session picker lists every session by name too), the session-wide **Accept All · Revert All · Clear Resolved · Export**, and, at the right, **Search · Active only · Spotlight · Refresh**. The **axes** row steps the pending edits at four granularities: **Diff** ◄► across the open file's edits (Keep · Undo · Chat · View diff — opens a real side-by-side diff editor — and the edit's relative time); **File** ◄► across changed files (filename + that file's edit count; Accept / Reject File); **Folder** ◄► across changed directories (folder + its file / edit totals; Accept / Reject Folder, acting on that folder's edits only); and **Chapter** ◄► across the session's subtasks (the chapter's folder / file / edit totals; Review · Accept Chapter · Reject Chapter · Chat). Actions are color-coded (green keep/accept, red undo/reject, blue chevrons, orange clear, purple search/spotlight), every icon unique to its action, with live n/m counters on each axis. |
+| **Observations** | A **session recap** on top (Claude Code's own title — zero token; ✨ to refine via `claude -p --resume`), a **Context** section naming what shaped the session — the skills it invoked, the plans it wrote, the memory it read, whether it was resumed from a compaction, plus the instruction files present where Claude Code auto-loads them, each row labelled with how we know it (`transcript` for what the session demonstrably did, `file-present` for files that merely exist in a loaded location, since CLAUDE.md and memory are injected system-prompt-side and leave no per-session trace) — then a coalesced **change feed** — files ordered by most-recent activity, each expanding to its edits (id + a small dimmed time + delta, adjacent same-file edits collapsing into a **×N** run) — with Claude's actual reasoning per row. Each row carries the observatory's **memory of that file** — cross-session accept/revert history and prior analyses; files whose edits get reverted repeatedly are flagged. |
+| **Stats** | A **top navbar** — the active Claude Code session, shown by **name** (its title or first prompt, not the raw id), with a chip naming the **model and reasoning effort** the session is actually running on (`Opus 4.8 · max effort`; a session that switched models shows the current one and says it switched, with per-model turn counts in the tooltip) — over a **Session tokens** section (the session's cumulative **input** / **output** / **cached** split with the **cache hit rate**, kept live by an incremental transcript cursor), an **Edits** section with the live **review scoreboard** (pending / accepted / reverted + a progress bar; the **pending** count is clickable, jumping to the first / oldest edit to review), a **tokens** step-line plot (total / input / output, log axis, Today / 7 days / 30 days), and live **Usage** bars — context fill plus 5h / week plan usage (from [claude-statusline](https://github.com/cell-observatory/claude-statusline)), the 5h and weekly rows now showing an estimated **used / total** (the 100 % total inferred from tokens ÷ percent). A **context meter** plots context sent per turn, saw-toothing down at every **compaction** the harness performed. |
 
 ![The master–detail Overview: a left nav with Fleet, Workflows, and Tasks tabs listing every running agent, workflow run, and numbered task; the selected one's change-map on the right — the Chapters ribbon, the Folders strip, and the churn-ranked Files ledger, with a two-row nav bar (session controls over the Diff · File · Folder · Chapter axes) above](docs/media/overview-tabs.png)
 
 <p>
   <img src="docs/media/observations.png" width="55%" alt="Observations: session recap, per-edit reasoning, and cross-session file memory with revert-risk flags">
-  <img src="docs/media/stats.png" width="43.5%" alt="Stats: review scoreboard, tokens step-line trends with a Today/7d/30d toggle, plus live usage bars">
+  <img src="docs/media/stats.png" width="43.5%" alt="Stats: session token split (input/output/cached + hit rate), review scoreboard, tokens step-line trends with a Today/7d/30d toggle, plus live usage bars">
 </p>
 
 **Review surfaces** — the left sidebar / tool window (icon-only tabs, 🔬 microscope badged with the pending count):
@@ -191,6 +193,7 @@ The `claude-observatory` CLI is a first-class front-end — review without leavi
 
 ```text
 claude-observatory status          # hooks + hook-path health + active session + counts
+claude-observatory doctor          # diagnose setup (hooks, PATH, config dir, session, status line) with fixes
 claude-observatory sessions        # list all sessions in the store (● = current dir)
 claude-observatory list            # edits in the active session (grouped by file, ±lines, status)
 claude-observatory list --pending  # filters: --pending | --kept | --undone, and --file <substr>
@@ -208,6 +211,7 @@ claude-observatory insights        # Observations: recap + per-edit reasoning/fl
 claude-observatory actions         # every tool call this session — typed, grouped, zero-token (alias `trace`); --json | --category <c> | --errors | --limit <n> | --all
 claude-observatory risk            # audit shell commands for destructive / remote-code / privilege / credential risk — ⚠ high/med
 claude-observatory egress          # what this session touched off-machine: WebFetch hosts · MCP servers · network shell (remote vs unknown)
+claude-observatory capabilities    # what the session reached for: reads/edits (split by in- vs outside the workspace) · shell + risk tiers · MCP servers · network · subagents — exercised, never "approved"; --json
 claude-observatory subagents       # per-subagent action timeline + metrics (duration · tokens · tool-uses · status), zero-token (alias `agents`); --json
 claude-observatory siblings        # other Claude sessions in this project: active/idle · pending edits · files · risk flags — read-only, path-only (alias `fleet`); --json | --all | --repo (every worktree of the repo)
 claude-observatory multitask       # real-time multi-agent view: every running agent across the repo's worktrees — phase · sparkline · ±diff · risk · subagents · workflows · collisions, git-free; --json
@@ -265,8 +269,9 @@ claude-observatory init --with-statusline   # capture hooks + the bundled status
 ```
 
 The [claude-statusline](https://github.com/cell-observatory/claude-statusline) status line is **bundled**
-— `claude-observatory statusline` installs/refreshes it with no network (it powers the Usage bars). Refresh
-the vendored copy with `scripts/sync-statusline.sh`.
+— `claude-observatory statusline` installs/refreshes it with no network (it powers the Usage bars; it's a
+bash script and needs `jq` on the PATH, on every platform). Refresh the vendored copy with
+`scripts/sync-statusline.sh`.
 
 > **Important — install hooks _before_ launching Claude Code.** Claude Code snapshots your hooks at session
 > start, so hooks added to a **running** session get reverted. Run `claude-observatory init` with Claude
@@ -299,7 +304,9 @@ afterward, add the [plugin repository](packages/jetbrains/README.md#auto-updates
 **Teams:** run `claude-observatory init --project` to write the hook into the repo's `./.claude/settings.json`
 (checked in). Teammates then only need `claude-observatory` on their PATH.
 
-**Remote development (SSH & devcontainers):** the extension runs on the **remote host** (where Claude, the
+### Remote development (SSH & devcontainers)
+
+The extension runs on the **remote host** (where Claude, the
 transcripts, and the store live). Full setup — Remote-SSH, JetBrains Gateway/Toolbox, the devcontainer
 template, and relocating `CLAUDE_CONFIG_DIR` — is in **[docs/REMOTE.md](docs/REMOTE.md)**.
 

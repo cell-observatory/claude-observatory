@@ -39,7 +39,7 @@
       // This extension is distributed as a private .vsix (not on the Marketplace), so it can't be
       // auto-installed by id here. setup.sh prints how to install the packaged .vsix into the
       // container. If you publish it to the Marketplace or a private registry, add its id here to
-      // auto-install on rebuild, e.g. "claude-observatory.claude-observatory-vscode".
+      // auto-install on rebuild, e.g. "cell-observatory.claude-observatory-vscode".
       "extensions": []
     }
   }

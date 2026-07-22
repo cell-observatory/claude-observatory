@@ -438,6 +438,47 @@ ok "observations run carries combined delta + per-edit rows" "printf '%s' \"\$OB
 ok "observations edit carries Claude's reasoning"        "printf '%s' \"\$OBSV\" | jq -e '[.runs[].edits[] | select(.reasoning!=null)]|length>=1' >/dev/null"
 ok "observations nextSteps includes the open to-do"      "printf '%s' \"\$OBSV\" | jq -e '[.nextSteps[] | select(test(\"ship observations\"))]|length>=1' >/dev/null"
 
+echo "════════ E2E 20: 0.8.6 session vitals · compactions · capabilities · context sources ════════"
+# One transcript carrying everything the 0.8.6 lenses read: two models (the later one wins), a
+# structural effort stamp, a real compact_boundary record (no `message` field — it must survive the
+# parser's message gate), a Skill invocation, and an out-of-workspace read.
+V6=vitals86
+: > "$HOME/.claude/projects/$MANGLE/$V6.jsonl"
+node -e '
+  const fs=require("fs");
+  const [proj, sess]=process.argv.slice(1);
+  const at=(ms)=>new Date(ms).toISOString();
+  const turn=(id,model,effort,ms,usage)=>JSON.stringify({type:"assistant",timestamp:at(ms),effort,
+    message:{role:"assistant",id,model,usage,content:[]}});
+  const boundary=JSON.stringify({type:"system",subtype:"compact_boundary",content:"Conversation compacted",
+    isSidechain:false,timestamp:at(3000),
+    compactMetadata:{trigger:"auto",preTokens:1000140,postTokens:13883,cumulativeDroppedTokens:986257,durationMs:125455}});
+  const skill=JSON.stringify({type:"assistant",timestamp:at(4000),message:{role:"assistant",content:[
+    {type:"tool_use",id:"sk1",name:"Skill",input:{skill:"dataviz"}}]}});
+  const outside=JSON.stringify({type:"assistant",timestamp:at(5000),message:{role:"assistant",content:[
+    {type:"tool_use",id:"rd1",name:"Read",input:{file_path:"/etc/hosts"}}]}});
+  fs.writeFileSync(proj+"/"+sess+".jsonl",[
+    turn("v1","claude-opus-4-8","max",1000,{input_tokens:900,output_tokens:20,cache_read_input_tokens:100,cache_creation_input_tokens:0}),
+    turn("v2","claude-fable-5","xhigh",2000,{input_tokens:1200,output_tokens:30,cache_read_input_tokens:200,cache_creation_input_tokens:0}),
+    boundary, skill, outside].join("\n")+"\n");
+' "$HOME/.claude/projects/$MANGLE" "$V6"
+USG=$(cc usage --session "$V6" 2>/dev/null)
+ok "usage --json carries vitals"                         "printf '%s' \"\$USG\" | jq -e 'has(\"vitals\") and has(\"sessionTokens\")' >/dev/null"
+ok "vitals: the LATEST main-chain model is current"      "printf '%s' \"\$USG\" | jq -e '.vitals.model.label==\"Fable 5\"' >/dev/null"
+ok "vitals: every model used is listed (switch shown)"   "printf '%s' \"\$USG\" | jq -e '(.vitals.models|length)==2' >/dev/null"
+ok "vitals: effort read from the assistant record"       "printf '%s' \"\$USG\" | jq -e '.vitals.effort.level==\"xhigh\" and .vitals.effort.source==\"record\"' >/dev/null"
+ok "vitals: the compaction is captured"                  "printf '%s' \"\$USG\" | jq -e '(.vitals.compactions|length)==1' >/dev/null"
+ok "vitals: context series feeds the meter"              "printf '%s' \"\$USG\" | jq -e '(.vitals.context|length)>=2' >/dev/null"
+ACT6=$(cc actions --session "$V6" --json 2>/dev/null)
+ok "actions: a compaction becomes a 'compact' row"       "printf '%s' \"\$ACT6\" | jq -e '[.actions[]|select(.category==\"compact\")]|length==1' >/dev/null"
+ok "actions: the compact row carries THIS event's drop"  "printf '%s' \"\$ACT6\" | jq -e '[.actions[]|select(.category==\"compact\")][0].compact.droppedTokens==986257' >/dev/null"
+CAP6=$(cc capabilities --session "$V6" --json 2>/dev/null)
+ok "capabilities --json reports the footprint"           "printf '%s' \"\$CAP6\" | jq -e '.capabilities|has(\"reads\") and has(\"exec\") and has(\"mcp\")' >/dev/null"
+ok "capabilities: an out-of-workspace read is flagged"   "printf '%s' \"\$CAP6\" | jq -e '.capabilities.reads.outOfRoot>=1' >/dev/null"
+OBS6=$(cc observations --session "$V6" 2>/dev/null)
+ok "observations: context sources ride the payload"      "printf '%s' \"\$OBS6\" | jq -e '.context|has(\"sources\") and has(\"note\")' >/dev/null"
+ok "observations: an invoked skill is transcript-proven" "printf '%s' \"\$OBS6\" | jq -e '[.context.sources[]|select(.kind==\"skill\" and .evidence==\"transcript\")]|length==1' >/dev/null"
+
 echo "════════ E2E 19: 0.8.0 demo simulator (real pipeline end-to-end, total chapters, no-residue lifecycle) ════════"
 # The demo replays a scripted session through the REAL pipeline (transcript + captured edits + a
 # subagent + a workflow) in an isolated demo-* session + folder — then every 0.8.0 surface is asserted

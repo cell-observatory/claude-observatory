@@ -15,6 +15,7 @@ import * as path from 'path';
 import { findTranscript } from './observe';
 import { cachedByFiles } from './fscache';
 import { parseTranscriptActions, ActionRecord, ActionSummary, summarizeActions, agentPhaseDetail, Phase, PhaseConfidence, attributeEditIds, EditAttributionAuthor } from './actions';
+import { sessionTaskRows, taskChapterId, SessionTaskRow } from './tasks';
 
 /** Spawn + result metadata for one subagent, mined from the parent transcript's Agent/Task result. */
 interface SubagentMeta {
@@ -292,6 +293,33 @@ export interface SubagentsSummary {
   totalDurationMs: number;
   totalTokens: number;
   errors: number;
+}
+
+/** The Tasks tab's rows across BOTH task generations: the legacy numbered list (TaskCreate/TaskUpdate
+ *  + ~/.claude/tasks files) UNIONED with one row per background Agent run — the newer harness's task
+ *  system, which writes agent transcripts + task-notifications instead of numbered task files, and
+ *  which previously left the tab permanently empty. Subject = the spawn description; status tracks the
+ *  agent's LIVE phase (in_progress while running, errored passes through); activeForm = the agent's own
+ *  in-progress todo (honest: null when it declared none). Lives here, not tasks.ts, because tasks.ts
+ *  must not import subagents (subagents → actions → changemap → tasks would close a cycle). The two
+ *  generations never coexist in practice; when they do, the numbered list leads. */
+export function allSessionTaskRows(cwd: string, sessionId: string): SessionTaskRow[] {
+  const spawnOrder = parseSubagents(cwd, sessionId).slice().sort((a, b) => a.ts - b.ts);
+  const agents = spawnOrder.map((s, i): SessionTaskRow => {
+    const subject = (s.description || '').trim() || `${s.agentType || 'agent'} ${s.agentId.slice(0, 8)}`;
+    return {
+      id: `a${i + 1}`, // spawn-order display key ("#a1") — distinct on sight from the legacy numeric ids
+      subject,
+      description: [s.agentType, s.currentTask].filter(Boolean).join(' — '),
+      status: s.running ? 'in_progress' : s.phase === 'errored' ? 'errored' : 'completed',
+      activeForm: s.running ? s.currentTask : null,
+      blocks: [],
+      blockedBy: [],
+      chapterId: taskChapterId(subject),
+    };
+  });
+  agents.reverse(); // newest spawn first, matching the legacy rows' newest-first order
+  return [...sessionTaskRows(cwd, sessionId), ...agents];
 }
 
 /** Headline rollup across all subagents (for the Actions "Subagents" group header + `metrics`). */

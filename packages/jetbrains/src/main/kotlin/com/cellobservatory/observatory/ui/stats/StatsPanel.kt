@@ -51,7 +51,36 @@ private data class Usage(
     val fivePct: Double?, val fiveReset: Long?, val fiveTok: Double?,
     val weekPct: Double?, val weekReset: Long?, val weekTok: Double?,
     val statuslineCache: Boolean, val cachedAtMs: Long?, val staleMs: Long,
+    val sessionTokens: SessionTokens?,
+    val vitals: SessionVitals?,
 )
+
+/** The session's cumulative token split from `usage --json`'s `sessionTokens` (core.sessionUsage). */
+private data class SessionTokens(
+    val input: Double, val output: Double, val cacheRead: Double, val cacheCreation: Double,
+    val hitPct: Double?,
+)
+
+/** What the session is running on and how its context has fared, from `usage --json`'s `vitals`
+ *  (core.sessionVitals). [model] is null until the session has an assistant turn and [effort] is null
+ *  when it never declared one — both render as nothing, never as a guessed default (the default differs
+ *  by build and model, so inventing one would be a lie). */
+private data class SessionVitals(
+    val model: String?,
+    val modelTurns: Int,
+    /** Every model the session ran on as label→turns; more than one means it switched mid-flight. */
+    val models: List<Pair<String, Int>>,
+    val effort: String?,
+    /** True when the level came from an older transcript's `/effort` echo rather than an assistant record. */
+    val effortStub: Boolean,
+    val compactions: List<VitalCompaction>,
+    /** Context sent per assistant turn as ts→tokens, already downsampled by core — saw-tooths down at
+     *  each compaction. */
+    val context: List<Pair<Long, Double>>,
+)
+
+/** One compaction from `vitals.compactions` — a tick under the context meter. */
+private data class VitalCompaction(val ts: Long, val trigger: String, val droppedTokens: Double)
 
 private fun human(n: Double): String {
     if (!n.isFinite()) return "0"
@@ -120,6 +149,8 @@ class StatsPanel(private val project: Project) : JPanel(BorderLayout()), com.int
         border = JBUI.Borders.empty(8)
         toolTipText = "First scan of your transcripts; cached after"
     }
+    private val tokenStrip = TokenStrip()
+    private val ctxMeter = ContextMeter()
     private val scoreboard = ReviewScoreboard()
     private val tokensChart = ChartComponent(
         "TOKENS", true,
@@ -139,6 +170,13 @@ class StatsPanel(private val project: Project) : JPanel(BorderLayout()), com.int
         foreground = UIUtil.getContextHelpForeground()
         toolTipText = "Active Claude Code session"
     }
+    // Which model is serving this session, and at what effort (0.8.6). Hidden outright until the
+    // transcript records an assistant turn — a placeholder chip beside the title would read as a fact.
+    private val vitalsChip = JBLabel().apply {
+        font = JBUI.Fonts.miniFont()
+        foreground = UIUtil.getContextHelpForeground()
+        isVisible = false
+    }
 
     init {
         val ranges = JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(4), JBUI.scale(4)))
@@ -149,13 +187,17 @@ class StatsPanel(private val project: Project) : JPanel(BorderLayout()), com.int
             group.add(b)
             ranges.add(b)
         }
-        // Top navbar: the active session, above the range toggle. Clicking the scoreboard's PENDING
-        // column jumps to the first edit to review.
+        // Top navbar: the active session. The range toggle lives in the stack right above the chart it
+        // scopes (VS Code parity: title → session tokens → edits → ranges → chart → usage). Clicking
+        // the scoreboard's PENDING column jumps to the first edit to review.
         val navbar = JPanel(BorderLayout(JBUI.scale(8), 0)).apply {
             border = JBUI.Borders.empty(4, 8, 3, 8)
             add(sessionLabel, BorderLayout.WEST)
+            add(vitalsChip, BorderLayout.EAST)
         }
-        add(JPanel().apply { layout = javax.swing.BoxLayout(this, javax.swing.BoxLayout.Y_AXIS); add(navbar); add(ranges) }, BorderLayout.NORTH)
+        add(navbar, BorderLayout.NORTH)
+        // In the BoxLayout stack an unbounded JPanel would soak up glue space — pin its height.
+        ranges.maximumSize = Dimension(Int.MAX_VALUE, ranges.preferredSize.height)
         scoreboard.toolTipText = "Click the PENDING count to jump to the first edit to review"
         scoreboard.addMouseListener(object : java.awt.event.MouseAdapter() {
             override fun mouseClicked(e: java.awt.event.MouseEvent) { if (e.x < scoreboard.width / 3) reviewFirst() }
@@ -168,9 +210,14 @@ class StatsPanel(private val project: Project) : JPanel(BorderLayout()), com.int
 
         val stack = ScrollableStack().apply {
             border = JBUI.Borders.empty(4, 8)
-            add(gathering)
+            add(tokenStrip)
+            add(Box.createVerticalStrut(JBUI.scale(12)))
+            add(ctxMeter)
+            add(Box.createVerticalStrut(JBUI.scale(12)))
             add(scoreboard)
             add(Box.createVerticalStrut(JBUI.scale(12)))
+            add(ranges)
+            add(gathering)
             add(tokensChart)
             add(Box.createVerticalStrut(JBUI.scale(12)))
             add(usageBars)
@@ -248,15 +295,45 @@ class StatsPanel(private val project: Project) : JPanel(BorderLayout()), com.int
     }
 
     private fun fetchUsage() {
+        val session = ObservatoryService.getInstance(project).currentSession()
         AppExecutorUtil.getAppExecutorService().submit {
-            val u = ObservatoryCli.usageJson(project.basePath)?.let { parseUsage(it) }
+            val u = ObservatoryCli.usageJson(session, project.basePath)?.let { parseUsage(it) }
             ApplicationManager.getApplication().invokeLater {
                 if (project.isDisposed) return@invokeLater
                 usage = u ?: usage
                 usageBars.update(usage)
+                tokenStrip.update(usage?.sessionTokens)
+                updateVitals(usage?.vitals)
+                ctxMeter.update(usage)
                 updateHint()
             }
         }
+    }
+
+    /** The navbar's model/effort chip. Nothing is invented: no model → no chip at all, no declared effort
+     *  → no effort clause. "+N" means the session switched models mid-flight; the tooltip names them with
+     *  their turn counts, and says when the effort came from an `/effort` echo instead of a record. */
+    private fun updateVitals(v: SessionVitals?) {
+        val model = v?.model
+        if (v == null || model == null) {
+            vitalsChip.isVisible = false
+            return
+        }
+        val others = v.models.filter { it.first != model }
+        vitalsChip.text = model + (v.effort?.let { " · $it effort" } ?: "") + (if (others.isNotEmpty()) "  +${others.size}" else "")
+        vitalsChip.toolTipText = buildString {
+            append("Model: $model")
+            if (v.modelTurns > 0) append(" · ${v.modelTurns} turn(s)")
+            if (others.isNotEmpty()) {
+                append("\nAlso ran on: ")
+                append(others.joinToString(", ") { "${it.first} (${it.second} turn(s))" })
+            }
+            v.effort?.let {
+                append("\nEffort: $it")
+                if (v.effortStub) append(" — read from the session's /effort command, not from an assistant record")
+            }
+        }
+        vitalsChip.isVisible = true
     }
 
     private fun updateHint() {
@@ -317,6 +394,46 @@ class StatsPanel(private val project: Project) : JPanel(BorderLayout()), com.int
             statuslineCache = o.get("statuslineCache")?.asBoolean ?: false,
             cachedAtMs = lng(o.get("cachedAtMs")),
             staleMs = lng(o.get("staleMs")) ?: 300_000L,
+            sessionTokens = o.get("sessionTokens")?.takeIf { it.isJsonObject }?.asJsonObject?.let { st ->
+                SessionTokens(
+                    input = num(st.get("input")) ?: 0.0,
+                    output = num(st.get("output")) ?: 0.0,
+                    cacheRead = num(st.get("cacheRead")) ?: 0.0,
+                    cacheCreation = num(st.get("cacheCreation")) ?: 0.0,
+                    hitPct = num(st.get("hitPct")),
+                )
+            },
+            vitals = o.get("vitals")?.takeIf { it.isJsonObject }?.asJsonObject?.let { v ->
+                val m = v.get("model")?.takeIf { it.isJsonObject }?.asJsonObject
+                val eff = v.get("effort")?.takeIf { it.isJsonObject }?.asJsonObject
+                fun list(k: String) =
+                    v.get(k)?.takeIf { it.isJsonArray }?.asJsonArray ?: com.google.gson.JsonArray()
+                SessionVitals(
+                    model = m?.get("label")?.takeIf { !it.isJsonNull }?.asString,
+                    modelTurns = num(m?.get("turns"))?.toInt() ?: 0,
+                    models = list("models").mapNotNull { e ->
+                        val mo = e.takeIf { it.isJsonObject }?.asJsonObject ?: return@mapNotNull null
+                        val label = mo.get("label")?.takeIf { !it.isJsonNull }?.asString ?: return@mapNotNull null
+                        label to (num(mo.get("turns"))?.toInt() ?: 0)
+                    },
+                    effort = eff?.get("level")?.takeIf { !it.isJsonNull }?.asString,
+                    effortStub = eff?.get("source")?.takeIf { !it.isJsonNull }?.asString == "stub",
+                    compactions = list("compactions").mapNotNull { e ->
+                        val co = e.takeIf { it.isJsonObject }?.asJsonObject ?: return@mapNotNull null
+                        VitalCompaction(
+                            ts = lng(co.get("ts")) ?: 0L,
+                            trigger = co.get("trigger")?.takeIf { !it.isJsonNull }?.asString ?: "compact",
+                            droppedTokens = num(co.get("droppedTokens")) ?: 0.0,
+                        )
+                    },
+                    // [tsMs, tokens] pairs — a shape change would otherwise throw and null the whole payload.
+                    context = list("context").mapNotNull { e ->
+                        val p = e.takeIf { it.isJsonArray }?.asJsonArray ?: return@mapNotNull null
+                        if (p.size() < 2) return@mapNotNull null
+                        (lng(p.get(0)) ?: 0L) to (num(p.get(1)) ?: 0.0)
+                    },
+                )
+            },
         )
     } catch (_: Exception) {
         null
@@ -337,6 +454,142 @@ private class ScrollableStack : JPanel(), javax.swing.Scrollable {
     override fun getScrollableTracksViewportHeight() = false
 }
 
+/** This session's cumulative token split — INPUT (uncached) / OUTPUT / CACHED (reads, with the hit
+ *  rate folded into its label) — under the session title. "SESSION TOKENS", not "TOKENS"/"USAGE":
+ *  both already name other sections of this panel (the machine-wide time-series chart and the
+ *  plan-limit bars). VS Code parity. */
+private class TokenStrip : JComponent() {
+    private var t: SessionTokens? = null
+
+    init {
+        preferredSize = Dimension(JBUI.scale(200), JBUI.scale(64))
+        minimumSize = Dimension(JBUI.scale(110), JBUI.scale(64))
+        maximumSize = Dimension(Int.MAX_VALUE, JBUI.scale(68))
+    }
+
+    fun update(tokens: SessionTokens?) {
+        t = tokens
+        repaint()
+    }
+
+    override fun paintComponent(g: Graphics) {
+        val g2 = g as Graphics2D
+        g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+        val grey = UIUtil.getContextHelpForeground()
+        g2.color = grey
+        g2.font = JBUI.Fonts.miniFont()
+        g2.drawString("SESSION TOKENS", JBUI.scale(2), JBUI.scale(10))
+        val tok = t
+        val cachedLabel = "CACHED" + (tok?.hitPct?.let { " · ${Math.round(it)}% HIT" } ?: "")
+        val cells: List<Triple<String, String, Color>> = listOf(
+            Triple("INPUT", tok?.input?.let(::human) ?: "—", C_INPUT),
+            Triple("OUTPUT", tok?.output?.let(::human) ?: "—", C_TOTAL),
+            Triple(cachedLabel, tok?.cacheRead?.let(::human) ?: "—", C_KEPT),
+        )
+        val gap = JBUI.scale(6)
+        val top = JBUI.scale(16)
+        val cellW = (width - 2 * gap) / 3
+        val cellH = JBUI.scale(42)
+        var x = 0
+        for ((label, value, color) in cells) {
+            g2.color = JBColor.border()
+            g2.drawRoundRect(x, top, cellW - 1, cellH, JBUI.scale(6), JBUI.scale(6))
+            g2.color = color
+            g2.font = JBUI.Fonts.label(14f).asBold()
+            g2.drawString(value, x + (cellW - g2.fontMetrics.stringWidth(value)) / 2, top + JBUI.scale(22))
+            g2.color = grey
+            g2.font = JBUI.Fonts.miniFont()
+            g2.drawString(label, x + (cellW - g2.fontMetrics.stringWidth(label)) / 2, top + JBUI.scale(36))
+            x += cellW + gap
+        }
+        toolTipText = tok?.let {
+            "This session's cumulative tokens, as billed — input ${human(it.input)} (uncached) · output ${human(it.output)}" +
+                " · cache reads ${human(it.cacheRead)} · cache writes ${human(it.cacheCreation)}" +
+                (it.hitPct?.let { p -> " · hit rate ${Math.round(p)}% (reads ÷ all context sent)" } ?: "")
+        } ?: "This session's cumulative token split — fills in once the session has assistant turns"
+    }
+}
+
+/** How full the context window was on each assistant turn, with an amber tick at every compaction — the
+ *  cliffs ARE the compactions. Structural: core reads the series and the boundaries off the transcript's
+ *  own records, so nothing here is estimated. VS Code parity. */
+private class ContextMeter : JComponent() {
+    private var u: Usage? = null
+
+    init {
+        preferredSize = Dimension(JBUI.scale(200), JBUI.scale(58))
+        minimumSize = Dimension(JBUI.scale(110), JBUI.scale(58))
+        maximumSize = Dimension(Int.MAX_VALUE, JBUI.scale(62))
+    }
+
+    fun update(usage: Usage?) {
+        u = usage
+        repaint()
+    }
+
+    override fun paintComponent(g: Graphics) {
+        val g2 = g as Graphics2D
+        g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+        val grey = UIUtil.getContextHelpForeground()
+        g2.color = grey
+        g2.font = JBUI.Fonts.miniFont()
+        g2.drawString("CONTEXT FILL", JBUI.scale(2), JBUI.scale(10))
+        val top = JBUI.scale(15)
+        val plotH = JBUI.scale(26)
+        val baseY = top + plotH
+        g2.color = JBColor.border()
+        g2.drawLine(0, baseY, width, baseY)
+        val v = u?.vitals
+        val series = v?.context ?: emptyList()
+        if (v == null || series.isEmpty()) {
+            g2.color = grey
+            g2.drawString("no assistant turns yet", JBUI.scale(2), baseY + JBUI.scale(14))
+            toolTipText = "How full the context window was on each assistant turn — fills in once the session has turns"
+            return
+        }
+        val n = series.size
+        val peak = max(1.0, series.maxOf { it.second })
+        fun xOf(i: Int): Int = if (n == 1) width - 1 else i * (width - 1) / (n - 1)
+        fun yOf(value: Double): Int = baseY - ((value / peak) * (plotH - JBUI.scale(2))).toInt()
+        val area = java.awt.Polygon()
+        area.addPoint(xOf(0), baseY)
+        for (i in 0 until n) area.addPoint(xOf(i), yOf(series[i].second))
+        area.addPoint(xOf(n - 1), baseY)
+        g2.color = UIUtil.toAlpha(C_TOTAL, 60)
+        g2.fillPolygon(area)
+        g2.color = C_TOTAL
+        for (i in 1 until n) g2.drawLine(xOf(i - 1), yOf(series[i - 1].second), xOf(i), yOf(series[i].second))
+        // One tick per compaction, placed on the time axis the series spans.
+        val firstTs = series.first().first
+        val span = max(1.0, (series.last().first - firstTs).toDouble())
+        g2.color = C_PENDING
+        for (c in v.compactions) {
+            val x = (((c.ts - firstTs) / span) * (width - 1)).toInt().coerceIn(0, max(0, width - 1))
+            g2.drawLine(x, top, x, baseY)
+        }
+        val latest = series.last().second
+        val size = u?.ctxSize
+        val fill = if (size != null && size > 0) "${human(latest)} / ${human(size)}" else human(latest)
+        val dropped = v.compactions.sumOf { it.droppedTokens }
+        val nc = v.compactions.size
+        g2.color = grey
+        g2.font = JBUI.Fonts.miniFont()
+        g2.drawString(
+            fill + if (nc > 0) "  ·  $nc compaction${if (nc == 1) "" else "s"} · ${human(dropped)} dropped" else "",
+            JBUI.scale(2), baseY + JBUI.scale(14),
+        )
+        toolTipText = buildString {
+            append("Context carried into each assistant turn — $n sampled turn(s), peak ${human(peak)}")
+            if (nc > 0) {
+                append("\n$nc compaction(s): each amber tick is the harness summarizing older turns away")
+                append(" (${human(dropped)} tokens dropped in total)")
+            } else {
+                append("\nNo compactions yet — nothing has been summarized away")
+            }
+        }
+    }
+}
+
 /** Live review scoreboard: current pending / accepted / reverted counts + a progress bar that fills as
  *  edits get reviewed. Fed from ObservatoryService.counts() on every store change — parity with the VS
  *  Code Stats webview's review section (natively painted, consistent with the charts below). */
@@ -344,9 +597,9 @@ private class ReviewScoreboard : JComponent() {
     private var c: ObservatoryService.Counts? = null
 
     init {
-        preferredSize = Dimension(JBUI.scale(200), JBUI.scale(80))
-        minimumSize = Dimension(JBUI.scale(110), JBUI.scale(80))
-        maximumSize = Dimension(Int.MAX_VALUE, JBUI.scale(86))
+        preferredSize = Dimension(JBUI.scale(200), JBUI.scale(96))
+        minimumSize = Dimension(JBUI.scale(110), JBUI.scale(96))
+        maximumSize = Dimension(Int.MAX_VALUE, JBUI.scale(102))
     }
 
     fun update(counts: ObservatoryService.Counts?) {
@@ -358,6 +611,9 @@ private class ReviewScoreboard : JComponent() {
         val g2 = g as Graphics2D
         g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
         val grey = UIUtil.getContextHelpForeground()
+        g2.color = grey
+        g2.font = JBUI.Fonts.miniFont()
+        g2.drawString("EDITS", JBUI.scale(2), JBUI.scale(10))
         val counts = c ?: ObservatoryService.Counts(0, 0, 0, null)
         val cells = listOf(
             Triple("PENDING", counts.pending, C_PENDING),
@@ -365,25 +621,26 @@ private class ReviewScoreboard : JComponent() {
             Triple("REVERTED", counts.undone, C_REVERTED),
         )
         val gap = JBUI.scale(6)
+        val top = JBUI.scale(16)
         val cellW = (width - 2 * gap) / 3
         val cellH = JBUI.scale(44)
         var x = 0
         for ((label, value, color) in cells) {
             g2.color = JBColor.border()
-            g2.drawRoundRect(x, 0, cellW - 1, cellH, JBUI.scale(6), JBUI.scale(6))
+            g2.drawRoundRect(x, top, cellW - 1, cellH, JBUI.scale(6), JBUI.scale(6))
             g2.color = color
             g2.font = JBUI.Fonts.label(16f).asBold()
             val num = value.toString()
-            g2.drawString(num, x + (cellW - g2.fontMetrics.stringWidth(num)) / 2, JBUI.scale(25))
+            g2.drawString(num, x + (cellW - g2.fontMetrics.stringWidth(num)) / 2, top + JBUI.scale(25))
             g2.color = grey
             g2.font = JBUI.Fonts.miniFont()
-            g2.drawString(label, x + (cellW - g2.fontMetrics.stringWidth(label)) / 2, JBUI.scale(39))
+            g2.drawString(label, x + (cellW - g2.fontMetrics.stringWidth(label)) / 2, top + JBUI.scale(39))
             x += cellW + gap
         }
         val reviewed = counts.kept + counts.undone
         val total = counts.pending + reviewed
         val pct = if (total > 0) reviewed.toDouble() / total else 0.0
-        val barY = cellH + JBUI.scale(10)
+        val barY = top + cellH + JBUI.scale(10)
         val barH = JBUI.scale(5)
         g2.color = JBColor.border()
         g2.fillRoundRect(0, barY, width, barH, 4, 4)

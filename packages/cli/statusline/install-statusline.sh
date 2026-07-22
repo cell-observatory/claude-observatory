@@ -29,8 +29,11 @@ cat > "$CLAUDE_DIR/statusline.sh" <<'STATUSLINE_EOF'
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Cell Observatory
 # Claude Code status line.
-#   Line 1: dir | branch | model
-#   Line 2: context% | 5h usage% (resets) | week usage% (resets)
+#   Line 1: time · date | branch (only inside a git repo) | current path (~-abbreviated)
+#   Line 2: session title (falls back to the folder name) | model · effort · think · style ·
+#           ↑input ↓output ↺cached session tokens · ◷duration
+#           (effort/think/style/tokens/duration shown only when present)
+#   Line 3: context% (used/size) | 5h usage% (resets · ~used/total) | week usage% (resets · ~used/total)
 # rate_limits.* fields are sent only for Claude.ai subscription plans (Pro/Max/Team)
 # and only after the first API response in a session, so line 2's usage may be empty
 # in a fresh session. Schema: https://code.claude.com/docs/en/statusline.md
@@ -49,10 +52,16 @@ j() { printf '%s' "$input" | jq -r "$1"; }
 
 dir=$(j '.workspace.current_dir // .cwd // ""')
 model=$(j '.model.display_name // ""')
+effort=$(j '.effort.level // ""')            # reasoning effort (low/medium/high/xhigh/max); absent if unsupported
+thinking=$(j '.thinking.enabled // false')   # extended thinking on/off
+ostyle=$(j '.output_style.name // ""')       # active output style (hidden when default)
+dur_ms=$(j '.cost.total_duration_ms // empty') # wall-clock session duration
 ctx=$(j '.context_window.used_percentage // empty')
 ctx_in=$(j '.context_window.total_input_tokens // 0')
 ctx_out=$(j '.context_window.total_output_tokens // 0')
 ctx_size=$(j '.context_window.context_window_size // empty')
+sid=$(j '.session_id // ""')
+tp=$(j '.transcript_path // ""')
 branch=$(git -C "$dir" --no-optional-locks rev-parse --abbrev-ref HEAD 2>/dev/null)
 
 five_pct=$(j '.rate_limits.five_hour.used_percentage // empty')
@@ -103,12 +112,52 @@ human() { local n=${1%.*}; [ -z "$n" ] && n=0
     if [ "$d" -eq 0 ]; then printf '%dM' $((n/1000000)); else printf '%d.%dM' $((n/1000000)) "$d"; fi
   elif [ "$n" -ge 1000 ]; then printf '%dk' $((n/1000))
   else printf '%d' "$n"; fi; }
+# milliseconds -> compact wall time "1h04m" / "4m" / "30s"
+dur_str() { local s=$(( ${1%.*} / 1000 ))
+  if [ "$s" -ge 3600 ]; then printf '%dh%02dm' $((s/3600)) $(((s%3600)/60))
+  elif [ "$s" -ge 60 ]; then printf '%dm' $((s/60))
+  else printf '%ds' "$s"; fi; }
 
-# Line 1
-line1="$(basename "$dir")"
+# Line 1 — when and where: the clock, the branch (only inside a git repo), and the ~-abbreviated
+# working directory.
+pdir="$dir"; case "$dir" in "$HOME"*) pdir="~${dir#"$HOME"}";; esac
+line1="$(date +%H:%M) ${DIM}·${R} $(date '+%b %d')"
 [ -n "$branch" ] && line1="$line1 $DIM|$R $branch"
-[ -n "$model" ]  && line1="$line1 $DIM|$R $model"
+line1="$line1 $DIM|$R $pdir"
 printf '%b\n' "$line1"
+
+# Session title for line 2: the transcript's latest ai-title — short but informative. The full path
+# already sits on line 1, so the folder name only fills in until Claude titles the session. Cheap:
+# grep pre-filters (no full JSON parse); each candidate line is validated by jq, last valid wins.
+title=""
+if [ -n "$tp" ] && [ -f "$tp" ]; then
+  while IFS= read -r ln; do
+    t=$(printf '%s' "$ln" | jq -r 'select(.type=="ai-title") | .aiTitle // empty' 2>/dev/null)
+    [ -n "$t" ] && title="$t"
+  done < <(grep '"type":"ai-title"' "$tp" 2>/dev/null | tail -n 5)
+fi
+[ -z "$title" ] && title=$(basename "$dir")
+[ "${#title}" -gt 48 ] && title="${title:0:47}…"
+
+# Session token counters (input / output / cache reads) via the claude-observatory CLI this script
+# ships with — the same split its Stats panel shows. Omitted (never zeroed) when the CLI is absent
+# or the session has no usage yet, matching the shown-only-when-present rule of the other segments.
+t_in=""; t_out=""; t_cr=""
+if [ -n "$sid" ] && command -v claude-observatory >/dev/null 2>&1; then
+  read -r t_in t_out t_cr <<<"$( (cd "$dir" 2>/dev/null && claude-observatory usage --session "$sid" 2>/dev/null) \
+    | jq -r '.sessionTokens | select(.total > 0) | "\(.input) \(.output) \(.cacheRead)"' 2>/dev/null)"
+fi
+
+# Line 2 — the session: title, then model + attributes + spend. The ↑/↓/↺/◷ glyphs are plain
+# text (not emoji), dimmed so the numbers carry the line.
+line2="$title"
+[ -n "$model" ]  && line2="$line2 $DIM|$R $model"
+[ -n "$effort" ] && line2="$line2 ${DIM}·${R} $effort"
+[ "$thinking" = "true" ] && line2="$line2 ${DIM}·${R} think"
+case "$ostyle" in ''|null|default|Default) ;; *) line2="$line2 ${DIM}·${R} $ostyle" ;; esac
+[ -n "$t_in" ] && line2="$line2 ${DIM}·${R} ${DIM}↑${R}$(human "$t_in") ${DIM}↓${R}$(human "$t_out") ${DIM}↺${R}$(human "$t_cr")"
+{ [ -n "$dur_ms" ] && [ "${dur_ms%.*}" -ge 1000 ]; } && line2="$line2 ${DIM}·${R} ${DIM}◷${R}$(dur_str "$dur_ms")"
+printf '%b\n' "$line2"
 
 # --- account-wide token ESTIMATE for the 5h/wk windows (rough, self-calibrating) ---
 # Those windows expose ONLY a percentage, never tokens. We approximate absolute tokens as
@@ -123,7 +172,7 @@ printf '%b\n' "$line1"
 est5=""; est7=""
 if command -v python3 >/dev/null 2>&1 && { [ -n "$five_pct" ] || [ -n "$week_pct" ]; }; then
   CFG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-  read -r est5 est7 <<<"$(python3 - "$CFG_DIR/statusline-usage.json" "$CFG_DIR/projects" \
+  read -r est5 tot5 est7 tot7 <<<"$(python3 - "$CFG_DIR/statusline-usage.json" "$CFG_DIR/projects" \
       "${five_pct:-0}" "${five_reset:-0}" "${week_pct:-0}" "${week_reset:-0}" 2>/dev/null <<'PYEOF'
 import sys, os, json, glob, time, datetime, signal
 sp, proj = sys.argv[1], sys.argv[2]
@@ -188,7 +237,9 @@ if ((now - last) >= THR or not st) and (r5 or r7):
     except Exception: pass
 e5 = int(p5 * tpp5) if (p5 and tpp5) else 0
 e7 = int(p7 * tpp7) if (p7 and tpp7) else 0
-print(f"{e5} {e7}")
+t5 = int(tpp5 * 100) if tpp5 else 0   # projected 100% budget (tokens) for the 5h window
+t7 = int(tpp7 * 100) if tpp7 else 0   # projected 100% budget (tokens) for the week window
+print(f"{e5} {t5} {e7} {t7}")
 PYEOF
 )"
 fi
@@ -216,7 +267,7 @@ printf '%s' "$input" | jq -c --argjson old "$_old" --arg est5 "${est5:-}" --arg 
   week_tok: (($est7 | tonumber?) // $old.week_tok)
 }' > "$_LAST.tmp" 2>/dev/null && mv "$_LAST.tmp" "$_LAST" 2>/dev/null || true
 
-# Line 2
+# Line 3 — the usage bars
 parts=()
 # Each segment shows a dim "label —" placeholder until its value arrives, so a fresh
 # session reads as "loading", not "missing" (ctx is null and rate_limits are absent
@@ -227,11 +278,12 @@ if [ -n "$ctx" ]; then c=$(uc "$ctx"); ct=""
   parts+=("${c}ctx [$(bar "$ctx" 8 "$c")] ${ctx%.*}%${R}${ct}")
 else parts+=("${DIM}ctx —${R}"); fi
 if [ -n "$five_pct" ]; then c=$(uc "$five_pct"); s=""; [ -n "$five_reset" ] && s=" ${DIM}·$(until_str "$five_reset")${R}"
-  [ "${est5:-0}" != 0 ] && s="$s ${DIM}~$(human "$est5")${R}"
+  # ~used/projected-total (total = 100% of the window's estimated budget); used-only until it calibrates
+  if [ "${est5:-0}" != 0 ]; then if [ "${tot5:-0}" != 0 ]; then s="$s ${DIM}~$(human "$est5")/$(human "$tot5")${R}"; else s="$s ${DIM}~$(human "$est5")${R}"; fi; fi
   parts+=("${c}5h [$(bar "$five_pct" 8 "$c")] $(printf '%.0f' "$five_pct")%${R}${s}")
 else parts+=("${DIM}5h —${R}"); fi
 if [ -n "$week_pct" ]; then c=$(uc "$week_pct"); s=""; [ -n "$week_reset" ] && s=" ${DIM}·$(until_str "$week_reset")${R}"
-  [ "${est7:-0}" != 0 ] && s="$s ${DIM}~$(human "$est7")${R}"
+  if [ "${est7:-0}" != 0 ]; then if [ "${tot7:-0}" != 0 ]; then s="$s ${DIM}~$(human "$est7")/$(human "$tot7")${R}"; else s="$s ${DIM}~$(human "$est7")${R}"; fi; fi
   parts+=("${c}wk [$(bar "$week_pct" 8 "$c")] $(printf '%.0f' "$week_pct")%${R}${s}")
 else parts+=("${DIM}wk —${R}"); fi
 out=""

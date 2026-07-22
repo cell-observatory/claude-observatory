@@ -93,6 +93,84 @@ data class ChangeMapSummary(
     val egress: Int,
 )
 
+/** One in/out-of-workspace file-touch tally from `capabilities` (core.CapabilityBadge). [samples] are up
+ *  to three example out-of-root paths, already home-shortened by core — shown in the badge's tooltip. */
+data class CapabilityBadge(val count: Int, val outOfRoot: Int, val samples: List<String>)
+
+/**
+ * What a session actually REACHED FOR (core.buildCapabilities): the files it read and edited and how many
+ * landed outside the workspace, the shell commands it ran and their risk tiers, MCP servers, web hosts,
+ * subagents spawned.
+ *
+ * EXERCISED capability, never granted permission — Claude Code writes nothing to the transcript when it
+ * prompts for approval, so no read-only observer can tell auto-approved from human-waved-through. Every
+ * label this drives must therefore say what the session DID, never what it was allowed to do.
+ */
+data class Capabilities(
+    val reads: CapabilityBadge,
+    val edits: CapabilityBadge,
+    val execCount: Int,
+    val execRisky: Int,
+    val execHigh: Int,
+    val mcpCalls: Int,
+    val mcpServers: List<String>,
+    val webCalls: Int,
+    val webHosts: List<String>,
+    val agentSpawns: Int,
+) {
+    /** True when the session exercised anything at all — the badge row hides itself otherwise. */
+    val any: Boolean
+        get() = reads.count > 0 || edits.count > 0 || execCount > 0 || mcpCalls > 0 || webCalls > 0 || agentSpawns > 0
+}
+
+/**
+ * One context compaction, placed in the chapter whose window CONTAINS it (core.CompactionMarker).
+ * [label] is core's one-line summary ("auto · 1M→14k · 986k dropped · 2m 5s") — rendered VERBATIM, never
+ * re-derived, so both editors word a compaction identically. [afterChapterId] is null when the session
+ * had no chapter windows at all; a renderer whose anchor chapter isn't drawn clamps the marker rather
+ * than dropping it.
+ */
+data class CompactBoundary(
+    val ts: Long,
+    val trigger: String,
+    val droppedTokens: Long,
+    /** The harness's running session total ("dropped so far"), not this event's own drop. */
+    val cumulativeDropped: Long,
+    val durationMs: Long,
+    val label: String,
+    val afterChapterId: String?,
+)
+
+/**
+ * Parse a `capabilities` block. Shared by [ChangeMapParser] and MultitaskParser — `changemap --json` and
+ * the `multitask --json` fleet rows carry the identical block. Deliberately total: a partial or foreign
+ * block yields zeros instead of throwing, because an exception here would null the WHOLE payload and
+ * blank the Overview for anyone on an older CLI.
+ */
+internal fun parseCapabilities(o: JsonObject): Capabilities {
+    fun obj(k: String): JsonObject? = o.get(k)?.takeIf { it.isJsonObject }?.asJsonObject
+    fun i(x: JsonObject?, k: String): Int = x?.get(k)?.takeIf { !it.isJsonNull }?.asInt ?: 0
+    fun ss(x: JsonObject?, k: String): List<String> =
+        (x?.get(k)?.takeIf { it.isJsonArray }?.asJsonArray ?: com.google.gson.JsonArray())
+            .mapNotNull { it.takeIf { e -> !e.isJsonNull }?.asString }
+    fun badge(k: String): CapabilityBadge {
+        val b = obj(k)
+        return CapabilityBadge(i(b, "count"), i(b, "outOfRoot"), ss(b, "samples"))
+    }
+    val exec = obj("exec")
+    val mcp = obj("mcp")
+    val web = obj("web")
+    val agents = obj("agents")
+    return Capabilities(
+        reads = badge("reads"),
+        edits = badge("edits"),
+        execCount = i(exec, "count"), execRisky = i(exec, "risky"), execHigh = i(exec, "high"),
+        mcpCalls = i(mcp, "calls"), mcpServers = ss(mcp, "servers"),
+        webCalls = i(web, "calls"), webHosts = ss(web, "hosts"),
+        agentSpawns = i(agents, "spawns"),
+    )
+}
+
 /** A stable-id task (0.8.0) — content-hash identity spanning strict in-progress intervals. The Overview
  *  ribbon is built from these, JOINED to [TaskRoll] by [taskId] (NOT keyed off chapters). */
 data class ChangeMapTask(
@@ -187,6 +265,10 @@ data class ChangeMapAgent(
     val tasks: List<ChangeMapTask>,
     val rollupByTask: List<TaskRoll>,
     val rollupBySubagent: List<SubagentRoll>,
+    /** This agent's context compactions, oldest first — empty for an older CLI without the field. */
+    val compactions: List<CompactBoundary>,
+    /** What this agent reached for — null for an older CLI without the field (the badge row hides). */
+    val capabilities: Capabilities?,
 )
 
 data class ChangeMap(
@@ -206,6 +288,11 @@ data class ChangeMap(
     val rollupByWorkflow: List<WorkflowRoll>,
     /** One entry per workflow that produced attributed edits — the Overview's per-workflow tabs. */
     val workflows: List<ChangeMapWorkflow>,
+    /** Context compactions during this session, oldest first — the ribbon draws one marker per boundary,
+     *  positioned by [CompactBoundary.afterChapterId]. Empty for an older CLI without the field. */
+    val compactions: List<CompactBoundary>,
+    /** What this session reached for — null for an older CLI without the field (the badge row hides). */
+    val capabilities: Capabilities?,
 )
 
 object ChangeMapParser {
@@ -224,6 +311,8 @@ object ChangeMapParser {
             o.getAsJsonObject("unassigned")?.let { taskRoll(it) },
             arr(o, "rollupByWorkflow").map { workflowRoll(it.asJsonObject) },
             arr(o, "workflows").map { workflow(it.asJsonObject) },
+            arr(o, "compactions").map { compaction(it.asJsonObject) },
+            o.get("capabilities")?.takeIf { it.isJsonObject }?.asJsonObject?.let { parseCapabilities(it) },
         )
     } catch (_: Exception) {
         null
@@ -289,6 +378,18 @@ object ChangeMapParser {
         str(o, "taskId") ?: "", str(o, "content") ?: "", long(o, "firstTs"), long(o, "lastTs"),
     )
 
+    private fun compaction(o: JsonObject) = CompactBoundary(
+        ts = long(o, "ts"),
+        trigger = str(o, "trigger") ?: "compact",
+        droppedTokens = long(o, "droppedTokens"),
+        cumulativeDropped = long(o, "cumulativeDropped"),
+        durationMs = long(o, "durationMs"),
+        // core builds this line once (compactLabel) so both editors word a compaction identically; an
+        // older CLI without it degrades to the bare trigger rather than to a blank row.
+        label = str(o, "label") ?: (str(o, "trigger") ?: "compact"),
+        afterChapterId = str(o, "afterChapterId"),
+    )
+
     private fun taskRoll(o: JsonObject) = TaskRoll(
         str(o, "taskId"), int(o, "edits"), int(o, "added"), int(o, "removed"),
         int(o, "pending"), int(o, "kept"), int(o, "undone"),
@@ -337,6 +438,8 @@ object ChangeMapParser {
         tasks = arr(o, "tasks").map { task(it.asJsonObject) },
         rollupByTask = arr(o, "rollupByTask").map { taskRoll(it.asJsonObject) },
         rollupBySubagent = arr(o, "rollupBySubagent").map { subagentRoll(it.asJsonObject) },
+        compactions = arr(o, "compactions").map { compaction(it.asJsonObject) },
+        capabilities = o.get("capabilities")?.takeIf { it.isJsonObject }?.asJsonObject?.let { parseCapabilities(it) },
     )
 }
 

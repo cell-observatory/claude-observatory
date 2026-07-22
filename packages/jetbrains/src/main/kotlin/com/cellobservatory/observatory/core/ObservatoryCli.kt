@@ -150,6 +150,27 @@ object ObservatoryCli {
         }
     }
 
+    data class RedoScopeResult(val redone: Int, val conflicts: Int, val total: Int)
+
+    /** Re-apply every UNDONE edit in a scope in ONE call (the CLI's `redo --all` / `redo --under`, backed
+     *  by core.redoScope — the forward mirror of undoScope). `under` = null re-applies the whole session;
+     *  a path targets a file (exact) or folder (everything beneath). Returns null if the CLI call failed. */
+    fun redoScope(session: String, under: String?, workDir: String?): RedoScopeResult? {
+        val args = buildList {
+            add("redo")
+            if (under == null) add("--all") else { add("--under"); add(under) }
+            add("--session"); add(session); add("--json")
+        }
+        val r = run(args, workDir)
+        if (!r.ok) return null
+        return try {
+            val o = JsonParser.parseString(r.stdout).asJsonObject
+            RedoScopeResult(o.get("redone").asInt, o.get("conflicts").asInt, o.get("total").asInt)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     /** Revert an EXPLICIT pending-edit id set in ONE call (`undo --ids <a,b,c>`, backed by
      *  core.undoScope({ ids }) — the same set VS Code's Folder-axis Reject uses). Unlike `undoScope(under)`
      *  this targets a module bucket's EXACT edits, never the recursive subtree a path scope would catch.
@@ -186,6 +207,12 @@ object ObservatoryCli {
         }
     }
 
+    /** `sessions --json` — every store session incl. its human-readable title (0.8.6), for the chooser. */
+    fun sessionsJson(workDir: String?): String? {
+        val r = run(listOf("sessions", "--json"), workDir)
+        return if (r.ok) r.stdout else null
+    }
+
     fun statsJson(session: String?, workDir: String?): String? {
         val args = buildList {
             add("stats"); add("--json")
@@ -195,7 +222,15 @@ object ObservatoryCli {
         return if (r.ok) r.stdout else null
     }
 
-    fun usageJson(workDir: String?): String? = run(listOf("usage"), workDir).stdout.takeIf { it.isNotBlank() }
+    fun usageJson(session: String?, workDir: String?): String? {
+        // --session pins the sessionTokens breakdown to the session the panel is showing, instead of
+        // whatever the CLI would resolve as newest for the cwd.
+        val args = buildList {
+            add("usage")
+            session?.let { add("--session"); add(it) }
+        }
+        return run(args, workDir).stdout.takeIf { it.isNotBlank() }
+    }
 
     fun observeJson(session: String, workDir: String?): String? {
         val r = run(listOf("observe", "--session", session), workDir)

@@ -32,10 +32,38 @@ data class ObservationRun(
     val edits: List<ObservationEdit>, // chronological order (expand for per-edit Keep/Undo)
 )
 
+/**
+ * One thing that shaped this session's context — an instruction file, a memory doc, a plan, a skill, or a
+ * compaction summary (core.ContextSource).
+ *
+ * [evidence] is the whole point of the row, not a detail: `transcript` rows are things the session
+ * demonstrably did; `file-present` rows are files that merely exist where Claude Code auto-loads them,
+ * because current builds inject CLAUDE.md and memory system-prompt-side and leave no transcript trace.
+ * Renderers must keep the two visibly distinct rather than presenting both as observed facts.
+ */
+data class ContextSource(
+    /** 'claude-md' | 'memory' | 'plan' | 'skill' | 'compact-summary' — core owns the vocabulary. */
+    val kind: String,
+    val label: String,
+    /** The file a row opens on double-click; null for sources that aren't a file. */
+    val path: String?,
+    val evidence: String,
+    val detail: String?,
+    /** Transcript evidence only: how many times it appeared. 0 on a file-present row. */
+    val count: Int,
+    val ts: Long,
+)
+
+/** The Context section: what shaped this session + core's caveat, which is rendered VERBATIM (the
+ *  section over-claims without it). */
+data class ContextReport(val sources: List<ContextSource>, val note: String)
+
 data class Observations(
     val recap: String,
     val runs: List<ObservationRun>, // most-recent activity first
     val nextSteps: List<String>,
+    /** What shaped this session — null for an older CLI without the field (the section hides). */
+    val context: ContextReport?,
 )
 
 object ObservationsParser {
@@ -45,6 +73,12 @@ object ObservationsParser {
             recap = o.get("recap")?.takeIf { !it.isJsonNull }?.asString ?: "",
             runs = arr(o, "runs").map { run(it.asJsonObject) },
             nextSteps = arr(o, "nextSteps").mapNotNull { it.takeIf { e -> !e.isJsonNull }?.asString },
+            context = o.get("context")?.takeIf { it.isJsonObject }?.asJsonObject?.let { c ->
+                ContextReport(
+                    sources = arr(c, "sources").map { contextSource(it.asJsonObject) },
+                    note = str(c, "note") ?: "",
+                )
+            },
         )
     } catch (_: Exception) {
         null
@@ -63,6 +97,18 @@ object ObservationsParser {
         removed = int(o, "removed"),
         status = str(o, "status") ?: "kept",
         edits = arr(o, "edits").map { edit(it.asJsonObject) },
+    )
+
+    private fun contextSource(o: JsonObject) = ContextSource(
+        kind = str(o, "kind") ?: "",
+        label = str(o, "label") ?: "",
+        path = str(o, "path"),
+        // Version-skew tolerance: a payload that predates the evidence axis only ever carried rows the
+        // transcript actually showed, so that is the honest default for a missing key.
+        evidence = str(o, "evidence") ?: "transcript",
+        detail = str(o, "detail"),
+        count = int(o, "count"),
+        ts = long(o, "ts"),
     )
 
     private fun edit(o: JsonObject) = ObservationEdit(

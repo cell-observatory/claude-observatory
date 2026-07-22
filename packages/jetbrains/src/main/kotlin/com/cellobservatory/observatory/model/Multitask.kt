@@ -47,6 +47,11 @@ data class RunningAgent(
     val durationMs: Long,
     val riskTotal: Int,
     val riskHigh: Int,
+    /** What this agent reached for — the same block `changemap --json` carries, read off the map core
+     *  already built for the row. Null for an older CLI without the field. */
+    val capabilities: Capabilities?,
+    /** How many times this agent's context was compacted; 0 for an older CLI without the field. */
+    val compactions: Int,
 )
 
 /** A file touched by 2+ agents — computed from the UNCAPPED distinct file sets, path-only (no contents
@@ -246,6 +251,8 @@ object MultitaskParser {
             durationMs = long(o, "durationMs"),
             riskTotal = risk?.let { int(it, "total") } ?: 0,
             riskHigh = risk?.let { int(it, "high") } ?: 0,
+            capabilities = o.get("capabilities")?.takeIf { it.isJsonObject }?.asJsonObject?.let { parseCapabilities(it) },
+            compactions = int(o, "compactions"),
         )
     }
 

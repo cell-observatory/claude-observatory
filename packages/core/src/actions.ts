@@ -11,7 +11,7 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
-import { readLog, readBlob, findRecord, EditRecord } from './store';
+import { readLog, readBlob, findRecord, EditRecord, minOf, maxOf } from './store';
 import { findTranscript } from './observe';
 import { findSubagentsDir } from './subagents';
 import { scoreCommand, CommandRisk } from './risk';
@@ -29,6 +29,7 @@ export type ActionCategory =
   | 'todo' // TodoWrite                                (updates the plan checklist)
   | 'mcp' // mcp__<server>__<tool>                     (an external MCP tool)
   | 'meta' // AskUserQuestion | ExitPlanMode | ToolSearch | Skill (harness/UX, not codebase work)
+  | 'compact' // a context compaction the harness performed (not a tool call — see CompactionEvent)
   | 'other';
 
 export interface ActionRecord {
@@ -52,6 +53,65 @@ export interface ActionRecord {
   risk?: CommandRisk;
   /** The tool_use id (correlates to its tool_result). */
   toolUseId?: string;
+  /** For 'compact' rows: what the harness dropped and when. */
+  compact?: CompactionEvent;
+}
+
+/** One context compaction: the harness summarized the conversation so far and continued on the summary.
+ *  Structural, from the transcript's own `compact_boundary` record — no estimation. */
+export interface CompactionEvent {
+  ts: number;
+  /** 'auto' (hit the context limit) or 'manual' (/compact) — passed through verbatim. */
+  trigger: string;
+  /** Context size just before / just after the compaction. */
+  preTokens: number;
+  postTokens: number;
+  /** What THIS compaction dropped (pre − post). Deliberately not `cumulativeDroppedTokens`, which is a
+   *  running session total — a real two-compaction session records 986k then 1.97M, so rendering the
+   *  cumulative figure as one event's drop overstates the later ones. */
+  droppedTokens: number;
+  /** The session-cumulative drop as the harness recorded it (for a "dropped so far" readout). */
+  cumulativeDropped: number;
+  /** How long the summarization itself took. */
+  durationMs: number;
+}
+
+/** A `compact_boundary` line → its event, or null for any other record. Shared with metrics.ts, whose
+ *  incremental cursor detects the same lines without re-reading the transcript this parser walks. */
+export function parseCompactLine(o: any): CompactionEvent | null {
+  if (!o || o.type !== 'system' || o.subtype !== 'compact_boundary') return null;
+  const md = o.compactMetadata || {};
+  const fin = (v: unknown): number => (typeof v === 'number' && isFinite(v) ? v : 0);
+  const preTokens = fin(md.preTokens);
+  const postTokens = fin(md.postTokens);
+  return {
+    ts: toMs(o.timestamp ?? o.ts),
+    trigger: typeof md.trigger === 'string' ? md.trigger : '',
+    preTokens,
+    postTokens,
+    droppedTokens: Math.max(0, preTokens - postTokens),
+    cumulativeDropped: fin(md.cumulativeDroppedTokens),
+    durationMs: fin(md.durationMs),
+  };
+}
+
+/** The one-line summary every surface shows for a compaction — built ONCE here so the CLI, the Actions
+ *  timeline, the Overview ribbon and both editors' panels can never word it differently.
+ *  e.g. `auto · 1M→14k · 986k dropped · 2m 5s`. */
+export function compactLabel(ce: CompactionEvent): string {
+  const tok = (n: number): string => {
+    if (!Number.isFinite(n) || n <= 0) return '0';
+    if (n < 1000) return String(Math.round(n));
+    if (n < 1e6) return (n / 1e3).toFixed(n < 1e4 ? 1 : 0).replace(/\.0$/, '') + 'k';
+    return (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
+  };
+  const parts = [ce.trigger || 'compact', `${tok(ce.preTokens)}→${tok(ce.postTokens)}`];
+  if (ce.droppedTokens > 0) parts.push(`${tok(ce.droppedTokens)} dropped`);
+  if (ce.durationMs > 0) {
+    const s = ce.durationMs / 1000;
+    parts.push(s < 60 ? `${s.toFixed(s < 10 ? 1 : 0).replace(/\.0$/, '')}s` : `${Math.floor(s / 60)}m${Math.round(s % 60) ? ` ${Math.round(s % 60)}s` : ''}`);
+  }
+  return parts.join(' · ');
 }
 
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
@@ -178,6 +238,27 @@ function parseTranscriptActionsUncached(transcriptPath: string, includeSidechain
     } catch {
       continue;
     }
+    // A compaction is a harness event, not a tool call: its record carries no `message` at all, so it
+    // must be read BEFORE the message gate below. It earns a timeline row because losing context is
+    // the single most consequential thing that happens to a session — everything above the boundary
+    // was summarized away, which is why later turns can "forget" earlier work.
+    if (o.isSidechain !== true || includeSidechain) {
+      const ce = parseCompactLine(o);
+      if (ce) {
+        actions.push({
+          ts: ce.ts,
+          tool: 'CompactBoundary',
+          category: 'compact',
+          target: compactLabel(ce),
+          detail: 'context compacted — earlier turns summarized',
+          ok: true,
+          isError: false,
+          compact: ce,
+        });
+        continue;
+      }
+    }
+
     const msg = o.message;
     if (!msg || !Array.isArray(msg.content)) continue;
 
@@ -378,7 +459,7 @@ function linkEditIds(cwd: string, sessionId: string, actions: ActionRecord[]): v
 // --- category grouping (the Actions view is grouped by kind; curated by default) ---
 
 /** Display order for the category groups — high-signal kinds first. */
-export const CATEGORY_ORDER: ActionCategory[] = ['edit', 'exec', 'web', 'agent', 'mcp', 'todo', 'search', 'read', 'meta', 'other'];
+export const CATEGORY_ORDER: ActionCategory[] = ['edit', 'exec', 'web', 'agent', 'mcp', 'todo', 'compact', 'search', 'read', 'meta', 'other'];
 
 /** Human labels for each category group header. */
 export const CATEGORY_LABEL: Record<ActionCategory, string> = {
@@ -391,11 +472,12 @@ export const CATEGORY_LABEL: Record<ActionCategory, string> = {
   todo: 'To-dos',
   mcp: 'MCP',
   meta: 'Meta',
+  compact: 'Compactions',
   other: 'Other',
 };
 
 /** Shown by default (the rest hide behind "show all"); errors always surface regardless of category. */
-export const CURATED_CATEGORIES: ReadonlySet<ActionCategory> = new Set<ActionCategory>(['edit', 'exec', 'web', 'agent', 'mcp', 'todo']);
+export const CURATED_CATEGORIES: ReadonlySet<ActionCategory> = new Set<ActionCategory>(['edit', 'exec', 'web', 'agent', 'mcp', 'todo', 'compact']);
 
 export interface ActionGroup {
   category: ActionCategory;
@@ -454,8 +536,8 @@ export function summarizeActions(actions: ActionRecord[]): ActionSummary {
     total: actions.length,
     byCategory,
     errors,
-    firstTs: ts.length ? Math.min(...ts) : 0,
-    lastTs: ts.length ? Math.max(...ts) : 0,
+    firstTs: ts.length ? minOf(ts) : 0,
+    lastTs: ts.length ? maxOf(ts) : 0,
   };
 }
 
@@ -486,6 +568,45 @@ const PHASE_TAIL_BYTES = 64 * 1024;
 const PERMISSION_STALE_MS = 10_000;
 /** A completed turn with no append for this long reads as `done` (vs a recently-`idle` pause). */
 const DONE_STALE_MS = 5 * 60_000;
+/** A child agent transcript written within this window marks the session as actively working with
+ *  HIGH confidence; older-but-under-DONE_STALE_MS child writes still count as working, heuristically
+ *  (a child mid-long-turn appends nothing for minutes — same bound the main classifier uses). */
+const CHILD_ACTIVE_MS = 30_000;
+
+/** Newest mtime across the session's CHILD agent transcripts — subagents/*.jsonl plus every
+ *  subagents/workflows/<wf>/*.jsonl — 0 when none. Background agents and workflow fleets keep
+ *  working while the MAIN transcript idles (the spawning turn ended long ago), so the phase clock
+ *  must include them or a live 50-agent run reads as `done` and gets filtered by "Active only". */
+function newestChildActivityMs(transcriptPath: string): number {
+  const subDir = path.join(transcriptPath.replace(/\.jsonl$/, ''), 'subagents');
+  let newest = 0;
+  const scan = (dir: string): void => {
+    let names: string[];
+    try {
+      names = fs.readdirSync(dir);
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      if (!name.endsWith('.jsonl')) continue;
+      try {
+        const m = fs.statSync(path.join(dir, name)).mtimeMs;
+        if (m > newest) newest = m;
+      } catch {
+        /* file vanished between readdir and stat */
+      }
+    }
+  };
+  scan(subDir);
+  let wfs: string[] = [];
+  try {
+    wfs = fs.readdirSync(path.join(subDir, 'workflows'));
+  } catch {
+    /* no workflow runs */
+  }
+  for (const wf of wfs) scan(path.join(subDir, 'workflows', wf));
+  return newest;
+}
 
 /**
  * What is the agent in this transcript doing right now? Structural + zero-token — see the section note.
@@ -552,7 +673,12 @@ export function agentPhaseDetail(transcriptPath: string): PhaseResult {
     }
   }
 
-  const age = Date.now() - mtimeMs;
+  // The activity clock spans the MAIN transcript and every child agent transcript: while a background
+  // agent or workflow fleet churns, the session is alive no matter how stale the main file is. This is
+  // also what keeps a turn with an async Agent tool_use pending from misreading as awaiting-permission.
+  const childMs = newestChildActivityMs(transcriptPath);
+  const age = Date.now() - Math.max(mtimeMs, childMs);
+  const childAge = childMs > 0 ? Date.now() - childMs : Infinity;
   // 1. A pending tool_use that blocks on the user => awaiting-input (structural).
   for (const name of pending.values()) {
     if (INPUT_TOOLS.has(name)) return { phase: 'awaiting-input', confidence: 'high' };
@@ -573,8 +699,13 @@ export function agentPhaseDetail(transcriptPath: string): PhaseResult {
   //       the turn was abandoned mid-flight (crash/kill/interrupt) => done. This is what keeps the live
   //       session reading "working" between tool calls instead of flickering to idle after each result.
   if (lastKind === 'result') return age > DONE_STALE_MS ? { phase: 'done', confidence: 'heuristic' } : { phase: 'working', confidence: 'high' };
-  //    c. The turn is COMPLETE (assistant spoke and stopped, or nothing in view): recently => idle,
-  //       long-stale => done (both staleness heuristics — there's no session-end record).
+  //    c. The turn is COMPLETE (assistant spoke and stopped, or nothing in view) — but child agents
+  //       still writing mean the session is working THROUGH its delegated agents, not resting.
+  if (childAge < DONE_STALE_MS) {
+    return { phase: 'working', confidence: childAge < CHILD_ACTIVE_MS ? 'high' : 'heuristic' };
+  }
+  //       Otherwise: recently => idle, long-stale => done (both staleness heuristics — there's no
+  //       session-end record).
   return age > DONE_STALE_MS ? { phase: 'done', confidence: 'heuristic' } : idle;
 }
 

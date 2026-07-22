@@ -3,7 +3,7 @@
  * with it (kept / reverted / pending, per file, acceptance rate). Rendered once here so the CLI and
  * both editors export the identical markdown (e.g. to paste into a PR).
  */
-import { readLog } from './store';
+import { readLog, minOf, maxOf } from './store';
 import { lineDelta } from './format';
 
 export interface ReviewFileSummary {
@@ -67,8 +67,8 @@ export function reviewSummary(session: string): ReviewSummary {
     acceptanceRate: reviewed ? kept / reviewed : null,
     files: [...byFile.values()],
     reverted,
-    firstTs: log.length ? Math.min(...log.map((r) => r.ts)) : null,
-    lastTs: log.length ? Math.max(...log.map((r) => r.ts)) : null,
+    firstTs: log.length ? minOf(log.map((r) => r.ts)) : null,
+    lastTs: log.length ? maxOf(log.map((r) => r.ts)) : null,
   };
 }
 

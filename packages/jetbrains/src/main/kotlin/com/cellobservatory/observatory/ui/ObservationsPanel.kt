@@ -1,6 +1,6 @@
 package com.cellobservatory.observatory.ui
 
-import com.cellobservatory.observatory.core.ObservatoryCli
+import com.cellobservatory.observatory.model.ContextSource
 import com.cellobservatory.observatory.model.ObservationEdit
 import com.cellobservatory.observatory.model.ObservationRun
 import com.cellobservatory.observatory.model.Observations
@@ -12,9 +12,6 @@ import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.DefaultActionGroup
 import com.intellij.openapi.application.ApplicationManager
-import com.intellij.openapi.progress.ProgressIndicator
-import com.intellij.openapi.progress.ProgressManager
-import com.intellij.openapi.progress.Task
 import com.intellij.openapi.project.DumbAware
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.SimpleToolWindowPanel
@@ -33,6 +30,7 @@ import javax.swing.JComponent
 import javax.swing.JTree
 import javax.swing.tree.DefaultMutableTreeNode
 import javax.swing.tree.DefaultTreeModel
+import javax.swing.tree.TreePath
 import javax.swing.tree.TreeSelectionModel
 
 /**
@@ -49,8 +47,13 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
 
     private object RecapMarker
     private object StepsMarker
+    private object ContextMarker
 
     @Volatile private var data: Observations? = null
+
+    // The user-triggered `claude -p` recap (Refresh Recap), preferred over the auto recap until the next
+    // manual regeneration — guarantees the freshly generated text is what the recap row shows.
+    @Volatile private var freshRecap: String? = null
 
     private val root = DefaultMutableTreeNode()
     private val model = DefaultTreeModel(root)
@@ -67,7 +70,15 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
         toolbar = buildToolbar()
         tree.addMouseListener(object : MouseAdapter() {
             override fun mouseClicked(e: MouseEvent) {
-                if (e.clickCount == 2) selectedEdit()?.let { openEdit(it.id) }
+                if (e.clickCount != 2) return
+                // A context row opens the file behind it (a CLAUDE.md, a memory doc, a plan) — same
+                // LocalFileSystem open the Actions panel's conflict rows use.
+                val ctx = (tree.lastSelectedPathComponent as? DefaultMutableTreeNode)?.userObject as? ContextSource
+                if (ctx != null) {
+                    openContext(ctx)
+                    return
+                }
+                selectedEdit()?.let { openEdit(it.id) }
             }
         })
         PopupHandler.installPopupMenu(tree, buildPopupGroup(), "ClaudeObservatoryObsPopup")
@@ -131,6 +142,13 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
                 root.add(runNode)
             }
         }
+        // Context: what shaped this session (0.8.6). Its rows nest UNDER the marker (unlike the two
+        // sections around it, which flatten onto root) so a long list collapses as one unit.
+        val ctxSources = d?.context?.sources ?: emptyList()
+        val ctxNode = if (ctxSources.isEmpty()) null else DefaultMutableTreeNode(ContextMarker).also { n ->
+            for (s in ctxSources) n.add(DefaultMutableTreeNode(s))
+            root.add(n)
+        }
         // Next-steps: Claude's own open to-dos + heuristic follow-ups (shown independently of the timeline).
         if (d != null && d.nextSteps.isNotEmpty()) {
             root.add(DefaultMutableTreeNode(StepsMarker))
@@ -138,6 +156,9 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
         }
         model.reload()
         TreeUtil.expandAll(tree)
+        // expandAll just opened every section; a long Context list would push the recap and timeline off
+        // screen, so fold it back when it runs past a handful of rows (its header still carries the count).
+        ctxNode?.takeIf { it.childCount > 5 }?.let { tree.collapsePath(TreePath(it.path)) }
     }
 
     // --- keep / undo (per-edit — expand a run to its rows), + open / diff / chat ---
@@ -159,6 +180,15 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
         ReviewOps.undoOrRedo(project, session, rec, redo = false)
     }
 
+    /** Open the file behind a Context row. A source with no path (nothing on disk to show) says so rather
+     *  than doing nothing — a dead double-click reads as a bug. */
+    private fun openContext(s: ContextSource) {
+        val path = s.path ?: return ReviewOps.notify(project, "${s.label} isn't a file on disk")
+        val vf = com.intellij.openapi.vfs.LocalFileSystem.getInstance().refreshAndFindFileByPath(path)
+        if (vf == null) ReviewOps.notify(project, "File not found: $path", NotificationType.WARNING)
+        else com.intellij.openapi.fileEditor.FileEditorManager.getInstance(project).openFile(vf, true)
+    }
+
     private fun openEdit(id: Int) {
         val session = session() ?: return
         ObservatoryService.getInstance(project).log().find { it.id == id }?.let { Navigate.openFileAtEdit(project, session, it) }
@@ -172,59 +202,6 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
     private fun chatEdit(id: Int) {
         val session = session() ?: return
         ReviewOps.chatAbout(project, session, id)
-    }
-
-    // --- store maintenance (unique to this panel: install hooks, clean store) ---
-
-    private fun installHooks() {
-        ProgressManager.getInstance().run(object : Task.Backgroundable(project, "Installing capture hooks…", false) {
-            override fun run(indicator: ProgressIndicator) {
-                val r = ObservatoryCli.init(project.basePath)
-                ApplicationManager.getApplication().invokeLater {
-                    if (r.ok) {
-                        ReviewOps.notify(project, "Capture hooks installed. Quit Claude Code and relaunch it — hooks are snapshotted at session start.")
-                    } else {
-                        ReviewOps.notify(project, "Install failed — is the claude-observatory CLI installed? ${r.stderr.take(200)}", NotificationType.ERROR)
-                    }
-                }
-            }
-        })
-    }
-
-    /** Store maintenance (parity with the CLI `clean`): GC orphaned blobs, or drop the whole session. */
-    private fun cleanStore() {
-        val session = ObservatoryService.getInstance(project).currentSession()
-            ?: return ReviewOps.notify(project, "No active Claude Code session for this project", NotificationType.WARNING)
-        val gcOpt = "Reclaim disk — garbage-collect orphaned blobs"
-        val dropOpt = "Drop this session — delete its edits + blobs (files on disk are unchanged)"
-        com.intellij.openapi.ui.popup.JBPopupFactory.getInstance()
-            .createPopupChooserBuilder(listOf(gcOpt, dropOpt))
-            .setTitle("Clean the store")
-            .setItemChosenCallback { chosen ->
-                val drop = chosen == dropOpt
-                if (drop) {
-                    val ok = com.intellij.openapi.ui.Messages.showYesNoDialog(
-                        project, "Drop session $session? This deletes its captured edits + blobs. Files on disk are NOT changed.",
-                        "Claude Observatory", "Drop Session", "Cancel", com.intellij.openapi.ui.Messages.getWarningIcon(),
-                    )
-                    if (ok != com.intellij.openapi.ui.Messages.YES) return@setItemChosenCallback
-                }
-                ProgressManager.getInstance().run(object : Task.Backgroundable(project, "Cleaning store…", false) {
-                    override fun run(indicator: ProgressIndicator) {
-                        val r = if (drop) ObservatoryCli.dropSession(session, project.basePath) else ObservatoryCli.gc(session, project.basePath)
-                        ApplicationManager.getApplication().invokeLater {
-                            if (r.ok) {
-                                ObservatoryService.getInstance(project).refresh()
-                                ReviewOps.notify(project, if (drop) "Dropped session $session." else "Reclaimed disk (GC complete).")
-                            } else {
-                                ReviewOps.notify(project, "Clean failed — ${r.stderr.take(160)}", NotificationType.ERROR)
-                            }
-                        }
-                    }
-                })
-            }
-            .createPopup()
-            .showInCenterOf(tree)
     }
 
     // --- toolbar / menu / renderer ---
@@ -252,9 +229,13 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
                     if (resolved > 0) ReviewOps.clearResolved(project, s, resolved) else ReviewOps.notify(project, "No resolved edits to clear")
                 }
             },
-            action("Install Capture Hooks", AllIcons.Actions.Install) { installHooks() },
-            action("Clean Store…", AllIcons.Vcs.Remove) { cleanStore() },
+            action("Install Capture Hooks", AllIcons.Actions.Install) { ReviewOps.installHooks(project) },
+            action("Clean Store…", AllIcons.Vcs.Remove) { ReviewOps.cleanStore(project, tree) },
             action("Switch Session", AllIcons.Vcs.Branch) { ReviewOps.chooseSession(project, tree) },
+            // Opt-in `claude -p` recap (spends tokens): regenerate, then repaint the recap row with it.
+            action("Refresh Recap (Claude)", Icons.Star) {
+                withSession { s -> ReviewOps.refreshRecap(project, s) { text -> freshRecap = text; repaintTree() } }
+            },
             action("Refresh", AllIcons.Actions.Refresh) { service().observations(force = true); service().refresh() },
             action("Setup Check (doctor)", AllIcons.General.Information) { ReviewOps.openDoctor(project) },
         )
@@ -269,6 +250,10 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
         action("Open File at Edit", AllIcons.Actions.EditSource) { selectedEdit()?.let { openEdit(it.id) } },
         action("Show Diff", AllIcons.Actions.Diff) { selectedEdit()?.let { diffEdit(it.id) } },
         action("Chat About This Edit", AllIcons.General.Balloon) { selectedEdit()?.let { chatEdit(it.id) } },
+        // Opt-in `claude -p` deep analysis (spends tokens): open the result as a markdown tab.
+        action("Analyze Edit with Claude", Icons.Star) {
+            selectedEdit()?.let { e -> withSession { s -> ReviewOps.analyzeEdit(project, s, e.id) } }
+        },
     )
 
     private fun action(text: String, icon: javax.swing.Icon, run: () -> Unit): AnAction =
@@ -286,7 +271,7 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
             when (val node = (value as? DefaultMutableTreeNode)?.userObject) {
                 is RecapMarker -> {
                     icon = Icons.Microscope
-                    val recap = data?.recap?.takeIf { it.isNotBlank() }
+                    val recap = (freshRecap ?: data?.recap)?.takeIf { it.isNotBlank() }
                     append(recap ?: "No recap yet — it fills in from Claude's session title / last summary.")
                     append("  session recap", SimpleTextAttributes.GRAYED_ATTRIBUTES)
                 }
@@ -294,6 +279,44 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
                     icon = AllIcons.Actions.IntentionBulb
                     append("Next steps", SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES)
                     append("  from Claude's to-dos + heuristics", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                }
+                is ContextMarker -> {
+                    icon = AllIcons.General.InspectionsEye
+                    append("Context", SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES)
+                    val ctx = data?.context
+                    val sources = ctx?.sources ?: emptyList()
+                    val observed = sources.count { it.evidence == "transcript" }
+                    append("  what shaped this session · ${sources.size} source(s), $observed observed", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                    // core's caveat, verbatim and ON the row — left in a tooltip, the section over-claims.
+                    ctx?.note?.takeIf { it.isNotBlank() }?.let { append("  $it", SimpleTextAttributes.GRAYED_ITALIC_ATTRIBUTES) }
+                    toolTipText = ctx?.note
+                }
+                is ContextSource -> {
+                    icon = when (node.kind) {
+                        "skill" -> AllIcons.Nodes.Plugin
+                        "plan" -> AllIcons.Actions.ListFiles
+                        "memory" -> AllIcons.Nodes.DataTables
+                        "compact-summary" -> AllIcons.Actions.Collapseall
+                        "claude-md" -> AllIcons.FileTypes.Text
+                        else -> AllIcons.General.Information
+                    }
+                    append(node.label)
+                    if (node.count > 1) append("  ×${node.count}", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                    node.detail?.takeIf { it.isNotBlank() }?.let { append("  $it", SimpleTextAttributes.GRAYED_ATTRIBUTES) }
+                    // The evidence axis belongs ON the row, not buried in a tooltip: a file that merely
+                    // exists where Claude Code auto-loads it is not something this session was seen doing.
+                    if (node.evidence != "transcript") {
+                        append("  present, not observed", SimpleTextAttributes.GRAYED_ITALIC_ATTRIBUTES)
+                    }
+                    toolTipText = buildString {
+                        append(node.path ?: node.label)
+                        append("\n")
+                        append(
+                            if (node.evidence == "transcript") "Observed in this session's transcript"
+                            else "Present where Claude Code auto-loads it — the injection isn't recorded per session"
+                        )
+                        if (node.path != null) append("\nDouble-click to open")
+                    }
                 }
                 is String -> {
                     icon = AllIcons.General.ArrowRight

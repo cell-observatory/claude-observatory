@@ -227,6 +227,7 @@ class ActionsPanel(private val project: Project) : SimpleToolWindowPanel(true, t
             "agent" -> AllIcons.Actions.RunAll
             "todo" -> AllIcons.Actions.Checked
             "mcp" -> AllIcons.Nodes.Plugin
+            "compact" -> AllIcons.Actions.Collapseall
             "meta" -> AllIcons.General.Settings
             else -> AllIcons.General.Information
         }

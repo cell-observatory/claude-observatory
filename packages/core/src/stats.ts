@@ -278,6 +278,10 @@ export function computeStats(activeSessionId?: string, nowMs?: number): StatsRes
   const editsBySession: Record<string, number> = {};
   const hourEdits: EditSplit[] = Array.from({ length: 24 }, () => zeroSplit());
   for (const s of listSessions()) {
+    // A session whose last activity predates the 31-day window holds only out-of-window edits, so its
+    // day buckets never reach the 30-day series — skip its whole log (mirrors the transcript cutoff
+    // above). The active session is always walked so its "current session" edit count stays exact.
+    if (s.lastMs < cutoff && s.id !== activeSessionId) continue;
     for (const rec of readLog(s.id)) {
       const key = dayKey(rec.ts);
       if (!editsByDay[key]) editsByDay[key] = zeroSplit();

@@ -106,6 +106,52 @@
         <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt CLOSE_BRACKET"/>
         <keyboard-shortcut keymap="Mac OS X 10.5+" first-keystroke="meta alt CLOSE_BRACKET" replace-all="true"/>
       </action>
+      <!-- Session-level utilities: reachable from Find Action / keybindable (no default keymaps). Each
+           reuses the shared panel handler (ReviewOps / the service), so behavior never forks. -->
+      <action id="ClaudeObservatory.SetupCheck"
+              class="com.cellobservatory.observatory.actions.SetupCheckAction"
+              text="Claude Observatory: Setup Check (doctor)"
+              description="Open the setup diagnostics — hooks, PATH, config, session, status line"/>
+      <action id="ClaudeObservatory.ExportSummary"
+              class="com.cellobservatory.observatory.actions.ExportReviewSummaryAction"
+              text="Claude Observatory: Export Review Summary"
+              description="Export a shareable markdown review summary (kept/reverted per file)"/>
+      <action id="ClaudeObservatory.SwitchSession"
+              class="com.cellobservatory.observatory.actions.SwitchSessionAction"
+              text="Claude Observatory: Switch Session"
+              description="Pick which capture session the observatory shows"/>
+      <action id="ClaudeObservatory.CleanStore"
+              class="com.cellobservatory.observatory.actions.CleanStoreAction"
+              text="Claude Observatory: Clean Store…"
+              description="Garbage-collect orphaned blobs, or drop the whole session"/>
+      <action id="ClaudeObservatory.InstallHooks"
+              class="com.cellobservatory.observatory.actions.InstallHooksAction"
+              text="Claude Observatory: Install Capture Hooks"
+              description="Install the PreToolUse/PostToolUse capture hooks (claude-observatory init)"/>
+      <action id="ClaudeObservatory.AcceptAll"
+              class="com.cellobservatory.observatory.actions.AcceptAllEditsAction"
+              text="Claude Observatory: Accept All Edits"
+              description="Accept every pending Claude edit in this session"/>
+      <action id="ClaudeObservatory.RevertAll"
+              class="com.cellobservatory.observatory.actions.RevertAllEditsAction"
+              text="Claude Observatory: Revert All Edits"
+              description="Revert every pending Claude edit in this session"/>
+      <action id="ClaudeObservatory.RedoAll"
+              class="com.cellobservatory.observatory.actions.RedoAllEditsAction"
+              text="Claude Observatory: Redo All Edits"
+              description="Re-apply every undone Claude edit in this session"/>
+      <action id="ClaudeObservatory.ClearResolved"
+              class="com.cellobservatory.observatory.actions.ClearResolvedEditsAction"
+              text="Claude Observatory: Clear Resolved Edits"
+              description="Clear the resolved (kept/undone) edits from the log; pending edits are kept"/>
+      <action id="ClaudeObservatory.Spotlight"
+              class="com.cellobservatory.observatory.actions.SpotlightAction"
+              text="Claude Observatory: Toggle Spotlight"
+              description="Dim the unedited lines to foreground Claude's changes"/>
+      <action id="ClaudeObservatory.SearchEdits"
+              class="com.cellobservatory.observatory.actions.SearchEditsAction"
+              text="Claude Observatory: Search Edits"
+              description="Filter the Edits/Diffs trees by file path"/>
     </group>
   </actions>
 </idea-plugin>
