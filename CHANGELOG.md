@@ -29,6 +29,10 @@ A quality-of-life sweep across the CLI, core, both editors, and the docs.
 
 ### Changed
 
+- **VS Code extension publisher is now `cell-observatory`** (was `claude-observatory`), matching the
+  GitHub org — the extension id is therefore `cell-observatory.claude-observatory-vscode`. Existing
+  installs migrate automatically: `claude-observatory update` installs the renamed extension and removes
+  the old-id copy, and the extension itself cleans up a lingering pre-rename duplicate on activation.
 - **Consistent terminology & emoji-free copy** — unified the Keep/Undo verbs across the CLI and VS Code
   (the stored/JSON `status` value is unchanged), standardized the CLI warning glyph on `⚠`, and dropped
   decorative 🎉/✨/💡 from output and settings descriptions.

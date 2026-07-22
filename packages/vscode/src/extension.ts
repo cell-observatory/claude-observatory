@@ -4475,6 +4475,27 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('claudeObservatory.checkForUpdates', () => checkForUpdate(context, true))
   );
   void checkForUpdate(context, false);
+
+  // 0.8.6 changed the publisher (claude-observatory → cell-observatory), which changed the extension
+  // id — editors treat the pre-rename install as a separate extension, so updating leaves a duplicate
+  // behind. Remove it if it's still around. (Optional chain: the smoke-test mock has no `extensions`.)
+  const OLD_EXT_ID = 'claude-observatory.claude-observatory-vscode';
+  if (vscode.extensions?.getExtension?.(OLD_EXT_ID)) {
+    void (async () => {
+      try {
+        await vscode.commands.executeCommand('workbench.extensions.uninstallExtension', OLD_EXT_ID);
+        const pick = await vscode.window.showInformationMessage(
+          'Claude Observatory: removed the duplicate pre-0.8.6 install (the publisher changed) — reload to finish.',
+          'Reload Window'
+        );
+        if (pick === 'Reload Window') void vscode.commands.executeCommand('workbench.action.reloadWindow');
+      } catch {
+        void vscode.window.showWarningMessage(
+          'Claude Observatory is installed twice (the publisher changed in 0.8.6). Please uninstall the older "Claude Observatory" entry in the Extensions view.'
+        );
+      }
+    })();
+  }
 }
 
 export function deactivate(): void {

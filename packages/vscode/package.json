@@ -3,7 +3,7 @@
   "displayName": "Claude Observatory",
   "description": "A running list of every file change Claude Code makes, each with its own Keep / Undo (surgical, git-free).",
   "version": "0.8.5",
-  "publisher": "claude-observatory",
+  "publisher": "cell-observatory",
   "private": true,
   "engines": {
     "vscode": "^1.85.0"

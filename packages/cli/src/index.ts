@@ -1605,7 +1605,11 @@ const RELEASE_REPO = 'cell-observatory/claude-observatory';
 // The VS Code-family extension id (publisher.name). We detect the extension by its install DIR (like
 // the JetBrains plugin dirs) so detection never depends on the editor CLI being on PATH; the CLI is
 // only needed to APPLY the update, and is resolved from app-bundle locations when it's off PATH.
-const VSCODE_EXT_ID = 'claude-observatory.claude-observatory-vscode';
+const VSCODE_EXT_ID = 'cell-observatory.claude-observatory-vscode';
+// The id before 0.8.6, when the publisher changed (claude-observatory → cell-observatory). Editors
+// treat it as a separate extension, so old-id installs must still be detected — and removed after a
+// successful update to the renamed .vsix, or every migrated editor ends up with two Observatories.
+const VSCODE_EXT_ID_OLD = 'claude-observatory.claude-observatory-vscode';
 // One row per VS Code-family editor: where it keeps installed extensions (relative to $HOME), the CLI
 // that drives `--install-extension`, and the macOS .app name used to locate that CLI when off PATH.
 const VSCODE_EDITORS: { label: string; extDirs: string[]; cli: string; app: string }[] = [
@@ -1730,8 +1734,8 @@ function resolveEditorCli(cli: string, app: string): string | null {
 
 /** Parse the version out of a VS Code extension folder named `<id>-<version>` (fallback: its
  *  package.json). Returns null if neither yields a semver. */
-function versionFromExtFolder(folderPath: string, folderName: string): string | null {
-  const suffix = folderName.slice(VSCODE_EXT_ID.length + 1); // drop the `<id>-` prefix
+function versionFromExtFolder(folderPath: string, folderName: string, id: string): string | null {
+  const suffix = folderName.slice(id.length + 1); // drop the `<id>-` prefix
   if (/^\d+\.\d+\.\d+/.test(suffix)) return suffix;
   try {
     const fs = require('fs');
@@ -1743,31 +1747,48 @@ function versionFromExtFolder(folderPath: string, folderName: string): string | 
 }
 
 /** VS Code-family installs of our extension, detected by their extensions DIR (CLI-independent, like
- *  the JetBrains plugin dirs). `version` = the newest install folder for that editor; `cli` = the
- *  resolved absolute CLI path to apply an update, or null if none was found. */
-function vscodeInstalls(): { label: string; version: string; cli: string | null }[] {
+ *  the JetBrains plugin dirs). `version` = the newest install folder for that editor (old or new id);
+ *  `cli` = the resolved absolute CLI path to apply an update, or null if none was found; `hasOld` =
+ *  an install under the pre-0.8.6 id is present and should be removed once the renamed one is in. */
+function vscodeInstalls(): { label: string; version: string; cli: string | null; extDirs: string[]; hasOld: boolean }[] {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const fs = require('fs');
   const path = require('path');
   const os = require('os');
   const home = os.homedir();
-  const out: { label: string; version: string; cli: string | null }[] = [];
+  const out: { label: string; version: string; cli: string | null; extDirs: string[]; hasOld: boolean }[] = [];
   for (const ed of VSCODE_EDITORS) {
     let best: string | null = null; // newest version across this editor's extension dirs
+    let hasOld = false;
     for (const rel of ed.extDirs) {
       const dir = path.join(home, rel);
       let entries: string[] = [];
       try { entries = fs.readdirSync(dir); } catch { continue; }
       for (const e of entries) {
         // VS Code names extension folders `<publisher>.<name>-<version>` (lowercased).
-        if (!e.toLowerCase().startsWith(VSCODE_EXT_ID + '-')) continue;
-        const v = versionFromExtFolder(path.join(dir, e), e);
+        const id = [VSCODE_EXT_ID, VSCODE_EXT_ID_OLD].find((i) => e.toLowerCase().startsWith(i + '-'));
+        if (!id) continue;
+        if (id === VSCODE_EXT_ID_OLD) hasOld = true;
+        const v = versionFromExtFolder(path.join(dir, e), e, id);
         if (v && (best === null || core.isNewer(v, best))) best = v;
       }
     }
-    if (best !== null) out.push({ label: ed.label, version: best, cli: resolveEditorCli(ed.cli, ed.app) });
+    if (best !== null) out.push({ label: ed.label, version: best, cli: resolveEditorCli(ed.cli, ed.app), extDirs: ed.extDirs, hasOld });
   }
   return out;
+}
+
+/** Whether any of an editor's extension dirs (home-relative) holds an install folder of `id`. */
+function hasExtFolder(extDirs: string[], id: string): boolean {
+  const fs = require('fs');
+  const path = require('path');
+  const home = require('os').homedir();
+  for (const rel of extDirs) {
+    let entries: string[] = [];
+    try { entries = fs.readdirSync(path.join(home, rel)); } catch { continue; }
+    if (entries.some((e: string) => e.toLowerCase().startsWith(id + '-'))) return true;
+  }
+  return false;
 }
 
 /** Refresh the VS Code-family extension in every editor that already has it (never installs into an
@@ -1809,6 +1830,13 @@ async function refreshVscodeExtension(
         if (r.status === 0) {
           process.stdout.write(c.green('✓ ') + `${h.label} extension ${h.version} → ${latest}\n`);
           installed++;
+          // Publisher change (0.8.6): drop the old-id install, but only once the renamed extension is
+          // confirmed on disk — a --force reinstall of a pre-rename .vsix must not uninstall itself.
+          if (h.hasOld && hasExtFolder(h.extDirs, VSCODE_EXT_ID)) {
+            const u = cp.spawnSync(h.cli as string, ['--uninstall-extension', VSCODE_EXT_ID_OLD], { stdio: 'pipe' });
+            if (u.status === 0) process.stdout.write(c.dim(`  removed the old ${VSCODE_EXT_ID_OLD} install (publisher changed in 0.8.6).\n`));
+            else process.stdout.write(c.yellow(`  ⚠ ${h.label} still has the pre-0.8.6 install — uninstall the older "Claude Observatory" entry in its Extensions view.\n`));
+          }
         } else {
           process.stdout.write(c.yellow(`  ⚠ ${h.label} --install-extension failed — install the .vsix manually from the release\n`));
         }
