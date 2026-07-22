@@ -63,6 +63,9 @@ A quality-of-life sweep across the CLI, core, both editors, and the docs.
   at the `.bak` instead of dumping a raw `SyntaxError`.
 - **JetBrains** — session-wide **Revert All** and the Edits-tree **Clear Resolved** now report "Nothing
   to revert" / "No resolved edits to clear" instead of silently doing nothing (no-silent-fail parity).
+- **JetBrains: the Overview's review-axes row (Diff · File · Folder · Chapter) now wraps** onto
+  additional centered lines when the pane is too narrow, instead of the axis toolbars collapsing into a
+  "…" overflow — completing the toolbar-wrap fix (the top controls row already wrapped as of 0.8.5).
 - **Docs** — the "Remote development" guide link (referenced from the VS Code, JetBrains, and devcontainer
   READMEs) now resolves — its target is a real heading; the `status` sample output and a demo file-path
   inconsistency in DEMO.md are corrected.

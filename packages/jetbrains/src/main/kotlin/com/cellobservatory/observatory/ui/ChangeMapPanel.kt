@@ -53,8 +53,6 @@ import java.awt.Dimension
 import java.awt.FlowLayout
 import java.awt.Graphics
 import java.awt.Graphics2D
-import java.awt.GridBagConstraints
-import java.awt.GridBagLayout
 import java.awt.LayoutManager2
 import java.awt.RenderingHints
 import java.awt.event.ComponentAdapter
@@ -324,19 +322,25 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
                 }
             })
         }
-        // BOTTOM row: the four axes as ONE centered cluster with a divider between each (glue on both ends).
-        val bottomRow = JPanel(GridBagLayout()).apply {
+        // BOTTOM row: the four review axes, centered, with a divider between each. WrapLayout (a wrapping
+        // FlowLayout) flows them onto ADDITIONAL centered lines when the pane is too narrow for one row —
+        // instead of the axis toolbars shrinking below preferred and collapsing into an IntelliJ "…" overflow.
+        val bottomRow = JPanel(WrapLayout(FlowLayout.CENTER, JBUI.scale(2), JBUI.scale(3))).apply {
             isOpaque = false
             alignmentX = Component.LEFT_ALIGNMENT
-            var col = 0
-            fun natural() = GridBagConstraints().apply { gridx = col++; gridy = 0; fill = GridBagConstraints.NONE; anchor = GridBagConstraints.CENTER }
-            fun glue() = add(Box.createHorizontalGlue(), GridBagConstraints().apply { gridx = col++; gridy = 0; weightx = 1.0; fill = GridBagConstraints.HORIZONTAL })
-            glue()
             listOf(diffTb, fileTb, folderTb, chapterTb).forEachIndexed { i, tb ->
-                if (i > 0) add(navDivider(), natural())
-                add(tb.component, natural())
+                if (i > 0) add(navDivider())
+                add(tb.component)
             }
-            glue()
+            // Height tracks the current width — revalidate on a width change so the host toolbar grows
+            // rows (mirrors the top row); without it the first (pre-width) pass would leave a single row.
+            addComponentListener(object : ComponentAdapter() {
+                private var lastWidth = -1
+                override fun componentResized(e: ComponentEvent) {
+                    val c = e.component
+                    if (c.width != lastWidth) { lastWidth = c.width; c.revalidate() }
+                }
+            })
         }
         toolbar = JPanel().apply {
             layout = BoxLayout(this, BoxLayout.Y_AXIS)
@@ -1606,5 +1610,55 @@ internal class SplitWrapLayout(private val vgap: Int) : LayoutManager2 {
             left?.setBounds(ins.left, ins.top, lp.width, lp.height)
             right?.setBounds(parent.width - ins.right - rp.width, ins.top, rp.width, rp.height)
         }
+    }
+}
+
+/**
+ * A FlowLayout that actually WRAPS its rows. Stock FlowLayout reports a single-row preferred size, so a
+ * BoxLayout/BorderLayout host never gives it height for extra rows and its children clip or (for an
+ * IntelliJ ActionToolbar) collapse into a "…" overflow. This computes the true wrapped height for the
+ * current width, so the Overview's centered review-axes row flows Diff/File/Folder/Chapter onto more
+ * lines when the pane is narrow. (Rob Camick's well-known WrapLayout, ported to Kotlin.)
+ */
+internal class WrapLayout(align: Int, hgap: Int, vgap: Int) : FlowLayout(align, hgap, vgap) {
+    override fun preferredLayoutSize(target: Container): Dimension = layoutSize(target, true)
+
+    override fun minimumLayoutSize(target: Container): Dimension =
+        layoutSize(target, false).also { it.width -= (hgap + 1) }
+
+    private fun layoutSize(target: Container, preferred: Boolean): Dimension {
+        synchronized(target.treeLock) {
+            // The target may have width 0 during the first pass — walk up to the first sized ancestor.
+            var container: Container = target
+            while (container.size.width == 0 && container.parent != null) container = container.parent!!
+            val targetWidth = container.size.width.let { if (it == 0) Int.MAX_VALUE else it }
+            val insets = target.insets
+            val horizontalInsetsAndGap = insets.left + insets.right + hgap * 2
+            val maxWidth = targetWidth - horizontalInsetsAndGap
+            val dim = Dimension(0, 0)
+            var rowWidth = 0
+            var rowHeight = 0
+            for (i in 0 until target.componentCount) {
+                val m = target.getComponent(i)
+                if (!m.isVisible) continue
+                val d = if (preferred) m.preferredSize else m.minimumSize
+                if (rowWidth + d.width > maxWidth) {
+                    addRow(dim, rowWidth, rowHeight); rowWidth = 0; rowHeight = 0
+                }
+                if (rowWidth != 0) rowWidth += hgap
+                rowWidth += d.width
+                rowHeight = maxOf(rowHeight, d.height)
+            }
+            addRow(dim, rowWidth, rowHeight)
+            dim.width += horizontalInsetsAndGap
+            dim.height += insets.top + insets.bottom + vgap * 2
+            return dim
+        }
+    }
+
+    private fun addRow(dim: Dimension, rowWidth: Int, rowHeight: Int) {
+        dim.width = maxOf(dim.width, rowWidth)
+        if (dim.height > 0) dim.height += vgap
+        dim.height += rowHeight
     }
 }
