@@ -9,4 +9,6 @@ the `statusline-last.json` it writes.
 
 - Upstream stays the source of truth for statusline-only users.
 - Refresh this copy with `scripts/sync-statusline.sh` (run from the repo root) and commit the diff.
-- Vendored from upstream commit: `93deebf` (Support ISO-8601 rate-limit resets).
+- Vendored from upstream commit: `5064e68` / v0.3.0 (three rows — clock/branch/path, then the session
+  title + ↑↓↺ token counters fed by `claude-observatory usage --json` with the ◷ duration at the end,
+  then the usage bars).

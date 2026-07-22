@@ -207,6 +207,12 @@ object ObservatoryCli {
         }
     }
 
+    /** `sessions --json` — every store session incl. its human-readable title (0.8.6), for the chooser. */
+    fun sessionsJson(workDir: String?): String? {
+        val r = run(listOf("sessions", "--json"), workDir)
+        return if (r.ok) r.stdout else null
+    }
+
     fun statsJson(session: String?, workDir: String?): String? {
         val args = buildList {
             add("stats"); add("--json")
@@ -216,7 +222,15 @@ object ObservatoryCli {
         return if (r.ok) r.stdout else null
     }
 
-    fun usageJson(workDir: String?): String? = run(listOf("usage"), workDir).stdout.takeIf { it.isNotBlank() }
+    fun usageJson(session: String?, workDir: String?): String? {
+        // --session pins the sessionTokens breakdown to the session the panel is showing, instead of
+        // whatever the CLI would resolve as newest for the cwd.
+        val args = buildList {
+            add("usage")
+            session?.let { add("--session"); add(it) }
+        }
+        return run(args, workDir).stdout.takeIf { it.isNotBlank() }
+    }
 
     fun observeJson(session: String, workDir: String?): String? {
         val r = run(listOf("observe", "--session", session), workDir)

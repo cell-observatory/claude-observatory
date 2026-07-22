@@ -470,22 +470,65 @@ object ReviewOps {
     }
 
     /** Switch Session with no explicit anchor (Find Action / keymap) — centers the chooser in the window. */
-    fun chooseSession(project: Project) = chooseSessionPopup(project).showCenteredInCurrentWindow(project)
+    fun chooseSession(project: Project) {
+        chooseSession(project, null)
+    }
 
     /** Pin which capture session the observatory shows (e.g. the demo-showcase fixture) instead of the
-     *  auto-resolved newest one — a chooser over every session in the store, centered on [anchor]. */
-    fun chooseSession(project: Project, anchor: javax.swing.JComponent) = chooseSessionPopup(project).showInCenterOf(anchor)
+     *  auto-resolved newest one — a chooser over every session in the store, centered on [anchor].
+     *  Sessions lead with their human-readable TITLE (from `sessions --json`, the single CLI backend),
+     *  fetched off the EDT; when the CLI is unavailable the popup still opens with raw ids. */
+    fun chooseSession(project: Project, anchor: javax.swing.JComponent?) {
+        com.intellij.util.concurrency.AppExecutorUtil.getAppExecutorService().submit {
+            val entries = sessionEntries(project)
+            ApplicationManager.getApplication().invokeLater {
+                if (project.isDisposed) return@invokeLater
+                val popup = chooseSessionPopup(project, entries)
+                if (anchor != null && anchor.isShowing) popup.showInCenterOf(anchor)
+                else popup.showCenteredInCurrentWindow(project)
+            }
+        }
+    }
 
-    private fun chooseSessionPopup(project: Project): com.intellij.openapi.ui.popup.JBPopup {
+    private data class SessionEntry(val id: String, val title: String?, val pending: Int, val lastMs: Long)
+
+    /** `sessions --json` rows (id + title + pending + lastMs); falls back to the in-process store list
+     *  (ids only, no titles) when the CLI is missing — the chooser must never fail to open. */
+    private fun sessionEntries(project: Project): List<SessionEntry> {
+        val json = ObservatoryCli.sessionsJson(project.basePath)
+        if (json != null) {
+            try {
+                val o = com.google.gson.JsonParser.parseString(json).asJsonObject
+                return o.getAsJsonArray("sessions").map { el ->
+                    val s = el.asJsonObject
+                    SessionEntry(
+                        id = s.get("id").asString,
+                        title = s.get("title")?.takeIf { it.isJsonPrimitive }?.asString?.takeIf { it.isNotBlank() },
+                        pending = s.get("pending")?.takeIf { it.isJsonPrimitive }?.asInt ?: 0,
+                        lastMs = s.get("lastMs")?.takeIf { it.isJsonPrimitive }?.asLong ?: 0L,
+                    )
+                }
+            } catch (_: Exception) {
+                /* malformed / foreign JSON — fall through to the store reader */
+            }
+        }
+        return com.cellobservatory.observatory.core.StoreReader.listSessions().map {
+            SessionEntry(it.id, null, it.pending, it.lastMs)
+        }
+    }
+
+    private fun chooseSessionPopup(project: Project, entries: List<SessionEntry>): com.intellij.openapi.ui.popup.JBPopup {
         val settings = com.cellobservatory.observatory.settings.ObservatorySettings.instance
         val pinned = settings.state.session?.takeIf { it.isNotBlank() }
         val auto = project.basePath?.let { com.cellobservatory.observatory.core.SessionResolver.resolveSessionId(it) }
         val labelToId = LinkedHashMap<String, String?>()
         labelToId["Auto — newest for this workspace" + (auto?.let { " ($it)" } ?: "")] = null
-        for (s in com.cellobservatory.observatory.core.StoreReader.listSessions()) {
+        for (s in entries) {
             val mark = if (s.id == pinned) "● " else ""
             val autoTag = if (s.id == auto) " · auto" else ""
-            labelToId["$mark${s.id}  —  ${s.pending} pending · ${com.cellobservatory.observatory.model.relTime(s.lastMs)}$autoTag"] = s.id
+            val name = s.title ?: "session ${s.id.take(8)}"
+            // The 8-char id keeps labels unique when two sessions share a title (the map is label-keyed).
+            labelToId["$mark$name  —  ${s.id.take(8)} · ${s.pending} pending · ${com.cellobservatory.observatory.model.relTime(s.lastMs)}$autoTag"] = s.id
         }
         return com.intellij.openapi.ui.popup.JBPopupFactory.getInstance()
             .createPopupChooserBuilder(labelToId.keys.toList())

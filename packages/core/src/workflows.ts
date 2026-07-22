@@ -26,6 +26,7 @@ import { diffLines } from 'diff';
 import { parseTranscriptActions } from './actions';
 import { findSubagentsDir } from './subagents';
 import { cachedByFiles } from './fscache';
+import { friendlyModel } from './format';
 /**
  * Freshness window for a workflow's `running` gate. Deliberately WIDER than the fleet's 60s
  * FLEET_ACTIVE_MS: a workflow agent deep in a long reasoning turn appends nothing to its transcript for
@@ -148,17 +149,6 @@ interface AgentMetrics {
   activityTs: number[];
   /** The model the agent ran on (raw id, e.g. 'claude-opus-4-8'), '' when none seen. */
   model: string;
-}
-
-/** A raw model id → a short human label, e.g. 'claude-opus-4-8' → 'Opus 4.8', 'claude-sonnet-5' → 'Sonnet 5'.
- *  Unknown shapes pass through unchanged so nothing is ever mislabeled. */
-function friendlyModel(m: string): string {
-  if (!m) return '';
-  const mm = /claude-([a-z]+)-(\d+)(?:-(\d+))?/i.exec(m);
-  if (!mm) return m;
-  const fam = mm[1].charAt(0).toUpperCase() + mm[1].slice(1);
-  const ver = mm[3] ? `${mm[2]}.${mm[3]}` : mm[2];
-  return `${fam} ${ver}${/\[1m\]|-1m\b/i.test(m) ? ' (1M)' : ''}`;
 }
 
 /** Bucket activity timestamps into a fixed-width sparkline (counts per bin, span-normalized) — the same
@@ -424,7 +414,10 @@ function parseScriptMeta(text: string): { name?: string; description?: string; p
   const arr = /phases\s*:\s*\[([\s\S]*?)\]/.exec(body);
   if (arr) {
     // Object phases (`{ title: '…' }`) → titles; else a plain string array (`['…']`) → the strings.
-    const titleRe = /title\s*:\s*(['"`])((?:\\.|(?!\1)[\s\S])*)\1/g;
+    // The key may itself be quoted (`{"title":"Scope"}` — newer harnesses serialize meta phases as
+    // JSON), so tolerate an optional quote around it; without this every string in the array leaks
+    // into `phases` ("title","Scope","detail",…) via the plain-string fallback below.
+    const titleRe = /['"`]?title['"`]?\s*:\s*(['"`])((?:\\.|(?!\1)[\s\S])*)\1/g;
     let t: RegExpExecArray | null;
     while ((t = titleRe.exec(arr[1]))) phases.push(t[2]);
     if (phases.length === 0) {

@@ -1,5 +1,6 @@
 package com.cellobservatory.observatory.ui
 
+import com.cellobservatory.observatory.model.ContextSource
 import com.cellobservatory.observatory.model.ObservationEdit
 import com.cellobservatory.observatory.model.ObservationRun
 import com.cellobservatory.observatory.model.Observations
@@ -29,6 +30,7 @@ import javax.swing.JComponent
 import javax.swing.JTree
 import javax.swing.tree.DefaultMutableTreeNode
 import javax.swing.tree.DefaultTreeModel
+import javax.swing.tree.TreePath
 import javax.swing.tree.TreeSelectionModel
 
 /**
@@ -45,6 +47,7 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
 
     private object RecapMarker
     private object StepsMarker
+    private object ContextMarker
 
     @Volatile private var data: Observations? = null
 
@@ -67,7 +70,15 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
         toolbar = buildToolbar()
         tree.addMouseListener(object : MouseAdapter() {
             override fun mouseClicked(e: MouseEvent) {
-                if (e.clickCount == 2) selectedEdit()?.let { openEdit(it.id) }
+                if (e.clickCount != 2) return
+                // A context row opens the file behind it (a CLAUDE.md, a memory doc, a plan) — same
+                // LocalFileSystem open the Actions panel's conflict rows use.
+                val ctx = (tree.lastSelectedPathComponent as? DefaultMutableTreeNode)?.userObject as? ContextSource
+                if (ctx != null) {
+                    openContext(ctx)
+                    return
+                }
+                selectedEdit()?.let { openEdit(it.id) }
             }
         })
         PopupHandler.installPopupMenu(tree, buildPopupGroup(), "ClaudeObservatoryObsPopup")
@@ -131,6 +142,13 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
                 root.add(runNode)
             }
         }
+        // Context: what shaped this session (0.8.6). Its rows nest UNDER the marker (unlike the two
+        // sections around it, which flatten onto root) so a long list collapses as one unit.
+        val ctxSources = d?.context?.sources ?: emptyList()
+        val ctxNode = if (ctxSources.isEmpty()) null else DefaultMutableTreeNode(ContextMarker).also { n ->
+            for (s in ctxSources) n.add(DefaultMutableTreeNode(s))
+            root.add(n)
+        }
         // Next-steps: Claude's own open to-dos + heuristic follow-ups (shown independently of the timeline).
         if (d != null && d.nextSteps.isNotEmpty()) {
             root.add(DefaultMutableTreeNode(StepsMarker))
@@ -138,6 +156,9 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
         }
         model.reload()
         TreeUtil.expandAll(tree)
+        // expandAll just opened every section; a long Context list would push the recap and timeline off
+        // screen, so fold it back when it runs past a handful of rows (its header still carries the count).
+        ctxNode?.takeIf { it.childCount > 5 }?.let { tree.collapsePath(TreePath(it.path)) }
     }
 
     // --- keep / undo (per-edit — expand a run to its rows), + open / diff / chat ---
@@ -157,6 +178,15 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
         val rec = ObservatoryService.getInstance(project).log().find { it.id == edit.id }
             ?: return ReviewOps.notify(project, "Edit #${edit.id} is no longer in the store")
         ReviewOps.undoOrRedo(project, session, rec, redo = false)
+    }
+
+    /** Open the file behind a Context row. A source with no path (nothing on disk to show) says so rather
+     *  than doing nothing — a dead double-click reads as a bug. */
+    private fun openContext(s: ContextSource) {
+        val path = s.path ?: return ReviewOps.notify(project, "${s.label} isn't a file on disk")
+        val vf = com.intellij.openapi.vfs.LocalFileSystem.getInstance().refreshAndFindFileByPath(path)
+        if (vf == null) ReviewOps.notify(project, "File not found: $path", NotificationType.WARNING)
+        else com.intellij.openapi.fileEditor.FileEditorManager.getInstance(project).openFile(vf, true)
     }
 
     private fun openEdit(id: Int) {
@@ -249,6 +279,44 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
                     icon = AllIcons.Actions.IntentionBulb
                     append("Next steps", SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES)
                     append("  from Claude's to-dos + heuristics", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                }
+                is ContextMarker -> {
+                    icon = AllIcons.General.InspectionsEye
+                    append("Context", SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES)
+                    val ctx = data?.context
+                    val sources = ctx?.sources ?: emptyList()
+                    val observed = sources.count { it.evidence == "transcript" }
+                    append("  what shaped this session · ${sources.size} source(s), $observed observed", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                    // core's caveat, verbatim and ON the row — left in a tooltip, the section over-claims.
+                    ctx?.note?.takeIf { it.isNotBlank() }?.let { append("  $it", SimpleTextAttributes.GRAYED_ITALIC_ATTRIBUTES) }
+                    toolTipText = ctx?.note
+                }
+                is ContextSource -> {
+                    icon = when (node.kind) {
+                        "skill" -> AllIcons.Nodes.Plugin
+                        "plan" -> AllIcons.Actions.ListFiles
+                        "memory" -> AllIcons.Nodes.DataTables
+                        "compact-summary" -> AllIcons.Actions.Collapseall
+                        "claude-md" -> AllIcons.FileTypes.Text
+                        else -> AllIcons.General.Information
+                    }
+                    append(node.label)
+                    if (node.count > 1) append("  ×${node.count}", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                    node.detail?.takeIf { it.isNotBlank() }?.let { append("  $it", SimpleTextAttributes.GRAYED_ATTRIBUTES) }
+                    // The evidence axis belongs ON the row, not buried in a tooltip: a file that merely
+                    // exists where Claude Code auto-loads it is not something this session was seen doing.
+                    if (node.evidence != "transcript") {
+                        append("  present, not observed", SimpleTextAttributes.GRAYED_ITALIC_ATTRIBUTES)
+                    }
+                    toolTipText = buildString {
+                        append(node.path ?: node.label)
+                        append("\n")
+                        append(
+                            if (node.evidence == "transcript") "Observed in this session's transcript"
+                            else "Present where Claude Code auto-loads it — the injection isn't recorded per session"
+                        )
+                        if (node.path != null) append("\nDouble-click to open")
+                    }
                 }
                 is String -> {
                     icon = AllIcons.General.ArrowRight

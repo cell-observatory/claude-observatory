@@ -474,7 +474,7 @@
           <article class="slide" role="group" aria-roledescription="slide" aria-label="Observations">
             <div class="slide-in">
               <div><span class="eyebrow">Observations</span><h3>A change feed with Claude's reasoning</h3>
-                <p>The session appears as a feed of files ordered by most-recent activity; adjacent edits to the same file coalesce into one ×N run. Each entry is paired with Claude's reasoning, parsed from the transcript it already wrote, at zero extra tokens.</p></div>
+                <p>The session appears as a feed of files ordered by most-recent activity; adjacent edits to the same file coalesce into one ×N run. Each entry is paired with Claude's reasoning, parsed from the transcript it already wrote, at zero extra tokens. Above the feed, a Context section names what shaped the session — skills invoked, plans written, memory read, whether it resumed from a compaction — each row marked with whether the transcript proves it or the file is merely present where Claude Code loads it.</p></div>
               <div class="panel"><img src="media/observations.png" loading="lazy" alt="Observations: files by recent activity with same-file edits coalesced into ×N runs, each with Claude's own reasoning"></div>
             </div>
           </article>
@@ -509,13 +509,14 @@
 
           <article class="slide" role="group" aria-roledescription="slide" aria-label="Risk and egress">
             <div class="slide-in">
-              <div><span class="eyebrow">Risk &amp; egress</span><h3>Risk and egress audits</h3>
-                <p>Risk flags the shell commands that were destructive or privileged; egress lists everywhere the session reached off-machine.</p></div>
+              <div><span class="eyebrow">Risk &amp; egress</span><h3>Risk, egress, and capability audits</h3>
+                <p>Risk flags the shell commands that were destructive or privileged; egress lists everywhere the session reached off-machine; the capability footprint says what the session reached for at all — including the reads and edits that landed outside the workspace. It reports what was exercised, never what was permitted: approval prompts are never written to the transcript.</p></div>
               <div class="panel"><div class="mock">
-                <div class="mh">Risk · Egress</div>
+                <div class="mh">Risk · Egress · Capabilities</div>
                 <div><span class="r">⚠ HIGH</span> &nbsp;rm -rf build/ <span class="d">recursive delete</span></div>
                 <div><span class="p">⚠ med</span> &nbsp;&nbsp;curl api.example.com <span class="d">network</span></div>
                 <div style="margin-top:6px">⇅ 3 destinations <span class="d">· 3 remote</span></div>
+                <div style="margin-top:6px">edits 58 <span class="d">· 18 outside the workspace</span></div>
               </div></div>
             </div>
           </article>
@@ -545,8 +546,8 @@
           <article class="slide" role="group" aria-roledescription="slide" aria-label="Stats">
             <div class="slide-in">
               <div><span class="eyebrow">Stats</span><h3>Progress, tokens, and usage</h3>
-                <p>A live scoreboard of pending / accepted / reverted edits, token plots by session and window, and context and plan usage. The session is identified by name rather than its raw id, and the 5-hour and weekly usage rows show an estimated used of total — the 100% figure inferred from the tokens spent divided by the percent reported.</p></div>
-              <div class="panel"><img src="media/stats.png" loading="lazy" alt="Stats: review scoreboard, token plots, and usage bars"></div>
+                <p>The session's cumulative tokens — input, output, cached, and the cache hit rate — sit right under its name, followed by a live scoreboard of pending / accepted / reverted edits, token plots by window, and context and plan usage. The session is identified by name rather than its raw id, and the 5-hour and weekly usage rows show an estimated used of total — the 100% figure inferred from the tokens spent divided by the percent reported.</p></div>
+              <div class="panel"><img src="media/stats.png" loading="lazy" alt="Stats: session token split, review scoreboard, token plots, and usage bars"></div>
             </div>
           </article>
 

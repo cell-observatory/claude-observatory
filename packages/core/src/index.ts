@@ -19,6 +19,7 @@ export * from './groups';
 export * from './actions';
 export * from './risk';
 export * from './egress';
+export * from './capabilities';
 export * from './subagents';
 export * from './workflows';
 export * from './fleet';

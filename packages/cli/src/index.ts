@@ -292,7 +292,8 @@ function cmdDoctor(args: string[]): void {
 
 function cmdSessions(args: string[] = []): void {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
-  const sessions = core.listSessions();
+  // Titles ride along so pickers (and humans) see session NAMES — the raw id stays for --session.
+  const sessions = core.listSessionsWithTitles(process.cwd());
   if (args.includes('--json')) {
     emitJson({ active: core.resolveSessionId(process.cwd()), sessions });
     return;
@@ -304,8 +305,9 @@ function cmdSessions(args: string[] = []): void {
   const active = core.resolveSessionId(process.cwd());
   for (const s of sessions) {
     const mark = s.id === active ? c.green('● ') : '  ';
+    const name = s.title ? `${c.bold(s.title)}  ${c.dim(s.id)}` : c.bold(s.id);
     process.stdout.write(
-      `${mark}${c.bold(s.id)}  ${c.dim(`${s.edits} edit(s) · ${s.pending} pending · ${core.relTime(s.lastMs)}`)}\n`
+      `${mark}${name}  ${c.dim(`${s.edits} edit(s) · ${s.pending} pending · ${core.relTime(s.lastMs)}`)}\n`
     );
   }
   process.stdout.write(c.dim('\n● = resolves for this directory · use `--session <id>` to target another\n'));
@@ -524,6 +526,42 @@ function cmdEgress(args: string[]): void {
   }
 }
 
+/** `capabilities` — what this session actually reached for: files outside the workspace, shell
+ *  commands (with risk tiers), MCP servers, the network, subagent spawns. Reads EXERCISED capability,
+ *  never granted permission: Claude Code writes nothing to the transcript when it asks for approval,
+ *  so "auto-approved vs prompted" is unknowable from the outside — this counts what ran. */
+function cmdCapabilities(args: string[]): void {
+  const core = require('@claude-observatory/core') as Core;
+  const session = getSessionId(args);
+  const ri = args.indexOf('--root'); // classify in/out-of-workspace against the editor's workspace
+  const root = ri >= 0 && args[ri + 1] ? args[ri + 1] : process.cwd();
+  const cap = core.buildCapabilities(core.parseActions(process.cwd(), session), { root });
+  if (args.includes('--json')) {
+    emitJson({ session, capabilities: cap });
+    return;
+  }
+  process.stdout.write(c.bold('Capabilities') + c.dim(`  exercised this session · ${session}\n\n`));
+  const fileLine = (label: string, b: { count: number; outOfRoot: number; samples: string[] }): void => {
+    if (b.count === 0) return;
+    const out = b.outOfRoot > 0 ? c.yellow(` · ${b.outOfRoot} outside the workspace`) : '';
+    process.stdout.write(`  ${c.cyan(label.padEnd(9))} ${b.count}${out}\n`);
+    for (const s of b.samples) process.stdout.write(c.dim(`              ${s}\n`));
+  };
+  fileLine('reads', cap.reads);
+  fileLine('edits', cap.edits);
+  if (cap.exec.count) {
+    const risk = cap.exec.risky ? c.yellow(` · ${cap.exec.risky} risky`) + (cap.exec.high ? c.red(` (${cap.exec.high} high)`) : '') : '';
+    process.stdout.write(`  ${c.cyan('commands'.padEnd(9))} ${cap.exec.count}${risk}\n`);
+  }
+  if (cap.mcp.calls) process.stdout.write(`  ${c.cyan('mcp'.padEnd(9))} ${cap.mcp.calls} call(s) · ${cap.mcp.servers.join(', ')}\n`);
+  if (cap.web.calls) process.stdout.write(`  ${c.cyan('web'.padEnd(9))} ${cap.web.calls} call(s)${cap.web.hosts.length ? ` · ${cap.web.hosts.slice(0, 5).join(', ')}` : ''}\n`);
+  if (cap.agents.spawns) process.stdout.write(`  ${c.cyan('agents'.padEnd(9))} ${cap.agents.spawns} spawn(s)\n`);
+  if (!cap.reads.count && !cap.edits.count && !cap.exec.count && !cap.mcp.calls && !cap.web.calls && !cap.agents.spawns) {
+    process.stdout.write(c.dim('  nothing exercised yet\n'));
+  }
+  process.stdout.write(c.dim(`\n${core.CAPABILITIES_NOTE}\n`));
+}
+
 /** ms → compact human duration (450ms / 3.2s / 2m 5s). */
 function fmtDur(ms: number): string {
   if (!Number.isFinite(ms) || ms <= 0) return '0ms';
@@ -663,7 +701,12 @@ function cmdMultitask(args: string[]): void {
       ? core.agentPhaseDetail(transcript)
       : { phase: 'idle' as const, confidence: 'heuristic' as const };
     // Full (slow-tier) payload: whole-file builds per agent — aggregated HERE so renderers stay thin.
-    const map = core.buildChangeMap(sib.worktree, sib.id, { root: sib.worktree });
+    // The ACTIVE session is always rebuilt (its transcript is still growing, and its live counts are
+    // what the user is watching); every other sibling comes from the on-disk map cache.
+    const map =
+      sib.id === session
+        ? core.buildChangeMap(sib.worktree, sib.id, { root: sib.worktree })
+        : core.siblingChangeMap(sib.worktree, sib.id, { root: sib.worktree });
     // Per-sibling tokens + wall-clock (one light transcript pass) — so Fleet shows the same metric style
     // as Workflows already do. Cached on this slow tier alongside buildChangeMap.
     const usage = core.sessionUsage(sib.worktree, sib.id);
@@ -695,9 +738,12 @@ function cmdMultitask(args: string[]): void {
       subagents,
       files: sib.files,
       diff: { added: map.summary.added, removed: map.summary.removed },
-      tokens: usage.tokens,
+      tokens: usage.total,
       durationMs: usage.durationMs,
       risk: sib.risk,
+      // Read off the map just built — never a second action scan.
+      capabilities: map.capabilities,
+      compactions: map.summary.compactions,
     };
   });
 
@@ -727,10 +773,11 @@ function cmdMultitask(args: string[]): void {
     worktrees: [...wtBy.values()],
     // Workflow runs (one level above subagents) for the ACTIVE session — aggregated in core, rendered thin.
     workflows: core.parseWorkflows(cwd, session),
-    // The ACTIVE session's task list (TaskCreate/TaskUpdate — the newer system next to TodoWrite),
-    // for the Overview's Tasks tab: transcript history ∪ live dir state, each row carrying the
-    // chapterId that joins it to its change-map chapter. [] for sessions that never used tasks.
-    tasks: core.sessionTaskRows(cwd, session),
+    // The ACTIVE session's task list for the Overview's Tasks tab, across BOTH task generations:
+    // the legacy numbered TaskCreate/TaskUpdate list (transcript history ∪ live dir state) unioned
+    // with one row per background Agent run — the current harness's task system. Each row carries the
+    // chapterId that joins it to its change-map chapter. [] for sessions with neither.
+    tasks: core.allSessionTaskRows(cwd, session),
     actions,
     summary: { active: fleet.active, conflicts: fleet.conflicts },
   });
@@ -1389,7 +1436,9 @@ function cmdChangeMap(args: string[]): void {
   const agents = (sibs.length ? sibs : [{ id: session, worktree: cwd, gitBranch: null, phase: null }]).map((sib) => ({
     ...(sib.id === session && sib.worktree === cwd && root === cwd
       ? base
-      : core.buildChangeMap(sib.worktree, sib.id, { root: sib.worktree })),
+      : // A finished sibling's map is memoized on disk (keyed by its transcript + log stamps), so a
+        // repo with dozens of past sessions doesn't re-derive all of them on every Overview refresh.
+        core.siblingChangeMap(sib.worktree, sib.id, { root: sib.worktree })),
     session: sib.id,
     worktree: sib.worktree,
     gitBranch: sib.gitBranch ?? null,
@@ -1510,7 +1559,9 @@ function cmdInsights(args: string[]): void {
   }
 }
 
-/** The UsageLine snapshot (ctx / 5h / week) + the shared staleness threshold; always JSON. */
+/** The UsageLine snapshot (ctx / 5h / week) + the session's input/output/cache token split + its
+ *  model/effort/compaction vitals + the shared staleness threshold; always JSON. Both editors' Stats
+ *  panels consume this. */
 function cmdUsage(args: string[]): void {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const si = args.indexOf('--session');
@@ -1518,7 +1569,16 @@ function cmdUsage(args: string[]): void {
   // Guard a user-provided id like getSessionId does — usageLine derives a store path from it.
   if (provided && !core.isSafeSessionId(provided)) fail(`invalid session id "${provided}" (letters, digits, dot, dash, underscore only).`);
   const sid = provided || core.resolveSessionId(process.cwd()) || '';
-  emitJson({ ...core.usageLine(process.cwd(), sid), staleMs: core.USAGE_STALE_MS });
+  // sessionTokens = the session's cumulative input/output/cache split (+ cache hit rate), which the
+  // editors' stats panels render under the session title; ctx/5h/week above are point-in-time limits.
+  // vitals = which model/effort served the session, its compactions, and the context-fill series —
+  // free here, since it shares the cursor sessionUsage just advanced.
+  emitJson({
+    ...core.usageLine(process.cwd(), sid),
+    sessionTokens: core.sessionUsage(process.cwd(), sid),
+    vitals: core.sessionVitals(process.cwd(), sid),
+    staleMs: core.USAGE_STALE_MS,
+  });
 }
 
 // --- opt-in `claude -p` analysis (token-spending; cached results are returned unless --fresh) ---
@@ -2117,13 +2177,15 @@ function usage(): void {
       `                       the latest GitHub Release (VS Code via \`code --install-extension\`;\n` +
       `                       JetBrains by unzip into plugin dirs). --check reports only; --cli-only\n` +
       `                       skips the extensions; --force reinstalls even if already current\n` +
-      `  sessions             list all sessions in the store (● = current dir)\n` +
+      `  sessions             list all sessions in the store, by name (● = current dir)\n` +
       `  list [filters]       list edits (grouped by file); filters: --pending|--kept|--undone, --file <substr>\n` +
       `  timeline [--json]    edits newest-first as a chronological feed (time · id · Δ · file)\n` +
       `  actions [--json]     the full action timeline: EVERY tool call Claude made (reads, greps, bash,\n` +
       `                       web, subagents, to-dos), each with its result (alias: trace); --category <c> | --errors | --limit <n>\n` +
       `  risk [--json]        flag shell commands that can destroy data / escalate privilege / touch secrets\n` +
       `  egress [--json]      what this session touched off-machine (web / MCP / network-shell destinations)\n` +
+      `  capabilities [--json]  what this session reached for: files outside the workspace, shell commands\n` +
+      `                       (with risk tiers), MCP servers, network, subagents — exercised, not approved\n` +
       `  subagents [--json]   every subagent this session spawned, each with its own action timeline + metrics (alias: agents)\n` +
       `  siblings [--json]    the other Claude Code sessions in THIS project (active/idle · pending · files · risk);\n` +
       `                       agent-facing digest for cross-agent awareness (alias: fleet); --all includes self;\n` +
@@ -2163,7 +2225,8 @@ function usage(): void {
       `  observe              recap + per-edit reasoning/flags/memory as JSON\n` +
       `  observations [--root <d>]   Observations view-model: recap + timeline runs (adjacent same-file\n` +
       `                       edits coalesced ×N, each with reasoning) + next steps, as JSON\n` +
-      `  usage                ctx / 5h / week usage snapshot as JSON\n\n` +
+      `  usage                ctx / 5h / week snapshot + session token split + model/effort/compaction\n` +
+      `                       vitals, as JSON\n\n` +
       `opt-in, token-spending (runs \`claude -p\`; returns the cached result unless --fresh):\n` +
       `  analyze <id>         deep-analyze one edit    [--json --fresh --claude-bin <path>]\n` +
       `  recap                one-line session recap   [--json --fresh --claude-bin <path>]\n` +
@@ -2327,6 +2390,9 @@ function main(): void {
       break;
     case 'egress':
       cmdEgress(rest);
+      break;
+    case 'capabilities':
+      cmdCapabilities(rest);
       break;
     case 'subagents':
     case 'agents':

@@ -7,10 +7,64 @@ Per-tag release artifacts and auto-generated notes are on the
 
 ## [0.8.6] — Unreleased
 
-A quality-of-life sweep across the CLI, core, both editors, and the docs.
+A quality-of-life sweep across the CLI, core, both editors, and the docs, plus four new lenses on a
+session: what it ran on, what happened to its context, what it reached for, and what shaped it.
 
 ### Added
 
+- **The session's model and reasoning effort, beside its name (both editors)** — the Stats panel now
+  says what the session is actually running on: `Opus 4.8 · max effort`. The model comes from the
+  assistant turns themselves (sidechain turns are excluded — a subagent may run a different model —
+  and synthetic records are skipped), so a session that switched models mid-flight shows the current
+  one and flags that it switched, with the full per-model turn counts in the tooltip. Effort is read
+  from the structural field current Claude Code stamps on every turn, falling back to the `/effort`
+  command echo on older transcripts; a session that never declared one shows nothing rather than a
+  guessed default. Backed by `core.sessionVitals`, which rides the same incremental byte cursor
+  `sessionUsage` already advances — asking for both costs one `stat()`. Exposed as `usage --json`'s
+  new `vitals` object.
+- **Compactions are visible everywhere (both editors)** — when the harness runs out of context it
+  summarizes the conversation and continues, which is the single most consequential thing that can
+  happen to a session: everything above that line reaches later turns as a summary, not as what was
+  actually said. Until now the observatory drew nothing. Now each compaction is a first-class
+  **Actions** row in its own curated *Compactions* group (`auto · 1M→14k · 986k dropped · 2m 5s`), a
+  **marker between chapters** in the Overview, and a **context-fill meter** in the Stats panel whose
+  saw-tooth is the session's context filling and being dropped. The per-event drop is derived as
+  `pre − post`; the harness's own `cumulativeDroppedTokens` is a running session total, so quoting it
+  per event would overstate every compaction after the first.
+- **Capability footprint badges (both editors)** — a glanceable row on the Overview for what a session
+  actually reached for: file reads and edits (split by whether they landed **outside the workspace**),
+  shell commands with their risk tiers, MCP servers, network hosts, and subagent spawns. Also
+  `claude-observatory capabilities [--json]` and a per-agent footprint on every fleet row. These count
+  what was **exercised, never what was approved**: Claude Code writes nothing to the transcript when it
+  prompts for permission, so auto-approved and hand-approved are indistinguishable from the outside —
+  the badges say what ran, and the UI says so too.
+- **Context sources — what shaped this session (both editors)** — a Context section in Observations
+  listing the skills it invoked, the plans it wrote, the memory it read, and whether it was resumed
+  from a compaction, alongside the instruction files present where Claude Code auto-loads them. Each
+  row is labelled with how we know: `transcript` for things the session demonstrably did,
+  `file-present` for files that merely exist in a loaded location — because current builds inject
+  CLAUDE.md and memory system-prompt-side, leaving no per-session trace. Claiming those as observed
+  would be false; hiding them would omit the biggest influence on the session, so they are listed and
+  labelled. Rows with a file open it on click. Exposed as `observations --json`'s new `context` object.
+- **The Tasks tab tracks the new task system (both editors)** — current Claude Code builds replaced the
+  numbered TaskCreate/TaskUpdate list with background **Agent runs** (task-notifications + per-agent
+  transcripts), which left the tab permanently empty. Each agent run is now a task row — subject from
+  its spawn description, live status from its own transcript's phase, the agent's in-progress todo as
+  the active label — unioned with the legacy numbered rows so either harness generation works
+  (`core.allSessionTaskRows`, riding the existing `multitask --json`).
+- **Session pickers show session names** — the switch-session dropdown in both editors (and
+  `claude-observatory sessions`) now leads with each session's human-readable title (its `ai-title`,
+  else the first prompt), with the raw id demoted to the description line. Backed by
+  `core.listSessionsWithTitles` and a `title` field in `sessions --json`; the JetBrains chooser now
+  builds off the EDT from that JSON, falling back to raw ids if the CLI is missing.
+- **Session tokens on the Stats panel (both editors)** — a new section right under the session title
+  shows the session's cumulative tokens split the way the API bills them: **input** (uncached),
+  **output**, **cached** reads, and the **cache hit rate** (reads ÷ all context sent; cache writes in
+  the tooltip). The review scoreboard now sits under its own **Edits** heading. Backed by
+  `core.sessionUsage`, which now returns the full split and follows the transcript with an incremental
+  byte cursor — a refresh parses only newly appended lines (a no-change refresh is a single `stat()`),
+  instead of re-reading a potentially 50 MB transcript. Exposed to the editors via `usage --json`'s new
+  `sessionTokens` object (the JetBrains panel now pins it to the visible session with `--session`).
 - **Bulk "redo all" across every surface** — the forward mirror of Revert All: `claude-observatory redo
   --all` (plus `--file <substr>` / `--under <path>` / `--ids <a,b,c>` and `--json`, matching `undo`), a
   **Redo all edits** command + toolbar button in VS Code, and a **Redo All Edits** action in JetBrains
@@ -27,8 +81,45 @@ A quality-of-life sweep across the CLI, core, both editors, and the docs.
   `diff`. `help` now documents the `chapter` command, `undo --ids`, the `trace`/`agents` aliases,
   `doctor --markdown`, `version --latest`, and `clean --session`.
 
+### Performance
+
+A sweep over the whole read path, measured against a real 53.5 MB transcript in a repo with 27 sibling
+sessions. Nothing here changes what any surface reports — every number was diffed against the
+un-optimized output first.
+
+- **The Overview refresh went from ~29 s of work to ~4.6 s.** It builds a full change map for every
+  sibling session in the repo, nearly all of which are *finished* sessions whose transcript and store
+  log will never change again — and it does that in a fresh CLI process every few seconds, where the
+  in-process memo can never help. Finished siblings are now memoized on disk, keyed by their
+  (transcript, log) stamps: `changemap --json` **14.5 s → 1.6 s**, `multitask --json` **14.9 s → 3.0 s**.
+  The session actually being viewed is always rebuilt, since its transcript is still growing and its
+  live counts are the ones being watched.
+- **The parse cache was thrashing to a ~0 % hit rate.** Its per-kind cap was 128 entries with
+  oldest-inserted eviction, but a single session's `subagents/` directory holds 150+ transcripts after a
+  big workflow run — so every pass evicted exactly the entries the next pass needed, and each
+  "memoized" parser re-ran every time. The cap now fits the real working set and eviction is
+  least-recently-*used*: warm `buildChangeMap` **126 ms → 29 ms**.
+- **The status line and the JetBrains stats poll no longer re-read the whole transcript.** Both run a
+  fresh CLI process per tick, so the in-memory usage cursor never survived for them; it is now persisted
+  and resumed, turning a full re-parse into a delta: `usage --json` **160 ms → 50 ms** on that 53.5 MB
+  session. Token dedup still carries the complete seen-set — duplicate message ids recur hundreds of
+  lines apart in resumed sessions, so a cheaper shortcut would double-count.
+- **`metrics` stopped re-reading the transcript for tool latencies** (the last unmemoized full scan in
+  that module): **127 ms → 17 ms** warm.
+- **VS Code no longer refreshes for other repos' sessions.** The transcript watcher pattern spans
+  `~/.claude/projects`, i.e. every project on the machine, so unrelated Claude activity was waking this
+  window for a full refresh; arrivals are now filtered to this workspace and its worktree siblings.
+  Subagent and workflow transcripts nested under a watched session still count, so a live agent fleet
+  keeps updating in real time.
+
 ### Changed
 
+- **Status line: three rows, session-first** (bundled `claude-observatory statusline`, vendored from
+  claude-statusline) — a new top row carries the clock, the git **branch** (when in a repo), and the
+  `~`-abbreviated **path**; the middle row is the session: its **title** (folder name until one
+  exists), the model + attributes with a `◷` duration, and **`↑in ↓out ↺cached` token counters**
+  (from `usage --json` — the same split as the Stats panel; omitted when the CLI is absent); the
+  usage bars stay the last row.
 - **VS Code extension publisher is now `cell-observatory`** (was `claude-observatory`), matching the
   GitHub org — the extension id is therefore `cell-observatory.claude-observatory-vscode`. Existing
   installs migrate automatically: `claude-observatory update` installs the renamed extension and removes
@@ -52,6 +143,18 @@ A quality-of-life sweep across the CLI, core, both editors, and the docs.
 
 ### Fixed
 
+- **A compacted session no longer renames itself "This session is being continued…".** The summary the
+  harness injects after a compaction is a synthesized *user* turn, and it slipped past the guards that
+  skip command wrappers — so on any long session it became the first user prompt, and from there the
+  session title, the synthetic chapter's title, and the label in both editors' session pickers.
+- **A session running background agents or a workflow fleet no longer reads as `done` / `awaiting
+  permission` while its agents churn.** The phase classifier's staleness clock now spans the child
+  agent transcripts (`subagents/*.jsonl` and `subagents/workflows/*/*.jsonl`), not just the main one —
+  so a live 100-agent workflow run keeps its session `working`, visible under the Overview's
+  "Active only" filter instead of being dropped as finished.
+- **Workflow phase titles parse again on current Claude Code builds.** Newer harnesses serialize the
+  script meta's phases with quoted keys (`{"title":"Scope",…}`), which the fallback parser flattened
+  into a title/detail string soup; the Workflows pane now shows the real phase names.
 - **JetBrains: `claude-observatory update --check` no longer reports a current plugin as perpetually
   out of date.** The installed version is now read from the plugin's own jar
   (`lib/claude-observatory-jetbrains-<ver>.jar` — present for every install method: the bootstrap

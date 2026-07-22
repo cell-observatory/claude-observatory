@@ -308,7 +308,7 @@ No icon serves two actions: the session-wide bulk pair get their own glyphs (Acc
 Revert All a history-rewind), distinct from the file-scoped double-check / ✕ and the per-edit ✓ / ↩.
 On the **Overview title bar** the bar expands to **two rows**. The **top row** carries the controls: a
 **session selector** — which now shows the session's human-readable **name** (its title or first prompt;
-the raw id sits in the tooltip) — the session-wide bulk actions **Accept All · Revert All · Clear
+the raw id sits in the tooltip), and whose switch-session picker lists every session by name too — the session-wide bulk actions **Accept All · Revert All · Clear
 Resolved · Export**, and on the right **Search · Active only · Spotlight · Refresh**. The **bottom row**
 steps the pending edits on **four review axes**, each a coarser grain than the last:
 
@@ -424,23 +424,36 @@ review, so observations get sharper the longer you use the tool. Zero tokens, ze
 ### Stats — trends and live usage
 
 A **top navbar** now runs across the very top of the Stats view (both editors): the **active Claude
-Code session, shown by its name** (not its raw id). (The Search-edits box moved out in 0.7.5 — the
-**Edits** / **Diffs** title-bar search is the single entry point.) Below it, a live **review scoreboard** leads the tab:
-**pending / accepted / reverted** counts and a **progress bar** that fills as you review — updated the
-instant you keep or undo an edit, and the **pending** count is now **clickable**: click it to jump
-straight to the first (oldest) edit awaiting review. Then a step-line plot of **tokens** (total / input / output, logarithmic axis) with a **Today / 7 days /
+Code session, shown by its name** (not its raw id), followed by a chip naming the **model and reasoning
+effort** the session is actually running on — `Opus 4.8 · max effort` (0.8.6). The model is read from
+the session's own assistant turns, excluding sidechain turns because a subagent may run a different
+model; a session that switched models mid-flight shows the current one and says so, with per-model turn
+counts in the tooltip. Effort comes from the field current Claude Code stamps on each turn, falling back
+to the `/effort` command echo on older transcripts — and when a session never declared one, the chip
+simply omits it rather than inventing a default. (The Search-edits box moved out in 0.7.5 — the
+**Edits** / **Diffs** title-bar search is the single entry point.) Right below the title, a **Session
+tokens** section (0.8.6) shows this session's cumulative spend split the way the API bills it —
+**input** (uncached) / **output** / **cached** reads, plus the **cache hit rate** (reads ÷ all context
+sent); cache-write totals live in the tooltip. Then, under an **Edits** heading, the live **review
+scoreboard**: **pending / accepted / reverted** counts and a **progress bar** that fills as you review —
+updated the instant you keep or undo an edit, and the **pending** count is now **clickable**: click it
+to jump straight to the first (oldest) edit awaiting review. Then a step-line plot of **tokens** (total / input / output, logarithmic axis) with a **Today / 7 days /
 30 days** toggle, then the live **Usage** bars: context fill, plus the **5h** and **weekly** plan-usage
 rows, which now show an estimated **used / total** — the 100% total inferred from the reported tokens
 ÷ percent. The full scoreboard (`3 pending · 42 accepted · 5 reverted · 89% accepted · oldest 12m`)
-also lives in the status-bar microscope's tooltip. The stats scan runs in a subprocess with an
-incremental cache, so the UI never blocks.
+also lives in the status-bar microscope's tooltip. Below the token cells, a **context meter** (0.8.6)
+plots the context sent per turn across the session; its saw-tooth is the window filling and then being
+dropped, with a tick at each **compaction**. The stats scan runs in a subprocess with an
+incremental cache — and the session-token counters keep a per-transcript byte cursor, parsing only
+what was appended since the last refresh — so the UI never blocks.
 
 ### Overview — the master-detail multi-agent panel
 
 The flagship 0.8.0 surface, and the one that replaces both the old **Change Map** and the old
 **Multitasking** window. **Overview** is a **master-detail** panel (both editors): a **left nav**
 (~25%) that lists every agent and every workflow, and a **right detail** (~75%) that shows the selected
-one's **change-map**. The left nav groups its rows under **Fleet**, **Workflows**, and **Tasks** tabs,
+one's **change-map**. The left nav groups its rows under **Fleet**, **Workflows**, and **Tasks** tabs (Tasks lists the
+session's numbered tasks — or, on newer Claude Code builds, its background **Agent runs**),
 each of which opens with a one-line description of what it lists; every tab and change-map section also
 carries a hover description. A **title bar** across the top carries a **session selector** (showing the
 session by its name), the combined **two-row review nav bar**, and the session-wide bulk actions. It
@@ -604,11 +617,11 @@ $ claude-observatory chat-context --agent a669a284d111a7745 --json
 Both `tasklog` and `chat-context` are **additive** — mined from the transcript + the local store, they
 add nothing to the store and change no on-disk format.
 
-### Risk & Egress — two zero-token audits
+### Risk, Egress & Capabilities — three zero-token audits
 
-The Actions timeline already knows every command Claude ran and every host it reached, so two safety
-audits fall straight out of it — **zero tokens, no new store or format**. Both ride the same **Actions**
-view in the **sidebar** ("Claude Edits"), and each gets its own CLI verb.
+The Actions timeline already knows every command Claude ran and every host it reached, so these safety
+audits fall straight out of it — **zero tokens, no new store or format**. Risk and Egress ride the same
+**Actions** view in the **sidebar** ("Claude Edits"), and each gets its own CLI verb.
 
 **Risk** flags the shell commands that can bite: data-destroying (`rm -rf`, `git reset --hard`, force
 push), remote code execution (`curl … | sh`), privilege escalation (`sudo`), or reads/writes of
@@ -642,7 +655,33 @@ remote   Command   curl https://sh.rustup.rs | sh
 unknown  MCP       localhost:7331 (fs)
 ```
 
-Both are **additive** — mined from the transcript's action trace, they add nothing to the store and
+**Capabilities** (0.8.6) rolls the same timeline into one glanceable answer to *"what did this session
+reach for?"* — a badge row above the Overview's chapters, a per-agent footprint on every fleet row, and
+its own verb:
+
+```console
+$ claude-observatory capabilities
+Capabilities  exercised this session · 0c396c6b-2da9-4be2-9c6d-c8c5797de7a5
+
+  reads     14 · 3 outside the workspace
+              ~/.claude/CLAUDE.md
+  edits     58 · 18 outside the workspace
+              ~/.claude/plans/refactor-auth.md
+  commands  58 · 1 risky (1 high)
+  mcp       7 call(s) · linear
+  web       3 call(s) · raw.githubusercontent.com
+  agents    2 spawn(s)
+
+exercised, not approved — permission prompts are never written to the transcript
+```
+
+That last line is the whole design constraint, stated in the product: Claude Code writes **nothing** to
+the transcript when it prompts for permission, so from the outside auto-approved and hand-approved work
+are indistinguishable. The footprint therefore counts what **ran** — never what was allowed — and the
+files that landed **outside the workspace** are called out, because that is the line users actually
+care about.
+
+All three are **additive** — mined from the transcript's action trace, they add nothing to the store and
 change no on-disk format.
 
 ### Subagents — every spawned agent, its own timeline

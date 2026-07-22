@@ -152,12 +152,28 @@ export async function runDemo(opts: DemoOptions = {}): Promise<DemoResult> {
       type: 'assistant',
       sessionId: session,
       timestamp: clock.iso(),
+      // Model + effort are stamped the way current Claude Code stamps them, so the demo session lights
+      // up the Stats panel's model/effort chip instead of leaving it blank.
+      effort: 'high',
       message: {
         role: 'assistant',
         id: `demo_msg_${toolSeq}_${steps}`,
+        model: 'claude-opus-4-8',
         usage: { ...usage, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
         content: blocks,
       },
+    });
+  /** A context compaction, exactly as the harness records one — so the demo exercises the compaction
+   *  marker, the Actions row and the context meter's saw-tooth. */
+  const compaction = (preTokens: number, postTokens: number, cumulative: number) =>
+    append({
+      type: 'system',
+      subtype: 'compact_boundary',
+      content: 'Conversation compacted',
+      sessionId: session,
+      isSidechain: false,
+      timestamp: clock.iso(),
+      compactMetadata: { trigger: 'auto', preTokens, postTokens, cumulativeDroppedTokens: cumulative, durationMs: 92_000 },
     });
   const result = (toolUseId: string) =>
     append({
@@ -298,6 +314,20 @@ export async function runDemo(opts: DemoOptions = {}): Promise<DemoResult> {
     'class Dataset:\n    def __init__(self, features, labels):\n        self.features = features\n        self.labels = labels\n\n    def validate(self):\n        if len(self.features) != len(self.labels):\n            return {"ok": False, "error": "features/labels length mismatch"}\n        if not self.features:\n            return {"ok": False, "error": "empty dataset"}\n        return {"ok": True}\n',
     'Adding Dataset.validate() — matching feature/label lengths and a non-empty check, returned as {ok, error}.'
   );
+
+  // A long session fills its context window and the harness compacts it. The turns on either side
+  // carry realistic context sizes so the meter shows the climb and the drop, not a flat line.
+  await beat('  … context fills up and the harness compacts the conversation');
+  assistant([{ type: 'text', text: 'Continuing — the dataset checks are in place.' }], { input_tokens: 2_400, output_tokens: 320 });
+  compaction(178_000, 12_400, 165_600);
+  append({
+    type: 'user',
+    sessionId: session,
+    timestamp: clock.iso(),
+    isCompactSummary: true,
+    message: { role: 'user', content: 'This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.' },
+  });
+  assistant([{ type: 'text', text: 'Picking up from the summary — tests are next.' }], { input_tokens: 900, output_tokens: 140 });
 
   await beat('▸ chapter 3 — tests, written by a subagent');
   todos([

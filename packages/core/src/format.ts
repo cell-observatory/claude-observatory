@@ -48,6 +48,19 @@ export function lineDelta(sessionId: string, rec: EditRecord): { added: number; 
   return { added, removed };
 }
 
+/** A raw model id → a short human label, e.g. 'claude-opus-4-8' → 'Opus 4.8', 'claude-sonnet-5' → 'Sonnet 5'.
+ *  Unknown shapes pass through unchanged so nothing is ever mislabeled. Shared: the Workflows rows label
+ *  each agent's model with it, and the Stats panel labels the session's own model with it — one labeler,
+ *  so the two surfaces can never disagree about what "Opus 4.8" is called. */
+export function friendlyModel(m: string): string {
+  if (!m) return '';
+  const mm = /claude-([a-z]+)-(\d+)(?:-(\d+))?/i.exec(m);
+  if (!mm) return m;
+  const fam = mm[1].charAt(0).toUpperCase() + mm[1].slice(1);
+  const ver = mm[3] ? `${mm[2]}.${mm[3]}` : mm[2];
+  return `${fam} ${ver}${/\[1m\]|-1m\b/i.test(m) ? ' (1M)' : ''}`;
+}
+
 /** ANSI-colored unified diff for one edit, ready to print to a terminal. */
 export function coloredDiff(sessionId: string, rec: EditRecord, color = true): string {
   const before = blobText(sessionId, rec.beforeBlob);

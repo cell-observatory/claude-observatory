@@ -3,6 +3,8 @@ package com.cellobservatory.observatory.ui
 import com.cellobservatory.observatory.core.ChatRef
 import com.cellobservatory.observatory.core.ObservatoryCli
 import com.cellobservatory.observatory.core.StoreReader
+import com.cellobservatory.observatory.model.Capabilities
+import com.cellobservatory.observatory.model.CapabilityBadge
 import com.cellobservatory.observatory.model.ChangeMap
 import com.cellobservatory.observatory.model.ChangeMapAgent
 import com.cellobservatory.observatory.model.ChangeMapChapter
@@ -11,6 +13,7 @@ import com.cellobservatory.observatory.model.ChangeMapModule
 import com.cellobservatory.observatory.model.ChangeMapSummary
 import com.cellobservatory.observatory.model.ChangeMapWorkflow
 import com.cellobservatory.observatory.model.Collision
+import com.cellobservatory.observatory.model.CompactBoundary
 import com.cellobservatory.observatory.model.MtSubagent
 import com.cellobservatory.observatory.model.MultitaskResult
 import com.cellobservatory.observatory.model.SessionTask
@@ -595,6 +598,7 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             else TabData(
                 session = m.summary?.session ?: "", summary = m.summary, files = m.files, modules = m.modules,
                 chapters = m.chapters,
+                capabilities = m.capabilities, compactions = m.compactions,
             )
         is NavSel.Agent -> m.agents.firstOrNull { it.session == sel.session }?.let { agentTabData(it) }
         is NavSel.Workflow -> m.workflows.firstOrNull { it.id == sel.id }?.let { workflowTabData(it, m) }
@@ -603,6 +607,7 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
     private fun agentTabData(a: ChangeMapAgent) = TabData(
         session = a.session, summary = a.summary, files = a.files, modules = a.modules,
         chapters = a.chapters,
+        capabilities = a.capabilities, compactions = a.compactions,
     )
 
     /** One workflow's detail: a synthetic summary from its rollup, its churn-ranked touched files, and its
@@ -618,6 +623,8 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             session = m.summary?.session ?: "", summary = summary, files = w.files, modules = emptyList(),
             chapters = w.chapters,
             running = w.running,
+            // No capability/compaction defaults are filled in here: both are session-scoped facts core
+            // does not slice per workflow run, and attributing the session's to one run would overstate it.
         )
     }
 
@@ -794,6 +801,13 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             if (a.riskTotal > 0) append("  ⚠ ${if (a.riskHigh > 0) "${a.riskHigh} high" else "${a.riskTotal}"}",
                 if (a.riskHigh > 0) SimpleTextAttributes.ERROR_ATTRIBUTES else SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, MT_ATTENTION))
             if (node.collides) append("  ⛒ collision", SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, MT_ATTENTION))
+            // The agent's footprint in the two clauses worth scanning a fleet row for: how far outside its
+            // workspace it reached, and how often its context was compacted. The rest lives in the tooltip
+            // — and all of it is EXERCISED capability, never granted permission.
+            val cap = a.capabilities
+            val outside = if (cap == null) 0 else cap.reads.outOfRoot + cap.edits.outOfRoot
+            if (outside > 0) append("  ⤴ $outside outside", SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, MT_ATTENTION))
+            if (a.compactions > 0) append("  ⌁ ${a.compactions}", SimpleTextAttributes.GRAYED_ATTRIBUTES)
             toolTipText = buildString {
                 append(if (a.self) "This session: " else "Agent: ").append(a.session).append("\n")
                 append("phase ${a.phase}").append(if (heuristic) " (~ inferred from inactivity)" else "").append("\n")
@@ -803,6 +817,15 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
                     val cur = a.todos.firstOrNull { it.status == "in_progress" } ?: a.todos.lastOrNull()
                     cur?.let { append("\ntask: ${it.content}") }
                 }
+                cap?.let { c ->
+                    append("\nreached for: ${c.reads.count} read · ${c.edits.count} edited · ${c.execCount} command(s)")
+                    if (c.mcpCalls > 0) append(" · ${c.mcpCalls} MCP")
+                    if (c.webCalls > 0) append(" · ${c.webCalls} web")
+                    if (c.agentSpawns > 0) append(" · ${c.agentSpawns} subagent(s)")
+                    if (outside > 0) append("\n$outside touch(es) outside its workspace")
+                    append("\nexercised, not approved — permission prompts are never written to the transcript")
+                }
+                if (a.compactions > 0) append("\n${a.compactions} context compaction(s)")
                 append("\nSelect to map this agent's changes on the right")
             }
         }
@@ -972,6 +995,10 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         val chapters: List<ChangeMapChapter>,
         /** Non-null on a workflow slice — its run state, shown as a badge in the chips row. */
         val running: Boolean? = null,
+        /** What this slice's session reached for — null when the CLI predates it (the badge row hides). */
+        val capabilities: Capabilities? = null,
+        /** Context compactions in this slice, oldest first — markers spliced into the chapter ribbon. */
+        val compactions: List<CompactBoundary> = emptyList(),
     )
 
     /** One slice's Overview detail: chips headline · named-chapter ribbon · module strip · churn ledger. */
@@ -1011,6 +1038,20 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
 
         // Section captions (VS Code .cm-caption) + the bottom summary bar. The caption tooltips describe
         // each section; the summary names the current scope's pending/accepted/file/folder totals.
+        private val capFootprint = caption("Footprint", "Footprint — what this session actually reached for: files it read and edited (and how many landed outside this workspace), shell commands and their risk tiers, MCP servers, web hosts, subagents spawned. Exercised, not approved: Claude Code never writes permission prompts to the transcript, so nothing here says what was allowed.")
+        // A wrapping row so a busy session's badges flow onto extra lines instead of clipping — the same
+        // WrapLayout + revalidate-on-resize pairing the nav bar's axis row uses.
+        private val badgeRow = JPanel(WrapLayout(FlowLayout.LEFT, JBUI.scale(6), JBUI.scale(1))).apply {
+            isOpaque = false
+            alignmentX = Component.LEFT_ALIGNMENT
+            addComponentListener(object : ComponentAdapter() {
+                private var lastWidth = -1
+                override fun componentResized(e: ComponentEvent) {
+                    val c = e.component
+                    if (c.width != lastWidth) { lastWidth = c.width; c.revalidate() }
+                }
+            })
+        }
         private val capChapters = caption("Chapters", "Chapters — the subtasks (Claude’s to-dos / tasks) this work fell under. Each chip shows ±lines · edits · pending; click it to review that chapter in the nav bar.")
         private val capFolders = caption("Folders", "Folders — the directories Claude changed. Color = review status (amber pending · green kept · red reverted); click a tile to filter the files below and open that folder in the nav bar.")
         private val capFiles = caption("Files", "Files — every changed file, ranked by churn. Dot = review status, bar = relative churn, +N = lines, ⧗/✓ = pending/reviewed; click a row to open the edit.")
@@ -1031,6 +1072,8 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             val north = JPanel().apply {
                 layout = BoxLayout(this, BoxLayout.Y_AXIS)
                 border = JBUI.Borders.empty(2, 4)
+                add(capFootprint)  // above the capability badges
+                add(badgeRow)
                 add(capChapters)   // above the Chapters ribbon
                 add(ribbonScroll)
                 add(capFolders)    // above the Folders strip
@@ -1086,19 +1129,38 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             // collapse behind a "N done" toggle so many stay readable.
             ribbon.removeAll()
             val done = ArrayList<ChangeMapChapter>()
+            // Compaction markers ride BETWEEN the chapter rows, after the chapter whose window core placed
+            // each one in. This ribbon filters and re-orders chapters, so a marker's anchor is often not on
+            // screen — `drawnCompactions` tracks what actually landed so the leftovers can be clamped to the
+            // tail below instead of silently vanishing.
+            val drawnCompactions = HashSet<Int>()
             data.chapters.forEach { ch ->
                 // Task-born chapters live on the Tasks tab — never duplicate them here (VS Code parity);
                 // and planned zero-edit rows stay hidden like VS Code's ribbon filter.
                 if (ch.fromTask) return@forEach
                 if (ch.edits == 0 && ch.status != "wip") return@forEach
-                if (ch.edits > 0 && ch.pending == 0 && ch.undone == 0) done.add(ch) else ribbon.add(chapterRow(ch))
+                if (ch.edits > 0 && ch.pending == 0 && ch.undone == 0) done.add(ch) else {
+                    ribbon.add(chapterRow(ch))
+                    addCompactionsAfter(ch.id, drawnCompactions)
+                }
             }
             if (done.isNotEmpty()) {
                 ribbon.add(doneToggle(done.size))
-                if (ribOpen) done.forEach { ribbon.add(chapterRow(it)) }
+                if (ribOpen) done.forEach { ribbon.add(chapterRow(it)); addCompactionsAfter(it.id, drawnCompactions) }
             }
+            // Whatever is left — anchored to a collapsed/filtered chapter, or to no chapter at all — lands
+            // at the ribbon tail in core's order, so the ribbon always shows every compaction that happened.
+            data.compactions.forEachIndexed { i, cb -> if (!drawnCompactions.contains(i)) ribbon.add(compactRow(cb)) }
             ribbonScroll.isVisible = ribbon.componentCount > 0
             capChapters.isVisible = ribbonScroll.isVisible
+
+            // The capability footprint: a few glanceable badges for what this session REACHED FOR, with the
+            // attention tint on the two things people actually scan for — touches outside the workspace and
+            // risky commands. Never a permission claim (approvals never reach the transcript).
+            badgeRow.removeAll()
+            data.capabilities?.takeIf { it.any }?.let { cap -> capabilityBadges(cap).forEach { badgeRow.add(it) } }
+            badgeRow.isVisible = badgeRow.componentCount > 0
+            capFootprint.isVisible = badgeRow.isVisible
 
             strip.isVisible = data.modules.isNotEmpty()
             capFolders.isVisible = strip.isVisible
@@ -1125,6 +1187,7 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
 
             refreshSummary()
             ribbon.revalidate(); ribbon.repaint()
+            badgeRow.revalidate(); badgeRow.repaint()
             strip.repaint()
             revalidate(); repaint()
         }
@@ -1265,6 +1328,103 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
                 row.add(miniButton(NavTint.CLEAR, "Clear — drop this chapter's resolved edits") { withSession { s -> ReviewOps.clearTask(project, s, ch.id, title) } })
             }
             return row
+        }
+
+        /** Append every not-yet-drawn compaction core anchored to [chapterId], marking each as drawn.
+         *  Order is core's (oldest first) — the ribbon never re-sorts what core already ordered. */
+        private fun addCompactionsAfter(chapterId: String, drawn: MutableSet<Int>) {
+            data.compactions.forEachIndexed { i, cb ->
+                if (drawn.contains(i) || cb.afterChapterId != chapterId) return@forEachIndexed
+                ribbon.add(compactRow(cb))
+                drawn.add(i)
+            }
+        }
+
+        /** One compaction marker between chapter rows: the moment the harness summarized older turns away
+         *  and carried on from the summary. The line is core's `label`, rendered verbatim — re-deriving the
+         *  numbers here is exactly how the two editors would start disagreeing about the same event. */
+        private fun compactRow(cb: CompactBoundary): JComponent {
+            val row = rowPanel()
+            row.add(JBLabel("⌁").apply { font = JBUI.Fonts.label(); foreground = MT_ATTENTION })
+            row.add(JBLabel(clipText("context compacted · ${cb.label}", 52)).apply {
+                font = JBUI.Fonts.miniFont()
+                foreground = UIUtil.getContextHelpForeground()
+                toolTipText = buildString {
+                    append("Context compacted — ${cb.label}")
+                    if (cb.cumulativeDropped > 0) append("\n${fmtTok(cb.cumulativeDropped)} tokens dropped so far this session")
+                    append("\nOlder turns were summarized away; the session continued from that summary.")
+                    if (cb.afterChapterId == null) append("\nNo chapter window covers it — shown at the end of the ribbon.")
+                }
+            })
+            return row
+        }
+
+        /** One dim chip per exercised facet — amber once something left the workspace or a command scored
+         *  risky, red when a command scored high. Wording stays past-tense ("read", "ran"): this is what
+         *  the session DID, and every tooltip says so, because approvals are never in the transcript. */
+        private fun capabilityBadges(c: Capabilities): List<JComponent> {
+            val out = ArrayList<JComponent>()
+            val exercised = "\nexercised, not approved — permission prompts are never written to the transcript"
+            fun fileBadge(noun: String, b: CapabilityBadge, verb: String) {
+                if (b.count == 0) return
+                val outside = b.outOfRoot > 0
+                out.add(capBadge(
+                    "${b.count} $noun" + if (outside) " · ${b.outOfRoot} outside" else "",
+                    if (outside) CM_PENDING else null,
+                    buildString {
+                        append("${b.count} file(s) $verb this session")
+                        if (outside) {
+                            append("\n${b.outOfRoot} outside this workspace, for example:")
+                            b.samples.forEach { append("\n  $it") }
+                        }
+                        append(exercised)
+                    },
+                ))
+            }
+            fileBadge("read", c.reads, "read")
+            fileBadge("edited", c.edits, "edited")
+            if (c.execCount > 0) {
+                out.add(capBadge(
+                    "${c.execCount} command${if (c.execCount == 1) "" else "s"}" + if (c.execRisky > 0) " · ${c.execRisky} risky" else "",
+                    if (c.execHigh > 0) MT_ERROR else if (c.execRisky > 0) CM_PENDING else null,
+                    buildString {
+                        append("${c.execCount} shell command(s) run this session")
+                        if (c.execRisky > 0) append("\n${c.execRisky} scored risky" + if (c.execHigh > 0) ", ${c.execHigh} of them high" else "")
+                        append(exercised)
+                    },
+                ))
+            }
+            if (c.mcpCalls > 0) {
+                out.add(capBadge(
+                    "${c.mcpCalls} MCP" + if (c.mcpServers.isNotEmpty()) " · ${clipText(c.mcpServers.joinToString(", "), 22)}" else "",
+                    null,
+                    "${c.mcpCalls} MCP tool call(s)" +
+                        (if (c.mcpServers.isNotEmpty()) "\nservers: ${c.mcpServers.joinToString(", ")}" else "") + exercised,
+                ))
+            }
+            if (c.webCalls > 0) {
+                out.add(capBadge(
+                    "${c.webCalls} web" + if (c.webHosts.isNotEmpty()) " · ${clipText(c.webHosts.joinToString(", "), 22)}" else "",
+                    null,
+                    "${c.webCalls} web fetch/search call(s)" +
+                        (if (c.webHosts.isNotEmpty()) "\nhosts: ${c.webHosts.joinToString(", ")}"
+                        else "\nsearch queries carry no host, so none are listed") + exercised,
+                ))
+            }
+            if (c.agentSpawns > 0) {
+                out.add(capBadge(
+                    "${c.agentSpawns} subagent${if (c.agentSpawns == 1) "" else "s"}",
+                    null,
+                    "${c.agentSpawns} subagent run(s) this session spawned" + exercised,
+                ))
+            }
+            return out
+        }
+
+        private fun capBadge(text: String, tint: JBColor?, tip: String): JComponent = JBLabel(text).apply {
+            font = JBUI.Fonts.miniFont()
+            foreground = tint ?: UIUtil.getContextHelpForeground()
+            toolTipText = tip
         }
 
         /** Right-click context menu on a chapter row: Accept / Reject / Clear — WYSIWYG over the

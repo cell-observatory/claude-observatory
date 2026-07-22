@@ -10,16 +10,17 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import { EditStatus, EditRecord, readLog, minOf } from './store';
+import { EditStatus, EditRecord, readLog, minOf, logPath, rootDir } from './store';
 import { buildEditTree, EditTree, TreeEdit, TreeFolder, TreeFile } from './tree';
 import { reasoningByEdit, transcriptInsights, findTranscript, flagsFor } from './observe';
-import { parseActions, summarizeActions } from './actions';
+import { parseActions, summarizeActions, compactLabel } from './actions';
 import { parseSubagents } from './subagents';
 import { buildEgressReport } from './egress';
 import { projectSessionIds } from './fleet';
 import { parseWorkflows, workflowWindows, workflowForTs } from './workflows';
 import { taskSnaps, digest12 } from './tasks';
 import { cachedByFiles } from './fscache';
+import { buildCapabilities, CapabilityFootprint } from './capabilities';
 
 /** One edit (review unit) placed in the map: where it landed, how big, how reviewed, why, and which goal. */
 export interface ChangeMapEdit {
@@ -117,6 +118,7 @@ export interface ChangeMapSummary {
   subagents: number;
   fleet: number; // sibling sessions in this project
   egress: number; // off-machine destinations
+  compactions: number; // context compactions the harness performed this session
   spanMs: number; // wall-clock span of the session's actions
 }
 
@@ -193,10 +195,38 @@ export interface AgentRoll {
   files: number;
 }
 
+/** A context compaction, placed for rendering against the session's chapter timeline. */
+export interface CompactionMarker {
+  ts: number;
+  trigger: string;
+  preTokens: number;
+  postTokens: number;
+  /** This event's own drop (pre − post), never the session-cumulative figure. */
+  droppedTokens: number;
+  /** The harness's running session total, for a "dropped so far" readout. */
+  cumulativeDropped: number;
+  durationMs: number;
+  /** The one-line summary every surface prints (built once in core — see `compactLabel`). */
+  label: string;
+  /** The chapter whose window CONTAINS this compaction, or null when the session had no chapter
+   *  windows at all. Renderers draw the marker after that chapter's chip — and because they filter
+   *  chapters (fromTask, zero-edit, collapsed 'done' rows), a marker whose chapter isn't drawn should
+   *  clamp to the nearest visible neighbour or fall back to a header count, using `ts` to order it.
+   *  Resolved by TIME, never by array position: `chapters` is in plan order, and the synthetic chapter
+   *  is appended last though its work usually starts first. */
+  afterChapterId: string | null;
+}
+
 export interface ChangeMap {
   summary: ChangeMapSummary;
   edits: ChangeMapEdit[];
   chapters: ChangeMapChapter[];
+  /** Context compactions during this session, oldest first — the Overview draws each as a marker
+   *  between chapter chips, and the Actions timeline carries the same events as 'compact' rows. */
+  compactions: CompactionMarker[];
+  /** What this session reached for (files outside the workspace, shell/risk, MCP, network, subagents)
+   *  — EXERCISED capability, not granted permission (approvals never reach the transcript). */
+  capabilities: CapabilityFootprint;
   /** Per-file rollup, churn-desc. Rendered directly — front-ends must not re-aggregate. */
   files: ChangeMapFile[];
   /** Per-module rollup, churn-desc. Rendered directly — front-ends must not re-aggregate. */
@@ -826,6 +856,31 @@ export function buildChangeMap(cwd: string, session: string, opts: { root?: stri
   // Summary — headline counts, all from pieces already parsed above (+ one action scan for errors/egress).
   const actions = parseActions(cwd, session);
   const aSum = summarizeActions(actions);
+
+  // Compactions ride that SAME action scan (they're 'compact' rows) — no extra transcript read, which
+  // matters because buildChangeMap runs once per fleet sibling. Each is placed by TIME, into the
+  // chapter whose display window CONTAINS it. The placement reads the spans directly rather than the
+  // chapters' own startTs/endTs, because those two fields are deliberately lossy: the first span is
+  // edge-extended to 0 ("opening work counts toward the first chapter") and the last span's open end
+  // is stored as 0, so `startTs === 0` can't tell "began the session" from "never started". The
+  // windows tile the timeline, so any timestamp lands in exactly one of them.
+  const chapterWindows: { id: string; start: number; end: number }[] = [];
+  for (const c of chapters) {
+    if (c.synthetic || c.taskId === null) continue; // a duplicate-content row owns no window
+    const sp = firstSpan.get(c.title);
+    if (sp) chapterWindows.push({ id: c.id, start: sp.start, end: sp.end });
+  }
+  const compactions: CompactionMarker[] = actions
+    .filter((a) => a.compact)
+    .map((a) => {
+      const ce = a.compact!;
+      const win = chapterWindows.find((w) => w.start <= ce.ts && ce.ts < w.end);
+      return { ...ce, label: compactLabel(ce), afterChapterId: win ? win.id : null };
+    })
+    .sort((a, b) => a.ts - b.ts);
+
+  // Same single action scan again — the capability footprint is a pure fold, so it costs a loop.
+  const capabilities = buildCapabilities(actions, { root });
   const summary: ChangeMapSummary = {
     session,
     title: (insights.title ?? insights.firstUserPrompt ?? '').replace(/\s+/g, ' ').trim(),
@@ -841,6 +896,7 @@ export function buildChangeMap(cwd: string, session: string, opts: { root?: stri
     subagents: subs.length,
     fleet: projectSessionIds(cwd).filter((id) => id !== session).length,
     egress: buildEgressReport(actions).length,
+    compactions: compactions.length,
     spanMs: aSum.lastTs && aSum.firstTs ? Math.max(0, aSum.lastTs - aSum.firstTs) : 0,
   };
 
@@ -914,7 +970,7 @@ export function buildChangeMap(cwd: string, session: string, opts: { root?: stri
   workflows.sort((a, b) => b.rollup.edits - a.rollup.edits || a.id.localeCompare(b.id));
 
   return {
-    summary, edits, chapters, files, modules, tasks,
+    summary, edits, chapters, compactions, capabilities, files, modules, tasks,
     rollupByTask: rollupByTask(edits),
     rollupBySubagent: rollupBySubagent(edits),
     rollupByWorkflow: rollupByWorkflow(edits),
@@ -1080,4 +1136,60 @@ export function sessionChapters(cwd: string, session: string): SessionChapterRow
     });
   }
   return rows.sort((a, b) => a.index - b.index);
+}
+
+
+// --- cross-process change-map cache (the Overview's dominant cost) ---
+
+/** Bump to invalidate every persisted map after a shape or semantics change. */
+const MAP_CACHE_VERSION = 1;
+
+/** (mtimeMs:size) for a file, or '' when it can't be stat'd. */
+function fileStamp(p: string | null): string {
+  if (!p) return '';
+  try {
+    const st = fs.statSync(p);
+    return `${st.mtimeMs}:${st.size}`;
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * `buildChangeMap` for a FLEET SIBLING, memoized on disk.
+ *
+ * Why this exists: the Overview builds one full change map per sibling session, and a mature repo has
+ * dozens (27 in this one) — nearly all finished sessions whose transcript and store log will never
+ * change again. Each build re-parses that session's transcript, so one Overview refresh cost ~14.5s of
+ * pure re-derivation, in a fresh CLI process every few seconds where the in-process memo can never
+ * help. Keying the result to its (transcript, log) stamps turns every idle sibling into a file read.
+ *
+ * Deliberately NOT used for the session being viewed: that transcript is growing, so it would miss
+ * every time regardless, and its live counts are the ones a user is watching.
+ */
+export function siblingChangeMap(cwd: string, session: string, opts: { root: string }): ChangeMap {
+  const transcript = findTranscript(cwd, session);
+  const tStamp = fileStamp(transcript);
+  const lStamp = fileStamp(logPath(session));
+  // Nothing stable to key on (neither input exists) — just build it.
+  if (!tStamp && !lStamp) return buildChangeMap(cwd, session, opts);
+  const stamp = `${MAP_CACHE_VERSION}|${tStamp}|${lStamp}`;
+  const key = crypto.createHash('sha256').update(`${cwd} ${session} ${opts.root}`).digest('hex').slice(0, 16);
+  const p = path.join(rootDir(), 'changemap-cache', `${key}.json`);
+  try {
+    const hit = JSON.parse(fs.readFileSync(p, 'utf8')) as { stamp: string; map: ChangeMap };
+    if (hit && hit.stamp === stamp && hit.map) return hit.map;
+  } catch {
+    /* absent or unreadable — rebuild */
+  }
+  const map = buildChangeMap(cwd, session, opts);
+  try {
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    const tmp = `${p}.${process.pid}.tmp`; // pid-scoped so concurrent CLI processes can't collide
+    fs.writeFileSync(tmp, JSON.stringify({ stamp, map }));
+    fs.renameSync(tmp, p); // atomic: a concurrent reader sees old-or-new, never a torn map
+  } catch {
+    /* cache is best-effort */
+  }
+  return map;
 }

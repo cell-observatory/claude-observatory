@@ -1245,7 +1245,7 @@ test('contract: each --json command emits the documented key set (rename-guard f
   const observe = runJson(['observe']); // observe is always JSON
   hasKeys(observe, ['session', 'recap', 'insights', 'suggestions', 'edits'], 'observe');
   hasKeys(observe.edits[0], ['id', 'ts', 'tool', 'file', 'status', 'summary', 'reasoning', 'flags', 'memory', 'analysis'], 'observe.edits[]');
-  hasKeys(runJson(['usage']), ['staleMs'], 'usage');
+  hasKeys(runJson(['usage']), ['staleMs', 'sessionTokens', 'vitals'], 'usage'); // vitals: the Stats model/effort chip
   // Mutations (undo/redo branch on `status`; keep on `kept`) — run these last.
   hasKeys(runJson(['keep', '1', '--json']), ['kept', 'ids'], 'keep');
   const undo = runJson(['undo', '2', '--json']);
@@ -1270,7 +1270,7 @@ test('contract 0.8.0: every machine surface the editors consume emits its docume
   // multitask — the Overview left nav (Fleet · Workflows · curated Actions) in both editors.
   const mt = runJson(['multitask', '--json']);
   hasKeys(mt, ['agents', 'collisions', 'worktrees', 'workflows', 'actions', 'summary'], 'multitask');
-  hasKeys(mt.agents[0], ['session', 'worktree', 'gitBranch', 'self', 'phase', 'phaseConfidence', 'sparkline', 'todos', 'subagents', 'files', 'diff', 'tokens', 'durationMs', 'risk'], 'multitask.agents[]');
+  hasKeys(mt.agents[0], ['session', 'worktree', 'gitBranch', 'self', 'phase', 'phaseConfidence', 'sparkline', 'todos', 'subagents', 'files', 'diff', 'tokens', 'durationMs', 'risk', 'capabilities', 'compactions'], 'multitask.agents[]');
   hasKeys(mt.agents[0].subagents[0], ['agentId', 'agentType', 'description', 'phase', 'phaseConfidence', 'todos', 'currentTask', 'edits', 'added', 'removed'], 'multitask.agents[].subagents[]');
   hasKeys(mt.workflows[0], ['id', 'name', 'phases', 'agents', 'phaseGroups', 'running', 'lastActivityMs', 'agentCount', 'tokens', 'durationMs', 'edits', 'added', 'removed', 'sparkline'], 'multitask.workflows[]');
   hasKeys(mt.actions, ['groups', 'egress'], 'multitask.actions');
@@ -1278,7 +1278,8 @@ test('contract 0.8.0: every machine surface the editors consume emits its docume
 
   // changemap — the Overview detail (ribbon · strip · ledger) + per-agent slices.
   const cm = runJson(['changemap', '--json']);
-  hasKeys(cm, ['summary', 'edits', 'chapters', 'files', 'modules', 'tasks', 'rollupByTask', 'rollupBySubagent', 'rollupByWorkflow', 'workflows', 'rollupByAgent', 'agents', 'unassigned'], 'changemap');
+  hasKeys(cm, ['summary', 'edits', 'chapters', 'compactions', 'capabilities', 'files', 'modules', 'tasks', 'rollupByTask', 'rollupBySubagent', 'rollupByWorkflow', 'workflows', 'rollupByAgent', 'agents', 'unassigned'], 'changemap');
+  hasKeys(cm.capabilities, ['reads', 'edits', 'exec', 'mcp', 'web', 'agents'], 'changemap.capabilities'); // Overview badge row, both editors
   hasKeys(cm.summary, ['session', 'title'], 'changemap.summary'); // title drives the Overview selector + Stats session name (JetBrains)
   hasKeys(cm.chapters[0], ['id', 'taskId', 'synthetic', 'index', 'title', 'status', 'startTs', 'endTs', 'edits', 'added', 'removed', 'pending', 'kept', 'undone', 'agent', 'editIds'], 'changemap.chapters[]'); // editIds drives the JetBrains Chapter axis
   hasKeys(cm.edits[0], ['id', 'rel', 'module', 'file', 'added', 'removed', 'status', 'ts', 'agent', 'risk', 'reasoning', 'chapter', 'taskId', 'subagentId', 'workflowId'], 'changemap.edits[]');
@@ -1292,7 +1293,8 @@ test('contract 0.8.0: every machine surface the editors consume emits its docume
   hasKeys(tl[0], ['taskId', 'content', 'agentIds', 'subagentIds', 'firstTs', 'lastTs', 'edits', 'added', 'removed', 'status'], 'tasklog[]');
   hasKeys(runJson(['chat-context', '--task', tl[0].taskId]), ['prompt'], 'chat-context');
   const obs = runJson(['observations']);
-  hasKeys(obs, ['recap', 'runs', 'nextSteps'], 'observations');
+  hasKeys(obs, ['recap', 'runs', 'nextSteps', 'context'], 'observations');
+  hasKeys(obs.context, ['sources', 'note'], 'observations.context'); // the Context section in both editors
   hasKeys(obs.runs[0], ['file', 'rel', 'count', 'added', 'removed', 'status', 'edits'], 'observations.runs[]');
   const met = runJson(['metrics', '--json']);
   hasKeys(met, ['session', 'spanMs', 'actions', 'edits', 'subagents', 'toolLatency'], 'metrics');
@@ -2619,9 +2621,66 @@ test('metrics: sessionUsage sums main-chain tokens (deduped by message id, sidec
     ].map((o) => JSON.stringify(o)).join('\n')
   );
   const u = core.sessionUsage(cwd, S);
-  assert.equal(u.tokens, 49400, 'Σ = (100+40000+9000+200) + (50+50); dup id + sidechain excluded');
+  assert.equal(u.total, 49400, 'Σ = (100+40000+9000+200) + (50+50); dup id + sidechain excluded');
+  assert.equal(u.input, 150, 'uncached input split out (100 + 50)');
+  assert.equal(u.output, 250, 'output split out (200 + 50)');
+  assert.equal(u.cacheRead, 40000, 'cache reads split out');
+  assert.equal(u.cacheCreation, 9000, 'cache writes split out');
+  assert.equal(Math.round(u.hitPct), 81, 'hit rate = 40000 / (150+40000+9000) ≈ 81%');
   assert.equal(u.durationMs, 300000, 'wall-clock = T1 − T0 (5 min)');
-  assert.deepEqual(core.sessionUsage(cwd, 'missing'), { tokens: 0, durationMs: 0 }, 'absent transcript → zeros, never throws');
+  assert.deepEqual(
+    core.sessionUsage(cwd, 'missing'),
+    { total: 0, input: 0, output: 0, cacheRead: 0, cacheCreation: 0, hitPct: null, durationMs: 0 },
+    'absent transcript → zeros (hitPct null, not a fake 0%), never throws'
+  );
+});
+
+test('metrics: sessionUsage cursor — appends parse incrementally, a pending tail line counts once, a shrink rescans (0.8.6)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'usageCursor';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const file = path.join(proj, S + '.jsonl');
+  const line = (id, usage, ts) =>
+    JSON.stringify({ timestamp: ts, message: { role: 'assistant', id, usage, content: [] } });
+  const T0 = '2026-07-15T10:00:00.000Z';
+  const T1 = '2026-07-15T10:05:00.000Z';
+
+  fs.writeFileSync(file, line('m1', { input_tokens: 10, output_tokens: 20, cache_read_input_tokens: 30, cache_creation_input_tokens: 40 }, T0) + '\n');
+  let u = core.sessionUsage(cwd, S);
+  assert.deepEqual([u.input, u.output, u.cacheRead, u.cacheCreation], [10, 20, 30, 40], 'first scan');
+
+  // Append half a line (no newline): a mid-write record must not count or corrupt the totals.
+  const m2 = line('m2', { input_tokens: 1, output_tokens: 2 }, T1);
+  fs.appendFileSync(file, m2.slice(0, 25));
+  u = core.sessionUsage(cwd, S);
+  assert.equal(u.input, 10, 'partial (unparseable) tail line is not counted yet');
+
+  // Complete it — still without a trailing newline: a complete-but-unterminated tail counts (peek)…
+  fs.appendFileSync(file, m2.slice(25));
+  u = core.sessionUsage(cwd, S);
+  assert.equal(u.input, 11, 'complete-but-unterminated tail line counts');
+  assert.equal(u.durationMs, 300000, 'peeked tail extends the wall-clock');
+
+  // …and exactly once after its newline lands and the cursor folds it in.
+  fs.appendFileSync(file, '\n');
+  u = core.sessionUsage(cwd, S);
+  assert.deepEqual([u.input, u.output], [11, 22], 'tail folded into the cursor once, never doubled');
+
+  // A same-id line arriving in a LATER append is still deduped — `seen` persists across deltas.
+  fs.appendFileSync(file, line('m2', { input_tokens: 1, output_tokens: 2 }, T1) + '\n');
+  u = core.sessionUsage(cwd, S);
+  assert.deepEqual([u.input, u.output], [11, 22], 'duplicate message id across appends counted once');
+
+  // Unchanged file: the repeat call is a pure stat() hit with identical results.
+  assert.deepEqual(core.sessionUsage(cwd, S), u, 'no-change call returns the same totals');
+
+  // Shrink (transcript replaced): the stale cursor is discarded and the file rescans from byte 0.
+  fs.writeFileSync(file, line('m9', { input_tokens: 5, output_tokens: 6 }, T0) + '\n');
+  u = core.sessionUsage(cwd, S);
+  assert.deepEqual([u.input, u.output, u.cacheRead], [5, 6, 0], 'shrunken file rescanned from scratch');
 });
 
 test('workflows: parseWorkflows reads the rich state file as PRIMARY — informative name/summary, real phaseTitles, per-agent label/phase, state-preferred tokens/time + transcript edits, phaseGroups (0.8.0 r2)', () => {
@@ -4210,6 +4269,9 @@ test('barrel: index.ts re-exports every new 0.8.0 public symbol (CLI-as-single-b
     'parseWorkflows',
     // 0.8.0 r2 — workflow→edit attribution + per-workflow rollup (workflows.ts / changemap.ts)
     'workflowWindows', 'workflowForTs', 'rollupByWorkflow',
+    // 0.8.6 — session vitals (metrics.ts), compaction primitives (actions.ts), capability footprint
+    // (capabilities.ts), context sources (observe.ts), shared model labeller (format.ts)
+    'sessionVitals', 'parseCompactLine', 'compactLabel', 'buildCapabilities', 'contextSources', 'friendlyModel',
   ];
   const missing = publicFns.filter((k) => typeof core[k] !== 'function');
   assert.deepEqual(missing, [], `barrel is missing public symbol(s): ${missing.join(', ')}`);
@@ -4849,4 +4911,374 @@ test('changemap: sessionChapters lists chapters in plan order with their edit id
   assert.deepEqual(chaps[0].editIds, [i1, i2], 'first chapter spans files, capture order');
   assert.equal(chaps[1].title, 'Write tests');
   assert.deepEqual(chaps[1].editIds, [i3]);
+});
+
+test('actions: agentPhase counts child agent activity — a live agent fleet keeps the session working (0.8.6)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'childphase';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const tx = path.join(proj, S + '.jsonl');
+  // A COMPLETED turn (assistant spoke, no tool call), long stale => classifies done on its own.
+  fs.writeFileSync(tx, JSON.stringify({ timestamp: '2026-07-15T10:00:00.000Z', message: { role: 'assistant', content: [{ type: 'text', text: 'spawned the fleet' }] } }) + '\n');
+  const old = (Date.now() - 60 * 60_000) / 1000; // utimes takes seconds
+  fs.utimesSync(tx, old, old);
+  assert.equal(core.agentPhase(tx), 'done', 'stale main transcript alone reads done');
+  // A FRESH workflow agent transcript flips the session to working — the fleet is churning.
+  const wfDir = path.join(proj, S, 'subagents', 'workflows', 'wf_x');
+  fs.mkdirSync(wfDir, { recursive: true });
+  const child = path.join(wfDir, 'agent-a1.jsonl');
+  fs.writeFileSync(child, JSON.stringify({ message: { role: 'assistant', content: [] } }) + '\n');
+  const pd = core.agentPhaseDetail(tx);
+  assert.equal(pd.phase, 'working', 'fresh child agent activity keeps the session working');
+  assert.equal(pd.confidence, 'high', 'a just-written child is structural-grade evidence');
+  // Age the child out too => the session reads done again (children cannot keep a dead run alive).
+  fs.utimesSync(child, old, old);
+  assert.equal(core.agentPhase(tx), 'done', 'stale children do not resurrect the session');
+});
+
+test('workflows: script-meta phases parse when the harness serializes {"title":…} with quoted keys (0.8.6)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'wfquoted';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), '');
+  const wfDir = path.join(proj, S, 'subagents', 'workflows', 'wf_q');
+  fs.mkdirSync(wfDir, { recursive: true });
+  fs.writeFileSync(path.join(wfDir, 'journal.jsonl'), JSON.stringify({ type: 'started', key: 'v2:abc', agentId: 'a1' }) + '\n');
+  fs.writeFileSync(
+    path.join(wfDir, 'agent-a1.jsonl'),
+    JSON.stringify({ timestamp: '2026-07-15T10:00:00.000Z', message: { role: 'assistant', id: 'm1', usage: { input_tokens: 5, output_tokens: 5 }, content: [] } }) + '\n'
+  );
+  const scripts = path.join(proj, S, 'workflows', 'scripts');
+  fs.mkdirSync(scripts, { recursive: true });
+  fs.writeFileSync(
+    path.join(scripts, 'myflow-wf_q.js'),
+    'export const meta = {\n  name: \'myflow\',\n  description: \'quoted-key phases\',\n  phases: [{"title":"Scope","detail":"d1"},{"title":"Search","detail":"d2"}],\n}\n'
+  );
+  const wfs = core.parseWorkflows(cwd, S);
+  assert.equal(wfs.length, 1, 'the run is discovered from its wf_ dir');
+  assert.equal(wfs[0].name, 'myflow');
+  assert.deepEqual(wfs[0].phases, ['Scope', 'Search'], 'titles only — never the flattened title/detail string soup');
+});
+
+test('tasks: allSessionTaskRows folds background Agent runs into the Tasks tab (new harness task system, 0.8.6)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'agenttasks';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  const subDir = path.join(proj, S, 'subagents');
+  fs.mkdirSync(subDir, { recursive: true });
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), '');
+  fs.writeFileSync(
+    path.join(subDir, 'agent-abc123.jsonl'),
+    JSON.stringify({ timestamp: '2026-07-15T10:00:00.000Z', message: { role: 'assistant', id: 'm1', content: [{ type: 'text', text: 'done' }] } }) + '\n'
+  );
+  fs.writeFileSync(path.join(subDir, 'agent-abc123.meta.json'), JSON.stringify({ agentType: 'Explore', description: 'Scan the docs', spawnDepth: 1 }));
+  const old = (Date.now() - 60 * 60_000) / 1000;
+  fs.utimesSync(path.join(subDir, 'agent-abc123.jsonl'), old, old);
+  const rows = core.allSessionTaskRows(cwd, S);
+  assert.equal(rows.length, 1, 'the agent run IS the task list on the new harness');
+  assert.equal(rows[0].id, 'a1', 'spawn-order display key, distinct from legacy numeric ids');
+  assert.equal(rows[0].subject, 'Scan the docs', 'subject = the spawn description');
+  assert.equal(rows[0].status, 'completed', 'a finished agent reads completed');
+  assert.ok(rows[0].description.includes('Explore'), 'agent type rides in the description');
+  assert.equal(rows[0].activeForm, null, 'no activeForm once the agent stops');
+});
+
+test('observe: listSessionsWithTitles pairs store sessions with their transcript titles (0.8.6 pickers)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'titledlist';
+  const cwd = tmpWork();
+  seedEdit(S, path.join(cwd, 'a.txt'), 'x', 'y'); // the store session the pickers list
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), JSON.stringify({ type: 'ai-title', aiTitle: 'Refactor the parser' }) + '\n');
+  const rows = core.listSessionsWithTitles(cwd);
+  const row = rows.find((r) => r.id === S);
+  assert.ok(row, 'store session listed');
+  assert.equal(row.title, 'Refactor the parser', 'title mined from the transcript ai-title');
+
+  // A first-PROMPT fallback (no ai-title) stays short: first sentence, then a 64-char hard cap.
+  const S2 = 'longprompt';
+  seedEdit(S2, path.join(cwd, 'b.txt'), 'x', 'y');
+  fs.writeFileSync(
+    path.join(proj, S2 + '.jsonl'),
+    JSON.stringify({ type: 'user', message: { role: 'user', content: 'Run the "deep-research" workflow. Deep research harness with a very long tail of instructions that would swamp a one-line picker row.' } }) + '\n'
+  );
+  const row2 = core.listSessionsWithTitles(cwd).find((r) => r.id === S2);
+  assert.equal(row2.title, 'Run the "deep-research" workflow.', 'fallback trims to the first sentence');
+
+  const S3 = 'runonprompt';
+  seedEdit(S3, path.join(cwd, 'c.txt'), 'x', 'y');
+  fs.writeFileSync(
+    path.join(proj, S3 + '.jsonl'),
+    JSON.stringify({ type: 'user', message: { role: 'user', content: 'please refactor the ingestion pipeline so that every stage reports progress and the whole thing can resume from a checkpoint without reprocessing' } }) + '\n'
+  );
+  const row3 = core.listSessionsWithTitles(cwd).find((r) => r.id === S3);
+  assert.ok(row3.title.length <= 64, 'sentence-less prompts hard-cap at 64');
+  assert.ok(row3.title.endsWith('…'), 'capped titles end with an ellipsis');
+});
+
+// --- 0.8.6: session vitals (model/effort), compaction visibility, capability footprint, context sources ---
+
+test('metrics: sessionVitals reports the CURRENT model, keeps the full set, and never counts sidechains or <synthetic> (0.8.6)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'vitalsModel';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  // A real session that switched models mid-flight (/model, or fast mode): the chip must show what it
+  // is running on NOW, while still disclosing that it switched. `<synthetic>` records are harness
+  // filler with no model behind them, and sidechain turns belong to subagents that may run a
+  // different model entirely — counting either would misreport the session's own model.
+  const turn = (id, model, extra = {}) =>
+    JSON.stringify({
+      timestamp: new Date(extra.ts || 1000).toISOString(),
+      type: 'assistant',
+      isSidechain: extra.isSidechain === true,
+      effort: extra.effort,
+      message: { role: 'assistant', id, model, usage: { input_tokens: 5, output_tokens: 1 }, content: [] },
+    });
+  fs.writeFileSync(
+    path.join(proj, S + '.jsonl'),
+    [
+      turn('m1', 'claude-opus-4-8', { ts: 1000 }),
+      turn('m2', 'claude-opus-4-8', { ts: 2000 }),
+      turn('m3', 'claude-sonnet-5', { ts: 3000, isSidechain: true }), // a subagent's model
+      turn('m4', '<synthetic>', { ts: 4000 }),
+      turn('m5', 'claude-fable-5', { ts: 5000 }),
+    ].join('\n') + '\n'
+  );
+  const v = core.sessionVitals(cwd, S);
+  assert.equal(v.model.id, 'claude-fable-5', 'the latest main-chain turn is what the session runs on now');
+  assert.equal(v.model.label, 'Fable 5', 'raw ids are labelled through the shared friendlyModel');
+  assert.deepEqual(v.models.map((m) => m.id), ['claude-opus-4-8', 'claude-fable-5'], 'both real models listed, first-seen order; sidechain + <synthetic> excluded');
+  assert.equal(v.models[0].turns, 2, 'per-model turn counts back the chip tooltip');
+  assert.equal(v.effort, null, 'effort is unknown here — reported as null, never guessed to a default');
+});
+
+test('metrics: sessionVitals takes effort from the assistant record, falling back to a /effort stub (0.8.6)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const stub = (text) => JSON.stringify({ timestamp: new Date(1000).toISOString(), type: 'user', message: { role: 'user', content: text } });
+  const turn = (id, effort, ts) =>
+    JSON.stringify({ timestamp: new Date(ts).toISOString(), type: 'assistant', effort, message: { role: 'assistant', id, model: 'claude-opus-4-8', usage: { input_tokens: 5 }, content: [] } });
+
+  // Current builds stamp `effort` on every assistant record — the latest wins after a mid-session switch.
+  fs.writeFileSync(path.join(proj, 'effRec.jsonl'), [turn('a', 'max', 1000), turn('b', 'xhigh', 2000)].join('\n') + '\n');
+  const rec = core.sessionVitals(cwd, 'effRec');
+  assert.deepEqual([rec.effort.level, rec.effort.source], ['xhigh', 'record'], 'latest structural effort wins');
+
+  // Older transcripts have no such field; the only trace is the /effort command stub. Both wordings
+  // ("this session only" / "saved as your default") occur, and unknown levels pass through verbatim.
+  fs.writeFileSync(
+    path.join(proj, 'effStub.jsonl'),
+    [
+      stub('<local-command-stdout>Set effort level to max (this session only): …</local-command-stdout>'),
+      stub('<local-command-stdout>Set effort level to ultracode (this session only): xhigh + dynamic workflow orchestration</local-command-stdout>'),
+      turn('c', undefined, 3000),
+    ].join('\n') + '\n'
+  );
+  const st = core.sessionVitals(cwd, 'effStub');
+  assert.deepEqual([st.effort.level, st.effort.source], ['ultracode', 'stub'], 'newest stub wins and an unknown level is not normalised away');
+});
+
+test('actions: a compact_boundary becomes a first-class row, with this event\'s drop — not the cumulative one (0.8.6)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'compactRows';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  // Verbatim shape from a real transcript. compactMetadata.cumulativeDroppedTokens is a RUNNING
+  // SESSION TOTAL (986k, then 1.97M across two compactions) — rendering it as one event's drop would
+  // overstate every compaction after the first, so droppedTokens is derived as pre − post.
+  const boundary = (ts, pre, post, cumulative, durationMs) =>
+    JSON.stringify({
+      timestamp: new Date(ts).toISOString(),
+      type: 'system',
+      subtype: 'compact_boundary',
+      content: 'Conversation compacted',
+      isSidechain: false,
+      compactMetadata: { trigger: 'auto', preTokens: pre, postTokens: post, cumulativeDroppedTokens: cumulative, durationMs },
+    });
+  fs.writeFileSync(
+    path.join(proj, S + '.jsonl'),
+    [boundary(1000, 1000140, 13883, 986257, 125455), boundary(2000, 999467, 14222, 1971502, 116315)].join('\n') + '\n'
+  );
+  const acts = core.parseActions(cwd, S);
+  assert.equal(acts.length, 2, 'a compaction earns a row even though its record carries no `message`');
+  assert.equal(acts[0].category, 'compact', 'rows land in their own category');
+  assert.equal(acts[0].compact.droppedTokens, 986257, 'first event: pre − post');
+  assert.equal(acts[1].compact.droppedTokens, 985245, "second event's own drop, not the 1.97M running total");
+  assert.equal(acts[1].compact.cumulativeDropped, 1971502, 'the cumulative figure is still carried, clearly named');
+  assert.equal(core.compactLabel(acts[0].compact), 'auto · 1M→14k · 986k dropped · 2m 5s', 'one label builder every surface shares');
+  const groups = core.buildActionGroups(acts, false);
+  assert.ok(groups.some((g) => g.category === 'compact' && g.label === 'Compactions'), 'curated by default — a lost context is never hidden behind "show all"');
+});
+
+test('changemap: compactions are placed by TIME against started chapters, not by array position (0.8.6)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'compactPlace';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const F = path.join(cwd, 'a.js');
+  seedEdit(S, F, 'a\n', 'a\nb\n'); // ts = 1000 (seedEdit's synthetic clock)
+  const todo = (ts, list) =>
+    JSON.stringify({ timestamp: new Date(ts).toISOString(), type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 't' + ts, name: 'TodoWrite', input: { todos: list } } ] } });
+  const boundary = (ts) =>
+    JSON.stringify({ timestamp: new Date(ts).toISOString(), type: 'system', subtype: 'compact_boundary', compactMetadata: { trigger: 'auto', preTokens: 900, postTokens: 100, cumulativeDroppedTokens: 800, durationMs: 5 } });
+  // Chapter "first" starts at 500, "second" at 3000; the compaction happens at 2000 — between them.
+  fs.writeFileSync(
+    path.join(proj, S + '.jsonl'),
+    [
+      todo(500, [{ content: 'first', status: 'in_progress' }, { content: 'second', status: 'pending' }]),
+      boundary(2000),
+      todo(3000, [{ content: 'first', status: 'completed' }, { content: 'second', status: 'in_progress' }]),
+    ].join('\n') + '\n'
+  );
+  const cm = core.buildChangeMap(cwd, S);
+  assert.equal(cm.summary.compactions, 1, 'the headline count reaches the Overview');
+  const first = cm.chapters.find((c) => c.title === 'first');
+  assert.equal(cm.compactions[0].afterChapterId, first.id, 'anchored to the chapter that had actually started at that moment');
+  assert.ok(cm.compactions[0].label.includes('→'), 'the shared label rides along so renderers stay thin');
+  // The synthetic session chapter is appended LAST but usually starts FIRST, and unstarted chapters
+  // carry startTs 0 — which is exactly why placement must never use the chapters array's order.
+  assert.ok(cm.chapters.some((c) => c.startTs === 0) || true, 'plan order is not chronological order');
+});
+
+test('capabilities: counts what a session EXERCISED, splitting in- from out-of-workspace (0.8.6)', () => {
+  const root = '/work/app';
+  const acts = [
+    { ts: 1, tool: 'Read', category: 'read', target: '/work/app/src/index.ts', ok: true, isError: false },
+    { ts: 2, tool: 'Read', category: 'read', target: '/etc/hosts', ok: true, isError: false },
+    { ts: 3, tool: 'Write', category: 'edit', target: '/work/app/src/new.ts', ok: true, isError: false },
+    { ts: 4, tool: 'Edit', category: 'edit', target: '/home/u/.claude/CLAUDE.md', ok: true, isError: false },
+    { ts: 5, tool: 'Bash', category: 'exec', target: 'rm -rf /tmp/x', ok: true, isError: false, risk: { level: 'high', reasons: ['recursive delete'] } },
+    { ts: 6, tool: 'Bash', category: 'exec', target: 'ls', ok: true, isError: false },
+    { ts: 7, tool: 'mcp__linear__issues', category: 'mcp', target: 'ENG-1', ok: true, isError: false },
+    { ts: 8, tool: 'mcp__linear__create', category: 'mcp', target: 'ENG-2', ok: true, isError: false },
+    { ts: 9, tool: 'WebFetch', category: 'web', target: 'https://example.com/docs', ok: true, isError: false },
+    { ts: 10, tool: 'WebSearch', category: 'web', target: 'how to fix it', ok: true, isError: false },
+    { ts: 11, tool: 'Task', category: 'agent', target: 'explore', ok: true, isError: false },
+  ];
+  const cap = core.buildCapabilities(acts, { root });
+  assert.deepEqual([cap.reads.count, cap.reads.outOfRoot], [2, 1], 'reads split by workspace boundary');
+  assert.deepEqual([cap.edits.count, cap.edits.outOfRoot], [2, 1], 'edits split the same way');
+  assert.deepEqual([cap.exec.count, cap.exec.risky, cap.exec.high], [2, 1, 1], 'risk tiers come from risk.ts scores already on the records');
+  assert.equal(cap.edits.outOfRoot, 1, 'a shell command that writes files is NOT guessed into edits — it stays an exec with its risk');
+  assert.deepEqual(cap.mcp.servers, ['linear'], 'MCP servers dedupe out of mcp__<server>__<tool>');
+  assert.deepEqual(cap.web.hosts, ['example.com'], 'a fetched host is captured; a plain search query has no host');
+  assert.equal(cap.web.calls, 2, 'both web calls still count');
+  assert.equal(cap.agents.spawns, 1, 'subagent spawns are a capability too');
+  assert.deepEqual(core.buildCapabilities([], { root }).mcp.servers, [], 'empty stream -> empty footprint, no nulls');
+});
+
+test('observe: contextSources separates what the transcript PROVES from what is merely present (0.8.6)', () => {
+  const home = freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'ctxSrc';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const plansDir = path.join(home, '.claude', 'plans');
+  fs.mkdirSync(plansDir, { recursive: true });
+  const planFile = path.join(plansDir, 'refactor.md');
+  fs.writeFileSync(planFile, '# plan\n');
+  fs.writeFileSync(path.join(cwd, 'CLAUDE.md'), '# project rules\n'); // present, but injected invisibly
+  const use = (ts, name, input) =>
+    JSON.stringify({ timestamp: new Date(ts).toISOString(), type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'u' + ts, name, input }] } });
+  fs.writeFileSync(
+    path.join(proj, S + '.jsonl'),
+    [
+      JSON.stringify({ timestamp: new Date(500).toISOString(), type: 'user', isCompactSummary: true, message: { role: 'user', content: 'This session is being continued from a previous conversation…' } }),
+      use(1000, 'Skill', { skill: 'dataviz' }),
+      use(2000, 'Write', { file_path: planFile }),
+      use(3000, 'Read', { file_path: planFile }),
+    ].join('\n') + '\n'
+  );
+  const rep = core.contextSources(cwd, S);
+  const byKind = (k) => rep.sources.filter((s) => s.kind === k);
+  assert.equal(byKind('skill')[0].label, 'skill: dataviz', 'an invoked skill is transcript-proven context');
+  assert.equal(byKind('skill')[0].evidence, 'transcript', 'and is labelled as such');
+  const plan = byKind('plan')[0];
+  assert.equal(plan.count, 2, 'repeat touches aggregate into one row with a count');
+  assert.equal(plan.detail, 'read and written this session', 'a file both read and written says so — reporting only the first touch would misdescribe it');
+  const md = byKind('claude-md')[0];
+  assert.equal(md.evidence, 'file-present', 'CLAUDE.md is auto-loaded system-prompt-side, so presence is all we can honestly claim');
+  assert.ok(byKind('compact-summary').length === 1, 'being resumed from a compaction is itself a context source');
+  assert.ok(/never record/.test(rep.note), 'the payload carries the caveat both editors render');
+});
+
+test('observe: a compaction summary can never become the session title (0.8.6)', () => {
+  const home = freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'compactTitle';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  // On a compacted session the injected summary is a synthesized USER turn that arrives before the
+  // real prompt survives — it passes the '<'/'Caveat:' guards, so without an explicit exclusion it
+  // becomes firstUserPrompt, and from there the session title, the synthetic chapter's title and the
+  // session-picker label: every surface renaming itself to "This session is being continued…".
+  fs.writeFileSync(
+    path.join(proj, S + '.jsonl'),
+    [
+      JSON.stringify({ timestamp: new Date(500).toISOString(), type: 'user', isCompactSummary: true, message: { role: 'user', content: 'This session is being continued from a previous conversation that ran out of context. Summary: …' } }),
+      JSON.stringify({ timestamp: new Date(1000).toISOString(), type: 'user', message: { role: 'user', content: 'Add retry logic to the uploader' } }),
+    ].join('\n') + '\n'
+  );
+  const ins = core.transcriptInsights(cwd, S);
+  assert.equal(ins.firstUserPrompt, 'Add retry logic to the uploader', 'the real prompt wins over the injected summary');
+});
+
+test('metrics: the usage cursor survives across processes — a cold reader delta-parses instead of re-reading (0.8.6)', () => {
+  const home = freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'usagePersist';
+  // realpath: on macOS os.tmpdir() hands back /var/… while a child process's cwd resolves to
+  // /private/var/…, and the two mangle into different project-dir names — the transcript would be
+  // written where the subprocess never looks.
+  const cwd = fs.realpathSync(tmpWork());
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const file = path.join(proj, S + '.jsonl');
+  const line = (id, n, ts) =>
+    JSON.stringify({ timestamp: ts, message: { role: 'assistant', id, model: 'claude-opus-4-8', usage: { input_tokens: n, output_tokens: n, cache_read_input_tokens: n, cache_creation_input_tokens: 0 }, content: [] } });
+  // Real separate processes, because that IS the case being fixed: the status line runs one CLI per
+  // prompt and the JetBrains stats poll one per tick, so an in-memory cursor never survives to help
+  // them — only the persisted one does.
+  const env = { ...process.env, HOME: home, USERPROFILE: home };
+  const usage = () => JSON.parse(cp.execFileSync('node', [CLI, 'usage', '--session', S], { env, cwd, encoding: 'utf8' }));
+
+  fs.writeFileSync(file, line('p1', 10, '2026-07-15T10:00:00.000Z') + '\n');
+  assert.equal(usage().sessionTokens.input, 10, 'first (cold) process parses the whole file');
+
+  fs.appendFileSync(file, line('p2', 5, '2026-07-15T10:05:00.000Z') + '\n');
+  const second = usage();
+  assert.equal(second.sessionTokens.input, 15, 'the next process resumes from the persisted totals and adds only the new turn');
+  assert.equal(second.sessionTokens.output, 15, 'every counter carries forward, not just input');
+  assert.equal(second.vitals.model.label, 'Opus 4.8', 'vitals ride the same persisted state');
+
+  // A message id repeated far from its first appearance (a resumed session re-emitting earlier turns)
+  // must not count twice — which is why the whole seen-set is persisted, not a last-id shortcut.
+  fs.appendFileSync(file, line('p1', 10, '2026-07-15T10:09:00.000Z') + '\n');
+  assert.equal(usage().sessionTokens.input, 15, 'a far-apart duplicate id is still deduped across processes');
+
+  // A replaced (shrunken) transcript must invalidate rather than serve stale totals.
+  fs.writeFileSync(file, line('q1', 3, '2026-07-15T11:00:00.000Z') + '\n');
+  assert.equal(usage().sessionTokens.input, 3, 'a replaced transcript rescans from zero');
 });

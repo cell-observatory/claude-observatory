@@ -6,7 +6,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { diffArrays } from 'diff';
-import { EditRecord, EditStatus, readLog, readBlob, logPath, maxOf } from './store';
+import { EditRecord, EditStatus, readLog, readBlob, logPath, maxOf, listSessions, SessionInfo } from './store';
 import { lineDelta } from './format';
 import { projectDir } from './session';
 import { claudeConfigDir } from './paths';
@@ -137,6 +137,33 @@ export function transcriptInsights(cwd: string, sessionId: string): TranscriptIn
   return cachedByFiles('insights', [p], () => transcriptInsightsUncached(p));
 }
 
+/** Every store session (listSessions order) + its human-readable TITLE — the transcript's `ai-title`,
+ *  else the first user prompt — for the session pickers: both editors' dropdowns show names, with the
+ *  raw id demoted to detail. `title` is null when the session has no transcript under this cwd (another
+ *  project's session) — renderers fall back to the id. Insights are memoized per (mtime,size), so
+ *  re-opening a picker costs stats, not parses. */
+export function listSessionsWithTitles(cwd: string): (SessionInfo & { title: string | null })[] {
+  return listSessions().map((s) => {
+    let title: string | null = null;
+    try {
+      const ins = transcriptInsights(cwd, s.id);
+      title = (ins.title ?? ins.firstUserPrompt ?? '').replace(/\s+/g, ' ').trim() || null;
+      // Keep list rows SHORT but informative: ai-titles already are ("Steps to publish on
+      // marketplace"), but the first-PROMPT fallback can be a whole pasted brief (headless sessions
+      // never get an ai-title) — take its first sentence, then hard-cap. The full text still shows
+      // where there's a hover surface: the session chip's tooltip renders it uncapped.
+      if (title) {
+        const sentence = /^(.*?[.?!])(?:\s|$)/.exec(title);
+        if (sentence && sentence[1].length >= 12) title = sentence[1]; // a bare "Hi." is no title
+        if (title.length > 64) title = title.slice(0, 63).trimEnd() + '…';
+      }
+    } catch {
+      /* unreadable transcript — the id still identifies the session */
+    }
+    return { ...s, title };
+  });
+}
+
 function transcriptInsightsUncached(p: string): TranscriptInsights {
   const empty: TranscriptInsights = { todos: [], lastSummary: null, title: null, firstUserPrompt: null };
   let lines: string[];
@@ -167,7 +194,10 @@ function transcriptInsightsUncached(p: string): TranscriptInsights {
     // First REAL user prompt — the fallback chapter title for sessions without to-dos. String or
     // text-block content both occur; skip sidechains, tool_result-only turns, and the harness's
     // command/caveat wrappers (`<command-name>…`, `Caveat: …`) — those aren't what the user asked.
-    if (firstUserPrompt === null && msg && msg.role === 'user' && o.isSidechain !== true) {
+    // A compaction summary is likewise excluded: it's a synthesized user turn ("This session is being
+    // continued from a previous conversation…"), so on a compacted session it would otherwise become
+    // the session title, the synthetic chapter's title and the session picker's label.
+    if (firstUserPrompt === null && msg && msg.role === 'user' && o.isSidechain !== true && o.isCompactSummary !== true) {
       let text: string | null = null;
       if (typeof msg.content === 'string') text = msg.content;
       else if (Array.isArray(msg.content)) {
@@ -193,6 +223,164 @@ function transcriptInsightsUncached(p: string): TranscriptInsights {
     }
   }
   return { todos, lastSummary, title, firstUserPrompt };
+}
+
+// --- context sources: what shaped this session ---
+
+/** Where a piece of the session's context came from. */
+export type ContextSourceKind = 'claude-md' | 'memory' | 'plan' | 'skill' | 'compact-summary';
+
+export interface ContextSource {
+  kind: ContextSourceKind;
+  /** Display label, e.g. `CLAUDE.md (global)`, `skill: dataviz`, `plan: refactor-auth.md`. */
+  label: string;
+  /** The file to open when the row is clicked; null for sources that aren't a file. */
+  path: string | null;
+  /** How we know: the transcript recorded it, or the file simply exists where the harness loads it
+   *  from. The distinction is the point — see `ContextSourcesReport.note`. */
+  evidence: 'transcript' | 'file-present';
+  detail: string | null;
+  /** Transcript evidence only: how many times it appeared. */
+  count: number;
+  /** First transcript evidence (ms epoch); 0 for file-present rows. */
+  ts: number;
+}
+
+export interface ContextSourcesReport {
+  sources: ContextSource[];
+  /** Rendered verbatim by both editors as the section's caveat. */
+  note: string;
+}
+
+const CONTEXT_NOTE =
+  'Detectable sources only — instruction files are injected into the system prompt, which transcripts never record.';
+
+/**
+ * What shaped this session: the skills it invoked, the plans it wrote, the memory it read, whether it
+ * was resumed from a compaction, and which instruction files are present where the harness loads them.
+ *
+ * Two tiers of evidence, kept explicit rather than blurred: `transcript` rows are things the session
+ * demonstrably did, `file-present` rows are files that exist in a location Claude Code auto-loads —
+ * because current builds inject CLAUDE.md and memory system-prompt-side, leaving no transcript trace.
+ * Claiming those as observed facts would be a lie; omitting them would hide the biggest influence on
+ * the session. So they're listed, and labelled as what they are.
+ */
+export function contextSources(cwd: string, sessionId: string): ContextSourcesReport {
+  const p = findTranscript(cwd, sessionId);
+  // Memoize only the transcript fold: cachedByFiles declines to cache when any input path can't be
+  // stat'd, so stamping the (often absent) instruction files here would disable caching entirely.
+  const fromTranscript = p ? cachedByFiles('contextSources', [p], () => contextSourcesUncached(p)) : [];
+  const seen = new Set(fromTranscript.map((s) => s.path).filter(Boolean) as string[]);
+  const present: ContextSource[] = [];
+  const addPresent = (file: string, kind: ContextSourceKind, label: string): void => {
+    if (seen.has(file)) return; // transcript evidence already covers it — don't list it twice
+    let ok = false;
+    try {
+      ok = fs.existsSync(file);
+    } catch {
+      ok = false;
+    }
+    if (!ok) return;
+    seen.add(file);
+    present.push({ kind, label, path: file, evidence: 'file-present', detail: 'auto-loaded — injection not recorded per-session', count: 0, ts: 0 });
+  };
+  addPresent(path.join(cwd, 'CLAUDE.md'), 'claude-md', 'CLAUDE.md (project)');
+  addPresent(path.join(claudeConfigDir(), 'CLAUDE.md'), 'claude-md', 'CLAUDE.md (global)');
+  addPresent(path.join(projectDir(cwd), 'memory', 'MEMORY.md'), 'memory', 'MEMORY.md (memory index)');
+
+  const order: Record<ContextSourceKind, number> = { 'claude-md': 0, memory: 1, plan: 2, skill: 3, 'compact-summary': 4 };
+  const sources = [...fromTranscript, ...present].sort(
+    (a, b) => order[a.kind] - order[b.kind] || b.count - a.count || a.label.localeCompare(b.label)
+  );
+  return { sources, note: CONTEXT_NOTE };
+}
+
+/** The transcript half of `contextSources` — one pass, parsed locally (importing parseActions here
+ *  would close a cycle: actions.ts already imports findTranscript from this module). */
+function contextSourcesUncached(transcriptPath: string): ContextSource[] {
+  let lines: string[];
+  try {
+    lines = fs.readFileSync(transcriptPath, 'utf8').split('\n');
+  } catch {
+    return [];
+  }
+  const plansDir = path.join(claudeConfigDir(), 'plans');
+  const configDir = claudeConfigDir();
+  const byKey = new Map<string, ContextSource>();
+  // A file that was both read and written must say so — reporting only whichever came first would
+  // describe a plan the session actively maintained as merely "read".
+  const touch = new Map<string, { read: boolean; wrote: boolean }>();
+  const add = (key: string, src: Omit<ContextSource, 'count'>): void => {
+    const hit = byKey.get(key);
+    if (hit) {
+      hit.count++;
+      if (src.ts && (!hit.ts || src.ts < hit.ts)) hit.ts = src.ts;
+      return;
+    }
+    byKey.set(key, { ...src, count: 1 });
+  };
+  const addFile = (key: string, src: Omit<ContextSource, 'count' | 'detail'>, wrote: boolean): void => {
+    const flags = touch.get(key) ?? { read: false, wrote: false };
+    if (wrote) flags.wrote = true;
+    else flags.read = true;
+    touch.set(key, flags);
+    add(key, { ...src, detail: null });
+  };
+  const under = (file: string, dir: string): boolean => {
+    const rel = path.relative(dir, file);
+    return !!rel && !rel.startsWith('..') && !path.isAbsolute(rel);
+  };
+
+  for (const line of lines) {
+    const t = line.trim();
+    if (!t) continue;
+    let o: any;
+    try {
+      o = JSON.parse(t);
+    } catch {
+      continue;
+    }
+    if (o.isSidechain === true) continue;
+    const ts = toEpochMs(o.timestamp ?? o.ts) ?? 0;
+    // Resumed from a compaction: everything before the boundary reaches this session as a summary.
+    if (o.isCompactSummary === true) {
+      add('compact-summary', {
+        kind: 'compact-summary',
+        label: 'resumed from a compaction summary',
+        path: null,
+        evidence: 'transcript',
+        detail: 'earlier turns arrived as a summary, not their original text',
+        ts,
+      });
+      continue;
+    }
+    const msg = o.message;
+    if (!msg || msg.role !== 'assistant' || !Array.isArray(msg.content)) continue;
+    for (const b of msg.content) {
+      if (!b || b.type !== 'tool_use' || typeof b.name !== 'string') continue;
+      const input = b.input && typeof b.input === 'object' ? b.input : {};
+      if (b.name === 'Skill') {
+        const skill = typeof input.skill === 'string' ? input.skill : typeof input.command === 'string' ? input.command : '';
+        if (skill) add('skill:' + skill, { kind: 'skill', label: `skill: ${skill}`, path: null, evidence: 'transcript', detail: 'instructions loaded into the session', ts });
+        continue;
+      }
+      const file = typeof input.file_path === 'string' ? input.file_path : '';
+      if (!file) continue;
+      const wrote = b.name === 'Write' || b.name === 'Edit' || b.name === 'MultiEdit' || b.name === 'NotebookEdit';
+      if (under(file, plansDir)) {
+        addFile('plan:' + file, { kind: 'plan', label: `plan: ${path.basename(file)}`, path: file, evidence: 'transcript', ts }, wrote);
+      } else if (under(file, configDir) && /\bmemory\b/.test(file)) {
+        addFile('memory:' + file, { kind: 'memory', label: `memory: ${path.basename(file)}`, path: file, evidence: 'transcript', ts }, wrote);
+      } else if (path.basename(file) === 'CLAUDE.md') {
+        addFile('claude-md:' + file, { kind: 'claude-md', label: `CLAUDE.md (${path.basename(path.dirname(file))})`, path: file, evidence: 'transcript', ts }, wrote);
+      }
+    }
+  }
+  for (const [key, flags] of touch) {
+    const s = byKey.get(key);
+    if (s) s.detail = flags.read && flags.wrote ? 'read and written this session' : flags.wrote ? 'written this session' : 'read this session';
+  }
+  return [...byKey.values()];
 }
 
 /** Pull a "Next steps / TODO / Follow-ups" bullet section out of Claude's recap (last summary). */
@@ -356,6 +544,7 @@ export interface Observations {
   recap: string; // session recap (auto-title, else the last assistant summary)
   runs: ObservationRun[]; // most-recent activity first
   nextSteps: string[]; // still-open to-dos + heuristic follow-ups
+  context: ContextSourcesReport; // what shaped this session (skills, plans, memory, instruction files)
 }
 
 /** Worst-unreviewed-wins status for a run (mirrors changemap.fileStatus, inlined to avoid a cycle). */
@@ -407,7 +596,7 @@ export function buildObservations(cwd: string, sessionId: string, opts: { root?:
   // Most-recent activity first: the run's newest member ts (falls back to id order for ts-less records).
   const runTs = (r: ObservationRun): number => maxOf(r.edits.map((e) => e.ts || e.id));
   runs.sort((a, b) => runTs(b) - runTs(a));
-  return { recap, runs, nextSteps };
+  return { recap, runs, nextSteps, context: contextSources(cwd, sessionId) };
 }
 
 // --- usage readout (context fill + rough 5h/week plan usage) for the sidebar status line ---
@@ -443,9 +632,9 @@ function toEpochMs(v: unknown): number | null {
   return null;
 }
 
-/** The status line's second line: context fill + 5h/week plan usage. Source of truth is the exact
- *  per-turn values claude-statusline persisted to `statusline-last.json`; if that's absent we fall
- *  back to a context estimate from the session transcript's latest usage (5h/week stay null). */
+/** The status line's usage row (its last line): context fill + 5h/week plan usage. Source of truth is
+ *  the exact per-turn values claude-statusline persisted to `statusline-last.json`; if that's absent we
+ *  fall back to a context estimate from the session transcript's latest usage (5h/week stay null). */
 export function usageLine(cwd: string, sessionId: string): UsageLine {
   const out: UsageLine = {
     ctx: null,
