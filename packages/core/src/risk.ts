@@ -86,7 +86,12 @@ export function outsideWrites(actions: ActionRecord[], root: string): OutsideWri
     const abs = path.isAbsolute(a.target) ? a.target : path.resolve(root, a.target);
     const rel = path.relative(root, abs);
     if (!rel.startsWith('..') && !path.isAbsolute(rel)) continue;
-    const shown = home && abs.startsWith(home) ? '~' + abs.slice(home.length) : abs;
+    // Display forward-slashed and home-shortened, like every other path this product shows — on Windows
+    // both `abs` and `home` carry backslashes, so normalize before comparing and slicing (a `~\a\b`
+    // would leak the platform separator and diverge from the rel paths the rest of the UI renders).
+    const absN = abs.replace(/\\/g, '/');
+    const homeN = home.replace(/\\/g, '/');
+    const shown = homeN && absN.startsWith(homeN) ? '~' + absN.slice(homeN.length) : absN;
     byPath.set(shown, (byPath.get(shown) ?? 0) + 1);
   }
   return [...byPath.entries()]

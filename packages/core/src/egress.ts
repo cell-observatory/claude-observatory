@@ -54,7 +54,11 @@ export function outsideReads(actions: ActionRecord[], root: string): EgressChann
     const abs = path.isAbsolute(a.target) ? a.target : path.resolve(root, a.target);
     const rel = path.relative(root, abs);
     if (!rel.startsWith('..') && !path.isAbsolute(rel)) continue; // inside the workspace
-    const shown = home && abs.startsWith(home) ? '~' + abs.slice(home.length) : abs;
+    // Forward-slashed + home-shortened, like every other path shown (Windows carries backslashes on
+    // both `abs` and `home`, so normalize before comparing/slicing — see outsideWrites in risk.ts).
+    const absN = abs.replace(/\\/g, '/');
+    const homeN = home.replace(/\\/g, '/');
+    const shown = homeN && absN.startsWith(homeN) ? '~' + absN.slice(homeN.length) : absN;
     byPath.set(shown, (byPath.get(shown) ?? 0) + 1);
   }
   return [...byPath.entries()]
