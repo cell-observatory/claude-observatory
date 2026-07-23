@@ -10,7 +10,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import { EditStatus, EditRecord, readLog, minOf, logPath, rootDir } from './store';
+import { EditStatus, EditRecord, readLog, minOf, maxOf, logPath, rootDir } from './store';
 import { buildEditTree, EditTree, TreeEdit, TreeFolder, TreeFile } from './tree';
 import { reasoningByEdit, transcriptInsights, findTranscript, flagsFor } from './observe';
 import { parseActions, summarizeActions, compactLabel } from './actions';
@@ -19,8 +19,9 @@ import { buildEgressReport } from './egress';
 import { projectSessionIds } from './fleet';
 import { parseWorkflows, workflowWindows, workflowForTs } from './workflows';
 import { taskSnaps, digest12 } from './tasks';
+import { sessionRequests } from './requests';
+import { sessionProcesses } from './processes';
 import { cachedByFiles } from './fscache';
-import { buildCapabilities, CapabilityFootprint } from './capabilities';
 
 /** One edit (review unit) placed in the map: where it landed, how big, how reviewed, why, and which goal. */
 export interface ChangeMapEdit {
@@ -183,6 +184,46 @@ export interface ChangeMapWorkflow {
   chapters: ChangeMapChapter[];
 }
 
+/**
+ * One user REQUEST as a change-map slice: everything that ask produced, aggregated exactly the way a
+ * workflow's slice is, so a renderer can swap one for the other and draw the same ribbon/strip/ledger.
+ *
+ * This is the axis a PERSON reads a session by. Selecting a request narrows every other view to the
+ * work that ask caused — its chapters, folders and files on the right; its subagents, workflow runs,
+ * to-dos and background shells on the left. Attribution is by START time (core's rule for requests):
+ * a shell launched by #4 stays #4's even when it exits during #7.
+ */
+export interface ChangeMapRequest {
+  id: string; // stable request id — the same one `requests --json` emits
+  index: number; // 1-based chronological position, the way a person counts their own turns
+  /** The ask itself, whitespace-collapsed and COMPLETE — renderers wrap it; nothing here is clipped. */
+  text: string;
+  /** First line, capped — for one-line contexts (a button label, a tooltip head). */
+  title: string;
+  ts: number;
+  endTs: number; // 0 while this is the ask still being answered
+  rollup: { edits: number; added: number; removed: number; pending: number; kept: number; undone: number };
+  files: ChangeMapFile[]; // this ask's touched files, churn-desc (a per-request rollupFiles)
+  modules: ChangeMapModule[]; // …and their folder buckets, so the strip needs no re-aggregation
+  /** This ask's edits regrouped by chapter — session-chapter identity, counts scoped to the request. */
+  chapters: ChangeMapChapter[];
+  /** Raw store edit ids this ask committed, capture order — the review scope of "accept this ask". */
+  editIds: number[];
+  /** Chapters (to-dos) this ask worked in: the ones its edits landed in, plus any whose in_progress
+   *  window overlapped it — a to-do can be in flight across an ask that produced no edits of its own. */
+  chapterIds: string[];
+  /** Subagents spawned while answering (their own agentIds — what a fleet row is keyed by). */
+  agentIds: string[];
+  /** Workflow runs started while answering (wf_<id>). */
+  workflowIds: string[];
+  /** Background shells launched while answering (the harness shell id — what a Processes row shows). */
+  processIds: string[];
+  actions: number;
+  errors: number;
+  compactions: number;
+  durationMs: number;
+}
+
 /** Per-AGENT (per-session) rollup row — one per built change-map, worktree-aware when fed siblings. */
 export interface AgentRoll {
   session: string;
@@ -224,9 +265,6 @@ export interface ChangeMap {
   /** Context compactions during this session, oldest first — the Overview draws each as a marker
    *  between chapter chips, and the Actions timeline carries the same events as 'compact' rows. */
   compactions: CompactionMarker[];
-  /** What this session reached for (files outside the workspace, shell/risk, MCP, network, subagents)
-   *  — EXERCISED capability, not granted permission (approvals never reach the transcript). */
-  capabilities: CapabilityFootprint;
   /** Per-file rollup, churn-desc. Rendered directly — front-ends must not re-aggregate. */
   files: ChangeMapFile[];
   /** Per-module rollup, churn-desc. Rendered directly — front-ends must not re-aggregate. */
@@ -240,6 +278,12 @@ export interface ChangeMap {
   /** One entry per workflow that produced ts-window-attributed edits — the Overview's per-workflow tabs
    *  (edits rolled up + touched files), aggregated here so renderers stay thin. */
   workflows: ChangeMapWorkflow[];
+  /**
+   * The session partitioned by what the USER asked for — one slice per request, in order. Only built
+   * when `opts.requests` is set (the Requests window's own scope source), because it costs one more
+   * transcript pass and the fleet builds dozens of sibling maps per refresh that never need it.
+   */
+  requests: ChangeMapRequest[];
   /**
    * Strict-span task identities (taskId → content), the authoritative label + join source for
    * `rollupByTask`, the Overview task ribbon, and the cross-agent task log. Covers exactly the tasks
@@ -398,7 +442,11 @@ interface TodoSnap {
  */
 function planSnaps(transcriptPath: string): TodoSnap[] {
   const todos = todoSnaps(transcriptPath);
-  const tasks = taskSnaps(transcriptPath);
+  // Sort by ts: the merge below walks both lists as if they were ascending, but taskSnaps emits in
+  // transcript LINE order and a transcript is not ts-ordered (one real session steps backwards 438
+  // times). An inverted snapshot yields a task whose firstTs > lastTs, which silently attributes zero
+  // edits and returns an empty feed for a task that did plenty.
+  const tasks = taskSnaps(transcriptPath).slice().sort((a, b) => a.ts - b.ts);
   if (!tasks.length) return todos;
   if (!todos.length) return tasks;
   const norm = (s: string) => s.trim().toLowerCase();
@@ -688,7 +736,11 @@ export function rollupByAgent(maps: ChangeMap[]): AgentRoll[] {
 }
 
 /** Build the change-map for a session. `root` sets display-relative paths (defaults to cwd). */
-export function buildChangeMap(cwd: string, session: string, opts: { root?: string } = {}): ChangeMap {
+export function buildChangeMap(
+  cwd: string,
+  session: string,
+  opts: { root?: string; requests?: boolean } = {},
+): ChangeMap {
   const root = opts.root ?? cwd;
   const tree = buildEditTree(session, { root });
   const flat = flattenTree(tree);
@@ -879,8 +931,6 @@ export function buildChangeMap(cwd: string, session: string, opts: { root?: stri
     })
     .sort((a, b) => a.ts - b.ts);
 
-  // Same single action scan again — the capability footprint is a pure fold, so it costs a loop.
-  const capabilities = buildCapabilities(actions, { root });
   const summary: ChangeMapSummary = {
     session,
     title: (insights.title ?? insights.firstUserPrompt ?? '').replace(/\s+/g, ' ').trim(),
@@ -970,12 +1020,141 @@ export function buildChangeMap(cwd: string, session: string, opts: { root?: stri
   workflows.sort((a, b) => b.rollup.edits - a.rollup.edits || a.id.localeCompare(b.id));
 
   return {
-    summary, edits, chapters, compactions, capabilities, files, modules, tasks,
+    summary, edits, chapters, compactions, files, modules, tasks,
     rollupByTask: rollupByTask(edits),
     rollupBySubagent: rollupBySubagent(edits),
     rollupByWorkflow: rollupByWorkflow(edits),
     workflows,
+    // Per-REQUEST slices are opt-in: they need the user's turns, which is one more transcript pass, and
+    // the fleet builds a map per worktree sibling on every refresh — none of which is ever scoped by an
+    // ask typed into THIS window. The self map asks for them; siblings don't.
+    requests: opts.requests ? requestSlices(cwd, session, { edits, chById, spans, chapterByContent, subs }) : [],
   };
+}
+
+/**
+ * Group the session's work by the ask that caused it.
+ *
+ * Everything here is a fold over pieces `buildChangeMap` already computed — the only new reads are the
+ * user's turns (`sessionRequests`, memoized against the transcript + log) and the background shells,
+ * whose ids are what a Processes row is keyed by. Attribution is by START time throughout, so a slice
+ * answers "what did asking for this set in motion", not "what finished while I was typing".
+ */
+function requestSlices(
+  cwd: string,
+  session: string,
+  ctx: {
+    edits: ChangeMapEdit[];
+    chById: Map<string, ChangeMapChapter>;
+    spans: Span[];
+    chapterByContent: Map<string, ChangeMapChapter>;
+    subs: { agentId: string; ts: number }[];
+  }
+): ChangeMapRequest[] {
+  const reqs = sessionRequests(cwd, session);
+  if (!reqs.length) return [];
+  const slices: ChangeMapRequest[] = reqs.map((r) => ({
+    id: r.id,
+    index: r.index,
+    text: r.text,
+    title: r.title,
+    ts: r.ts,
+    endTs: r.endTs,
+    rollup: { edits: 0, added: 0, removed: 0, pending: 0, kept: 0, undone: 0 },
+    files: [],
+    modules: [],
+    chapters: [],
+    editIds: r.editIds.slice(),
+    chapterIds: [],
+    agentIds: [],
+    workflowIds: [],
+    processIds: [],
+    actions: r.actions,
+    errors: r.errors,
+    compactions: r.compactions,
+    durationMs: r.durationMs,
+  }));
+  // Which ask owned a given moment — the same binary search `sessionRequests` attributes with, over
+  // ask times that are sorted and tile the session from the first prompt onward. A moment BEFORE the
+  // first ask belongs to no request (session setup answers to nobody).
+  const owner = (ts: number): number => {
+    if (!ts || ts < slices[0].ts) return -1;
+    let lo = 0;
+    let hi = slices.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (slices[mid].ts <= ts) lo = mid;
+      else hi = mid - 1;
+    }
+    return lo;
+  };
+  const endOf = (i: number): number => (slices[i].endTs || Number.MAX_SAFE_INTEGER);
+
+  // 1. the edits, and with them the files/folders/chapters each ask touched
+  const editsByReq = new Map<number, ChangeMapEdit[]>();
+  const chapterIds = slices.map(() => new Set<string>());
+  for (const e of ctx.edits) {
+    const i = owner(e.ts);
+    if (i < 0) continue;
+    let arr = editsByReq.get(i);
+    if (!arr) editsByReq.set(i, (arr = []));
+    arr.push(e);
+    chapterIds[i].add(e.chapter);
+  }
+  // 2. the to-dos that were in flight while it was being answered, even when they produced no edits
+  //    inside this window — "what was Claude working on when I asked" is a question about the plan,
+  //    not about the diff.
+  for (const sp of ctx.spans) {
+    const ch = ctx.chapterByContent.get(sp.content);
+    if (!ch) continue;
+    for (let i = 0; i < slices.length; i++) if (sp.start < endOf(i) && sp.end > slices[i].ts) chapterIds[i].add(ch.id);
+  }
+  // 3. subagents by SPAWN time — a fleet row is keyed by the subagent's own agentId, so resolve to that
+  //    rather than to the spawning tool_use id (which only the action timeline speaks).
+  for (const s of ctx.subs) {
+    const i = owner(s.ts);
+    if (i >= 0) slices[i].agentIds.push(s.agentId);
+  }
+  for (const w of parseWorkflows(cwd, session)) {
+    const i = owner(w.startedTs || w.lastActivityMs);
+    if (i >= 0) slices[i].workflowIds.push(w.id);
+  }
+  for (const p of sessionProcesses(cwd, session)) {
+    const i = owner(p.startedTs);
+    if (i >= 0) slices[i].processIds.push(p.id);
+  }
+
+  for (let i = 0; i < slices.length; i++) {
+    const sl = slices[i];
+    sl.chapterIds = [...chapterIds[i]];
+    const mine = editsByReq.get(i);
+    if (!mine || !mine.length) continue;
+    // Regroup this ask's edits by chapter — session-chapter identity, counts scoped to the request, the
+    // same shape a workflow slice's ribbon renders. editIds: [] for the same reason it is there: the
+    // Chapter axis walks the SESSION's chapters, and a slice's partial set would misstate its scope.
+    const chs = new Map<string, ChangeMapChapter>();
+    for (const e of mine) {
+      foldStatus(sl.rollup, e);
+      const src = ctx.chById.get(e.chapter);
+      if (!src) continue;
+      let c = chs.get(src.id);
+      if (!c) {
+        c = { ...src, edits: 0, added: 0, removed: 0, pending: 0, kept: 0, undone: 0, agent: false, editIds: [] };
+        chs.set(src.id, c);
+      }
+      c.edits++;
+      c.added += e.added;
+      c.removed += e.removed;
+      if (e.status === 'kept') c.kept++;
+      else if (e.status === 'undone') c.undone++;
+      else c.pending++;
+      if (e.agent) c.agent = true;
+    }
+    sl.files = rollupFiles(mine);
+    sl.modules = rollupModules(sl.files);
+    sl.chapters = [...chs.values()].sort((a, b) => a.index - b.index);
+  }
+  return slices;
 }
 
 /**
@@ -1168,28 +1347,84 @@ function fileStamp(p: string | null): string {
  * every time regardless, and its live counts are the ones a user is watching.
  */
 export function siblingChangeMap(cwd: string, session: string, opts: { root: string }): ChangeMap {
+  return siblingOverview(cwd, session, opts).map;
+}
+
+/** Everything the fleet views derive per sibling that is a pure function of its files. */
+export interface SiblingOverview {
+  map: ChangeMap;
+  /** Fixed-width activity histogram over the session's tool calls — the fleet row's sparkline. */
+  sparkline: number[];
+  /** The session's latest to-do list, for the fleet row's task line. */
+  todos: { content: string; status: string }[];
+}
+
+/**
+ * One sibling's whole fleet payload, memoized on disk.
+ *
+ * The Overview derives several things per sibling — its change map, an activity sparkline, its current
+ * to-dos — and a mature repo has dozens of siblings, nearly all FINISHED sessions whose transcript and
+ * store log will never change again. All of it runs in a fresh CLI process every few seconds, where an
+ * in-process memo can never help, so each refresh re-parsed every sibling transcript two or three more
+ * times over. Keying the finished result to its (transcript, log) stamps turns that into one file read.
+ *
+ * Live facts (an agent's phase, its subagents' phases) are deliberately NOT cached here: they are
+ * staleness-derived, so a frozen copy would report a working agent as done.
+ */
+export function siblingOverview(cwd: string, session: string, opts: { root: string; bins?: number }): SiblingOverview {
   const transcript = findTranscript(cwd, session);
   const tStamp = fileStamp(transcript);
   const lStamp = fileStamp(logPath(session));
+  const bins = opts.bins ?? 20;
+  const build = (): SiblingOverview => ({
+    map: buildChangeMap(cwd, session, opts),
+    sparkline: activityBins(parseActions(cwd, session).map((a) => a.ts), bins),
+    todos: transcriptInsights(cwd, session).todos,
+  });
   // Nothing stable to key on (neither input exists) — just build it.
-  if (!tStamp && !lStamp) return buildChangeMap(cwd, session, opts);
-  const stamp = `${MAP_CACHE_VERSION}|${tStamp}|${lStamp}`;
+  if (!tStamp && !lStamp) return build();
+  const stamp = `${MAP_CACHE_VERSION}|${tStamp}|${lStamp}|${bins}`;
   const key = crypto.createHash('sha256').update(`${cwd} ${session} ${opts.root}`).digest('hex').slice(0, 16);
   const p = path.join(rootDir(), 'changemap-cache', `${key}.json`);
   try {
-    const hit = JSON.parse(fs.readFileSync(p, 'utf8')) as { stamp: string; map: ChangeMap };
-    if (hit && hit.stamp === stamp && hit.map) return hit.map;
+    const hit = JSON.parse(fs.readFileSync(p, 'utf8')) as { stamp: string; view: SiblingOverview };
+    if (hit && hit.stamp === stamp && hit.view && hit.view.map) return hit.view;
   } catch {
     /* absent or unreadable — rebuild */
   }
-  const map = buildChangeMap(cwd, session, opts);
+  const view = build();
   try {
     fs.mkdirSync(path.dirname(p), { recursive: true });
     const tmp = `${p}.${process.pid}.tmp`; // pid-scoped so concurrent CLI processes can't collide
-    fs.writeFileSync(tmp, JSON.stringify({ stamp, map }));
-    fs.renameSync(tmp, p); // atomic: a concurrent reader sees old-or-new, never a torn map
+    fs.writeFileSync(tmp, JSON.stringify({ stamp, view }));
+    fs.renameSync(tmp, p); // atomic: a concurrent reader sees old-or-new, never a torn view
   } catch {
     /* cache is best-effort */
   }
-  return map;
+  return view;
+}
+
+/**
+ * Bucket timestamps into a fixed-width activity histogram (the fleet + workflow sparklines). Loop-based
+ * min/max, never Math.min(...ts): a long session's timestamp array is large enough to blow the call
+ * stack when spread into arguments.
+ */
+export function activityBins(tsList: number[], bins = 20): number[] {
+  const out = new Array(bins).fill(0);
+  const ts = tsList.filter((t) => t > 0);
+  if (ts.length === 0) return out;
+  const min = minOf(ts);
+  const max = maxOf(ts);
+  if (max === min) {
+    out[bins - 1] = ts.length; // all at one instant → a single trailing spike, not a divide-by-zero
+    return out;
+  }
+  const span = max - min;
+  for (const t of ts) {
+    let i = Math.floor(((t - min) / span) * bins);
+    if (i < 0) i = 0;
+    if (i >= bins) i = bins - 1;
+    out[i]++;
+  }
+  return out;
 }

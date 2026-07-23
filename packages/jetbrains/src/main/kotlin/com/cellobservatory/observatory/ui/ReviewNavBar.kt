@@ -3,6 +3,7 @@ package com.cellobservatory.observatory.ui
 import com.cellobservatory.observatory.core.ChatRef
 import com.cellobservatory.observatory.model.ChangeMapChapter
 import com.cellobservatory.observatory.model.EditRecord
+import com.cellobservatory.observatory.model.SessionRequest
 import com.cellobservatory.observatory.model.folderLabelOf
 import com.cellobservatory.observatory.model.relTime
 import com.cellobservatory.observatory.services.ObservatoryService
@@ -450,6 +451,115 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
         val ch = chaptersProvider().firstOrNull { it.id == chapterId } ?: return
         val log = service.log()
         val firstId = ch.editIds.firstOrNull { id -> log.any { it.id == id && it.pending } } ?: return
+        val rec = log.find { it.id == firstId } ?: return
+        navEditId = firstId
+        session()?.let { Navigate.openFileAtEdit(project, it, rec) }
+        onNavChange()
+    }
+
+    // ============================ Request axis (Overview only) ============================
+    // The LAST axis on the bar, and the only one that walks the session the way the PERSON experienced it:
+    // one step per thing they asked for. Everything else groups work the way the agent saw it (its own
+    // to-dos, its files, its subagents). Scope = the request's editIds, exactly as core attributed them —
+    // by what STARTED the work, never by what happened to be running when it finished.
+
+    /** The session's requests (with editIds) — the model this axis walks. The Overview feeds it
+     *  `requests --json`; the status bar leaves it empty (it carries no Request axis, as with Chapter). */
+    var requestsProvider: () -> List<SessionRequest> = { emptyList() }
+
+    /** Requests with something still pending, in the order they were asked. */
+    private fun pendingRequests(): List<SessionRequest> {
+        val pending = service.log().filter { it.pending }.map { it.id }.toHashSet()
+        if (pending.isEmpty()) return emptyList()
+        return requestsProvider().filter { r -> r.editIds.any { it in pending } }.sortedBy { it.index }
+    }
+    private fun hasPendingRequests(): Boolean = pendingRequests().isNotEmpty()
+
+    /** The pending request the Diff anchor (navEditId) falls in, or null. */
+    private fun currentRequest(): SessionRequest? {
+        val anchor = navEditId ?: return null
+        return pendingRequests().firstOrNull { anchor in it.editIds }
+    }
+    private fun hasCurrentRequest(): Boolean = currentRequest() != null
+
+    /** The current request's id — the Overview bottom summary's request-axis scope. */
+    fun currentRequestId(): String? = currentRequest()?.id
+
+    /** How a request is named in a prompt / notification: its turn number plus the ask itself, so a
+     *  destructive confirmation says which ask it is about and not just a number. */
+    private fun requestLabel(r: SessionRequest): String =
+        "#${r.index}" + r.title.takeIf { it.isNotBlank() }?.let { " “${clipAsk(it)}”" }.orEmpty()
+
+    private fun clipAsk(s: String): String = if (s.length <= 48) s else s.take(47) + "…"
+
+    /** The edits this request produced that are still in the store (its review scope). */
+    private fun editsOfRequest(r: SessionRequest): List<EditRecord> {
+        val ids = r.editIds.toHashSet()
+        return service.log().filter { it.id in ids }.sortedBy { it.id }
+    }
+
+    fun requestAxis(): List<AnAction> = listOf(
+        iconAct("Previous request (what you asked for)", NavTint.tint(AllIcons.Actions.Back, NavTint.BLUE), ::hasPendingRequests) { navRequest(-1) },
+        textAct(::requestCounterText, ::requestCounterTip) { currentRequest()?.let { revealRequest(it.id) } },
+        iconAct("Next request (what you asked for)", NavTint.tint(AllIcons.Actions.Forward, NavTint.BLUE), ::hasPendingRequests) { navRequest(1) },
+    )
+
+    fun reviewRequestAction(showText: Boolean = true): AnAction =
+        labelAct(showText, "Review", "Review this request — jump to the first pending edit it produced", NavTint.tint(AllIcons.Actions.Preview, NavTint.BLUE), ::hasCurrentRequest) {
+            currentRequest()?.let { revealRequest(it.id) }
+        }
+
+    fun acceptRequestAction(showText: Boolean = true): AnAction =
+        labelAct(showText, "Accept Request", "Accept every pending edit this request produced", NavTint.ACCEPT_ALL, ::hasCurrentRequest) {
+            currentRequest()?.let { r -> withSession { s -> ReviewOps.keepAll(project, s, editsOfRequest(r), "request ${requestLabel(r)}") } }
+        }
+
+    fun revertRequestAction(showText: Boolean = true): AnAction =
+        labelAct(showText, "Revert Request", "Revert every pending edit this request produced", NavTint.REVERT_ALL, ::hasCurrentRequest) {
+            currentRequest()?.let { r ->
+                withSession { s -> ReviewOps.undoIds(project, s, editsOfRequest(r), "request #${r.index}", "request ${requestLabel(r)}") }
+            }
+        }
+
+    /** Request-axis counter ("Request i/n · N files · N edits"), or null when no request has pending work.
+     *  The ask itself is the hover tooltip — a prompt is far too long to sit inline (Chapter parity). */
+    private fun requestCounterText(): String? {
+        val reqs = pendingRequests()
+        if (reqs.isEmpty()) return null
+        val cur = currentRequest()
+        val idx = if (cur != null) reqs.indexOf(cur) else -1
+        val base = "Request ${if (idx >= 0) idx + 1 else "–"}/${reqs.size}"
+        if (cur == null) return base
+        val log = service.log()
+        val files = cur.editIds.mapNotNull { id -> log.find { it.id == id }?.file }
+        val nFiles = files.distinct().size
+        val bits = mutableListOf<String>()
+        if (nFiles > 0) bits.add("$nFiles file${if (nFiles == 1) "" else "s"}")
+        if (cur.editIds.isNotEmpty()) bits.add("${cur.editIds.size} edit${if (cur.editIds.size == 1) "" else "s"}")
+        return base + (if (bits.isNotEmpty()) " · ${bits.joinToString(" · ")}" else "")
+    }
+
+    private fun requestCounterTip(): String? =
+        currentRequest()?.let { "#${it.index}: ${clipAsk(it.text.ifBlank { it.title })}" }
+            ?: "the request the current edit came from"
+
+    private fun navRequest(dir: Int) {
+        val reqs = pendingRequests()
+        if (reqs.isEmpty()) return
+        val anchor = navEditId
+        val curIdx = if (anchor != null) reqs.indexOfFirst { anchor in it.editIds } else -1
+        val start = if (curIdx < 0) (if (dir == 1) -1 else 0) else curIdx
+        val target = reqs[(start + dir + reqs.size) % reqs.size]
+        revealRequest(target.id)
+    }
+
+    /** Jump the Request axis straight to one request (a Requests-tab row click) — opens its first pending
+     *  edit. A request with nothing pending is left alone: there is nothing to review, and moving the
+     *  cursor to a resolved edit would silently change what every other axis is scoped to. */
+    fun revealRequest(requestId: String) {
+        val r = requestsProvider().firstOrNull { it.id == requestId } ?: return
+        val log = service.log()
+        val firstId = r.editIds.firstOrNull { id -> log.any { it.id == id && it.pending } } ?: return
         val rec = log.find { it.id == firstId } ?: return
         navEditId = firstId
         session()?.let { Navigate.openFileAtEdit(project, it, rec) }

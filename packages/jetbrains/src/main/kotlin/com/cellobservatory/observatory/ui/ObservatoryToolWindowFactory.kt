@@ -10,7 +10,9 @@ import com.intellij.ui.content.ContentFactory
 import javax.swing.Icon
 import javax.swing.JComponent
 
-/** Sidebar review window (VS Code activity-bar analog): Edits + Diffs + File History + Actions. */
+/** Sidebar review window (VS Code activity-bar analog): Edits + Diffs + File History + Actions +
+ *  Observations. 0.8.7: Observations moved here from the bottom dock, which freed that dock for the
+ *  Requests window beside the Overview. */
 class ObservatoryToolWindowFactory : ToolWindowFactory, DumbAware {
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
         val factory = ContentFactory.getInstance()
@@ -20,6 +22,9 @@ class ObservatoryToolWindowFactory : ToolWindowFactory, DumbAware {
         cm.addContent(iconTab(factory, FileHistoryPanel(project), "File History", AllIcons.Vcs.History))
         // Actions timeline — moved out of the Observations dock window (0.8.0 r4), pinned at the bottom.
         cm.addContent(iconTab(factory, ActionsPanel(project), "Actions", AllIcons.Debugger.Console))
+        // …and Observations after it (0.8.7), so the whole read-and-review side of the product lives in
+        // one window and the bottom dock is free for the two views that must be seen side by side.
+        cm.addContent(iconTab(factory, ObservationsPanel(project), "Observations", AllIcons.Actions.IntentionBulb))
     }
 
     /** An icon + text tab. The label must be the displayName — the new UI (PyCharm 2025+) renders content
@@ -33,25 +38,26 @@ class ObservatoryToolWindowFactory : ToolWindowFactory, DumbAware {
         }
 }
 
-/** Bottom dashboards window (VS Code panel analog, next to Terminal/Problems). 0.8.0 r3 consolidation —
+/** Bottom dashboards window (VS Code panel analog, next to Terminal/Problems). 0.8.7 layout —
  *  three panes side by side in one split (dividers draggable, each pane carrying its name):
- *    · Observations — TABBED (Observations timeline | Actions timeline).
- *    · Overview     — the combined MASTER–DETAIL: a Fleet · Workflows nav on the left (the former
- *                     standalone Multitasking window, folded in) driving the change-map detail on the right.
- *    · Stats        — session metrics.
- *  The standalone Multitasking / Actions / Timeline panes are gone — Multitasking's fleet+workflows fold
- *  into the Overview, its Actions fold into Observations, and Timeline folds into Observations. */
+ *    · Requests — what the USER asked for, in order. Selecting one SCOPES the Overview beside it, which
+ *                 is why the two are neighbours rather than tabs: you keep the list of asks in view
+ *                 while you read what one of them produced.
+ *    · Overview — the combined MASTER–DETAIL: a Fleet · Workflows · Tasks · Processes nav on the left
+ *                 driving the change-map detail on the right.
+ *    · Stats    — session metrics.
+ *  Observations moved to the sidebar window (with Edits / Diffs / File History / Actions) to make room. */
 class ObservatoryDashboardsFactory : ToolWindowFactory, DumbAware {
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
         val stats = com.cellobservatory.observatory.ui.stats.StatsPanel(project)
-        // Default split: Observations 10% | Overview 80% | Stats 10% (user request 2026-07-16) — the
-        // master-detail Overview is the panel's centerpiece; the dividers stay draggable.
-        val right = com.intellij.ui.OnePixelSplitter(false, 8f / 9f).apply {
+        // Default split: Requests 20% | Overview 65% | Stats 15% — the master-detail Overview stays the
+        // centerpiece, and the Requests pane is wide enough to read a prompt wrapped over a few lines.
+        val right = com.intellij.ui.OnePixelSplitter(false, 0.81f).apply {
             firstComponent = titled("Overview", ChangeMapPanel(project))
             secondComponent = titled("Stats", stats)
         }
-        val split = com.intellij.ui.OnePixelSplitter(false, 0.10f).apply {
-            firstComponent = titled("Observations", ObservationsPanel(project))
+        val split = com.intellij.ui.OnePixelSplitter(false, 0.20f).apply {
+            firstComponent = titled("Requests", RequestsPanel(project))
             secondComponent = right
         }
         val factory = ContentFactory.getInstance()

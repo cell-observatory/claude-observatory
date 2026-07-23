@@ -10,6 +10,7 @@ import { EditRecord, EditStatus, readLog, readBlob, logPath, maxOf, listSessions
 import { lineDelta } from './format';
 import { projectDir } from './session';
 import { claudeConfigDir } from './paths';
+import { cachedAnalysis } from './analyze';
 import { cachedByFiles } from './fscache';
 
 /** Locate the Claude Code transcript jsonl for a session, walking up from cwd (like resolveSessionId). */
@@ -31,6 +32,11 @@ const CORRELATED_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
 interface ToolUse {
   file: string;
   reasoning: string;
+  /** ms epoch of the tool_use line — the key the correlation matches on. */
+  ts: number;
+  /** The tool_use id, when the transcript carries one. Reserved for an EXACT join: capture does not
+   *  record an id on the edit yet, so nothing matches on this today. */
+  id: string;
 }
 
 /** Edit/Write/MultiEdit/NotebookEdit tool_uses in transcript order, each with its message's text. */
@@ -58,10 +64,9 @@ function parseToolUses(transcriptPath: string): ToolUse[] {
     if (!msg || msg.role !== 'assistant' || !Array.isArray(msg.content)) continue;
     // NOTE: sidechain (subagent) messages are deliberately NOT skipped here. The capture hooks fire
     // for subagent edits too (same session store), so if a legacy transcript inlines them
-    // (isSidechain:true) their tool_uses must stay in the per-file queues to keep the store<->
-    // transcript correlation aligned. Current Claude Code writes sidechains to separate
-    // subagents/*.jsonl files, so subagent-made edits have no transcript counterpart at all — an
-    // inherent limitation of the correlation, not something an exclusion here could fix.
+    // (isSidechain:true) their tool_uses must stay in the queues. Current Claude Code writes sidechains
+    // to separate subagents/*.jsonl files — which this parser is now pointed at as well, so a
+    // subagent's edit takes ITS OWN agent's words instead of the orchestrator's.
     let text = '';
     let think = '';
     for (const b of msg.content) {
@@ -73,10 +78,12 @@ function parseToolUses(transcriptPath: string): ToolUse[] {
     }
     const reasoning = text || think; // prefer the visible explanation; fall back to thinking
     if (reasoning) lastReasoning = reasoning;
+    const ts = toEpochMs(o.timestamp ?? o.ts) ?? 0;
     for (const b of msg.content) {
       if (b.type === 'tool_use' && CORRELATED_TOOLS.has(b.name)) {
         const f = b.input && (b.input.file_path || b.input.notebook_path);
-        if (typeof f === 'string') out.push({ file: path.resolve(f), reasoning: lastReasoning });
+        if (typeof f === 'string')
+          out.push({ file: path.resolve(f), reasoning: lastReasoning, ts, id: typeof b.id === 'string' ? b.id : '' });
       }
     }
   }
@@ -94,26 +101,97 @@ export function reasoningByEdit(cwd: string, sessionId: string): Map<number, str
   );
 }
 
+/** How far before an edit's commit its tool_use may sit. The hook writes the record moments after the
+ *  call, so this is generous rather than tight — but bounded, so an unrelated edit hours earlier in the
+ *  same file can never lend its words. */
+const REASONING_WINDOW_MS = 10 * 60_000;
+/** A tool_use may be stamped slightly AFTER the commit when clocks or buffering disagree. */
+const REASONING_SLACK_MS = 2_000;
+
+/** Every transcript that can explain an edit in this session: the main chain plus each subagent's own
+ *  file. Computed from the transcript path rather than imported from subagents.ts, which imports this
+ *  module (a value import back would close a runtime cycle). */
+function explainingTranscripts(transcript: string): string[] {
+  const out = [transcript];
+  const subDir = path.join(transcript.replace(/\.jsonl$/, ''), 'subagents');
+  const walk = (dir: string): void => {
+    let names: string[];
+    try {
+      names = fs.readdirSync(dir);
+    } catch {
+      return;
+    }
+    for (const n of names) if (n.endsWith('.jsonl')) out.push(path.join(dir, n));
+  };
+  walk(subDir);
+  let runs: string[] = [];
+  try {
+    runs = fs.readdirSync(path.join(subDir, 'workflows'));
+  } catch {
+    /* no workflow runs */
+  }
+  for (const r of runs) walk(path.join(subDir, 'workflows', r));
+  return out;
+}
+
+/**
+ * Correlate store edits to the words that explain them.
+ *
+ * Matching is by TIME, per file, across every transcript that could have produced the edit — the main
+ * chain and each subagent's own file. The previous approach walked a per-file positional cursor over
+ * the main transcript alone, which broke twice over: a subagent's edits have no main-chain tool_use, so
+ * they either went unexplained or consumed an entry belonging to the orchestrator (attributing one
+ * author's words to another's work); and any gap — a file also touched by a `prettier --write`, a
+ * filtered record — shifted every later edit in that file, so one miss cascaded through the session.
+ *
+ * A nearest-in-time match costs at most the single edit it gets wrong, and it reads the author's own
+ * transcript. Each tool_use is consumed once, so two edits never claim the same sentence.
+ */
 function reasoningByEditUncached(transcript: string, sessionId: string): Map<number, string> {
   const map = new Map<number, string>();
-  const byFile = new Map<string, string[]>();
-  for (const e of parseToolUses(transcript)) {
-    if (!byFile.has(e.file)) byFile.set(e.file, []);
-    byFile.get(e.file)!.push(e.reasoning);
-  }
-  const cursor = new Map<string, number>();
-  for (const rec of readLog(sessionId)) {
-    // Only records that HAVE a transcript tool_use may consume a file's cursor. A Bash record (files
-    // changed by a `prettier --write`/`eslint --fix` etc.) has no tool_use in parseToolUses, so
-    // advancing the cursor for it would shift every later edit's reasoning to the wrong entry.
-    if (!CORRELATED_TOOLS.has(rec.tool)) continue;
-    const q = byFile.get(path.resolve(rec.file));
-    if (!q) continue;
-    const i = cursor.get(rec.file) ?? 0;
-    if (i < q.length) {
-      if (q[i]) map.set(rec.id, q[i]);
-      cursor.set(rec.file, i + 1);
+  const byFile = new Map<string, ToolUse[]>();
+  for (const file of explainingTranscripts(transcript)) {
+    for (const e of parseToolUses(file)) {
+      const list = byFile.get(e.file);
+      if (list) list.push(e);
+      else byFile.set(e.file, [e]);
     }
+  }
+  for (const list of byFile.values()) list.sort((a, b) => a.ts - b.ts);
+  const used = new Set<ToolUse>();
+
+  for (const rec of readLog(sessionId)) {
+    // A Bash record (a file changed by `prettier --write`, `eslint --fix`) has no tool_use to match.
+    if (!CORRELATED_TOOLS.has(rec.tool)) continue;
+    const list = byFile.get(path.resolve(rec.file));
+    if (!list || !list.length) continue;
+    let best: ToolUse | null = null;
+    // Time matching needs both sides to HAVE a time. A legacy transcript (or a test fixture) whose
+    // tool_uses carry no timestamp would otherwise see every candidate tie at 0 and hand the newest
+    // entry to the oldest edit — so those fall through to the positional order they were written in.
+    if (rec.ts) {
+      // The tool_use always PRECEDES the commit the hook writes, so a candidate at-or-before the edit
+      // is the right one and the latest such candidate is the nearest. Only if none exists do we allow
+      // the small slack for clock/buffering skew — otherwise a later edit's explanation, which sits
+      // just inside that slack, would outrank the correct earlier one.
+      for (const e of list) {
+        if (used.has(e) || !e.reasoning || !e.ts) continue;
+        if (e.ts > rec.ts) break; // sorted: everything after is later still
+        if (rec.ts - e.ts > REASONING_WINDOW_MS) continue;
+        best = e;
+      }
+      if (!best) {
+        for (const e of list) {
+          if (used.has(e) || !e.reasoning || !e.ts) continue;
+          if (e.ts > rec.ts + REASONING_SLACK_MS) break;
+          if (e.ts > rec.ts) best = e;
+        }
+      }
+    }
+    if (!best) best = list.find((e) => !used.has(e) && e.reasoning && !e.ts) ?? null;
+    if (!best) continue;
+    used.add(best);
+    map.set(rec.id, best.reasoning);
   }
   return map;
 }
@@ -470,19 +548,42 @@ export function summarize(sessionId: string, rec: EditRecord): string {
 /** Cheap issue flags for an edit (scans added lines + the whole session's file set).
  *  Pass `log` (the session's readLog result) when calling per-edit in a loop to avoid re-reading
  *  the log file for every edit; omitted, it is read on demand (backward compatible). */
-export function flagsFor(sessionId: string, rec: EditRecord, log?: EditRecord[]): Flag[] {
+/** The BLOB-derived half of `flagsFor`, memoized on the two blob hashes.
+ *
+ *  Blobs are content-addressed and immutable, so this pair always yields the same answer. It is worth
+ *  caching because the change map calls flagsFor once per edit on every build, and each call ran two
+ *  full array diffs — at ~1,100 edits that was the single largest cost in the build. Deliberately only
+ *  the blob half: the "no test file changed" flag below depends on the session's FILE SET, which grows
+ *  as the session runs, so caching the whole result would freeze a flag that is supposed to flip. */
+const flagBlobMemo = new Map<string, { addedText: string; removed: number } | null>();
+const FLAG_MEMO_CAP = 20000;
+
+function flagInputs(sessionId: string, rec: EditRecord): { addedText: string; removed: number } | null {
+  const key = `${rec.beforeBlob ?? ''}\u0000${rec.afterBlob ?? ''}`;
+  const hit = flagBlobMemo.get(key);
+  if (hit !== undefined) return hit;
   const before = blobText(sessionId, rec.beforeBlob);
   const after = blobText(sessionId, rec.afterBlob);
+  const value =
+    after === null
+      ? null // the file was deleted — the caller answers that without diffing
+      : { addedText: addedLines(before ?? '', after).join(''), removed: before !== null ? addedLines(after, before).length : 0 };
+  if (flagBlobMemo.size >= FLAG_MEMO_CAP) flagBlobMemo.clear();
+  flagBlobMemo.set(key, value);
+  return value;
+}
+
+export function flagsFor(sessionId: string, rec: EditRecord, log?: EditRecord[]): Flag[] {
   const flags: Flag[] = [];
-  if (after === null) return [{ level: 'warn', message: 'file deleted' }];
-  const added = addedLines(before ?? '', after);
-  const addedText = added.join('');
+  const blob = flagInputs(sessionId, rec);
+  if (blob === null) return [{ level: 'warn', message: 'file deleted' }];
+  const addedText = blob.addedText;
   if (/\b(TODO|FIXME|XXX|HACK)\b/.test(addedText)) flags.push({ level: 'info', message: 'adds a TODO/FIXME' });
   if (/\b(console\.log|debugger|print\(|dbg!)\b/.test(addedText))
     flags.push({ level: 'warn', message: 'adds a debug statement' });
   if (/(api[_-]?key|secret|password|token)\s*[:=]\s*['"`]/i.test(addedText))
     flags.push({ level: 'warn', message: 'possible hard-coded secret' });
-  const removed = before !== null ? addedLines(after, before).length : 0;
+  const removed = blob.removed;
   if (removed > 30) flags.push({ level: 'warn', message: `large deletion (−${removed} lines)` });
   // source file with no test sibling touched anywhere in the session
   if (/\.(ts|tsx|js|jsx|py|go|rs)$/.test(rec.file) && !/\.(test|spec)\.|_test\.|test_/.test(rec.file)) {
@@ -493,6 +594,10 @@ export function flagsFor(sessionId: string, rec: EditRecord, log?: EditRecord[])
   }
   return flags;
 }
+
+/** How many GENERATED follow-ups accompany Claude's own to-dos. They are one template per source file,
+ *  so an uncapped list buries the handful of steps a human actually wrote. */
+const HEURISTIC_STEP_CAP = 8;
 
 /** Session-level heuristic next-steps (zero-token). */
 export function heuristicSuggestions(sessionId: string): string[] {
@@ -513,7 +618,7 @@ export function heuristicSuggestions(sessionId: string): string[] {
     return after !== null && /\b(TODO|FIXME)\b/.test(addedLines(before ?? '', after).join(''));
   });
   for (const r of todoFiles) out.push(`Follow up on the TODO/FIXME added in ${path.basename(r.file)}.`);
-  if (out.length === 0) out.push('No obvious follow-ups from heuristics — run “Generate suggestions” for a deeper look.');
+  if (out.length === 0) out.push('No obvious follow-ups from these heuristics.');
   return out;
 }
 
@@ -541,7 +646,12 @@ export interface ObservationRun {
 }
 
 export interface Observations {
-  recap: string; // session recap (auto-title, else the last assistant summary)
+  recap: string; // session recap — see `recapSource` for where it came from
+  /** WHERE the recap came from, because the three sources mean different things and were previously
+   *  swapped silently: 'analysis' is a line Claude generated on request, 'title' is Claude Code's own
+   *  auto-title, 'summary' is the last thing the assistant happened to say — presenting that last one
+   *  unlabelled reads as a considered recap when it is just the tail of the transcript. '' when none. */
+  recapSource: 'analysis' | 'title' | 'summary' | '';
   runs: ObservationRun[]; // most-recent activity first
   nextSteps: string[]; // still-open to-dos + heuristic follow-ups
   context: ContextSourcesReport; // what shaped this session (skills, plans, memory, instruction files)
@@ -567,8 +677,24 @@ export function buildObservations(cwd: string, sessionId: string, opts: { root?:
   const log = readLog(sessionId);
   const reasoning = reasoningByEdit(cwd, sessionId);
   const insights = transcriptInsights(cwd, sessionId);
-  const recap = insights.title ?? insights.lastSummary ?? '';
-  const nextSteps = [...new Set([...transcriptSuggestions(cwd, sessionId), ...heuristicSuggestions(sessionId)])];
+  // ONE definition of the recap, shared by every surface. Core previously used `title ?? lastSummary`
+  // while the CLI and VS Code used `cachedAnalysis('recap') ?? title` — so the same session read
+  // "Plan mode is active…" in one editor and "No recap yet" in the other, and a generated recap
+  // survived a restart in only one of them.
+  const analysis = cachedAnalysis(sessionId, 'recap')?.text?.trim() || '';
+  const recap = analysis || insights.title || insights.lastSummary || '';
+  const recapSource: Observations['recapSource'] = analysis ? 'analysis' : insights.title ? 'title' : insights.lastSummary ? 'summary' : '';
+  // Claude's OWN open to-dos come first and are never what gets cut — they were being sliced to 6
+  // while the generated half ran unbounded (58 rows, 55 of them one template, one per source file).
+  // The heuristic half is capped, and says how many it dropped rather than trailing off silently.
+  const fromTranscript = transcriptSuggestions(cwd, sessionId);
+  const heuristic = heuristicSuggestions(sessionId).filter((h) => !fromTranscript.includes(h));
+  const shown = heuristic.slice(0, HEURISTIC_STEP_CAP);
+  const hidden = heuristic.length - shown.length;
+  const nextSteps = [
+    ...new Set([...fromTranscript, ...shown]),
+    ...(hidden > 0 ? [`… ${hidden} more heuristic follow-up${hidden === 1 ? '' : 's'} not shown.`] : []),
+  ];
 
   // Walk the log in chronological (capture) order, merging consecutive same-file edits into one run.
   const runs: ObservationRun[] = [];
@@ -596,7 +722,7 @@ export function buildObservations(cwd: string, sessionId: string, opts: { root?:
   // Most-recent activity first: the run's newest member ts (falls back to id order for ts-less records).
   const runTs = (r: ObservationRun): number => maxOf(r.edits.map((e) => e.ts || e.id));
   runs.sort((a, b) => runTs(b) - runTs(a));
-  return { recap, runs, nextSteps, context: contextSources(cwd, sessionId) };
+  return { recap, recapSource, runs, nextSteps, context: contextSources(cwd, sessionId) };
 }
 
 // --- usage readout (context fill + rough 5h/week plan usage) for the sidebar status line ---

@@ -61,10 +61,10 @@ private data class SessionTokens(
     val hitPct: Double?,
 )
 
-/** What the session is running on and how its context has fared, from `usage --json`'s `vitals`
- *  (core.sessionVitals). [model] is null until the session has an assistant turn and [effort] is null
- *  when it never declared one — both render as nothing, never as a guessed default (the default differs
- *  by build and model, so inventing one would be a lie). */
+/** What the session is running on and what has happened to its context, from `usage --json`'s `vitals`
+ *  (core.sessionVitals). [model] is null until the session has an assistant turn and [effort] is null when
+ *  it never declared one — both render as nothing, never as a guessed default (the default differs by
+ *  build and model, so inventing one would be a lie). */
 private data class SessionVitals(
     val model: String?,
     val modelTurns: Int,
@@ -73,13 +73,14 @@ private data class SessionVitals(
     val effort: String?,
     /** True when the level came from an older transcript's `/effort` echo rather than an assistant record. */
     val effortStub: Boolean,
+    /** Context compactions the harness recorded, oldest first — structural (`compact_boundary` records),
+     *  never estimated. Empty for a session that was never compacted. */
     val compactions: List<VitalCompaction>,
-    /** Context sent per assistant turn as ts→tokens, already downsampled by core — saw-tooths down at
-     *  each compaction. */
-    val context: List<Pair<Long, Double>>,
 )
 
-/** One compaction from `vitals.compactions` — a tick under the context meter. */
+/** One compaction from `vitals.compactions`. [droppedTokens] is THIS event's own drop (pre − post) —
+ *  core deliberately does not hand over the harness's running cumulative total here, which would
+ *  overstate every compaction after the first. */
 private data class VitalCompaction(val ts: Long, val trigger: String, val droppedTokens: Double)
 
 private fun human(n: Double): String {
@@ -150,7 +151,6 @@ class StatsPanel(private val project: Project) : JPanel(BorderLayout()), com.int
         toolTipText = "First scan of your transcripts; cached after"
     }
     private val tokenStrip = TokenStrip()
-    private val ctxMeter = ContextMeter()
     private val scoreboard = ReviewScoreboard()
     private val tokensChart = ChartComponent(
         "TOKENS", true,
@@ -175,6 +175,16 @@ class StatsPanel(private val project: Project) : JPanel(BorderLayout()), com.int
     private val vitalsChip = JBLabel().apply {
         font = JBUI.Fonts.miniFont()
         foreground = UIUtil.getContextHelpForeground()
+        isVisible = false
+    }
+    // Context compactions, as one line. The saw-tooth context chart this used to sit under is gone, but
+    // losing context is the most consequential thing that happens to a long session, so the FACT stays:
+    // how many times, and how much the last one dropped. Hidden outright when there were none.
+    private val compactionLine = JBLabel().apply {
+        font = JBUI.Fonts.miniFont()
+        foreground = UIUtil.getContextHelpForeground()
+        border = JBUI.Borders.empty(2, 2, 0, 2)
+        alignmentX = java.awt.Component.LEFT_ALIGNMENT
         isVisible = false
     }
 
@@ -211,8 +221,7 @@ class StatsPanel(private val project: Project) : JPanel(BorderLayout()), com.int
         val stack = ScrollableStack().apply {
             border = JBUI.Borders.empty(4, 8)
             add(tokenStrip)
-            add(Box.createVerticalStrut(JBUI.scale(12)))
-            add(ctxMeter)
+            add(compactionLine)
             add(Box.createVerticalStrut(JBUI.scale(12)))
             add(scoreboard)
             add(Box.createVerticalStrut(JBUI.scale(12)))
@@ -304,7 +313,6 @@ class StatsPanel(private val project: Project) : JPanel(BorderLayout()), com.int
                 usageBars.update(usage)
                 tokenStrip.update(usage?.sessionTokens)
                 updateVitals(usage?.vitals)
-                ctxMeter.update(usage)
                 updateHint()
             }
         }
@@ -314,6 +322,7 @@ class StatsPanel(private val project: Project) : JPanel(BorderLayout()), com.int
      *  → no effort clause. "+N" means the session switched models mid-flight; the tooltip names them with
      *  their turn counts, and says when the effort came from an `/effort` echo instead of a record. */
     private fun updateVitals(v: SessionVitals?) {
+        updateCompactions(v?.compactions ?: emptyList())
         val model = v?.model
         if (v == null || model == null) {
             vitalsChip.isVisible = false
@@ -334,6 +343,29 @@ class StatsPanel(private val project: Project) : JPanel(BorderLayout()), com.int
             }
         }
         vitalsChip.isVisible = true
+    }
+
+    /** The one-line compaction readout: how many times this session's context was summarized away, and
+     *  what the most recent one dropped. A session that was never compacted shows nothing at all — an
+     *  explicit "0 compactions" line would be noise on the majority of sessions. */
+    private fun updateCompactions(comps: List<VitalCompaction>) {
+        val last = comps.lastOrNull()
+        if (last == null) {
+            compactionLine.isVisible = false
+            return
+        }
+        val drop = if (last.droppedTokens > 0) " · last dropped ${human(last.droppedTokens)} tokens" else ""
+        compactionLine.text = "⌁ ${comps.size} context compaction${if (comps.size == 1) "" else "s"}$drop"
+        compactionLine.toolTipText = buildString {
+            append("Claude Code summarized the conversation so far and continued from that summary.")
+            comps.takeLast(6).forEach {
+                append("\n${it.trigger.ifBlank { "compact" }}")
+                if (it.droppedTokens > 0) append(" · ${human(it.droppedTokens)} dropped")
+                if (it.ts > 0) append(" · ${java.text.SimpleDateFormat("HH:mm").format(java.util.Date(it.ts))}")
+            }
+            if (comps.size > 6) append("\n(${comps.size - 6} earlier one(s) not listed)")
+        }
+        compactionLine.isVisible = true
     }
 
     private fun updateHint() {
@@ -426,12 +458,6 @@ class StatsPanel(private val project: Project) : JPanel(BorderLayout()), com.int
                             droppedTokens = num(co.get("droppedTokens")) ?: 0.0,
                         )
                     },
-                    // [tsMs, tokens] pairs — a shape change would otherwise throw and null the whole payload.
-                    context = list("context").mapNotNull { e ->
-                        val p = e.takeIf { it.isJsonArray }?.asJsonArray ?: return@mapNotNull null
-                        if (p.size() < 2) return@mapNotNull null
-                        (lng(p.get(0)) ?: 0L) to (num(p.get(1)) ?: 0.0)
-                    },
                 )
             },
         )
@@ -507,86 +533,6 @@ private class TokenStrip : JComponent() {
                 " · cache reads ${human(it.cacheRead)} · cache writes ${human(it.cacheCreation)}" +
                 (it.hitPct?.let { p -> " · hit rate ${Math.round(p)}% (reads ÷ all context sent)" } ?: "")
         } ?: "This session's cumulative token split — fills in once the session has assistant turns"
-    }
-}
-
-/** How full the context window was on each assistant turn, with an amber tick at every compaction — the
- *  cliffs ARE the compactions. Structural: core reads the series and the boundaries off the transcript's
- *  own records, so nothing here is estimated. VS Code parity. */
-private class ContextMeter : JComponent() {
-    private var u: Usage? = null
-
-    init {
-        preferredSize = Dimension(JBUI.scale(200), JBUI.scale(58))
-        minimumSize = Dimension(JBUI.scale(110), JBUI.scale(58))
-        maximumSize = Dimension(Int.MAX_VALUE, JBUI.scale(62))
-    }
-
-    fun update(usage: Usage?) {
-        u = usage
-        repaint()
-    }
-
-    override fun paintComponent(g: Graphics) {
-        val g2 = g as Graphics2D
-        g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
-        val grey = UIUtil.getContextHelpForeground()
-        g2.color = grey
-        g2.font = JBUI.Fonts.miniFont()
-        g2.drawString("CONTEXT FILL", JBUI.scale(2), JBUI.scale(10))
-        val top = JBUI.scale(15)
-        val plotH = JBUI.scale(26)
-        val baseY = top + plotH
-        g2.color = JBColor.border()
-        g2.drawLine(0, baseY, width, baseY)
-        val v = u?.vitals
-        val series = v?.context ?: emptyList()
-        if (v == null || series.isEmpty()) {
-            g2.color = grey
-            g2.drawString("no assistant turns yet", JBUI.scale(2), baseY + JBUI.scale(14))
-            toolTipText = "How full the context window was on each assistant turn — fills in once the session has turns"
-            return
-        }
-        val n = series.size
-        val peak = max(1.0, series.maxOf { it.second })
-        fun xOf(i: Int): Int = if (n == 1) width - 1 else i * (width - 1) / (n - 1)
-        fun yOf(value: Double): Int = baseY - ((value / peak) * (plotH - JBUI.scale(2))).toInt()
-        val area = java.awt.Polygon()
-        area.addPoint(xOf(0), baseY)
-        for (i in 0 until n) area.addPoint(xOf(i), yOf(series[i].second))
-        area.addPoint(xOf(n - 1), baseY)
-        g2.color = UIUtil.toAlpha(C_TOTAL, 60)
-        g2.fillPolygon(area)
-        g2.color = C_TOTAL
-        for (i in 1 until n) g2.drawLine(xOf(i - 1), yOf(series[i - 1].second), xOf(i), yOf(series[i].second))
-        // One tick per compaction, placed on the time axis the series spans.
-        val firstTs = series.first().first
-        val span = max(1.0, (series.last().first - firstTs).toDouble())
-        g2.color = C_PENDING
-        for (c in v.compactions) {
-            val x = (((c.ts - firstTs) / span) * (width - 1)).toInt().coerceIn(0, max(0, width - 1))
-            g2.drawLine(x, top, x, baseY)
-        }
-        val latest = series.last().second
-        val size = u?.ctxSize
-        val fill = if (size != null && size > 0) "${human(latest)} / ${human(size)}" else human(latest)
-        val dropped = v.compactions.sumOf { it.droppedTokens }
-        val nc = v.compactions.size
-        g2.color = grey
-        g2.font = JBUI.Fonts.miniFont()
-        g2.drawString(
-            fill + if (nc > 0) "  ·  $nc compaction${if (nc == 1) "" else "s"} · ${human(dropped)} dropped" else "",
-            JBUI.scale(2), baseY + JBUI.scale(14),
-        )
-        toolTipText = buildString {
-            append("Context carried into each assistant turn — $n sampled turn(s), peak ${human(peak)}")
-            if (nc > 0) {
-                append("\n$nc compaction(s): each amber tick is the harness summarizing older turns away")
-                append(" (${human(dropped)} tokens dropped in total)")
-            } else {
-                append("\nNo compactions yet — nothing has been summarized away")
-            }
-        }
     }
 }
 

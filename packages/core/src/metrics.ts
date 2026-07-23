@@ -127,20 +127,12 @@ interface UsageCursor {
   effortRecord: string;
   /** Latest effort from a `/effort` command stub — the only source on builds that predate the field. */
   effortStub: string;
-  /** Per counted assistant turn: timestamp and context sent (input + cacheRead + cacheCreation). */
-  ctxT: number[];
-  ctxV: number[];
   compactions: CompactionEvent[];
 }
 
 const usageCursors = new Map<string, UsageCursor>(); // insertion order = LRU (touch re-inserts)
 const USAGE_CURSOR_CAP = 32; // a fleet scan touches tens of transcripts; an evicted one just rescans
 const TAIL_PEEK_MAX = 2 * 1024 * 1024; // a usage-bearing line is small; never re-read a huge pending tail
-/** Raw context samples kept per cursor; halved in place at the cap so a 10k-turn session stays bounded
- *  (the rendered series is downsampled to CTX_POINTS anyway — this only bounds memory). */
-const RAW_CTX_CAP = 4096;
-/** Points handed to renderers: enough for a legible sparkline, small enough to post to a webview. */
-const CTX_POINTS = 160;
 
 function newCursor(): UsageCursor {
   return {
@@ -158,8 +150,6 @@ function newCursor(): UsageCursor {
     lastModel: '',
     effortRecord: '',
     effortStub: '',
-    ctxT: [],
-    ctxV: [],
     compactions: [],
   };
 }
@@ -219,8 +209,6 @@ interface StoredCursor {
   lastModel: string;
   effortRecord: string;
   effortStub: string;
-  ctxT: number[];
-  ctxV: number[];
   compactions: CompactionEvent[];
 }
 
@@ -249,8 +237,6 @@ function loadCursor(transcript: string): UsageCursor | undefined {
     lastModel: raw.lastModel || '',
     effortRecord: raw.effortRecord || '',
     effortStub: raw.effortStub || '',
-    ctxT: raw.ctxT || [],
-    ctxV: raw.ctxV || [],
     compactions: raw.compactions || [],
   };
 }
@@ -274,8 +260,6 @@ function saveCursor(transcript: string, cur: UsageCursor): void {
     lastModel: cur.lastModel,
     effortRecord: cur.effortRecord,
     effortStub: cur.effortStub,
-    ctxT: cur.ctxT,
-    ctxV: cur.ctxV,
     compactions: cur.compactions,
   };
   try {
@@ -385,26 +369,7 @@ function consumeDelta(transcript: string, cur: UsageCursor, end: number): void {
     cur.output += num(u.output_tokens);
     cur.cacheRead += num(u.cache_read_input_tokens);
     cur.cacheCreation += num(u.cache_creation_input_tokens);
-    // Context actually sent on this turn — the series that saw-tooths back down at every compaction.
-    const ctx = num(u.input_tokens) + num(u.cache_read_input_tokens) + num(u.cache_creation_input_tokens);
-    if (ctx > 0 && ts > 0) {
-      cur.ctxT.push(ts);
-      cur.ctxV.push(ctx);
-      if (cur.ctxT.length > RAW_CTX_CAP) halveSeries(cur);
-    }
   }
-}
-
-/** Drop every second sample, in place — a long session keeps its shape at half the memory. */
-function halveSeries(cur: UsageCursor): void {
-  const t: number[] = [];
-  const v: number[] = [];
-  for (let i = 0; i < cur.ctxT.length; i += 2) {
-    t.push(cur.ctxT[i]);
-    v.push(cur.ctxV[i]);
-  }
-  cur.ctxT = t;
-  cur.ctxV = v;
 }
 
 /** `<local-command-stdout>Set effort level to max (this session only): …</local-command-stdout>` → 'max'.
@@ -488,8 +453,6 @@ export interface SessionVitals {
   effort: { level: string; source: 'record' | 'stub' } | null;
   /** Every context compaction, in transcript order. */
   compactions: CompactionEvent[];
-  /** Context sent per turn as [tsMs, tokens], downsampled for rendering — saw-tooths at each compaction. */
-  context: [number, number][];
 }
 
 /**
@@ -497,7 +460,7 @@ export interface SessionVitals {
  * cursor: calling both back-to-back (as the stats panels do) parses the transcript once.
  */
 export function sessionVitals(cwd: string, sessionId: string): SessionVitals {
-  const empty: SessionVitals = { model: null, models: [], effort: null, compactions: [], context: [] };
+  const empty: SessionVitals = { model: null, models: [], effort: null, compactions: [] };
   const transcript = findTranscript(cwd, sessionId);
   if (!transcript) return empty;
   const adv = advanceCursor(transcript);
@@ -510,23 +473,7 @@ export function sessionVitals(cwd: string, sessionId: string): SessionVitals {
     effort: level ? { level, source: cur.effortRecord ? 'record' : 'stub' } : null,
     // Fresh objects only — the cursor is mutable shared state that keeps accumulating.
     compactions: cur.compactions.map((c) => ({ ...c })),
-    context: downsample(cur.ctxT, cur.ctxV, CTX_POINTS),
   };
-}
-
-/** Bucket a series down to at most `max` points, keeping each bucket's LAST sample (so the newest
- *  value — the one the readout quotes — always survives, and compaction drops stay visible). */
-function downsample(t: number[], v: number[], max: number): [number, number][] {
-  const n = t.length;
-  if (n === 0) return [];
-  if (n <= max) return t.map((ts, i): [number, number] => [ts, v[i]]);
-  const out: [number, number][] = [];
-  for (let b = 0; b < max; b++) {
-    const start = Math.floor((b * n) / max);
-    const end = Math.max(start, Math.floor(((b + 1) * n) / max) - 1);
-    out.push([t[end], v[end]]);
-  }
-  return out;
 }
 
 /** Tool-call latencies (ms) = each tool_result timestamp − its tool_use timestamp, matched by id. */

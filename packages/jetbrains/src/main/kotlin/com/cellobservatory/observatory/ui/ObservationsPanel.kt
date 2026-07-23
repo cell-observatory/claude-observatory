@@ -1,10 +1,12 @@
 package com.cellobservatory.observatory.ui
 
 import com.cellobservatory.observatory.model.ContextSource
+import com.cellobservatory.observatory.model.ObsEdit
 import com.cellobservatory.observatory.model.ObservationEdit
 import com.cellobservatory.observatory.model.ObservationRun
 import com.cellobservatory.observatory.model.Observations
 import com.cellobservatory.observatory.services.ObservatoryService
+import com.cellobservatory.observatory.services.ObserveCache
 import com.intellij.icons.AllIcons
 import com.intellij.notification.NotificationType
 import com.intellij.openapi.actionSystem.ActionManager
@@ -16,6 +18,7 @@ import com.intellij.openapi.project.DumbAware
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.SimpleToolWindowPanel
 import com.intellij.ui.ColoredTreeCellRenderer
+import com.intellij.ui.JBColor
 import com.intellij.ui.PopupHandler
 import com.intellij.ui.SimpleTextAttributes
 import com.intellij.ui.components.JBScrollPane
@@ -51,6 +54,12 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
 
     @Volatile private var data: Observations? = null
 
+    /** Per-edit issue flags + cross-session file memory, by edit id — from the `observe --json` payload
+     *  ObserveCache already holds for the reasoning shown elsewhere. The observations view-model carries
+     *  neither, and dropping them left this panel silently quieter than the same view in VS Code, which
+     *  decorates every row it has a flag or a memory line for. */
+    @Volatile private var obsById: Map<Int, ObsEdit> = emptyMap()
+
     // The user-triggered `claude -p` recap (Refresh Recap), preferred over the auto recap until the next
     // manual regeneration — guarantees the freshly generated text is what the recap row shows.
     @Volatile private var freshRecap: String? = null
@@ -84,6 +93,7 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
         PopupHandler.installPopupMenu(tree, buildPopupGroup(), "ClaudeObservatoryObsPopup")
 
         ObservatoryService.getInstance(project).addListener { rebuild() }
+        ObserveCache.getInstance(project).addListener { rebuild() } // flags/memory land async → decorate then
         rebuild()
     }
 
@@ -122,9 +132,13 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
         // The SHARED throttled observations view (0.8.0 stabilization) — one spawn per ~3s across the
         // window; get() serves the latest cached view now and re-fires the listener when fresh data lands.
         val res = service.observations()
+        // Cached and keyed on the store, so this is a stat() when nothing moved; joined once per repaint
+        // rather than per row (the renderer runs for every visible row on every paint).
+        val obs = ObserveCache.getInstance(project).payload()?.edits?.associateBy { it.id } ?: emptyMap()
         ApplicationManager.getApplication().invokeLater {
             if (project.isDisposed) return@invokeLater
             data = res
+            obsById = obs
             repaintTree()
         }
     }
@@ -263,6 +277,39 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
 
     private inner class Renderer : ColoredTreeCellRenderer() {
         private val hhmm = SimpleDateFormat("HH:mm")
+        // Warn-level flags share the review palette's amber (the same hue the Actions timeline uses for a
+        // flagged call); an info flag and the memory line stay grey — they are context, not an alarm.
+        private val amber = SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, JBColor.ORANGE)
+
+        /** A row earns the warning icon when the edit was flagged at warn level, or when this file's
+         *  cross-session history says edits to it get reverted often (VS Code's `warn`). */
+        private fun warned(ob: ObsEdit?): Boolean = ob != null && (ob.risky || ob.flags.any { it.level == "warn" })
+
+        /** The row's flag + memory decoration: the FIRST flag inline (warn wins), a "+N" for the rest, and
+         *  the file's cross-session verdict summary. Everything else goes to the tooltip — a row is one
+         *  line, and a flag that only exists on hover is a flag nobody reads. */
+        private fun appendObs(ob: ObsEdit?) {
+            if (ob == null) return
+            val flag = ob.flags.firstOrNull { it.level == "warn" } ?: ob.flags.firstOrNull()
+            if (flag != null) {
+                val warn = flag.level == "warn"
+                append("  ${if (warn) "⚠" else "·"} ${flag.message}", if (warn) amber else SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                if (ob.flags.size > 1) append(" +${ob.flags.size - 1}", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+            }
+            ob.memorySummary.takeIf { it.isNotBlank() }?.let {
+                append("  ⚑ $it", if (ob.risky) amber else SimpleTextAttributes.GRAYED_ITALIC_ATTRIBUTES)
+            }
+        }
+
+        /** Every flag + the memory line, for the tooltip (the row shows only the first). */
+        private fun obsTip(ob: ObsEdit?): String = buildString {
+            if (ob == null) return@buildString
+            ob.flags.forEach { append("\n${if (it.level == "warn") "⚠" else "ℹ"} ${it.message}") }
+            ob.memorySummary.takeIf { it.isNotBlank() }?.let {
+                append("\n⚑ $it")
+                if (ob.risky) append(" — edits to this file get reverted often; review carefully")
+            }
+        }
 
         override fun customizeCellRenderer(
             tree: JTree, value: Any?, selected: Boolean, expanded: Boolean,
@@ -323,7 +370,10 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
                     append(node, SimpleTextAttributes.REGULAR_ATTRIBUTES)
                 }
                 is ObservationRun -> {
-                    icon = when (node.status) {
+                    // A single-edit run IS its edit's row (it never expands), so it carries that edit's
+                    // flags/memory too — otherwise the decoration would appear only on multi-edit files.
+                    val ob = if (node.count == 1) node.edits.firstOrNull()?.let { obsById[it.id] } else null
+                    icon = if (warned(ob)) AllIcons.General.Warning else when (node.status) {
                         "pending" -> AllIcons.General.Modified
                         "undone" -> AllIcons.Actions.Cancel
                         else -> NavTint.KEEP
@@ -334,14 +384,17 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
                     if (node.added > 0 || node.removed > 0) append("  +${node.added} -${node.removed}", SimpleTextAttributes.GRAYED_ATTRIBUTES)
                     val why = node.edits.firstNotNullOfOrNull { it.reasoning?.lineSequence()?.firstOrNull()?.takeIf { l -> l.isNotBlank() } }
                     if (why != null) append("  $why", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                    appendObs(ob)
                     toolTipText = buildString {
                         append(node.rel)
                         append("\n${node.count} edit(s) · +${node.added} -${node.removed} · ${node.status}")
                         if (node.count == 1) node.edits.firstOrNull()?.reasoning?.let { append("\n💭 $it") }
+                        append(obsTip(ob))
                     }
                 }
                 is ObservationEdit -> {
-                    icon = when (node.status) {
+                    val ob = obsById[node.id]
+                    icon = if (warned(ob)) AllIcons.General.Warning else when (node.status) {
                         "kept" -> NavTint.KEEP
                         "undone" -> AllIcons.Actions.Cancel
                         else -> AllIcons.General.Modified
@@ -355,9 +408,11 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
                     if (node.added > 0 || node.removed > 0) append("  +${node.added} -${node.removed}", SimpleTextAttributes.GRAYED_ATTRIBUTES)
                     node.reasoning?.lineSequence()?.firstOrNull()?.takeIf { it.isNotBlank() }
                         ?.let { append("  $it", SimpleTextAttributes.GRAYED_ATTRIBUTES) }
+                    appendObs(ob)
                     toolTipText = buildString {
                         node.reasoning?.let { append("💭 $it\n") }
                         append("edit #${node.id} · +${node.added} -${node.removed} · ${node.status}")
+                        append(obsTip(ob))
                     }
                 }
             }

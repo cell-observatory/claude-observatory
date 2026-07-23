@@ -1270,7 +1270,7 @@ test('contract 0.8.0: every machine surface the editors consume emits its docume
   // multitask — the Overview left nav (Fleet · Workflows · curated Actions) in both editors.
   const mt = runJson(['multitask', '--json']);
   hasKeys(mt, ['agents', 'collisions', 'worktrees', 'workflows', 'actions', 'summary'], 'multitask');
-  hasKeys(mt.agents[0], ['session', 'worktree', 'gitBranch', 'self', 'phase', 'phaseConfidence', 'sparkline', 'todos', 'subagents', 'files', 'diff', 'tokens', 'durationMs', 'risk', 'capabilities', 'compactions'], 'multitask.agents[]');
+  hasKeys(mt.agents[0], ['session', 'worktree', 'gitBranch', 'self', 'phase', 'phaseConfidence', 'sparkline', 'todos', 'subagents', 'files', 'diff', 'tokens', 'durationMs', 'risk', 'outside', 'compactions'], 'multitask.agents[]');
   hasKeys(mt.agents[0].subagents[0], ['agentId', 'agentType', 'description', 'phase', 'phaseConfidence', 'todos', 'currentTask', 'edits', 'added', 'removed'], 'multitask.agents[].subagents[]');
   hasKeys(mt.workflows[0], ['id', 'name', 'phases', 'agents', 'phaseGroups', 'running', 'lastActivityMs', 'agentCount', 'tokens', 'durationMs', 'edits', 'added', 'removed', 'sparkline'], 'multitask.workflows[]');
   hasKeys(mt.actions, ['groups', 'egress'], 'multitask.actions');
@@ -1278,13 +1278,19 @@ test('contract 0.8.0: every machine surface the editors consume emits its docume
 
   // changemap — the Overview detail (ribbon · strip · ledger) + per-agent slices.
   const cm = runJson(['changemap', '--json']);
-  hasKeys(cm, ['summary', 'edits', 'chapters', 'compactions', 'capabilities', 'files', 'modules', 'tasks', 'rollupByTask', 'rollupBySubagent', 'rollupByWorkflow', 'workflows', 'rollupByAgent', 'agents', 'unassigned'], 'changemap');
-  hasKeys(cm.capabilities, ['reads', 'edits', 'exec', 'mcp', 'web', 'agents'], 'changemap.capabilities'); // Overview badge row, both editors
+  hasKeys(cm, ['summary', 'edits', 'chapters', 'compactions', 'files', 'modules', 'tasks', 'rollupByTask', 'rollupBySubagent', 'rollupByWorkflow', 'workflows', 'rollupByAgent', 'agents', 'unassigned'], 'changemap');
+  // 0.8.7 folded the footprint into the risk/egress audits — see `risk --json`.outsideWrites and the
+  // `file` channels in `egress --json`. The change map no longer carries a badge-row payload.
+  assert.ok(!('footprint' in cm), 'changemap carries no footprint — it folded into risk + egress');
   hasKeys(cm.summary, ['session', 'title'], 'changemap.summary'); // title drives the Overview selector + Stats session name (JetBrains)
   hasKeys(cm.chapters[0], ['id', 'taskId', 'synthetic', 'index', 'title', 'status', 'startTs', 'endTs', 'edits', 'added', 'removed', 'pending', 'kept', 'undone', 'agent', 'editIds'], 'changemap.chapters[]'); // editIds drives the JetBrains Chapter axis
   hasKeys(cm.edits[0], ['id', 'rel', 'module', 'file', 'added', 'removed', 'status', 'ts', 'agent', 'risk', 'reasoning', 'chapter', 'taskId', 'subagentId', 'workflowId'], 'changemap.edits[]');
   hasKeys(cm.workflows[0], ['id', 'name', 'running', 'rollup', 'files', 'taskIds', 'chapters'], 'changemap.workflows[]');
   hasKeys(cm.agents[0], ['session', 'worktree', 'gitBranch', 'phase', 'lastMs', 'summary', 'chapters', 'files', 'modules'], 'changemap.agents[]');
+  // Per-sibling `edits` is deliberately projected out: 1.95 MB of a 3.30 MB payload that no renderer
+  // read. The ACTIVE session's own top-level edits stay — that is the list tools consume.
+  assert.ok(!('edits' in cm.agents[0]), 'changemap.agents[] carries no per-sibling edit list');
+  assert.ok(Array.isArray(cm.edits), 'the session\'s own edits are untouched');
   assert.ok(cm.edits.every((e) => typeof e.chapter === 'string' && e.chapter.length > 0), 'changemap: the chapter dimension is TOTAL');
 
   // tasklog / chat-context / observations / metrics / siblings --repo.
@@ -4269,9 +4275,9 @@ test('barrel: index.ts re-exports every new 0.8.0 public symbol (CLI-as-single-b
     'parseWorkflows',
     // 0.8.0 r2 — workflow→edit attribution + per-workflow rollup (workflows.ts / changemap.ts)
     'workflowWindows', 'workflowForTs', 'rollupByWorkflow',
-    // 0.8.6 — session vitals (metrics.ts), compaction primitives (actions.ts), capability footprint
+    // 0.8.6 — session vitals (metrics.ts), compaction primitives (actions.ts), footprint
     // (capabilities.ts), context sources (observe.ts), shared model labeller (format.ts)
-    'sessionVitals', 'parseCompactLine', 'compactLabel', 'buildCapabilities', 'contextSources', 'friendlyModel',
+    'sessionVitals', 'parseCompactLine', 'compactLabel', 'outsideReads', 'outsideWrites', 'contextSources', 'friendlyModel',
   ];
   const missing = publicFns.filter((k) => typeof core[k] !== 'function');
   assert.deepEqual(missing, [], `barrel is missing public symbol(s): ${missing.join(', ')}`);
@@ -5026,7 +5032,7 @@ test('observe: listSessionsWithTitles pairs store sessions with their transcript
   assert.ok(row3.title.endsWith('…'), 'capped titles end with an ellipsis');
 });
 
-// --- 0.8.6: session vitals (model/effort), compaction visibility, capability footprint, context sources ---
+// --- 0.8.6: session vitals (model/effort), compaction visibility, footprint, context sources ---
 
 test('metrics: sessionVitals reports the CURRENT model, keeps the full set, and never counts sidechains or <synthetic> (0.8.6)', () => {
   freshHome();
@@ -5160,33 +5166,6 @@ test('changemap: compactions are placed by TIME against started chapters, not by
   assert.ok(cm.chapters.some((c) => c.startTs === 0) || true, 'plan order is not chronological order');
 });
 
-test('capabilities: counts what a session EXERCISED, splitting in- from out-of-workspace (0.8.6)', () => {
-  const root = '/work/app';
-  const acts = [
-    { ts: 1, tool: 'Read', category: 'read', target: '/work/app/src/index.ts', ok: true, isError: false },
-    { ts: 2, tool: 'Read', category: 'read', target: '/etc/hosts', ok: true, isError: false },
-    { ts: 3, tool: 'Write', category: 'edit', target: '/work/app/src/new.ts', ok: true, isError: false },
-    { ts: 4, tool: 'Edit', category: 'edit', target: '/home/u/.claude/CLAUDE.md', ok: true, isError: false },
-    { ts: 5, tool: 'Bash', category: 'exec', target: 'rm -rf /tmp/x', ok: true, isError: false, risk: { level: 'high', reasons: ['recursive delete'] } },
-    { ts: 6, tool: 'Bash', category: 'exec', target: 'ls', ok: true, isError: false },
-    { ts: 7, tool: 'mcp__linear__issues', category: 'mcp', target: 'ENG-1', ok: true, isError: false },
-    { ts: 8, tool: 'mcp__linear__create', category: 'mcp', target: 'ENG-2', ok: true, isError: false },
-    { ts: 9, tool: 'WebFetch', category: 'web', target: 'https://example.com/docs', ok: true, isError: false },
-    { ts: 10, tool: 'WebSearch', category: 'web', target: 'how to fix it', ok: true, isError: false },
-    { ts: 11, tool: 'Task', category: 'agent', target: 'explore', ok: true, isError: false },
-  ];
-  const cap = core.buildCapabilities(acts, { root });
-  assert.deepEqual([cap.reads.count, cap.reads.outOfRoot], [2, 1], 'reads split by workspace boundary');
-  assert.deepEqual([cap.edits.count, cap.edits.outOfRoot], [2, 1], 'edits split the same way');
-  assert.deepEqual([cap.exec.count, cap.exec.risky, cap.exec.high], [2, 1, 1], 'risk tiers come from risk.ts scores already on the records');
-  assert.equal(cap.edits.outOfRoot, 1, 'a shell command that writes files is NOT guessed into edits — it stays an exec with its risk');
-  assert.deepEqual(cap.mcp.servers, ['linear'], 'MCP servers dedupe out of mcp__<server>__<tool>');
-  assert.deepEqual(cap.web.hosts, ['example.com'], 'a fetched host is captured; a plain search query has no host');
-  assert.equal(cap.web.calls, 2, 'both web calls still count');
-  assert.equal(cap.agents.spawns, 1, 'subagent spawns are a capability too');
-  assert.deepEqual(core.buildCapabilities([], { root }).mcp.servers, [], 'empty stream -> empty footprint, no nulls');
-});
-
 test('observe: contextSources separates what the transcript PROVES from what is merely present (0.8.6)', () => {
   const home = freshHome();
   delete process.env.CLAUDE_CONFIG_DIR;
@@ -5281,4 +5260,313 @@ test('metrics: the usage cursor survives across processes — a cold reader delt
   // A replaced (shrunken) transcript must invalidate rather than serve stale totals.
   fs.writeFileSync(file, line('q1', 3, '2026-07-15T11:00:00.000Z') + '\n');
   assert.equal(usage().sessionTokens.input, 3, 'a replaced transcript rescans from zero');
+});
+
+test('processes: background shells are reconstructed with runtime, exit code and output (0.8.7)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'bgProc';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const outFile = path.join(cwd, 'job.output');
+  fs.writeFileSync(outFile, 'some output\n');
+  // Verbatim record shapes: the spawn is a Bash tool_use with run_in_background, the result names the
+  // shell in toolUseResult.backgroundTaskId, and the completion arrives as its own `queue-operation`
+  // record carrying a <task-notification> block — which has no `message` at all.
+  const spawn = (id, cmd, desc, ts) =>
+    JSON.stringify({ timestamp: new Date(ts).toISOString(), type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id, name: 'Bash', input: { command: cmd, description: desc, run_in_background: true } }] } });
+  const result = (id, bg, ts) =>
+    JSON.stringify({ timestamp: new Date(ts).toISOString(), type: 'user', toolUseResult: { backgroundTaskId: bg }, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: `Command running in background with ID: ${bg}. Output is being written to: ${outFile}. You will be notified.` }] } });
+  const done = (bg, ts, code) =>
+    JSON.stringify({ type: 'queue-operation', operation: 'enqueue', timestamp: new Date(ts).toISOString(), content: `<task-notification> <task-id>${bg}</task-id> <status>completed</status> <summary>Background command "job" completed (exit code ${code})</summary> </task-notification>` });
+
+  fs.writeFileSync(
+    path.join(proj, S + '.jsonl'),
+    [
+      spawn('t1', 'npm test', 'Run the suite', 1000),
+      result('t1', 'shellA', 1100),
+      done('shellA', 61000, 0),
+      spawn('t2', 'tail -f log', 'Watch the log', 2000),
+      result('t2', 'shellB', 2100),
+      // a foreground Bash must NOT appear
+      JSON.stringify({ timestamp: new Date(3000).toISOString(), type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 't3', name: 'Bash', input: { command: 'ls' } }] } }),
+    ].join('\n') + '\n'
+  );
+
+  const list = core.sessionProcesses(cwd, S, 92000); // pin "now" so the live runtime is deterministic
+  assert.equal(list.length, 2, 'only backgrounded shells are listed — a foreground Bash is not a process');
+  // Running first: the Processes tab leads with the shell you might still act on. Look rows up by id
+  // rather than position so this assertion states identity, not ordering.
+  assert.deepEqual(list.map((p) => p.id), ['shellB', 'shellA'], 'a running shell sorts above a finished one');
+  const a = list.find((p) => p.id === 'shellA');
+  const b = list.find((p) => p.id === 'shellB');
+  assert.deepEqual([a.id, a.command, a.description], ['shellA', 'npm test', 'Run the suite'], 'identity comes from the spawn + its result');
+  assert.equal(a.running, false, 'the completion notification ends it');
+  assert.equal(a.exitCode, 0, 'the exit code is read out of the completion summary');
+  assert.equal(a.runtimeMs, 60000, 'a finished shell measures start → finish');
+  assert.equal(a.outputBytes, 12, 'the output file is stat-ed for volume');
+  assert.equal(b.running, true, 'a shell with no completion notification is still running');
+  assert.equal(b.runtimeMs, 90000, 'a live shell measures start → now');
+  assert.equal(b.exitCode, null, 'a running shell has no exit code — reported as unknown, never 0');
+  assert.deepEqual(core.summarizeProcesses(list), { total: 2, running: 1, failed: 0 }, 'headline for the Processes tab');
+  assert.deepEqual(core.sessionProcesses(cwd, 'nope'), [], 'no transcript -> no processes');
+});
+
+test('feed: each kind tails the file that thing writes, and says what it dropped (0.8.7)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'feedSess';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const use = (id, name, input, ts) =>
+    JSON.stringify({ timestamp: new Date(ts).toISOString(), type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id, name, input }] } });
+  const err = (id, ts) =>
+    JSON.stringify({ timestamp: new Date(ts).toISOString(), type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, is_error: true }] } });
+  fs.writeFileSync(
+    path.join(proj, S + '.jsonl'),
+    [use('a1', 'Read', { file_path: '/x/one.ts' }, 1000), use('a2', 'Bash', { command: 'npm test' }, 2000), err('a2', 2100)].join('\n') + '\n'
+  );
+
+  const sess = core.liveFeed(cwd, S, { kind: 'session', id: '' });
+  assert.equal(sess.entries.length, 2, 'the session feed is its main-chain tool calls');
+  assert.equal(sess.entries[0].label, 'Read', 'oldest first — a feed reads downward like a terminal');
+  assert.equal(sess.entries[1].ok, false, 'a failed call is marked, not silently normal');
+
+  // A limit must report what it hid: a feed that silently truncates reads as "this is everything".
+  const capped = core.liveFeed(cwd, S, { kind: 'session', id: '' }, { limit: 1 });
+  assert.equal(capped.entries.length, 1, 'limit honoured');
+  assert.equal(capped.truncated, 1, 'and the dropped count is reported');
+  assert.equal(capped.entries[0].label, 'Bash', 'the NEWEST entries survive a cap, not the oldest');
+
+  // A subagent's feed comes from its own transcript.
+  const subDir = path.join(proj, S, 'subagents');
+  fs.mkdirSync(subDir, { recursive: true });
+  const agFile = path.join(subDir, 'agent-ag1.jsonl');
+  // A COMPLETED turn (the call and its result), then backdated: an unanswered tool call would read as
+  // awaiting-permission — still alive — and phase is staleness-derived, so a file written a millisecond
+  // ago never looks finished either. (utimesSync takes SECONDS.)
+  fs.writeFileSync(
+    agFile,
+    [use('s1', 'Grep', { pattern: 'todo' }, 3000), JSON.stringify({ timestamp: new Date(3100).toISOString(), type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 's1' }] } })].join('\n') + '\n'
+  );
+  const anHourAgo = (Date.now() - 60 * 60_000) / 1000;
+  fs.utimesSync(agFile, anHourAgo, anHourAgo);
+  const ag = core.liveFeed(cwd, S, { kind: 'agent', id: 'ag1' });
+  assert.equal(ag.entries[0].label, 'Grep', "an agent's feed is its OWN transcript, not the parent's");
+
+  // A background shell has no structured events — its feed is the output file, tailed.
+  const outFile = path.join(cwd, 'p.output');
+  fs.writeFileSync(outFile, 'line one\nline two\n');
+  fs.writeFileSync(
+    path.join(proj, 'procFeed.jsonl'),
+    [
+      JSON.stringify({ timestamp: new Date(1000).toISOString(), type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'p1', name: 'Bash', input: { command: 'tail -f log', run_in_background: true } }] } }),
+      JSON.stringify({ timestamp: new Date(1100).toISOString(), type: 'user', toolUseResult: { backgroundTaskId: 'sh1' }, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'p1', content: `Command running in background with ID: sh1. Output is being written to: ${outFile}.` }] } }),
+    ].join('\n') + '\n'
+  );
+  const proc = core.liveFeed(cwd, 'procFeed', { kind: 'process', id: 'sh1' });
+  assert.deepEqual(proc.entries.map((e) => e.label), ['line one', 'line two'], 'output lines become feed rows');
+  assert.equal(proc.entries[0].ts, 0, 'raw output carries no timestamp — reported as 0, never invented');
+  assert.equal(proc.running, true, 'no completion notification yet -> still running');
+  // A feed means a different thing depending on whether its source is still going: follow a live one,
+  // read a finished one as the record it is. Renderers key their label and their polling off this.
+  assert.equal(proc.mode, 'live', 'a running shell yields a LIVE feed');
+  assert.equal(ag.mode, 'audit', 'a finished agent yields an AUDIT log, and should stop being polled');
+
+  const missing = core.liveFeed(cwd, S, { kind: 'agent', id: 'nope' });
+  assert.deepEqual([missing.entries.length, missing.running], [0, false], 'an unknown target is empty, not an error');
+  assert.ok(missing.note, 'and says why it is empty');
+});
+
+test('processes: a shell that never reported an end is bounded by evidence, not by the clock (0.8.7)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'procEvidence';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const at = (ms) => new Date(ms).toISOString();
+  const spawn = (id, cmd, ts, bg = true) =>
+    JSON.stringify({ timestamp: at(ts), type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id, name: 'Bash', input: { command: cmd, run_in_background: bg } }] } });
+  const result = (id, bg, ts) =>
+    JSON.stringify({ timestamp: at(ts), type: 'user', toolUseResult: { backgroundTaskId: bg }, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: `Command running in background with ID: ${bg}.` }] } });
+  const note = (bg, ts, status, code) =>
+    JSON.stringify({ type: 'queue-operation', operation: 'enqueue', timestamp: at(ts), content: `<task-notification> <task-id>${bg}</task-id> <tool-use-id>t9</tool-use-id> <status>${status}</status> <summary>done (exit code ${code})</summary> </task-notification>` });
+
+  fs.writeFileSync(
+    path.join(proj, S + '.jsonl'),
+    [
+      // never-ending shell: the session's last record is the last moment we can vouch for
+      spawn('t1', 'tail -f log', 1000),
+      result('t1', 'ghost', 1100),
+      // the harness logs each completion TWICE (enqueue, then remove) — the FIRST is when it ended
+      spawn('t2', 'npm test', 2000),
+      result('t2', 'twice', 2100),
+      note('twice', 62000, 'completed', 0),
+      JSON.stringify({ type: 'queue-operation', operation: 'remove', timestamp: at(120000), content: '<task-notification> <task-id>twice</task-id> <status>completed</status> <summary>done (exit code 0)</summary> </task-notification>' }),
+      // an end that arrives BEFORE the result binding its id must still be applied
+      note('early', 3000, 'completed', 0),
+      spawn('t3', 'sleep 1', 4000),
+      result('t3', 'early', 4100),
+      // an explicit kill is the only end some shells ever get
+      spawn('t4', 'watch', 5000),
+      result('t4', 'killme', 5100),
+      JSON.stringify({ timestamp: at(9000), type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 't5', name: 'TaskStop', input: { task_id: 'killme' } }] } }),
+    ].join('\n') + '\n'
+  );
+
+  const byId = Object.fromEntries(core.sessionProcesses(cwd, S, 999999999).map((p) => [p.id, p]));
+  assert.equal(byId.twice.runtimeMs, 60000, 'the FIRST completion is when it ended — the later `remove` inflated runtimes up to 10x');
+  assert.equal(byId.early.running, false, 'a completion logged before its binding result is still applied');
+  assert.equal(byId.killme.status, 'stopped', 'TaskStop is an end — otherwise a killed shell runs forever');
+  assert.equal(byId.killme.running, false, 'and it is no longer polled');
+  // The open shell: "nobody told us it stopped" is not "it is still running at this instant".
+  assert.equal(byId.ghost.running, true, 'with no end recorded we do not claim it finished');
+  // Last evidence in this fixture is the `remove` record at 120000, so the open shell measures to
+  // there — not to `now`, which would have reported the age of the session instead of a runtime.
+  assert.equal(byId.ghost.runtimeMs, 119000, 'an open shell is measured to the last evidence, never to the clock');
+  assert.ok(byId.ghost.runtimeMs < 999999999 - byId.ghost.startedTs, 'and is nowhere near now-minus-start');
+});
+
+test('observe: a subagent edit takes ITS OWN reasoning, and one gap does not cascade (0.8.7)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'reasonAuthor';
+  const cwd = tmpWork();
+  const F = path.join(cwd, 'app.js');
+  const G = path.join(cwd, 'lib.js');
+  // #1 main-chain edit, #2 subagent edit (same file), #3 main-chain edit after an unexplained gap.
+  seedEdit(S, F, 'a\n', 'b\n'); // id 1, ts 1000
+  seedEdit(S, F, 'b\n', 'c\n'); // id 2, ts 2000  ← authored by the subagent
+  seedEdit(S, G, 'x\n', 'y\n'); // id 3, ts 3000
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const turn = (ts, text, file) =>
+    JSON.stringify({ timestamp: new Date(ts).toISOString(), type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text }, { type: 'tool_use', id: 'u' + ts, name: 'Edit', input: { file_path: file } }] } });
+  // The MAIN transcript explains #1 and #3 only — it never saw the subagent's edit.
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), [turn(900, 'Main: rename the handler.', F), turn(2900, 'Main: extend the helper.', G)].join('\n') + '\n');
+  // The subagent's own transcript explains #2.
+  const subDir = path.join(proj, S, 'subagents');
+  fs.mkdirSync(subDir, { recursive: true });
+  fs.writeFileSync(path.join(subDir, 'agent-a1.jsonl'), turn(1900, 'Agent: tighten the guard clause.', F) + '\n');
+
+  const m = core.reasoningByEdit(cwd, S);
+  assert.equal(m.get(1), 'Main: rename the handler.', 'the main chain explains its own edit');
+  // The bug this pins: the subagent's edit used to take the orchestrator's words (or nothing at all),
+  // because only the main transcript was searched and matching walked a positional cursor.
+  assert.equal(m.get(2), 'Agent: tighten the guard clause.', "a subagent's edit takes the words of the agent that made it");
+  assert.equal(m.get(3), 'Main: extend the helper.', 'and a later edit is unaffected — one gap no longer shifts everything after it');
+});
+
+test('audits: boundary crossings land in the audit that owns them (0.8.7)', () => {
+  const root = '/work/app';
+  const acts = [
+    { ts: 1, tool: 'Read', category: 'read', target: '/work/app/src/a.ts', ok: true, isError: false },
+    { ts: 2, tool: 'Read', category: 'read', target: '/etc/hosts', ok: true, isError: false },
+    { ts: 3, tool: 'Read', category: 'read', target: '/etc/hosts', ok: true, isError: false },
+    { ts: 4, tool: 'Write', category: 'edit', target: '/work/app/src/b.ts', ok: true, isError: false },
+    { ts: 5, tool: 'Edit', category: 'edit', target: '/tmp/scratch.md', ok: true, isError: false },
+  ];
+  // Reading outside the boundary is REACH — the same question egress answers for the network — so it
+  // arrives as a channel of that report rather than as a second audit.
+  const reads = core.outsideReads(acts, root);
+  assert.equal(reads.length, 1, 'only the read that left the workspace is a channel');
+  assert.deepEqual([reads[0].kind, reads[0].scope, reads[0].count], ['file', 'local', 2], 'repeat reads of one path collapse to a count');
+  assert.notEqual(reads[0].scope, 'unknown', "'local' is a fact; 'unknown' is an admission — never collapse the two");
+
+  // Writing outside it is DAMAGE, which is risk's question. Reported as an observation, never scored.
+  const writes = core.outsideWrites(acts, root);
+  assert.equal(writes.length, 1, 'only the edit that left the workspace is reported');
+  assert.ok(writes[0].file.endsWith('scratch.md'), 'named by path so a renderer can open it');
+
+  assert.deepEqual(core.outsideReads([], root), [], 'nothing read outside -> nothing claimed');
+  assert.deepEqual(core.outsideWrites([], root), [], 'nothing written outside -> nothing claimed');
+  assert.ok(/exercised, not approved/.test(core.EXERCISED_NOTE), 'the product rule survives the fold, in one place');
+});
+
+test('requests: the session splits by what the USER asked, and work belongs to the ask that started it (0.8.7)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'reqSplit';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  // Three DIFFERENT files: same-code collapse folds repeated edits to one file into a single review
+  // unit, and this test is about which ASK owns which work — not about the collapse.
+  seedEdit(S, path.join(cwd, 'a.js'), 'a\n', 'b\n'); // id 1 → ts 1000
+  seedEdit(S, path.join(cwd, 'b.js'), 'x\n', 'y\n'); // id 2 → ts 2000
+  seedEdit(S, path.join(cwd, 'c.js'), 'p\n', 'q\n'); // id 3 → ts 3000
+  const ask = (ts, text) =>
+    JSON.stringify({ timestamp: new Date(ts).toISOString(), type: 'user', message: { role: 'user', content: text } });
+  fs.writeFileSync(
+    path.join(proj, S + '.jsonl'),
+    [
+      ask(500, 'first, add the thing'),
+      // Records that WEAR the user's role without being anything a person typed. Counting any of them
+      // would invent turns, and every one of these occurs in real transcripts.
+      JSON.stringify({ timestamp: new Date(600).toISOString(), type: 'user', message: { role: 'user', content: '<local-command-stdout>Set effort level to max</local-command-stdout>' } }),
+      JSON.stringify({ timestamp: new Date(700).toISOString(), type: 'user', isCompactSummary: true, message: { role: 'user', content: 'This session is being continued…' } }),
+      JSON.stringify({ timestamp: new Date(800).toISOString(), type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'x' }] } }),
+      JSON.stringify({ timestamp: new Date(900).toISOString(), type: 'user', isSidechain: true, message: { role: 'user', content: 'a subagent turn' } }),
+      // Token usage inside request #1's window — the two lines share a message.id (one assistant
+      // message split across lines), so the usage counts ONCE: 100+50+1000+200 = 1350.
+      JSON.stringify({ timestamp: new Date(1500).toISOString(), type: 'assistant', message: { role: 'assistant', id: 'msgA', usage: { input_tokens: 100, output_tokens: 50, cache_read_input_tokens: 1000, cache_creation_input_tokens: 200 } } }),
+      JSON.stringify({ timestamp: new Date(1550).toISOString(), type: 'assistant', message: { role: 'assistant', id: 'msgA', usage: { input_tokens: 100, output_tokens: 50, cache_read_input_tokens: 1000, cache_creation_input_tokens: 200 } } }),
+      // A to-do marked in_progress during request #1 → one "task worked".
+      JSON.stringify({ timestamp: new Date(1600).toISOString(), type: 'assistant', message: { role: 'assistant', id: 'msgT', content: [{ type: 'tool_use', id: 'tuTodo', name: 'TodoWrite', input: { todos: [{ content: 'build the thing', status: 'in_progress' }] } }] } }),
+      ask(2500, 'now the second thing'),
+      JSON.stringify({ timestamp: new Date(2600).toISOString(), type: 'assistant', message: { role: 'assistant', id: 'msgB', usage: { input_tokens: 300, output_tokens: 200 } } }),
+    ].join('\n') + '\n'
+  );
+
+  const rs = core.sessionRequests(cwd, S);
+  assert.equal(rs.length, 2, 'command stubs, compaction summaries, tool results and sidechains are not asks');
+  assert.deepEqual(rs.map((r) => r.index), [1, 2], 'numbered the way a person counts their own turns');
+  // Edits 1 and 2 landed before the second ask; edit 3 after it.
+  assert.deepEqual(rs[0].editIds, [1, 2], 'the first ask owns the work done before the next one');
+  assert.deepEqual(rs[1].editIds, [3], 'and the second owns what followed');
+  assert.equal(rs[0].added > 0, true, '±lines are accumulated, not left at zero');
+  assert.equal(rs[1].endTs, 0, 'the ask being answered has no end yet');
+  assert.deepEqual(core.requestEditIds(cwd, S, rs[0].id), [1, 2], 'the review scope for "accept everything from this ask"');
+  assert.deepEqual(core.summarizeRequests(rs), { total: 2, withEdits: 2, edits: 3 }, 'headline for the Requests tab');
+  // 0.8.7: each ask carries files, folders, tokens and tasks — the per-request headline stats.
+  assert.equal(rs[0].files, 2, 'request #1 touched a.js and b.js');
+  assert.equal(rs[0].folders, 1, '…both in the one folder');
+  assert.equal(rs[1].files, 1, 'request #2 touched only c.js');
+  assert.equal(rs[0].tokens, 1350, 'tokens are summed from assistant usage and deduped by message id (counted once, not twice)');
+  assert.equal(rs[1].tokens, 500, 'the second ask gets only the usage in its own window');
+  assert.equal(rs[0].tasks, 1, 'a to-do marked in_progress during the ask counts as one task worked');
+  assert.equal(rs[1].tasks, 0, 'an ask that touched no to-do reports zero, not a guess');
+  assert.deepEqual(core.sessionRequests(cwd, 'nope'), [], 'no transcript -> no requests');
+
+  // …and the SLICES the Requests window scopes everything by (0.8.7). Same partition, aggregated the
+  // way a workflow's slice is, so a renderer can swap one for the other.
+  const plain = core.buildChangeMap(cwd, S, { root: cwd });
+  assert.deepEqual(plain.requests, [], 'slices are opt-in — the fleet builds a map per sibling and none of them needs one');
+  const map = core.buildChangeMap(cwd, S, { root: cwd, requests: true });
+  assert.equal(map.requests.length, 2, 'one slice per ask');
+  assert.equal(map.requests[0].rollup.edits, 2, 'the first ask’s own edit count');
+  assert.equal(map.requests[1].rollup.edits, 1, '…and the second’s');
+  assert.equal(
+    map.requests[0].rollup.added + map.requests[1].rollup.added,
+    map.summary.added,
+    'the slices partition the session exactly — every line is claimed once'
+  );
+  assert.deepEqual(map.requests[0].files.map((f) => f.file).sort(), ['a.js', 'b.js'], 'a slice carries its own file rollup (no renderer re-aggregates)');
+  assert.deepEqual(map.requests[1].files.map((f) => f.file), ['c.js'], '…and only its own files — never a neighbouring ask’s');
+  assert.equal(map.requests[0].modules.length, 1, '…plus its own folder buckets, for the strip');
+  assert.equal(map.requests[0].chapters.length >= 1, true, '…and its edits regrouped by chapter, for the ribbon');
+  assert.equal(map.requests[0].text, 'first, add the thing', 'the slice carries the ask in FULL — renderers wrap it, nothing is clipped');
+  assert.deepEqual(map.requests[0].editIds, [1, 2], 'the review scope rides along');
+
+  // Accept/reject by REQUEST scope resolves to exactly that ask's edits and flips only those — the set
+  // keepRequest/undoRequest apply in the editors. #1 owns edits 1 & 2; accepting it must leave #2's
+  // edit 3 pending. (Chapter/folder/file scopes are covered end-to-end in test/e2e.sh.)
+  for (const id of core.requestEditIds(cwd, S, rs[0].id)) core.setStatus(S, id, 'kept');
+  const afterKeep = core.readLog(S);
+  assert.deepEqual(afterKeep.filter((r) => r.status === 'kept').map((r) => r.id).sort((a, b) => a - b), [1, 2],
+    'accepting a request flips exactly its own edits');
+  assert.equal(afterKeep.find((r) => r.id === 3).status, 'pending', '…and leaves a neighbouring ask’s edit untouched');
 });

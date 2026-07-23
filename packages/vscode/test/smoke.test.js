@@ -21,6 +21,7 @@ test('extension: three views, click commands, inline annotations, chat, status s
   const proj = path.join(home, '.claude', 'projects', ws.replace(/[^a-zA-Z0-9]/g, '-'));
   fs.mkdirSync(proj, { recursive: true });
   const F = path.join(ws, 'app.txt');
+  const OUT = path.join(home, 'notes', 'outside.md'); // deliberately NOT under the workspace
   // transcript: the ai-title recap + two assistant messages whose Edit tool_uses on F carry Claude's
   // reasoning (correlated per-file to store edits #1/#2) — feeds the inline reasoning lens + blame.
   const AG = 'sa0000000001';
@@ -34,6 +35,12 @@ test('extension: three views, click commands, inline annotations, chat, status s
     JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [
       { type: 'text', text: 'Operation 2 — add a validate() method' },
       { type: 'tool_use', name: 'Edit', input: { file_path: F } },
+    ] } }),
+    // 0.8.7: one read and one edit that land OUTSIDE the workspace — the two facts the folded footprint
+    // left behind, which the Actions tree's Egress (reach) and Risk (damage) sections must state.
+    JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [
+      { type: 'tool_use', name: 'Read', input: { file_path: OUT } },
+      { type: 'tool_use', name: 'Edit', input: { file_path: OUT } },
     ] } }),
     // Subagents (0.7.0): an Agent spawn + its result carrying the subagent's id + metrics.
     JSON.stringify({ timestamp: '2026-07-13T10:00:00.000Z', message: { role: 'assistant', content: [
@@ -78,6 +85,7 @@ test('extension: three views, click commands, inline annotations, chat, status s
   const diffCalls = [];
   const decoCalls = []; // { typeId, opts }
   const trees = {};
+  const treeViewOpts = {};
   const contentProviders = {};
   const webviewProviders = {};
   let lensProvider = null;
@@ -153,6 +161,7 @@ test('extension: three views, click commands, inline annotations, chat, status s
     window: {
       createTreeView: (id, opts) => {
         trees[id] = opts.treeDataProvider;
+        treeViewOpts[id] = opts;
         return { badge: undefined, description: undefined, onDidChangeVisibility: () => ({ dispose() {} }), dispose() {} };
       },
       createStatusBarItem: () => { const it = { text: '', tooltip: '', command: undefined, backgroundColor: undefined, show() {}, hide() {}, dispose() {} }; statusBarItems.push(it); return it; },
@@ -218,17 +227,30 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.ok(!webviewProviders['claudeObservatory.multitask'] && !trees['claudeObservatory.multitask'], 'the standalone Multitasking view is gone (folded into the Overview)');
     assert.ok(trees['claudeObservatory.actions'], 'Actions is registered as a timeline-style tree (now in the sidebar window)');
 
-    // The Actions view now lives in the "Claude Edits" SIDEBAR container (activity-bar), at the BOTTOM
-    // after File History — NOT in the bottom-panel dock (which is now Observations · Overview · Stats).
+    // The Actions view lives in the "Claude Edits" SIDEBAR container (activity-bar) — NOT in the
+    // bottom-panel dock. 0.8.7: Observations joined it there (LAST, with the edits/diffs trees), which
+    // freed the dock for Requests · Overview · Stats — three windows side by side, so the list of asks
+    // and the Overview it scopes are visible at the same time.
     const pkg = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../package.json'), 'utf8'));
     const sidebar = pkg.contributes.views.claudeObservatory;
     const dock = pkg.contributes.views.claudeObservatoryDock;
     const sidebarIds = sidebar.map((v) => v.id);
     assert.ok(sidebarIds.includes('claudeObservatory.actions'), 'Actions view is in the Claude Edits sidebar container');
-    assert.equal(sidebarIds[sidebarIds.length - 1], 'claudeObservatory.actions', 'Actions is the LAST sidebar view (bottom, after File History)');
+    assert.equal(sidebarIds[sidebarIds.length - 1], 'claudeObservatory.observations', 'Observations is the LAST sidebar view (0.8.7)');
     assert.equal(sidebarIds[sidebarIds.indexOf('claudeObservatory.actions') - 1], 'claudeObservatory.fileHistory', 'Actions sits directly after File History');
     assert.ok(!dock.some((v) => v.id === 'claudeObservatory.actions'), 'Actions is no longer in the bottom-panel dock');
-    assert.deepEqual(dock.map((v) => v.id), ['claudeObservatory.observations', 'claudeObservatory.changemap', 'claudeObservatory.stats'], 'the dock is now Observations · Overview · Stats');
+    assert.deepEqual(dock.map((v) => v.id), ['claudeObservatory.requests', 'claudeObservatory.changemap', 'claudeObservatory.stats'], 'the dock is Requests · Overview · Stats (0.8.7)');
+    assert.ok(webviewProviders['claudeObservatory.requests'], 'the Requests window is registered as a webview view');
+    // 0.8.7 QoL: the sidebar trees carry VS Code's native Collapse-All button (showCollapseAll) — the
+    // file-Explorer affordance the user asked for, on Edits · Diffs · Actions (+ Observations).
+    for (const id of ['claudeObservatory.edits', 'claudeObservatory.diffs', 'claudeObservatory.actions', 'claudeObservatory.observations'])
+      assert.equal(treeViewOpts[id] && treeViewOpts[id].showCollapseAll, true, `${id} tree offers Collapse All`);
+    // …and the palette command that reveals the Requests window after a VS Code layout-persistence hide.
+    assert.ok(typeof commands['claudeObservatory.showRequests'] === 'function', 'the Show Requests command is registered');
+    assert.ok(
+      pkg.contributes.commands.some((c) => c.command === 'claudeObservatory.showRequests'),
+      'Show Requests is contributed to the command palette'
+    );
     assert.ok(contentProviders['claude-edit'] && contentProviders['claude-observation'], 'blob + markdown content providers registered');
     assert.ok(decoProvider, 'status FileDecorationProvider registered');
 
@@ -360,6 +382,21 @@ test('extension: three views, click commands, inline annotations, chat, status s
     // Next steps: the still-open to-dos + heuristic follow-ups, grouped at the end.
     assert.ok(obsChildren.some((n) => n.kind === 'steps'), 'the Next-steps group is present');
     assert.ok(obsChildren.some((n) => n.kind === 'suggestion'), 'next-steps suggestions are listed');
+    // 0.8.7 review (P11): Context — what shaped this session — sits BEFORE Next steps and NESTS under its
+    // own header, so a long list collapses as one unit instead of burying everything after it.
+    fs.writeFileSync(path.join(ws, 'CLAUDE.md'), '# project instructions\n'); // one file-present source
+    const obsCtx = obsTree.getChildren();
+    const ctxHead = obsCtx.find((n) => n.kind === 'ctxhead');
+    assert.ok(ctxHead, 'the Context section appears once this session has a context source');
+    assert.ok(obsCtx.indexOf(ctxHead) < obsCtx.findIndex((n) => n.kind === 'steps'), 'Context is placed BEFORE Next steps');
+    assert.ok(!obsCtx.some((n) => n.kind === 'ctxsrc'), 'context sources are no longer flat root-level siblings');
+    const ctxKids = obsTree.getChildren(ctxHead);
+    assert.ok(ctxKids.length >= 1 && ctxKids.every((n) => n.kind === 'ctxsrc'), 'the sources nest under the Context header');
+    const ctxItem = obsTree.getTreeItem(ctxHead);
+    assert.equal(ctxItem.collapsibleState, vscode.TreeItemCollapsibleState.Expanded, 'a short Context list opens');
+    assert.match(String(ctxItem.description), new RegExp('^' + ctxKids.length + ' · '), 'the header states how many sources it holds');
+    const bigCtx = obsTree.getTreeItem({ kind: 'ctxhead', note: ctxHead.note, sources: new Array(6).fill(ctxKids[0].src) });
+    assert.equal(bigCtx.collapsibleState, vscode.TreeItemCollapsibleState.Collapsed, 'a long Context list auto-folds — its header still carries the count');
     const obsMd = contentProviders['claude-observation'].provideTextDocumentContent({ authority: 'obs', path: '/edit-1.md', query: 's=' + S });
     assert.match(obsMd, /\*\*Summary:\*\*/, 'observation markdown has a summary');
 
@@ -373,15 +410,71 @@ test('extension: three views, click commands, inline annotations, chat, status s
     const editGroup = actGroups.find((n) => n.kind === 'agroup' && n.label === 'Edits');
     assert.ok(editGroup, 'the Actions timeline has a collapsible "Edits" category subsection');
     assert.equal(actTree.getTreeItem(editGroup).collapsibleState, vscode.TreeItemCollapsibleState.Collapsed, 'category subsections are collapsed by default (user expands on demand)');
-    assert.match(String(actTree.getTreeItem(editGroup).description), /2/, 'the Edits subsection counts the two seeded edits');
+    assert.match(String(actTree.getTreeItem(editGroup).description), /3/, 'the Edits subsection counts the seeded edits (two in the workspace, one outside it)');
     assert.ok(!actGroups.some((n) => n.kind === 'agroup' && n.label === 'Subagents'), 'the Subagents category is dropped (those are the Overview fleet)');
     const actRows = actTree.getChildren(editGroup);
-    assert.equal(actRows.length, 2, 'the Edits subsection expands to its two action rows');
-    const aItem = actTree.getTreeItem(actRows[0]);
+    assert.equal(actRows.length, 3, 'the Edits subsection expands to its action rows');
+    // Rows are newest-first, so the head of the list is the out-of-workspace edit — which has no store
+    // record to review. The linked one is the row that drills into its review.
+    const aItem = actTree.getTreeItem(actRows.find((n) => n.rec.editId != null));
     assert.match(aItem.label, /Edit/, 'an action row shows the tool');
     assert.ok(/\d\d:\d\d|--:--/.test(aItem.label), 'an action row leads with a TIMESTAMP column');
     assert.equal(aItem.command.command, 'claudeObservatory.viewChanges', 'an edit-action links to its review (viewChanges)');
     assert.ok(typeof aItem.command.arguments[0] === 'number', 'the edit-action carries the store edit id to review');
+    // 0.8.7 review (P6): a flagged command must say WHY in place — core already scored the reasons, and
+    // making the user leave the panel to learn what "⚠ HIGH" meant is the whole cost of the flag.
+    const riskItem = actTree.getTreeItem({ kind: 'arow', rec: {
+      ts: Date.now(), tool: 'Bash', category: 'exec', target: 'rm -rf build', ok: false, isError: false,
+      risk: { level: 'medium', reasons: ['recursive/forced delete (rm -rf)', 'writes outside the workspace'] },
+    } });
+    assert.match(String(riskItem.description), /⚠ medium/, 'a flagged row spells the level out ("medium", never "med")');
+    assert.match(String(riskItem.tooltip), /⚠ medium risk: recursive\/forced delete \(rm -rf\) · writes outside the workspace/,
+      'the tooltip states core’s own reasons for the flag');
+    // 0.8.7: the footprint folded into the Risk + Egress audits, which live HERE — and both sections are
+    // built from the SAME parsed action stream, so the seeded out-of-workspace read/edit must surface.
+    const oLive = actGroups.find((n) => n.kind === 'ogroup');
+    assert.ok(oLive, 'an edit outside the workspace grows its own section in the Actions tree');
+    assert.deepEqual(oLive.writes.map((w) => w.file), ['~/notes/outside.md'], 'it names the file, home-shortened as core reports it');
+    assert.deepEqual([oLive.files, oLive.edits], [1, 1], 'and counts the files and the edits that landed there');
+    const eLive = actGroups.find((n) => n.kind === 'egroup');
+    assert.ok(eLive && eLive.channels.some((ch) => ch.kind === 'file' && ch.scope === 'local' && ch.target === '~/notes/outside.md'),
+      'a read from outside the workspace is an EGRESS channel — reach past the boundary, exactly like a fetch');
+    assert.ok(actGroups.indexOf(oLive) < actGroups.indexOf(eLive) && actGroups.indexOf(oLive) > actGroups.findIndex((n) => n.kind === 'agroup'),
+      'the audits sit after the action categories, risk before egress (the order the CLI reports them)');
+    // Risk gains the edits that landed outside the workspace — the one fact the file ledger cannot state,
+    // since it shows every path workspace-relative.
+    const oGroup = actTree.getTreeItem({ kind: 'ogroup', writes: new Array(50).fill({ file: '~/notes/x.md', count: 2 }), files: 62, edits: 130 });
+    assert.equal(oGroup.label, 'Outside the workspace', 'the out-of-workspace writes get their own section, after the command groups');
+    assert.equal(String(oGroup.description), '50 of 62 files · 130 edits', 'the header counts files and edits, and says the list is partial');
+    assert.match(String(oGroup.tooltip), /12 file\(s\) not shown/, 'a capped list says how many rows it hid — never reads as the whole story');
+    assert.equal(String(actTree.getTreeItem({ kind: 'ogroup', writes: [{ file: '~/a.md', count: 1 }], files: 1, edits: 1 }).description), '1 files · 1 edits',
+      'an uncapped list states its size plainly (no phantom "of")');
+    const oRow = actTree.getTreeItem({ kind: 'orow', w: { file: '~/notes/x.md', count: 3 } });
+    assert.equal(oRow.label, 'x.md', 'a row names the file');
+    assert.match(String(oRow.description), /~\/notes · ×3/, '…with its directory and how many edits landed there');
+    assert.equal(oRow.command.command, 'vscode.open', 'a row opens the file that was written outside the workspace');
+    assert.ok(!oRow.command.arguments[0].fsPath.startsWith('~'), 'core’s ~-shortened display path is expanded before opening');
+    // Egress gains `file` channels — files READ from outside the workspace. Their scope is 'local', which
+    // renders as its own word ("outside", as the CLI prints it): 'unknown' means we could not classify a
+    // destination, and printing a known fact as an admission would be a lie.
+    const eLocal = actTree.getTreeItem({ kind: 'erow', ch: { kind: 'file', target: '~/.claude/CLAUDE.md', scope: 'local', count: 4 } });
+    assert.equal(eLocal.label, 'CLAUDE.md', 'a file channel names the file it read');
+    assert.match(String(eLocal.description), /file · outside ×4/, 'a local (out-of-workspace) read renders as "outside"');
+    assert.ok(!/unknown/.test(String(eLocal.description) + String(eLocal.tooltip)), 'a local scope is never collapsed into "unknown"');
+    assert.equal(eLocal.command.command, 'vscode.open', 'a file channel opens the file it names');
+    const eUnknown = actTree.getTreeItem({ kind: 'erow', ch: { kind: 'mcp', target: 'some-server', scope: 'unknown', count: 1 } });
+    assert.match(String(eUnknown.description), /mcp · unknown/, '…and an unclassifiable destination still says "unknown"');
+    assert.equal(eUnknown.command, undefined, 'a non-file channel has nothing to open');
+    assert.match(String(actTree.getTreeItem({ kind: 'egroup', channels: [] }).tooltip), /read from outside this workspace/,
+      'the Egress header says it now covers out-of-workspace reads as well as the network');
+    // 0.8.7 review (B16): the root feed — which walks every sibling worktree for live conflicts, ~100ms of
+    // SYNCHRONOUS host work — is computed once per REFRESH CYCLE, not once per getChildren() call.
+    const firstActions = (nodes) => (nodes.find((n) => n.kind === 'agroup') || {}).actions;
+    const ag1 = firstActions(actTree.getChildren());
+    assert.ok(ag1, 'the Actions root has at least one category group to compare');
+    assert.ok(firstActions(actTree.getChildren()) === ag1, 'a second getChildren() in the same cycle reuses the computed feed (no second fleet scan)');
+    actTree.refresh();
+    assert.ok(firstActions(actTree.getChildren()) !== ag1, 'refresh() drops it — the fleet’s time-derived "active" flags are never frozen across cycles');
 
     // Combined Stats + Usage webview: one view — plots on top, usage bars below; both fed via postMessage.
     const stProvider = webviewProviders['claudeObservatory.stats'];
@@ -406,6 +499,17 @@ test('extension: three views, click commands, inline annotations, chat, status s
       'stats posts the live review counts (2 pending, 0 accepted, 0 reverted)');
     assert.match(stView.webview.html, /Gathering stats/i, 'stats placeholder present until the scan returns');
     assert.match(stView.webview.html, /id="ustale"/, 'stale-cache hint present (panel-only sessions)');
+    // 0.8.7: the context-per-turn chart is GONE (core no longer emits the series) — and so is its scaffolding.
+    assert.ok(!/tk-fill|renderFill|class="spark"/.test(stView.webview.html), 'the context-per-turn chart and its scaffolding are removed');
+    assert.match(stView.webview.html, /id="nb-model"/, 'the model / effort chip stays (it is not part of the removed chart)');
+    // 0.8.7 review (B23): removing the chart also removed every mention of compaction. The events still
+    // ride vitals.compactions, so a one-line readout (count + last drop) is restored — no chart.
+    assert.match(stView.webview.html, /id="nb-compact"/, 'the compaction readout chip is present');
+    assert.ok(/function renderCompactions/.test(stView.webview.html) && /renderVitals\(m\.v\); renderCompactions\(m\.v\)/.test(stView.webview.html),
+      'the compactions the host already posts are actually rendered');
+    assert.ok(/' compaction'\+\(cs\.length===1\?'':'s'\)\+' · last dropped '/.test(stView.webview.html), 'the readout is count + the size of the LAST drop');
+    assert.ok(/if\(!cs\.length\)\{ el\.style\.display='none'/.test(stView.webview.html), 'a session that never compacted shows no chip (absent data renders absent)');
+    assert.ok(!/\$/.test('⤺ 1 compaction · last dropped 992k'), 'the readout carries no dollar amount');
     // CLI-missing hint: a failed scan (before any data) posts statsError so the webview shows install help
     const stMsgs = [];
     stView.webview.postMessage = (m) => stMsgs.push(m);
@@ -476,11 +580,185 @@ test('extension: three views, click commands, inline annotations, chat, status s
     // taskIds → the named-chapter ribbon), joined to CM by workflow id.
     assert.ok(/function workflowSlice/.test(cmView.webview.html) && /kind==='workflow'/.test(cmView.webview.html), 'Overview: a selected workflow renders a per-workflow detail slice (workflowSlice)');
     assert.ok(/function detailSlice/.test(cmView.webview.html) && /cmAgent/.test(cmView.webview.html), 'Overview: the detail joins the nav selection to the changemap slice by session/workflowId');
+    // 0.8.7: the footprint badge row and its drill-down are GONE — folded into the Risk and Egress audits
+    // (Actions panel), which is now the ONE audit surface. `changemap --json` no longer emits the key, so a
+    // renderer still reading it would paint a silent blank; nothing may read it, and no scaffolding survives.
+    assert.ok(!/cm-caps|cm-capd|cm-cdr|renderCaps|renderCapDetail|capBadge|data-cap=|data-facet|--fp-/.test(cmView.webview.html),
+      'the footprint badge row, its drill-down, its palette and its click-through are gone from the Overview');
+    assert.ok(!/\.footprint|\['footprint'\]/.test(cmView.webview.html),
+      'nothing in the Overview reads the removed footprint key (the comments explaining the fold are fine)');
+    assert.ok(!/openPath/.test(cmView.webview.html), 'the drill-down’s openPath message went with it (the Actions tree opens its own file rows)');
+    // 0.8.7: the fleet lists every sibling session, so a session switch must re-point the DETAIL selection.
+    assert.ok(/SEL = k \? \{kind:'agent', session:k\} : null; SEL_CH=null;/.test(cmView.webview.html), 'switching sessions re-points the Overview selection (and drops the old chapter scope)');
+    // 0.8.7 (3) the PROCESSES tab: background shells left running. No pid column — the transcript records
+    // no OS pid, so the harness's shell id is the identity.
+    assert.match(cmView.webview.html, /id="ov-pane-processes"/, 'Overview: the Processes pane container is present');
+    assert.match(cmView.webview.html, /id="ov-processes"/, 'Overview: the Processes list container is present');
+    assert.ok(/'Processes'/.test(cmView.webview.html) && /function renderProcesses/.test(cmView.webview.html), 'the left nav labels Processes and renders it');
+    assert.ok(/function procState/.test(cmView.webview.html) && /'exit '\+p\.exitCode/.test(cmView.webview.html) && /fmtBytes/.test(cmView.webview.html),
+      'process rows show running / exit state, runtime and output volume');
+    assert.ok(!/p\.pid|\bpid:/.test(cmView.webview.html) && /no OS pid/.test(cmView.webview.html), 'the Processes tab invents no pid — the harness’s shell id is the identity, and the code says why');
+    // 0.8.7 fix: Active only must hide EXITED shells (fleet/workflows/tasks all honor the toggle; the
+    // Processes pane was the outlier), and an emptied list must read as the filter's doing, not "none ran".
+    assert.ok(/if\(ACTIVE_ONLY\)\{ var running=\[\];[^}]*\.running\)/.test(cmView.webview.html),
+      'the Processes pane drops non-running shells when Active only is on');
+    assert.ok(/No running shells/.test(cmView.webview.html) && /clear <b>Active only<\/b> to see the '\+exitedHidden/.test(cmView.webview.html),
+      'an Active-only-emptied Processes pane says why it is empty and how many exited shells are hidden');
+    // 0.8.7 review: the tab is ALWAYS present (JetBrains parity) — one that vanishes when the CLI can't
+    // answer hides the failure. Its badge is running/total, tinted while a shell is still going, and the
+    // three states it can be in (nothing read yet · no answer · genuinely none) get three sentences.
+    assert.ok(/defs\.push\(\['processes'/.test(cmView.webview.html) && !/if\(PR\) defs\.push/.test(cmView.webview.html),
+      'the Processes tab is always present, so a CLI that cannot answer is reported rather than hidden');
+    assert.ok(/psum\? \(psum\.running\+'\/'\+psum\.total\) : ''/.test(cmView.webview.html), 'the Processes tab badge is running/total, and blank when there is no payload to count');
+    assert.ok(/\.ov-tn\.hot \{ color: var\(--mt-done\)/.test(cmView.webview.html), 'the running/total badge is tinted with the same green the running row badge uses');
+    assert.ok(/Reading this session’s background shells…/.test(cmView.webview.html), 'state 1: nothing has been read yet');
+    assert.ok(/No answer for background shells/.test(cmView.webview.html), 'state 2: the CLI returned nothing — stated, not silently blamed on the session');
+    assert.ok(/No background shells — Claude starts one only when it runs a command/.test(cmView.webview.html), 'state 3: this session genuinely started none');
+    // 0.8.7 review (B21): Tasks + Processes are the ACTIVE session's payloads; selecting a sibling fleet
+    // row re-points the change map and the feed but NOT these two, so both panes say so.
+    assert.ok(/function offSession/.test(cmView.webview.html) && /function scopeNote/.test(cmView.webview.html), 'the session-scope note exists for the tabs the fleet selection does not re-point');
+    assert.ok(/scopeNote\('Tasks'\)/.test(cmView.webview.html) && /scopeNote\('Background shells'\)/.test(cmView.webview.html), 'both session-scoped panes carry the note');
+    assert.ok(/ACTIVE session’s numbered task list/.test(cmView.webview.html) && /background shells the ACTIVE session launched/.test(cmView.webview.html),
+      'the tab tooltips name the scope too');
+    assert.ok(!/\.mt-scope \{[^}]*var\(--mt-attn\)/.test(cmView.webview.html), 'the scope note does not borrow the amber that means "outside the workspace"');
+    // 0.8.7 (5) REQUESTS — its own WINDOW in the dock (left of the Overview), not a tab inside it, so
+    // the list of asks and the view it scopes are visible at the same time. Picking one filters the
+    // Overview beside it: fleet · runs · tasks · shells, and the whole change map.
+    const rqProvider = webviewProviders['claudeObservatory.requests'];
+    assert.ok(rqProvider, 'the Requests window is registered');
+    let rqMsgHandler = null;
+    const rqView = {
+      webview: { options: {}, html: '', postMessage: () => {}, onDidReceiveMessage: (cb) => { rqMsgHandler = cb; return { dispose() {} }; } },
+      onDidChangeVisibility: () => ({ dispose() {} }),
+      visible: false, // no subprocess spawn while hidden
+    };
+    rqProvider.resolveWebviewView(rqView);
+    assert.match(rqView.webview.html, /id="rq-list"/, 'Requests: the list container is present');
+    assert.ok(/#'\+r\.index/.test(rqView.webview.html) && /esc\(r\.text\|\|r\.title\)/.test(rqView.webview.html),
+      'a row carries the ask’s own number and the ask itself');
+    // NO TRUNCATION anywhere: the ask wraps over as many lines as it needs (user rule 2026-07-23). An
+    // ellipsis or a line clamp would throw away the only copy of what the person actually said.
+    assert.ok(/\.rq-ask \{[^}]*white-space:pre-wrap[^}]*\}/.test(rqView.webview.html), 'the ask wraps (pre-wrap), never clipped');
+    assert.ok(!/\.rq-ask \{[^}]*text-overflow:ellipsis/.test(rqView.webview.html) && !/-webkit-line-clamp/.test(rqView.webview.html),
+      'no ellipsis and no line clamp on the ask');
+    assert.ok(/r\.edits\+' edit'/.test(rqView.webview.html) && /r\.agents\.length\+' subagent'/.test(rqView.webview.html)
+      && /r\.workflows\.length\+' workflow run'/.test(rqView.webview.html) && /r\.processes\.length\+' shell'/.test(rqView.webview.html)
+      && /r\.compactions/.test(rqView.webview.html) && /fmtDur\(r\.durationMs\)/.test(rqView.webview.html),
+      'the facts are edits · subagents · workflow runs · shells · compactions · duration');
+    // 0.8.7: each row also carries files, folders, tokens and tasks — the full per-request headline.
+    assert.ok(/\(r\.files\|\|0\)\+'f · '\+\(r\.folders\|\|0\)\+'fo'/.test(rqView.webview.html), 'the edit line names files and folders touched');
+    assert.ok(/r\.tokens\) f\.push/.test(rqView.webview.html) && /fmtTok\(r\.tokens\)\+' tok/.test(rqView.webview.html), 'a row shows the tokens spent answering');
+    assert.ok(/r\.tasks\) w\.push\(r\.tasks\+' task'/.test(rqView.webview.html), 'a row shows the tasks worked');
+    // A request with 0 edits is normal and common — rendered as itself, never hidden, never made to look wrong.
+    assert.ok(/no edits — a question or a decision/.test(rqView.webview.html), 'an ask that produced no edits says so plainly');
+    assert.ok(/r\.actions \? \('no edits · '\+r\.actions\+' tool call'/.test(rqView.webview.html),
+      'an ask that ran tools but changed no files says THAT — calling it "a question" would be wrong');
+    assert.ok(/if\(r\.added\|\|r\.removed\)/.test(rqView.webview.html), 'the ±lines cell is omitted when there are none, never a fabricated +0 −0');
+    assert.ok(/\(r\.endTs\?''\:'~'\)\+fmtDur\(r\.durationMs\)/.test(rqView.webview.html), 'the in-flight ask’s duration is marked "~" (endTs 0 is not a finished number)');
+    // The same three states every list in this product keeps apart.
+    assert.ok(/Reading this session’s requests…/.test(rqView.webview.html), 'state 1: nothing has been read yet');
+    assert.ok(/No answer for <b>requests<\/b>/.test(rqView.webview.html), 'state 2: the CLI returned nothing — stated, not blamed on the session');
+    assert.ok(/No requests recorded yet/.test(rqView.webview.html), 'state 3: this session genuinely has none');
+    // A failed tool call is not a risk flag — it must not borrow ⚠ + the risk colour.
+    assert.ok(/rq-err[^>]*>✗ '\+r\.errors/.test(rqView.webview.html) && /\.rq-err \{[^}]*var\(--mt-warn\)/.test(rqView.webview.html),
+      'failed tool calls are marked ✗ in the warn colour');
+    // Selecting: the WINDOW owns the pick, the host relays it, the Overview scopes to it.
+    assert.ok(/type:'select', id:SEL/.test(rqView.webview.html), 'clicking a row posts the selection to the host');
+    assert.ok(/SEL = \(SEL===id\)\? null : id/.test(rqView.webview.html), 'clicking the selected ask again clears the scope');
+    assert.equal(typeof rqProvider.selection, 'object', 'the host holds the selection (null until something is picked)');
+    rqMsgHandler({ type: 'select', id: 'abc123' });
+    assert.equal(rqProvider.selection, 'abc123', 'the host records the picked ask');
+    rqMsgHandler({ type: 'select', id: null });
+    assert.equal(rqProvider.selection, null, '…and drops it again');
+    // 0.8.7: each row expands to review Claude's reply — a caret that toggles the response, fetched
+    // lazily from the host (the prose can be large, so it never rides the list payload) and rendered
+    // wrapped, never clipped. The caret must NOT change the scope selection.
+    assert.ok(/class="rq-exp/.test(rqView.webview.html) && /function toggleResp/.test(rqView.webview.html), 'each row has an expand-response caret');
+    assert.ok(/type:'expand', id:id/.test(rqView.webview.html), 'expanding an unfetched response asks the host for it');
+    assert.ok(/\.rq-rtext \{[^}]*white-space:pre-wrap/.test(rqView.webview.html), 'the response wraps and never clips');
+    assert.ok(/closest\('\.rq-exp'\)/.test(rqView.webview.html) && /ev\.stopPropagation\(\); toggleResp/.test(rqView.webview.html),
+      'a caret click toggles the response without changing the scope selection');
+    // The Overview no longer carries a Requests tab — it carries the SCOPE the window sets.
+    assert.ok(!/id="ov-pane-requests"/.test(cmView.webview.html) && !/function renderRequests/.test(cmView.webview.html),
+      'the Overview’s Requests tab is gone (it is a window now)');
+    assert.ok(/var ids=\['fleet','workflows','tasks','processes'\]/.test(cmView.webview.html), 'the Overview’s panes are Fleet · Workflows · Tasks · Processes');
+    assert.ok(/NAV='fleet'/.test(cmView.webview.html), 'the Overview opens on Fleet');
+    // No scope banner IN the Overview: the Requests window beside it already shows the picked ask, so
+    // repeating it here was pure duplication. The scope is still applied (setRequestScope on the relayed
+    // message) and still visible where it matters — the pane notes, the bulk labels, the bottom summary.
+    assert.ok(!/id="ov-reqbar"/.test(cmView.webview.html) && !/function renderReqBar/.test(cmView.webview.html),
+      'the Overview carries no request-scope banner (the Requests window shows the ask)');
+    assert.ok(/function setRequestScope/.test(cmView.webview.html) && /m\.type==='request'/.test(cmView.webview.html),
+      'the Overview still applies the ask scope the host relays');
+    // The filtering itself: one helper, applied by every pane, over core's per-ask id sets.
+    assert.ok(/function reqFilter/.test(cmView.webview.html) && /function reqSlice/.test(cmView.webview.html),
+      'one filter helper, reading core’s per-request slice (CM.requests)');
+    assert.ok(/reqFilter\(wf, 'workflowIds'/.test(cmView.webview.html) && /reqFilter\(ts, 'chapterIds'/.test(cmView.webview.html)
+      && /reqFilter\(all, 'processIds'/.test(cmView.webview.html) && /has\(rqf\.agentIds/.test(cmView.webview.html),
+      'runs, tasks, shells and subagents each filter by the ask that STARTED them');
+    assert.ok(/function requestSlice/.test(cmView.webview.html) && /var rq=requestSlice\(\); if\(rq\) return rq;/.test(cmView.webview.html),
+      'the change map draws the ask’s own slice (files/folders/chapters aggregated in core)');
+    assert.ok(/if\(!r\) return \{ rows:list, hidden:0, scoped:false \}/.test(cmView.webview.html),
+      'with no slice to filter by (an older CLI), nothing is filtered — a scoped banner over unfiltered rows would be a lie');
+    assert.ok(/hidden — not started by request #/.test(cmView.webview.html), 'a pane whose rows dropped says how many and why');
+    assert.ok(/if\(REQ_ID\) vscode\.postMessage\(\{type:req, requestId:REQ_ID\}\)/.test(cmView.webview.html),
+      'the bulk actions retarget to the picked ask');
+    assert.ok(/setRequestScope\(id\)\{ REQ_ID = id \|\| null; if\(REQ_ID\) SEL_CH=null;/.test(cmView.webview.html),
+      'picking an ask drops the chapter scope — a bulk action never has two answers to "in what"');
+    assert.ok(/SEL_CH=null; REQ_ID=null;/.test(cmView.webview.html), 'switching sessions drops the picked ask with the picked chapter');
+    // The bottom summary names the picked ask — and since core aggregates its files/folders, it reports them.
+    assert.ok(/rq\.rollup\.pending/.test(cmView.webview.html) && /\(rq\.files\|\|\[\]\)\.length/.test(cmView.webview.html),
+      'the bottom summary names the ask with its own review counts, files and folders');
+    // 0.8.7 (4) the FEED pane: core's `mode` decides whether it is a live tail or a finished audit log,
+    // and only a live one keeps being fetched — on the panel's EXISTING refresh tick, never a new timer.
+    assert.match(cmView.webview.html, /id="ov-feed"/, 'Overview: the live-feed / audit-log pane is present');
+    assert.ok(/function renderFeed/.test(cmView.webview.html) && /mode==='live'/.test(cmView.webview.html) && /audit log/.test(cmView.webview.html),
+      'the pane labels itself live or audit from core’s mode');
+    assert.ok(/updated '\+ago\(f\.lastTs\)/.test(cmView.webview.html), 'a live feed shows the age of the newest evidence, never a claim of realtime');
+    assert.ok(/earlier entr/.test(cmView.webview.html), 'a truncated feed says how many earlier entries are not shown');
+    assert.ok(/e\.kind==='output'/.test(cmView.webview.html) && /ov-fout/.test(cmView.webview.html), 'raw output lines render monospace, with no fabricated timestamp');
+    assert.ok(/e\.ok===false/.test(cmView.webview.html) && /f\.note/.test(cmView.webview.html), 'failed rows are marked and core’s note explains an empty feed');
+    assert.ok(!/setInterval|setTimeout\(function\(\)\{ *vscode\.postMessage\(\{type:'feed'/.test(cmView.webview.html), 'the feed adds no polling timer of its own');
+    // 0.8.7 review (P3): one failed spawn (an older CLI on PATH) must not permanently disable the only
+    // re-fetch. Only a GOOD 'audit' answer stops the polling; an explicit Refresh always re-attempts.
+    const bundleSrc = fs.readFileSync(BUNDLE, 'utf8');
+    assert.ok(!/feedLive/.test(bundleSrc), 'the "is it live" latch a failed fetch could never clear is gone');
+    assert.ok(/feedSettled = ok && d\.mode === "audit"/.test(bundleSrc), 'only a fetch that landed and reported audit settles the feed');
+    assert.ok(/this\.feedRef && \(force \|\| !this\.feedSettled\)/.test(bundleSrc), 'live feeds, failed fetches and an explicit Refresh all re-attempt');
+    assert.ok(/registerCommand\("claudeObservatory\.refresh", \(\) => refreshAll\(true\)\)/.test(bundleSrc), 'the Refresh command forces — a pane stuck on a failed spawn is recoverable from the UI');
+    // 0.8.7 review (P4): the pane repaints on the panel's tick, but an UNCHANGED payload must not rebuild
+    // the body (that discards scroll + selection), and a live tail follows only when it actually grew.
+    assert.ok(/function feedShell/.test(cmView.webview.html) && /if\(!host\.querySelector\('\.ov-fbody'\)\) feedShell\(host\)/.test(cmView.webview.html),
+      'the feed shell is built once per selection, not on every tick');
+    assert.ok(/if\(h===FEED_BODY\) return;/.test(cmView.webview.html), 'an identical payload skips the repaint entirely');
+    assert.ok(/if\(live && rows>FEED_ROWS\) body\.scrollTop=body\.scrollHeight;/.test(cmView.webview.html), 'a live tail is followed only when the row count GREW');
+    // 0.8.7 review (B35): a compaction core could not anchor to a DRAWN chapter clamps by ts to the nearest
+    // visible chip; only an event that precedes every chip aggregates into the header marker.
+    assert.ok(/vc\.ts>0 && vc\.ts<=cm2\.ts && vc\.ts>bestTs/.test(cmView.webview.html), 'an unanchored compaction clamps to the latest visible chapter that had already started');
+    assert.ok(/ts:ch\.startTs\|\|0/.test(cmView.webview.html), 'ribbon chips carry their window start, so the clamp is resolved by TIME not array position');
+    assert.ok(/Context compacted before any chapter shown here/.test(cmView.webview.html), 'the aggregate says what it actually is (events preceding every drawn chapter)');
+    // 0.8.7: the one footprint fact worth a glance survives on the fleet row — that the session reached
+    // OUTSIDE the workspace — re-pointed at the multitask payload's `outside:{reads,writes}`.
+    assert.ok(/function outsideSuffix/.test(cmView.webview.html) && /\(a&&a\.outside\)\|\|null/.test(cmView.webview.html),
+      'the fleet row’s outside-touch suffix reads the payload’s outside{reads,writes}');
+    assert.ok(/'↗ '\+bits\.join\(' · '\)\+' outside'/.test(cmView.webview.html), '…and renders it as "↗ 3 read · 20 written outside"');
+    assert.ok(/read outside this workspace — Actions ▸ Egress names them/.test(cmView.webview.html) &&
+      /written outside this workspace — Actions ▸ Risk names them/.test(cmView.webview.html),
+      'reads and writes are never summed in the tooltip — a read out there is egress, a write is risk — and each points at the audit that names the files');
+    assert.ok(!/\+'⚠'\+high|c\.mcp&&c\.mcp\.calls|c\.web&&c\.web\.calls/.test(cmView.webview.html),
+      'the suffix no longer restates risk / mcp / web — the row has its own ⚠ cell and those are Egress’s answer');
+    assert.ok(cmView.webview.html.includes(core.EXERCISED_NOTE),
+      'the suffix still carries core’s single-sourced caveat — these are things the session EXERCISED, never things it was permitted');
+    // …and it has to be VISIBLE: the row is the tail of a 25%-wide column, where an unwrapped flex line
+    // renders its last items hundreds of pixels past the right edge (measured in the headless harness).
+    assert.ok(/\.mt-arow \{[^}]*flex-wrap:wrap/.test(cmView.webview.html), 'a fleet row wraps instead of clipping the facts at its tail');
     // A hidden view must not shell out; and a failed scan (before any data) posts the CLI-missing hint.
     const cmMsgs = [];
     cmView.webview.postMessage = (m) => cmMsgs.push(m);
     cmProvider.refresh();
     assert.equal(cmMsgs.length, 0, 'a hidden Overview does not spawn the CLI or post');
+    cmMsgHandler({ type: 'feed', kind: 'process', id: 'bg123' });
+    assert.equal(cmMsgs.length, 0, 'a hidden Overview does not fetch a feed either');
     cmProvider.postError();
     assert.ok(cmMsgs.some((m) => m.type === 'error'), 'a failed Overview scan posts the CLI-missing hint');
     assert.ok(typeof cmMsgHandler === 'function', 'the Overview registered a message handler');
@@ -560,11 +838,12 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.ok(/function relabelBulk/.test(cmView.webview.html), 'the bulk buttons relabel to the selected scope (relabelBulk)');
     assert.ok(/Accept All in /.test(cmView.webview.html) && /Revert All in /.test(cmView.webview.html) && /Clear in /.test(cmView.webview.html),
       'the scoped bulk buttons read "… in <chapter>"');
-    // the bulk wiring posts the strict-span task ops when a chapter is selected, else the session-wide op.
-    assert.ok(/bulk\('ov-keepall','keepAll','taskKeep'\)/.test(cmView.webview.html)
-      && /bulk\('ov-undoall','undoAll','taskUndo'\)/.test(cmView.webview.html)
-      && /bulk\('ov-clearres','clearResolved','taskClear'\)/.test(cmView.webview.html),
-      'a selected chapter reroutes Accept All / Revert All / Clear to the strict-span task ops');
+    // the bulk wiring posts the strict-span task ops when a chapter is selected, the request ops when a
+    // REQUEST is selected (0.8.7), else the session-wide op.
+    assert.ok(/bulk\('ov-keepall','keepAll','taskKeep','requestKeep'\)/.test(cmView.webview.html)
+      && /bulk\('ov-undoall','undoAll','taskUndo','requestUndo'\)/.test(cmView.webview.html)
+      && /bulk\('ov-clearres','clearResolved','taskClear','requestClear'\)/.test(cmView.webview.html),
+      'a selected chapter reroutes Accept All / Revert All / Clear to the strict-span task ops (and a selected request to the request ops)');
     // the folded-in per-chip chat still hands off a zero-token chat by taskId (unchanged routing).
     assert.match(cmView.webview.html, /data-chat=/, 'each chapter chip keeps a zero-token chat handoff (💬)');
 
@@ -597,15 +876,68 @@ test('extension: three views, click commands, inline annotations, chat, status s
       commands[cmd] = real;
       assert.equal(seen, 1, `the Overview nav-bar "${msg}" control routes to ${cmd}`);
     }
+    // (3) THE REQUEST AXIS (0.8.7) — the LAST axis on the review nav bar, after Chapter. Same
+    // step/Review/Accept/Reject affordances the Chapter axis has, scoped to one of the user's own asks.
+    for (const id of ['ov-requestprev', 'ov-requestcount', 'ov-requestnext', 'ov-reviewrequest', 'ov-acceptrequest', 'ov-rejectrequest']) {
+      assert.ok(cmView.webview.html.includes(`id="${id}"`), `the review nav bar carries the Request-axis control ${id}`);
+    }
+    assert.ok(cmView.webview.html.indexOf('id="ov-chaptercount"') < cmView.webview.html.indexOf('id="ov-requestcount"'),
+      'Request is the LAST axis — it comes after Chapter on the bar');
+    assert.ok(/id="ov-requestcount"[^>]*>Request –\/–</.test(cmView.webview.html), 'the Request counter starts at –/– (no position is claimed before one is known)');
+    assert.ok(/'Request '\+\(p\.request\.i\|\|'–'\)\+'\/'\+p\.request\.n/.test(cmView.webview.html) && /'\ · #'\+p\.request\.index/.test(cmView.webview.html),
+      'the counter shows both the review position (i/n) and the ask’s OWN session number (#k) — they differ');
+    // …and it routes to the host commands, which resolve the scope in core (never re-derived here).
+    for (const [msg, cmd] of [
+      ['navRequestPrev', 'claudeObservatory.navRequestPrev'],
+      ['navRequestNext', 'claudeObservatory.navRequestNext'],
+      ['reviewCurrentRequest', 'claudeObservatory.reviewCurrentRequest'],
+      ['acceptCurrentRequest', 'claudeObservatory.acceptCurrentRequest'],
+      ['rejectCurrentRequest', 'claudeObservatory.rejectCurrentRequest'],
+    ]) {
+      assert.ok(typeof commands[cmd] === 'function', `${cmd} registered`);
+      let seen = 0;
+      const real = commands[cmd];
+      commands[cmd] = () => { seen++; };
+      cmMsgHandler({ type: msg });
+      commands[cmd] = real;
+      assert.equal(seen, 1, `the Overview nav-bar "${msg}" control routes to ${cmd}`);
+    }
+    // the Requests tab's selected row drives the id-scoped ops directly (the same shape the task ops use).
+    for (const [msg, cmd] of [
+      ['requestKeep', 'claudeObservatory.requestKeep'],
+      ['requestUndo', 'claudeObservatory.requestUndo'],
+      ['requestClear', 'claudeObservatory.requestClear'],
+      ['reviewRequest', 'claudeObservatory.reviewRequest'],
+    ]) {
+      assert.ok(typeof commands[cmd] === 'function', `${cmd} registered`);
+      const seen = [];
+      const real = commands[cmd];
+      commands[cmd] = (id) => { seen.push(id); };
+      cmMsgHandler({ type: msg, requestId: 'req7' });
+      commands[cmd] = real;
+      assert.deepEqual(seen, ['req7'], `a scoped ${msg} routes to ${cmd} with the request id`);
+    }
+    // The Requests WINDOW fetches its own list (one spawn, its own visibility gate); the Overview does
+    // NOT spawn `requests --json` any more — the per-ask slices it filters by ride the changemap payload
+    // it already asks for, so the panel got one spawn cheaper, not one dearer.
+    assert.ok(/"requests", "--json", "--session", session/.test(bundleSrc), 'the Requests window fetches requests --json for the active session');
+    assert.ok(/rq = d && Array\.isArray\(d\.requests\) && d\.summary \? d : null/.test(bundleSrc), 'a CLI that cannot answer requests lands as null, not as a crash');
+    assert.ok(/cm === void 0 \|\| mt === void 0 \|\| pr === void 0\)/.test(bundleSrc), 'the Overview paint waits for its three spawns (requests is no longer one of them)');
+    assert.ok(!/setInterval[^;]*requests/.test(bundleSrc), 'the Requests window adds no polling timer of its own');
+    assert.ok(/"requests", "--id", id, "--response", "--json", "--session", session/.test(bundleSrc),
+      'a row expand fetches Claude’s reply via requests --id --response --json');
+
     // the live position push: setNavPos posts a {navpos} message to a VISIBLE Overview so the counters update.
     assert.ok(typeof cmProvider.setNavPos === 'function', 'the Overview exposes setNavPos (the host pushes the live Diff/File position)');
     cmView.visible = true;
     const navPosMsgs = [];
     cmView.webview.postMessage = (m) => navPosMsgs.push(m);
-    cmProvider.setNavPos({ diff: { i: 1, n: 3 }, file: { i: 2, n: 4 } });
+    cmProvider.setNavPos({ diff: { i: 1, n: 3 }, file: { i: 2, n: 4 }, request: { i: 2, n: 5, index: 9, title: 'add the requests axis' } });
     cmView.visible = false;
     assert.ok(navPosMsgs.some((m) => m.type === 'navpos' && m.pos && m.pos.diff.n === 3 && m.pos.file.i === 2),
       'setNavPos pushes the Diff/File position to the visible Overview counters');
+    assert.ok(navPosMsgs.some((m) => m.type === 'navpos' && m.pos && m.pos.request && m.pos.request.n === 5 && m.pos.request.index === 9),
+      'setNavPos carries the Request-axis position too (review place i/n + the ask’s own number)');
 
     // 0.8.0 stabilization: the literal-tabs prototype (overviewTabs/OverviewTab) was superseded by the
     // Fleet/Workflows master–detail nav and removed — the export must stay gone (dead code guard).

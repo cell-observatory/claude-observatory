@@ -8,6 +8,8 @@ import com.cellobservatory.observatory.services.ObservatoryService
 import com.cellobservatory.observatory.settings.ObservatorySettings
 import com.cellobservatory.observatory.ui.inline.InlineOverlay
 import com.intellij.icons.AllIcons
+import com.intellij.ide.CommonActionsManager
+import com.intellij.ide.DefaultTreeExpander
 import com.intellij.openapi.actionSystem.ActionManager
 import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnAction
@@ -263,6 +265,13 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
             action("Export Review Summary", AllIcons.ToolbarDecorator.Export) { exportSummary() },
             action("Setup Check (doctor)", AllIcons.General.Information) { ReviewOps.openDoctor(project) },
         )
+        // Collapse-all / expand-all for the folder → file → class tree — IntelliJ's own tree actions,
+        // the platform equivalent of VS Code's file-Explorer Collapse-All button.
+        val expander = DefaultTreeExpander(tree)
+        val cam = CommonActionsManager.getInstance()
+        group.addSeparator()
+        group.add(cam.createCollapseAllAction(expander, tree))
+        group.add(cam.createExpandAllAction(expander, tree))
         val tb = ActionManager.getInstance().createActionToolbar("ClaudeObservatoryTree", group, true)
         tb.targetComponent = tree
         return tb.component

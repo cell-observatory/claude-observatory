@@ -9,6 +9,7 @@ import * as path from 'path';
 import { EditRecord, EditStatus, readLog, readBlob } from './store';
 import { lineDelta } from './format';
 import { detectClasses, classAt } from './classes';
+import * as crypto from 'crypto';
 import { locateEditInCurrent } from './ranges';
 import { matchesQuery } from './filter';
 import { reviewEdits } from './groups';
@@ -131,8 +132,10 @@ function buildFile(session: string, rel: string, file: string, recs: EditRecord[
   };
   const byClass = new Map<string, TreeClass>();
   const loose: TreeEdit[] = [];
+  // One hash per FILE (not per edit) identifies the current text for the memo below.
+  const textKey = `${text.length}:${crypto.createHash('sha1').update(text).digest('hex').slice(0, 16)}`;
   for (const r of recs) {
-    const line = locateEditInCurrent(readText(r.beforeBlob), readText(r.afterBlob), text)[0];
+    const line = locateCached(textKey, session, r.beforeBlob, r.afterBlob, readText(r.beforeBlob), readText(r.afterBlob), text);
     const cls = line !== undefined ? classAt(spans, line) : null;
     if (cls) {
       const key = `${cls.name}@${cls.start}`;
@@ -150,6 +153,26 @@ function buildFile(session: string, rel: string, file: string, recs: EditRecord[
  * - `root`: workspace root, used to compute display-relative paths (defaults to the raw absolute path).
  * - `filter`: optional Search filter (matched against the relative path).
  */
+/** Memo for the per-edit line lookup, keyed by (current file text, before blob, after blob).
+ *
+ *  `locateEditInCurrent` tokenizes three texts and runs two array diffs to decide which line an edit
+ *  landed on, and the tree calls it once per edit. On a 1,100-edit session that was ~1.5 s per change-map
+ *  build — the largest single cost in the build, repeated on every refresh. All three inputs are
+ *  content-identified (blobs are immutable; the file text is hashed once per FILE, not per edit), so a
+ *  hit is exact: when the file on disk changes, the key changes with it. */
+const lineMemo = new Map<string, number | undefined>();
+const LINE_MEMO_CAP = 20000;
+
+function locateCached(textKey: string, session: string, beforeBlob: string | null | undefined, afterBlob: string | null | undefined, before: string, after: string, text: string): number | undefined {
+  const key = `${textKey}\u0000${beforeBlob ?? ''}\u0000${afterBlob ?? ''}`;
+  const hit = lineMemo.get(key);
+  if (hit !== undefined || lineMemo.has(key)) return hit;
+  const line = locateEditInCurrent(before, after, text)[0];
+  if (lineMemo.size >= LINE_MEMO_CAP) lineMemo.clear();
+  lineMemo.set(key, line);
+  return line;
+}
+
 export function buildEditTree(session: string, opts: { root?: string; filter?: string } = {}): EditTree {
   const log = readLog(session);
   const filter = opts.filter || '';

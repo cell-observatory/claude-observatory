@@ -447,7 +447,8 @@ const subRow = (badge, type, desc, task, added, removed) => `
       <span style="color:var(--purple)">${icoChat}</span>
     </span>
   </div>`;
-// The FILE COLLISIONS strip — files touched by more than one agent, with agent count + pending state.
+// The FILE COLLISIONS strip — files touched by more than one agent. Lives in the ACTIONS view since
+// 0.8.3; kept here for the Actions scenes, and deliberately NOT drawn inside the Overview any more.
 const collisionStrip = `
   <div style="border-top:1px solid var(--border);margin-top:6px;padding:9px 16px 5px">
     <div style="font-size:10px;letter-spacing:.08em;color:var(--dim);font-weight:600;margin-bottom:7px">FILE COLLISIONS (1)</div>
@@ -459,6 +460,38 @@ const collisionStrip = `
       </span>
     </div>
   </div>`;
+// One row of the Requests window (0.8.7): the facts the ask produced on one line, then the ask itself
+// WRAPPED — never clipped, because a truncated prompt is unrecognisable and the text is the row's whole
+// identity. `sel` outlines the ask the Overview beside it is currently scoped to.
+const requestRow = (ix, live, delta, edits, ask, extra, dur, sel, resp) => `
+  <div style="border:1px solid var(--${sel ? 'accent' : 'border2'});border-radius:6px;margin:7px 16px;padding:7px 10px${sel ? ';background:var(--side)' : ''}">
+    <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap;font-size:11px">
+      <span class="mono" style="color:var(--ink);flex:none">#${ix}</span>
+      ${live ? `<span style="font-size:8.5px;font-weight:700;color:#fff;background:var(--blue);border-radius:99px;padding:0 6px;flex:none">${live}</span>` : ''}
+      ${delta ? `<span class="mono" style="font-size:10px;flex:none"><span style="color:${gADD}">${delta.split(' ')[0]}</span> <span style="color:${gREM}">${delta.split(' ')[1]}</span></span>` : ''}
+      ${edits ? `<span class="mono" style="font-size:9.5px;color:var(--faint);flex:none">${edits}</span>` : ''}
+      ${!delta && !edits ? `<span style="font-size:10px;color:var(--faint);font-style:italic;flex:none">${extra}</span>` : (extra ? `<span class="mono" style="font-size:9.5px;color:var(--faint);flex:none">${extra}</span>` : '')}
+      <span style="margin-left:auto;flex:none;font-size:9px;border:1px solid var(--${resp ? 'accent' : 'border2'});border-radius:99px;padding:0 8px;color:var(--${resp ? 'accent' : 'faint'})">${resp ? '▾' : '▸'} response</span>
+      <span class="mono" style="flex:none;font-size:9.5px;color:var(--faint)">${dur}</span>
+    </div>
+    <div style="font-size:11.5px;line-height:1.45;color:var(--ink);margin-top:4px">${ask}</div>
+    ${resp ? `<div style="margin-top:6px;border-top:1px dashed var(--border2);padding-top:6px">
+      <div style="font-size:8px;letter-spacing:.6px;text-transform:uppercase;color:var(--faint);margin-bottom:4px">Claude's response · 4 turns</div>
+      <div style="font-size:10.5px;line-height:1.5;color:var(--dim)">${resp}</div></div>` : ''}
+  </div>`;
+
+// The dock's REQUESTS window, compact — for the whole-IDE mockups. Three asks, newest first, the
+// scoped one outlined: enough to show what the window is without competing with the panes beside it.
+const compactRequestRow = (ix, facts, ask, sel) => `
+  <div style="border:1px solid var(${sel ? '--accent' : '--border2'});border-radius:5px;margin:5px 14px;padding:5px 8px;${sel ? 'background:var(--bg);' : ''}">
+    <div style="display:flex;gap:8px;align-items:center;font-size:10px"><span class="mono" style="color:var(--ink)">#${ix}</span><span class="mono" style="color:var(--faint);font-size:9px">${facts}</span></div>
+    <div style="font-size:10.5px;line-height:1.4;color:var(--dim);margin-top:3px">${ask}</div>
+  </div>`;
+const requestsCol =
+  compactRequestRow(3, '2 tool calls', 'add a Processes tab so I can see the shells still running', false) +
+  compactRequestRow(2, '31 edits · 1 shell', 'stream the loader instead of reading the whole file', true) +
+  compactRequestRow(1, '18 edits', 'split the training loop out of models.py', false);
+
 // The Overview's Fleet tab — every agent (worktree) in this project, its subagents, and the collisions
 // strip (0.8.0: folded in from the old Multitasking window; header is now the Fleet · Workflows nav).
 const multitaskingBody = `
@@ -466,17 +499,17 @@ const multitaskingBody = `
     <span style="color:var(--ink);border-bottom:1.5px solid var(--accent);padding-bottom:8px">Fleet</span>
     <span style="color:var(--faint);padding-bottom:8px">Workflows</span>
     <span style="color:var(--faint);padding-bottom:8px">Tasks 2/3</span>
+    <span style="color:var(--faint);padding-bottom:8px;white-space:nowrap">Processes <span style="color:var(--kept)">1/2</span></span>
     <span style="color:var(--faint)">·</span><span style="color:var(--dim)">3 agents</span>
     <span style="color:var(--blue)">1 active</span>
-    <span style="color:var(--pending)">1 conflict</span>
+    <span style="color:var(--faint)">conflicts in Actions</span>
     <span style="margin-left:auto;display:flex;gap:14px;color:var(--faint);font-size:11px;padding-bottom:8px"><span>Active only</span><span>Clear completed</span></span>
   </div>
   ${agentRow(phase('working', 'var(--blue)'), 'demo', 'main', true, [.3, .6, .4, .8, .5, .9, .7, 1], 'var(--blue)', 15, 0, 1, 1)}
   ${subRow(phase('working', 'var(--blue)'), 'Explore', 'maps the models layer', 'reading src/models/*.py', 0, 0)}
   ${subRow(phase('done', 'var(--kept)'), 'Explore', 'audits the import graph', '12 files scanned', 0, 0)}
   ${agentRow(phase('awaiting', 'var(--pending)'), 'demo-feat-x', 'feat-x', false, [.5, .7, .3, .6, .8, .4, .6, .5], 'var(--pending)', 42, 7, 2, 1)}
-  ${agentRow(phase('done', 'var(--kept)'), 'demo-hotfix', 'hotfix', false, [.4, .8, .6, .3, .7, .5, .2, .4], 'var(--kept)', 6, 0, null, null)}
-  ${collisionStrip}`;
+  ${agentRow(phase('done', 'var(--kept)'), 'demo-hotfix', 'hotfix', false, [.4, .8, .6, .3, .7, .5, .2, .4], 'var(--kept)', 6, 0, null, null)}`;
 
 // A task-ribbon pill — a status dot + label + ±delta (0.8.0 redesign: labelled wrapping pills, with
 // completed tasks collapsed behind a "N done" toggle, so many chapters stay readable).
@@ -495,7 +528,7 @@ const chapterRow = (glyph, color, title, delta, pending, actable, synthetic) => 
     <span class="mono" style="margin-left:auto;color:var(--faint);font-size:10.5px;flex:none">${delta}${pending ? ` · <span style="color:var(--pending)">${pending}</span>` : ''}</span>
     ${actable ? `<span style="display:flex;gap:8px;align-items:center;flex:none"><span style="color:var(--kept)">${icoChecklist}</span><span style="color:#e5534b">${icoHistory}</span><span style="color:#d9822b">${icoClear}</span></span>` : '<span style="width:44px;flex:none"></span>'}
   </div>`;
-// Overview MASTER-DETAIL — a left nav (Fleet · Workflows: agent rows + workflow runs) drives the right
+// Overview MASTER-DETAIL — a left nav (Fleet · Workflows · Tasks · Processes) drives the right
 // change-map detail (session chip + task ribbon + module strip + file ledger). Self/orchestrator selected.
 const ovAgentRow = (dot, branch, self, bars, added, removed, sel) => `
   <div style="display:flex;align-items:center;gap:7px;padding:6px 12px;font-size:11.5px${sel ? ';background:var(--bg);box-shadow:inset 2px 0 0 var(--accent)' : ''}">
@@ -507,10 +540,11 @@ const ovAgentRow = (dot, branch, self, bars, added, removed, sel) => `
 const overviewTabsBody = `
   <div style="display:flex;align-items:stretch">
     <div style="flex:0 0 35%;min-width:0;background:var(--side);border-right:1px solid var(--border)">
-      <div style="display:flex;gap:12px;padding:9px 12px 7px;border-bottom:1px solid var(--border);font-size:11.5px">
-        <span style="color:var(--ink);border-bottom:1.5px solid var(--accent);padding-bottom:6px;margin-bottom:-8px">Fleet</span>
-        <span style="color:var(--faint)">Workflows</span>
-        <span style="color:var(--faint)">Tasks 2/3</span>
+      <div style="display:flex;flex-wrap:wrap;gap:4px 10px;padding:9px 12px 7px;border-bottom:1px solid var(--border);font-size:11px;line-height:1.5">
+        <span style="color:var(--ink);border-bottom:1.5px solid var(--accent);padding-bottom:4px;white-space:nowrap">Fleet</span>
+        <span style="color:var(--faint);white-space:nowrap">Workflows</span>
+        <span style="color:var(--faint);white-space:nowrap">Tasks 2/3</span>
+        <span style="color:var(--faint);white-space:nowrap">Processes <span style="color:var(--kept)">1/2</span></span>
       </div>
       ${ovAgentRow('var(--blue)', 'demo/pipeline', true, [.3, .6, .4, .8, .5, .9, .7, 1], 40, 3, true)}
       ${ovAgentRow('var(--pending)', 'feat-x', false, [.5, .7, .3, .6, .8, .4, .6, .5], 42, 7, false)}
@@ -711,7 +745,7 @@ const scenes = {
       <div style="border-top:1px solid var(--border);background:var(--panel);">
         <div class="paneltabs"><span>PROBLEMS</span><span>OUTPUT</span><span>TERMINAL</span><span class="on">④ CLAUDE OBSERVATORY</span></div>
         <div class="row" style="align-items:stretch;height:168px;">
-          ${['OBSERVATIONS|Each edit paired with Claude&rsquo;s own reasoning, under a session recap — with the coalesced ×N change-feed (Timeline) folded in.'].map(c => {
+          ${['REQUESTS|What you asked for, in order. Select one and everything beside it — fleet, runs, tasks, shells, the change map — narrows to the work that ask caused.'].map(c => {
             const [h, d] = c.split('|');
             return `<div class="col" style="flex:1.1;border-right:1px solid var(--border);"><div class="colhead" style="color:var(--coral)">${h}</div><div style="font-size:11px;color:var(--dim);padding:2px 16px;line-height:1.5;">${d}</div></div>`;
           }).join('')}
@@ -751,6 +785,7 @@ const scenes = {
           <div class="viewhead" style="border-top:1px solid var(--border);margin-top:8px;">DIFFS</div>
           <div class="viewhead" style="border-top:1px solid var(--border);">FILE HISTORY <span style="float:right;color:var(--faint)">features.py</span></div>
           <div class="viewhead" style="border-top:1px solid var(--border);">ACTIONS</div>
+          <div class="viewhead" style="border-top:1px solid var(--border);">OBSERVATIONS</div>
         </div>
         <div style="flex:1;display:flex;flex-direction:column;">
           <div style="position:relative;display:flex;align-items:center;background:var(--side);border-bottom:1px solid var(--border);box-shadow:inset 0 0 0 2px var(--coral);">
@@ -764,7 +799,7 @@ const scenes = {
       <div style="border-top:1px solid var(--border);background:var(--panel);">
         <div class="paneltabs"><span>PROBLEMS</span><span>OUTPUT</span><span>TERMINAL</span><span class="on">④ CLAUDE OBSERVATORY</span></div>
         <div class="row" style="align-items:stretch;height:184px;">
-          ${mapPane('1', 'OBSERVATIONS', observationsCol)}
+          ${mapPane('1', 'REQUESTS', requestsCol)}
           ${mapPane('1.55', 'OVERVIEW', changeMapCol)}
           ${mapPane('1', 'STATS', statsCol(30, 30).replace(/<div class="uhead">USAGE<\/div>[\s\S]*$/, '<div class="urow"><span class="lbl">ctx</span><span class="track"><span class="fill" style="width:39%;background:var(--kept)"></span></span><span class="pct" style="color:var(--kept)">39%</span><span class="sub">390k/1M</span></div>'), true)}
         </div>
@@ -791,6 +826,7 @@ const scenes = {
           <div class="viewhead" style="border-top:1px solid var(--border);margin-top:8px;">DIFFS</div>
           <div class="viewhead" style="border-top:1px solid var(--border);">FILE HISTORY <span style="float:right;color:var(--faint)">features.py</span></div>
           <div class="viewhead" style="border-top:1px solid var(--border);">ACTIONS</div>
+          <div class="viewhead" style="border-top:1px solid var(--border);">OBSERVATIONS</div>
         </div>
         <div style="flex:1;display:flex;flex-direction:column;">
           <div style="display:flex;background:var(--side);border-bottom:1px solid var(--border);">
@@ -802,7 +838,7 @@ const scenes = {
       <div style="border-top:1px solid var(--border);background:var(--panel);">
         <div class="paneltabs"><span>PROBLEMS</span><span>OUTPUT</span><span>TERMINAL</span><span class="on">CLAUDE OBSERVATORY</span></div>
         <div class="row" style="align-items:stretch;height:212px;">
-          <div class="col" style="flex:1;border-right:1px solid var(--border);"><div class="colhead">OBSERVATIONS</div>${observationsCol}</div>
+          <div class="col" style="flex:1;border-right:1px solid var(--border);"><div class="colhead">REQUESTS</div>${requestsCol}</div>
           <div class="col" style="flex:1.55;border-right:1px solid var(--border);"><div class="colhead">OVERVIEW</div>${changeMapCol}</div>
           <div class="col" style="flex:1;"><div class="colhead">STATS</div>${statsCol(34, 34).replace(/<div class="uhead">USAGE<\/div>[\s\S]*$/, '<div class="urow"><span class="lbl">ctx</span><span class="track"><span class="fill" style="width:39%;background:var(--kept)"></span></span><span class="pct" style="color:var(--kept)">39%</span><span class="sub">390k/1M</span></div>')}</div>
         </div>
@@ -890,6 +926,22 @@ const scenes = {
       ${multitaskingBody}
     </div>`),
 
+  // J2. 0.8.7 — the Requests window: the session as the conversation, one row per ask, each with what
+  //     it produced. The ask is never clipped — it wraps over as many lines as it takes. Selecting one
+  //     scopes the Overview beside it (the scoped row is outlined, and its scope bar appears there).
+  'requests': scene(700, `
+    <div class="window" style="padding-bottom:8px;">
+      <div class="viewhead" style="padding-top:12px;">REQUESTS <span style="float:right;color:var(--faint)">6 asks · 4 with edits · 71 edits</span></div>
+      <div style="font-size:10.5px;color:var(--faint);padding:0 16px 8px;line-height:1.45;border-bottom:1px solid var(--border)">What you asked for, in order. Select one to scope the Overview beside it — its fleet, runs, tasks, shells and change map narrow to the work that ask caused.</div>
+      ${requestRow(6, 'now', '', '', 'add a Processes tab so I can see the shells that are still running, and let me click one to follow its output', '2 tool calls · 41k tok', '~4m', false)}
+      ${requestRow(5, '', '+412 −96', '31 edits · 8f · 3fo · 12 pending', 'the loader is still reading the whole file into memory — stream it instead, and add a test that fails on the old behaviour', '190k tok · 2 tasks · 1 subagent · 1 shell', '22m', true,
+        'Right — the loader reads the file whole before yielding. I switched it to a streaming reader that emits one record at a time, and added a test that pins the old eager behaviour as a failure. Two call sites needed the iterator form; both updated.')}
+      ${requestRow(4, '', '', '', 'yes, that reading is right', 'no edits — a question or a decision · 6k tok', '40s', false)}
+      ${requestRow(3, '', '+188 −41', '18 edits · 5f · 2fo', 'split the training loop out of models.py — it has grown into two things', '120k tok · 3 tasks · 1 workflow run', '31m', false)}
+      ${requestRow(2, '', '+94 −12', '9 edits · 3f · 1fo', 'add type hints to the dataset module', '58k tok · 1 task', '11m', false)}
+      ${requestRow(1, '', '+220 −18', '13 edits · 6f · 4fo · 3 pending', 'set up the project: a package layout, a test runner, and the smallest CI that runs it', '210k tok · 4 tasks · 2 shells', '18m', false)}
+    </div>`),
+
   // K. 0.8.0 — Overview master-detail: Fleet · Workflows left nav + the change-map detail (right).
   'overview-workflows': scene(820, workflowsBody),
   'overview-tasks': scene(820, tasksBody),
@@ -964,7 +1016,7 @@ const SIZE = {
   stats: '808,478', 'inline-review': '1028,440', observations: '1028,368',
   cli: '948,540', conflict: '928,290', diffs: '1028,330', heatmap: '1028,400',
   'file-history': '768,130',
-  multitasking: '868,352', 'overview-tabs': '808,248',
+  multitasking: '868,218', 'overview-tabs': '808,266', requests: '748,560',
   'overview-workflows': '868,196', 'overview-tasks': '868,168', 'win-overview': '1248,368',
   chapters: '768,224', chat: '908,440', demo: '928,392',
 };

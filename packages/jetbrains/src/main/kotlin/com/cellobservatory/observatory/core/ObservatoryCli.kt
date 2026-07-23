@@ -340,11 +340,81 @@ object ObservatoryCli {
 
     /** The multi-agent view: one row per running agent across every worktree (live phase, sparkline,
      *  ±diff, risk), nested subagents, and cross-agent file collisions. `--root` keys the repo-scoped
-     *  fleet. Everything is aggregated in core — the panel only paints. */
-    fun multitaskJson(workDir: String?): String? {
+     *  fleet. Everything is aggregated in core — the panel only paints.
+     *
+     *  `--session` pins WHICH sibling is the payload's own: it decides the fleet's `self` row and the
+     *  session-scoped sections (actions, tasks). Without it the CLI re-resolves the newest session for
+     *  the cwd, so after Switch Session every one of those still described the session you left. */
+    fun multitaskJson(session: String?, workDir: String?): String? {
         val args = buildList {
             add("multitask"); add("--json")
+            session?.takeIf { it.isNotBlank() }?.let { add("--session"); add(it) }
             workDir?.let { add("--root"); add(it) }
+        }
+        val r = run(args, workDir)
+        return if (r.ok) r.stdout else null
+    }
+
+    /** `risk --json` — the flagged shell commands AND (0.8.7) the edits that landed OUTSIDE the
+     *  workspace. `--root` is the boundary "outside" is measured against; without it the CLI falls back
+     *  to its own cwd, which is not the project root whenever the IDE was launched from elsewhere. */
+    fun riskJson(session: String, workDir: String?): String? {
+        val args = buildList {
+            add("risk"); add("--session"); add(session)
+            workDir?.let { add("--root"); add(it) }
+            add("--json")
+        }
+        val r = run(args, workDir)
+        return if (r.ok) r.stdout else null
+    }
+
+    /** `egress --json` — every destination this session reached: web hosts, MCP servers, network shell,
+     *  and (0.8.7) the files it READ from outside the workspace. Only this verb carries those `file`
+     *  channels; the `multitask --json` egress sub-report predates the fold and would omit them. */
+    fun egressJson(session: String, workDir: String?): String? {
+        val args = buildList {
+            add("egress"); add("--session"); add(session)
+            workDir?.let { add("--root"); add(it) }
+            add("--json")
+        }
+        val r = run(args, workDir)
+        return if (r.ok) r.stdout else null
+    }
+
+    /** The background shells this session launched with `run_in_background` and left running — runtime,
+     *  exit code, output volume. No OS pid is reported because none exists to report: the transcript
+     *  never records one, and guessing it from local processes breaks the moment the agent runs over
+     *  SSH or in a container. */
+    fun processesJson(session: String, workDir: String?): String? {
+        val r = run(listOf("processes", "--session", session, "--json"), workDir)
+        return if (r.ok) r.stdout else null
+    }
+
+    /** The session as the list of things the USER asked for — each ask with the edits, tool calls,
+     *  subagents, workflow runs and background shells it produced. Work is attributed to the request that
+     *  STARTED it (core's rule), so nothing here re-attributes by completion. */
+    fun requestsJson(session: String, workDir: String?): String? {
+        val r = run(listOf("requests", "--session", session, "--json"), workDir)
+        return if (r.ok) r.stdout else null
+    }
+
+    /** Claude's prose reply to one ask (its tool calls stripped) — the log a reviewer expands to read.
+     *  Fetched on demand because it can be large. */
+    fun requestResponseJson(session: String, requestId: String, workDir: String?): String? {
+        val r = run(listOf("requests", "--id", requestId, "--response", "--session", session, "--json"), workDir)
+        return if (r.ok) r.stdout else null
+    }
+
+    /** A bounded tail of what ONE thing is doing: an agent, a workflow run, a task, a background shell,
+     *  or the session itself. core decides whether the source is still writing ('live') or has finished
+     *  ('audit'), so both editors follow — and stop following — the same things. */
+    fun feedJson(session: String, kind: String, id: String, limit: Int, workDir: String?): String? {
+        val args = buildList {
+            add("feed"); add("--kind"); add(kind)
+            if (id.isNotBlank()) { add("--id"); add(id) }
+            add("--limit"); add(limit.toString())
+            add("--session"); add(session)
+            add("--json")
         }
         val r = run(args, workDir)
         return if (r.ok) r.stdout else null

@@ -247,7 +247,9 @@ function parseTranscriptActionsUncached(transcriptPath: string, includeSidechain
       if (ce) {
         actions.push({
           ts: ce.ts,
-          tool: 'CompactBoundary',
+          // Not a tool name: every surface prints `tool` verbatim, and "CompactBoundary" in that slot
+          // reads as though Claude called it. The harness did this TO the session.
+          tool: 'Compaction',
           category: 'compact',
           target: compactLabel(ce),
           detail: 'context compacted — earlier turns summarized',
