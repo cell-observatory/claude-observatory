@@ -68,6 +68,10 @@ export interface HookPayload {
   session_id?: string;
   cwd?: string;
   tool_name?: string;
+  /** The harness's id for this tool call, when it sends one. Current Claude Code builds do NOT include
+   *  it in the hook payload; it is read opportunistically so that the day it appears, edit→reasoning
+   *  correlation becomes an exact join instead of a nearest-in-time match. */
+  tool_use_id?: string;
   tool_input?: { file_path?: string; notebook_path?: string; [k: string]: unknown };
   hook_event_name?: string;
 }

@@ -5,14 +5,22 @@ import com.cellobservatory.observatory.core.SessionResolver
 import com.cellobservatory.observatory.core.StoreReader
 import com.cellobservatory.observatory.core.StoreWatcher
 import com.cellobservatory.observatory.core.TranscriptWatcher
+import com.cellobservatory.observatory.model.AuditParser
 import com.cellobservatory.observatory.model.ChangeMap
 import com.cellobservatory.observatory.model.ChangeMapParser
 import com.cellobservatory.observatory.model.EditRecord
 import com.cellobservatory.observatory.model.EditTree
+import com.cellobservatory.observatory.model.Feed
+import com.cellobservatory.observatory.model.FeedParser
 import com.cellobservatory.observatory.model.MultitaskParser
 import com.cellobservatory.observatory.model.MultitaskResult
 import com.cellobservatory.observatory.model.Observations
 import com.cellobservatory.observatory.model.ObservationsParser
+import com.cellobservatory.observatory.model.ProcessesParser
+import com.cellobservatory.observatory.model.ProcessesResult
+import com.cellobservatory.observatory.model.RequestsParser
+import com.cellobservatory.observatory.model.RequestsResult
+import com.cellobservatory.observatory.model.SessionAudit
 import com.cellobservatory.observatory.model.TreeParser
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
@@ -156,6 +164,10 @@ class ObservatoryService(private val project: Project) : Disposable {
         editTreeKey = key // claim this fetch so rapid refreshes don't stack
         ApplicationManager.getApplication().executeOnPooledThread {
             val parsed = ObservatoryCli.treeJson(session, workspaceRoot, filterQuery)?.let { TreeParser.parse(it) }
+            // Ignore a result the key has already moved past: a mutation re-keys mid-flight and starts a
+            // second fetch, and the two land in whatever order the CLI finishes them — an older answer
+            // winning would park a pre-mutation tree in the cache that nothing would refetch.
+            if (editTreeKey != key) return@executeOnPooledThread
             if (parsed == null) {
                 editTreeKey = "" // fetch failed — retry on the next refresh
             } else {
@@ -175,43 +187,102 @@ class ObservatoryService(private val project: Project) : Disposable {
     private inner class ThrottledFetch<T : Any>(private val fetch: (String) -> T?) {
         @Volatile var value: T? = null
             private set
+        /** True once a fetch has COMPLETED at least once, successfully or not. A null [value] means two
+         *  very different things — "not asked yet" and "asked, and the CLI could not answer" — and a
+         *  panel that blurs them states as fact something it never observed. */
+        @Volatile var attempted = false
+            private set
         @Volatile private var fetchedKey = ""
         @Volatile private var fetchedAt = 0L
         @Volatile private var inFlight = false
 
+        /** A refresh that must NOT be dropped — armed by the Refresh button and by [refresh]`(force=true)`
+         *  after a MUTATION. It outlives an in-flight spawn on purpose: see [spawn]. */
+        @Volatile private var forced = false
+
+        /** Arm a forced refresh without asking for the value (the mutation path — the panel's next
+         *  [get] on the same tick then spawns even if the throttle window has not elapsed). */
+        fun forceNext() {
+            forced = true
+        }
+
         /** Latest cached view (possibly null before the first fetch lands); kicks a background refresh
          *  when stale. `force` bypasses the throttle (the toolbar Refresh button). */
         fun get(key: String, force: Boolean = false): T? {
+            if (force) forced = true
             val now = System.currentTimeMillis()
             val stale = key != fetchedKey || now - fetchedAt >= MIN_FETCH_MS
-            if (!inFlight && (stale || force)) {
-                inFlight = true
-                ApplicationManager.getApplication().executeOnPooledThread {
-                    try {
-                        val v = fetch(key)
-                        fetchedAt = System.currentTimeMillis() // set on failure too — back off, don't spin
-                        if (v != null) {
-                            value = v
-                            fetchedKey = key
-                            ApplicationManager.getApplication().invokeLater { listeners.forEach { it.run() } }
-                        }
-                    } finally {
-                        inFlight = false
+            if (!inFlight && (stale || forced)) spawn(key)
+            return value
+        }
+
+        private fun spawn(key: String) {
+            inFlight = true
+            forced = false // this spawn answers the pending force…
+            ApplicationManager.getApplication().executeOnPooledThread {
+                try {
+                    val v = fetch(key)
+                    fetchedAt = System.currentTimeMillis() // set on failure too — back off, don't spin
+                    if (v != null) {
+                        value = v
+                        fetchedKey = key
+                        ApplicationManager.getApplication().invokeLater { listeners.forEach { it.run() } }
                     }
+                } finally {
+                    attempted = true
+                    inFlight = false
+                    // …but a force that arrived WHILE this ran asked about a state this spawn could not
+                    // have seen — it started BEFORE the mutation. Dropping it (the old `!inFlight` guard
+                    // did) let the stale answer stand, which is how the panel kept showing pre-mutation
+                    // pending/accepted counts after Clear Resolved. Re-run instead.
+                    if (forced) ApplicationManager.getApplication().invokeLater { get(key) }
                 }
             }
-            return value
         }
     }
 
-    private val multitaskFetch = ThrottledFetch { _ ->
-        ObservatoryCli.multitaskJson(workspaceRoot)?.let { MultitaskParser.parse(it) }
+    // Keyed on the ACTIVE session and pinned with it: `multitask --json` decides its `self` fleet row and
+    // its session-scoped sections (actions, tasks) from --session, so a pinned session must be passed or
+    // every one of those keeps describing whatever the CLI resolves as newest for the cwd.
+    private val multitaskFetch = ThrottledFetch { session ->
+        ObservatoryCli.multitaskJson(session.takeIf { it.isNotBlank() }, workspaceRoot)?.let { MultitaskParser.parse(it) }
     }
     private val changemapFetch = ThrottledFetch { session ->
         ObservatoryCli.changemapJson(session, workspaceRoot)?.let { ChangeMapParser.parse(it) }
     }
     private val observationsFetch = ThrottledFetch { session ->
         ObservatoryCli.observationsJson(session, workspaceRoot)?.let { ObservationsParser.parse(it) }
+    }
+    private val processesFetch = ThrottledFetch { session ->
+        ObservatoryCli.processesJson(session, workspaceRoot)?.let { ProcessesParser.parse(it) }
+    }
+    // The user's own turns (0.8.7) — the Overview's first nav tab AND the Request review axis. Rides the
+    // same throttled tick as every other view; never a timer of its own.
+    private val requestsFetch = ThrottledFetch { session ->
+        ObservatoryCli.requestsJson(session, workspaceRoot)?.let { RequestsParser.parse(it) }
+    }
+    // The folded footprint's two surviving facts (0.8.7): the writes that left the workspace (`risk`) and
+    // the reads that did (`egress`'s `file` channels). Neither rides the shared multitask payload, so both
+    // are fetched here — in ONE throttled slot, on the panel's existing refresh tick, never a new timer.
+    private val auditFetch = ThrottledFetch { session ->
+        val risk = ObservatoryCli.riskJson(session, workspaceRoot)
+        val egress = ObservatoryCli.egressJson(session, workspaceRoot)
+        if (risk == null || egress == null) null else AuditParser.parse(risk, egress)
+    }
+
+    /** Which feed to tail. Carries the SESSION as well as core's ref, because a fleet row can name a
+     *  sibling session rather than this project's active one. */
+    data class FeedRef(val session: String, val kind: String, val id: String) {
+        internal val key: String get() = listOf(session, kind, id).joinToString(KEY_SEP)
+    }
+
+    /** One shared slot serves every feed, so the cached tail carries the ref it was fetched FOR — a tail
+     *  that landed for a previous selection must never be handed back under the new one. */
+    private val feedFetch = ThrottledFetch { key ->
+        val p = key.split(KEY_SEP)
+        ObservatoryCli.feedJson(p[0], p[1], p[2], FEED_LIMIT, workspaceRoot)
+            ?.let { FeedParser.parse(it) }
+            ?.let { key to it }
     }
 
     /** The shared `multitask --json` view (fleet + workflows + curated actions). Keyed on the active
@@ -223,6 +294,53 @@ class ObservatoryService(private val project: Project) : Disposable {
 
     /** The shared `observations --json` view-model. */
     fun observations(force: Boolean = false): Observations? = currentSession()?.let { observationsFetch.get(it, force) }
+
+    /** The shared `risk` + `egress` audit view — the Actions surface's out-of-workspace writes and its
+     *  full destination list (incl. the `file` reads that left the workspace). */
+    fun audit(force: Boolean = false): SessionAudit? = currentSession()?.let { auditFetch.get(it, force) }
+
+    /** The shared `processes --json` view (the Overview's Processes tab). */
+    fun processes(force: Boolean = false): ProcessesResult? = currentSession()?.let { processesFetch.get(it, force) }
+
+    /** True once a `processes --json` fetch has completed — with [processes] null, this separates "still
+     *  reading" from "this CLI cannot answer for background shells" (an older one on PATH). */
+    val processesAttempted: Boolean get() = processesFetch.attempted
+
+    /** The shared `requests --json` view (the Overview's Requests tab + the Request review axis). */
+    fun requests(force: Boolean = false): RequestsResult? = currentSession()?.let { requestsFetch.get(it, force) }
+
+    /** True once a `requests --json` fetch has completed — with [requests] null, this separates "still
+     *  reading" from "this CLI cannot answer for requests" (an older one on PATH). */
+    val requestsAttempted: Boolean get() = requestsFetch.attempted
+
+    /**
+     * The ask picked in the Requests window — the SCOPE every other dashboard narrows to (0.8.7).
+     *
+     * It lives on the service rather than in either panel because two windows have to agree about it:
+     * the Requests window owns the pick, the Overview filters its fleet · runs · tasks · shells and its
+     * whole change map by it, and either one can clear it. Setting it re-renders every registered
+     * surface through the existing listener path — no new channel, no new timer.
+     */
+    var selectedRequestId: String? = null
+        set(value) {
+            if (field == value) return
+            field = value
+            listeners.forEach { it.run() }
+        }
+
+    /**
+     * The `feed --json` tail for [ref], on the same throttled path as every other view — the panel gets
+     * its feed on its existing refresh tick, no extra timer.
+     *
+     * An 'audit' feed is a RECORD of something that already finished, so it is fetched once and then
+     * left alone: re-polling a completed run would spend a CLI spawn per tick to re-read a file that
+     * can no longer change. `force` (the Refresh button) still refetches.
+     */
+    fun feed(ref: FeedRef, force: Boolean = false): Feed? {
+        val loaded = feedFetch.value?.takeIf { it.first == ref.key }?.second
+        if (!force && loaded != null && !loaded.live) return loaded
+        return feedFetch.get(ref.key, force)?.takeIf { it.first == ref.key }?.second
+    }
 
     data class Counts(val pending: Int, val kept: Int, val undone: Int, val oldestPendingTs: Long?)
 
@@ -239,13 +357,26 @@ class ObservatoryService(private val project: Project) : Disposable {
     fun addListener(l: Runnable) = listeners.add(l)
     fun removeListener(l: Runnable) = listeners.remove(l)
 
-    /** Invalidate caches and re-render every registered surface. Call on the EDT. */
-    fun refresh() {
+    /**
+     * Invalidate caches and re-render every registered surface. Call on the EDT.
+     *
+     * [force] is for MUTATIONS (keep/undo/redo/clear): their refresh must never be swallowed by the
+     * throttle, and must never be answered by a spawn that started BEFORE the mutation — either one
+     * leaves the panel stating pre-mutation counts as current fact. Watcher-driven refreshes stay
+     * throttled: they fire on every transcript byte.
+     */
+    fun refresh(force: Boolean = false) {
         cachedKey = "" // force re-read
         cachedAutoSession = null // re-resolve the session (a new session may have appeared)
+        if (force) sharedViews.forEach { it.forceNext() }
         refreshEditTree() // kick a background tree fetch; repaints when it lands
         listeners.forEach { it.run() }
     }
+
+    /** Every shared throttled view, so a forced refresh reaches all of them (feeds included — a reverted
+     *  edit changes what the selected row's window shows). */
+    private val sharedViews: List<ThrottledFetch<*>>
+        get() = listOf(multitaskFetch, changemapFetch, observationsFetch, processesFetch, requestsFetch, auditFetch, feedFetch)
 
     override fun dispose() {
         StoreWatcher.instance.removeListener(watchListener)
@@ -257,6 +388,14 @@ class ObservatoryService(private val project: Project) : Disposable {
 
         /** Minimum interval between spawns of the same CLI view (matches VS Code's Overview throttle). */
         private const val MIN_FETCH_MS = 3_000L
+
+        /** Feed rows per fetch — enough scrollback to be useful, bounded so a busy agent's tail stays
+         *  cheap to post on every tick. Anything older comes back as the feed's `truncated` count. */
+        private const val FEED_LIMIT = 80
+
+        /** Field separator for the feed's composite cache key (session · kind · id) — a control char, so
+         *  no id can ever split into the wrong fields. */
+        private const val KEY_SEP = "\u0000"
     }
 }
 

@@ -20,8 +20,42 @@ data class ActionRecord(
     val risk: CommandRisk?,
 )
 
-/** One off-machine destination this session touched (mirrors core's EgressChannel). */
+/** One destination this session reached (mirrors core's EgressChannel). [kind] is web | mcp | shell |
+ *  file — the last being a file READ from outside the workspace, which is reach exactly like a fetch.
+ *  [scope] is remote | local | unknown: 'local' means it stayed on this machine but crossed the workspace
+ *  boundary (a FACT), 'unknown' that the destination could not be classified (an ADMISSION). */
 data class EgressChannel(val kind: String, val target: String, val scope: String, val count: Int)
+
+/** One file this session EDITED outside the workspace, with how many edits landed there (core's
+ *  OutsideWrite, off `risk --json`). The edits ledger cannot state this — every path it shows is
+ *  workspace-relative — so the risk audit is where it surfaces. */
+data class OutsideWrite(val file: String, val count: Int)
+
+/** The two audits the Actions surface folds the old footprint badges into (0.8.7): `risk --json`'s
+ *  out-of-workspace writes and the FULL `egress --json` channel list. Fetched off their own verbs
+ *  because the shared `multitask --json` payload's egress sub-report predates the fold and carries
+ *  neither the writes nor the `file` read channels. */
+data class SessionAudit(val outsideWrites: List<OutsideWrite>, val egress: List<EgressChannel>)
+
+/** Parse the `risk --json` + `egress --json` pair into the folded audit view. Tolerant of an older CLI
+ *  that emits neither key (both lists simply come back empty) and of the `{transcript:null}` payload
+ *  every audit verb emits when there is no transcript to read. */
+object AuditParser {
+    fun parse(riskJson: String, egressJson: String): SessionAudit? = try {
+        val r = JsonParser.parseString(riskJson).asJsonObject
+        val e = JsonParser.parseString(egressJson).asJsonObject
+        SessionAudit(
+            outsideWrites = (r.getAsJsonArray("outsideWrites") ?: com.google.gson.JsonArray()).map { w ->
+                val wo = w.asJsonObject
+                OutsideWrite(wo.get("file").asString, wo.get("count")?.takeIf { !it.isJsonNull }?.asInt ?: 1)
+            },
+            egress = (e.getAsJsonArray("channels") ?: com.google.gson.JsonArray())
+                .map { ActionsParser.parseEgress(it.asJsonObject) },
+        )
+    } catch (_: Exception) {
+        null
+    }
+}
 
 /** A category group in the Actions timeline (mirrors core's ActionGroup). */
 data class ActionGroup(

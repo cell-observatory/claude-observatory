@@ -1,3 +1,5 @@
+import * as path from 'path';
+import { ActionRecord } from './actions';
 /**
  * Command risk scoring (zero-token): flag the shell commands an agent ran that can destroy data,
  * escalate privilege, execute remote code, or touch credentials. Pure pattern-matching over the Bash
@@ -58,3 +60,46 @@ export function scoreCommand(command: string): CommandRisk | null {
   if (reasons.length === 0) return null;
   return { level: high ? 'high' : 'medium', reasons };
 }
+
+
+/** One file the session WROTE outside the workspace. */
+export interface OutsideWrite {
+  /** Display path, home-shortened. */
+  file: string;
+  /** How many edits landed there. */
+  count: number;
+}
+
+/**
+ * Edits that landed OUTSIDE the workspace.
+ *
+ * Risk otherwise only inspects shell commands, but writing outside the boundary you gave the agent is
+ * the same class of fact — and the one the edits ledger cannot state, because it presents every path
+ * workspace-relative. Reported separately from command risk rather than scored into it: this is an
+ * observation about where the work went, not a judgement that the write was dangerous.
+ */
+export function outsideWrites(actions: ActionRecord[], root: string): OutsideWrite[] {
+  const home = process.env.HOME || process.env.USERPROFILE || '';
+  const byPath = new Map<string, number>();
+  for (const a of actions) {
+    if (a.category !== 'edit' || !a.target) continue;
+    const abs = path.isAbsolute(a.target) ? a.target : path.resolve(root, a.target);
+    const rel = path.relative(root, abs);
+    if (!rel.startsWith('..') && !path.isAbsolute(rel)) continue;
+    const shown = home && abs.startsWith(home) ? '~' + abs.slice(home.length) : abs;
+    byPath.set(shown, (byPath.get(shown) ?? 0) + 1);
+  }
+  return [...byPath.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([file, count]) => ({ file, count }));
+}
+
+
+/** The caveat every audit surface prints beside what a session DID.
+ *
+ *  Claude Code writes nothing to the transcript when it prompts for approval, so auto-approved and
+ *  hand-approved work are indistinguishable from the outside. These audits therefore report what was
+ *  exercised — never what was permitted — and say so wherever they are rendered. Defined once so the
+ *  CLI and both editors cannot drift into wording that implies permission was granted.
+ */
+export const EXERCISED_NOTE = 'exercised, not approved — permission prompts are never written to the transcript';

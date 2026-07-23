@@ -11,6 +11,14 @@ import com.google.gson.JsonParser
  */
 data class MtTodo(val content: String, val status: String)
 
+/** How far an agent reached past the boundary it was given (core's `outside`): the count of distinct
+ *  FILES it read / wrote outside its own workspace. The rest of the old footprint block folded into the
+ *  `risk` and `egress` audits in 0.8.7; this stayed because it is the one fact worth a glance on a fleet
+ *  row. Null for an older CLI without the field — an absent fact renders absent, never as a zero. */
+data class OutsideTouch(val reads: Int, val writes: Int) {
+    val any: Boolean get() = reads > 0 || writes > 0
+}
+
 /** A subagent spawned by a running agent, with its own live phase + current task (mirrors core). */
 data class MtSubagent(
     val agentId: String,
@@ -47,9 +55,8 @@ data class RunningAgent(
     val durationMs: Long,
     val riskTotal: Int,
     val riskHigh: Int,
-    /** What this agent reached for — the same block `changemap --json` carries, read off the map core
-     *  already built for the row. Null for an older CLI without the field. */
-    val capabilities: Capabilities?,
+    /** Files this agent read / wrote outside its own worktree — the fleet row's ↗ suffix. */
+    val outside: OutsideTouch?,
     /** How many times this agent's context was compacted; 0 for an older CLI without the field. */
     val compactions: Int,
 )
@@ -251,7 +258,8 @@ object MultitaskParser {
             durationMs = long(o, "durationMs"),
             riskTotal = risk?.let { int(it, "total") } ?: 0,
             riskHigh = risk?.let { int(it, "high") } ?: 0,
-            capabilities = o.get("capabilities")?.takeIf { it.isJsonObject }?.asJsonObject?.let { parseCapabilities(it) },
+            outside = o.get("outside")?.takeIf { it.isJsonObject }?.asJsonObject
+                ?.let { OutsideTouch(int(it, "reads"), int(it, "writes")) },
             compactions = int(o, "compactions"),
         )
     }

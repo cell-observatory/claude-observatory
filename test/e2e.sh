@@ -371,7 +371,10 @@ ok "siblings --repo summary carries conflicts (uncapped)" "printf '%s' \"\$SR\" 
 CM2=$(cc changemap --session "$MTA" 2>/dev/null)
 ok "changemap still carries summary/edits/chapters/files/modules" "printf '%s' \"\$CM2\" | jq -e 'has(\"summary\") and has(\"edits\") and has(\"chapters\") and has(\"files\") and has(\"modules\")' >/dev/null"
 ok "changemap adds rollupByAgent/agents/unassigned"     "printf '%s' \"\$CM2\" | jq -e 'has(\"rollupByAgent\") and has(\"agents\") and has(\"unassigned\")' >/dev/null"
-ok "changemap agents[] is a per-sibling change-map build (both worktrees)" "printf '%s' \"\$CM2\" | jq -e '[.agents[] | select(has(\"summary\") and has(\"edits\") and has(\"rollupByTask\"))]|length>=2' >/dev/null"
+ok "changemap agents[] is a per-sibling change-map build (both worktrees)" "printf '%s' \"\$CM2\" | jq -e '[.agents[] | select(has(\"summary\") and has(\"chapters\") and has(\"rollupByTask\"))]|length>=2' >/dev/null"
+# 0.8.7: the per-sibling edit LIST is projected out of agents[] (1.95 MB of a 3.30 MB payload that no
+# renderer read); the session's own top-level edits are untouched.
+ok "changemap agents[] carries no per-sibling edit list"  "printf '%s' \"\$CM2\" | jq -e '[.agents[] | select(has(\"edits\"))]|length==0' >/dev/null"
 ok "changemap per-edit carries taskId (strict spans)"   "printf '%s' \"\$CM2\" | jq -e '.edits[0] | has(\"taskId\")' >/dev/null"
 ok "changemap unassigned bucket has taskId null"        "printf '%s' \"\$CM2\" | jq -e '.unassigned.taskId==null' >/dev/null"
 
@@ -468,16 +471,59 @@ ok "vitals: the LATEST main-chain model is current"      "printf '%s' \"\$USG\" 
 ok "vitals: every model used is listed (switch shown)"   "printf '%s' \"\$USG\" | jq -e '(.vitals.models|length)==2' >/dev/null"
 ok "vitals: effort read from the assistant record"       "printf '%s' \"\$USG\" | jq -e '.vitals.effort.level==\"xhigh\" and .vitals.effort.source==\"record\"' >/dev/null"
 ok "vitals: the compaction is captured"                  "printf '%s' \"\$USG\" | jq -e '(.vitals.compactions|length)==1' >/dev/null"
-ok "vitals: context series feeds the meter"              "printf '%s' \"\$USG\" | jq -e '(.vitals.context|length)>=2' >/dev/null"
+ok "vitals: no per-turn context series (dropped in 0.8.7)" "printf '%s' \"\$USG\" | jq -e '(.vitals|has(\"context\"))|not' >/dev/null"
 ACT6=$(cc actions --session "$V6" --json 2>/dev/null)
 ok "actions: a compaction becomes a 'compact' row"       "printf '%s' \"\$ACT6\" | jq -e '[.actions[]|select(.category==\"compact\")]|length==1' >/dev/null"
 ok "actions: the compact row carries THIS event's drop"  "printf '%s' \"\$ACT6\" | jq -e '[.actions[]|select(.category==\"compact\")][0].compact.droppedTokens==986257' >/dev/null"
-CAP6=$(cc capabilities --session "$V6" --json 2>/dev/null)
-ok "capabilities --json reports the footprint"           "printf '%s' \"\$CAP6\" | jq -e '.capabilities|has(\"reads\") and has(\"exec\") and has(\"mcp\")' >/dev/null"
-ok "capabilities: an out-of-workspace read is flagged"   "printf '%s' \"\$CAP6\" | jq -e '.capabilities.reads.outOfRoot>=1' >/dev/null"
+# 0.8.7: the footprint folded into the risk/egress audits. Its two unique facts now live where they
+# belong — reads that left the workspace are egress (reach), writes that left it are risk (damage).
+RISK7=$(cc risk --session "$V6" --json 2>/dev/null)
+ok "risk --json reports writes that left the workspace" "printf '%s' \"\$RISK7\" | jq -e 'has(\"outsideWrites\")' >/dev/null"
+EGR7=$(cc egress --session "$V6" --json 2>/dev/null)
+ok "egress --json carries out-of-workspace reads"      "printf '%s' \"\$EGR7\" | jq -e '[.channels[]|select(.kind==\"file\")]|length>=1' >/dev/null"
+ok "egress: an outside read is scoped local, not unknown" "printf '%s' \"\$EGR7\" | jq -e '[.channels[]|select(.kind==\"file\" and .scope==\"local\")]|length>=1' >/dev/null"
+ok "changemap no longer carries a footprint payload"   "printf '%s' \"\$(cc changemap --json 2>/dev/null)\" | jq -e '(has(\"footprint\"))|not' >/dev/null"
 OBS6=$(cc observations --session "$V6" 2>/dev/null)
 ok "observations: context sources ride the payload"      "printf '%s' \"\$OBS6\" | jq -e '.context|has(\"sources\") and has(\"note\")' >/dev/null"
 ok "observations: an invoked skill is transcript-proven" "printf '%s' \"\$OBS6\" | jq -e '[.context.sources[]|select(.kind==\"skill\" and .evidence==\"transcript\")]|length==1' >/dev/null"
+
+echo "════════ E2E 21: 0.8.7 background processes ════════"
+# A backgrounded Bash leaves three marks: the spawn (run_in_background), a result naming the shell, and
+# a queue-operation notification carrying the exit code. A FOREGROUND Bash must not appear.
+P7=proc87
+: > "$HOME/.claude/projects/$MANGLE/$P7.jsonl"
+POUT="$WS/job.output"; printf 'output\n' > "$POUT"
+node -e '
+  const fs=require("fs");
+  const [proj, sess, out]=process.argv.slice(1);
+  const at=(ms)=>new Date(ms).toISOString();
+  const spawn=JSON.stringify({timestamp:at(1000),type:"assistant",message:{role:"assistant",content:[
+    {type:"tool_use",id:"tb1",name:"Bash",input:{command:"npm test",description:"Run the suite",run_in_background:true}}]}});
+  const res=JSON.stringify({timestamp:at(1100),type:"user",toolUseResult:{backgroundTaskId:"shellA"},
+    message:{role:"user",content:[{type:"tool_result",tool_use_id:"tb1",content:"Command running in background with ID: shellA. Output is being written to: "+out+". You will be notified."}]}});
+  const fg=JSON.stringify({timestamp:at(1200),type:"assistant",message:{role:"assistant",content:[
+    {type:"tool_use",id:"tb2",name:"Bash",input:{command:"ls"}}]}});
+  const done=JSON.stringify({type:"queue-operation",operation:"enqueue",timestamp:at(61000),
+    content:"<task-notification> <task-id>shellA</task-id> <status>completed</status> <summary>Background command \"job\" completed (exit code 0)</summary> </task-notification>"});
+  fs.writeFileSync(proj+"/"+sess+".jsonl",[spawn,res,fg,done].join("\n")+"\n");
+' "$HOME/.claude/projects/$MANGLE" "$P7" "$POUT"
+PROC=$(cc processes --session "$P7" --json 2>/dev/null)
+ok "processes --json lists background shells"          "printf '%s' \"\$PROC\" | jq -e '(.processes|length)==1' >/dev/null"
+ok "processes: a FOREGROUND Bash is not a process"     "printf '%s' \"\$PROC\" | jq -e '[.processes[]|select(.command==\"ls\")]|length==0' >/dev/null"
+ok "processes: the shell carries command + runtime"    "printf '%s' \"\$PROC\" | jq -e '.processes[0].command==\"npm test\" and .processes[0].runtimeMs==60000' >/dev/null"
+ok "processes: exit code read from the notification"   "printf '%s' \"\$PROC\" | jq -e '.processes[0].exitCode==0 and .processes[0].running==false' >/dev/null"
+ok "processes: output volume is stat-ed"               "printf '%s' \"\$PROC\" | jq -e '.processes[0].outputBytes>0' >/dev/null"
+ok "processes: summary headlines the tab"              "printf '%s' \"\$PROC\" | jq -e '.summary.total==1 and .summary.running==0' >/dev/null"
+
+echo "════════ E2E 22: 0.8.7 live feed ════════"
+# The feed tails whatever the clicked thing writes. Reuses the process fixture above ($P7 / shellA).
+FEEDP=$(cc feed --kind process --id shellA --session "$P7" --json 2>/dev/null)
+ok "feed: a process feed tails its output file"       "printf '%s' \"\$FEEDP\" | jq -e '[.entries[]|select(.kind==\"output\")]|length>=1' >/dev/null"
+ok "feed: output rows carry no invented timestamp"    "printf '%s' \"\$FEEDP\" | jq -e '[.entries[]|select(.ts!=0)]|length==0' >/dev/null"
+FEEDS=$(cc feed --session "$P7" --json 2>/dev/null)
+ok "feed: the session feed lists its tool calls"      "printf '%s' \"\$FEEDS\" | jq -e '(.entries|length)>=1 and .ref.kind==\"session\"' >/dev/null"
+ok "feed: a capped feed reports what it dropped"      "printf '%s' \"\$(cc feed --session \"$P7\" --limit 1 --json 2>/dev/null)\" | jq -e '(.entries|length)==1 and (.truncated>=0)' >/dev/null"
+ok "feed: an unknown target is empty with a reason"   "printf '%s' \"\$(cc feed --kind agent --id nope --session \"$P7\" --json 2>/dev/null)\" | jq -e '(.entries|length)==0 and (.note|length)>0' >/dev/null"
 
 echo "════════ E2E 19: 0.8.0 demo simulator (real pipeline end-to-end, total chapters, no-residue lifecycle) ════════"
 # The demo replays a scripted session through the REAL pipeline (transcript + captured edits + a

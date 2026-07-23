@@ -112,7 +112,7 @@ object ReviewOps {
             return
         }
         refreshFile(rec.file)
-        ObservatoryService.getInstance(project).refresh()
+        ObservatoryService.getInstance(project).refresh(force = true) // the undo/redo just changed the store
         // Routine single-edit undo/redo confirmation → transient status bar (no Event Log pile-up);
         // failures stay as balloons. Parity with VS Code's setStatusBarMessage.
         if (res.ok) status(project, res.message) else notify(project, res.message, NotificationType.ERROR)
@@ -201,12 +201,20 @@ object ReviewOps {
 
     /** Reject (revert) every PENDING edit in ONE module bucket — the Overview Folder-axis Reject. Acts on
      *  the bucket's EXACT edits (by id), never the recursive subtree a path scope would catch — mirrors VS
-     *  Code's `undoEditsInFolder` (core.undoScope({ ids })). Same dirty-buffer guard + confirm + refresh as
-     *  [undoAll]; the revert is ONE CLI call (`undo --ids`), not a per-id loop. */
+     *  Code's `undoEditsInFolder` (core.undoScope({ ids })). */
     fun undoFolder(project: Project, session: String, targets: List<EditRecord>, folderLabel: String) {
+        undoIds(project, session, targets, folderLabel, "folder “$folderLabel”")
+    }
+
+    /** Reject (revert) every PENDING edit in an EXPLICIT id set — the shared implementation behind the
+     *  Folder axis and the Request axis ("revert everything from this ask"). Same dirty-buffer guard +
+     *  confirm + refresh as [undoAll]; the revert is ONE CLI call (`undo --ids`), not a per-id loop, so
+     *  the front-ends can't drift. [shortScope] names the set in the terse "nothing to do" notice;
+     *  [longScope] names it in the destructive prompt and the result. */
+    fun undoIds(project: Project, session: String, targets: List<EditRecord>, shortScope: String, longScope: String) {
         val list = targets.filter { it.pending }.sortedByDescending { it.id }
         if (list.isEmpty()) {
-            notify(project, "No pending edits to reject in $folderLabel")
+            notify(project, "No pending edits to reject in $shortScope")
             return
         }
         val dirty = list.map { it.file }.distinct().filter { isDirty(it) }
@@ -214,22 +222,22 @@ object ReviewOps {
         val files = list.map { it.file }.distinct()
         val ok = Messages.showYesNoDialog(
             project,
-            "Revert ${list.size} pending edit(s) across ${files.size} file(s) in folder “$folderLabel”?\n\n" +
+            "Revert ${list.size} pending edit(s) across ${files.size} file(s) in $longScope?\n\n" +
                 "This rewrites the files on disk. Later-overlapping edits may conflict " +
                 "(revert those individually to force-restore).",
             "Revert Claude's Edits",
             "Revert ${list.size} Edit(s)", "Cancel", Messages.getWarningIcon(),
         )
         if (ok != Messages.YES) return
-        runBg(project, "Reverting ${list.size} edit(s) in $folderLabel") {
+        runBg(project, "Reverting ${list.size} edit(s) in $shortScope") {
             val res = ObservatoryCli.undoScopeIds(session, list.map { it.id }, project.basePath)
             files.forEach { refreshFile(it) }
             if (res == null) {
-                done(project, cliFailMsg("revert edits in $folderLabel"), NotificationType.ERROR)
+                done(project, cliFailMsg("revert edits in $shortScope"), NotificationType.ERROR)
             } else {
                 done(
                     project,
-                    "Reverted ${res.undone} edit(s) in folder “$folderLabel”" +
+                    "Reverted ${res.undone} edit(s) in $longScope" +
                         if (res.conflicts > 0) " · ${res.conflicts} conflict(s) — revert those individually to force" else "",
                 )
             }
@@ -457,7 +465,7 @@ object ReviewOps {
                     val r = if (drop) ObservatoryCli.dropSession(session, project.basePath) else ObservatoryCli.gc(session, project.basePath)
                     ApplicationManager.getApplication().invokeLater {
                         if (r.ok) {
-                            ObservatoryService.getInstance(project).refresh()
+                            ObservatoryService.getInstance(project).refresh(force = true) // the store just changed
                             notify(project, if (drop) "Dropped session $session." else "Reclaimed disk (GC complete).")
                         } else {
                             notify(project, "Clean failed — ${r.stderr.take(160)}", NotificationType.ERROR)
@@ -598,9 +606,12 @@ object ReviewOps {
         })
     }
 
+    /** Every mutating op lands here, so this is where the refresh is FORCED: the throttled views must not
+     *  answer a post-mutation refresh from a spawn that started before it, or the panel keeps showing the
+     *  counts the mutation just changed. */
     private fun done(project: Project, msg: String, type: NotificationType = NotificationType.INFORMATION) {
         ApplicationManager.getApplication().invokeLater {
-            ObservatoryService.getInstance(project).refresh()
+            ObservatoryService.getInstance(project).refresh(force = true)
             notify(project, msg, type)
         }
     }
@@ -620,7 +631,7 @@ object ReviewOps {
     /** Like [done] but routes the confirmation through the transient status bar instead of a balloon. */
     private fun doneQuiet(project: Project, msg: String) {
         ApplicationManager.getApplication().invokeLater {
-            ObservatoryService.getInstance(project).refresh()
+            ObservatoryService.getInstance(project).refresh(force = true)
             status(project, msg)
         }
     }

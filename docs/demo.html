@@ -171,11 +171,12 @@
   .ovbar .tk{color:var(--kept)} .ovbar .tu{color:var(--deleted)} .ovbar .nvb{color:#4c8bf5} .ovbar .ts{color:#9a6ac2}
   .ovbar button{border:1px solid var(--accent);background:var(--surface);color:var(--ink);border-radius:999px;padding:1px 10px;font-family:var(--sans);font-size:.72rem;cursor:pointer}
   .ovbar button.hint{animation:pulse 1.6s ease-in-out infinite}
-  .ovwrap{display:grid;grid-template-columns:170px 1fr;flex:1}
+  .ovwrap{display:grid;grid-template-columns:200px 1fr;flex:1}
   @media (max-width:640px){.ovwrap{grid-template-columns:1fr}.ovnav{display:none}}
   .ovnav{border-right:1px solid var(--line-soft);display:flex;flex-direction:column;min-width:0}
-  .ovtabs{display:flex;gap:2px;padding:6px 8px;border-bottom:1px solid var(--line-soft);font-size:.68rem}
-  .ovtabs span{padding:2px 8px;border-radius:6px;color:var(--ink-faint);white-space:nowrap}
+  /* four tabs do not fit side by side in a narrow nav column, so the row wraps rather than clipping one */
+  .ovtabs{display:flex;flex-wrap:wrap;gap:2px;padding:6px 8px;border-bottom:1px solid var(--line-soft);font-size:.68rem}
+  .ovtabs span{padding:2px 6px;border-radius:6px;color:var(--ink-faint);white-space:nowrap}
   .ovtabs .on{background:var(--accent-soft);color:var(--accent-ink)}
   .fr{display:flex;gap:6px;align-items:baseline;padding:4px 8px;font-family:var(--mono);font-size:.64rem;color:var(--ink-soft);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .fr .gl{flex:none;color:var(--accent)}
@@ -201,6 +202,16 @@
   .lr .lc{flex:none;font-family:var(--mono);font-size:.66rem;color:var(--ink-faint)}
   .lr .lc .p{color:var(--kept)} .lr .lc .m{color:var(--deleted)}
   .readout{padding:6px 12px;font-family:var(--mono);font-size:.64rem;color:var(--ink-faint);border-top:1px solid var(--line-soft);margin-top:auto}
+  /* the selected row's feed: live while its source is still writing, an audit log once it has finished */
+  .ovfeed{padding:5px 12px 7px;font-family:var(--mono);font-size:.62rem;color:var(--ink-faint);border-top:1px solid var(--line-soft);background:var(--surface-2)}
+  .ovfeed .fh{display:flex;gap:6px;align-items:baseline;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:3px}
+  .ovfeed .fh b{color:var(--ink);font-weight:600}
+  .ovfeed .fh .live{color:var(--kept)}
+  .ovfeed .fh .audit{color:var(--ink-faint)}
+  .ovfeed .fe{display:flex;gap:7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .ovfeed .fe .ft{flex:none;color:var(--ink-faint)}
+  .ovfeed .fe .fa{flex:none;color:var(--ink)}
+  .ovfeed .more{opacity:.75}
 
   /* stats pane */
   .stnav{display:flex;gap:8px;align-items:baseline;padding:6px 12px;border-bottom:1px solid var(--line-soft);font-family:var(--mono);font-size:.68rem;color:var(--ink-soft)}
@@ -342,7 +353,7 @@
           <div class="ovbar" id="ovbar" aria-hidden="true"></div>
           <div class="ovwrap">
             <div class="ovnav">
-              <div class="ovtabs"><span class="on">Fleet</span><span id="wf-tab">Workflows</span><span id="tk-tab" title="The session's numbered task list — statuses update as chapters land">Tasks</span></div>
+              <div class="ovtabs"><span class="on">Fleet</span><span id="wf-tab">Workflows</span><span id="tk-tab" title="The session's numbered task list — statuses update as chapters land">Tasks</span><span id="pr-tab" title="Background shells this session launched with run_in_background — state, runtime and output volume. Shell ids are the harness's own; a transcript records no OS process id.">Processes</span></div>
               <div id="fleet"></div>
             </div>
             <div class="ovdetail">
@@ -350,6 +361,7 @@
               <div class="strip" id="ov-strip" hidden></div>
               <div id="ov-ledger"></div>
               <div class="readout" id="ov-readout"></div>
+              <div class="ovfeed" id="ov-feed" hidden></div>
             </div>
           </div>
         </section>
@@ -552,11 +564,11 @@
       {ed:2,landed:2,
        narr:'A second edit wires scaling into the training entrypoint. Chapter one is complete — the ribbon marks it half-moon: finished, but both edits still pending your review. The nav bar’s File and Diff counters track exactly where you are.'},
       {ed:3,landed:3,
-       narr:'Chapter two adds dataset validation. The module strip apportions the churn across src, src/models, tests, and docs; commands Claude runs (a quick python src/train.py sanity check here) land in the Actions timeline the same way.'},
+       narr:'Chapter two adds dataset validation. The folder strip apportions the churn across src, src/models, tests, and docs; commands Claude runs (a quick python src/train.py sanity check here) land in the Actions timeline the same way. Two more are backgrounded — a test watcher and a docs preview — so the Processes tab picks them up, one still running.'},
       {ed:4,landed:4,
        narr:'Claude hands the test-writing to a subagent — watch it appear under the session in the Fleet nav. Its edit is attributed to it in the timeline and reviewed exactly like any other.'},
       {ed:5,landed:5,
-       narr:'A workflow run writes the docs — the Workflows tab picks up the run. Five edits are now pending across three chapters; the Next steps list at the bottom of Observations says what remains.'},
+       narr:'A workflow run writes the docs — the Workflows tab picks up the run. Under the change map, the feed reads what the selected row is doing, straight from the file it writes: it is marked live while that source is still writing, and becomes an audit log once it has finished. Five edits are now pending across three chapters; the Next steps list at the bottom of Observations says what remains.'},
       {ed:1,landed:5,gate:'keep',hint:'Click ✓ Keep on the lens in the editor.',
        narr:'Review the first edit: the scaling function is correct — <span class="hl">keep it</span>. Keeping one edit resolves it and nothing else.'},
       {ed:2,landed:5,gate:'undo',hint:'Click ↩ Undo on the lens in the editor.',
@@ -564,7 +576,7 @@
       {ed:2,landed:5,gate:'acceptall',hint:'Click ✓ Accept all in the Overview toolbar.',
        narr:'Sweep the rest in one motion: <span class="hl">Accept all</span> resolves everything still pending. Clicking a chapter row scopes the same bulk actions to just that task.'},
       {ed:1,landed:5,recap:true,
-       narr:'That is the whole loop: every edit tracked with its reasoning, reviewed one at a time or by the chapter, and resolved without git. Run the same session in your own editor below — or start with the <a href="getting-started.html" style="color:var(--accent-ink);text-decoration:underline">recorded walkthrough</a>.'},
+       narr:'That is the whole loop: every edit tracked with its reasoning, reviewed one at a time or by the chapter, and resolved without git. The session has stopped writing, so its feed is now an audit log rather than a live tail. Run the same session in your own editor below — or start with the <a href="getting-started.html" style="color:var(--accent-ink);text-decoration:underline">recorded walkthrough</a>.'},
     ];
     var N=STEPS.length;
     var el=function(id){return document.getElementById(id);};
@@ -708,6 +720,9 @@
       var tkDone=0;
       if(showPlan) CHAPTERS.forEach(function(ch){ if(ch.edits.every(function(id){return id<=landed.length;})) tkDone++; });
       el('tk-tab').textContent=showPlan?('Tasks '+tkDone+'/3'):'Tasks';
+      // Processes tab — the demo session backgrounds two shells alongside chapter two: a test watcher
+      // that exits 0, and a docs preview left running. The badge is running/total, as in the editors.
+      el('pr-tab').textContent=(landed.length>=3)?'Processes 1/2':'Processes';
 
       var rib='';
       if(showPlan){
@@ -745,6 +760,31 @@
       }).join('');
       var addAll=landed.reduce(function(a,e){return a+e.plus;},0),remAll=landed.reduce(function(a,e){return a+e.minus;},0);
       el('ov-readout').textContent=landed.length?(landed.length+' file'+(landed.length===1?'':'s')+' · +'+addAll+' −'+remAll+(p0?' · '+p0+' pending':' · reviewed clean')):'';
+
+      // ---- feed ----
+      // The selected row's activity, read from the file that thing writes. Which it IS depends on the
+      // source: LIVE while it is still writing (headed with the newest evidence, never a realtime
+      // claim), an AUDIT LOG once it has finished — a record, no longer followed. The demo has the
+      // session selected, so it flips to an audit log at the recap, when the session is done.
+      var feed=el('ov-feed');
+      if(!landed.length){ feed.hidden=true; feed.innerHTML=''; }
+      else{
+        var acts=[];
+        landed.forEach(function(e){ acts.push({t:e.time,a:'Edit',x:e.file}); });
+        if(landed.length>=3){
+          acts.push({t:'14:45',a:'Bash',x:'pytest -q --watch  (background: demo-tests)'});
+          acts.push({t:'14:45',a:'Bash',x:'python -m http.server 8000  (background: demo-serve)'});
+        }
+        acts.sort(function(a,b){return a.t<b.t?-1:a.t>b.t?1:0;});
+        var TAIL=4, hidden=Math.max(0,acts.length-TAIL), tail=acts.slice(-TAIL);
+        var last=tail[tail.length-1].t;
+        feed.hidden=false;
+        feed.innerHTML='<div class="fh"><b>demo-session</b>'+
+          (sessDone?('<span class="audit">▣ audit log</span><span>· last activity '+last+' · session</span>')
+                   :('<span class="live">● live</span><span>· updated '+last+' · session</span>'))+'</div>'+
+          (hidden?('<div class="more">… '+hidden+' earlier entr'+(hidden===1?'y':'ies')+' not shown</div>'):'')+
+          tail.map(function(a){return '<div class="fe"><span class="ft">'+a.t+'</span><span class="fa">'+a.a+'</span><span>'+esc(a.x)+'</span></div>';}).join('');
+      }
 
       // ---- stats ----
       var p=0,kk=0,u=0;

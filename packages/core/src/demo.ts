@@ -25,6 +25,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
+import * as os from 'os';
 import { projectDir } from './session';
 import { handleHookPayload } from './capture';
 import { readLog, clearResolved, removeSession, isSafeSessionId } from './store';
@@ -188,6 +189,39 @@ export async function runDemo(opts: DemoOptions = {}): Promise<DemoResult> {
     result(id);
   };
 
+  /** A backgrounded shell, exactly as the harness records one: the spawn, the result that names the
+   *  shell, and (optionally) the completion notification carrying its exit code. Without this the
+   *  Processes tab and `feed --kind process` can only ever render their empty states. */
+  const bgShell = (shellId: string, cmd: string, desc: string, opts: { finish?: number } = {}) => {
+    const id = tid();
+    const outPath = path.join(workspace, `.observatory-demo-${shellId}.log`);
+    try {
+      fs.writeFileSync(outPath, `${desc}\n… running ${cmd}\n`);
+    } catch {
+      /* the log is a nicety; the rows render without it */
+    }
+    assistant([{ type: 'tool_use', id, name: 'Bash', input: { command: cmd, description: desc, run_in_background: true } }]);
+    append({
+      type: 'user',
+      sessionId: session,
+      timestamp: clock.iso(),
+      toolUseResult: { backgroundTaskId: shellId },
+      message: {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: id, content: `Command running in background with ID: ${shellId}. Output is being written to: ${outPath}.` }],
+      },
+    });
+    if (opts.finish !== undefined) {
+      append({
+        type: 'queue-operation',
+        operation: 'enqueue',
+        sessionId: session,
+        timestamp: clock.iso(),
+        content: `<task-notification> <task-id>${shellId}</task-id> <status>completed</status> <summary>Background command "${desc}" completed (exit code ${opts.finish})</summary> </task-notification>`,
+      });
+    }
+  };
+
   // The NUMBERED task list (TaskCreate/TaskUpdate, 0.8.3) — seeded alongside the todos so the
   // Overview's Tasks tab shows live, LINKED data. Same titles as the to-dos: the merged plan dedupes
   // (todos win), so this never mints twin chapters. Task state is written both ways a real session
@@ -317,6 +351,24 @@ export async function runDemo(opts: DemoOptions = {}): Promise<DemoResult> {
 
   // A long session fills its context window and the harness compacts it. The turns on either side
   // carry realistic context sizes so the meter shows the climb and the drop, not a flat line.
+  await beat('  … a test watcher goes into the background while the work continues');
+  bgShell('demo-tests', 'pytest -q --watch', 'Watch the test suite', { finish: 0 });
+  bgShell('demo-serve', 'python -m http.server 8000', 'Serve the docs preview');
+  // Give the footprint something in every facet: a read outside the workspace, a flagged command, and
+  // a web fetch — otherwise four of its six drill-downs are unreachable in the demo.
+  const rd = tid();
+  assistant([{ type: 'tool_use', id: rd, name: 'Read', input: { file_path: path.join(os.homedir(), '.claude', 'CLAUDE.md') } }]);
+  result(rd);
+  const rm = tid();
+  assistant([{ type: 'tool_use', id: rm, name: 'Bash', input: { command: 'rm -rf build/', description: 'Clear the build directory' } }]);
+  result(rm);
+  const wf = tid();
+  assistant([{ type: 'tool_use', id: wf, name: 'WebFetch', input: { url: 'https://docs.pytest.org/en/stable/' } }]);
+  result(wf);
+  const mc = tid();
+  assistant([{ type: 'tool_use', id: mc, name: 'mcp__linear__list_issues', input: { team: 'pipeline' } }]);
+  result(mc);
+
   await beat('  … context fills up and the harness compacts the conversation');
   assistant([{ type: 'text', text: 'Continuing — the dataset checks are in place.' }], { input_tokens: 2_400, output_tokens: 320 });
   compaction(178_000, 12_400, 165_600);

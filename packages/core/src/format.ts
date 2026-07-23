@@ -35,7 +35,19 @@ export function relTime(ts: number, now: number = Date.now()): string {
 }
 
 /** Added/removed line counts for an edit. New-file = all added; deletion = all removed. */
+/** Memo for `lineDelta`, keyed by the two BLOB HASHES.
+ *
+ *  Blobs are content-addressed and immutable, so a (before, after) pair always yields the same delta —
+ *  there is nothing to invalidate. This is worth caching because the change map computes a delta for
+ *  every edit in the session on every build: at 1,100 edits the diff was ~1.6 s of a 3.5 s build, the
+ *  single largest cost left, and the same pairs recur across the fleet/agent slices within one run. */
+const deltaMemo = new Map<string, { added: number; removed: number }>();
+const DELTA_MEMO_CAP = 20000; // bounded: a long-lived editor host must not grow without limit
+
 export function lineDelta(sessionId: string, rec: EditRecord): { added: number; removed: number } {
+  const key = `${rec.beforeBlob ?? ''}\u0000${rec.afterBlob ?? ''}`;
+  const hit = deltaMemo.get(key);
+  if (hit) return hit;
   const before = blobText(sessionId, rec.beforeBlob);
   const after = blobText(sessionId, rec.afterBlob);
   let added = 0;
@@ -45,7 +57,10 @@ export function lineDelta(sessionId: string, rec: EditRecord): { added: number; 
     if (part.added) added += lines;
     else if (part.removed) removed += lines;
   }
-  return { added, removed };
+  const out = { added, removed };
+  if (deltaMemo.size >= DELTA_MEMO_CAP) deltaMemo.clear(); // simple bound; refills from the same blobs
+  deltaMemo.set(key, out);
+  return out;
 }
 
 /** A raw model id → a short human label, e.g. 'claude-opus-4-8' → 'Opus 4.8', 'claude-sonnet-5' → 'Sonnet 5'.

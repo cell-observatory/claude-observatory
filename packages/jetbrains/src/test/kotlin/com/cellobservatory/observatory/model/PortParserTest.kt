@@ -370,6 +370,59 @@ class PortParserTest {
     }
 
     @Test
+    fun `ChangeMapParser reads the chapter window, and ignores a stale footprint block`() {
+        // The chapter WINDOW is a field the plugin cannot re-derive: the ribbon places a compaction whose
+        // anchor chapter isn't drawn by ts, never by array position. The `footprint` block below is the
+        // 0.8.6 key an OLDER CLI on PATH still emits — 0.8.7 folded it into `risk`/`egress`, and nothing
+        // reads it any more, so its presence must not disturb the rest of the map.
+        val json = """
+            {"summary":{"session":"s1"},"edits":[],
+             "chapters":[{"id":"c0","taskId":"c0","index":0,"title":"Wire it","status":"wip",
+                          "startTs":1700,"endTs":1900,"edits":1,"added":1,"removed":0,
+                          "pending":1,"kept":0,"undone":0,"agent":false,"editIds":[1]}],
+             "files":[],"modules":[],
+             "footprint":{"reads":{"count":29,"outOfRoot":25,"samples":["~/.claude/CLAUDE.md"]},
+                          "exec":{"count":384,"risky":8,"high":8},"outsideWrites":3}}
+        """.trimIndent()
+        val m = ChangeMapParser.parse(json)!!
+        assertEquals(1700L, m.chapters[0].startTs)
+        assertEquals(1900L, m.chapters[0].endTs)
+        assertEquals(1, m.chapters.size)
+    }
+
+    @Test
+    fun `AuditParser reads the folded footprint facts off risk + egress`() {
+        // The two facts the badge row alone used to report, now each in the audit it belongs to: writes
+        // that left the workspace (risk — they changed files nobody pointed the agent at) and reads that
+        // left it (egress — reach, exactly like a fetch). Both are rendered in the Actions surface.
+        val risk = """
+            {"session":"s1","count":1,"high":1,
+             "risky":[{"ts":1,"tool":"Bash","target":"rm -rf /tmp/x","level":"high","reasons":["recursive delete"]}],
+             "outsideWrites":[{"file":"~/.zshrc","count":3},{"file":"~/notes.md","count":1}]}
+        """.trimIndent()
+        val egress = """
+            {"session":"s1","remote":1,"byKind":{"web":1,"file":1},
+             "channels":[{"kind":"web","target":"docs.anthropic.com","scope":"remote","count":2},
+                         {"kind":"mcp","target":"chrome","scope":"unknown","count":1},
+                         {"kind":"file","target":"~/.claude/CLAUDE.md","scope":"local","count":4}]}
+        """.trimIndent()
+        val a = AuditParser.parse(risk, egress)!!
+        assertEquals(2, a.outsideWrites.size)
+        assertEquals("~/.zshrc", a.outsideWrites[0].file)
+        assertEquals(3, a.outsideWrites[0].count)
+        // The `file` channel is a first-class destination, and its scope is 'local' — a FACT that the read
+        // left the workspace. It must never arrive as 'unknown', which is an admission, not a finding.
+        val file = a.egress.first { it.kind == "file" }
+        assertEquals("local", file.scope)
+        assertEquals("~/.claude/CLAUDE.md", file.target)
+        assertEquals("unknown", a.egress.first { it.kind == "mcp" }.scope)
+        // An older CLI emits neither key (and every audit verb emits {transcript:null} with no transcript
+        // at all) — both degrade to empty lists, never to a crash or an invented default.
+        val legacy = AuditParser.parse("""{"session":"s","count":0,"high":0,"risky":[]}""", """{"session":"s","transcript":null}""")!!
+        assertTrue(legacy.outsideWrites.isEmpty() && legacy.egress.isEmpty())
+    }
+
+    @Test
     fun `MultitaskParser extracts running agents, sparkline, subagents, and cross-agent collisions`() {
         val json = """
             {"agents":[
@@ -379,7 +432,8 @@ class PortParserTest {
                               "currentTask":"reading","todos":[{"content":"read","status":"in_progress"}],
                               "edits":2,"added":12,"removed":1}],
                 "files":["/w/main/a.ts","/w/main/b.ts"],"diff":{"added":40,"removed":3},
-                "tokens":8000,"durationMs":120000,"risk":{"total":2,"high":1}},
+                "tokens":8000,"durationMs":120000,"risk":{"total":2,"high":1},
+                "outside":{"reads":3,"writes":20}},
                {"session":"s2","worktree":"/w/feat","gitBranch":"feat/x","self":false,"phase":"idle",
                 "phaseConfidence":"heuristic","sparkline":[0,0,0,0,0],"todos":[],"subagents":[],
                 "files":["/w/feat/a.ts"],"diff":{"added":0,"removed":0},"risk":{"total":0,"high":0}}],
@@ -414,6 +468,11 @@ class PortParserTest {
         assertEquals(120000L, a.durationMs)
         assertEquals(2, a.riskTotal)
         assertEquals(1, a.riskHigh)
+        // 0.8.7: the fleet row's "↗ 3 read · 20 written outside" suffix — the one footprint fact kept when
+        // the badge row folded into risk/egress. An agent without the key renders the suffix absent, not 0.
+        assertEquals(3, a.outside?.reads)
+        assertEquals(20, a.outside?.writes)
+        assertEquals(null, r.agents[1].outside)
         assertEquals(1, a.todos.size)
         // nested subagent with its own live phase + current task + ±
         assertEquals(1, a.subagents.size)
@@ -521,5 +580,155 @@ class PortParserTest {
         // absent recap -> "" (not a crash); garbage -> null (the panel then renders empty)
         assertEquals("", ObservationsParser.parse("""{"runs":[]}""")!!.recap)
         assertNull(ObservationsParser.parse("not json"))
+    }
+
+    @Test
+    fun `ProcessesParser reads shells, summary and a fractional last-output stamp`() {
+        val json = """
+            {"session":"s1","summary":{"total":2,"running":1,"failed":0},"processes":[
+              {"id":"bpk1","toolUseId":"toolu_1","command":"npm test 2>&1 | tail -30","description":"Run the suite",
+               "startedTs":1000,"endedTs":9000,"running":false,"status":"completed","exitCode":0,"runtimeMs":8000,
+               "outputPath":"/tmp/bpk1.output","outputBytes":2352,"lastOutputTs":1784742469423.7883},
+              {"id":"bpk2","toolUseId":null,"command":"sleep 90","description":null,
+               "startedTs":2000,"endedTs":0,"running":true,"status":"running","exitCode":null,"runtimeMs":4000,
+               "outputPath":null,"outputBytes":0,"lastOutputTs":0}
+            ]}
+        """.trimIndent()
+        val res = ProcessesParser.parse(json)!!
+        assertEquals("s1", res.session)
+        assertEquals(2, res.summary.total)
+        assertEquals(1, res.summary.running)
+        val done = res.processes[0]
+        assertEquals("bpk1", done.id) // the harness's shell id IS the identity — no OS pid exists to read
+        assertEquals("Run the suite", done.description)
+        assertEquals(0, done.exitCode)
+        assertEquals(8000L, done.runtimeMs)
+        assertEquals(2352L, done.outputBytes)
+        // core stats the output file, so this stamp arrives fractional — it must not throw or land as 0
+        assertEquals(1784742469423L, done.lastOutputTs)
+        val live = res.processes[1]
+        assertTrue(live.running)
+        assertNull(live.exitCode) // never reported one — NOT the same as exit 0, so the row can't say so
+        assertNull(live.description)
+        assertNull(live.outputPath)
+        // older CLI / bare payload: no crash, no rows
+        val bare = ProcessesParser.parse("""{"session":"s1"}""")!!
+        assertEquals(0, bare.summary.total)
+        assertTrue(bare.processes.isEmpty())
+        assertNull(ProcessesParser.parse("not json"))
+    }
+
+    @Test
+    fun `RequestsParser reads the asks, their edit scope, and the one still being answered`() {
+        // Mirrors `requests --json`. editIds is the load-bearing field: the Request review axis accepts and
+        // reverts exactly that set, so a rename would silently scope "accept everything from this ask" to
+        // nothing. endTs 0 marks the CURRENT request — the row says "answering…" instead of a duration
+        // that would otherwise keep growing unexplained.
+        val json = """
+            {"session":"s1","summary":{"total":2,"withEdits":1,"edits":3},
+             "requests":[
+               {"id":"0381d2f21f10","index":1,"ts":1000,"endTs":5000,
+                "text":"fold all of that into 0.8.6 and ship it","title":"fold all of that into 0.8.6 and ship it",
+                "editIds":[4,5,9],"edits":3,"added":0,"removed":0,"pending":2,"kept":1,"undone":0,
+                "files":2,"folders":1,"tokens":135000,"tasks":4,
+                "actions":14,"errors":1,"agents":["toolu_a1"],"workflows":["wf_1"],"processes":["toolu_b1","toolu_b2"],
+                "compactions":1,"durationMs":4000},
+               {"id":"b66dc615f487","index":2,"ts":5000,"endTs":0,
+                "text":"is everything installed locally?","title":"is everything installed locally?",
+                "editIds":[],"edits":0,"added":0,"removed":0,"pending":0,"kept":0,"undone":0,
+                "actions":3,"errors":0,"agents":[],"workflows":[],"processes":[],"compactions":0,"durationMs":57000}
+             ]}
+        """.trimIndent()
+        val res = RequestsParser.parse(json)!!
+        assertEquals("s1", res.session)
+        assertEquals(2, res.summary.total)
+        assertEquals(1, res.summary.withEdits)
+        assertEquals(3, res.summary.edits)
+        val first = res.requests[0]
+        assertEquals("0381d2f21f10", first.id)
+        assertEquals(1, first.index) // 1-based, the way a person counts their own turns
+        assertEquals(listOf(4, 5, 9), first.editIds) // the review scope the Request axis acts on
+        assertEquals(2, first.pending)
+        assertEquals(1, first.kept)
+        assertEquals(14, first.actions)
+        assertEquals(1, first.errors)
+        assertEquals(listOf("toolu_a1"), first.agents)
+        assertEquals(listOf("wf_1"), first.workflows)
+        assertEquals(2, first.processes.size) // shells it STARTED — they may well outlive it
+        assertEquals(1, first.compactions)
+        assertEquals(4000L, first.durationMs)
+        assertFalse(first.current) // it has an endTs, so it is finished
+        // 0.8.7 per-request headline stats.
+        assertEquals(2, first.files)
+        assertEquals(1, first.folders)
+        assertEquals(135000L, first.tokens)
+        assertEquals(4, first.tasks)
+        // An ask with no edits is normal (a question) — it parses as itself, never as missing data.
+        val second = res.requests[1]
+        assertEquals(0, second.edits)
+        assertTrue(second.editIds.isEmpty())
+        assertTrue(second.current) // endTs 0 = still being answered
+        // An older CLI without a pre-trimmed title falls back to the text — never a blank, nameless row.
+        val untitled = RequestsParser.parse(
+            """{"session":"s","summary":{"total":1,"withEdits":0,"edits":0},"requests":[{"id":"x","index":1,"ts":1,"endTs":2,"text":"do the thing"}]}""",
+        )!!
+        assertEquals("do the thing", untitled.requests[0].title)
+        assertTrue(untitled.requests[0].editIds.isEmpty())
+        // bare / older payload: no crash, no rows; garbage -> null (the tab then renders its empty state)
+        val bare = RequestsParser.parse("""{"session":"s1"}""")!!
+        assertEquals(0, bare.summary.total)
+        assertTrue(bare.requests.isEmpty())
+        assertNull(RequestsParser.parse("not json"))
+    }
+
+    @Test
+    fun `RequestsParser reads Claude's response to one ask`() {
+        // Mirrors `requests --id N --response --json` — the prose a reviewer expands to read.
+        val resp = RequestsParser.parseResponse(
+            """{"session":"s1","response":{"requestId":"0381d2f21f10","index":1,"text":"Here is what I did…","turns":3,"bytes":18,"truncated":0}}""",
+        )!!
+        assertEquals("0381d2f21f10", resp.requestId)
+        assertEquals(1, resp.index)
+        assertEquals("Here is what I did…", resp.text)
+        assertEquals(3, resp.turns)
+        assertEquals(0L, resp.truncated)
+        // A capped response reports how much it dropped; an ask with no recorded reply parses as null.
+        assertEquals(4096L, RequestsParser.parseResponse("""{"response":{"requestId":"x","index":2,"text":"…","turns":1,"truncated":4096}}""")!!.truncated)
+        assertNull(RequestsParser.parseResponse("""{"session":"s1","response":null}"""))
+        assertNull(RequestsParser.parseResponse("not json"))
+    }
+
+    @Test
+    fun `FeedParser keeps core's mode, order, truncation and failure marks`() {
+        val json = """
+            {"ref":{"kind":"process","id":"bpk1"},"title":"Run the suite","running":true,"mode":"live",
+             "entries":[
+               {"ts":1000,"kind":"action","label":"Bash","detail":"npm test","ok":false},
+               {"ts":0,"kind":"output","label":"  ok 12 passed"},
+               {"ts":2000,"kind":"reasoning","label":"checking the failure"}
+             ],"truncated":26,"lastTs":2000,"note":null}
+        """.trimIndent()
+        val feed = FeedParser.parse(json)!!
+        assertEquals("process", feed.kind)
+        assertEquals("bpk1", feed.id) // the pane checks this before painting, so a stale tail can't show
+        assertTrue(feed.live)
+        assertEquals(26, feed.truncated) // said out loud — a cap must never read as completeness
+        assertEquals(2000L, feed.lastTs)
+        assertNull(feed.note)
+        assertEquals(3, feed.entries.size)
+        assertEquals(false, feed.entries[0].ok) // an explicit false is a failure to mark
+        assertEquals(0L, feed.entries[1].ts) // raw output has no timestamp — rendered without a fake one
+        assertNull(feed.entries[1].ok) // absent -> not applicable, never "failed"
+        assertEquals("reasoning", feed.entries[2].kind)
+
+        // finished source: audit, plus core's explanation of an empty feed
+        val audit = FeedParser.parse(
+            """{"ref":{"kind":"agent","id":"a1"},"title":"a1","running":false,"mode":"audit","entries":[],"truncated":0,"lastTs":0,"note":"no transcript for this agent yet"}""",
+        )!!
+        assertFalse(audit.live)
+        assertEquals("no transcript for this agent yet", audit.note)
+        // an unknown/absent mode must not be labelled live (and must not be polled forever)
+        assertFalse(FeedParser.parse("""{"title":"x","entries":[]}""")!!.live)
+        assertNull(FeedParser.parse("not json"))
     }
 }

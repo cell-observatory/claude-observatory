@@ -5,6 +5,141 @@ All notable changes to Claude Observatory are recorded here, following
 Per-tag release artifacts and auto-generated notes are on the
 [Releases page](https://github.com/cell-observatory/claude-observatory/releases).
 
+## [0.8.7] — 2026-07-23
+
+Follow-up to 0.8.6, and largely a subtraction: the separate capability panel folds into the Risk and
+Egress audits, the context-per-turn chart goes away, and what remains is sharper — background
+**Processes**, a **live feed** for whatever you click, switching sessions actually switching the
+Overview, and two more optimization passes. A full adversarial review of the batch produced 58 verified
+findings, and the fixes for them are in here too.
+
+### Added
+
+- **Requests — the session as the conversation you actually had.** Every other view organizes the work
+  the way the *agent* saw it: worktrees, runs, its own to-dos, files. This one is one row per thing
+  **you** asked for, in order, each carrying what that ask produced — its edits, the subagents and
+  workflow runs it spawned, the background shells it launched, the compactions it suffered. Work belongs
+  to the ask that **started** it, never the one that happened to be current when it finished: a shell
+  launched by request #4 stays #4's even when it exits during #7. `claude-observatory requests` prints
+  the list; `--id <n>` prints one ask with everything it caused.
+- **Selecting a request scopes everything.** In both editors, Requests is now its own window in the
+  bottom dock, immediately left of the Overview — so the list of asks stays visible while you read what
+  one of them produced. Picking a row narrows the Overview beside it: its fleet (the subagents that ask
+  spawned), its workflow runs, its tasks, its background shells, and the whole change map — chapters,
+  folders, files. The bulk actions retarget to it ("Accept All in #18"), and every pane that dropped
+  rows says how many and why. Each ask's files and folders are aggregated in core, so both editors
+  render the same numbers without re-deriving anything.
+- **A Request axis on the review nav bar**, beside Diff · File · Folder · Chapter: step between your own
+  asks, and accept or revert everything one of them produced.
+- **Every request carries its own headline stats** — edits, files, folders, tokens, subagents, workflow
+  runs, tasks worked, background shells, and time. Tokens are the main-chain assistant total for the
+  window (deduped by message id, the same figure the Stats panel sums); files/folders are the distinct
+  paths the ask's edits touched; tasks are the to-dos it worked. `requests --id <n>` lists them all.
+- **Expand any request to read Claude's reply.** Each row opens a log of Claude's actual response to
+  that ask — its prose, with the tool calls stripped out, so you get the narrative (the plan, the
+  explanations, the summary). Fetched on demand because it can be large, and shown whole, wrapped, never
+  clipped. From the shell: `claude-observatory requests --id <n> --response`.
+- **Collapse All on the sidebar trees.** Edits, Diffs and Actions gain the file-Explorer's Collapse-All
+  affordance — VS Code's native tree button, and its IntelliJ toolbar equivalent — so a deep
+  folder → file → class tree folds to its top level in one click.
+- **Risk and Egress now answer the whole "what did it touch" question.** `risk` reports the edits that
+  landed **outside the workspace** alongside the shell commands it already flagged — writing outside the
+  boundary you gave the agent is the same class of fact, and the edits ledger cannot state it because it
+  shows every path workspace-relative. `egress` reports the files **read** from outside the workspace as
+  channels beside web hosts, MCP servers and network shell — reading outside the boundary is reach,
+  exactly like a fetch. Egress scopes gained `local`, rendered as its own label: `local` is a fact,
+  `unknown` is an admission that a destination could not be classified, and collapsing the first into
+  the second would be a lie.
+- **Processes — the background shells Claude left running.** A new tab beside Fleet · Workflows · Tasks,
+  and `claude-observatory processes`. Each shell shows its runtime, its exit code, and how much output it
+  has produced; `--id <shell>` prints the full command it is running plus a tail of that output. There is
+  deliberately no OS process id: the transcript never records one, and inferring it from local processes
+  would be wrong the moment the agent runs over SSH or in a devcontainer, so the harness's own shell id
+  is the identity — which is also what the agent uses to read or kill it.
+- **A live feed for whatever you click** — an agent, a workflow run, a task, a background shell, or the
+  session itself — read from the file that thing writes as it works, via `claude-observatory feed`. A
+  feed means a different thing depending on whether its source is still going, so core decides and both
+  editors agree: **live** while it is still writing (follow the tail, and report the age from real
+  evidence rather than claiming realtime), **audit** once it has finished, because a completed run is a
+  record, not a stream — and a finished thing stops being polled. Capped feeds always say how many
+  earlier entries they did not show.
+
+### Changed
+
+- **The bottom dock is Requests · Overview · Stats; Observations moved to the sidebar.** Three windows
+  side by side instead of two-plus-a-list: the Requests window needs to be visible *while* you look at
+  what it scopes, which a tab inside the Overview could never do. Observations joined Edits · Diffs ·
+  File History · Actions in the sidebar window, where the rest of the read-and-review surface already
+  lives. Nothing was removed — everything is where the review work happens.
+- **Long text wraps everywhere instead of being clipped.** A prompt, a workflow name, a to-do: these
+  render whole, over as many lines as they need, in both editors and in `requests` on the terminal. An
+  ellipsis throws away the only copy of what was actually said.
+- **The Requests window is a clean list for picking an ask.** The scope it sets is shown where it
+  matters — the Overview's panes note what they hid, the bulk buttons read "…in #N", and the bottom
+  summary names the ask — so the redundant banner that repeated the ask inside the Overview is gone, as
+  are the per-row Review/Accept/Revert icons (those live on the Overview's Request axis once an ask is
+  selected).
+
+### Fixed
+
+- **"Active only" now hides exited background shells too.** Fleet, Workflows and Tasks already scoped to
+  what is still going when the toggle is on; the Processes pane was the outlier and kept showing finished
+  shells. It now shows only running ones, and when that empties the list it says so — "No running
+  shells — clear Active only to see the N that have exited" — rather than looking blank.
+- **Revealing the Requests window after an upgrade.** When a view container's contents change, VS Code
+  keeps the pre-upgrade panel layout and does not surface a newly-added view, so upgraders into 0.8.7
+  did not see the new Requests window. A one-time, dismissible prompt now points at it, and a
+  **"Claude Observatory: Show Requests window"** command reveals it on demand. (A fresh install shows it
+  already; JetBrains was never affected — it builds the pane unconditionally.)
+- **The separate capability/footprint panel is gone — folded into Risk and Egress.** It shipped in
+  0.8.6 as a six-facet badge row, and most of it restated audits that already existed: risky commands
+  are Risk, MCP servers and web hosts are Egress, subagent spawns are the Subagents view. Only two of
+  its facts were unique, and those are the two that moved. One audit surface instead of two. The
+  `footprint` and `capabilities` commands still run, printing both audits with a note on stderr.
+- **The file-edit facet is gone** — edits already have the ledger, the Overview and the review
+  scoreboard; repeating them here added a number without adding a fact.
+
+### Removed
+
+- **`claude-observatory capabilities` is now `claude-observatory footprint`.** The old verb still works
+  and forwards, printing a one-line deprecation notice on **stderr** so anything piping `--json` is
+  unaffected. The JSON key changed with it (`capabilities` → `footprint` in `changemap --json` and
+  `multitask --json`) — a deliberate exception to the "add fields, don't rename them" contract, recorded
+  here because a version-skewed editor drops the whole footprint row silently rather than erroring.
+- **`changemap --json` no longer repeats a full edit list per sibling session** (`agents[].edits`).
+  It was 1.95 MB of a 3.30 MB payload that both editors re-parsed on every refresh and neither read;
+  the whole payload is now 1.43 MB. The active session's own top-level `edits` is unchanged. Removing a
+  shipped field is against this project's "add fields, don't remove them" rule, so it is stated here.
+- **The context-per-turn chart** in the Stats panel, along with the per-turn series that fed it. The
+  compaction data it visualised stays: compactions remain a curated group in the Actions timeline and
+  markers between the Overview's chapters.
+
+### Fixed
+
+- **Switching sessions now changes the Overview's detail pane.** The fleet lists every sibling session
+  in the repo, so a selection made against the previous session still resolved after the switch and the
+  detail kept rendering the old session's change map — the label changed, the content did not. Both
+  editors now re-point the selection when the active session changes, in the same place they already
+  reset their dismissed sets.
+- **A long session's activity sparkline can no longer blow the call stack** — the fleet histogram used
+  `Math.min(...timestamps)`, which throws once a session accumulates enough tool calls to overflow the
+  argument list. It now uses the loop-based min/max the rest of core already switched to.
+
+### Performance
+
+A second sweep, measured the same way (real 53.5 MB transcript, 27 sibling sessions).
+
+- **The new views cost nothing to poll.** `sessionProcesses` re-read the whole transcript on every call
+  (122 ms on a 53.5 MB session) — fatal for a tab that refreshes; its transcript half is now memoized,
+  **122 ms → 0 ms**, while runtime and output size stay deliberately uncached, since those are exactly
+  the two numbers that must keep moving. The feed is a bounded tail by construction (~2 ms warm for a
+  session, ~0 ms for an agent).
+- **The Overview's remaining per-sibling re-parsing is gone.** 0.8.6 cached each finished sibling's
+  change map on disk, but the fleet row also derived an activity sparkline and a to-do list per sibling,
+  each re-reading that transcript in a fresh process every refresh. Both now ride the same cached entry:
+  `multitask --json` **2.3 s → 1.8 s**, and the full Overview refresh (both spawns) is now **~2.9 s**,
+  down from ~29 s before the 0.8.6 sweep.
+
 ## [0.8.6] — 2026-07-22
 
 A quality-of-life sweep across the CLI, core, both editors, and the docs, plus four new lenses on a

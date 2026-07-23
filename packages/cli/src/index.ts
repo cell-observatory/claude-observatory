@@ -483,16 +483,20 @@ function cmdActions(args: string[]): void {
 function cmdRisk(args: string[]): void {
   const core = require('@claude-observatory/core') as Core;
   const session = getSessionId(args);
+  const rri = args.indexOf('--root'); // the workspace boundary for "outside", like changemap/footprint
+  const root = rri >= 0 && args[rri + 1] ? args[rri + 1] : process.cwd();
+  if (noTranscript(session, args.includes('--json'))) return;
   const risky = core
     .parseActions(process.cwd(), session)
     .filter((a) => a.risk)
     .map((a) => ({ ts: a.ts, tool: a.tool, target: a.target, level: a.risk!.level, reasons: a.risk!.reasons }));
   const high = risky.filter((r) => r.level === 'high').length;
   if (args.includes('--json')) {
-    emitJson({ session, count: risky.length, high, risky });
+    // The folded footprint's damaging half: edits that landed outside the workspace boundary.
+    emitJson({ session, count: risky.length, high, risky, outsideWrites: core.outsideWrites(core.parseActions(process.cwd(), session), root) });
     return;
   }
-  if (risky.length === 0) {
+  if (risky.length === 0 && !core.outsideWrites(core.parseActions(process.cwd(), session), root).length) {
     process.stdout.write(c.dim(`no risky commands flagged (session ${session}).\n`));
     return;
   }
@@ -501,13 +505,33 @@ function cmdRisk(args: string[]): void {
     const badge = r.level === 'high' ? c.red('● HIGH') : c.yellow('● MED ');
     process.stdout.write(`${badge}  ${(r.target || '').slice(0, 74)}\n       ${c.dim(r.reasons.join(' · '))}\n`);
   }
+
+  // Writes that left the workspace. Risk otherwise only inspects commands, but "it edited files outside
+  // the directory you pointed it at" is the same class of fact, and the edits ledger cannot say it —
+  // every path there is shown workspace-relative. Stated as an observation, not scored as a danger.
+  const outside = core.outsideWrites(core.parseActions(process.cwd(), session), root);
+  if (outside.length) {
+    const total = outside.reduce((n, w) => n + w.count, 0);
+    process.stdout.write('\n' + c.bold('Outside the workspace') + c.dim(`  ${total} edit(s) across ${outside.length} file(s)\n`));
+    for (const w of outside.slice(0, args.includes('--all') ? 200 : 8)) {
+      process.stdout.write(`  ${c.yellow('↗')} ${w.file}${w.count > 1 ? c.dim(` ×${w.count}`) : ''}\n`);
+    }
+    const hidden = outside.length - Math.min(outside.length, args.includes('--all') ? 200 : 8);
+    if (hidden) process.stdout.write(c.dim(`     … ${hidden} more (--all)\n`));
+  }
 }
 
 /** Egress: what this session touched off-machine — web / MCP / network-shell destinations. */
 function cmdEgress(args: string[]): void {
   const core = require('@claude-observatory/core') as Core;
   const session = getSessionId(args);
-  const channels = core.buildEgressReport(core.parseActions(process.cwd(), session));
+  if (noTranscript(session, args.includes('--json'))) return;
+  const eri = args.indexOf('--root'); // the workspace boundary for the `file` channels below
+  const eroot = eri >= 0 && args[eri + 1] ? args[eri + 1] : process.cwd();
+  const acts = core.parseActions(process.cwd(), session);
+  // Reads that left the workspace are reach, exactly like a fetch — the same question this audit
+  // already answers for the network, so they are channels of the same report rather than a second one.
+  const channels = [...core.buildEgressReport(acts), ...core.outsideReads(acts, eroot)];
   const sum = core.summarizeEgress(channels);
   if (args.includes('--json')) {
     emitJson({ session, ...sum });
@@ -521,45 +545,232 @@ function cmdEgress(args: string[]): void {
     c.bold('Egress') + c.dim(`  ${channels.length} destination(s) · ${sum.remote} remote · session ${session}\n\n`)
   );
   for (const ch of channels) {
-    const scope = ch.scope === 'remote' ? c.red('remote ') : c.dim('unknown');
+    // 'local' is a FACT (it stayed on this machine but left the workspace); 'unknown' is an admission
+    // that we could not classify the destination. Printing the first as the second would be a lie.
+    const scope = ch.scope === 'remote' ? c.red('remote ') : ch.scope === 'local' ? c.yellow('outside') : c.dim('unknown');
     process.stdout.write(`${scope}  ${c.cyan(ch.kind.padEnd(5))} ${ch.target}${ch.count > 1 ? c.dim(` ×${ch.count}`) : ''}\n`);
   }
 }
 
-/** `capabilities` — what this session actually reached for: files outside the workspace, shell
- *  commands (with risk tiers), MCP servers, the network, subagent spawns. Reads EXERCISED capability,
- *  never granted permission: Claude Code writes nothing to the transcript when it asks for approval,
- *  so "auto-approved vs prompted" is unknowable from the outside — this counts what ran. */
-function cmdCapabilities(args: string[]): void {
+/** Every audit verb reads the transcript. When there ISN'T one (another project's session, a bad id),
+ *  an empty result means "we couldn't look", not "nothing happened" — and printing the second is a false
+ *  statement of absence. Returns true when the caller should stop. */
+function noTranscript(session: string, json: boolean): boolean {
+  const core = require('@claude-observatory/core') as Core;
+  if (core.findTranscript(process.cwd(), session)) return false;
+  if (json) emitJson({ session, transcript: null, error: 'no transcript found for this session under this directory' });
+  else process.stdout.write(c.dim(`no transcript found for session ${session} under this directory — nothing to audit.\n`));
+  return true;
+}
+
+/** `footprint`/`capabilities` — folded into `risk` and `egress` in 0.8.7. The two facts it alone
+ *  reported now live where they belong: reads that left the workspace are egress (reach), writes that
+ *  left it are risk (damage). One audit surface instead of two. */
+function cmdFootprint(args: string[]): void {
+  process.stderr.write(
+    c.dim('`footprint` was folded into `risk` and `egress` in 0.8.7 — reads that left the workspace are\n' +
+      'reported by `egress`, writes that left it by `risk`. Showing both.\n\n')
+  );
+  cmdRisk(args);
+  process.stdout.write('\n');
+  cmdEgress(args);
+}
+
+/** `processes` — the background shells this session launched with `run_in_background` and left running,
+ *  with the detail the harness's own Background panel omits: runtime, exit code, output volume. There is
+ *  no OS pid here on purpose — the transcript never records one, and guessing it from local processes
+ *  would be wrong whenever the agent runs on another machine (SSH / devcontainer / another worktree). */
+function cmdProcesses(args: string[]): void {
   const core = require('@claude-observatory/core') as Core;
   const session = getSessionId(args);
-  const ri = args.indexOf('--root'); // classify in/out-of-workspace against the editor's workspace
-  const root = ri >= 0 && args[ri + 1] ? args[ri + 1] : process.cwd();
-  const cap = core.buildCapabilities(core.parseActions(process.cwd(), session), { root });
-  if (args.includes('--json')) {
-    emitJson({ session, capabilities: cap });
+  if (noTranscript(session, args.includes('--json'))) return;
+  const list = core.sessionProcesses(process.cwd(), session);
+  const sum = core.summarizeProcesses(list);
+  // `--id <shell>` drills into ONE shell: the full command it is running, plus a tail of its output —
+  // for a job that is still going, that tail is the only view of what it is actually doing.
+  const want = flagValue(args, '--id');
+  if (want) {
+    const p = list.find((x) => x.id === want);
+    if (!p) fail(`no background shell "${want}" in session ${session}.`);
+    const tail = core.processOutputTail(p!.outputPath);
+    if (args.includes('--json')) {
+      emitJson({ session, process: p, outputTail: tail });
+      return;
+    }
+    process.stdout.write(c.bold(p!.id) + c.dim(`  ${p!.running ? 'running' : p!.status}${p!.exitCode !== null ? ` (exit ${p!.exitCode})` : ''} · ${fmtDur(p!.runtimeMs)}\n\n`));
+    if (p!.description) process.stdout.write(c.dim(`${p!.description}\n\n`));
+    process.stdout.write(`${p!.command}\n`);
+    if (p!.outputPath) process.stdout.write(c.dim(`\noutput → ${p!.outputPath}\n`));
+    if (tail) process.stdout.write(c.dim('\n--- last output ---\n') + tail + '\n');
     return;
   }
-  process.stdout.write(c.bold('Capabilities') + c.dim(`  exercised this session · ${session}\n\n`));
-  const fileLine = (label: string, b: { count: number; outOfRoot: number; samples: string[] }): void => {
-    if (b.count === 0) return;
-    const out = b.outOfRoot > 0 ? c.yellow(` · ${b.outOfRoot} outside the workspace`) : '';
-    process.stdout.write(`  ${c.cyan(label.padEnd(9))} ${b.count}${out}\n`);
-    for (const s of b.samples) process.stdout.write(c.dim(`              ${s}\n`));
-  };
-  fileLine('reads', cap.reads);
-  fileLine('edits', cap.edits);
-  if (cap.exec.count) {
-    const risk = cap.exec.risky ? c.yellow(` · ${cap.exec.risky} risky`) + (cap.exec.high ? c.red(` (${cap.exec.high} high)`) : '') : '';
-    process.stdout.write(`  ${c.cyan('commands'.padEnd(9))} ${cap.exec.count}${risk}\n`);
+  if (args.includes('--json')) {
+    emitJson({ session, summary: sum, processes: list });
+    return;
   }
-  if (cap.mcp.calls) process.stdout.write(`  ${c.cyan('mcp'.padEnd(9))} ${cap.mcp.calls} call(s) · ${cap.mcp.servers.join(', ')}\n`);
-  if (cap.web.calls) process.stdout.write(`  ${c.cyan('web'.padEnd(9))} ${cap.web.calls} call(s)${cap.web.hosts.length ? ` · ${cap.web.hosts.slice(0, 5).join(', ')}` : ''}\n`);
-  if (cap.agents.spawns) process.stdout.write(`  ${c.cyan('agents'.padEnd(9))} ${cap.agents.spawns} spawn(s)\n`);
-  if (!cap.reads.count && !cap.edits.count && !cap.exec.count && !cap.mcp.calls && !cap.web.calls && !cap.agents.spawns) {
-    process.stdout.write(c.dim('  nothing exercised yet\n'));
+  if (!list.length) {
+    process.stdout.write(c.dim(`no background shells in session ${session}.\n`));
+    return;
   }
-  process.stdout.write(c.dim(`\n${core.CAPABILITIES_NOTE}\n`));
+  process.stdout.write(
+    c.bold('Processes') + c.dim(`  ${sum.running} running · ${sum.total} total${sum.failed ? ` · ${sum.failed} failed` : ''} · session ${session}\n\n`)
+  );
+  for (const p of list) {
+    const state = p.running
+      ? c.green('running')
+      : p.exitCode === null
+        ? c.dim(p.status)
+        : p.exitCode === 0
+          ? c.dim('exit 0 ')
+          : c.red(`exit ${p.exitCode}`);
+    const out = p.outputBytes ? c.dim(` · ${human(p.outputBytes)}B out`) : '';
+    process.stdout.write(`${state}  ${c.cyan(p.id.padEnd(11))} ${fmtDur(p.runtimeMs).padStart(7)}${out}\n`);
+    process.stdout.write(c.dim(`             ${(p.description || p.command).replace(/\s+/g, ' ').slice(0, 84)}\n`));
+  }
+  process.stdout.write(c.dim('\nshell ids are the harness’s own — no OS pid is recorded in the transcript\n'));
+}
+
+/** `feed` — what ONE thing is doing right now: an agent, a workflow run, a task, a background shell, or
+ *  the session itself. A bounded tail of the file that thing writes as it works, so the editors can poll
+ *  it on their existing watcher tick without re-reading whole transcripts. */
+function cmdFeed(args: string[]): void {
+  const core = require('@claude-observatory/core') as Core;
+  const session = getSessionId(args);
+  const kind = (flagValue(args, '--kind') || 'session') as 'session' | 'agent' | 'workflow' | 'task' | 'process';
+  if (!['session', 'agent', 'workflow', 'task', 'process'].includes(kind)) fail(`--kind must be session|agent|workflow|task|process (got "${kind}").`);
+  const id = flagValue(args, '--id') || '';
+  if (kind !== 'session' && !id) fail(`--id <${kind} id> is required for --kind ${kind}.`);
+  const limitRaw = flagValue(args, '--limit');
+  const limit = limitRaw ? Math.max(1, Number(limitRaw) || 0) : undefined;
+  const res = core.liveFeed(process.cwd(), session, { kind, id }, limit ? { limit } : {});
+  if (args.includes('--json')) {
+    emitJson(res);
+    return;
+  }
+  const age = res.lastTs ? core.relTime(res.lastTs) : 'no activity yet';
+  // Print core's own mode, not a re-derived running/idle: live-vs-audit IS the feature, and both editors
+  // and the docs present it in exactly these words.
+  const mode = res.mode === 'live' ? c.green('● live') : c.dim('▣ audit log');
+  process.stdout.write(c.bold(res.title) + c.dim(`  `) + mode + c.dim(` · ${age} · ${kind}\n`));
+  if (res.note) process.stdout.write(c.dim(`${res.note}\n`));
+  process.stdout.write('\n');
+  if (res.truncated) process.stdout.write(c.dim(`… ${res.truncated} earlier entr${res.truncated === 1 ? 'y' : 'ies'} not shown\n`));
+  for (const e of res.entries) {
+    if (e.kind === 'output') {
+      process.stdout.write(`${e.label}\n`);
+      continue;
+    }
+    // LOCAL time: this is the only wall clock the CLI prints, and UTC put it hours off the reader's
+    // own clock (rolling past midnight mid-list). Both editors already format the same ts locally.
+    const when = e.ts ? c.dim(new Date(e.ts).toTimeString().slice(0, 8) + ' ') : '';
+    const mark = e.ok === false ? c.red('✗ ') : '  ';
+    process.stdout.write(`${when}${mark}${c.cyan(e.label)}${e.detail ? c.dim(' ' + e.detail.replace(/\s+/g, ' ').slice(0, 90)) : ''}\n`);
+  }
+  if (!res.entries.length) process.stdout.write(c.dim('nothing recorded yet\n'));
+}
+
+/** `requests` — the session broken into what the USER asked for, in order, each carrying what it
+ *  produced. Every other view organizes work the way the agent saw it (chapters from Claude's to-dos,
+ *  rollups by file or agent); this is the only one that answers "what happened when I asked for X". */
+function cmdRequests(args: string[]): void {
+  const core = require('@claude-observatory/core') as Core;
+  const session = getSessionId(args);
+  if (noTranscript(session, args.includes('--json'))) return;
+  const reqs = core.sessionRequests(process.cwd(), session);
+  const want = flagValue(args, '--id');
+  if (want) {
+    const r = reqs.find((x) => x.id === want || String(x.index) === want);
+    if (!r) fail(`no request "${want}" in session ${session} (1..${reqs.length}).`);
+    // `--response`: Claude's own prose in reply to this ask (its tool calls stripped) — the log a
+    // reviewer expands to read. Fetched lazily because it can be large.
+    if (args.includes('--response')) {
+      const resp = core.requestResponse(process.cwd(), session, r!.id);
+      if (args.includes('--json')) {
+        emitJson({ session, response: resp });
+        return;
+      }
+      if (!resp || !resp.text) {
+        process.stdout.write(c.dim(`no assistant response recorded for request #${r!.index}.\n`));
+        return;
+      }
+      process.stdout.write(c.bold(`#${r!.index}`) + c.dim(`  Claude’s response · ${resp.turns} turn(s)\n\n`));
+      process.stdout.write(`${resp.text}\n`);
+      if (resp.truncated) process.stdout.write(c.dim(`\n… ${fmtBytes(resp.truncated)} more not shown (--json for the capped text)\n`));
+      return;
+    }
+    if (args.includes('--json')) {
+      emitJson({ session, request: r });
+      return;
+    }
+    process.stdout.write(c.bold(`#${r!.index}`) + c.dim(`  ${core.relTime(r!.ts)} · ${fmtDur(r!.durationMs)}\n\n`));
+    process.stdout.write(`${r!.text}\n\n`);
+    const bits: string[] = [];
+    if (r!.edits) bits.push(`${r!.edits} edit(s) (+${r!.added}/−${r!.removed}) · ${r!.pending} pending · ${r!.kept} accepted · ${r!.undone} reverted`);
+    if (r!.files) bits.push(`${r!.files} file(s) · ${r!.folders} folder(s)`);
+    if (r!.tokens) bits.push(`${fmtTok(r!.tokens)} tokens`);
+    if (r!.actions) bits.push(`${r!.actions} tool call(s)${r!.errors ? ` · ${r!.errors} failed` : ''}`);
+    if (r!.tasks) bits.push(`${r!.tasks} task(s) worked`);
+    if (r!.agents.length) bits.push(`${r!.agents.length} subagent(s)`);
+    if (r!.workflows.length) bits.push(`${r!.workflows.length} workflow run(s)`);
+    if (r!.processes.length) bits.push(`${r!.processes.length} background shell(s)`);
+    if (r!.compactions) bits.push(`${r!.compactions} compaction(s)`);
+    for (const b of bits) process.stdout.write(c.dim(`  ${b}\n`));
+    if (r!.editIds.length) process.stdout.write(c.dim(`\n  edits: ${r!.editIds.slice(0, 40).join(', ')}${r!.editIds.length > 40 ? ` … ${r!.editIds.length - 40} more (--json)` : ''}\n`));
+    return;
+  }
+  if (args.includes('--json')) {
+    emitJson({ session, summary: core.summarizeRequests(reqs), requests: reqs });
+    return;
+  }
+  const sum = core.summarizeRequests(reqs);
+  if (!reqs.length) {
+    process.stdout.write(c.dim(`no user requests recorded in session ${session}.\n`));
+    return;
+  }
+  process.stdout.write(c.bold('Requests') + c.dim(`  ${sum.total} asked · ${sum.withEdits} produced edits · ${sum.edits} edit(s) total · session ${session}\n\n`));
+  for (const r of reqs) {
+    const facts: string[] = [];
+    if (r.edits) facts.push(c.cyan(`${r.edits}e`) + c.dim(` ${r.files}f ${r.folders}fo`));
+    if (r.tokens) facts.push(`${fmtTok(r.tokens)} tok`);
+    if (r.tasks) facts.push(`${r.tasks}t`);
+    if (r.agents.length) facts.push(`${r.agents.length}a`);
+    if (r.workflows.length) facts.push(`${r.workflows.length}w`);
+    if (r.processes.length) facts.push(`${r.processes.length}p`);
+    if (r.compactions) facts.push('⤺');
+    // The ask is printed WHOLE, wrapped over as many lines as it needs — never clipped to a width.
+    // A truncated prompt is the one thing on this list a reader can't reconstruct from anywhere else.
+    const lines = wrapText(r.text, Math.max(40, (process.stdout.columns || 100) - 5));
+    process.stdout.write(c.dim(`#${String(r.index).padEnd(3)}`) + `${lines[0]}\n`);
+    for (const ln of lines.slice(1)) process.stdout.write(`     ${ln}\n`);
+    process.stdout.write(c.dim(`     ${fmtDur(r.durationMs).padStart(7)}${facts.length ? '  ' + facts.join(' · ') : ''}\n`));
+  }
+  process.stdout.write(c.dim('\nwork is attributed to the request that STARTED it — a shell launched here belongs here even if it exits later\n'));
+}
+
+/** Break text onto lines at word boundaries — used wherever a full sentence must survive a narrow
+ *  terminal. Wrapping, never clipping: an ellipsis loses the only copy of what the user actually said.
+ *  A word longer than the width (a path, a URL) gets its own line rather than being cut mid-token. */
+function wrapText(s: string, width: number): string[] {
+  const out: string[] = [];
+  let line = '';
+  for (const w of String(s ?? '').split(/\s+/).filter(Boolean)) {
+    if (!line) line = w;
+    else if (line.length + 1 + w.length <= width) line += ' ' + w;
+    else {
+      out.push(line);
+      line = w;
+    }
+  }
+  if (line) out.push(line);
+  return out.length ? out : [''];
+}
+
+/** Compact token count (1.2M / 45k / 900) — the total incl. cache, as the Stats panel sums it. */
+function fmtTok(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '0';
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
+  if (n >= 1e3) return `${Math.round(n / 1e3)}k`;
+  return `${n}`;
 }
 
 /** ms → compact human duration (450ms / 3.2s / 2m 5s). */
@@ -702,11 +913,18 @@ function cmdMultitask(args: string[]): void {
       : { phase: 'idle' as const, confidence: 'heuristic' as const };
     // Full (slow-tier) payload: whole-file builds per agent — aggregated HERE so renderers stay thin.
     // The ACTIVE session is always rebuilt (its transcript is still growing, and its live counts are
-    // what the user is watching); every other sibling comes from the on-disk map cache.
-    const map =
+    // what the user is watching); every other sibling comes from the on-disk cache, which carries its
+    // sparkline and to-dos too — those were the remaining per-sibling transcript re-parses.
+    const view =
       sib.id === session
-        ? core.buildChangeMap(sib.worktree, sib.id, { root: sib.worktree })
-        : core.siblingChangeMap(sib.worktree, sib.id, { root: sib.worktree });
+        ? {
+            map: core.buildChangeMap(sib.worktree, sib.id, { root: sib.worktree }),
+            sparkline: core.activityBins(core.parseActions(sib.worktree, sib.id).map((a) => a.ts)),
+            todos: core.transcriptInsights(sib.worktree, sib.id).todos,
+          }
+        : core.siblingOverview(sib.worktree, sib.id, { root: sib.worktree });
+    const map = view.map;
+    const sibActions = core.parseActions(sib.worktree, sib.id); // memoized — the sparkline used it too
     // Per-sibling tokens + wall-clock (one light transcript pass) — so Fleet shows the same metric style
     // as Workflows already do. Cached on this slow tier alongside buildChangeMap.
     const usage = core.sessionUsage(sib.worktree, sib.id);
@@ -733,16 +951,21 @@ function cmdMultitask(args: string[]): void {
       self: sib.self,
       phase: pd.phase,
       phaseConfidence: pd.confidence,
-      sparkline: activityBins(core.parseActions(sib.worktree, sib.id).map((a) => a.ts)),
-      todos: core.transcriptInsights(sib.worktree, sib.id).todos,
+      sparkline: view.sparkline,
+      todos: view.todos,
       subagents,
       files: sib.files,
       diff: { added: map.summary.added, removed: map.summary.removed },
       tokens: usage.total,
       durationMs: usage.durationMs,
       risk: sib.risk,
-      // Read off the map just built — never a second action scan.
-      capabilities: map.capabilities,
+      // Boundary crossings for the fleet row's ↗ suffix — the footprint's one unique fact, kept after
+      // the badge row was folded into risk/egress. Computed off the actions already parsed for the
+      // sparkline, never a second scan.
+      outside: {
+        reads: core.outsideReads(sibActions, sib.worktree).length,
+        writes: core.outsideWrites(sibActions, sib.worktree).length,
+      },
       compactions: map.summary.compactions,
     };
   });
@@ -1139,12 +1362,14 @@ function cmdChapter(args: string[]): void {
     process.stdout.write(c.dim(`no edit #${editId} in this session\n`));
     return;
   }
-  process.stdout.write(
-    c.bold(ch.title) +
-      c.dim(`${ch.synthetic ? ' (session)' : ''} — ${ch.editIds.length} edit(s): `) +
-      ch.editIds.join(', ') +
-      '\n'
-  );
+  // Lead with the chapter id: it is the value task-keep / task-undo / task-clear / chat-context --task /
+  // feed --kind task all require, and it was the one thing this command didn't print. The sibling list
+  // is the bulky part (875 ids on one line for a big session), so it wraps and truncates.
+  process.stdout.write(c.bold(ch.title) + c.dim(`${ch.synthetic ? ' (session)' : ''}\n`));
+  process.stdout.write(`  ${c.cyan('id')}      ${ch.id}\n`);
+  const shown = ch.editIds.slice(0, 40);
+  process.stdout.write(`  ${c.cyan('edits')}   ${ch.editIds.length}${ch.editIds.length ? `: ${shown.join(', ')}` : ''}`);
+  process.stdout.write(ch.editIds.length > shown.length ? c.dim(` … ${ch.editIds.length - shown.length} more (--json)\n`) : '\n');
 }
 
 /** `demo` (0.8.0) — the live simulator: replays a scripted Claude session through the REAL pipeline
@@ -1426,13 +1651,22 @@ function cmdChangeMap(args: string[]): void {
   const ri = args.indexOf('--root');
   const root = ri >= 0 && args[ri + 1] ? args[ri + 1] : process.cwd();
   const cwd = process.cwd();
-  const base = core.buildChangeMap(cwd, session, { root });
+  // `requests: true` — the per-ask slices the Requests window scopes everything by. Only the ACTIVE
+  // session builds them: they cost one more transcript pass, and no ask typed into this window scopes a
+  // sibling worktree's map (the sibling builds below deliberately leave the flag off).
+  const base = core.buildChangeMap(cwd, session, { root, requests: true });
   // One full change-map per worktree-sibling (the Overview per-agent tabs, §5). listRepoSiblings
   // includes self; when this cwd has no resolvable repo (no .git) it returns [] → degrade to just self.
   // Each entry carries a top-level session/worktree/gitBranch/phase so the per-agent-tab renderer has a
   // stable identity key without digging into summary.session. The SELF entry reuses `base` instead of
   // rebuilding the whole map a second time — half the work for the common single-agent case.
   const sibs = core.listRepoSiblings(cwd, session);
+  // Project each sibling slice down to what the renderers actually read. The full per-sibling `edits`
+  // array was 1.95 MB of the 3.30 MB payload — re-emitted, re-parsed and re-posted every refresh while
+  // NOTHING consumed it (VS Code's detailSlice reads summary/chapters/files/modules/footprint/
+  // compactions/rollupByTask; JetBrains' ChangeMapAgent has no edits field at all). Dropping a shipped
+  // field is against the "add fields, don't rename or remove" contract, so it is called out in the
+  // changelog — the active session's own top-level `edits` is untouched, which is what tools read.
   const agents = (sibs.length ? sibs : [{ id: session, worktree: cwd, gitBranch: null, phase: null }]).map((sib) => ({
     ...(sib.id === session && sib.worktree === cwd && root === cwd
       ? base
@@ -1452,7 +1686,21 @@ function cmdChangeMap(args: string[]): void {
   const unassigned =
     base.rollupByTask.find((r) => r.taskId === null) ??
     { taskId: null, edits: 0, added: 0, removed: 0, pending: 0, kept: 0, undone: 0 };
-  emitJson({ ...base, rollupByAgent: core.rollupByAgent(agents), agents, unassigned });
+  // Project each sibling slice down to what the renderers actually read before emitting. The full
+  // per-sibling `edits` array was 1.95 MB of a 3.30 MB payload — re-emitted, re-parsed and re-posted on
+  // every refresh while NOTHING consumed it (VS Code's detailSlice reads summary/chapters/files/
+  // modules/footprint/compactions/rollupByTask; JetBrains' ChangeMapAgent has no `edits` field at all).
+  // Dropping a shipped field is against the "add fields, don't remove them" contract, so the changelog
+  // says so. The rollup above still sees the full maps, and the ACTIVE session's own top-level `edits`
+  // is untouched — that is the one tools actually read.
+  // `requests` goes the same way as `edits`: the SELF entry is the very `base` object emitted at the
+  // top level, so leaving it here would serialize every per-ask slice twice in one payload. Siblings
+  // never carry any (the flag is off for their builds), so this only ever drops the duplicate.
+  const slimAgents = agents.map((a) => {
+    const { edits: _dropped, requests: _reqs, ...rest } = a as typeof a & { edits?: unknown; requests?: unknown };
+    return rest;
+  });
+  emitJson({ ...base, rollupByAgent: core.rollupByAgent(agents), agents: slimAgents, unassigned });
 }
 
 /** `chat-context` (§2.6/§7) — the zero-token chat handoff: assemble a ready-to-paste prompt about one
@@ -1481,7 +1729,9 @@ function buildObserve(core: Core, session: string, cwd: string) {
   const log = core.readLog(session);
   const reasoning = core.reasoningByEdit(cwd, session);
   const insights = core.transcriptInsights(cwd, session);
-  const recap = core.cachedAnalysis(session, 'recap')?.text ?? insights.title ?? null;
+  // Core owns the recap definition now (analysis > auto-title > last summary, with its source), so the
+  // CLI and both editors can no longer disagree about what "recap" means.
+  const recap = core.buildObservations(process.cwd(), session).recap || null;
   const suggestions = [
     ...new Set([...core.transcriptSuggestions(cwd, session), ...core.heuristicSuggestions(session)]),
   ];
@@ -2182,17 +2432,26 @@ function usage(): void {
       `  timeline [--json]    edits newest-first as a chronological feed (time · id · Δ · file)\n` +
       `  actions [--json]     the full action timeline: EVERY tool call Claude made (reads, greps, bash,\n` +
       `                       web, subagents, to-dos), each with its result (alias: trace); --category <c> | --errors | --limit <n>\n` +
-      `  risk [--json]        flag shell commands that can destroy data / escalate privilege / touch secrets\n` +
-      `  egress [--json]      what this session touched off-machine (web / MCP / network-shell destinations)\n` +
-      `  capabilities [--json]  what this session reached for: files outside the workspace, shell commands\n` +
+
+      `  egress [--json]      what this session reached beyond here: web hosts, MCP servers, network shell,\n` +
+      `                       and the files it READ from outside the workspace (--root <d>)\n` +
+      `  risk [--json]        shell commands that can destroy data / escalate privilege / touch secrets,\n` +
+      `                       plus the edits that landed OUTSIDE the workspace (--all, --root <d>)\n` +
       `                       (with risk tiers), MCP servers, network, subagents — exercised, not approved\n` +
+      `  processes [--json]   background shells this session left running (runtime · exit code · output);\n` +
+      `                       --id <shell> shows one shell's full command + a tail of its output\n` +
+      `  requests [--json]    the session as the list of things YOU asked for, each with the edits,\n` +
+      `                       files, folders, tokens, agents, workflows, tasks and shells it produced;\n` +
+      `                       --id <n> drills into one; --id <n> --response prints Claude’s reply to it\n` +
+      `  feed [--json]        what ONE thing is doing now — a tail of its activity;\n` +
+      `                       --kind session|agent|workflow|task|process --id <id> [--limit <n>]\n` +
       `  subagents [--json]   every subagent this session spawned, each with its own action timeline + metrics (alias: agents)\n` +
       `  siblings [--json]    the other Claude Code sessions in THIS project (active/idle · pending · files · risk);\n` +
       `                       agent-facing digest for cross-agent awareness (alias: fleet); --all includes self;\n` +
       `                       --repo widens to every WORKTREE of the repo (adds worktree/branch/phase + conflicts)\n` +
-      `  multitask [--json]   the multi-agent view: one row per running agent across every worktree (live phase,\n` +
+      `  multitask                the multi-agent view: one row per running agent across every worktree (live phase,\n` +
       `                       sparkline, ±lines, risk) + nested subagents (phase/current task) + file collisions\n` +
-      `  tasklog [--json]     cross-agent task log: one row per stable taskId, unioned across worktrees + subagents\n` +
+      `  tasklog                    cross-agent task log: one row per stable taskId, unioned across worktrees + subagents\n` +
       `  metrics [--json]     session numbers: ±lines, action/error counts, subagent duration/tokens, tool latency\n` +
       `  diff <id>            show before/after for an edit\n` +
       `  keep <id>            mark an edit kept; bulk: --all | --file <substr> | --under <path>\n` +
@@ -2391,8 +2650,24 @@ function main(): void {
     case 'egress':
       cmdEgress(rest);
       break;
+    case 'footprint':
+      cmdFootprint(rest);
+      break;
     case 'capabilities':
-      cmdCapabilities(rest);
+      // 0.8.6 shipped this verb; 0.8.7 renamed it to `footprint`. Keep it working rather than answering
+      // an upgrade with "unknown command", and put the notice on STDERR — a line on stdout would corrupt
+      // `capabilities --json` for anything already piping it.
+      process.stderr.write(c.dim('`capabilities` was renamed to `footprint` in 0.8.7 — running `footprint`.\n'));
+      cmdFootprint(rest);
+      break;
+    case 'processes':
+      cmdProcesses(rest);
+      break;
+    case 'requests':
+      cmdRequests(rest);
+      break;
+    case 'feed':
+      cmdFeed(rest);
       break;
     case 'subagents':
     case 'agents':

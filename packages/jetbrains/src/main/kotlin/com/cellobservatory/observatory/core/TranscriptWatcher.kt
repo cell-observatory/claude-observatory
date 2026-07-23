@@ -122,7 +122,9 @@ class TranscriptWatcher(private val project: Project) : Disposable {
     private fun discoverSiblingDirs(): List<Path> {
         val base = project.basePath ?: return emptyList()
         val cwds = LinkedHashSet<String>().apply { add(base) }
-        runCatching { ObservatoryCli.multitaskJson(base)?.let { MultitaskParser.parse(it)?.worktrees } }
+        // No --session: only `worktrees[]` is read here, which is keyed by --root (the repo), not by
+        // whichever sibling the payload calls its own.
+        runCatching { ObservatoryCli.multitaskJson(null, base)?.let { MultitaskParser.parse(it)?.worktrees } }
             .getOrNull()?.let { cwds.addAll(it) }
         return projectDirsFor(cwds)
     }
