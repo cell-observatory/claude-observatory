@@ -168,14 +168,6 @@
               class="com.cellobservatory.observatory.actions.TourPlayPauseAction"
               text="Claude Observatory: Guided Tour — Pause or Resume"
               description="Pause or resume the guided tour's autoplay"/>
-      <action id="ClaudeObservatory.TourDock"
-              class="com.cellobservatory.observatory.actions.TourDockAction"
-              text="Claude Observatory: Guided Tour — Dock"
-              description="Move the guided tour from its own window into a docked tool window"/>
-      <action id="ClaudeObservatory.TourFloat"
-              class="com.cellobservatory.observatory.actions.TourFloatAction"
-              text="Claude Observatory: Guided Tour — Float"
-              description="Move the guided tour out into its own window, above the IDE"/>
       <action id="ClaudeObservatory.ExitDemo"
               class="com.cellobservatory.observatory.actions.ExitDemoAction"
               icon="AllIcons.Actions.Cancel"

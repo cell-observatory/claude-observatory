@@ -22,9 +22,10 @@ import javax.swing.JComponent
  * The guided tour (0.8.9), JetBrains side. Walks the same steps in the same order as the CLI and the
  * VS Code panel — the script is core's (`demo --tour --json`), never written here.
  *
- * The tour is DOCKED into a tool window by default, and detaches into a non-modal dialog of its own when
- * you would rather have it on a second screen. Either way it survives the focus changes the steps
- * deliberately cause; which mode you last used is remembered.
+ * The tour lives in a DOCKED tool window on the right, inside the IDE. It had a floating non-modal
+ * dialog too; that window never appeared in PyCharm 2025.2 and was removed rather than carried as a
+ * control that does nothing. VS Code keeps its own detach — it drives the platform's own
+ * move-editor-to-new-window, which works — so the two editors differ here on purpose.
  *
  * It can never be a TAB of the existing Claude Observatory window: that window's panes are `Content`s
  * and only one shows at a time, so the step that says "look at the Edits tree" would hide the tour
@@ -37,9 +38,9 @@ import javax.swing.JComponent
 @Service(Service.Level.PROJECT)
 class TourController(private val project: Project) : com.intellij.openapi.Disposable {
 
-    /** Closing the project with a DOCKED tour open reaches no other teardown: the dialog's own dispose is
-     *  what stops a floating one, and there is no dialog here. Without this the 1 Hz countdown task
-     *  reschedules itself forever, because its body returns on `project.isDisposed` without cancelling. */
+    /** Closing the project with the tour open reaches no other teardown. Without this the 1 Hz countdown
+     *  task reschedules itself forever, because its body returns on `project.isDisposed` without
+     *  cancelling. */
     override fun dispose() {
         stopAutoplay()
         if (watch != null) service().removeListener(watchListener)
@@ -58,16 +59,11 @@ class TourController(private val project: Project) : com.intellij.openapi.Dispos
     private var essentialsTrack = false
     private var remainder: List<DemoStep> = emptyList()
     private var index = -1
-    private var dialog: TourDialog? = null
     private var ringDisposable: com.intellij.openapi.Disposable? = null
     /** The wait step currently armed. No timer and no new watcher — the service already fires on every
      *  store change, and the verdict itself is core's, so both editors reach the same one. */
     private var watch: Watch? = null
     private var litSpotlight = false
-    /** Set while [moveTo] is tearing the window down to rebuild it in the other mode, so the dispose it
-     *  causes is not mistaken for the reader closing the tour. Without it, one Float→Dock toggle sends
-     *  the tour back to step 1: the dialog's dispose handler calls stop(), which clears the index. */
-    private var moving = false
     private val watchListener = Runnable { checkWatch() }
 
     /**
@@ -172,11 +168,6 @@ class TourController(private val project: Project) : com.intellij.openapi.Dispos
             total = log.size,
         )
 
-    /** true = docked into a tool window (the default), false = floating in a dialog of its own. */
-    private var docked: Boolean
-        get() = com.cellobservatory.observatory.settings.ObservatorySettings.instance.state.tourDocked
-        set(v) { com.cellobservatory.observatory.settings.ObservatorySettings.instance.state.tourDocked = v }
-
     // Built LAZILY, on the EDT, when the tour window is first opened. This is a project service, and
     // `TourNextAction.update()` runs on a background thread (SessionAction declares ActionUpdateThread.BGT)
     // — typing "guided tour" into Find Action instantiates the service, so constructing Swing components
@@ -235,22 +226,6 @@ class TourController(private val project: Project) : com.intellij.openapi.Dispos
                     .showCenteredInCurrentWindow(project)
             }
         }
-    }
-
-    /** Move between the floating dialog and the docked tool window, keeping the current step. */
-    fun moveTo(dockedNow: Boolean) {
-        if (docked == dockedNow && (dialog != null || toolWindowExists())) return
-        docked = dockedNow
-        if (!running) return
-        val at = index
-        moving = true
-        try {
-            closeWindow()
-            openWindow()
-        } finally {
-            moving = false
-        }
-        applyStep(at)
     }
 
     // Every manual control hands over the wheel: autoplay stops and only the transport restarts it.
@@ -419,6 +394,8 @@ class TourController(private val project: Project) : com.intellij.openapi.Dispos
     fun stop() {
         index = -1
         stopAutoplay()
+        lastRing = null
+        windowShown = false
         disarm()
         ChangeMapPanel.of(project)?.setShowAll(false)
         ring(null)
@@ -454,30 +431,26 @@ class TourController(private val project: Project) : com.intellij.openapi.Dispos
 
     // --- the window -----------------------------------------------------------------------------
 
-    private fun toolWindowExists() = ToolWindowManager.getInstance(project).getToolWindow(TOOL_WINDOW_ID) != null
-
-    private fun openWindow() {
-        if (docked) ensureToolWindow() else ensureDialog()
-    }
+    private fun openWindow() = ensureToolWindow()
 
     private fun closeWindow() {
-        dialog?.close(0)
-        dialog = null
         ToolWindowManager.getInstance(project).getToolWindow(TOOL_WINDOW_ID)?.remove()
     }
 
-    /** The floating tour: a NON-MODAL dialog, so the IDE stays fully usable underneath it and every
-     *  step can move focus wherever it likes without dismissing the tour. */
-    private fun ensureDialog() {
-        dialog?.let { if (it.isShowing) return }
-        val d = TourDialog(project, buildPanel()) { if (running && !moving) stop() }
-        dialog = d
-        d.show()
-    }
-
-    /** Subscribed once, for the project's lifetime: hiding the docked tour is the reader closing it, and
-     *  the tour must not keep running — and keep ACTING — behind a window that is no longer on screen. */
+    /** Subscribed once, for the project's lifetime. A tour whose window is not on screen must not keep
+     *  ACTING — its wait steps accept and revert edits on a nine-second timer, and doing that behind a
+     *  window the reader cannot see is the worst thing this feature could do.
+     *
+     *  It PAUSES rather than ends: the window also hides when the reader activates any other tool window
+     *  on the same anchor, and losing the whole tour to a misclick on a stripe button would be its own
+     *  defect. Bringing it back re-draws the ring; resuming stays the reader's to ask for, like every
+     *  other manual control. */
     private var hideWatch: com.intellij.openapi.Disposable? = null
+    /** Last known visibility of the tour's tool window, so the listener acts on TRANSITIONS only —
+     *  stateChanged fires for every tool window in the project, many times per step. */
+    private var windowShown = false
+    /** The control the current step rings, kept so hiding and re-showing the window restores it. */
+    private var lastRing: JComponent? = null
 
     private fun watchForHide() {
         if (hideWatch != null) return
@@ -488,9 +461,17 @@ class TourController(private val project: Project) : com.intellij.openapi.Dispos
             com.intellij.openapi.wm.ex.ToolWindowManagerListener.TOPIC,
             object : com.intellij.openapi.wm.ex.ToolWindowManagerListener {
                 override fun stateChanged(mgr: ToolWindowManager) {
-                    if (!running || !docked || moving) return
+                    if (!running) return
                     val tw = mgr.getToolWindow(TOOL_WINDOW_ID) ?: return
-                    if (!tw.isVisible) stop()
+                    val visible = tw.isVisible
+                    if (visible == windowShown) return // only the transitions matter
+                    windowShown = visible
+                    if (!visible) {
+                        pauseAutoplay()
+                        ring(null) // no outline pointing at a control the tour can no longer explain
+                    } else {
+                        ring(lastRing) // back on screen: point at the step's control again
+                    }
                 }
             },
         )
@@ -502,6 +483,7 @@ class TourController(private val project: Project) : com.intellij.openapi.Dispos
         val existing = mgr.getToolWindow(TOOL_WINDOW_ID)
         if (existing != null) {
             existing.activate(null)
+            windowShown = true
             return
         }
         val tw = mgr.registerToolWindow(TOOL_WINDOW_ID) {
@@ -513,6 +495,7 @@ class TourController(private val project: Project) : com.intellij.openapi.Dispos
         content.isCloseable = false
         tw.contentManager.addContent(content)
         tw.activate(null)
+        windowShown = true // the listener acts on transitions, so seed it with the truth
     }
 
     private fun buildPanel(): JComponent {
@@ -549,14 +532,11 @@ class TourController(private val project: Project) : com.intellij.openapi.Dispos
             steps.addActionListener { chooseStep(steps) }
             playBtn.toolTipText = "Pause or resume the tour. Any other control pauses it too."
             if (playBtn.actionListeners.isEmpty()) playBtn.addActionListener { playPause() }
-            val dock = JButton(if (docked) "Float" else "Dock")
-            dock.toolTipText = "Move the tour between its own window and a docked tool window"
-            dock.addActionListener { moveTo(!docked) }
             val exit = JButton("Exit demo")
             // Exit goes through the shared handler, so leaving from here removes exactly what leaving
             // from the palette or the panel toolbar removes.
             exit.addActionListener { com.cellobservatory.observatory.ui.ReviewOps.exitDemo(project) }
-            add(playBtn); add(backBtn); add(nextBtn); add(steps); add(dock); add(exit)
+            add(playBtn); add(backBtn); add(nextBtn); add(steps); add(exit)
         }
         return JBPanel<JBPanel<*>>(BorderLayout()).apply {
             border = JBUI.Borders.empty(10, 12)
@@ -589,10 +569,11 @@ class TourController(private val project: Project) : com.intellij.openapi.Dispos
         nextBtn.text = if (i + 1 >= steps.size) "Finish" else "Next ▸"
 
         ring(null) // clear the previous step's ring before anything moves
+        lastRing = null
         val anchor = activate(step)
         // Re-raise the tour LAST so the reader ends up looking at the text, not at what it just moved.
-        // The floating dialog needs no raising — it is already above the IDE, which is the point of it.
-        if (docked) ToolWindowManager.getInstance(project).getToolWindow(TOOL_WINDOW_ID)?.show(null)
+        ToolWindowManager.getInstance(project).getToolWindow(TOOL_WINDOW_ID)?.show(null)
+        lastRing = anchor
         ring(anchor)
         // After the surface is forward, so the reader can see the thing before being asked to act on it.
         renderAction(step.action, null)
@@ -688,39 +669,6 @@ class TourController(private val project: Project) : com.intellij.openapi.Dispos
         "<html><body style='width:220px'>" +
             s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;") +
             "</body></html>"
-}
-
-/**
- * The floating tour window: a NON-MODAL dialog, so the IDE underneath stays fully usable and every step
- * can move focus wherever it needs to without dismissing the tour. Resizable and movable, including onto
- * a second screen — which is the whole reason the tour does not live in a tool-window tab.
- *
- * It carries no OK/Cancel: the panel has its own Back, Next, Steps, Dock and Exit, and a dialog button
- * bar under them would be a second set of controls saying nothing new.
- */
-private class TourDialog(
-    project: Project,
-    private val content: JComponent,
-    private val onClosed: () -> Unit,
-) : com.intellij.openapi.ui.DialogWrapper(project, false) {
-
-    init {
-        title = "Claude Observatory — guided tour"
-        isModal = false
-        init()
-    }
-
-    override fun createCenterPanel(): JComponent = content
-
-    /** No button bar — every control the tour needs is in the panel itself. */
-    override fun createActions(): Array<javax.swing.Action> = emptyArray()
-
-    override fun getDimensionServiceKey(): String = "ClaudeObservatoryTourDialog" // remembers size + position
-
-    override fun dispose() {
-        super.dispose()
-        onClosed()
-    }
 }
 
 /**

@@ -73,8 +73,10 @@ jump — hands you the wheel, with a transport button to resume. A **YOUR TURN**
 performs the action itself if you do nothing, so watching it hands-off still shows Keep and Undo really
 happening rather than only describing them.
 
-It **docks beside your code** by default and detaches into a window of its own for a second screen; the
-choice is remembered.
+It **docks beside your code**: an editor-area panel in VS Code, a tool window on the right in JetBrains.
+VS Code can also **detach** it into a window of its own for a second screen, and remembers the choice.
+JetBrains cannot — its floating window never appeared in PyCharm 2025.2, so it was removed rather than
+shipped as a control that does nothing.
 
 Each step brings its surface forward — the Overview tab, the sidebar tree, or the file itself — and
 **rings** the control it names: a CSS outline in VS Code, a glass-pane painter in JetBrains. The step's
@@ -89,7 +91,10 @@ While the tour runs, the Overview's **Active only** filter is held open so the r
 actually on screen — five of the demo's six tasks are completed, and the filter hides completed tasks by
 default. Your own setting and your own tab come back when the tour ends.
 
-Back, Next, a step chooser and Dock/Float drive it; **Exit demo** ends it and removes the session.
+Back, Next and a step chooser drive it (plus Dock/Float in VS Code); **Exit demo** ends it and removes
+the session. In JetBrains, hiding the tour's tool window **pauses** it — a tour must never keep acting behind a
+window you cannot see, and its wait steps accept and revert edits on a timer. Bringing the window back
+restores the step's outline; resuming is yours to ask for, like every other control.
 
 On a first install, and once after an update, both editors **offer the demo**: one notification, four
 seconds after startup, carrying **Never ask**. It is skipped while a Claude session is live in that

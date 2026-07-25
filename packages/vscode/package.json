@@ -1031,22 +1031,22 @@
         {
           "command": "claudeObservatory.startDemo",
           "when": "(view == claudeObservatory.edits || view == claudeObservatory.changemap) && !claudeObservatory.demoPresent",
-          "group": "navigation@0"
+          "group": "2_demo"
         },
         {
           "command": "claudeObservatory.exitDemo",
           "when": "(view == claudeObservatory.edits || view == claudeObservatory.changemap) && claudeObservatory.demoPresent",
-          "group": "navigation@0"
+          "group": "2_demo"
         },
         {
           "command": "claudeObservatory.startTour",
           "when": "(view == claudeObservatory.edits || view == claudeObservatory.changemap) && claudeObservatory.demoPresent && !claudeObservatory.demoTour",
-          "group": "navigation@0"
+          "group": "2_demo"
         },
         {
           "command": "claudeObservatory.restartDemo",
           "when": "(view == claudeObservatory.edits || view == claudeObservatory.changemap) && claudeObservatory.demoPresent",
-          "group": "navigation@0"
+          "group": "2_demo"
         }
       ],
       "editor/title": [

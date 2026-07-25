@@ -40,8 +40,13 @@ capture hooks need not be installed — which makes it the first thing a new rea
   so a reader who only watches still sees Keep and Undo actually happen. VS Code honours
   `prefers-reduced-motion` and starts paused; the JetBrains platform exposes no such signal, so it starts
   playing and the button is the control.
-- **The tour docks beside your code**, and detaches into a window of its own when you would rather have
-  it on a second screen. The choice is remembered.
+- **The tour docks beside your code** — an editor-area panel in VS Code, a tool window on the right in
+  JetBrains. VS Code can also detach it into a window of its own for a second screen and remembers the
+  choice; JetBrains cannot, because that window never appeared in PyCharm 2025.2 and shipping a control
+  that does nothing is worse than not offering it. Hiding the JetBrains tool window **pauses** the
+  tour, because its wait steps act on a timer and must never do so behind a window you cannot see.
+- **Demo mode sits at the END of the panel toolbars** in both editors. It was the first thing in the row,
+  which pushed the review actions rightward and read as though the demo were part of reviewing.
 - **The demo is offered on a first install and once after an update** — one notification, four seconds
   after startup, with **Never ask** on it. Skipped while a Claude session is live in that project, in an
   untrusted workspace, and once a demo is already recorded there.

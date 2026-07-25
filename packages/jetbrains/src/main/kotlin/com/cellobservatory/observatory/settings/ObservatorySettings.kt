@@ -25,7 +25,6 @@ class ObservatorySettings : PersistentStateComponent<ObservatorySettings.State> 
 
         /** Guided tour: docked into a tool window (the default), or floating in a dialog of its own.
          *  A person's preference about their own screen, so it is remembered rather than re-asked. */
-        var tourDocked: Boolean = true
 
         // --- the first-run / post-update demo offer -------------------------------------------------
         // Application-level, like everything else here: declining silences it in EVERY project, which is

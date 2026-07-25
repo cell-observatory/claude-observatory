@@ -185,25 +185,6 @@ class TourPlayPauseAction : SessionAction() {
     }
 }
 
-/** Move the tour between its own floating window and a docked tool window. */
-class TourDockAction : SessionAction() {
-    override fun update(e: AnActionEvent) {
-        e.presentation.isEnabledAndVisible = e.project != null && TourController.getInstance(e.project!!).running
-    }
-    override fun actionPerformed(e: AnActionEvent) {
-        TourController.getInstance(e.project ?: return).moveTo(true)
-    }
-}
-
-class TourFloatAction : SessionAction() {
-    override fun update(e: AnActionEvent) {
-        e.presentation.isEnabledAndVisible = e.project != null && TourController.getInstance(e.project!!).running
-    }
-    override fun actionPerformed(e: AnActionEvent) {
-        TourController.getInstance(e.project ?: return).moveTo(false)
-    }
-}
-
 /** Leave demo mode and remove every trace of it. */
 class ExitDemoAction : SessionAction() {
     override fun update(e: AnActionEvent) {

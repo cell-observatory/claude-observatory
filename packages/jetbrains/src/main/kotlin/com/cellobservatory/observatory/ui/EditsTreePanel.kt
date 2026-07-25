@@ -228,15 +228,6 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
             action("Search Edits", NavTint.SEARCH) { searchEdits() },
             action("Review Previous Pending Edit", AllIcons.Actions.Back) { reviewPrev() },
             action("Review Next Pending Edit", AllIcons.Actions.Forward) { reviewNext() },
-            // Demo mode (0.8.9) — reachable from the panel, not only from Find Action, and showing the
-            // verb that fits the state you are in (parity with the VS Code title-bar buttons).
-            demoAction("Start Demo Mode", AllIcons.Actions.Execute, wantDemo = false) { ReviewOps.startDemo(project) },
-            demoAction("Restart Demo", AllIcons.Actions.Restart, wantDemo = true) { ReviewOps.startDemo(project) },
-            demoAction("Guided Tour", AllIcons.Actions.Preview, wantDemo = true) {
-                com.cellobservatory.observatory.ui.tour.TourController.getInstance(project)
-                    .start { msg -> ReviewOps.notify(project, msg, com.intellij.notification.NotificationType.WARNING) }
-            },
-            demoAction("Exit Demo Mode", AllIcons.Actions.Cancel, wantDemo = true) { ReviewOps.exitDemo(project) },
             action("Accept All Edits", NavTint.ACCEPT_ALL) {
                 withSession { s -> ReviewOps.keepAll(project, s) }
             },
@@ -271,6 +262,17 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
                 }),
             action("Export Review Summary", AllIcons.ToolbarDecorator.Export) { exportSummary() },
             action("Setup Check (doctor)", AllIcons.General.Information) { ReviewOps.openDoctor(project) },
+            // Demo mode LAST — reachable from the panel, not only from Find Action, and showing the verb
+            // that fits the state you are in. It sits at the end because it is the one group here that is
+            // not about the session you are actually reviewing; putting it mid-toolbar pushed the review
+            // actions rightward and read as though the demo were part of the review flow.
+            demoAction("Start Demo Mode", AllIcons.Actions.Execute, wantDemo = false) { ReviewOps.startDemo(project) },
+            demoAction("Restart Demo", AllIcons.Actions.Restart, wantDemo = true) { ReviewOps.startDemo(project) },
+            demoAction("Guided Tour", AllIcons.Actions.Preview, wantDemo = true) {
+                com.cellobservatory.observatory.ui.tour.TourController.getInstance(project)
+                    .start { msg -> ReviewOps.notify(project, msg, com.intellij.notification.NotificationType.WARNING) }
+            },
+            demoAction("Exit Demo Mode", AllIcons.Actions.Cancel, wantDemo = true) { ReviewOps.exitDemo(project) },
         )
         // Collapse-all / expand-all for the folder → file → class tree — IntelliJ's own tree actions,
         // the platform equivalent of VS Code's file-Explorer Collapse-All button.
