@@ -140,6 +140,15 @@ Copy this shape for any new structured view.
 | Build the JetBrains plugin | `gradle buildPlugin` (in `packages/jetbrains`) |
 | Unit + smoke tests | `npm test` (runs `version:check` → build → build:vscode → `node --test` on core + smoke) |
 | End-to-end CLI + hook | `npm run e2e` (`bash test/e2e.sh`, isolated temp `$HOME`) |
+
+**Do not point your editor at `node_modules/typescript`.** Since TypeScript 7 the npm package ships only
+the `tsc` driver — the language service, the `lib.*.d.ts` files, and the compiler API all live inside a
+per-platform native binary — so `node_modules/typescript/lib` holds no `tsserver.js` and
+`require('typescript')` returns nothing but a version. An editor configured to use the *workspace*
+TypeScript (VS Code's `typescript.tsdk` / "Use Workspace Version", the IntelliJ TypeScript service's
+directory setting) will silently lose inline errors and IntelliSense while every build here keeps
+passing. Use the editor's own bundled TypeScript; it reads this repo's `tsconfig` settings fine from
+5.6 onward.
 | JetBrains port tests | `gradle test` (in `packages/jetbrains`) |
 | Everything | `npm run test:all` |
 | Check/bump version | `node scripts/version.mjs [<x.y.z>]` |
