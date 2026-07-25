@@ -10,6 +10,15 @@ updates:
     groups:
       dev-dependencies:
         dependency-type: development
+    ignore:
+      # TypeScript 7 is the native rewrite: its npm package ships the `tsc` driver alone, with no
+      # language service, no lib.*.d.ts and no compiler API. Builds and CI pass on it — they only ever
+      # invoke tsc — but every editor that uses the project's TypeScript (IntelliJ's TypeScript service
+      # auto-detects node_modules/typescript; VS Code's "Use Workspace Version") silently loses inline
+      # errors and IntelliSense. Stay on 5.x until the language service ships, then take the major
+      # deliberately: tsconfig.base.json already uses node16 resolution, which is all 7.x requires.
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /
