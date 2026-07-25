@@ -5,7 +5,7 @@
 // + `multitask --json` payloads; each snapshot is rendered by the ACTUAL webview code (the OVERVIEW_SCRIPT
 // and shell style extracted from packages/vscode/src/extension.ts) in headless Chrome; the frames are
 // assembled into three recordings (gifenc — no native deps, no ffmpeg): docs/media/demo-live.gif (the
-// run), demo-workflow.gif (the workflow arc, Workflows angle), demo-review.gif (chapter review + auto-clear).
+// run), demo-workflow.gif (the workflow arc, Workflows angle), demo-review.gif (task review + auto-clear).
 //
 // Usage: node scripts/record-demo.mjs        (≈20s; requires Google Chrome + a built core/cli)
 import { execFileSync } from 'node:child_process';
@@ -91,12 +91,12 @@ const res = await core.runDemo({
   },
 });
 sessionId = res.session;
-snap('✓ demo complete — 3 chapters, a subagent, a workflow, 5 pending edits');
+snap('✓ demo complete — 3 tasks, a subagent, a workflow, 5 pending edits');
 console.log(`  ${frames.length} beats captured from ${res.session}`);
 
-// --- the REVIEW sequence: real chapter ops against the demo store, one snapshot per decision --------
-// This is the WYSIWYG story: each ✓ resolves exactly the edits its chapter row shows; Accept All on a
-// fully-reviewed demo auto-clears the store (no residue).
+// --- the REVIEW sequence: real task ops against the demo store, one snapshot per decision -----------
+// Each `task-keep` accepts exactly the edits captured while that to-do was in progress — its STRICT
+// span, never a guess; Accept All on a fully-reviewed demo then auto-clears the store (no residue).
 const reviewFrames = [];
 const rsnap = (cmd, caption) => {
   const cm = runJson(['changemap', '--json', '--root', ws, '--session', sessionId]);
@@ -106,15 +106,18 @@ const rsnap = (cmd, caption) => {
 {
   const cm0 = runJson(['changemap', '--json', '--root', ws, '--session', sessionId]);
   const pending = cm0.summary.pending;
-  reviewFrames.push({ cm: cm0, mt: runJson(['multitask', '--json', '--root', ws, '--session', sessionId]), cmd: 'demo', caption: `${pending} pending edits across ${cm0.chapters.length} chapters` });
+  reviewFrames.push({ cm: cm0, mt: runJson(['multitask', '--json', '--root', ws, '--session', sessionId]), cmd: 'demo', caption: `${pending} pending edits across ${cm0.tasks.length} tasks` });
   // Captions below are the CLI's OWN output lines — the recording shows exactly what the command printed.
   const runOp = (args) =>
     execFileSync('node', [CLI, ...args, '--session', sessionId], { cwd: ws, env: process.env, encoding: 'utf8' })
       .split('\n')[0].replace(/\x1b\[[0-9;]*m/g, '').trim();
-  const chs = cm0.chapters.filter((c) => c.edits > 0);
-  for (const ch of chs.slice(0, 2)) {
-    const out = runOp(['task-keep', ch.id]);
-    rsnap(`task-keep ${ch.id.slice(0, 8)}`, out);
+  // The tasks that actually produced edits, by their strict rollup — a planned to-do with nothing
+  // captured under it has nothing to accept, and a frame showing "kept 0" would say nothing.
+  const rollBy = Object.fromEntries((cm0.rollupByTask || []).filter((r) => r.taskId).map((r) => [r.taskId, r]));
+  const worked = (cm0.tasks || []).filter((t) => (rollBy[t.taskId]?.pending || 0) > 0);
+  for (const t of worked.slice(0, 2)) {
+    const out = runOp(['task-keep', t.taskId]);
+    rsnap(`task-keep ${t.taskId.slice(0, 8)}`, out);
   }
   const out = runOp(['keep', '--all']);
   rsnap('keep --all', `${out} — the fully reviewed demo session clears its own store`);
@@ -183,15 +186,15 @@ encodeGif('demo-live.gif', livePngs.map((p, i) => ({ png: p, delay: i === 0 ? 14
 
 // 2) demo-workflow.gif — the workflow arc, Workflows angle: the empty tab, the run appearing (journal,
 //    still running), its agent's edit landing, then the completed run with its phase groups — the
-//    selected run's change-map slice (its own chapter rollup + files) on the right throughout.
+//    selected run's change-map slice (its own rollup + files) on the right throughout.
 console.log('▸ rendering demo-workflow.gif (the workflow arc, Workflows angle)…');
 const wfStart = Math.max(0, frames.findIndex((f) => /WORKFLOW/i.test(f.caption)) - 1);
 const wfFrames = frames.slice(wfStart);
 const wfPngs = wfFrames.map((f) => renderFrame(f, { workflows: true }));
 encodeGif('demo-workflow.gif', wfPngs.map((p, i) => ({ png: p, delay: i === wfPngs.length - 1 ? 4200 : 1900 })));
 
-// 3) demo-review.gif — the WYSIWYG review: accept chapter by chapter, then Accept All → auto-clear.
-console.log('▸ rendering demo-review.gif (chapter review + auto-clear)…');
+// 3) demo-review.gif — the review: accept task by task (strict spans), then Accept All → auto-clear.
+console.log('▸ rendering demo-review.gif (task review + auto-clear)…');
 const revPngs = reviewFrames.map((f) => renderFrame(f));
 encodeGif('demo-review.gif', revPngs.map((p, i) => ({ png: p, delay: i === revPngs.length - 1 ? 4200 : 2300 })));
 
