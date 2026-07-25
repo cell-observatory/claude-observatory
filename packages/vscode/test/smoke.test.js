@@ -732,12 +732,23 @@ test('extension: three views, click commands, inline annotations, chat, status s
     // kills the whole panel at runtime with a SyntaxError. Compile each <script> the page ships.
     for (const [label, view] of [['overview', cmView], ['prompts', rqView], ['stats', stView]]) {
       if (!view) continue;
-      // Case-insensitive on purpose: a tag-matching regex that only sees lowercase would silently skip a
-      // <SCRIPT> block and report "every shipped script parses" having compiled none of it.
-      const scripts = String(view.webview.html).match(/<script[^>]*>([\s\S]*?)<\/script>/gi) || [];
+      // Scanned, not regex-matched. A tag-matching regex has to be written case-insensitively AND to
+      // tolerate `</script >`, and getting either wrong makes this guard silently vacuous: it would
+      // find no blocks and still report that every shipped script parses. Index scanning has neither
+      // failure mode (CodeQL flags the regex form as js/bad-tag-filter for exactly this reason).
+      const html = String(view.webview.html);
+      const hay = html.toLowerCase();
+      const scripts = [];
+      for (let at = hay.indexOf('<script'); at >= 0; ) {
+        const bodyStart = hay.indexOf('>', at);
+        if (bodyStart < 0) break;
+        const bodyEnd = hay.indexOf('</script', bodyStart);
+        if (bodyEnd < 0) break;
+        scripts.push(html.slice(bodyStart + 1, bodyEnd));
+        at = hay.indexOf('<script', bodyEnd);
+      }
       assert.ok(scripts.length, `${label}: the panel ships at least one script`);
-      for (const block of scripts) {
-        const body = block.replace(/^<script[^>]*>/i, '').replace(/<\/script>$/i, '');
+      for (const body of scripts) {
         assert.doesNotThrow(() => new Function(body), `${label}: every shipped script parses`);
       }
     }
