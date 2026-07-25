@@ -1275,8 +1275,12 @@ test('contract 0.8.0: every machine surface the editors consume emits its docume
   // multitask — the Overview left nav (Fleet · Workflows · curated Actions) in both editors.
   const mt = runJson(['multitask', '--json']);
   hasKeys(mt, ['agents', 'collisions', 'worktrees', 'workflows', 'actions', 'summary'], 'multitask');
-  hasKeys(mt.agents[0], ['session', 'worktree', 'gitBranch', 'self', 'phase', 'phaseConfidence', 'sparkline', 'todos', 'subagents', 'files', 'diff', 'tokens', 'durationMs', 'risk', 'outside', 'compactions'], 'multitask.agents[]');
-  hasKeys(mt.agents[0].subagents[0], ['agentId', 'agentType', 'description', 'phase', 'phaseConfidence', 'todos', 'currentTask', 'edits', 'added', 'removed'], 'multitask.agents[].subagents[]');
+  // Select the SELF row, never agents[0]: listRepoSiblings sorts by transcript mtime, and the demo's
+  // sibling agent can hold that slot. A positional assumption here fails as a confusing TypeError.
+  const self = mt.agents.find((a) => a.self);
+  assert.ok(self, 'the active session appears in its own fleet');
+  hasKeys(self, ['session', 'worktree', 'gitBranch', 'self', 'phase', 'phaseConfidence', 'sparkline', 'todos', 'subagents', 'files', 'diff', 'tokens', 'durationMs', 'risk', 'outside', 'compactions'], 'multitask.agents[]');
+  hasKeys(self.subagents[0], ['agentId', 'agentType', 'description', 'phase', 'phaseConfidence', 'todos', 'currentTask', 'edits', 'added', 'removed'], 'multitask.agents[].subagents[]');
   hasKeys(mt.workflows[0], ['id', 'name', 'phases', 'agents', 'phaseGroups', 'running', 'lastActivityMs', 'agentCount', 'tokens', 'durationMs', 'edits', 'added', 'removed', 'sparkline'], 'multitask.workflows[]');
   hasKeys(mt.actions, ['groups', 'egress'], 'multitask.actions');
   hasKeys(mt.summary, ['active', 'conflicts'], 'multitask.summary');
@@ -4311,21 +4315,60 @@ test('demo: runDemo replays a real-pipeline session — strict task attribution,
   const ws = fs.realpathSync(tmpWork()); // physical path — the demo records under the shell's getcwd()
   const res = await core.runDemo({ fast: true, cwd: ws });
   assert.match(res.session, /^demo-[0-9a-f]{8}$/, 'the demo- prefix gates every demo-only behavior');
-  assert.equal(res.edits, 5, 'five captured store edits (2 scaling, 1 validation, 1 tests, 1 docs)');
+  assert.equal(res.edits, 9, 'nine captured store edits across the three prompts');
   assert.ok(fs.existsSync(res.transcript), 'a real transcript in the real project dir');
+  assert.equal(res.sibling, null, 'no repo here (tmpWork has no .git) ⇒ no sibling agent is invented');
+  assert.equal(res.cancelled, false, 'a run nobody stopped is not reported as cancelled');
 
   // Every demo edit is strictly attributed — the scenario keeps a to-do in_progress for every edit.
   const m = core.buildChangeMap(ws, res.session, { root: ws });
   assert.ok(!('subtasks' in m), 'no display-subtask layer (0.8.8)');
   assert.ok(m.edits.every((e) => typeof e.taskId === 'string' && e.taskId.length > 0), 'every demo edit sits in a real strict interval');
-  assert.deepEqual(m.rollupByTask.filter((r) => r.taskId !== null).map((r) => r.edits).sort(), [1, 2, 2], 'the three tasks claim 2/1/2 edits');
+  // Six task identities, but only five own edits: the sixth is left IN PROGRESS when the replay ends, so
+  // the Tasks tab shows work under way rather than only a finished plan. Its in-progress span is a single
+  // checkpoint and strict attribution needs a ts strictly inside a span, so it owns nothing — which is
+  // why this rollup is unchanged by it, and why that is a fact worth pinning rather than a coincidence.
+  assert.equal(m.tasks.length, 6, 'six strict task identities');
+  assert.deepEqual(m.rollupByTask.filter((r) => r.taskId !== null).map((r) => r.edits).sort(), [1, 1, 2, 2, 2], 'and five of them claim 2/1/2/1/2 edits');
   assert.ok(m.rollupByTask.every((r) => r.taskId !== null), 'strict model: nothing unassigned either');
+  const rows = core.sessionTaskRows(ws, res.session);
+  assert.equal(rows.length, 6);
+  assert.deepEqual(rows.filter((r) => r.status === 'in_progress').map((r) => r.subject), ['Tune the scaler for sparse columns'], 'exactly one is still under way');
+
+  // The workflow is still in flight when the replay ends — a demo whose every panel shows only the
+  // aftermath never shows what running work looks like. It decays to done on its own after five minutes.
+  const wfLive = core.parseWorkflows(ws, res.session).find((w) => w.id === 'wf_demo');
+  assert.equal(wfLive.running, true, 'the docs run is running');
+  assert.deepEqual(wfLive.phaseGroups.map((p) => `${p.title} ${p.done}/${p.total}`), ['Outline 1/1', 'Docs 1/1', 'Review 0/1'], 'with its last phase in flight');
 
   // Subagent + workflow attribution ride the real windows.
   const subs = core.parseSubagents(ws, res.session);
   assert.equal(subs.length, 1, 'one subagent (the test writer)');
   assert.ok(subs[0].actions.some((a) => a.editId != null), 'its edit is window-attributed to a store record');
   assert.ok(m.workflows.some((w) => w.id === 'wf_demo' && w.rollup.edits === 1), 'the docs workflow owns one edit');
+  const wfRun = core.parseWorkflows(ws, res.session).find((w) => w.id === 'wf_demo');
+  assert.equal(wfRun.agents.length, 3, 'the docs run is multi-agent');
+  assert.deepEqual(wfRun.phaseGroups.map((p) => p.title), ['Outline', 'Docs', 'Review'], 'and multi-phase, in runtime order');
+
+  // The audited surfaces each need live data, or the panel that presents them can only ever render its
+  // empty state in the demo — which is the one session anybody browses before installing anything.
+  const log = core.readLog(res.session);
+  assert.equal(log.filter((r) => r.afterBlob === null).length, 1, 'one DELETION (restore-on-undo, the deletion ghost)');
+  assert.equal(log.filter((r) => r.tool === 'Bash').length, 1, 'captured by the Bash tree-diff path, and only that one file');
+  assert.equal(m.edits.filter((e) => e.file.endsWith('features.py')).length, 2, 'features.py holds TWO independently reviewable units — undo one, keep the other');
+  assert.ok(m.modules.some((x) => x.label === '(external)'), 'the outside-the-workspace write gets its own folder tile');
+  const acts = core.parseActions(ws, res.session);
+  assert.equal(acts.filter((a) => a.ok === false).length, 1, 'one FAILED tool call for the Actions error filter');
+  assert.ok(acts[acts.length - 1].ok !== false, 'never trailing — a trailing error would phase the agent errored for the whole tour');
+  assert.equal(core.outsideWrites(acts, ws).length, 1, 'the Risk audit has an outside-the-workspace write to report');
+  assert.equal(core.sessionPrompts(ws, res.session).length, 3, 'three of YOUR asks — the Prompts window needs more than one row');
+  const procs = core.sessionProcesses(ws, res.session);
+  assert.equal(procs.length, 3, 'three background shells');
+  assert.deepEqual(
+    [procs.some((p) => p.running), procs.some((p) => p.exitCode === 0), procs.some((p) => p.exitCode === 1)],
+    [true, true, true],
+    'one running, one clean exit, one failure — every state the Processes tab renders'
+  );
 
   // No-residue review: resolve everything → autoClearDemo drops the records; never for a real id.
   for (const r of core.readLog(res.session)) core.setStatus(res.session, r.id, 'kept');
@@ -4333,9 +4376,13 @@ test('demo: runDemo replays a real-pipeline session — strict task attribution,
   assert.equal(core.readLog(res.session).length, 0, 'store is empty — panels read empty');
   assert.equal(core.autoClearDemo('11111111-2222-3333-4444-555555555555'), false, 'a real session id can never auto-clear');
 
-  // demo --clean removes the transcript, the session tree, the store, and the marked workspace.
+  // demo --clean removes the transcript, the session tree, the store, the marked workspace, and the
+  // scratch dir the one outside-the-workspace write landed in.
+  assert.ok(fs.existsSync(path.join(res.scratch, 'profile-report.md')), 'the report is really out there before cleanup');
   const cleaned = core.cleanDemo({ cwd: ws });
   assert.deepEqual(cleaned.sessions, [res.session], 'exactly the demo session is removed');
+  assert.deepEqual(cleaned.scratch, [res.scratch], 'and the scratch dir it wrote outside the workspace');
+  assert.ok(!fs.existsSync(res.scratch), 'scratch gone');
   assert.ok(!fs.existsSync(res.transcript), 'transcript gone');
   assert.ok(!fs.existsSync(path.join(ws, 'observatory-demo')), 'workspace gone (it carried the marker)');
   // …and a workspace WITHOUT the marker is never deleted, even when pointed at directly.
@@ -4344,6 +4391,339 @@ test('demo: runDemo replays a real-pipeline session — strict task attribution,
   fs.writeFileSync(path.join(precious, 'keep.txt'), 'mine');
   core.cleanDemo({ cwd: ws, dir: precious });
   assert.ok(fs.existsSync(path.join(precious, 'keep.txt')), 'an unmarked directory is never touched');
+});
+
+test('tour: autoplay pacing is derived from the text, and clamped at both ends', () => {
+  const steps = core.demoTour();
+  const dwell = (body, extra = {}) => core.demoStepDwellMs({ id: 'x', title: 't', view: 'edits', body, ...extra });
+
+  // Longer text holds longer — a flat timer would either outrun the dense steps or crawl through the
+  // short ones, and these bodies run two to three sentences where the site demo's captions run one.
+  assert.ok(dwell('x'.repeat(200)) < dwell('x'.repeat(400)), 'monotonic in length');
+  assert.ok(dwell('x'.repeat(400)) < dwell('x'.repeat(600)) || dwell('x'.repeat(400)) === 9000, 'up to the ceiling');
+  // Clamped, so nothing flashes past and nothing stalls.
+  assert.equal(dwell('short'), 3500, 'the floor');
+  assert.equal(dwell('x'.repeat(100000)), 9000, 'the ceiling');
+  // The tip and the try line are on screen too, so they count toward the time to read the step.
+  assert.ok(dwell('x'.repeat(100), { tip: 'y'.repeat(200) }) > dwell('x'.repeat(100)));
+
+  // Every shipped step gets a real, bounded dwell — a zero would advance instantly and a NaN would hang.
+  for (const s of steps) {
+    const ms = core.demoStepDwellMs(s);
+    assert.ok(Number.isFinite(ms) && ms >= 3500 && ms <= 9000, `${s.id}: ${ms}ms is in range`);
+  }
+  // And the whole thing is watchable in one sitting rather than a lunch break.
+  const total = steps.reduce((n, s) => n + core.demoStepDwellMs(s), 0);
+  assert.ok(total < 8 * 60_000, `the full tour plays in under eight minutes (${Math.round(total / 1000)}s)`);
+  const short = core.demoTour('essentials').reduce((n, s) => n + core.demoStepDwellMs(s), 0);
+  assert.ok(short < 3 * 60_000, `and the short track in under three (${Math.round(short / 1000)}s)`);
+
+  // A wait step's grace before it applies itself — the same nine seconds the site's demo gives its gates.
+  assert.equal(core.DEMO_ACTION_COUNTDOWN_MS, 9000);
+});
+
+test('tour: demoActionState decides for both editors, including when the demo clears itself', () => {
+  const snap = (kept, undone, total, pending = Math.max(0, total - kept - undone)) => ({ kept, undone, pending, total });
+  const S = core.demoActionState;
+
+  // Nothing moved.
+  assert.equal(S('keep-edit', snap(0, 0, 9), snap(0, 0, 9)), 'waiting');
+  // The right counter moved.
+  assert.equal(S('keep-edit', snap(0, 0, 9), snap(1, 0, 9)), 'satisfied');
+  assert.equal(S('keep-prompt', snap(2, 0, 9), snap(5, 0, 9)), 'satisfied');
+  assert.equal(S('keep-task', snap(0, 0, 9), snap(2, 0, 9)), 'satisfied');
+  assert.equal(S('undo-edit', snap(0, 0, 9), snap(0, 1, 9)), 'satisfied');
+  // The OTHER counter moving is not this step's action.
+  assert.equal(S('keep-edit', snap(0, 0, 9), snap(0, 3, 9)), 'waiting');
+  assert.equal(S('undo-edit', snap(0, 0, 9), snap(4, 0, 9)), 'waiting');
+
+  // The case that matters. A fully reviewed demo DROPS its records, so `kept` falls to zero — a
+  // decrease. A watcher that only looked for "kept went up" would hang exactly when the reader had
+  // done the most work, so an emptied log is its own verdict.
+  assert.equal(S('keep-edit', snap(4, 0, 9), snap(0, 0, 0)), 'vacated');
+  assert.equal(S('undo-edit', snap(0, 2, 9), snap(0, 0, 0)), 'vacated');
+  // …and a step armed against a session that never recorded anything resolves immediately rather than
+  // waiting forever.
+  assert.equal(S('keep-edit', snap(0, 0, 0), snap(0, 0, 0)), 'vacated');
+
+  // …and the second shape of "nothing left to do here": everything resolved, but the records still
+  // present (a real session, or a demo whose resolved edits were never cleared). "Accept an edit" then
+  // has no edit left to accept, and a step that only watched for "kept went up" would hang forever.
+  assert.equal(S('keep-edit', snap(4, 5, 9), snap(4, 5, 9)), 'vacated', 'nothing pending to accept');
+  assert.equal(S('keep-prompt', snap(4, 5, 9), snap(4, 5, 9)), 'vacated');
+  // Undo is deliberately NOT subject to that: a kept edit can still be reverted.
+  assert.equal(S('undo-edit', snap(9, 0, 9), snap(9, 0, 9)), 'waiting', 'a kept edit is still undoable');
+
+  // The kinds the editor performs are never armed as `wait`; if one ever were, waiting is the safe
+  // answer — the panel's Skip is always live, so nobody can be trapped.
+  assert.equal(S('toggle-spotlight', snap(0, 0, 9), snap(9, 9, 9)), 'waiting');
+  assert.equal(S('open-demo-file', snap(0, 0, 9), snap(9, 9, 9)), 'waiting');
+});
+
+test('demo: the sibling agent makes a fleet — two rows of one repo, one live collision', async () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const ws = fs.realpathSync(tmpWork());
+  fs.mkdirSync(path.join(ws, '.git'), { recursive: true }); // commonDir resolves ⇒ fleet correlation engages
+  const res = await core.runDemo({ fast: true, cwd: ws });
+  assert.match(res.sibling, /^demo-[0-9a-f]{8}$/, 'the sibling is simulator-owned too, so cleanup reaches it');
+
+  // The sibling launches from the demo workspace, which walks UP to the SAME .git — a different
+  // project dir, the same repo key. That is what puts two rows in one fleet without inventing a repo.
+  const fleet = core.listRepoSiblings(ws, res.session);
+  assert.equal(fleet.length, 2, 'two agents in this repo');
+  const self = fleet.find((s) => s.self);
+  const other = fleet.find((s) => !s.self);
+  assert.equal(self.id, res.session);
+  assert.equal(other.id, res.sibling);
+  assert.equal(other.gitBranch, 'demo/hotfix', 'its branch comes from its transcript, not from git');
+  assert.notEqual(self.worktree, other.worktree, 'and they report different worktrees');
+  assert.ok(!fs.existsSync(path.join(res.workspace, '.git')), 'no .git is fabricated inside the demo workspace');
+
+  // The collision the Fleet badge shows: the SAME absolute path pending on both sides.
+  const hits = core.fleetConflicts(fleet);
+  assert.equal(hits.length, 1, 'exactly one live collision');
+  assert.equal(hits[0].file, path.join(res.workspace, 'src', 'features.py'));
+  assert.deepEqual([...hits[0].agents].sort(), [res.session, res.sibling].sort(), 'both agents are named, with no winner picked');
+
+  // Cleanup reaches across BOTH project dirs, and takes the sibling's with it.
+  const cleaned = core.cleanDemo({ cwd: ws });
+  assert.deepEqual([...cleaned.sessions].sort(), [res.session, res.sibling].sort(), 'both sessions removed');
+  assert.ok(!fs.existsSync(core.projectDir(res.workspace)), "the sibling's project dir goes too — it existed only for the demo");
+  assert.equal(core.listSessions().length, 0, 'nothing left in the store');
+});
+
+test('demo: starting again RESETS — a replay replaces the previous demo, it does not stack on it', async () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const ws = fs.realpathSync(tmpWork());
+  const first = await core.runDemo({ fast: true, cwd: ws });
+  // Review some of it and edit a demo file, the way a presenter would before showing it again.
+  core.setStatus(first.session, core.readLog(first.session)[0].id, 'kept');
+  fs.writeFileSync(path.join(first.workspace, 'src', 'train.py'), '# scribbled on mid-demo\n');
+
+  const second = await core.runDemo({ fast: true, cwd: ws });
+  assert.notEqual(second.session, first.session, 'a fresh session id');
+  assert.equal(core.listSessions().length, 1, 'and the previous demo is GONE, not sitting beside it');
+  assert.equal(core.listSessions()[0].id, second.session);
+  assert.equal(core.readLog(second.session).filter((r) => r.status !== 'pending').length, 0, 'every edit is pending again');
+  assert.ok(!fs.readFileSync(path.join(second.workspace, 'src', 'train.py'), 'utf8').includes('scribbled'), 'and the workspace is re-seeded from scratch');
+
+  // The opt-out is there for a caller that deliberately wants two.
+  const third = await core.runDemo({ fast: true, cwd: ws, reset: false });
+  assert.equal(core.listSessions().length, 2, 'reset:false stacks instead');
+  assert.ok([second.session, third.session].every((id) => core.listSessions().some((s) => s.id === id)));
+  core.cleanDemo({ cwd: ws });
+});
+
+test('demo: the workspace hides itself from git, and a stranded one stays findable', async () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const ws = fs.realpathSync(tmpWork());
+  const res = await core.runDemo({ fast: true, cwd: ws });
+
+  // The demo writes into the reader's OWN repository. A self-ignoring .gitignore keeps it out of their
+  // `git status` and out of `git add -A`, without touching a file they own.
+  const ignore = fs.readFileSync(path.join(res.workspace, '.gitignore'), 'utf8');
+  assert.match(ignore, /^\*$/m, 'the demo folder ignores itself');
+
+  // A demo must stay findable after session resolution moves on — otherwise the only way out of demo
+  // mode disappears the moment the reader talks to Claude again, and the folder is stranded.
+  assert.deepEqual(core.demoSessionsFor({ cwd: ws }).sort(), [res.session, res.sibling].filter(Boolean).sort());
+  fs.writeFileSync(
+    path.join(core.projectDir(ws), '11111111-2222-3333-4444-555555555555.jsonl'),
+    JSON.stringify({ type: 'assistant', cwd: ws, message: { role: 'assistant', content: [] } }) + '\n'
+  );
+  assert.notEqual(core.resolveSessionId(ws), res.session, 'a newer real session is now what resolves');
+  assert.ok(core.demoSessionsFor({ cwd: ws }).includes(res.session), 'but the demo is still findable, so Exit can still be offered');
+
+  core.cleanDemo({ cwd: ws });
+  assert.deepEqual(core.demoSessionsFor({ cwd: ws }), [], 'and gone once removed');
+});
+
+test('demo: it will not adopt — and therefore cannot delete — a directory it did not create', async () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const ws = fs.realpathSync(tmpWork());
+  // A mistyped --dir used to be catastrophic: the demo planted its sentinel in whatever directory was
+  // named, seeded raw over any file whose path the scenario reuses, and then — because a run RESETS —
+  // the very next run rm -rf'd the whole thing. The sentinel has to prove prior ownership, not create it.
+  const mine = path.join(ws, 'mywork');
+  fs.mkdirSync(path.join(mine, 'notes'), { recursive: true });
+  fs.writeFileSync(path.join(mine, 'notes', 'thesis.txt'), 'my thesis');
+  fs.writeFileSync(path.join(mine, 'src-placeholder'), 'mine');
+  await assert.rejects(() => core.runDemo({ fast: true, cwd: ws, dir: mine }), /refusing to use/);
+  assert.equal(fs.readFileSync(path.join(mine, 'notes', 'thesis.txt'), 'utf8'), 'my thesis', 'not one byte written');
+  assert.ok(!fs.existsSync(path.join(mine, '.observatory-demo')), 'and no sentinel planted to authorize a later delete');
+
+  // An EMPTY directory is fine — the demo creates its own content there and owns it from then on.
+  const empty = path.join(ws, 'empty');
+  fs.mkdirSync(empty, { recursive: true });
+  const res = await core.runDemo({ fast: true, cwd: ws, dir: empty });
+  assert.equal(res.workspace, fs.realpathSync(empty));
+  // …and re-running is a reset, not a refusal, because it now carries the sentinel.
+  await core.runDemo({ fast: true, cwd: ws, dir: empty });
+  core.cleanDemo({ cwd: ws, dir: empty });
+  assert.ok(!fs.existsSync(empty), 'a demo-owned directory is reclaimed');
+});
+
+test('demo: a symlinked workspace resolves to ONE project dir, so the sibling is never orphaned', async () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const ws = fs.realpathSync(tmpWork());
+  fs.mkdirSync(path.join(ws, '.git'), { recursive: true });
+  // The sibling records under projectDir(workspace), and a project dir is a mangling of the path
+  // STRING — so resolving the workspace one way here and another way in cleanup mints two project dirs
+  // and strands the sibling where no command can reach it, while --clean reports success.
+  const real = path.join(ws, 'real');
+  const link = path.join(ws, 'link');
+  fs.mkdirSync(real, { recursive: true });
+  fs.symlinkSync(real, link);
+  const res = await core.runDemo({ fast: true, cwd: ws, dir: link });
+  assert.ok(res.sibling, 'the sibling was created');
+  assert.deepEqual(core.demoSessionsFor({ cwd: ws, dir: link }).sort(), [res.session, res.sibling].sort(), 'and is findable through the link');
+  // Both transcripts through the link, plus the workflow state file — the point is that the link and the
+  // real path resolve to ONE project dir, so nothing is stranded where no command can reach it.
+  const beat = core.demoHeartbeat({ cwd: ws, dir: link });
+  assert.equal(beat.filter((f) => f.endsWith('.jsonl')).length, 2, 'the heartbeat reaches both agents, so the fleet stays live');
+  const cleaned = core.cleanDemo({ cwd: ws, dir: link });
+  assert.deepEqual([...cleaned.sessions].sort(), [res.session, res.sibling].sort(), 'and cleanup removes both');
+  assert.equal(core.listSessions().length, 0, 'nothing stranded');
+});
+
+test('demo: --no-fleet writes exactly one session', async () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const ws = fs.realpathSync(tmpWork());
+  fs.mkdirSync(path.join(ws, '.git'), { recursive: true }); // a repo IS resolvable — the opt-out is what declines
+  const res = await core.runDemo({ fast: true, cwd: ws, fleet: false });
+  assert.equal(res.sibling, null);
+  assert.equal(core.listRepoSiblings(ws, res.session).length, 1, 'just this session');
+  core.cleanDemo({ cwd: ws });
+});
+
+test('demo: shouldStop halts at a beat boundary and the partial run still cleans up', async () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const ws = fs.realpathSync(tmpWork());
+  let beats = 0;
+  const res = await core.runDemo({ fast: true, cwd: ws, log: () => beats++, shouldStop: () => beats >= 4 });
+  assert.equal(res.cancelled, true, 'the result says it was stopped, rather than looking like a short scenario');
+  assert.ok(res.steps < 10, 'it really stopped early');
+  assert.ok(res.edits < 9, 'so not every edit landed');
+  // Whatever DID land is real and reviewable — and removable.
+  const cleaned = core.cleanDemo({ cwd: ws });
+  assert.deepEqual(cleaned.sessions, [res.session]);
+  assert.ok(!fs.existsSync(path.join(ws, 'observatory-demo')), 'a cancelled run leaves no more residue than a complete one');
+});
+
+test('demoHeartbeat: bumps every demo transcript and writes nothing', async () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const ws = fs.realpathSync(tmpWork());
+  fs.mkdirSync(path.join(ws, '.git'), { recursive: true });
+  const res = await core.runDemo({ fast: true, cwd: ws });
+  // Backdate both transcripts past the 60s fleet-active window — the state a tour reaches mid-explanation.
+  const stale = new Date(Date.now() - 5 * 60 * 1000);
+  const paths = [res.transcript, path.join(core.projectDir(res.workspace), `${res.sibling}.jsonl`)];
+  const sizes = paths.map((p) => fs.statSync(p).size);
+  for (const p of paths) fs.utimesSync(p, stale, stale);
+  assert.equal(core.listRepoSiblings(ws, res.session).filter((s) => s.active).length, 0, 'both have gone idle');
+
+  const touched = core.demoHeartbeat({ cwd: ws });
+  for (const p of paths) assert.ok(touched.includes(p), 'both demo transcripts, across both project dirs');
+  // …and the workflow run's state file, which is what holds the in-flight run inside its own window.
+  // ONLY that file: the agent transcripts beside it are watched by the editors, so bumping those would
+  // give the heartbeat a self-retriggering loop.
+  const stateFile = touched.find((p) => p.endsWith('.json'));
+  assert.match(stateFile ?? '', /workflows[/\\]wf_demo\.json$/, 'the workflow state file too');
+  assert.equal(touched.filter((p) => p.includes(`${path.sep}subagents${path.sep}`)).length, 0, 'and nothing under subagents/, which the editors watch');
+  assert.deepEqual(paths.map((p) => fs.statSync(p).size), sizes, 'touch only — no line is appended and no activity is invented');
+  assert.equal(core.listRepoSiblings(ws, res.session).filter((s) => s.active).length, 2, 'and the fleet is live again');
+  assert.equal(core.fleetConflicts(core.listRepoSiblings(ws, res.session)).length, 1, 'so the collision badge is back');
+  core.cleanDemo({ cwd: ws });
+});
+
+test('tour: demoTour is a complete, well-formed script for both editors', () => {
+  const steps = core.demoTour();
+  const VIEWS = new Set(['overview', 'prompts', 'stats', 'edits', 'diffs', 'fileHistory', 'actions', 'observations', 'editor']);
+  const TABS = ['sessions', 'fleet', 'workflows', 'tasks', 'processes'];
+  const ANCHORS = new Set([
+    'nav-tabs', 'folders-strip', 'files-ledger', 'summary-bar', 'feed', 'nav-axes', 'accept-prompt',
+    'session-label', 'spotlight', 'prompts-list',
+    'stats-model', 'stats-compaction', 'stats-tokens', 'stats-cache', 'stats-usage', 'stats-review',
+  ]);
+  assert.ok(steps.length >= 15, 'a tour of every surface is not a handful of steps');
+  assert.equal(new Set(steps.map((s) => s.id)).size, steps.length, 'ids are unique — both editors key on them');
+  for (const s of steps) {
+    assert.match(s.id, /^[a-z][a-z0-9-]*$/, `${s.id}: kebab id`);
+    assert.ok(s.title && s.title.length <= 60, `${s.id}: a title that fits a panel header`);
+    assert.ok(s.body && s.body.length >= 40, `${s.id}: a body that says something`);
+    assert.ok(!/[<>`]|\*\*/.test(s.body), `${s.id}: plain text — a webview and a Swing label must render it alike`);
+    assert.ok(VIEWS.has(s.view), `${s.id}: names a real view`);
+    assert.equal(s.view === 'overview', TABS.includes(s.tab), `${s.id}: a tab iff it is an Overview step`);
+    if (s.anchor) assert.ok(ANCHORS.has(s.anchor), `${s.id}: anchors must be mappable by both editors`);
+    if (s.tip) assert.ok(s.tip.length <= 90, `${s.id}: a tip has to fit beside the thing it describes`);
+  }
+  // The whole point of the tour: no shipped surface goes unexplained. EVERY view the type admits must
+  // have a step — a panel with no step is a panel nobody is told about, and `diffs` was exactly that.
+  for (const tab of TABS) assert.ok(steps.some((s) => s.tab === tab), `the Overview's ${tab} tab is explained`);
+  for (const view of VIEWS) assert.ok(steps.some((s) => s.view === view), `the ${view} surface is explained`);
+
+  // Action steps: the shape rules that keep the two labels honest.
+  const KINDS = new Set(['keep-edit', 'undo-edit', 'keep-prompt', 'keep-task', 'open-demo-file', 'toggle-spotlight']);
+  const acts = steps.filter((s) => s.action);
+  assert.ok(acts.length >= 4, 'the tour asks the reader to do things');
+  for (const s of acts) {
+    assert.ok(s.action.mode === 'wait' || s.action.mode === 'auto', `${s.id}: a known mode`);
+    assert.ok(KINDS.has(s.action.kind), `${s.id}: a kind both editors can implement`);
+    assert.ok(s.action.hint && s.action.hint.length <= 110, `${s.id}: a hint that fits one line`);
+    assert.equal(s.action.mode === 'auto', !!s.action.done, `${s.id}: a past-tense line iff the tour did it itself`);
+    // Two "do this" lines on one step is exactly the inconsistency the two labels exist to avoid.
+    assert.ok(!s.tryIt, `${s.id}: an action step carries no tryIt`);
+  }
+  for (const mode of ['wait', 'auto']) {
+    assert.ok(acts.some((s) => s.action.mode === mode), `the full tour has a ${mode} step`);
+    assert.ok(core.demoTour('essentials').some((s) => s.action?.mode === mode), `and so does the short track, so both labels teach themselves`);
+  }
+
+  // The short track is a FILTER over the same list, not a second script — so the two can never tell
+  // different stories, and a step can never appear in the short tour but not the long one.
+  const essentials = core.demoTour('essentials');
+  const ids = steps.map((s) => s.id);
+  assert.ok(essentials.length >= 8 && essentials.length < steps.length, 'a genuinely shorter track');
+  assert.deepEqual(essentials.map((s) => s.id), ids.filter((id) => essentials.some((e) => e.id === id)), 'same order, no reshuffling');
+  for (const e of essentials) assert.deepEqual(steps.find((s) => s.id === e.id), e, 'and identical content, not a paraphrase');
+  assert.deepEqual(core.demoTour(), steps, 'the default track is everything');
+  // The remainder is the exact complement, so finishing the short track can RESUME rather than restart.
+  const remainder = core.demoTour('remainder');
+  assert.deepEqual(
+    [...essentials, ...remainder].map((s) => s.id).sort(),
+    ids.slice().sort(),
+    'essentials ∪ remainder === everything'
+  );
+  assert.equal(essentials.filter((e) => remainder.some((r) => r.id === e.id)).length, 0, 'and they are disjoint');
+  assert.deepEqual(remainder.map((s) => s.id), ids.filter((id) => !essentials.some((e) => e.id === id)), 'remainder keeps script order');
+  assert.deepEqual(core.demoTrackSizes(), { essentials: essentials.length, remainder: remainder.length, everything: steps.length });
+  for (const t of ['essentials', 'remainder', 'everything']) {
+    assert.match(core.demoTrackBlurb(t), /\S.*\.$/, `${t} has a closing sentence`);
+  }
+  // Every anchor the type admits is used by some step, and each name belongs to exactly ONE panel —
+  // the editors broadcast an anchor to every tour-aware panel, so a shared name would ring two things.
+  const used = steps.filter((s) => s.anchor).map((s) => s.anchor);
+  for (const a of ANCHORS) assert.ok(used.includes(a), `the ${a} anchor is named by a step`);
+  const panelOf = (a) => (a.startsWith('stats-') ? 'stats' : a === 'prompts-list' ? 'prompts' : 'overview');
+  const byName = new Map();
+  for (const a of used) {
+    const p = panelOf(a);
+    if (byName.has(a)) assert.equal(byName.get(a), p, `${a} is owned by one panel`);
+    byName.set(a, p);
+  }
+  assert.equal(new Set(used).size, byName.size, 'no anchor name is shared between panels');
+  // The short track still has to be a coherent product story on its own.
+  for (const view of ['overview', 'prompts', 'edits', 'editor', 'actions']) {
+    assert.ok(essentials.some((s) => s.view === view), `the short track still reaches ${view}`);
+  }
 });
 
 // --- session resolution: stub transcripts must never hijack the current session ------------------

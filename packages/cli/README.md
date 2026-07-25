@@ -1,6 +1,6 @@
 # claude-observatory
 
-Standalone, git-free, **per-edit Keep / Undo for [Claude Code](https://claude.com/claude-code)** — a running list of every file change Claude makes, each with surgical undo. Works in the terminal and (with the companion extensions) the VS Code sidebar and JetBrains IDEs. Capture runs in local hooks, so it costs **zero extra Claude tokens**. Its `--json` output is the view API behind the editors' panels — including the 0.8.0 **real-time multi-agent** surfaces: the master–detail Overview (a fleet of running agents across git **worktrees** — correlated git-free — plus workflow runs) and the cross-agent task log.
+Standalone, git-free, **per-edit Keep / Undo for [Claude Code](https://claude.com/claude-code)** on established and mission-critical codebases — a running list of every file change Claude makes, each with surgical undo. Works in the terminal and (with the companion extensions) the VS Code sidebar and JetBrains IDEs. Capture runs in local hooks, so it costs **zero extra Claude tokens**. Its `--json` output is the view API behind the editors' panels — including the 0.8.0 **real-time multi-agent** surfaces: the master–detail Overview (a fleet of running agents across git **worktrees** — correlated git-free — plus workflow runs) and the cross-agent task log.
 
 ![the terminal front-end](../../docs/media/cli.png)
 

@@ -61,9 +61,19 @@ function workspaceRoot(): string | undefined {
   return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 }
 
-/** The session the observatory shows: a pinned `claudeObservatory.session` override if set, else the
- *  newest Claude Code session for this workspace (mangled-path resolution lives in core). */
+// Demo mode's session, held in MEMORY and never written to settings. Pinning through
+// `claudeObservatory.session` would write .vscode/settings.json into the user's repository — a demo
+// that dirties your worktree is a bug — and a pin left behind by a crash points at a session that
+// demo cleanup has since deleted, leaving every panel permanently empty for a non-obvious reason.
+// Auto-resolution already lands on the demo unaided (its transcript is the newest and carries
+// assistant records), so this is only the guard against a real session starting mid-tour.
+let demoSession: string | undefined;
+
+/** The session the observatory shows: demo mode while it is on, else a pinned
+ *  `claudeObservatory.session` override, else the newest Claude Code session for this workspace
+ *  (mangled-path resolution lives in core). */
 function currentSession(): string | undefined {
+  if (demoSession) return demoSession;
   const pinned = vscode.workspace.getConfiguration('claudeObservatory').get<string>('session', '').trim();
   if (pinned) return pinned;
   const root = workspaceRoot();
@@ -2018,6 +2028,9 @@ function combinedShell(): string {
   :root { --acc: var(--vscode-charts-blue, #4c8bf5); --c-pending: var(--vscode-charts-yellow, #d9a441); --c-kept: var(--vscode-charts-green, #3fb950); --c-reverted: var(--vscode-descriptionForeground, #9aa0aa); --c-total: var(--vscode-charts-blue, #4c8bf5); --c-input: var(--vscode-charts-purple, #9a6ac2); --c-output: var(--vscode-charts-orange, #c9713f); --c-cached: var(--vscode-charts-green, #3fb950); }
   body { margin:0; padding:8px 12px 12px; font-family: var(--vscode-font-family); font-size:11px; color: var(--vscode-foreground); position:relative; }
   .dim { opacity:.75; }
+  /* Guided tour: the ring on the control a step names. Outline, not border — it must not reflow the
+     panel it is pointing at. */
+  .ring { outline:2px solid var(--vscode-charts-blue, #4c8bf5); outline-offset:2px; border-radius:3px; }
   .empty { padding:12px 2px; color: var(--vscode-descriptionForeground); line-height:1.5; }
   .review { margin-bottom:14px; }
   .toksec { margin-bottom:14px; }
@@ -2073,11 +2086,13 @@ function combinedShell(): string {
     wk: 'Weekly plan usage — % of your weekly limit used · reset countdown · ~tokens used / estimated total for 100%',
   };
   const usageHtml =
+    `<div class="usagesec" id="usage-sec">` +
     `<div class="uhead" title="Plan usage: the context window (live from the transcript) plus your 5-hour and weekly limits (from Claude’s status line)">Usage</div>` +
     ['ctx', '5h', 'wk']
       .map((l) => `<div class="row" title="${usageTips[l]}"><span class="lbl">${l}</span><span class="track"><span class="fill" id="uf-${l}"></span></span><span class="pct" id="up-${l}">—</span><span class="sub" id="us-${l}"></span></div>`)
       .join('') +
     `<div id="uhint" class="empty" style="display:none">5h / week plan usage needs <b>claude-statusline</b> writing on this host.<br><span class="dim">run <b>claude-observatory statusline</b> (bundled — no download), then start a Claude session.</span></div>` +
+    `</div>` +
     `<div id="ustale" class="empty" style="display:none">5h / week last refreshed <b><span id="ustale-age"></span> ago</b> — keep an idle <b>claude</b> terminal open (it refreshes every ~60s).<br><span class="dim">Plan usage comes only from Claude's own status line — account-wide limits the panel can't fetch itself. ctx stays live from the transcript.</span></div>`;
   const script = `
     const vscode = acquireVsCodeApi();
@@ -2178,7 +2193,20 @@ function combinedShell(): string {
         lines.push((c.trigger||'compact')+' · '+human(c.preTokens||0)+'→'+human(c.postTokens||0)+' · '+human(c.droppedTokens||0)+' dropped'+(c.ts? ' · '+new Date(c.ts).toLocaleTimeString():'')); }
       el.title='Context compacted '+cs.length+' time'+(cs.length===1?'':'s')+' — Claude Code summarised the conversation so far and continued on the summary:\\n'+lines.join('\\n');
     }
+    // Guided tour: every tour-aware webview gets the anchor and rings it only if IT knows the name.
+    // Anchor names are globally unique (a core test pins that), so a broadcast cannot ring two things.
+    var TOUR_ANCHORS = { 'stats-model':'#nb-model', 'stats-compaction':'#nb-compact',
+      'stats-tokens':'#tk-sec', 'stats-cache':'#tk-cached-cell', 'stats-usage':'#usage-sec',
+      'stats-review':'#rv-sec' };
+    function applyTour(anchor){
+      var prev=document.querySelectorAll('.ring');
+      for(var i=0;i<prev.length;i++) prev[i].classList.remove('ring');
+      var sel = anchor ? TOUR_ANCHORS[anchor] : null;
+      var el = sel ? document.querySelector(sel) : null;
+      if(el){ el.classList.add('ring'); if(el.scrollIntoView) el.scrollIntoView({block:'nearest'}); }
+    }
     window.addEventListener('message', function(e){ var m=e.data||{};
+      if(m.type==='tour'){ applyTour(m.anchor||null); return; }
       if(m.type==='usage'){ renderUsage(m.u); }
       else if(m.type==='counts'){ renderCounts(m.c); renderTokens(m.t); renderVitals(m.v); renderCompactions(m.v);
         // Show the human-readable session NAME (title / first prompt); the raw id stays in the tooltip.
@@ -2197,7 +2225,7 @@ function combinedShell(): string {
   // "Tokens"/"Usage" — both already name other sections of this panel): the chart below is the
   // machine-wide day/hour series, the plan bars at the bottom are point-in-time limits.
   const tokensHtml =
-    `<div class="toksec">` +
+    `<div class="toksec" id="tk-sec">` +
     `<div class="uhead" title="This session’s cumulative tokens, split the way the API bills them. hit rate = cache reads ÷ all context sent (input + cache reads + cache writes).">Session tokens</div>` +
     `<div class="rvcounts">` +
     `<div class="rvc" title="Uncached input tokens sent this session"><span class="rvn" id="tk-in" style="color:var(--c-input)">—</span><span class="rvl">input</span></div>` +
@@ -2209,7 +2237,7 @@ function combinedShell(): string {
   // and a progress bar that fills as edits get reviewed — updated on every store change via postMessage.
   const reviewHtml =
     `<div class="uhead" title="This session’s captured edits, by review status">Edits</div>` +
-    `<div class="review">` +
+    `<div class="review" id="rv-sec">` +
     `<div class="rvcounts">` +
     `<div class="rvc rvc-click" id="rv-pending-cell" title="Jump to the first edit to review"><span class="rvn" id="rv-pending" style="color:var(--c-pending)">0</span><span class="rvl">pending</span></div>` +
     `<div class="rvc"><span class="rvn" id="rv-kept" style="color:var(--c-kept)">0</span><span class="rvl">accepted</span></div>` +
@@ -2389,6 +2417,11 @@ function changeMapShell(): string {
   /* …and a FIFTH (Prompts) makes it tighter still: the row is allowed to wrap onto as many lines as it
      needs, and each tab keeps its label whole rather than being squeezed into an ellipsis. */
   .ov-navtabs { display:flex; flex:none; flex-wrap:wrap; gap:4px; margin-bottom:6px; }
+  /* Guided tour (0.8.9): the ring on the control a step names. An outline rather than a border so it
+     costs no layout — a highlight that reflowed the panel it points at would move the very thing the
+     reader is looking for. The step's TEXT lives in the tour window; repeating it in here as well was
+     one sentence of duplication for seven pixels of every panel, so it is gone. */
+  .ov-ring { outline:2px solid var(--vscode-charts-blue, #4c8bf5); outline-offset:1px; border-radius:3px; }
   .ov-tab { flex:none; display:flex; align-items:center; gap:6px; background:transparent; border:1px solid var(--cm-border); border-radius:5px 5px 0 0; border-bottom:2px solid transparent; color: var(--vscode-descriptionForeground); font:inherit; font-size:11px; padding:4px 12px; cursor:pointer; white-space:nowrap; }
   .ov-tab:hover { background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.12)); }
   .ov-tab.on { color: var(--vscode-foreground); border-bottom-color: var(--mt-working); background: var(--vscode-list-activeSelectionBackground, rgba(80,120,200,0.18)); }
@@ -2619,7 +2652,7 @@ function changeMapShell(): string {
     // TWO rows, rendered bottom-up via .ov-toolbar{flex-direction:column-reverse} (user swap 2026-07-17):
     // this DOM-first row (the diff · file · folder · prompt AXES) shows on the BOTTOM; the DOM-second row
     // (session · bulk · export | search · active · spotlight · refresh controls) shows on TOP.
-    `<div class="ov-tbrow">` +
+    `<div class="ov-tbrow" id="ov-axesrow">` + // id: the guided tour rings this row for its "four axes" step
     // Diff axis + the per-edit pair it steps: n/m counters post to the existing nav commands.
     `<span class="ov-navgrp">` +
     `<button class="ov-nb" id="ov-diffprev" title="Previous edit in this file"><i class="codicon codicon-chevron-up"></i></button>` +
@@ -2830,6 +2863,269 @@ function spawnCliJson(args: string[], cwd: string, cb: (data: unknown | null) =>
  * Attribution is core's (`ChangeMapPrompt`): by START time, so a shell launched by #4 stays #4's even
  * when it exits during #7.
  */
+/**
+ * The guided tour's panel (0.8.9). A sidebar webview VIEW rather than a notification, a QuickPick or an
+ * editor panel, for reasons that are all about where focus goes: every step deliberately moves focus to
+ * the surface it is describing, which closes a QuickPick outright; a stack of twenty notifications is
+ * the wrong shape for paragraphs and one stray click dismisses them; and an editor panel fights the
+ * step that wants the editor itself. A view in the sidebar container survives all of that — focusing a
+ * SIBLING view expands that view without hiding this one.
+ *
+ * The steps come from core (`demoTour`), so this renders the same script the CLI prints and the
+ * JetBrains plugin shows.
+ */
+function tourShell(): string {
+  const nonce = getNonce();
+  const csp = `default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';`;
+  const style = `<style>
+  body { margin:0; padding:10px 12px 12px; font-family: var(--vscode-font-family); font-size:12px; color: var(--vscode-foreground); }
+  .count { font-family: var(--vscode-editor-font-family, monospace); font-size:9.5px; letter-spacing:.06em; text-transform:uppercase; color: var(--vscode-descriptionForeground); }
+  h2 { font-size:13px; margin:3px 0 7px; font-weight:600; line-height:1.35; }
+  /* Tour prose is the point of the panel — it wraps, it never clips. */
+  p { margin:0 0 8px; line-height:1.55; overflow-wrap:anywhere; }
+  .tip { border-left:2px solid var(--vscode-charts-blue, #4c8bf5); padding:3px 0 3px 8px; margin:0 0 8px; color: var(--vscode-descriptionForeground); line-height:1.5; }
+  .try { color: var(--vscode-descriptionForeground); line-height:1.5; margin:0 0 10px; }
+  .try::before { content:"try "; text-transform:uppercase; font-size:9px; letter-spacing:.07em; opacity:.8; }
+  /* The two action blocks share one geometry and differ in exactly two things — the heading, and
+     whether there is a waiting state. That similarity is what stops a mixed script reading as an
+     inconsistent one. */
+  .act { border:1px solid var(--vscode-widget-border, rgba(127,127,127,0.3)); border-radius:4px; padding:6px 9px; margin:0 0 10px; line-height:1.5; }
+  .act .lbl { display:block; text-transform:uppercase; font-size:9px; letter-spacing:.08em; color: var(--vscode-descriptionForeground); margin-bottom:3px; }
+  .act.wait { border-left:2px solid var(--vscode-charts-blue, #4c8bf5); }
+  .act.auto { border-left:2px solid var(--vscode-charts-green, #3fb950); }
+  .act .st { display:block; margin-top:4px; color: var(--vscode-descriptionForeground); }
+  .act .st.pending::before { content:"\u25cc "; animation: pulse 1.4s ease-in-out infinite; display:inline-block; }
+  .act .st.ok { color: var(--vscode-charts-green, #3fb950); }
+  @keyframes pulse { 0%,100% { opacity:.35 } 50% { opacity:1 } }
+  .row { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
+  button { font-family:inherit; font-size:11px; padding:3px 10px; border:1px solid var(--vscode-widget-border, rgba(127,127,127,0.3)); border-radius:3px; background: var(--vscode-button-secondaryBackground, transparent); color: var(--vscode-foreground); cursor:pointer; }
+  button.primary { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border-color: transparent; }
+  button:disabled { opacity:.4; cursor:default; }
+  .spacer { flex:1; }
+  .dots { display:flex; flex-wrap:wrap; gap:3px; margin-top:10px; }
+  .dot { width:5px; height:5px; border-radius:50%; background: var(--vscode-descriptionForeground); opacity:.3; cursor:pointer; }
+  .dot.on { opacity:1; background: var(--vscode-charts-blue, #4c8bf5); }
+  .dot.seen { opacity:.6; }
+  </style>`;
+  // Plain string interpolation only: the step text is core's, and textContent keeps it inert.
+  const script = `
+  const vs = acquireVsCodeApi();
+  var N = 0, LAST = null, WAITING = false, PLAYING = true, AUTOSECS = 0;
+  /** A wait step relabels Next to Skip. It is never DISABLED — nothing about an action can trap you. */
+  function setNext(i, n){
+    var nx = document.getElementById('next');
+    nx.textContent = WAITING ? 'Skip \u25b8' : (i + 1 >= n ? 'Finish' : 'Next \u25b8');
+    nx.classList.toggle('primary', !WAITING);
+  }
+  function renderAction(a, state){
+    var box = document.getElementById('action');
+    if(!a){ box.style.display='none'; WAITING=false; return; }
+    box.style.display='block';
+    // An unrecognized mode is treated as a WAIT with no watcher — inert text. Never as an auto step:
+    // an editor must not execute something because it failed to recognize a value.
+    // (No backticks in here: this script is inside a template literal.)
+    var auto = a.mode === 'auto';
+    // An auto step that did NOT run says so, and drops the past-tense line with it.
+    var ranNothing = auto && state === 'vacated';
+    box.className = 'act ' + (auto ? 'auto' : 'wait');
+    document.getElementById('actionlabel').textContent = auto ? 'The tour did this' : 'Your turn';
+    document.getElementById('actionhint').textContent = (!auto || ranNothing) ? a.hint : (a.done || a.hint);
+    var st = document.getElementById('actionstate');
+    if(ranNothing){ st.className='st pending'; st.textContent='\u2014 nothing left here to do it to'; WAITING=false; return; }
+    if(auto || state==='satisfied'){ st.className='st ok'; st.textContent='\u2713 done'; WAITING=false; return; }
+    if(state==='vacated'){ st.className='st ok'; st.textContent='\u2713 nothing left to review \u2014 the demo cleared its own records'; WAITING=false; return; }
+    // Under autoplay, say plainly that it will apply itself — a reader who does nothing is not being
+    // ignored, and one who wants to act can see exactly how long they have.
+    st.className='st pending';
+    st.textContent = (PLAYING && AUTOSECS > 0) ? ('applies automatically in ' + AUTOSECS + 's\u2026') : 'waiting\u2026';
+    WAITING=true;
+  }
+  function send(t){ vs.postMessage({type:t}); }
+  window.addEventListener('message', function(e){
+    var m = e.data; if(!m) return;
+    // The host reports a wait step's progress without re-sending the whole step.
+    if(m.type==='action'){ if(!LAST) return; AUTOSECS=0; renderAction(LAST.step.action, m.state); setNext(LAST.i, LAST.n); return; }
+    if(m.type==='auto'){ PLAYING=m.playing; AUTOSECS=m.secs;
+      document.getElementById('play').textContent = m.playing ? '❚❚' : '▸';
+      if(LAST) renderAction(LAST.step.action, LAST.actionState); return; }
+    if(m.type!=='step') return;
+    LAST = m;
+    N = m.n;
+    document.getElementById('count').textContent = (m.i+1) + ' / ' + m.n;
+    document.getElementById('title').textContent = m.step.title;
+    document.getElementById('body').textContent = m.step.body;
+    var tip = document.getElementById('tip');
+    tip.textContent = m.step.tip || ''; tip.style.display = m.step.tip ? 'block' : 'none';
+    var t = document.getElementById('try');
+    t.textContent = m.step.tryIt || ''; t.style.display = m.step.tryIt ? 'block' : 'none';
+    renderAction(m.step.action, m.actionState);
+    document.getElementById('back').disabled = m.i === 0;
+    document.getElementById('dock').textContent = m.docked ? 'Float' : 'Dock';
+    setNext(m.i, m.n);
+    var d = ''; for (var k=0;k<m.n;k++) d += '<span class="dot' + (k===m.i?' on':(k<m.i?' seen':'')) + '" data-i="'+k+'"></span>';
+    var host = document.getElementById('dots'); host.innerHTML = d;
+    var ds = host.querySelectorAll('.dot');
+    for (var j=0;j<ds.length;j++) ds[j].addEventListener('click', function(){ vs.postMessage({type:'goto', i:+this.getAttribute('data-i')}); });
+  });
+  document.getElementById('play').addEventListener('click', function(){ send('play'); });
+  document.getElementById('dock').addEventListener('click', function(){ send('dock'); });
+  document.getElementById('back').addEventListener('click', function(){ send('back'); });
+  document.getElementById('next').addEventListener('click', function(){ send('next'); });
+  document.getElementById('exit').addEventListener('click', function(){ send('exit'); });
+  vs.postMessage({type:'ready', reduced: !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches)});`;
+  return (
+    `<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}">${style}</head><body>` +
+    `<div class="count" id="count">— / —</div>` +
+    `<h2 id="title">Guided tour</h2>` +
+    `<p id="body"></p>` +
+    `<div class="tip" id="tip" style="display:none"></div>` +
+    `<div class="act" id="action" style="display:none"><span class="lbl" id="actionlabel"></span><span id="actionhint"></span><span class="st" id="actionstate"></span></div>` +
+    `<div class="try" id="try" style="display:none"></div>` +
+    `<div class="row"><button id="back">◂ Back</button><button class="primary" id="next">Next ▸</button><span class="spacer"></span>` +
+    `<button id="play" title="Pause or resume the tour. Any other control pauses it too.">❚❚</button>` +
+    `<button id="dock" title="Move the tour between its own window and a tab beside your code">Dock</button>` +
+    `<button id="exit">Exit demo</button></div>` +
+    `<div class="dots" id="dots"></div>` +
+    `<script nonce="${nonce}">${script}</script></body></html>`
+  );
+}
+
+/**
+ * The guided tour's window. A webview PANEL: docked beside your code by default, and detachable into a
+ * window of its own for a second screen. Either way it survives the focus changes the steps deliberately
+ * cause, which is what a tour needs and what the alternatives could not give.
+ *
+ * A sidebar view was the obvious choice and the wrong one: it consumes a slot in the very container whose
+ * other views the tour keeps asking you to look at. `Guided tour: move to its own window` detaches it;
+ * which mode you last used is remembered, because that preference belongs to a person, not to a project.
+ *
+ * The steps come from core (`demoTour`), so this renders the same script the CLI prints and the
+ * JetBrains plugin shows.
+ */
+class DemoTourPanel {
+  private panel?: vscode.WebviewPanel;
+  private last?: { i: number; n: number; step: core.DemoStep; actionState?: core.DemoActionState };
+  /** true = docked as an editor tab (the default), false = floating in a window of its own. */
+  private docked: boolean;
+  /** Set while `setDocked` is tearing the panel down to rebuild it in the other mode, so the dispose it
+   *  causes is not mistaken for the reader closing the tour. Without it, one dock↔float toggle mid-tour
+   *  ends the tour: `onDidDispose` fires `tourClosed`, which calls `endTour`, and Next/Back go dead. */
+  private moving = false;
+
+  constructor(private readonly memento: vscode.Memento) {
+    this.docked = memento.get<boolean>('tourDocked', true);
+  }
+
+  get isOpen(): boolean {
+    return !!this.panel;
+  }
+
+  /** Open (or re-reveal) the tour. `float` overrides the remembered mode for this run. */
+  async open(float?: boolean): Promise<void> {
+    if (float !== undefined) {
+      this.docked = !float;
+      void this.memento.update('tourDocked', this.docked);
+    }
+    if (this.panel) {
+      this.panel.reveal(undefined, true);
+      return;
+    }
+    const panel = vscode.window.createWebviewPanel('claudeObservatory.tour', 'Claude Observatory — guided tour', vscode.ViewColumn.Beside, {
+      enableScripts: true,
+      retainContextWhenHidden: true, // the tour keeps its step while every other view takes focus
+    });
+    panel.webview.html = tourShell();
+    panel.webview.onDidReceiveMessage((m: { type?: string; i?: number; reduced?: boolean }) => {
+      if (!m) return;
+      if (m.type === 'ready') {
+        if (m.reduced) void vscode.commands.executeCommand('claudeObservatory.tourReducedMotion');
+        this.repost();
+      }
+      else if (m.type === 'next') void vscode.commands.executeCommand('claudeObservatory.tourNext');
+      else if (m.type === 'back') void vscode.commands.executeCommand('claudeObservatory.tourBack');
+      else if (m.type === 'goto' && typeof m.i === 'number') void vscode.commands.executeCommand('claudeObservatory.tourGoto', m.i);
+      else if (m.type === 'exit') void vscode.commands.executeCommand('claudeObservatory.exitDemo');
+      else if (m.type === 'dock') void vscode.commands.executeCommand(this.docked ? 'claudeObservatory.tourFloat' : 'claudeObservatory.tourDock');
+      else if (m.type === 'play') void vscode.commands.executeCommand('claudeObservatory.tourPlayPause');
+    });
+    // Closing the tour window ends the tour: leaving `tourStep` advancing against a window nobody can
+    // see would make Next/Back silently move a thing that is not there.
+    panel.onDidDispose(() => {
+      this.panel = undefined;
+      if (this.moving) return; // a rebuild into the other mode, not the reader closing the tour
+      void vscode.commands.executeCommand('claudeObservatory.tourClosed');
+    });
+    this.panel = panel;
+    if (!this.docked) await this.detach();
+    this.repost();
+  }
+
+  /**
+   * Move the panel into a window of its own. VS Code exposes no API for creating a detached webview, so
+   * this drives the editor command that moves the ACTIVE editor out — which is why the panel is created
+   * focused first. If the command is unavailable (an older build, a remote host that refuses auxiliary
+   * windows) the panel simply stays in the editor area: docked is a working tour, not a failure.
+   */
+  private async detach(): Promise<void> {
+    try {
+      await vscode.commands.executeCommand('workbench.action.moveEditorToNewWindow');
+    } catch {
+      this.docked = true;
+      void this.memento.update('tourDocked', true);
+    }
+  }
+
+  async setDocked(docked: boolean): Promise<void> {
+    if (this.docked === docked && this.panel) return;
+    this.docked = docked;
+    void this.memento.update('tourDocked', docked);
+    // Re-open in the other mode: a panel cannot be moved back from an auxiliary window by API.
+    const step = this.last;
+    this.moving = true;
+    try {
+      this.panel?.dispose();
+      this.panel = undefined;
+      await this.open();
+    } finally {
+      this.moving = false;
+    }
+    // …carrying the action state across. Dropping it re-renders a step the reader already satisfied
+    // as "waiting", and the countdown text with it.
+    if (step) this.show(step.i, step.n, step.step, step.actionState);
+  }
+
+  show(i: number, n: number, step: core.DemoStep, actionState?: core.DemoActionState): void {
+    this.last = { i, n, step, actionState };
+    this.repost();
+  }
+
+  /** Report a wait step's progress without re-sending the whole step. */
+  postActionState(state: core.DemoActionState): void {
+    if (this.last) this.last.actionState = state;
+    void this.panel?.webview.postMessage({ type: 'action', state });
+  }
+
+  /** Autoplay state and the seconds left on this step, for the transport and the countdown. */
+  postAuto(playing: boolean, secs: number): void {
+    void this.panel?.webview.postMessage({ type: 'auto', playing, secs });
+  }
+
+  /** Bring the tour forward WITHOUT taking focus — every step has just focused something else. */
+  reveal(): void {
+    this.panel?.reveal(undefined, true);
+  }
+
+  close(): void {
+    const p = this.panel;
+    this.panel = undefined; // so onDidDispose does not re-enter the tour-ended command
+    p?.dispose();
+  }
+
+  private repost(): void {
+    if (this.last) void this.panel?.webview.postMessage({ type: 'step', ...this.last, docked: this.docked });
+  }
+}
+
 function promptsShell(): string {
   const nonce = getNonce();
   const csp = `default-src 'none'; style-src 'unsafe-inline'; font-src data:; script-src 'nonce-${nonce}';`;
@@ -2990,7 +3286,16 @@ const REQUESTS_SCRIPT = `
   }
   var clr=document.getElementById('rq-clear');
   if(clr) clr.addEventListener('click', function(){ SEL=null; render(); vscode.postMessage({type:'select', id:null}); });
+  var TOUR_ANCHORS = { 'prompts-list':'#rq-list' };
+  function applyTour(anchor){
+    var prev=document.querySelectorAll('.ring');
+    for(var i=0;i<prev.length;i++) prev[i].classList.remove('ring');
+    var sel = anchor ? TOUR_ANCHORS[anchor] : null;
+    var el = sel ? document.querySelector(sel) : null;
+    if(el) el.classList.add('ring');
+  }
   window.addEventListener('message', function(ev){ var m=ev.data||{};
+    if(m.type==='tour'){ applyTour(m.anchor||null); return; }
     if(m.type==='prompts'){ RQ=m.rq||null; SEEN=true; if(m.selected!==undefined) SEL=m.selected; render(); }
     else if(m.type==='response'){ RESP[m.id]=m.response||{text:'',turns:0,truncated:0}; render(); }
     else if(m.type==='error'){ RQ=null; SEEN=true; render(); }
@@ -3006,6 +3311,10 @@ const REQUESTS_SCRIPT = `
  *  the same scope both windows agree on. */
 class PromptsViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
+  /** Guided tour: ring the control a step names, if this panel is the one that owns it. */
+  setTour(anchor: string | null): void {
+    this.view?.webview.postMessage({ type: 'tour', anchor });
+  }
   private run = 0;
   private running = false;
   private rerun = false;
@@ -3101,6 +3410,10 @@ class PromptsViewProvider implements vscode.WebviewViewProvider {
 
 class StatsUsageViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
+  /** Guided tour: ring the control a step names, if this panel is the one that owns it. */
+  setTour(anchor: string | null): void {
+    this.view?.webview.postMessage({ type: 'tour', anchor });
+  }
   private statsRun = 0;
   private statsRunning = false;
   private statsEverLoaded = false; // gates the "CLI missing" hint: only before the first good payload
@@ -3264,6 +3577,18 @@ class ChangeMapViewProvider implements vscode.WebviewViewProvider {
   setNavPos(pos: NavPos): void {
     this.navPos = pos;
     if (this.view?.visible) this.view.webview.postMessage({ type: 'navpos', pos });
+  }
+  /** Guided tour: bring a left-nav tab forward and ring the one control the step is talking about.
+   *  Passing nulls clears both (the tour moved on, or ended). The step's text stays in the tour window. */
+  setTour(tab: string | null, anchor: string | null): void {
+    this.view?.webview.postMessage({ type: 'tour', tab, anchor });
+  }
+  /** Guided tour: suspend the Active-only display filter for the duration, and restore it after. The
+   *  tour narrates rows that filter hides — five of the demo's six tasks are completed — so leaving it
+   *  on makes the text describe a screen the reader is not looking at. The webview restores the reader's
+   *  own setting rather than a hard-coded default, so someone who had it OFF keeps it off. */
+  setShowAll(on: boolean): void {
+    this.view?.webview.postMessage({ type: 'showall', on });
   }
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
@@ -3614,6 +3939,10 @@ const OVERVIEW_SCRIPT = `
   // Active-only defaults ON (0.8.8) and persists across hide/show via the webview state API.
   var WVSTATE=(vscode.getState&&vscode.getState())||{};
   var ACTIVE_ONLY=(WVSTATE.activeOnly!==undefined)?!!WVSTATE.activeOnly:true, DISMISS_AG={}, DISMISS_WF={}, DISMISS_PR={};
+  // The reader's own Active-only value, parked while the guided tour runs. null = no tour is holding it.
+  var TOUR_FILTER=null;
+  /** The nav tab the reader was on before the tour moved them. null = no tour is holding it. */
+  var TOUR_NAV=null;
   // The pane split, as a percentage of the panel along each axis — one value for the side-by-side layout,
   // one for the stacked one, because a good height is not a good width.
   var NAV_W=(typeof WVSTATE.navW==='number')?WVSTATE.navW:25, NAV_H=(typeof WVSTATE.navH==='number')?WVSTATE.navH:45;
@@ -4348,6 +4677,21 @@ const OVERVIEW_SCRIPT = `
   }
   function applyPanes(){ var ids=['sessions','fleet','workflows','tasks','processes'];
     for(var i=0;i<ids.length;i++){ var el=document.getElementById('ov-pane-'+ids[i]); if(el) el.style.display=(NAV===ids[i])?'flex':'none'; } }
+  // Guided tour: which DOM node each anchor name points at. Anything not listed here is unknown to this
+  // build and simply does not ring — never an error, so core can name a control this build lacks.
+  var TOUR_ANCHORS = { 'nav-tabs':'#ov-navtabs', 'folders-strip':'#cm-strip', 'files-ledger':'#cm-ledger',
+    'summary-bar':'#cm-summary', 'feed':'#ov-feed', 'nav-axes':'#ov-axesrow', 'accept-prompt':'#ov-acceptprompt',
+    'session-label':'#ov-sess-label', 'spotlight':'#ov-spotlight' };
+  function applyTour(tab, anchor){
+    // Remember where the reader was BEFORE the first step moved them, so the tour hands the Overview back
+    // on the tab they had rather than wherever its last overview step happened to stop.
+    if(tab && tab!==NAV){ if(TOUR_NAV===null) TOUR_NAV=NAV; NAV=tab; renderNavTabs(); applyPanes(); }
+    var prev=document.querySelectorAll('.ov-ring');
+    for(var i=0;i<prev.length;i++) prev[i].classList.remove('ov-ring');
+    var sel = anchor ? TOUR_ANCHORS[anchor] : null;
+    var el = sel ? document.querySelector(sel) : null;
+    if(el){ el.classList.add('ov-ring'); if(el.scrollIntoView) el.scrollIntoView({block:'nearest'}); }
+  }
   function renderNavTabs(){ var c=navCounts();
     var defs=[
       // Sessions leads: which session you are reviewing is the question that precedes every other one.
@@ -4454,6 +4798,19 @@ const OVERVIEW_SCRIPT = `
     // carries it too, but that only arrives on the next refresh tick — this is what makes a click feel
     // like a click).
     else if(m.type==='prompt'){ setPromptScope(m.id||null); }
+    // Guided tour (0.8.9): select the tab the step is about, show its tip beside the panel it is
+    // describing, and ring the named control. An anchor this build does not know simply does not ring —
+    // the step still reads, which is what lets core add a step an older editor has never heard of.
+    else if(m.type==='tour'){ applyTour(m.tab||null, m.anchor||null); }
+    // The guided tour asks for every row to be visible while it runs, then hands the filter back exactly
+    // as it found it (TOUR_FILTER remembers the reader's own value, not a default).
+    else if(m.type==='showall'){
+      if(m.on){ if(TOUR_FILTER===null){ TOUR_FILTER=ACTIVE_ONLY; ACTIVE_ONLY=false; saveState(); paint(); } }
+      else {
+        if(TOUR_NAV!==null){ NAV=TOUR_NAV; TOUR_NAV=null; renderNavTabs(); applyPanes(); }
+        if(TOUR_FILTER!==null){ ACTIVE_ONLY=TOUR_FILTER; TOUR_FILTER=null; saveState(); paint(); }
+      }
+    }
     else if(m.type==='error'){ CLI_ERR=true; CM=null; MT=null; PR=null; OV_SEEN=true; FEED=null; FEEDDATA=null; SESS=m.sessions||null; renderFeed(); renderNavTabs(); applyPanes(); renderProcesses(); renderSessions();
       var em=document.getElementById('ov-empty'); em.style.display='block';
       em.innerHTML=CLI_ERR_HTML;
@@ -4715,8 +5072,372 @@ export function activate(context: vscode.ExtensionContext): void {
   // The Prompts window (dock, left of the Overview): picking an ask there scopes the Overview beside it.
   const promptsProvider = new PromptsViewProvider();
   promptsProvider.onSelect = (id) => changeMapProvider.setPrompt(id);
+  const tourPanel = new DemoTourPanel(context.globalState);
   editsProvider.view = editsView; // badge lives on the primary view
   editsProvider.updateBadge();
+
+  // --- demo mode + the guided tour (0.8.9) ---------------------------------------------------------
+  // The steps are core's, so this renders the same script the CLI prints and the JetBrains plugin
+  // shows. `tourStep` is -1 when no tour is running.
+  let TOUR: core.DemoStep[] = core.demoTour();
+  let tourTrack: core.DemoTrack = 'everything';
+  let tourStep = -1;
+  /** The wait step currently armed, if any. No timer and no new watcher: `refreshAll` already runs on
+   *  every store change, and the verdict itself is core's so both editors reach the same one. */
+  let tourWatch:
+    | { kind: core.DemoActionKind; before: core.DemoActionSnapshot; state: core.DemoActionState; session?: string }
+    | undefined;
+  /** Whether the last `editor` step actually got a file open — what makes its auto action honest. */
+  let tourOpenedFile = false;
+  /** Set when the tour turned Spotlight on, so it can turn it back off when the step is left. */
+  let tourLitSpotlight = false;
+  /**
+   * Autoplay. ONE timer per step, which is also a wait step's countdown — that single timer is what
+   * makes pausing actually pause. (The site's browser demo keeps them separate, so pausing there clears
+   * the step timer but not the gate countdown and a paused demo still drifts forward.)
+   */
+  let tourPlaying = true;
+  let tourTimer: NodeJS.Timeout | undefined;
+  let tourTick: NodeJS.Timeout | undefined;
+  let tourReducedMotion = false;
+
+  /** Bumped by every schedule and every stop, so a timer that outlived its moment cannot act. */
+  let tourAdvanceTok = 0;
+  const stopAutoplay = () => {
+    tourAdvanceTok++;
+    if (tourTimer) clearTimeout(tourTimer);
+    if (tourTick) clearInterval(tourTick);
+    tourTimer = undefined;
+    tourTick = undefined;
+  };
+  /**
+   * Schedule the beat between an action landing and the tour moving on — the ONE place that does it.
+   *
+   * Two paths reach this moment: `advanceAutoplay` performs an unanswered action, which refreshes, which
+   * makes `checkTourWatch` see the state change and want to move on too. Arming a timer at each site
+   * left two in flight for the same moment, relying on their index guards to make the second inert.
+   * They did — but a scheduler that cancels first, plus a token, does not depend on that reasoning
+   * holding the next time either guard is touched.
+   */
+  const scheduleAdvance = (from: number) => {
+    stopAutoplay();
+    const tok = tourAdvanceTok;
+    tourTimer = setTimeout(() => {
+      if (tok === tourAdvanceTok && tourPlaying && tourStep === from) void applyTourStep(from + 1);
+    }, 1400);
+    tourTimer.unref?.();
+  };
+  /** Pause and tell the panel. Every manual control routes through here — taking the wheel is explicit. */
+  const pauseAutoplay = () => {
+    if (!tourPlaying && !tourTimer) return;
+    tourPlaying = false;
+    stopAutoplay();
+    tourPanel.postAuto(false, 0);
+  };
+  const armAutoplay = (step: core.DemoStep) => {
+    stopAutoplay();
+    if (!tourPlaying || tourStep < 0) return;
+    // A wait step gets the countdown instead of the reading dwell: the reader is being asked to do
+    // something, and nine seconds is the grace before the tour does it for them.
+    const waiting = step.action?.mode === 'wait';
+    const ms = waiting ? core.DEMO_ACTION_COUNTDOWN_MS : core.demoStepDwellMs(step);
+    const until = Date.now() + ms;
+    const post = () => tourPanel.postAuto(true, Math.max(0, Math.ceil((until - Date.now()) / 1000)));
+    post();
+    const tok = tourAdvanceTok;
+    tourTick = setInterval(post, 1000);
+    tourTick.unref?.();
+    tourTimer = setTimeout(() => {
+      if (tok === tourAdvanceTok) void advanceAutoplay(step);
+    }, ms);
+    tourTimer.unref?.();
+  };
+  /** The timer ran out. A reading step moves on; an unanswered ask is performed, then moves on. */
+  const advanceAutoplay = async (step: core.DemoStep) => {
+    stopAutoplay();
+    if (!tourPlaying || tourStep < 0) return;
+    if (step.action?.mode === 'wait' && tourWatch?.state === 'waiting') {
+      await runTourAction(step.action.kind);
+      refreshAll(true);
+      // Show the result before moving — the point of doing it was that the reader sees it happen.
+      // Re-check: the reader can have hit Exit, or moved on, while the action was in flight.
+      if (tourStep < 0 || TOUR[tourStep]?.id !== step.id) return;
+      // Report what ACTUALLY happened. runTourAction is a deliberate no-op when there is nothing left to
+      // accept, and a hard-coded "done" would then claim an action the reader can see did not occur.
+      const after = tourWatch
+        ? core.demoActionState(tourWatch.kind, tourWatch.before, reviewSnapshot(tourWatch.session))
+        : 'satisfied';
+      if (tourWatch) tourWatch.state = after;
+      tourPanel.postActionState(after);
+      scheduleAdvance(tourStep);
+      return;
+    }
+    await applyTourStep(tourStep + 1);
+  };
+
+  const reviewSnapshot = (session?: string): core.DemoActionSnapshot => {
+    // Keyed to ONE session. Comparing a count taken against the demo with one taken after Exit Demo
+    // switched the view back to a real session is a comparison of two different logs.
+    const s = session ?? currentSession();
+    const log = s ? cachedLog(s) : [];
+    return {
+      kept: log.filter((r) => r.status === 'kept').length,
+      undone: log.filter((r) => r.status === 'undone').length,
+      pending: log.filter((r) => r.status === 'pending').length,
+      total: log.length,
+    };
+  };
+  const disarmTourWatch = () => {
+    tourWatch = undefined;
+  };
+  /** Called from refreshAll AFTER autoClearDemo — a fully reviewed demo drops its records, and that
+   *  emptied log is the `vacated` verdict rather than a reason to keep waiting. */
+  const checkTourWatch = () => {
+    if (!tourWatch) return;
+    // The session moved out from under the watch (Exit Demo, a switch): the counts are no longer
+    // comparable, so stop watching rather than reporting a verdict drawn from someone else's log.
+    if (currentSession() !== tourWatch.session) {
+      tourWatch = undefined;
+      return;
+    }
+    const state = core.demoActionState(tourWatch.kind, tourWatch.before, reviewSnapshot(tourWatch.session));
+    if (state === tourWatch.state) return; // only post on a CHANGE, so a refresh tick is not 20 messages
+    tourWatch.state = state;
+    tourPanel.postActionState(state);
+    // The reader did it. Cancel the countdown and move on after the same beat the timer would have used,
+    // so doing it yourself and letting it happen feel like the same tour.
+    if (state !== 'waiting' && tourPlaying) scheduleAdvance(tourStep);
+  };
+  /** Run an `auto` step's action, reusing the handler the product already ships. */
+  const runTourAction = async (kind: core.DemoActionKind): Promise<boolean> => {
+    const s = currentSession();
+    const root = workspaceRoot();
+    // Belt and braces: this function ACCEPTS AND REVERTS EDITS, and a `wait` step does it on a timer
+    // with nobody watching. It must never touch a session the reader actually cares about, whatever
+    // route got us here.
+    if (kind !== 'toggle-spotlight' && kind !== 'open-demo-file' && (!s || !core.isDemoSession(s))) return false;
+    if (kind === 'toggle-spotlight') {
+      // Turn it ON, never merely flip it: a reader who already had Spotlight lit would otherwise watch it
+      // go OUT under a panel announcing that it came on.
+      if (heatmapOn) return true;
+      await vscode.commands.executeCommand('claudeObservatory.toggleHeatmap');
+      tourLitSpotlight = true; // only ours to put back if we were the one who lit it
+      return true;
+    }
+    // The `editor` view branch already opened it — and reports whether it found anything it could open.
+    if (kind === 'open-demo-file') return tourOpenedFile;
+    if (!s) return false;
+    // Autoplay applies an unanswered ask itself, so every WAIT kind has to be performable too — always
+    // through the command the product already ships, never a second implementation of keep or undo.
+    if (kind === 'keep-edit' || kind === 'undo-edit') {
+      const rec = cachedLog(s).find((r) => r.status === 'pending');
+      if (!rec) return false; // nothing left to review; the panel's line says so rather than a no-op running
+      // These commands take the TREE NODE, not an id — they are the same handlers the Edits tree calls.
+      await vscode.commands.executeCommand(
+        kind === 'keep-edit' ? 'claudeObservatory.keep' : 'claudeObservatory.undo',
+        { kind: 'edit', rec } as EditNode
+      );
+      return true;
+    }
+    if (kind === 'keep-prompt' && root) {
+      try {
+        // The ask that still has work outstanding — resolved from the data, never a hard-coded index.
+        const p = core.sessionPrompts(root, s).find((r) => r.pending > 0);
+        if (!p) return false;
+        await vscode.commands.executeCommand('claudeObservatory.promptKeep', p.id);
+        return true;
+      } catch {
+        return false; // nothing pending under any ask
+      }
+    }
+    if (kind === 'keep-task' && root) {
+      // The task is resolved from the data, never hard-coded: a script that names task ids would go
+      // stale the moment the scenario changed.
+      try {
+        const m = core.buildChangeMap(root, s, { root });
+        const row = m.rollupByTask.find((r) => r.taskId !== null && r.pending > 0);
+        if (!row?.taskId) return false;
+        await vscode.commands.executeCommand('claudeObservatory.taskKeep', row.taskId);
+        return true;
+      } catch {
+        return false; // nothing pending to accept
+      }
+    }
+    return false;
+  };
+  // True while a replay is in flight. The paint timer flips `demoPresent` on within a second of the
+  // first beat, which unlocks Exit and Restart while the run is still writing the very files Exit would
+  // delete — and Start has no re-entrancy guard of its own.
+  let demoReplaying = false;
+  /** The tree views a tour step can bring forward. */
+  const TOUR_TREES: Record<string, unknown> = {
+    edits: editsView,
+    diffs: diffsView,
+    fileHistory: fileHistoryView,
+    actions: actionsView,
+    observations: insightsView,
+  };
+  const clearTourTips = () => {
+    changeMapProvider.setTour(null, null);
+    statsProvider.setTour(null);
+    promptsProvider.setTour(null);
+  };
+  const applyTourStep = async (i: number) => {
+    if (i < 0 || i >= TOUR.length) return;
+    disarmTourWatch();
+    // Leaving a Spotlight step turns it back off — a tour that dimmed your editor and walked away
+    // would have changed your workspace to make a point.
+    if (tourLitSpotlight) {
+      tourLitSpotlight = false;
+      await vscode.commands.executeCommand('claudeObservatory.toggleHeatmap');
+    }
+    tourStep = i;
+    const step = TOUR[i];
+    // Keep the fleet inside its 60s active window while the tour explains it. On step advance ONLY:
+    // this touches watched files, and a heartbeat driven by a refresh would re-trigger itself forever.
+    try {
+      const root = workspaceRoot();
+      if (root && demoSession) core.demoHeartbeat({ cwd: root });
+    } catch {
+      /* a heartbeat is a nicety; a step must never fail to show because of one */
+    }
+    clearTourTips();
+    // BROADCAST the anchor to every tour-aware panel; each rings it only if its own map knows the name,
+    // and the names are globally unique (a core test pins that). Routing by view instead would be wrong
+    // in both directions: a Stats anchor sent to the Overview rings nothing, and a Prompts step that
+    // names "Accept Prompt" — a control that lives in the Overview beside it — has to reach the Overview.
+    const anchor = step.anchor ?? null;
+    if (step.view !== 'overview') changeMapProvider.setTour(null, anchor);
+    statsProvider.setTour(anchor);
+    promptsProvider.setTour(anchor);
+    if (step.view === 'overview') {
+      await vscode.commands.executeCommand('claudeObservatory.changemap.focus');
+      changeMapProvider.setTour(step.tab ?? null, anchor);
+    } else if (step.view === 'prompts' || step.view === 'stats') {
+      await vscode.commands.executeCommand(`claudeObservatory.${step.view}.focus`);
+    } else if (step.view === 'editor') {
+      // Open the newest pending edit that is actually openable: inside the workspace (the scenario's
+      // last edit is the report written OUTSIDE it) and still on disk (one edit is a DELETION, and it
+      // becomes the newest pending as soon as the reader accepts anything the tour invited them to).
+      const s = currentSession();
+      const root = workspaceRoot();
+      const rec = s
+        ? cachedLog(s)
+            .filter((r) => r.status === 'pending' && (!root || r.file.startsWith(root + path.sep)) && fs.existsSync(r.file))
+            .pop()
+        : undefined;
+      tourOpenedFile = false;
+      if (rec) {
+        try {
+          await openFileAtEdit({ kind: 'edit', rec });
+          tourOpenedFile = true;
+        } catch {
+          /* a step that cannot open its file still reads — never let it strand the tour */
+        }
+      }
+    } else {
+      const view = TOUR_TREES[step.view];
+      if (view) await vscode.commands.executeCommand(`claudeObservatory.${step.view}.focus`);
+    }
+    // Bring the tour forward LAST, and WITHOUT focus: the step has just deliberately focused a panel,
+    // and stealing it back would undo the thing the step exists to show.
+    // Arm a wait step, or run an auto one — after the view is focused, so the reader can see the thing
+    // before being asked to act on it.
+    let actionState: core.DemoActionState | undefined;
+    if (step.action?.mode === 'auto') {
+      // An auto step that no-ops (nothing pending, no demo pinned, no openable file) must not print its
+      // past-tense line: the reader can see that nothing moved, and "✓ done" over that is a lie.
+      actionState = (await runTourAction(step.action.kind)) ? 'satisfied' : 'vacated';
+      refreshAll(true);
+    } else if (step.action) {
+      const watched = currentSession();
+      tourWatch = { kind: step.action.kind, before: reviewSnapshot(watched), state: 'waiting', session: watched };
+      // A session with no records at all resolves immediately rather than waiting forever.
+      tourWatch.state = core.demoActionState(tourWatch.kind, tourWatch.before, reviewSnapshot(watched));
+      actionState = tourWatch.state;
+    }
+    tourPanel.reveal();
+    tourPanel.show(i, TOUR.length, step, actionState);
+    // The last step is an offer, not a frame — autoplay stops there rather than looping.
+    if (i + 1 < TOUR.length) armAutoplay(step);
+    else pauseAutoplay();
+  };
+  /** Ask which track to walk, then open the tour. `track` skips the question (a restart keeps yours). */
+  const startTour = async (track?: core.DemoTrack) => {
+    // The tour ACTS on the session under review — it accepts and reverts edits, some on a timer. So it
+    // may only ever run against the demo. `demoPresent` is true whenever a demo exists on disk, which
+    // is deliberately weaker: one real Claude turn after a demo makes that the newest session, and a
+    // window reload drops the in-memory pin. Re-pin here, and refuse outright if there is nothing to pin.
+    const root0 = workspaceRoot();
+    if (!demoSession || !core.isDemoSession(demoSession)) {
+      const found = root0 ? core.demoSessionsFor({ cwd: root0 })[0] : undefined;
+      if (!found) {
+        void vscode.window.showWarningMessage(
+          'Claude Observatory: the guided tour runs against the demo session, and there is no demo recorded for this folder. Start Demo Mode first.'
+        );
+        return;
+      }
+      demoSession = found;
+      refreshAll(true);
+    }
+    const sizes = core.demoTrackSizes();
+    let chosen = track;
+    if (!chosen) {
+      const pick = await vscode.window.showQuickPick(
+        [
+          { label: `$(zap) Essentials`, description: `${sizes.essentials} steps`, detail: 'The review model, the agents, and the audits — the short way through.', track: 'essentials' as const },
+          { label: `$(book) Everything`, description: `${sizes.everything} steps`, detail: 'Every panel and every named feature, in order.', track: 'everything' as const },
+        ],
+        { title: 'Claude Observatory — guided tour', placeHolder: 'How much of it would you like to see?' }
+      );
+      if (!pick) return; // dismissed — no tour, and no half-opened window
+      chosen = pick.track;
+    }
+    TOUR = core.demoTour(chosen);
+    tourTrack = chosen;
+    // A reader who has asked their OS not to animate things has not asked for a tour that advances
+    // itself either. The webview reports the media query; until it does, assume motion is fine.
+    tourPlaying = !tourReducedMotion;
+    // The tour describes rows that Active only — ON by default — hides: five of the demo's six tasks are
+    // completed, so "Accept task 1" would name a row the reader cannot see. Show everything for the
+    // duration and put the filter back in endTour, exactly as the Spotlight step already does.
+    changeMapProvider.setShowAll(true);
+    await vscode.commands.executeCommand('setContext', 'claudeObservatory.demoTour', true);
+    await tourPanel.open();
+    await applyTourStep(0);
+  };
+  /**
+   * The end of a track. After the short one, offer its exact complement rather than just closing: the
+   * reader chose Essentials without knowing what was in the other half, and this is the only place they
+   * are told. Any other track ends the tour.
+   */
+  const finishTour = async () => {
+    if (tourTrack !== 'essentials') return endTour();
+    pauseAutoplay();
+    const rest = core.demoTrackSizes().remainder;
+    const go = `See the other ${rest}`;
+    const pick = await vscode.window.showInformationMessage(core.demoTrackBlurb('essentials'), go, 'Done');
+    // Dismissed (Escape) ends it too — an unanswered offer is not consent to keep going.
+    if (pick !== go) return endTour();
+    TOUR = core.demoTour('remainder');
+    tourTrack = 'remainder';
+    tourPlaying = !tourReducedMotion;
+    await applyTourStep(0);
+  };
+  const endTour = async () => {
+    tourStep = -1;
+    stopAutoplay();
+    disarmTourWatch();
+    changeMapProvider.setShowAll(false);
+    if (tourLitSpotlight) {
+      tourLitSpotlight = false;
+      await vscode.commands.executeCommand('claudeObservatory.toggleHeatmap');
+    }
+    clearTourTips();
+    tourPanel.close();
+    updateEmptyStateContext();
+    await vscode.commands.executeCommand('setContext', 'claudeObservatory.demoTour', false);
+  };
 
 
   // A SUBTLE whole-line green tint + coral change-bar on Claude's added/changed lines — deliberately
@@ -5074,6 +5795,21 @@ export function activate(context: vscode.ExtensionContext): void {
     const prior = log.length === 0 ? previousSessionWithEdits(session) : undefined;
     void vscode.commands.executeCommand('setContext', 'claudeObservatory.hooksInstalled', core.hooksInstalled());
     void vscode.commands.executeCommand('setContext', 'claudeObservatory.priorSessionWithEdits', !!prior);
+    // Offer Exit Demo whenever a demo EXISTS for this folder — not merely while one is the session
+    // being reviewed. Session resolution follows the newest transcript, so one real Claude turn after a
+    // demo (or a window that crashed mid-demo) would otherwise take the only way out away at exactly
+    // the moment it is needed, leaving the folder and two sessions behind with nothing offering to
+    // remove them. Demo mode holds no persisted state, so the disk is the honest signal.
+    const root = workspaceRoot();
+    let demoOnDisk = !!demoSession || (!!session && core.isDemoSession(session));
+    if (!demoOnDisk && root) {
+      try {
+        demoOnDisk = core.demoSessionsFor({ cwd: root }).length > 0;
+      } catch {
+        /* unreadable project dir — fall back to what resolution says */
+      }
+    }
+    void vscode.commands.executeCommand('setContext', 'claudeObservatory.demoPresent', demoOnDisk);
     editsView.message = prior
       ? `Session ${session ? session.slice(0, 8) : '—'} is fresh; last session ${prior.id.slice(0, 8)} has ${prior.edits} tracked edit(s).`
       : undefined;
@@ -5089,6 +5825,9 @@ export function activate(context: vscode.ExtensionContext): void {
     // store change re-enters here once and then no-ops (the log is empty).
     const s = currentSession();
     if (s) core.autoClearDemo(s);
+    // AFTER the auto-clear: a fully reviewed demo has just dropped its records, and that empty log is
+    // the verdict a wait step is looking for.
+    checkTourWatch();
     updateEmptyStateContext();
     editsProvider.refresh();
     diffsProvider.refresh();
@@ -5368,11 +6107,202 @@ export function activate(context: vscode.ExtensionContext): void {
       editFilter = q.trim();
       refreshAll();
     }),
-    // Pin which session the observatory shows (e.g. the demo-showcase fixture) instead of the
-    // auto-resolved newest one — a QuickPick over every session in the store.
+    // --- demo mode (0.8.9) ---
+    // Replay the scripted session LIVE, then take the guided tour. The replay runs IN-PROCESS (this
+    // extension bundles core), so it works with the capture hooks uninstalled — which is what makes it
+    // an honest first-run affordance in the empty state.
+    // `startDemo` and `restartDemo` share this handler: a run RESETS the demo in core (a previous demo
+    // for this folder is cleared before the replay), so starting again IS starting over. Two command
+    // ids exist only so the title bar can say "Start" before one is running and "Restart" after.
+    ...(() => {
+      const runDemoCommand = async () => {
+      if (demoReplaying) {
+        void vscode.window.showInformationMessage('Claude Observatory: the demo is still replaying — cancel it from the progress notification first.');
+        return;
+      }
+      const root = workspaceRoot();
+      if (!root) {
+        void vscode.window.showWarningMessage('Claude Observatory: open a folder first — the demo records against a workspace.');
+        return;
+      }
+      await endTour(); // a restart mid-tour starts the tour over too
+      let noRepo = false;
+      try {
+        noRepo = core.commonDir(root) === null;
+      } catch {
+        /* treat as a repo and let the Fleet step speak for itself */
+      }
+      // The replay is in-process, so it works with no CLI on PATH — but the Overview, Prompts and Stats
+      // panels shell out for their data, and 16 of the tour's steps are about those three. Say so
+      // BEFORE the tour walks a reader into panels that can only report a missing binary.
+      // PROBE it, never stat it: resolveBin returns the bare name as its PATH fallback, and statting that
+      // against the extension host's cwd is false for every perfectly good install outside its fixed
+      // candidate list. Spawning is the only check that answers the question actually being asked.
+      const probe = cp.spawnSync(resolveObservatoryBin(), ['--version'], { encoding: 'utf8', timeout: 5000 });
+      if (probe.error || probe.status !== 0) {
+        const go = await vscode.window.showWarningMessage(
+          'Claude Observatory: the claude-observatory CLI is not on PATH. The demo will replay and the sidebar will fill, but the Overview, Prompts and Stats panels read their data through the CLI and will stay empty.',
+          'Replay anyway',
+          'Cancel'
+        );
+        if (go !== 'Replay anyway') return;
+      }
+      let res: core.DemoResult;
+      demoReplaying = true;
+      try {
+        res = await vscode.window.withProgress(
+          { location: vscode.ProgressLocation.Notification, title: 'Claude Observatory: replaying a demo session', cancellable: true },
+          async (progress, token) => {
+            // Paint on a timer rather than from the `log` callback: a beat NARRATES before it writes, so
+            // refreshing from the callback would always paint one beat behind what is being announced.
+            const paint = setInterval(() => refreshAll(true), 500);
+            try {
+              return await core.runDemo({
+                cwd: root,
+                log: (line) => progress.report({ message: line.trim() }),
+                shouldStop: () => token?.isCancellationRequested === true,
+              });
+            } finally {
+              clearInterval(paint);
+            }
+          }
+        );
+      } catch (e) {
+        // A read-only or virtual workspace, a vanished root, a permission error. Report it as ours and
+        // leave the way out visible — a half-seeded folder is still removable by Exit Demo.
+        demoReplaying = false;
+        updateEmptyStateContext();
+        refreshAll(true);
+        void vscode.window.showErrorMessage(
+          `Claude Observatory: the demo could not be written to this folder — ${e instanceof Error ? e.message : String(e)}`
+        );
+        return;
+      }
+      // Only adopt a session that actually recorded something. Stopping in the first beat returns an id
+      // with no transcript behind it; making THAT the session under review empties every panel and hides
+      // the user's real session for the life of the window.
+      demoReplaying = false;
+      if (res.steps > 0) demoSession = res.session;
+      updateEmptyStateContext(); // derives demoPresent from what is on disk
+      refreshAll(true);
+      if (res.cancelled) {
+        // Stopping is not a failure and not a dead end: say what landed and name both ways out.
+        const pick = await vscode.window.showInformationMessage(
+          `Claude Observatory: demo stopped after ${res.edits} edit(s). What landed is real and reviewable.`,
+          'Restart demo',
+          'Exit demo'
+        );
+        if (pick === 'Restart demo') await vscode.commands.executeCommand('claudeObservatory.restartDemo');
+        else if (pick === 'Exit demo') await vscode.commands.executeCommand('claudeObservatory.exitDemo');
+        return;
+      }
+      if (noRepo) {
+        void vscode.window.showInformationMessage(
+          'Claude Observatory: this folder is not a git repository, so the Fleet tab has no worktrees to correlate. Every other panel is populated.'
+        );
+      }
+      await startTour();
+      };
+      return [
+        vscode.commands.registerCommand('claudeObservatory.startDemo', runDemoCommand),
+        vscode.commands.registerCommand('claudeObservatory.restartDemo', runDemoCommand),
+      ];
+    })(),
+    vscode.commands.registerCommand('claudeObservatory.startTour', () => startTour()),
+    vscode.commands.registerCommand('claudeObservatory.tourDock', () => tourPanel.setDocked(true)),
+    vscode.commands.registerCommand('claudeObservatory.tourFloat', () => tourPanel.setDocked(false)),
+    // The reader closed the tour's window. Ending the tour here keeps Next/Back from stepping a thing
+    // nobody can see, and puts the panels' borrowed tips back.
+    vscode.commands.registerCommand('claudeObservatory.tourClosed', () => {
+      if (tourStep >= 0) void endTour();
+    }),
+    // Every manual control hands over the wheel: autoplay stops and only the play button restarts it.
+    // That is the rule both of the site's demo engines use, so the muscle memory carries over.
+    vscode.commands.registerCommand('claudeObservatory.tourNext', async () => {
+      pauseAutoplay();
+      if (tourStep + 1 >= TOUR.length) return finishTour();
+      await applyTourStep(tourStep + 1);
+    }),
+    vscode.commands.registerCommand('claudeObservatory.tourBack', () => {
+      pauseAutoplay();
+      return applyTourStep(tourStep - 1);
+    }),
+    vscode.commands.registerCommand('claudeObservatory.tourGoto', (i: number) => {
+      pauseAutoplay();
+      return applyTourStep(i);
+    }),
+    vscode.commands.registerCommand('claudeObservatory.tourReducedMotion', () => {
+      tourReducedMotion = true;
+      pauseAutoplay();
+    }),
+    vscode.commands.registerCommand('claudeObservatory.tourPlayPause', () => {
+      if (tourPlaying) return pauseAutoplay();
+      tourPlaying = true;
+      if (tourStep >= 0) armAutoplay(TOUR[tourStep]);
+    }),
+    // Leave demo mode and remove every trace of it: both sessions, their stores, the demo folder, and
+    // the report the scenario wrote outside the workspace.
+    vscode.commands.registerCommand('claudeObservatory.exitDemo', async () => {
+      if (demoReplaying) {
+        void vscode.window.showInformationMessage('Claude Observatory: the demo is still replaying — cancel it from the progress notification, then exit.');
+        return;
+      }
+      const root = workspaceRoot();
+      await endTour();
+      demoSession = undefined;
+      // Close the demo's files FIRST. The tour deliberately opens one, and a buffer saved after the
+      // folder is deleted recreates a file inside it — taking the `.observatory-demo` sentinel's tree
+      // with it, so nothing may ever delete that folder again. Closing beats warning here: there is
+      // nothing in a demo file worth keeping.
+      const ws = root ? path.join(root, 'observatory-demo') : null;
+      if (ws) {
+        for (const group of vscode.window.tabGroups.all) {
+          for (const tab of group.tabs) {
+            const uri = (tab.input as { uri?: vscode.Uri } | undefined)?.uri;
+            if (uri?.fsPath.startsWith(ws + path.sep)) {
+              try {
+                await vscode.window.tabGroups.close(tab, false);
+              } catch {
+                /* a tab that will not close is not a reason to abandon cleanup */
+              }
+            }
+          }
+        }
+      }
+      let removed: core.DemoCleanResult | null = null;
+      try {
+        removed = core.cleanDemo({ cwd: root ?? process.cwd() });
+      } catch {
+        /* reported below from what actually came back */
+      }
+      await vscode.commands.executeCommand('setContext', 'claudeObservatory.demoPresent', false);
+      updateEmptyStateContext(); // re-derives demoPresent from what is actually on disk
+      refreshAll(true);
+      // Report what was REMOVED, not what removal was attempted: `cleanDemo` is best-effort per item,
+      // so a locked or read-only folder leaves the claim "the observatory-demo folder is gone" false.
+      const parts: string[] = [];
+      if (removed?.sessions.length) parts.push(`${removed.sessions.length} session(s)`);
+      if (removed?.workspaces.length) parts.push('the observatory-demo folder');
+      if (removed?.scratch.length) parts.push('the report it wrote outside the workspace');
+      void vscode.window.showInformationMessage(
+        parts.length
+          ? `Claude Observatory: demo removed — ${parts.join(', ')}.`
+          : 'Claude Observatory: nothing to remove — no demo is recorded for this folder.'
+      );
+    }),
+    // Pin which session the observatory shows (e.g. a demo session) instead of the auto-resolved
+    // newest one — a QuickPick over every session in the store.
     // Pin a session by id (the Sessions tab's row click and other programmatic switches).
     // The config change fires onDidChangeConfiguration, which already runs refreshAll — no second call.
     vscode.commands.registerCommand('claudeObservatory.pinSession', async (id: string) => {
+      // While demo mode is on, switching sessions moves the in-memory override instead of writing
+      // .vscode/settings.json — clicking a Sessions row mid-tour must not dirty the user's repository.
+      if (demoSession) {
+        demoSession = id || undefined;
+        refreshAll(true);
+        vscode.window.setStatusBarMessage(id ? `Claude Observatory: showing session ${id}` : 'Claude Observatory: session set to auto', 3000);
+        return;
+      }
       const cfg = vscode.workspace.getConfiguration('claudeObservatory');
       await cfg.update('session', id ?? '', vscode.ConfigurationTarget.Workspace);
       // Refresh from HERE rather than leaning on the configuration event: re-picking the session that
@@ -5432,11 +6362,10 @@ export function activate(context: vscode.ExtensionContext): void {
         void vscode.window.showInformationMessage('Claude Observatory: no previous session with tracked edits.');
         return;
       }
-      await vscode.workspace
-        .getConfiguration('claudeObservatory')
-        .update('session', prior.id, vscode.ConfigurationTarget.Workspace);
-      refreshAll();
-      vscode.window.setStatusBarMessage(`Claude Observatory: showing session ${prior.id}`, 3000);
+      // Through pinSession, so the demo guard applies here too: this command sits one line above "Try
+      // the demo" in the same welcome view, and a pin written during a demo is both invisible (the
+      // override wins) and outlives it (Exit deletes the session the pin then points at).
+      await vscode.commands.executeCommand('claudeObservatory.pinSession', prior.id);
     }),
     // A hand-edited `claudeObservatory.session` in settings.json should re-render immediately.
     vscode.workspace.onDidChangeConfiguration((e) => {
@@ -5823,7 +6752,90 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.commands.registerCommand('claudeObservatory.checkForUpdates', () => checkForUpdate(context, true))
   );
-  void checkForUpdate(context, false);
+  // The demo offer takes precedence for this activation. Two unsolicited notifications on the first
+  // launch after an update is precisely the noise "Never ask" exists to stop, and the update check is
+  // throttled anyway — it simply runs next time.
+  // `startDemo` replays AND then tours: there is no demo yet, so offering the tour alone would walk the
+  // reader through an empty product.
+  // …and hands back the update check if the four-second re-check ends up suppressing the offer, so a
+  // reader who was mid-session at activation is not left with neither notification.
+  if (!offerDemo(context, () => void vscode.commands.executeCommand('claudeObservatory.startDemo'), () => void checkForUpdate(context, false))) {
+    void checkForUpdate(context, false);
+  }
+}
+
+/**
+ * Offer the demo on a first install and after an update, once, with a way to decline for good.
+ *
+ * Returns true when an offer was scheduled, so activation can stand the update nudge down for this run.
+ *
+ * Every gate here is load-bearing, and the last one especially: an unsolicited notification that
+ * interrupts a live Claude session is worse than never offering at all, so a busy workspace is skipped
+ * WITHOUT stamping the version — it gets offered next launch, when the reader is idle.
+ */
+function offerDemo(context: vscode.ExtensionContext, run: () => void, standDown: () => void): boolean {
+  const g = context.globalState;
+  // `context.extension` is absent under the smoke-test mock and in headless hosts. This is the proven
+  // guard `checkForUpdate` already uses, and it is what keeps the offer out of automated runs.
+  const current = context.extension?.packageJSON?.version ? String(context.extension.packageJSON.version) : undefined;
+  if (!current) return false;
+  if (g.get<boolean>('demoOffer.never')) return false;
+  const last = g.get<string>('demoOffer.lastSeenVersion');
+  if (last === current) return false;
+  const root = workspaceRoot();
+  if (!root) return false; // nothing to record a demo against
+  // The demo writes into the reader's repository. Never offer that in a workspace they have not trusted.
+  if (vscode.workspace.isTrusted === false) return false;
+
+  // Install vs update: a brand-new install has an empty globalState, which a version key alone cannot
+  // tell from an upgrade — so look for any key a previous version would have written.
+  const hadPrior = !!(
+    g.get('requestsRevealed.0.8.7') ||
+    g.get('promptsRevealed.0.8.8') ||
+    g.get('setupNudged') ||
+    g.get('updateCheck.lastMs') ||
+    g.get('tourDocked')
+  );
+  const kind: 'install' | 'update' = last || hadPrior ? 'update' : 'install';
+
+  const busy = () => {
+    try {
+      const id = core.resolveSessionId(root);
+      if (!id || core.isDemoSession(id)) return false;
+      const t = core.findTranscript(root, id);
+      return !!t && Date.now() - fs.statSync(t).mtimeMs <= core.SESSION_BUSY_MS;
+    } catch {
+      return false;
+    }
+  };
+  if (busy()) return false; // and deliberately NOT stamped — try again next launch
+
+  // A toast at t=0 on a cold window is hostile; activation is already doing enough.
+  const timer = setTimeout(() => {
+    if (busy()) {
+      standDown(); // they started working in the meantime — leave them alone, and re-offer later
+      return;
+    }
+    // A demo already recorded here means they have found it. Stamp so this version stops asking, and give
+    // the update check its turn back rather than spending the activation on nothing.
+    if (core.demoSessionsFor({ cwd: root }).length > 0) {
+      void g.update('demoOffer.lastSeenVersion', current);
+      standDown();
+      return;
+    }
+    void g.update('demoOffer.lastSeenVersion', current); // stamp BEFORE showing: an ignored toast never re-asks
+    const message =
+      kind === 'install'
+        ? 'Claude Observatory is installed. There is nothing to set up to look around: the demo replays a real Claude session through the real capture pipeline in about twenty seconds, every button in it works, and leaving removes every trace.'
+        : `Claude Observatory is now ${current}. The guided tour walks what changed alongside everything else — the demo replays in about twenty seconds and removes every trace when you leave.`;
+    void vscode.window.showInformationMessage(message, 'Take the tour', 'Never ask').then((pick) => {
+      if (pick === 'Take the tour') run();
+      else if (pick === 'Never ask') void g.update('demoOffer.never', true);
+    });
+  }, 4000);
+  timer.unref?.();
+  context.subscriptions.push({ dispose: () => clearTimeout(timer) });
+  return true;
 }
 
 export function deactivate(): void {

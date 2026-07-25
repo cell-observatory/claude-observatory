@@ -123,6 +123,14 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
             }
             else -> tree.emptyText.appendLine("No tracked Claude edits in this project yet")
         }
+        // The same way in the Edits tree offers (VS Code offers it from this panel's empty state too):
+        // an empty Observations pane is exactly where a first-time reader is looking for something to see.
+        if (!ReviewOps.demoPresent(project)) {
+            tree.emptyText.appendLine(
+                "Try the demo — no Claude session needed",
+                com.intellij.ui.SimpleTextAttributes.LINK_ATTRIBUTES,
+            ) { ReviewOps.startDemo(project) }
+        }
         if (session == null) {
             data = null
             ApplicationManager.getApplication().invokeLater { if (!project.isDisposed) repaintTree() }

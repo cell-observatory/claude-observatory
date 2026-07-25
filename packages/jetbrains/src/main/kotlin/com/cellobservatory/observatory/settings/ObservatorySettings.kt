@@ -21,7 +21,21 @@ class ObservatorySettings : PersistentStateComponent<ObservatorySettings.State> 
         var configDir: String? = null // CLAUDE_CONFIG_DIR override; empty = env var, then ~/.claude
         var inlineReview: Boolean = true // inline editor overlay (lenses + line highlights)
         var unifiedDiff: Boolean = true // open edit diffs in the unified (inline) viewer, not side-by-side
-        var session: String? = null // pinned session id to show; empty/null = auto-resolve newest
+        var session: String? = null
+
+        /** Guided tour: docked into a tool window (the default), or floating in a dialog of its own.
+         *  A person's preference about their own screen, so it is remembered rather than re-asked. */
+        var tourDocked: Boolean = true
+
+        // --- the first-run / post-update demo offer -------------------------------------------------
+        // Application-level, like everything else here: declining silences it in EVERY project, which is
+        // what "never ask" has to mean for it to be worth offering.
+        /** The plugin version this reader was last offered the demo for. */
+        var demoOfferLastSeenVersion: String? = null
+        /** Declined for good. */
+        var demoOfferNever: Boolean = false
+        /** Set on the first activation ever, so an empty version stamp can tell an INSTALL from an update. */
+        var everRan: Boolean = false
         // The Overview's Active-only toggle. ON by default (0.8.8): the panel's job is work still awaiting
         // review, and a session's finished work otherwise buries it. Persisted so the toggle survives a
         // panel hide, a project reopen, and an IDE restart — a filter that silently resets is a filter the

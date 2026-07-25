@@ -9,7 +9,7 @@
 [![Pages](https://github.com/cell-observatory/claude-observatory/actions/workflows/pages.yml/badge.svg)](https://github.com/cell-observatory/claude-observatory/actions/workflows/pages.yml)
 [![Release](https://github.com/cell-observatory/claude-observatory/actions/workflows/release.yml/badge.svg)](https://github.com/cell-observatory/claude-observatory/actions/workflows/release.yml)
 [![Dependabot](https://img.shields.io/badge/dependabot-enabled-025E8C?logo=dependabot&logoColor=white)](https://github.com/cell-observatory/claude-observatory/blob/main/.github/dependabot.yml)
-[![Version](https://img.shields.io/badge/version-v0.8.8-blue)](https://github.com/cell-observatory/claude-observatory/releases/latest)
+[![Version](https://img.shields.io/badge/version-v0.8.9-blue)](https://github.com/cell-observatory/claude-observatory/releases/latest)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/cell-observatory/claude-observatory/blob/main/LICENSE)
 
 
@@ -19,7 +19,8 @@
 **Per-edit Keep / Undo for [Claude Code](https://claude.com/claude-code).** Every file change Claude makes
 becomes a reviewable entry with its own surgical undo — in your **terminal**, **VS Code**, and **JetBrains
 IDEs** — at **zero extra Claude tokens**. The review model resembles Cursor's per-change keep/undo, but it
-is standalone, shareable, and git-free.
+is standalone, shareable, and git-free. It is built for **established and mission-critical codebases**
+rather than throwaway prototypes.
 
 ![The observatory in VS Code: the Claude Edits sidebar (Edits · Diffs · File History · Actions), inline review in the editor, the Claude Observatory bottom panel (Prompts · Overview · Stats), and the microscope scoreboard in the status bar](docs/media/layout.png)
 
@@ -30,7 +31,24 @@ is standalone, shareable, and git-free.
 
 </details>
 
-**New in 0.8.8 — prompts, tasks, sessions, and a defined vocabulary.** The observatory groups a session's
+**New in 0.8.9 — demo mode, in both editors.** The demo simulator has existed since 0.8.0, but only in the
+terminal. It is now one command away in **VS Code** and **JetBrains**: **Start Demo Mode** replays a
+scripted Claude Code session through the real capture pipeline while you watch the panels fill, then opens
+a **guided tour** — forty-one steps over every panel and named feature, or thirteen if you pick the
+short track — that activates the panel it is describing and rings the exact control it names. The
+step's text stays in the tour window; only the outline is drawn in the panel. It plays itself at a
+readable pace, and any control that moves the tour — Next, Back, a step jump — hands you the wheel; a
+step that asks you to do something performs it after a countdown if you would rather just watch. The replay is cancellable, starting it again **resets** it,
+and **Exit Demo** removes every trace it wrote. Nothing calls a model, and the capture hooks need not be
+installed, so it is the first thing you can try. The simulated session now runs to three prompts, six
+tasks and nine edits, and covers the cases whose panels could previously only render an empty state: a
+second agent in a sibling worktree with a live file collision, a deletion, a failed tool call, a write
+outside the workspace, a failing background shell, and a three-phase workflow run.
+
+<details>
+<summary><b>New in 0.8.8</b> — prompts, tasks, sessions, and a defined vocabulary</summary>
+
+The observatory groups a session's
 work two ways, and names both. A **prompt** is one of your own turns together with the work it caused,
 attributed by what it **started**; picking one in the **Prompts** window scopes the whole Overview to it.
 A **task** is one of Claude's own numbered to-dos, and it owns only the edits captured while that task was
@@ -45,6 +63,8 @@ vocabulary the observatory is built from — the record, the two groupings of a 
 the agents, the audits, and the review verbs — and every prose surface uses it consistently, in the
 register described in [docs/STYLE.md](docs/STYLE.md).
 
+</details>
+
 The rest of the Overview is as it has been since 0.8.0. Claude running in several git **worktrees** of one
 repo unifies into a single **fleet** under the **Fleet** tab, each agent with a live **phase** and its
 nested **subagents**; the detail pane is the selected item's **change-map**. Still **zero extra Claude
@@ -55,13 +75,14 @@ pointer files, never the git binary.
 
 ## Why use it?
 
-Claude can change dozens of files in one turn. On code that matters, a giant diff skimmed at the end is
-not review. The observatory keeps you **in the loop on every edit**, deciding one change at a time.
+Claude can change dozens of files in one turn. On established and mission-critical codebases, a giant
+diff skimmed at the end is not review. The observatory keeps you **in the loop on every edit**, deciding
+one change at a time.
 
 - **Surgical review of AI edits** — accept, undo, or diff each change individually; undo one edit while
   keeping later edits to the same file.
-- **Critical-infrastructure work** — keep a human in the loop when Claude touches code you cannot afford to
-  get wrong.
+- **Established and mission-critical codebases** — keep a human in the loop when Claude touches code whose
+  failure is expensive.
 - **Any surface** — the same store is read/written by the CLI, the VS Code sidebar, and the JetBrains
   plugin, so terminal and editor stay in sync (great for remote/SSH/devcontainers where Claude runs on a host).
 - **Shareable & auditable** — a git-free content-addressed log of what the agent did and what you decided,
@@ -90,13 +111,14 @@ Observatory** view in your editor (or run `claude-observatory list`) to review.
 
 **Try it without Claude** — the same scenario is clickable in the browser on the
 **[interactive demo](https://cell-observatory.github.io/claude-observatory/demo.html)** page, nothing to
-install. Locally, `claude-observatory demo` replays a scripted session through the real
-pipeline in an isolated `demo-*` session and an `observatory-demo/` folder it creates in the current
-directory: open the Overview and watch
-tasks, fleet rows, and observations fill in live, then review the edits for real.
-`claude-observatory demo --clean` removes every trace.
+install. In your editor, run **Start Demo Mode** from the VS Code command palette or JetBrains Find Action, use
+the button on the Edits panel's toolbar, or click **Try the demo** in the empty Edits panel. It replays a scripted
+session through the real pipeline in an isolated `demo-*` session and an `observatory-demo/` folder it
+creates in the current directory, then walks you through every panel. In the terminal the same replay is
+`claude-observatory demo`, and `claude-observatory demo --tour` prints the tour as prose. Starting it
+again resets it; **Exit Demo Mode** (or `claude-observatory demo --clean`) removes every trace.
 
-![claude-observatory demo — the simulator narrates each beat (prompt, plan, three tasks, a subagent, a workflow, recap) and leaves five pending edits to review](docs/media/demo.png)
+![claude-observatory demo — the simulator narrates each beat (three prompts, the plan, tasks 1–4, a failed call, a subagent, a second agent on demo/hotfix, a workflow run, the recap) and ends with nine pending edits in observatory-demo/, pointing at demo --tour and demo --clean](docs/media/demo.png)
 
 **Prefer to let Claude install it?** Paste this prompt into a Claude Code session:
 
@@ -115,8 +137,8 @@ take effect on a fresh session — after installing, tell me to quit you, run
 
 ## The observatory
 
-The observatory is built for surgical Claude use on critical infrastructure: you see every change as it
-lands and accept, edit, or revert each one while Claude accelerates the work. Every surface below ships in
+The observatory is built for surgical Claude use on established and mission-critical codebases: you see
+every change as it lands and accept, edit, or revert each one while Claude accelerates the work. Every surface below ships in
 **both editors**, and most ship in the terminal as well. The terms used here — session, prompt, task,
 edit, action — are defined on the
 **[Concepts](https://cell-observatory.github.io/claude-observatory/concepts.html)** page.

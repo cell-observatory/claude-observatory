@@ -8,6 +8,7 @@ import com.cellobservatory.observatory.model.SessionsParser
 import com.cellobservatory.observatory.model.relTime
 import com.cellobservatory.observatory.model.UndoResult
 import com.cellobservatory.observatory.services.ObservatoryService
+import com.cellobservatory.observatory.ui.tour.TourController
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
 import com.intellij.openapi.application.ApplicationManager
@@ -22,6 +23,7 @@ import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VfsUtil
 import com.intellij.openapi.wm.WindowManager
 import com.intellij.util.concurrency.EdtScheduledExecutorService
+import java.io.File
 import java.util.concurrent.TimeUnit
 
 /**
@@ -560,12 +562,7 @@ object ReviewOps {
             .createPopupChooserBuilder(labelToId.keys.toList())
             .setTitle("Review which session?")
             .setSelectedValue(selected, true)
-            .setItemChosenCallback { chosen ->
-                settings.state.session = labelToId[chosen]
-                for (p in com.intellij.openapi.project.ProjectManager.getInstance().openProjects) {
-                    ObservatoryService.getInstance(p).refresh()
-                }
-            }
+            .setItemChosenCallback { chosen -> applySessionChoice(project, labelToId[chosen]) }
             .createPopup()
     }
 
@@ -623,6 +620,171 @@ object ReviewOps {
         ProgressManager.getInstance().run(object : Task.Backgroundable(project, title, false) {
             override fun run(indicator: ProgressIndicator) = work()
         })
+    }
+
+    /** Cancellable sibling of [runBg] — the replay is ~20 s and Cancel has to actually stop it. */
+    private fun runBgCancellable(project: Project, title: String, work: (ProgressIndicator) -> Unit) {
+        ProgressManager.getInstance().run(object : Task.Backgroundable(project, title, true) {
+            override fun run(indicator: ProgressIndicator) = work(indicator)
+        })
+    }
+
+    // --- demo mode (0.8.9) ---------------------------------------------------------------------------
+
+    /**
+     * Replay the demo session and open the guided tour. Starting it again RESETS it: core clears any
+     * previous demo for this folder before replaying, so Start and Restart are the same operation and
+     * the two cannot drift apart.
+     *
+     * Streamed rather than spawn-and-waited, so the progress bar narrates each beat, the panels refresh
+     * as the beats land, and Cancel stops the run instead of detaching from it.
+     */
+    fun startDemo(project: Project) {
+        val root = project.basePath
+        if (root == null) {
+            notify(project, "Open a project first — the demo records against a workspace.", NotificationType.WARNING)
+            return
+        }
+        TourController.getInstance(project).stop() // a restart mid-tour starts the tour over too
+        // `commonDir` is core's; the CLI reports the same fact by leaving `sibling` null, so ask it once
+        // up front rather than inferring "no fleet" from an empty tab later.
+        val noRepo = !File(root).let { generateSequence(it) { d -> d.parentFile }.any { File(it, ".git").exists() } }
+        runBgCancellable(project, "Replaying a Claude Observatory demo") { indicator ->
+            indicator.isIndeterminate = true
+            val res = ObservatoryCli.demoStreaming(emptyList(), root, { indicator.isCanceled }) { line ->
+                indicator.text2 = line
+                ApplicationManager.getApplication().invokeLater {
+                    if (!project.isDisposed) ObservatoryService.getInstance(project).refresh(force = true)
+                }
+            }
+            val cancelled = indicator.isCanceled
+            ApplicationManager.getApplication().invokeLater {
+                if (project.isDisposed) return@invokeLater
+                // The demo wrote real files; pull them into VFS or the editors show yesterday's tree.
+                refreshRecursive(root)
+                val session = ObservatoryCli.demoSessionFrom(res.stdout) ?: ObservatoryCli.demoSession(root)
+                ObservatoryService.getInstance(project).demoSessionOverride = session
+                when {
+                    // A run that exited non-zero left a PARTIAL demo, and a resolvable session id is not
+                    // evidence it finished — reporting success there sends the tour on to narrate panels
+                    // the aborted run never populated.
+                    (session == null || !res.ok) && !cancelled ->
+                        notify(project, "The demo did not finish — ${res.stderr.take(160).ifBlank { "the claude-observatory CLI reported no reason" }}", NotificationType.ERROR)
+                    // Stopping is not a failure and not a dead end: what landed is real, and both ways
+                    // out are one CLICK away, not merely named in prose.
+                    cancelled -> NotificationGroupManager.getInstance()
+                        .getNotificationGroup("Claude Observatory")
+                        .createNotification("Demo stopped. What landed is real and reviewable.", NotificationType.INFORMATION)
+                        .addAction(com.intellij.openapi.actionSystem.ActionManager.getInstance().getAction("ClaudeObservatory.RestartDemo"))
+                        .addAction(com.intellij.openapi.actionSystem.ActionManager.getInstance().getAction("ClaudeObservatory.ExitDemo"))
+                        .notify(project)
+                    else -> {
+                        // The fleet correlates on a repo key, so outside a git repo there is nothing to
+                        // correlate — say so, rather than letting the tour's Fleet step describe two
+                        // agents over an empty tab.
+                        if (noRepo) notify(project, "This folder is not a git repository, so the Fleet tab has no worktrees to correlate. Every other panel is populated.")
+                        TourController.getInstance(project).start { msg -> notify(project, msg, NotificationType.WARNING) }
+                    }
+                }
+            }
+        }
+    }
+
+    /** Leave demo mode and remove every trace: both sessions, their stores, the demo folder, and the
+     *  report the scenario wrote outside the workspace. */
+    fun exitDemo(project: Project) {
+        val root = project.basePath
+        TourController.getInstance(project).stop()
+        ObservatoryService.getInstance(project).demoSessionOverride = null
+        // Close the demo's files FIRST. The tour deliberately opens one, and a buffer saved after the
+        // folder is deleted recreates a file inside it — taking the `.observatory-demo` sentinel's tree
+        // with it, so nothing may ever delete that folder again. Nothing in a demo file is worth keeping.
+        val ws = root?.let { File(it, "observatory-demo").path }
+        if (ws != null) {
+            val fem = FileEditorManager.getInstance(project)
+            fem.openFiles.filter { it.path.startsWith(ws + File.separator) }.forEach { fem.closeFile(it) }
+        }
+        runBg(project, "Removing the demo…") {
+            val r = ObservatoryCli.demoClean(root)
+            ApplicationManager.getApplication().invokeLater {
+                if (project.isDisposed) return@invokeLater
+                root?.let { refreshRecursive(it) }
+                ObservatoryService.getInstance(project).refresh(force = true)
+                // Report what was REMOVED, not what removal was attempted: cleanup is best-effort per
+                // item, so a locked or read-only folder makes "the folder is gone" a false claim.
+                val removed = if (r.ok) parseCleanResult(r.stdout) else null
+                when {
+                    removed == null -> notify(project, "Could not remove the demo — ${r.stderr.take(160)}", NotificationType.ERROR)
+                    removed.isEmpty() -> notify(project, "Nothing to remove — no demo is recorded for this folder.")
+                    else -> notify(project, "Demo removed — ${removed.joinToString(", ")}.")
+                }
+            }
+        }
+    }
+
+    /** What `demo --clean --json` says it actually reclaimed, as phrases for the confirmation. */
+    private fun parseCleanResult(stdout: String): List<String>? = try {
+        val o = com.google.gson.JsonParser.parseString(stdout).asJsonObject
+        fun n(k: String) = o.getAsJsonArray(k)?.size() ?: 0
+        buildList {
+            if (n("sessions") > 0) add("${n("sessions")} session(s)")
+            if (n("workspaces") > 0) add("the observatory-demo folder")
+            if (n("scratch") > 0) add("the report it wrote outside the workspace")
+        }
+    } catch (_: Exception) {
+        null
+    }
+
+    /** True when the panels are currently showing a demo session — including one a crashed IDE left
+     *  behind, since demo mode persists no state of its own. Gates the Restart/Exit actions. */
+    fun demoPresent(project: Project): Boolean {
+        val service = ObservatoryService.getInstance(project)
+        if (service.demoSessionOverride != null) return true
+        if (ObservatoryCli.isDemoSession(service.currentSession())) return true
+        // Session resolution follows the newest transcript, so one real Claude turn after a demo — or a
+        // window that crashed mid-demo — would otherwise hide Exit at exactly the moment it is needed.
+        // Answered from the store reader, not the CLI: this runs from `update()` on every toolbar paint.
+        return demoOnDisk(project)
+    }
+
+    /** Cheap, cached check for a demo recorded under this project, for the action `update()` path. */
+    private val demoOnDiskCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, Boolean>>()
+
+    private fun demoOnDisk(project: Project): Boolean {
+        val base = project.basePath ?: return false
+        val now = System.currentTimeMillis()
+        demoOnDiskCache[base]?.let { (at, v) -> if (now - at < 3_000) return v }
+        val found = runCatching {
+            java.nio.file.Files.list(com.cellobservatory.observatory.core.ClaudePaths.projectDir(base)).use { s ->
+                s.map { it.fileName.toString() }
+                    .filter { it.endsWith(".jsonl") }
+                    .anyMatch { ObservatoryCli.isDemoSession(it.removeSuffix(".jsonl")) }
+            }
+        }.getOrDefault(false)
+        demoOnDiskCache[base] = now to found
+        return found
+    }
+
+    /**
+     * The single place a session choice is applied. While demo mode is on it moves the IN-MEMORY
+     * override; otherwise it writes the persisted pin as before.
+     *
+     * Two reasons this has to be one function. A pin written during a demo would be invisible — the
+     * override wins in `currentSession()`, so the Sessions tab would look broken exactly where the tour
+     * says "selecting one switches the whole observatory to it". And it would OUTLIVE the demo: Exit
+     * clears the override and deletes the session, leaving every panel pinned to a session that no
+     * longer exists, which is the failure the override was introduced to avoid.
+     */
+    fun applySessionChoice(project: Project, id: String?) {
+        val service = ObservatoryService.getInstance(project)
+        if (service.demoSessionOverride != null) {
+            service.demoSessionOverride = id // its setter already forces the refresh
+            return
+        }
+        com.cellobservatory.observatory.settings.ObservatorySettings.instance.state.session = id
+        for (p in com.intellij.openapi.project.ProjectManager.getInstance().openProjects) {
+            ObservatoryService.getInstance(p).refresh(force = true)
+        }
     }
 
     /** Every mutating op lands here, so this is where the refresh is FORCED: the throttled views must not

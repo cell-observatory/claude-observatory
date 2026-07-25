@@ -1370,37 +1370,111 @@ function cmdTaskClear(args: string[]): void {
 async function cmdDemo(args: string[]): Promise<void> {
   const core = require('@claude-observatory/core') as Core;
   const dir = flagValue(args, '--dir');
+  const json = args.includes('--json');
+  // The tour's script, printed rather than replayed. Both editors read the --json form, so the tour
+  // they render and the one this prints can never be two different tours.
+  if (args.includes('--tour')) {
+    // Three tracks over ONE script: `essentials` is the marked subset, `remainder` its exact complement
+    // (so finishing the short track can resume rather than restart), both in script order.
+    if (args.includes('--essentials') && args.includes('--remainder')) {
+      fail('`demo --tour` takes --essentials or --remainder, not both — they are complementary halves of one script');
+    }
+    const track = args.includes('--essentials') ? 'essentials' : args.includes('--remainder') ? 'remainder' : 'everything';
+    const steps = core.demoTour(track);
+    if (json) {
+      emitJson({ track, steps, sizes: core.demoTrackSizes(), blurb: core.demoTrackBlurb(track) });
+      return;
+    }
+    steps.forEach((s, i) => {
+      const where = s.view === 'overview' ? `Overview · ${s.tab}` : s.view;
+      process.stdout.write(`\n${c.bold(`${i + 1}. ${s.title}`)}  ${c.dim(`— ${where}`)}\n`);
+      for (const line of wrapText(s.body, 76)) process.stdout.write(`   ${line}\n`);
+      // The one-line gloss both editors render under the body. Dropping it here made the printed tour
+      // quietly shorter than the driven one, which is exactly the drift core owning the script prevents.
+      if (s.tip) for (const line of wrapText(s.tip, 76)) process.stdout.write(c.dim(`   ${line}\n`));
+      if (s.tryIt) for (const line of wrapText(`try: ${s.tryIt}`, 76)) process.stdout.write(c.dim(`   ${line}\n`));
+      // The same two labels the editors' panels use, so the printed tour and the driven one read alike.
+      if (s.action) {
+        const label = s.action.mode === 'auto' ? 'the tour does this:' : 'your turn:';
+        const text = s.action.mode === 'auto' ? s.action.done ?? s.action.hint : s.action.hint;
+        for (const line of wrapText(`${label} ${text}`, 76)) process.stdout.write(c.cyan(`   ${line}\n`));
+      }
+    });
+    const sizes = core.demoTrackSizes();
+    process.stdout.write(c.dim(`\n${core.demoTrackBlurb(track)}\n`));
+    process.stdout.write(
+      c.dim(
+        `${steps.length} steps · start the session they describe with: claude-observatory demo\n` +
+          (track === 'everything'
+            ? `  the short track is ${sizes.essentials} of these: demo --tour --essentials\n`
+            : track === 'essentials'
+              ? `  the other ${sizes.remainder}: demo --tour --remainder   ·   all ${sizes.everything}: demo --tour\n`
+              : `  all ${sizes.everything} steps: demo --tour\n`)
+      )
+    );
+    return;
+  }
+  // Keep a running demo inside the fleet's 60s active window while a tour explains it (mtime only —
+  // nothing is written, no activity is invented). The editors call this on each step advance.
+  if (args.includes('--touch')) {
+    const touched = core.demoHeartbeat({ dir: dir || undefined });
+    if (json) emitJson({ touched });
+    else process.stdout.write(c.dim(`touched ${touched.length} demo transcript(s)\n`));
+    return;
+  }
   if (args.includes('--clean')) {
     const res = core.cleanDemo({ dir: dir || undefined });
-    if (args.includes('--json')) {
+    if (json) {
       emitJson(res);
+      return;
+    }
+    if (!res.sessions.length && !res.workspaces.length && !res.scratch.length) {
+      process.stdout.write(c.dim('nothing to remove — no demo recorded for this folder\n'));
       return;
     }
     process.stdout.write(
       c.green('✓ ') +
         `removed ${res.sessions.length} demo session(s)` +
         (res.workspaces.length ? ` and ${res.workspaces.map(relFile).join(', ')}` : '') +
+        (res.scratch.length ? ` and ${res.scratch.length} scratch dir(s)` : '') +
         '\n'
     );
     return;
   }
+  // `demo --status --json` — does a demo exist for this folder? The editors ask so they can keep
+  // offering Exit after session resolution has moved on to a real session.
+  if (args.includes('--status')) {
+    const sessions = core.demoSessionsFor({ dir: dir || undefined });
+    if (json) emitJson({ sessions });
+    else process.stdout.write(sessions.length ? `${sessions.length} demo session(s): ${sessions.join(', ')}\n` : 'no demo recorded for this folder\n');
+    return;
+  }
   const speedRaw = flagValue(args, '--speed');
   const speed = speedRaw ? parseFloat(speedRaw) : undefined;
-  const json = args.includes('--json');
-  const res = await core.runDemo({
-    dir: dir || undefined,
-    fast: args.includes('--fast'),
-    speed,
-    log: json ? undefined : (line) => process.stdout.write(c.dim(line) + '\n'),
-  });
+  let res: Awaited<ReturnType<Core['runDemo']>>;
+  try {
+    res = await core.runDemo({
+      dir: dir || undefined,
+      fast: args.includes('--fast'),
+      speed,
+      fleet: !args.includes('--no-fleet'),
+      log: json ? undefined : (line) => process.stdout.write(c.dim(line) + '\n'),
+    });
+  } catch (e) {
+    // A refused `--dir`, a read-only parent, a vanished cwd. These are the user's mistakes to correct,
+    // so they get a sentence — never a stack trace.
+    fail(e instanceof Error ? e.message : String(e));
+  }
   if (json) {
     emitJson(res);
     return;
   }
   process.stdout.write(
     c.green('✓ ') +
-      `demo session ${res.session} is live — ${res.edits} pending edits in ${relFile(res.workspace)}\n` +
-      c.dim('  open the Overview / Observations panels, review the edits, then: claude-observatory demo --clean\n')
+      `demo session ${res.session} is live — ${res.edits} pending edits in ${relFile(res.workspace)}` +
+      (res.sibling ? ', plus a second agent on demo/hotfix' : '') +
+      '\n' +
+      c.dim('  guided tour: claude-observatory demo --tour   ·   remove every trace: claude-observatory demo --clean\n')
   );
 }
 
@@ -2475,11 +2549,18 @@ function usage(): void {
       `  task-undo <taskId>   revert every pending edit in a task's strict in-progress span (--json)\n` +
       `  task-clear <taskId>  drop a task's resolved (kept/undone) edits (--json);\n` +
       `                       --completed clears every settled task (edits present, all kept)\n` +
-      `  demo [--fast] [--speed <n>] [--dir <folder>] [--json]\n` +
-      `                       simulate a Claude session LIVE (a real transcript + captured edits + a\n` +
-      `                       subagent + a workflow in an isolated demo-* session and folder) — watch\n` +
-      `                       every panel update, then review/undo for real; --fast for scripts/tests;\n` +
-      `                       demo --clean removes every trace (sessions, store, demo folder)\n` +
+      `  demo [--fast] [--speed <n>] [--dir <folder>] [--no-fleet] [--json]\n` +
+      `                       simulate a Claude session LIVE in an isolated demo-* session and folder:\n` +
+      `                       a real transcript + captured edits + a subagent + a three-phase workflow\n` +
+      `                       + a second agent in a sibling worktree — watch every panel update, then\n` +
+      `                       review/undo for real; --fast for scripts/tests, --no-fleet for one agent.\n` +
+      `                       Running it again RESETS the demo (it replaces any previous demo here)\n` +
+      `  demo --tour [--essentials | --remainder] [--json]\n` +
+      `                       the guided tour: what to look at, panel by panel. --essentials is the\n` +
+      `                       short track through the same script; --remainder is its exact complement\n` +
+      `  demo --touch [--json]  keep a running demo inside the fleet's active window (mtime only)\n` +
+      `  demo --clean [--json]  remove every trace (both sessions, stores, demo folder, scratch dir)\n` +
+      `  demo --status [--json] whether a demo is recorded for this folder\n` +
       `  clean [opts]         GC orphaned blobs (--session <id> scopes; --json for structured output);\n` +
       `                       --drop <id> | --older-than <Nd> | --all | --resolved [--under <path> | --ids <a,b,c>]\n` +
       `  stats [--json]       usage stats (edits/tokens/messages/thinking/output) by session & window\n` +

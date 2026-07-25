@@ -165,6 +165,9 @@ const frame = ({ tab = 'fleet', agent, wf, tasks, sessions, mods, files, empty, 
 const T1 = 'Add feature scaling to the pipeline';
 const T2 = 'Validate the training dataset';
 const T3 = 'Tests and docs';
+const T4 = 'Retire the legacy scaler';
+const T5 = 'Profile the pipeline';
+const T6 = 'Tune the scaler for sparse columns'; // the sixth, still in progress when the demo ends
 const beats = [
   {
     tab: 'tasks',
@@ -173,6 +176,9 @@ const beats = [
       { g: '\u25D0', gc: Y, num: 1, title: T1, m: '' },
       { g: '\u25CB', gc: F, num: 2, title: T2, m: '' },
       { g: '\u25CB', gc: F, num: 3, title: T3, m: '' },
+      { g: '\u25CB', gc: F, num: 4, title: T4, m: '' },
+      { g: '\u25CB', gc: F, num: 5, title: T5, m: '' },
+      { g: '\u25CB', gc: F, num: 6, title: T6, m: '' },
     ],
     empty: 'No edits yet. This fills in as Claude edits files.',
   },
@@ -183,6 +189,9 @@ const beats = [
       { g: '\u25D0', gc: Y, num: 1, title: T1, m: '+9 \u22123', pending: '2\u29D7' },
       { g: '\u25CB', gc: F, num: 2, title: T2, m: '' },
       { g: '\u25CB', gc: F, num: 3, title: T3, m: '' },
+      { g: '\u25CB', gc: F, num: 4, title: T4, m: '' },
+      { g: '\u25CB', gc: F, num: 5, title: T5, m: '' },
+      { g: '\u25CB', gc: F, num: 6, title: T6, m: '' },
     ],
     mods: [['observatory-demo', Y]],
     files: [
@@ -197,6 +206,9 @@ const beats = [
       { g: '\u25CF', gc: G, num: 1, title: T1, m: '+9 \u22123', pending: '2\u29D7' },
       { g: '\u25D0', gc: Y, num: 2, title: T2, m: '+7 \u22120', pending: '1\u29D7' },
       { g: '\u25CB', gc: F, num: 3, title: T3, m: '' },
+      { g: '\u25CB', gc: F, num: 4, title: T4, m: '' },
+      { g: '\u25CB', gc: F, num: 5, title: T5, m: '' },
+      { g: '\u25CB', gc: F, num: 6, title: T6, m: '' },
     ],
     mods: [['observatory-demo', Y], ['src/models', Y]],
     files: [
@@ -236,6 +248,9 @@ const beats = [
       { g: '\u25CF', gc: G, num: 1, title: T1, m: '+9 \u22123' },
       { g: '\u25CF', gc: G, num: 2, title: T2, m: '+7 \u22120' },
       { g: '\u25D0', gc: Y, num: 3, title: T3, m: '+24 \u22120', pending: '2\u29D7' },
+      { g: '\u25CB', gc: F, num: 4, title: T4, m: '' },
+      { g: '\u25CB', gc: F, num: 5, title: T5, m: '' },
+      { g: '\u25CB', gc: F, num: 6, title: T6, m: '' },
     ],
     mods: [['docs', Y], ['tests', Y], ['observatory-demo', G], ['src/models', G]],
     files: [

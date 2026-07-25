@@ -134,6 +134,29 @@ private fun usedOfTotal(tok: Double?, pct: Double?): String? {
  */
 class StatsPanel(private val project: Project) : JPanel(BorderLayout()), com.intellij.openapi.Disposable {
 
+    /** Live panels by project, so the guided tour can ring a control this panel owns. Same shape as
+     *  ChangeMapPanel's registry — the panel is created by a tool-window factory and has no other
+     *  identity. Entries drop when the project closes. */
+    companion object Registry {
+        private val live = java.util.concurrent.ConcurrentHashMap<Project, StatsPanel>()
+        fun of(project: Project): StatsPanel? = live[project]
+        internal fun remember(project: Project, panel: StatsPanel) {
+            live[project] = panel
+            com.intellij.openapi.util.Disposer.register(project) { live.remove(project, panel) }
+        }
+    }
+
+    /** The component a tour step's anchor names, or null when this panel does not own that name — the
+     *  tour asks every panel and rings whichever one answers. */
+    fun tourAnchor(anchor: String?): javax.swing.JComponent? = when (anchor) {
+        "stats-model" -> vitalsChip
+        "stats-compaction" -> compactionLine
+        "stats-tokens", "stats-cache" -> tokenStrip
+        "stats-usage" -> usageBars
+        "stats-review" -> scoreboard
+        else -> null
+    }
+
     private var series: Map<String, List<Bucket>> = emptyMap()
     private var usage: Usage? = null
     private var range = "week"
@@ -189,6 +212,7 @@ class StatsPanel(private val project: Project) : JPanel(BorderLayout()), com.int
     }
 
     init {
+        Registry.remember(project, this) // so the guided tour can ring a control this panel owns
         val ranges = JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(4), JBUI.scale(4)))
         val group = ButtonGroup()
         for ((key, label) in listOf("today" to "Today", "week" to "7 days", "month" to "30 days")) {

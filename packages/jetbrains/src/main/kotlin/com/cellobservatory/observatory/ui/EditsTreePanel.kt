@@ -109,6 +109,7 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
             !com.cellobservatory.observatory.core.ClaudePaths.hooksInstalled() -> {
                 tree.emptyText.appendLine("No tracked Claude edits yet")
                 tree.emptyText.appendLine("Run `claude-observatory init`, then let Claude Code edit.")
+                tryTheDemoLine()
             }
             else -> {
                 // Hooks are fine — never imply otherwise. A fresh session with prior work gets a
@@ -135,10 +136,7 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
                         "Switch to previous session (${prior.id.take(8)} · ${prior.edits} edits)",
                         com.intellij.ui.SimpleTextAttributes.LINK_ATTRIBUTES
                     ) {
-                        com.cellobservatory.observatory.settings.ObservatorySettings.instance.state.session = prior.id
-                        for (p in com.intellij.openapi.project.ProjectManager.getInstance().openProjects) {
-                            com.cellobservatory.observatory.services.ObservatoryService.getInstance(p).refresh()
-                        }
+                        ReviewOps.applySessionChoice(project, prior.id)
                     }
                     tree.emptyText.appendLine(
                         "Pick a session…",
@@ -146,6 +144,7 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
                     ) { ReviewOps.chooseSession(project, tree) }
                 } else {
                     tree.emptyText.appendLine("No edits in this session yet.")
+                    tryTheDemoLine()
                     tree.emptyText.appendLine("Let Claude edit a file and it will appear here.")
                 }
             }
@@ -229,6 +228,15 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
             action("Search Edits", NavTint.SEARCH) { searchEdits() },
             action("Review Previous Pending Edit", AllIcons.Actions.Back) { reviewPrev() },
             action("Review Next Pending Edit", AllIcons.Actions.Forward) { reviewNext() },
+            // Demo mode (0.8.9) — reachable from the panel, not only from Find Action, and showing the
+            // verb that fits the state you are in (parity with the VS Code title-bar buttons).
+            demoAction("Start Demo Mode", AllIcons.Actions.Execute, wantDemo = false) { ReviewOps.startDemo(project) },
+            demoAction("Restart Demo", AllIcons.Actions.Restart, wantDemo = true) { ReviewOps.startDemo(project) },
+            demoAction("Guided Tour", AllIcons.Actions.Preview, wantDemo = true) {
+                com.cellobservatory.observatory.ui.tour.TourController.getInstance(project)
+                    .start { msg -> ReviewOps.notify(project, msg, com.intellij.notification.NotificationType.WARNING) }
+            },
+            demoAction("Exit Demo Mode", AllIcons.Actions.Cancel, wantDemo = true) { ReviewOps.exitDemo(project) },
             action("Accept All Edits", NavTint.ACCEPT_ALL) {
                 withSession { s -> ReviewOps.keepAll(project, s) }
             },
@@ -379,6 +387,32 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
 
     private fun action(text: String, icon: javax.swing.Icon, run: () -> Unit): AnAction =
         object : AnAction(text, null, icon), DumbAware {
+            override fun actionPerformed(e: AnActionEvent) = run()
+        }
+
+    /**
+     * The empty state's way into demo mode — the entry point that decides whether a first-time reader
+     * ever finds it. Offered even when the capture hooks are missing, because the replay drives the
+     * pipeline through the CLI directly and does not need them. Says "sidebar" rather than "every
+     * panel": the dock panels shell out to the CLI, so a machine without it on PATH fills the trees and
+     * the inline review and reports the missing CLI in the dock, which is what actually happens.
+     */
+    private fun tryTheDemoLine() {
+        if (ReviewOps.demoPresent(project)) return
+        tree.emptyText.appendLine(
+            "Try the demo — no Claude session needed",
+            com.intellij.ui.SimpleTextAttributes.LINK_ATTRIBUTES
+        ) { ReviewOps.startDemo(project) }
+    }
+
+    /** A demo-mode button, shown only in the state its verb belongs to: Start before a demo is running,
+     *  Restart and Exit while one is. Mirrors the VS Code title-bar `when` clauses. */
+    private fun demoAction(text: String, icon: javax.swing.Icon, wantDemo: Boolean, run: () -> Unit): AnAction =
+        object : AnAction(text, null, icon), DumbAware {
+            override fun getActionUpdateThread() = ActionUpdateThread.BGT
+            override fun update(e: AnActionEvent) {
+                e.presentation.isEnabledAndVisible = ReviewOps.demoPresent(project) == wantDemo
+            }
             override fun actionPerformed(e: AnActionEvent) = run()
         }
 

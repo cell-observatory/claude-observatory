@@ -91,7 +91,11 @@ const res = await core.runDemo({
   },
 });
 sessionId = res.session;
-snap('✓ demo complete — 3 tasks, a subagent, a workflow, 5 pending edits');
+// Derived, not typed: a hardcoded caption is a claim the scenario can falsify without anything failing.
+snap(
+  `✓ demo complete — ${core.DEMO_TASKS} tasks, a subagent, a 3-phase workflow, ${res.edits} pending edits` +
+    (res.sibling ? ', and a second agent on demo/hotfix' : '')
+);
 console.log(`  ${frames.length} beats captured from ${res.session}`);
 
 // --- the REVIEW sequence: real task ops against the demo store, one snapshot per decision -----------

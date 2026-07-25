@@ -1036,15 +1036,21 @@ const scenes = {
       <div class="titlebar"><span class="tl" style="background:#ff5f57"></span><span class="tl" style="background:#febc2e"></span><span class="tl" style="background:#28c840"></span><span class="t">demo — claude-observatory</span></div>
       <div class="term">
         <div class="cmd"><span class="pr">$</span>claude-observatory <span class="fl">demo</span></div>
-        <div class="out">▸ prompt — asking Claude to extend the training pipeline</div>
-        <div class="out">▸ plan — three to-dos + the numbered task list</div>
+        <div class="out">▸ prompt 1 — asking Claude to extend the training pipeline</div>
+        <div class="out">▸ plan — the to-dos and the numbered task list</div>
         <div class="out">▸ task 1 — feature scaling (2 edits)</div>
+        <div class="out">▸   … the sanity run FAILS — the failed call the audit counts</div>
         <div class="out">▸ task 2 — dataset validation</div>
+        <div class="out">▸ a second agent picks up a hotfix in a sibling worktree</div>
+        <div class="out">▸ prompt 2 — asking for the tests, the docs, and the old scaler gone</div>
         <div class="out">▸ task 3 — tests, written by a <span class="file2">subagent</span></div>
-        <div class="out">▸ a <span class="file2">workflow</span> run starts — documentation, one level above the subagents</div>
+        <div class="out">▸ a <span class="file2">workflow</span> run starts — three phases, one level above the subagents</div>
+        <div class="out">▸ task 4 — the legacy scaler is deleted (captured by the Bash path)</div>
+        <div class="out">▸ prompt 3 — asking for a profiling report</div>
         <div class="out">▸ recap — plan complete, next steps surfaced</div>
-        <div class="out"><span class="ok">✓</span> demo session <span class="id2">demo-3cc31d01</span> is live — <span class="warn">5 pending edits</span> in observatory-demo/</div>
-        <div class="out">  open the Overview / Observations panels, review the edits, then: <span class="fl">demo --clean</span></div>
+        <div class="out"><span class="ok">✓</span> demo session <span class="id2">demo-3cc31d01</span> is live — <span class="warn">9 pending edits</span> in observatory-demo/,</div>
+        <div class="out">  plus a second agent on demo/hotfix</div>
+        <div class="out">  guided tour: <span class="fl">demo --tour</span>   ·   remove every trace: <span class="fl">demo --clean</span></div>
         <div class="cmd"><span class="pr">$</span><span class="cursor">&nbsp;</span></div>
       </div>
     </div>`),
@@ -1060,7 +1066,7 @@ const SIZE = {
   'file-history': '768,130',
   multitasking: '868,218', 'overview-tabs': '908,266', prompts: '748,560',
   'overview-workflows': '868,196', 'overview-tasks': '868,168', 'win-overview': '1248,392',
-  sessions: '768,232', feed: '868,212', processes: '868,205', chat: '908,440', demo: '928,392',
+  sessions: '768,232', feed: '868,212', processes: '868,205', chat: '908,440', demo: '928,556',
 };
 const tmp = join(tmpdir(), 'obs-media');
 mkdirSync(tmp, { recursive: true });

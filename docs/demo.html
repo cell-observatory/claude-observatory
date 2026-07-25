@@ -251,9 +251,11 @@
   /* install cta */
   .center{text-align:center;margin-inline:auto;max-width:660px}
   .center .lede{margin-inline:auto;max-width:52ch}
-  .cmd{display:flex;align-items:center;gap:12px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:13px 12px 13px 16px;font-family:var(--mono);font-size:.9rem;overflow-x:auto;max-width:640px;margin:26px auto 0}
-  .cmd .pr{color:var(--accent);flex:none}
-  .cmd code{white-space:nowrap;color:var(--ink)}
+  .cmd{display:flex;align-items:center;gap:12px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:13px 12px 13px 16px;font-family:var(--mono);font-size:.9rem;flex-wrap:wrap;max-width:640px;margin:26px auto 0}
+  .cmd .pr{white-space:nowrap;flex:none;color:var(--accent)}
+  /* WRAP, never clip: a row narrower than its command used to scroll, which put the Copy button outside
+     the visible box on a phone and cut the command itself mid-word. */
+  .cmd code{white-space:pre-wrap;overflow-wrap:anywhere;color:var(--ink);flex:1 1 auto;min-width:0;text-align:left}
   .cmd .copy{margin-left:auto;flex:none;border:1px solid var(--line);background:var(--surface-2);color:var(--ink-soft);border-radius:7px;padding:5px 11px;font-family:var(--mono);font-size:.74rem;cursor:pointer;transition:.15s}
   .cmd .copy:hover{color:var(--ink);border-color:var(--ink-faint)}
   .cmd-note{font-family:var(--mono);font-size:.72rem;color:var(--ink-faint);margin-top:10px}
@@ -299,7 +301,7 @@
   <div class="wrap">
     <span class="eyebrow">Interactive demo</span>
     <h1>The full panels, <span class="hl">step by step</span></h1>
-    <p class="lede">A scripted replay of the bundled demo session over a small Python training pipeline, laid out the way it sits in the editor: the Claude Edits sidebar and the file on top, the Claude Observatory panels below. Nothing calls a model. The review clicks are yours, and each step applies itself after a short pause if you only watch.</p>
+    <p class="lede">Claude Observatory is built for established and mission-critical codebases. This is a scripted replay of its bundled demo session over a small Python training pipeline, laid out the way it sits in the editor: the Claude Edits sidebar and the file on top, the Claude Observatory panels below. Nothing calls a model. The review clicks are yours, and unless you have asked your system to reduce motion, each step applies itself after a short pause if you only watch. This is a shortened version: the demo bundled with the CLI and both editors runs to three prompts, six tasks and nine edits, and adds a second agent in a sibling worktree, a deletion, a failed tool call, a workflow still running and a write outside the workspace &mdash; run <code>claude-observatory demo</code>, or <b>Start Demo Mode</b> in your editor, to see it.</p>
   </div>
 </header>
 
@@ -315,7 +317,7 @@
         <span class="tcount" id="dcount"></span>
         <button class="tbtn" id="dplay" aria-label="Pause or resume the autoplay">❚❚</button>
         <button class="tbtn" id="drestart" aria-label="Restart the demo" title="Restart">↺</button>
-        <span class="tcount" style="min-width:auto;color:var(--ink-faint)">Auto-playing — click ❚❚ to pause</span>
+        <span class="tcount" id="dtransport" style="min-width:auto;color:var(--ink-faint)">Auto-playing — click ❚❚ to pause</span>
       </div>
     </div>
 
@@ -390,8 +392,13 @@
   <div class="wrap">
     <span class="eyebrow">Run it for real</span>
     <h2>The same session, in your editor</h2>
-    <p class="lede" style="margin-inline:auto;max-width:52ch">Once the observatory is installed, the bundled demo replays this exact scenario through the real capture pipeline — panels, lenses, and review included, still at zero tokens.</p>
+    <p class="lede" style="margin-inline:auto;max-width:52ch">The bundled demo replays through the real capture pipeline, in your own editor, at zero tokens. It goes further than this page: three prompts, six tasks and nine edits, a second agent holding the same file, a workflow still running, and a <b>guided tour</b> that drives the panels for you — forty-one steps, or thirteen if you are short of time.</p>
+    <div class="cmd"><span class="pr">VS&nbsp;Code</span><code>Claude Observatory: Start Demo Mode</code><button class="copy" data-copy="Claude Observatory: Start Demo Mode">Copy</button></div>
+    <p class="cmd-note">…from the command palette, the ▶ on the Edits panel, or <b>Try the demo</b> in the empty panel.</p>
+    <div class="cmd"><span class="pr">JetBrains</span><code>Claude Observatory: Start Demo Mode</code><button class="copy" data-copy="Claude Observatory: Start Demo Mode">Copy</button></div>
+    <p class="cmd-note">…from Find Action (<code>⇧⌘A</code>), the ▶ on the Edits panel, or the same empty-panel link.</p>
     <div class="cmd"><span class="pr">❯</span><code>claude-observatory demo</code><button class="copy" data-copy="claude-observatory demo">Copy</button></div>
+    <p class="cmd-note">In the terminal — and <code>demo --tour</code> prints the tour as prose (<code>--essentials</code> or <code>--remainder</code> for either half). The tour plays itself; Next, Back or a step jump hands you the wheel. <b>Exit Demo Mode</b> removes every trace.</p>
     <p class="cmd-note">Installation first — see <a href="showcase.html#install" style="color:var(--accent-ink);text-decoration:underline">Install Claude Observatory</a>.</p>
     <div class="install-cta">
       <a class="btn primary" href="getting-started.html">Getting started</a>
@@ -452,8 +459,11 @@
   })();
 
   // ---- the detailed scripted demo ----------------------------------------------------------------
-  // Mirrors the bundled `claude-observatory demo` scenario (packages/core/src/demo.ts): a Python
-  // training pipeline gains scaling + validation + tests + docs, then the visitor reviews it.
+  // A SHORTENED version of the bundled `claude-observatory demo` scenario
+  // (packages/core/src/demo.ts): a Python training pipeline gains scaling + validation + tests +
+  // docs, then the visitor reviews it. The bundled scenario goes further — three prompts, six
+  // tasks, nine edits, a sibling agent, a deletion, a failed call and a write outside the
+  // workspace — and the lede above says so rather than letting this page imply it is the whole of it.
   // State is DERIVED per step from (edits landed, gate decisions), so Back/Restart/dot-jumps always
   // re-render consistently. Autoplays by default; gates wait for the visitor's click.
   (function(){
@@ -572,7 +582,7 @@
       {ed:2,landed:5,gate:'acceptall',hint:'Click ✓ Accept All in the Overview toolbar.',
        narr:'Sweep the rest in one motion: <span class="hl">Accept All</span> resolves everything still pending. Accept Prompt narrows the same sweep to the work one prompt caused; in the editor, picking that prompt in the Prompts window scopes the whole Overview to it.'},
       {ed:1,landed:5,recap:true,
-       narr:'That is the whole loop: every edit tracked with its reasoning, reviewed one at a time or by file, folder, or prompt, and resolved without git. The plan is complete, the session has stopped writing, and its feed is now an audit log rather than a live tail. Run the same session in your own editor below — or start with the <a href="getting-started.html" style="color:var(--accent-ink);text-decoration:underline">recorded walkthrough</a>.'},
+       narr:'That is the whole loop: every edit tracked with its reasoning, reviewed one at a time or by file, folder, or prompt, and resolved without git. The plan is complete, the session has stopped writing, and its feed is now an audit log rather than a live tail. Run the same session in your own editor below — it goes further than this page, and the tour drives the panels for you — or start with the <a href="getting-started.html" style="color:var(--accent-ink);text-decoration:underline">recorded walkthrough</a>.'},
     ];
     var N=STEPS.length;
     var el=function(id){return document.getElementById(id);};
@@ -598,8 +608,18 @@
         updateHint();
       }else{ clearGateTimer(); if(armedStep===step) armedStep=-1; el('hint').textContent=''; }
       el('dcount').textContent=('0'+(step+1)).slice(-2)+' / '+('0'+N).slice(-2);
+      // The transport label depends on WHICH step you are on, not only on playing/paused — so it has to
+      // be recomputed here. Setting it only from stopPlay/startPlay left it reading "click ▸ to resume"
+      // on a finished demo, because the pause happened one step before the end.
+      setTransport();
+      // A finished walkthrough has nothing to resume: leaving ▸ live let it announce "Auto-playing" for
+      // 3.6s while nothing moved. ↺ is the control that applies here, and the transport line says so.
+      el('dplay').disabled=step===N-1;
       el('dback').disabled=step===0;
-      el('dnext').disabled=(step===N-1)||(!!st.gate&&!res[step]);
+      // Next is never disabled by a gate — it SKIPS it, exactly as the editors' tours relabel Next to
+      // "Skip". Disabling it left the only way forward on a control inside an aria-hidden mock toolbar.
+      el('dnext').disabled=step===N-1;
+      el('dnext').setAttribute('aria-label', (!!st.gate&&!res[step]) ? 'Skip this step' : 'Next step');
       var dots=el('ddots');
       if(!dots.childElementCount){
         STEPS.forEach(function(_,k){
@@ -794,12 +814,26 @@
     }
 
     function clearGateTimer(){ if(gateTimer){ clearInterval(gateTimer); gateTimer=null; } }
+    // The transport label used to be static markup that still read "Auto-playing" after you paused.
+    function setTransport(){
+      var t=el('dtransport'); if(!t) return;
+      t.textContent = (step >= N - 1 && !playing) ? 'That is the walkthrough — ↺ replays it'
+        : playing ? 'Auto-playing — click ❚❚ to pause' : 'Paused — click ▸ to resume';
+      // C6: the button's own label has to change with it, or a screen-reader user is told the same thing
+      // in every state.
+      var b=el('dplay'); if(b) b.setAttribute('aria-label', playing ? 'Pause the autoplay' : 'Resume the autoplay');
+    }
     function updateHint(){
       var st=STEPS[step];
-      el('hint').textContent=(st.gate&&!resolved[step])?(st.hint+' Applies automatically in '+gateLeft+'s.'):'';
+      if(!(st.gate&&!resolved[step])){ el('hint').textContent=''; return; }
+      // Paused: show what to click, but never a countdown that is not counting.
+      el('hint').textContent = playing ? (st.hint+' Applies automatically in '+gateLeft+'s.') : st.hint;
     }
     function armGate(){
       clearGateTimer();
+      // Only ever armed while playing. Every transport control is `stopPlay(); go(k);` and go() → render()
+      // re-arms, so without this a paused visitor still drifted forward one step per gate.
+      if(!playing) return;
       gateLeft=GATE_SECONDS;
       var s=step;
       gateTimer=setInterval(function(){
@@ -825,17 +859,32 @@
       render();
     }
     el('dback').addEventListener('click',function(){stopPlay();go(step-1);});
-    el('dnext').addEventListener('click',function(){stopPlay();go(step+1);});
+    el('dnext').addEventListener('click',function(){
+      stopPlay();
+      // Skipping an armed gate marks it resolved: the visitor said "move on", not "ask me again".
+      if(STEPS[step].gate&&!resolved[step]) resolved[step]=true;
+      go(step+1);
+    });
     el('drestart').addEventListener('click',function(){stopPlay();resolved={};step=0;render();});
     document.addEventListener('keydown',function(e){
       if(e.target&&/INPUT|TEXTAREA/.test(e.target.tagName))return;
-      if(e.key==='ArrowRight'&&!el('dnext').disabled){stopPlay();go(step+1);}
+      if(e.key==='ArrowRight'&&!el('dnext').disabled){stopPlay(); if(STEPS[step].gate&&!resolved[step]) resolved[step]=true; go(step+1);}
       if(e.key==='ArrowLeft'&&step>0){stopPlay();go(step-1);}
     });
-    function stopPlay(){playing=false;if(timer){clearInterval(timer);timer=null;}el('dplay').classList.remove('playing');el('dplay').textContent='▸';}
+    function stopPlay(){playing=false;if(timer){clearInterval(timer);timer=null;}
+      // Invalidate any advance resolveGate() has already queued. Without this, pausing in the ~1s after
+      // clicking Keep still slid the page one step forward while the transport read "Paused".
+      advanceTok++;
+      // Pause the GATE countdown too. Clearing only the step timer left a paused demo drifting forward
+      // one step per armed gate — and there are three in a row, so it slid 7→8→9→10 on its own.
+      clearGateTimer(); updateHint();
+      el('dplay').classList.remove('playing');el('dplay').textContent='▸';setTransport();}
     function startPlay(){
-      if(playing)return;
-      playing=true;el('dplay').classList.add('playing');el('dplay').textContent='❚❚';
+      if(playing||step>=N-1)return; // nothing left to play through
+      playing=true;el('dplay').classList.add('playing');el('dplay').textContent='❚❚';setTransport();
+      // Resuming on a gate step re-arms its countdown, which stopPlay() cleared.
+      var st0=STEPS[step]; if(st0.gate&&!resolved[step]){ armedStep=step; armGate(); }
+      updateHint();
       timer=setInterval(function(){
         var st=STEPS[step];
         if(st.gate&&!resolved[step])return; // the gate countdown owns this moment

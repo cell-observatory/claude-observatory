@@ -1,0 +1,749 @@
+package com.cellobservatory.observatory.ui.tour
+
+import com.cellobservatory.observatory.core.ObservatoryCli
+import com.cellobservatory.observatory.model.DemoStep
+import com.cellobservatory.observatory.ui.ChangeMapPanel
+import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.components.Service
+import com.intellij.openapi.components.service
+import com.intellij.openapi.project.Project
+import com.intellij.openapi.wm.ToolWindowAnchor
+import com.intellij.openapi.wm.ToolWindowManager
+import com.intellij.ui.components.JBLabel
+import com.intellij.ui.components.JBPanel
+import com.intellij.util.ui.JBUI
+import com.intellij.util.ui.UIUtil
+import java.awt.BorderLayout
+import java.awt.FlowLayout
+import javax.swing.JButton
+import javax.swing.JComponent
+
+/**
+ * The guided tour (0.8.9), JetBrains side. Walks the same steps in the same order as the CLI and the
+ * VS Code panel — the script is core's (`demo --tour --json`), never written here.
+ *
+ * The tour is DOCKED into a tool window by default, and detaches into a non-modal dialog of its own when
+ * you would rather have it on a second screen. Either way it survives the focus changes the steps
+ * deliberately cause; which mode you last used is remembered.
+ *
+ * It can never be a TAB of the existing Claude Observatory window: that window's panes are `Content`s
+ * and only one shows at a time, so the step that says "look at the Edits tree" would hide the tour
+ * explaining it.
+ *
+ * A step's TEXT lives in the tour window only. The control it names is RINGED, by a glass-pane painter —
+ * Swing's equivalent of a CSS outline: it paints above the component and costs no layout, where a border
+ * would add insets and reflow the very panel the reader is being pointed at.
+ */
+@Service(Service.Level.PROJECT)
+class TourController(private val project: Project) : com.intellij.openapi.Disposable {
+
+    /** Closing the project with a DOCKED tour open reaches no other teardown: the dialog's own dispose is
+     *  what stops a floating one, and there is no dialog here. Without this the 1 Hz countdown task
+     *  reschedules itself forever, because its body returns on `project.isDisposed` without cancelling. */
+    override fun dispose() {
+        stopAutoplay()
+        if (watch != null) service().removeListener(watchListener)
+        watch = null
+        ring(null)
+    }
+
+    companion object {
+        const val TOOL_WINDOW_ID = "Claude Observatory Tour"
+        fun getInstance(project: Project): TourController = project.service()
+    }
+
+    private var steps: List<DemoStep> = emptyList()
+    /** Set while the SHORT track is being walked, with its exact complement parked for the offer at the end.
+     *  Core owns the split (`demo --tour --essentials` is the marked subset); this is just the other half. */
+    private var essentialsTrack = false
+    private var remainder: List<DemoStep> = emptyList()
+    private var index = -1
+    private var dialog: TourDialog? = null
+    private var ringDisposable: com.intellij.openapi.Disposable? = null
+    /** The wait step currently armed. No timer and no new watcher — the service already fires on every
+     *  store change, and the verdict itself is core's, so both editors reach the same one. */
+    private var watch: Watch? = null
+    private var litSpotlight = false
+    /** Set while [moveTo] is tearing the window down to rebuild it in the other mode, so the dispose it
+     *  causes is not mistaken for the reader closing the tour. Without it, one Float→Dock toggle sends
+     *  the tour back to step 1: the dialog's dispose handler calls stop(), which clears the index. */
+    private var moving = false
+    private val watchListener = Runnable { checkWatch() }
+
+    /**
+     * Autoplay. ONE timer per step, which is also a wait step's countdown — that single timer is what
+     * makes pausing actually pause. (The site's browser demo keeps them separate, so pausing there stops
+     * the step timer but not the gate countdown, and a paused demo still drifts forward.)
+     *
+     * The platform exposes no reduced-motion signal, so unlike the VS Code build this always starts
+     * playing; the transport button is the control.
+     */
+    private var playing = true
+    private var stepFuture: java.util.concurrent.ScheduledFuture<*>? = null
+    private var tickFuture: java.util.concurrent.ScheduledFuture<*>? = null
+    private var deadlineMs = 0L
+    private val playBtn by lazy { JButton("❚❚") }
+
+    private fun stopAutoplay() {
+        stepFuture?.cancel(false); stepFuture = null
+        tickFuture?.cancel(false); tickFuture = null
+    }
+
+    /** Pause. Every manual control routes through here — taking the wheel is explicit. */
+    private fun pauseAutoplay() {
+        playing = false
+        stopAutoplay()
+        playBtn.text = "▸"
+        renderAction(steps.getOrNull(index)?.action, watch?.state)
+    }
+
+    private fun armAutoplay() {
+        stopAutoplay()
+        if (!playing || !running) return
+        val step = steps.getOrNull(index) ?: return
+        if (index + 1 >= steps.size) { pauseAutoplay(); return } // the last step is an offer, not a frame
+        val waiting = step.action?.mode == "wait"
+        val ms = if (waiting) 9_000L else dwellMs(step)
+        deadlineMs = System.currentTimeMillis() + ms
+        playBtn.text = "❚❚"
+        val sched = com.intellij.util.concurrency.EdtScheduledExecutorService.getInstance()
+        tickFuture = sched.scheduleWithFixedDelay(
+            { if (!project.isDisposed) renderAction(step.action, watch?.state) }, 1, 1, java.util.concurrent.TimeUnit.SECONDS
+        )
+        stepFuture = sched.schedule({ if (!project.isDisposed) expire(step) }, ms, java.util.concurrent.TimeUnit.MILLISECONDS)
+    }
+
+    /** The timer ran out. A reading step moves on; an unanswered ask is performed, then moves on. */
+    private fun expire(step: DemoStep) {
+        stopAutoplay()
+        if (!playing || !running) return
+        if (step.action?.mode == "wait" && watch?.state == "waiting") {
+            performWaitAction(step.action.kind)
+            com.cellobservatory.observatory.services.ObservatoryService.getInstance(project).refresh(force = true)
+            watch?.state = "satisfied"
+            renderAction(step.action, "satisfied")
+            // Show the result before moving — the point of doing it was that the reader sees it happen.
+            stepFuture = com.intellij.util.concurrency.EdtScheduledExecutorService.getInstance()
+                .schedule({ if (playing && running) applyStep(index + 1) }, 1400, java.util.concurrent.TimeUnit.MILLISECONDS)
+            return
+        }
+        applyStep(index + 1)
+    }
+
+    /** Seconds left on this step, for the countdown line. Zero when paused or not timing. */
+    private fun secsLeft(): Int =
+        if (!playing || stepFuture == null) 0
+        else Math.max(0, Math.ceil((deadlineMs - System.currentTimeMillis()) / 1000.0).toInt())
+
+    /** Core's reading-derived dwell, mirrored: the CLI is not spawned once per step just to ask. */
+    private fun dwellMs(step: DemoStep): Long {
+        val chars = step.body.length + (step.tip?.length ?: 0) + (step.tryIt?.length ?: 0)
+        return Math.min(9_000L, Math.max(3_500L, Math.round(chars / 46.0 * 1000)))
+    }
+
+    /** Perform an unanswered ask, through the handlers the product already ships. */
+    private fun performWaitAction(kind: String) {
+        val session = service().currentSession() ?: return
+        // Belt and braces: this ACCEPTS AND REVERTS EDITS, on a timer, with nobody watching. It must
+        // never touch a session the reader actually cares about, whatever route got us here.
+        if (!ObservatoryCli.isDemoSession(session)) return
+        val log = service().log()
+        when (kind) {
+            "keep-edit" -> log.firstOrNull { it.pending }?.let { com.cellobservatory.observatory.ui.ReviewOps.keep(project, session, it.id) }
+            "undo-edit" -> log.firstOrNull { it.pending }?.let { com.cellobservatory.observatory.ui.ReviewOps.undoOrRedo(project, session, it, false) }
+            "keep-prompt" -> keepFirstPendingPrompt()
+            else -> {}
+        }
+    }
+
+    private data class Watch(val kind: String, val beforeKept: Int, val beforeUndone: Int, var state: String)
+
+    /** Mirrors core's `demoActionState`. The rule itself lives in [com.cellobservatory.observatory.model.TourVerdict]
+     *  so a test can pin it without a Project — it is a second implementation of core's rule, and the
+     *  only thing keeping the editors in agreement is that it says the same thing. */
+    private fun verdict(w: Watch, log: List<com.cellobservatory.observatory.model.EditRecord>): String =
+        com.cellobservatory.observatory.model.TourVerdict.of(
+            kind = w.kind,
+            beforeKept = w.beforeKept,
+            beforeUndone = w.beforeUndone,
+            kept = log.count { it.status == "kept" },
+            undone = log.count { it.status == "undone" },
+            pending = log.count { it.pending },
+            total = log.size,
+        )
+
+    /** true = docked into a tool window (the default), false = floating in a dialog of its own. */
+    private var docked: Boolean
+        get() = com.cellobservatory.observatory.settings.ObservatorySettings.instance.state.tourDocked
+        set(v) { com.cellobservatory.observatory.settings.ObservatorySettings.instance.state.tourDocked = v }
+
+    // Built LAZILY, on the EDT, when the tour window is first opened. This is a project service, and
+    // `TourNextAction.update()` runs on a background thread (SessionAction declares ActionUpdateThread.BGT)
+    // — typing "guided tour" into Find Action instantiates the service, so constructing Swing components
+    // in its constructor would build them off the EDT before any tour had run.
+    private val counter by lazy { JBLabel() }
+    private val title by lazy { JBLabel() }
+    private val body by lazy { JBLabel() }
+    private val tip by lazy { JBLabel() }
+    private val tryIt by lazy { JBLabel() }
+    private val actionLabel by lazy { JBLabel() }
+    private val actionHint by lazy { JBLabel() }
+    private val actionState by lazy { JBLabel() }
+    private val backBtn by lazy { JButton("◂ Back") }
+    private val nextBtn by lazy { JButton("Next ▸") }
+
+    val running: Boolean get() = index >= 0
+
+    /** Fetch the script (off the EDT — it spawns the CLI), ask how much of it to walk, then open. */
+    fun start(onFailure: (String) -> Unit = {}) {
+        // The tour ACTS on the session under review — it accepts and reverts edits, some on a timer — so
+        // it may only run against the demo. `demoPresent` is true whenever a demo exists on disk, which
+        // is deliberately weaker: one real Claude turn after a demo makes that the newest session.
+        val service = service()
+        if (!ObservatoryCli.isDemoSession(service.currentSession())) {
+            val found = ObservatoryCli.demoSession(project.basePath)
+            if (found == null) {
+                onFailure("The guided tour runs against the demo session, and there is no demo recorded for this project. Start Demo Mode first.")
+                return
+            }
+            service.demoSessionOverride = found
+        }
+        com.intellij.util.concurrency.AppExecutorUtil.getAppExecutorService().submit {
+            val full = ObservatoryCli.demoTour(project.basePath, essentials = false)
+            val short = ObservatoryCli.demoTour(project.basePath, essentials = true)
+            ApplicationManager.getApplication().invokeLater {
+                if (project.isDisposed) return@invokeLater
+                if (full.isEmpty()) {
+                    // Never open an empty tour: say why instead (an older CLI on PATH is the usual cause).
+                    onFailure("Could not read the guided tour — is the claude-observatory CLI installed and up to date?")
+                    return@invokeLater
+                }
+                val essentialsLabel = "Essentials — ${short.size} steps"
+                val everythingLabel = "Everything — ${full.size} steps"
+                com.intellij.openapi.ui.popup.JBPopupFactory.getInstance()
+                    .createPopupChooserBuilder(listOfNotNull(essentialsLabel.takeIf { short.isNotEmpty() }, everythingLabel))
+                    .setTitle("Guided tour — how much would you like to see?")
+                    .setItemChosenCallback { chosen ->
+                        essentialsTrack = chosen == essentialsLabel
+                        remainder = if (essentialsTrack) full.filterNot { f -> short.any { it.id == f.id } } else emptyList()
+                        steps = if (essentialsTrack) short else full
+                        ChangeMapPanel.of(project)?.setShowAll(true)
+                        openWindow()
+                        applyStep(0)
+                    }
+                    .createPopup()
+                    .showCenteredInCurrentWindow(project)
+            }
+        }
+    }
+
+    /** Move between the floating dialog and the docked tool window, keeping the current step. */
+    fun moveTo(dockedNow: Boolean) {
+        if (docked == dockedNow && (dialog != null || toolWindowExists())) return
+        docked = dockedNow
+        if (!running) return
+        val at = index
+        moving = true
+        try {
+            closeWindow()
+            openWindow()
+        } finally {
+            moving = false
+        }
+        applyStep(at)
+    }
+
+    // Every manual control hands over the wheel: autoplay stops and only the transport restarts it.
+    fun next() {
+        if (!running) return
+        pauseAutoplay()
+        if (index + 1 >= steps.size) finish() else applyStep(index + 1)
+    }
+
+    fun back() {
+        if (!running || index <= 0) return
+        pauseAutoplay()
+        applyStep(index - 1)
+    }
+
+    fun playPause() {
+        if (playing) { pauseAutoplay(); return }
+        playing = true
+        armAutoplay()
+    }
+
+    /** Jump straight to a step — the counterpart of the VS Code panel's dot row, so neither editor can
+     *  only be walked forwards. Offered as a chooser rather than dots because forty-one dots in a Swing
+     *  strip say less than forty-one titles. */
+    private fun chooseStep(anchor: JComponent) {
+        if (!running) return
+        val labels = steps.mapIndexed { i, s -> "${i + 1}. ${s.title}" }
+        com.intellij.openapi.ui.popup.JBPopupFactory.getInstance()
+            .createPopupChooserBuilder(labels)
+            .setTitle("Go to step")
+            .setSelectedValue(labels.getOrNull(index), true)
+            .setItemChosenCallback { chosen -> pauseAutoplay(); applyStep(labels.indexOf(chosen)) }
+            .createPopup()
+            .showUnderneathOf(anchor)
+    }
+
+    // --- action steps ---------------------------------------------------------------------------
+
+    private fun service() = com.cellobservatory.observatory.services.ObservatoryService.getInstance(project)
+
+    /** Disarm, and put back anything an `auto` step changed about the reader's editor. */
+    private fun disarm() {
+        if (watch != null) {
+            service().removeListener(watchListener)
+            watch = null
+        }
+        if (litSpotlight) {
+            litSpotlight = false
+            com.cellobservatory.observatory.ui.inline.InlineOverlay.getInstance(project).toggleHeatmap()
+        }
+    }
+
+    /**
+     * Arm a `wait` step, or run an `auto` one. The verdict for a wait step is core's
+     * (`demoActionState`), mirrored here so the two editors cannot disagree about what "done" means —
+     * including the case that matters, where a fully reviewed demo drops its own records and the log
+     * going EMPTY is itself the answer rather than a reason to keep waiting.
+     */
+    private fun armOrRun(step: DemoStep) {
+        val a = step.action ?: return
+        if (a.mode == "auto") {
+            // Did it actually run? An auto step that no-ops (nothing pending, no demo pinned, the panel
+            // not built yet) must not print its past-tense line — the reader can see nothing happened.
+            var ran = false
+            when (a.kind) {
+                "toggle-spotlight" -> {
+                    // Turn it ON, never merely flip it: a reader who already had Spotlight lit would
+                    // otherwise watch it go OUT under a panel announcing that it came on.
+                    val overlay = com.cellobservatory.observatory.ui.inline.InlineOverlay.getInstance(project)
+                    if (!overlay.heatmapOn) {
+                        overlay.toggleHeatmap()
+                        litSpotlight = true // only ours to put back if we were the one who lit it
+                    }
+                    ran = true
+                }
+                "keep-task" -> ran = keepFirstPendingTask()
+                // activate()'s editor branch already ran this one — but only if it found a file it could
+                // open, which is exactly the case this flag exists to report.
+                "open-demo-file" -> ran = openedDemoFile
+                else -> {}
+            }
+            renderAction(a, if (ran) "satisfied" else "vacated")
+            return
+        }
+        val log = service().log()
+        watch = Watch(a.kind, log.count { it.status == "kept" }, log.count { it.status == "undone" }, "waiting")
+        service().addListener(watchListener)
+        checkWatch()
+    }
+
+    private fun checkWatch() {
+        val w = watch ?: return
+        val log = service().log()
+        val state = verdict(w, log)
+        if (state == w.state) return
+        w.state = state
+        ApplicationManager.getApplication().invokeLater {
+            if (project.isDisposed) return@invokeLater
+            renderAction(steps.getOrNull(index)?.action, state)
+            // The reader did it — cancel the countdown and move on after the same beat the timer would
+            // have used, so doing it yourself and letting it happen feel like the same tour (VS Code parity).
+            if (state != "waiting" && playing) {
+                stopAutoplay()
+                val at = index
+                stepFuture = com.intellij.util.concurrency.EdtScheduledExecutorService.getInstance()
+                    .schedule({ if (playing && index == at) applyStep(at + 1) }, 1400, java.util.concurrent.TimeUnit.MILLISECONDS)
+            }
+        }
+    }
+
+    /** Accept the first task that still has pending edits, resolved from the DATA — not from the rendered
+     *  rows, which Active only (on by default) strips of every completed task, and five of the demo's six
+     *  are completed. Returns whether it actually accepted anything. */
+    private fun keepFirstPendingTask(): Boolean {
+        val session = service().currentSession() ?: return false
+        if (!ObservatoryCli.isDemoSession(session)) return false // never accept a real session's work
+        val (taskId, label) = ChangeMapPanel.of(project)?.firstPendingTaskInData() ?: return false
+        com.cellobservatory.observatory.ui.ReviewOps.keepTask(project, session, taskId, label)
+        return true
+    }
+
+    /** Accept every pending edit of the first ask that still has some — the prompt-scoped accept the step
+     *  actually names. VS Code runs `promptKeep`; this is the same set of edits, through the same store. */
+    private fun keepFirstPendingPrompt(): Boolean {
+        val session = service().currentSession() ?: return false
+        if (!ObservatoryCli.isDemoSession(session)) return false
+        val prompt = service().prompts()?.prompts?.firstOrNull { it.pending > 0 } ?: return false
+        val ids = prompt.editIds.toHashSet()
+        val targets = service().log().filter { it.id in ids && it.pending }
+        if (targets.isEmpty()) return false
+        com.cellobservatory.observatory.ui.ReviewOps.keepAll(project, session, targets, "prompt #${prompt.index}")
+        return true
+    }
+
+    /** Paint the action block. Exactly two labels, one geometry — a mixed script reads as inconsistent
+     *  unless the reader can tell at a glance which kind of step they are on. */
+    private fun renderAction(a: com.cellobservatory.observatory.model.DemoAction?, state: String?) {
+        if (a == null) {
+            actionLabel.isVisible = false; actionHint.isVisible = false; actionState.isVisible = false
+            nextBtn.text = if (index + 1 >= steps.size) "Finish" else "Next ▸"
+            return
+        }
+        val auto = a.mode == "auto"
+        // An auto step that did NOT run says so, and drops the past-tense line with it: claiming
+        // "accepted a task — its files went green" over a screen where nothing moved is worse than silence.
+        val ranNothing = auto && state == "vacated"
+        actionLabel.isVisible = true; actionHint.isVisible = true; actionState.isVisible = true
+        actionLabel.text = if (auto) "THE TOUR DID THIS" else "YOUR TURN"
+        actionHint.text = wrapHtml(if (!auto) a.hint else if (ranNothing) a.hint else (a.done ?: a.hint))
+        val waiting = !auto && state != "satisfied" && state != "vacated"
+        val secs = secsLeft()
+        actionState.text = when {
+            ranNothing -> "— nothing left here to do it to"
+            auto || state == "satisfied" -> "✓ done"
+            state == "vacated" -> "✓ nothing left to review here"
+            // Under autoplay, say plainly that it will apply itself: a reader who does nothing is not
+            // being ignored, and one who wants to act can see exactly how long they have.
+            secs > 0 -> "◌ applies automatically in ${secs}s…"
+            else -> "◌ waiting…"
+        }
+        // Next is RELABELLED, never disabled: nothing about an action may trap the reader.
+        nextBtn.text = if (waiting) "Skip ▸" else if (index + 1 >= steps.size) "Finish" else "Next ▸"
+    }
+
+    /** End the tour and take its window away. Safe to call when no tour is running. */
+    fun stop() {
+        index = -1
+        stopAutoplay()
+        disarm()
+        ChangeMapPanel.of(project)?.setShowAll(false)
+        ring(null)
+        closeWindow()
+    }
+
+    /**
+     * The end of a track. After the short one, offer its exact complement rather than just closing: the
+     * reader chose Essentials without knowing what was in the other half, and this is the only place they
+     * are told. Dismissing the offer ends the tour — an unanswered question is not consent to keep going.
+     */
+    private fun finish() {
+        if (!essentialsTrack || remainder.isEmpty()) { stop(); return }
+        pauseAutoplay()
+        val go = "See the other ${remainder.size}"
+        val blurb = "That is the short track. ${remainder.size} more steps cover the rest of the panels " +
+            "and the features this one skipped."
+        com.intellij.openapi.ui.popup.JBPopupFactory.getInstance()
+            .createPopupChooserBuilder(listOf(go, "Done"))
+            .setTitle(blurb)
+            .setItemChosenCallback { chosen ->
+                if (chosen != go) { stop(); return@setItemChosenCallback }
+                essentialsTrack = false
+                steps = remainder
+                remainder = emptyList()
+                playing = true
+                applyStep(0)
+            }
+            .setCancelCallback { stop(); true }
+            .createPopup()
+            .showCenteredInCurrentWindow(project)
+    }
+
+    // --- the window -----------------------------------------------------------------------------
+
+    private fun toolWindowExists() = ToolWindowManager.getInstance(project).getToolWindow(TOOL_WINDOW_ID) != null
+
+    private fun openWindow() {
+        if (docked) ensureToolWindow() else ensureDialog()
+    }
+
+    private fun closeWindow() {
+        dialog?.close(0)
+        dialog = null
+        ToolWindowManager.getInstance(project).getToolWindow(TOOL_WINDOW_ID)?.remove()
+    }
+
+    /** The floating tour: a NON-MODAL dialog, so the IDE stays fully usable underneath it and every
+     *  step can move focus wherever it likes without dismissing the tour. */
+    private fun ensureDialog() {
+        dialog?.let { if (it.isShowing) return }
+        val d = TourDialog(project, buildPanel()) { if (running && !moving) stop() }
+        dialog = d
+        d.show()
+    }
+
+    /** Subscribed once, for the project's lifetime: hiding the docked tour is the reader closing it, and
+     *  the tour must not keep running — and keep ACTING — behind a window that is no longer on screen. */
+    private var hideWatch: com.intellij.openapi.Disposable? = null
+
+    private fun watchForHide() {
+        if (hideWatch != null) return
+        val d = com.intellij.openapi.util.Disposer.newDisposable("observatory-tour-hide")
+        com.intellij.openapi.util.Disposer.register(this, d)
+        hideWatch = d
+        project.messageBus.connect(d).subscribe(
+            com.intellij.openapi.wm.ex.ToolWindowManagerListener.TOPIC,
+            object : com.intellij.openapi.wm.ex.ToolWindowManagerListener {
+                override fun stateChanged(mgr: ToolWindowManager) {
+                    if (!running || !docked || moving) return
+                    val tw = mgr.getToolWindow(TOOL_WINDOW_ID) ?: return
+                    if (!tw.isVisible) stop()
+                }
+            },
+        )
+    }
+
+    private fun ensureToolWindow() {
+        watchForHide()
+        val mgr = ToolWindowManager.getInstance(project)
+        val existing = mgr.getToolWindow(TOOL_WINDOW_ID)
+        if (existing != null) {
+            existing.activate(null)
+            return
+        }
+        val tw = mgr.registerToolWindow(TOOL_WINDOW_ID) {
+            anchor = ToolWindowAnchor.RIGHT
+            canCloseContent = false
+            stripeTitle = { TOOL_WINDOW_ID }
+        }
+        val content = tw.contentManager.factory.createContent(buildPanel(), "", false)
+        content.isCloseable = false
+        tw.contentManager.addContent(content)
+        tw.activate(null)
+    }
+
+    private fun buildPanel(): JComponent {
+        counter.foreground = UIUtil.getContextHelpForeground()
+        title.font = title.font.deriveFont(java.awt.Font.BOLD, title.font.size + 1f)
+        for (l in listOf(body, tip, tryIt)) l.verticalAlignment = JBLabel.TOP
+        tip.foreground = UIUtil.getContextHelpForeground()
+        tryIt.foreground = UIUtil.getContextHelpForeground()
+        actionLabel.foreground = UIUtil.getContextHelpForeground()
+        actionLabel.font = JBUI.Fonts.smallFont()
+        actionState.foreground = UIUtil.getContextHelpForeground()
+
+        val north = JBPanel<JBPanel<*>>(BorderLayout()).apply {
+            isOpaque = false
+            add(counter, BorderLayout.NORTH)
+            add(title, BorderLayout.CENTER)
+            border = JBUI.Borders.emptyBottom(6)
+        }
+        val center = JBPanel<JBPanel<*>>().apply {
+            isOpaque = false
+            layout = javax.swing.BoxLayout(this, javax.swing.BoxLayout.Y_AXIS)
+            add(body); add(javax.swing.Box.createVerticalStrut(8)); add(tip)
+            add(javax.swing.Box.createVerticalStrut(6)); add(tryIt)
+            add(javax.swing.Box.createVerticalStrut(8)); add(actionLabel); add(actionHint); add(actionState)
+        }
+        val south = JBPanel<JBPanel<*>>(FlowLayout(FlowLayout.LEFT, 6, 0)).apply {
+            isOpaque = false
+            // Wired ONCE. These three are `by lazy` singletons and buildPanel() runs again on every
+            // dock/float, so re-adding would leave Next advancing two steps and the transport toggling
+            // twice — pausing and resuming in the same click, which reads as a dead button.
+            if (backBtn.actionListeners.isEmpty()) backBtn.addActionListener { back() }
+            if (nextBtn.actionListeners.isEmpty()) nextBtn.addActionListener { next() }
+            val steps = JButton("Steps…")
+            steps.addActionListener { chooseStep(steps) }
+            playBtn.toolTipText = "Pause or resume the tour. Any other control pauses it too."
+            if (playBtn.actionListeners.isEmpty()) playBtn.addActionListener { playPause() }
+            val dock = JButton(if (docked) "Float" else "Dock")
+            dock.toolTipText = "Move the tour between its own window and a docked tool window"
+            dock.addActionListener { moveTo(!docked) }
+            val exit = JButton("Exit demo")
+            // Exit goes through the shared handler, so leaving from here removes exactly what leaving
+            // from the palette or the panel toolbar removes.
+            exit.addActionListener { com.cellobservatory.observatory.ui.ReviewOps.exitDemo(project) }
+            add(playBtn); add(backBtn); add(nextBtn); add(steps); add(dock); add(exit)
+        }
+        return JBPanel<JBPanel<*>>(BorderLayout()).apply {
+            border = JBUI.Borders.empty(10, 12)
+            add(north, BorderLayout.NORTH)
+            add(center, BorderLayout.CENTER)
+            add(south, BorderLayout.SOUTH)
+        }
+    }
+
+    // --- one step -------------------------------------------------------------------------------
+
+    private fun applyStep(i: Int) {
+        if (i < 0 || i >= steps.size) return
+        disarm()
+        index = i
+        val step = steps[i]
+        // Keep the fleet inside its 60s active window while the tour explains it. On STEP ADVANCE only:
+        // this touches watched files, and a heartbeat driven by a refresh would wake itself forever.
+        com.intellij.util.concurrency.AppExecutorUtil.getAppExecutorService().submit {
+            ObservatoryCli.demoTouch(project.basePath)
+        }
+        counter.text = "${i + 1} / ${steps.size}"
+        title.text = step.title
+        body.text = wrapHtml(step.body)
+        tip.text = step.tip?.let { wrapHtml(it) } ?: ""
+        tip.isVisible = !step.tip.isNullOrBlank()
+        tryIt.text = step.tryIt?.let { wrapHtml("Try: $it") } ?: ""
+        tryIt.isVisible = !step.tryIt.isNullOrBlank()
+        backBtn.isEnabled = i > 0
+        nextBtn.text = if (i + 1 >= steps.size) "Finish" else "Next ▸"
+
+        ring(null) // clear the previous step's ring before anything moves
+        val anchor = activate(step)
+        // Re-raise the tour LAST so the reader ends up looking at the text, not at what it just moved.
+        // The floating dialog needs no raising — it is already above the IDE, which is the point of it.
+        if (docked) ToolWindowManager.getInstance(project).getToolWindow(TOOL_WINDOW_ID)?.show(null)
+        ring(anchor)
+        // After the surface is forward, so the reader can see the thing before being asked to act on it.
+        renderAction(step.action, null)
+        armOrRun(step)
+        armAutoplay()
+    }
+
+    /** Bring the surface this step is about forward, and return the component to point the tip at.
+     *  An unrecognized view activates nothing and returns null — the step still reads. */
+    private fun activate(step: DemoStep): JComponent? {
+        val mgr = ToolWindowManager.getInstance(project)
+        return when (step.view) {
+            "overview", "prompts", "stats" -> {
+                mgr.getToolWindow("Claude Observatory Dashboards")?.show(null)
+                val panel = ChangeMapPanel.of(project)
+                if (step.view == "overview") step.tab?.let { panel?.selectNavTab(it) }
+                // Prompts, the Overview and Stats are always-visible columns of the same bottom split,
+                // so raising the window IS the activation. The anchor then decides WHICH control is
+                // ringed, by asking every panel: names are globally unique, so exactly one answers —
+                // and that is what lets a Prompts step ring Accept Prompt, which lives in the Overview.
+                com.cellobservatory.observatory.ui.stats.StatsPanel.of(project)?.tourAnchor(step.anchor)
+                    ?: com.cellobservatory.observatory.ui.PromptsPanel.of(project)?.tourAnchor(step.anchor)
+                    ?: panel?.tourAnchor(step.anchor)
+                    // No fallback to the whole panel. An outline around EVERYTHING points at nothing, and
+                    // most steps carry no anchor at all — so the old fallback ringed the entire Overview
+                    // for the majority of the tour. VS Code rings nothing in that case; so does this.
+            }
+            "edits", "diffs", "fileHistory", "actions", "observations" -> {
+                val tw = mgr.getToolWindow("Claude Observatory") ?: return null
+                tw.show(null)
+                val name = when (step.view) {
+                    "edits" -> "Edits"; "diffs" -> "Diffs"; "fileHistory" -> "File History"
+                    "actions" -> "Actions"; else -> "Observations"
+                }
+                val cm = tw.contentManager
+                cm.contents.firstOrNull { it.displayName == name }?.let { cm.setSelectedContent(it) }
+                // Only when the step actually names a control: an anchorless step brings the tree forward
+                // and rings nothing, rather than outlining the whole pane.
+                if (step.anchor != null) cm.selectedContent?.component else null
+            }
+            // The editor: open the newest pending edit so the inline overlay has something to show. The
+            // step describes reviewing in the file itself, so leaving the editor on whatever happened to
+            // be open would point at nothing.
+            "editor" -> {
+                openedDemoFile = openNewestPendingEdit()
+                null // the balloon has no stable component here; the tour panel carries the text
+            }
+            else -> null
+        }
+    }
+
+    /** Open the file of the newest pending edit in the session under review, at that edit. */
+    /** Whether the last `editor` step actually got a file open — what makes its auto action honest. */
+    private var openedDemoFile = false
+
+    private fun openNewestPendingEdit(): Boolean {
+        val service = com.cellobservatory.observatory.services.ObservatoryService.getInstance(project)
+        val base = project.basePath?.let { it + java.io.File.separator }
+        // Openable means INSIDE the workspace — the scenario's last edit is the report written outside it,
+        // and the step is about the inline margins of a project file — and still ON DISK, because one edit
+        // is a deletion and it becomes the newest pending the moment the reader accepts anything.
+        val rec = service.log().lastOrNull {
+            it.pending && (base == null || it.file.startsWith(base)) && java.io.File(it.file).isFile
+        } ?: return false
+        val vf = com.intellij.openapi.vfs.LocalFileSystem.getInstance().refreshAndFindFileByPath(rec.file)
+            ?: return false
+        com.intellij.openapi.fileEditor.FileEditorManager.getInstance(project).openFile(vf, true)
+        return true
+    }
+
+    /**
+     * Ring the component a step names, on the IDE's glass pane. A painter rather than a border: a border
+     * adds insets and reflows the panel being pointed at, which moves the very thing the reader is
+     * looking for. Passing null clears the ring.
+     */
+    private fun ring(on: JComponent?) {
+        ringDisposable?.let { com.intellij.openapi.util.Disposer.dispose(it) }
+        ringDisposable = null
+        if (on == null || !on.isShowing) return
+        val d = com.intellij.openapi.util.Disposer.newDisposable("claude-observatory-tour-ring")
+        try {
+            com.intellij.openapi.wm.IdeGlassPaneUtil.find(on).addPainter(on, RingPainter(on), d)
+            com.intellij.openapi.util.Disposer.register(project, d)
+            ringDisposable = d
+        } catch (_: Exception) {
+            // A ring is a nicety; a step must never fail to show because it could not be painted.
+            com.intellij.openapi.util.Disposer.dispose(d)
+        }
+    }
+
+    /** Swing labels do not wrap; the HTML flavour does. Escaped, because the text is data. */
+    private fun wrapHtml(s: String): String =
+        "<html><body style='width:220px'>" +
+            s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;") +
+            "</body></html>"
+}
+
+/**
+ * The floating tour window: a NON-MODAL dialog, so the IDE underneath stays fully usable and every step
+ * can move focus wherever it needs to without dismissing the tour. Resizable and movable, including onto
+ * a second screen — which is the whole reason the tour does not live in a tool-window tab.
+ *
+ * It carries no OK/Cancel: the panel has its own Back, Next, Steps, Dock and Exit, and a dialog button
+ * bar under them would be a second set of controls saying nothing new.
+ */
+private class TourDialog(
+    project: Project,
+    private val content: JComponent,
+    private val onClosed: () -> Unit,
+) : com.intellij.openapi.ui.DialogWrapper(project, false) {
+
+    init {
+        title = "Claude Observatory — guided tour"
+        isModal = false
+        init()
+    }
+
+    override fun createCenterPanel(): JComponent = content
+
+    /** No button bar — every control the tour needs is in the panel itself. */
+    override fun createActions(): Array<javax.swing.Action> = emptyArray()
+
+    override fun getDimensionServiceKey(): String = "ClaudeObservatoryTourDialog" // remembers size + position
+
+    override fun dispose() {
+        super.dispose()
+        onClosed()
+    }
+}
+
+/**
+ * Paints the guided tour's highlight around one component, on the IDE's glass pane — above everything,
+ * and outside the component's own layout, so ringing a panel never moves what is inside it.
+ *
+ * The colour is the accent both editors' tours already use for this (`.ov-ring` in the VS Code webview),
+ * so the same step looks like the same step in either IDE.
+ */
+private class RingPainter(private val target: JComponent) : com.intellij.openapi.ui.AbstractPainter() {
+    override fun needsRepaint(): Boolean = true // follow the component through scrolls and resizes
+
+    override fun executePaint(component: java.awt.Component, g: java.awt.Graphics2D) {
+        if (!target.isShowing) return
+        var r = javax.swing.SwingUtilities.convertRectangle(target.parent ?: return, target.bounds, component)
+        // The glass pane sets NO clip, and a JList inside a JBScrollPane reports its FULL bounds — so an
+        // unclipped ring is drawn around the whole list, straight over the panes above and below the
+        // viewport. Clip to what is actually visible; ring nothing when none of it is.
+        val vis = javax.swing.SwingUtilities.convertRectangle(target, target.visibleRect, component)
+        r = r.intersection(vis)
+        if (r.isEmpty) return
+        g.color = com.intellij.ui.JBColor(0x4C8BF5, 0x4C8BF5)
+        g.stroke = java.awt.BasicStroke(JBUI.scale(2).toFloat())
+        g.drawRoundRect(r.x - 1, r.y - 1, r.width + 2, r.height + 2, JBUI.scale(4), JBUI.scale(4))
+    }
+}

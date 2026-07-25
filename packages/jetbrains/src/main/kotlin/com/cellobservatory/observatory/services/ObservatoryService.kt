@@ -59,9 +59,26 @@ class ObservatoryService(private val project: Project) : Disposable {
 
     val workspaceRoot: String? get() = project.basePath
 
+    /**
+     * Demo mode's session, held in MEMORY and deliberately never written to settings. Persisting it
+     * would leave a pin behind after a crash pointing at a session demo cleanup has since deleted,
+     * which shows as every panel being permanently empty for a non-obvious reason. Auto-resolution
+     * already lands on a running demo unaided (its transcript is the newest); this is the guard against
+     * a real Claude session starting mid-tour.
+     */
+    @Volatile
+    var demoSessionOverride: String? = null
+        set(value) {
+            field = value
+            cachedAutoSession = null // the auto-resolution memo must not answer for the old session
+            cachedAutoRoot = null
+            refresh(force = true)
+        }
+
     fun currentSession(): String? {
-        // A pinned session (Switch Session / settings) wins over auto-resolution — lets you review the
-        // demo-showcase fixture or any past session instead of just the newest for this workspace.
+        demoSessionOverride?.takeIf { it.isNotBlank() }?.let { return it }
+        // A pinned session (Switch Session / settings) wins over auto-resolution — lets you review a
+        // demo session or any past session instead of just the newest for this workspace.
         com.cellobservatory.observatory.settings.ObservatorySettings.instance.state.session
             ?.takeIf { it.isNotBlank() }
             ?.let { return it }
@@ -456,7 +473,76 @@ class ObservatoryStartup : ProjectActivity {
                         com.intellij.ide.projectView.ProjectView.getInstance(project).currentProjectViewPane?.updateFromRoot(true)
                     }
                 }
+                offerDemo(project)
             }
         }
+    }
+
+    /**
+     * Offer the demo on a first install and after an update, once, with a way to decline for good.
+     *
+     * Every gate matters, and the last one most: an unsolicited notification that interrupts a live
+     * Claude session is worse than never offering, so a busy project is skipped WITHOUT stamping the
+     * version — it is offered next launch, when the reader is idle.
+     */
+    private fun offerDemo(project: Project) {
+        val app = com.intellij.openapi.application.ApplicationManager.getApplication()
+        if (app.isUnitTestMode || app.isHeadlessEnvironment) return
+        // The demo WRITES into the reader's project. Never offer that in a project they have not trusted
+        // (VS Code gates on workspace.isTrusted for the same reason).
+        if (!com.intellij.ide.trustedProjects.TrustedProjects.isProjectTrusted(project)) return
+        val state = com.cellobservatory.observatory.settings.ObservatorySettings.instance.state
+        if (state.demoOfferNever) return
+        val current = com.intellij.ide.plugins.PluginManagerCore
+            .getPlugin(com.intellij.openapi.extensions.PluginId.getId("com.cell-observatory.claude-observatory"))
+            ?.version ?: return
+        if (state.demoOfferLastSeenVersion == current) return
+        val root = project.basePath ?: return
+        // An empty version stamp cannot tell a fresh install from an upgrade on its own.
+        val kind = if (state.demoOfferLastSeenVersion != null || state.everRan) "update" else "install"
+
+        val busy = {
+            val id = ObservatoryService.getInstance(project).currentSession()
+            if (id == null || com.cellobservatory.observatory.core.ObservatoryCli.isDemoSession(id)) false
+            else runCatching {
+                val f = java.io.File(com.cellobservatory.observatory.core.ClaudePaths.projectDir(root).toFile(), "$id.jsonl")
+                f.exists() && System.currentTimeMillis() - f.lastModified() <= 5 * 60_000
+            }.getOrDefault(false)
+        }
+        // Stamped only once we are actually going to ask. Setting it above the busy gate turned a reader's
+        // FIRST EVER offer into the "is now 0.8.9" update copy: launch one stamps everRan and returns
+        // without stamping the version, and launch two then computes kind == "update".
+        if (busy()) return // and deliberately NOT stamped — try again next launch
+        state.everRan = true
+
+        // A balloon at t=0 on a cold IDE is hostile; startup is already doing enough.
+        com.intellij.util.concurrency.EdtScheduledExecutorService.getInstance().schedule({
+            if (project.isDisposed || busy()) return@schedule
+            // The action below hides itself once a demo is on disk (StartDemoAction.update), so offering
+            // then would show a balloon with nothing to press. Stamp and stay quiet: they have already
+            // found it.
+            if (com.cellobservatory.observatory.ui.ReviewOps.demoPresent(project)) {
+                state.demoOfferLastSeenVersion = current
+                return@schedule
+            }
+            state.demoOfferLastSeenVersion = current // stamp BEFORE showing: an ignored balloon never re-asks
+            val text = if (kind == "install") {
+                "Claude Observatory is installed. There is nothing to set up to look around: the demo replays a real Claude session through the real capture pipeline in about twenty seconds, every button in it works, and leaving removes every trace."
+            } else {
+                "Claude Observatory is now $current. The guided tour walks what changed alongside everything else — the demo replays in about twenty seconds and removes every trace when you leave."
+            }
+            com.intellij.notification.NotificationGroupManager.getInstance()
+                .getNotificationGroup("Claude Observatory")
+                .createNotification(text, com.intellij.notification.NotificationType.INFORMATION)
+                // startDemo replays AND then tours: there is no demo yet, so the tour alone would walk
+                // the reader through an empty product.
+                .addAction(com.intellij.notification.NotificationAction.createSimpleExpiring("Take the tour") {
+                    com.cellobservatory.observatory.ui.ReviewOps.startDemo(project)
+                })
+                .addAction(com.intellij.notification.NotificationAction.createSimpleExpiring("Never ask") {
+                    com.cellobservatory.observatory.settings.ObservatorySettings.instance.state.demoOfferNever = true
+                })
+                .notify(project)
+        }, 4, java.util.concurrent.TimeUnit.SECONDS)
     }
 }

@@ -1,11 +1,18 @@
 package com.cellobservatory.observatory.core
 
+import com.cellobservatory.observatory.model.DemoStep
 import com.cellobservatory.observatory.model.Placement
+import com.cellobservatory.observatory.model.TourParser
 import com.cellobservatory.observatory.model.UndoResult
 import com.cellobservatory.observatory.settings.ObservatorySettings
 import com.google.gson.JsonParser
 import com.intellij.execution.configurations.GeneralCommandLine
+import com.intellij.execution.process.OSProcessHandler
+import com.intellij.execution.process.ProcessAdapter
+import com.intellij.execution.process.ProcessEvent
+import com.intellij.execution.process.ProcessOutputTypes
 import com.intellij.execution.util.ExecUtil
+import com.intellij.openapi.util.Key
 import com.intellij.openapi.util.SystemInfo
 import java.io.File
 import java.util.concurrent.TimeUnit
@@ -49,7 +56,7 @@ object ObservatoryCli {
             ?.firstOrNull { it.exists() }
             ?.path
 
-    fun run(args: List<String>, workDir: String? = null, stdin: String? = null, timeoutMs: Int = 30_000): CliResult {
+    private fun commandLine(args: List<String>, workDir: String?): GeneralCommandLine {
         // Windows: npm installs the CLI as a .cmd shim, which ProcessBuilder can't exec directly —
         // route through cmd.exe (which also does PATH+PATHEXT resolution for the bare fallback).
         val bin = resolveBin()
@@ -62,6 +69,11 @@ object ObservatoryCli {
         ObservatorySettings.instance.state.configDir?.takeIf { it.isNotBlank() }?.let {
             cmd.withEnvironment("CLAUDE_CONFIG_DIR", it)
         }
+        return cmd
+    }
+
+    fun run(args: List<String>, workDir: String? = null, stdin: String? = null, timeoutMs: Int = 30_000): CliResult {
+        val cmd = commandLine(args, workDir)
         return try {
             val out = if (stdin != null) {
                 val proc = cmd.createProcess()
@@ -488,6 +500,101 @@ object ObservatoryCli {
     } catch (_: Exception) {
         null
     }
+
+    // --- demo mode + the guided tour (0.8.9) ---------------------------------------------------------
+
+    /**
+     * Replay the demo session, STREAMING its per-beat narration instead of waiting for the process.
+     *
+     * `run` is spawn-and-wait with a 30s cap, and a paced replay is ~20s — already inside the noise
+     * margin, and `--speed 0.5` would blow straight past it. Streaming buys three things a longer
+     * timeout does not: the progress bar narrates each beat as it lands, the panels can be refreshed
+     * per beat rather than once at the end, and Cancel can actually stop it.
+     *
+     * A cancelled run leaves a partial demo, which `demoClean` removes exactly like a complete one.
+     * Returns the exit code with the narration joined, for the caller's error path.
+     */
+    fun demoStreaming(args: List<String>, workDir: String?, isCancelled: () -> Boolean, onLine: (String) -> Unit): CliResult {
+        return try {
+            val handler = OSProcessHandler(commandLine(listOf("demo") + args, workDir))
+            // StringBuffer, not StringBuilder: these are appended from the process reader thread and
+            // read from this one after an ASYNCHRONOUS destroyProcess(), so there is no happens-before
+            // edge to rely on — a torn read used to surface a plain cancel as "could not start".
+            val out = StringBuffer()
+            val err = StringBuffer()
+            handler.addProcessListener(object : ProcessAdapter() {
+                override fun onTextAvailable(event: ProcessEvent, outputType: Key<*>) {
+                    // stderr is the only place a failing run says WHY; dropping it left every failure
+                    // reported as "is the CLI installed?", the one cause already ruled out.
+                    if (outputType == ProcessOutputTypes.STDERR) { err.append(event.text); return }
+                    if (outputType != ProcessOutputTypes.STDOUT) return
+                    out.append(event.text)
+                    event.text.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.forEach(onLine)
+                }
+            })
+            handler.startNotify()
+            var cancelled = false
+            while (!handler.waitFor(200)) {
+                if (isCancelled()) { handler.destroyProcess(); cancelled = true; break }
+            }
+            CliResult(
+                if (cancelled) -1 else (handler.exitCode ?: -1),
+                out.toString(),
+                if (cancelled) "cancelled" else err.toString(),
+            )
+        } catch (e: Exception) {
+            CliResult(-1, "", e.message ?: "failed to launch the demo")
+        }
+    }
+
+    /**
+     * The guided tour's script. Core owns it, so this and the VS Code panel render the same tour.
+     *
+     * Capability-probed first, and that is not defensive habit: a pre-0.8.9 CLI does not reject
+     * `demo --tour --json` — it ignores the unknown flag, honours `--json`, and REPLAYS AN ENTIRE DEMO
+     * as the side effect of being asked for a script. Asking `help` what it supports costs one cheap
+     * process and cannot mutate anything.
+     */
+    fun demoTour(workDir: String?, essentials: Boolean = false): List<DemoStep> {
+        if (!run(listOf("help"), workDir).stdout.contains("demo --tour")) return emptyList()
+        val args = buildList { add("demo"); add("--tour"); if (essentials) add("--essentials"); add("--json") }
+        val r = run(args, workDir)
+        return if (r.ok) TourParser.parse(r.stdout) else emptyList()
+    }
+
+    /** Keep a running demo inside the fleet's 60s active window — mtime only, nothing is written.
+     *  Called on tour step advance ONLY: this touches watched files, so calling it from a refresh
+     *  would wake the watcher that triggered it, forever. */
+    fun demoTouch(workDir: String?): CliResult = run(listOf("demo", "--touch", "--json"), workDir)
+
+    /** Remove every trace: both sessions, their stores, the demo folder, and the scratch dir. */
+    fun demoClean(workDir: String?): CliResult = run(listOf("demo", "--clean", "--json"), workDir)
+
+    /** The primary session id a streamed replay reported. Its final narration line names it, and the
+     *  sibling agent's id is never printed — so this is exact, where picking one out of the store would
+     *  have to assume an ordering. Null when the run printed nothing (a failed spawn, or a cancel
+     *  before the first beat), and the caller falls back to [demoSession]. */
+    fun demoSessionFrom(stdout: String): String? =
+        DEMO_ID_IN_TEXT.findAll(stdout).lastOrNull()?.value
+
+    private val DEMO_ID_IN_TEXT = Regex("demo-[0-9a-f]{8}")
+
+    /** The demo session id for this project, or null — how the plugin finds a demo it did not itself
+     *  just start (one a crashed IDE left behind, since demo mode persists no state of its own). */
+    fun demoSession(workDir: String?): String? = try {
+        val r = run(listOf("sessions", "--json"), workDir)
+        if (!r.ok) null
+        else JsonParser.parseString(r.stdout).asJsonObject.getAsJsonArray("sessions")
+            .mapNotNull { it.takeIf { e -> e.isJsonObject }?.asJsonObject?.get("id")?.asString }
+            .firstOrNull { DEMO_ID.matches(it) }
+    } catch (_: Exception) {
+        null
+    }
+
+    /** The same gate core applies — `demo-<8hex>` and nothing else may drive demo-only behaviour. */
+    private val DEMO_ID = Regex("^demo-[0-9a-f]{8}$")
+
+    fun isDemoSession(id: String?): Boolean = id != null && DEMO_ID.matches(id)
 
     private fun parseUndo(r: CliResult): UndoResult = try {
         val o = JsonParser.parseString(r.stdout).asJsonObject

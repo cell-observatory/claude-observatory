@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Claude Observatory — record and review what your coding agent did</title>
-<meta name="description" content="Claude Observatory records every edit a Claude Code session makes to an established codebase and presents it for review at the scope that fits the work, by several abstractions over what the agent changed for a given prompt. When several agents work at once — subagents, workflow runs, sessions in parallel git worktrees — their work does not blur together: every edit is correlated back to the agent that made it. Local, git-free, no extra tokens.">
+<meta name="description" content="Claude Observatory records every edit a Claude Code session makes to an established and mission-critical codebase and presents it for review at the scope that fits the work, by several abstractions over what the agent changed for a given prompt. When several agents work at once — subagents, workflow runs, sessions in parallel git worktrees — their work does not blur together: every edit is correlated back to the agent that made it. Local, git-free, no extra tokens.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%AC%3C/text%3E%3C/svg%3E">
 <style>
   :root{
@@ -325,7 +325,7 @@
   <div class="wrap">
     <div class="stagger hero-lead">
       <h1 style="--i:1">Claude Observatory</h1>
-      <p class="lede" style="--i:2">Coding agents change code faster than anyone can read it, and a change accepted without being understood is a liability. The observatory is built for established codebases rather than throwaway prototypes: it records every edit a Claude Code session makes, through local hooks that cost no tokens. You review at the scope that fits the work, by several abstractions over what the agent changed for a given prompt. Every edit keeps its own diff and its own conflict-guarded undo, so reverting one leaves the others standing. When several agents work at once — subagents, workflow runs, sessions in parallel git worktrees — their work does not blur together: every edit is correlated back to the agent that made it. Everything stays local and git-free, and one store serves the terminal, VS Code, and JetBrains IDEs.</p>
+      <p class="lede" style="--i:2">Coding agents change code faster than anyone can read it, and a change accepted without being understood is a liability. The observatory is built for established and mission-critical codebases rather than throwaway prototypes: it records every edit a Claude Code session makes, through local hooks that cost no tokens. You review at the scope that fits the work, by several abstractions over what the agent changed for a given prompt. Every edit keeps its own diff and its own conflict-guarded undo, so reverting one leaves the others standing. When several agents work at once — subagents, workflow runs, sessions in parallel git worktrees — their work does not blur together: every edit is correlated back to the agent that made it. Everything stays local and git-free, and one store serves the terminal, VS Code, and JetBrains IDEs.</p>
       <div class="cta" style="--i:3">
         <a class="btn primary" href="#install">Get started</a>
         <a class="btn line" href="demo.html">Full interactive demo →</a>
@@ -653,6 +653,7 @@
     <h2>One-command install</h2>
     <p class="lede">Install once, run Claude Code, and every edit is captured for review.</p>
     <div class="cmd"><span class="pr">$</span><code>curl -fsSL https://raw.githubusercontent.com/cell-observatory/claude-observatory/main/scripts/bootstrap.sh | bash</code><button class="copy" data-copy="curl -fsSL https://raw.githubusercontent.com/cell-observatory/claude-observatory/main/scripts/bootstrap.sh | bash">Copy</button></div>
+    <p class="stay-current" style="margin-top:22px">Then look around with no Claude session at all: <b>Claude Observatory: Start Demo Mode</b> from the VS&nbsp;Code command palette or JetBrains Find Action, or <code>claude-observatory demo</code> in the terminal. It replays a real session through the real capture pipeline and walks you through every panel; leaving removes every trace.</p>
     <div class="install-cta">
       <a class="btn primary" href="https://github.com/cell-observatory/claude-observatory#quickstart">Read the README</a>
       <a class="btn line" href="getting-started.html">Getting started →</a>
@@ -801,8 +802,11 @@
 </script>
 <script>
   // ---- the lead interactive demo -----------------------------------------------------------------
-  // Mirrors the bundled `claude-observatory demo` scenario (packages/core/src/demo.ts): a Python
-  // training pipeline gains scaling + validation + tests + docs. State is DERIVED per step from
+  // A SHORTENED version of the bundled `claude-observatory demo` scenario
+  // (packages/core/src/demo.ts): a Python training pipeline gains scaling + validation + tests + docs.
+  // The bundled scenario goes further (three prompts, six tasks, nine edits, a sibling agent, a
+  // deletion, a failed call, a write outside the workspace); the closing narration links to it rather
+  // than letting this film imply it is the whole of it. State is DERIVED per step from
   // (edits landed, gate decisions), so Back/Restart/dot-jumps always re-render consistently.
   // Autoplays by default; gates self-resolve after a pause; any manual control hands over the wheel.
   (function(){
@@ -920,7 +924,7 @@
       {ed:2,landed:5,gate:'acceptall',
        narr:'The rest is swept in one motion: <span class="hl">Accept all</span> resolves everything still pending. Accepting one prompt, or one task, works the same way over a smaller scope.'},
       {ed:1,landed:5,recap:true,
-       narr:'That is the whole loop: every edit tracked with its reasoning, reviewed one at a time or by the prompt that caused it, and resolved without git. <a href="demo.html" style="color:var(--accent-ink);text-decoration:underline">Try it yourself in the full demo</a>.'},
+       narr:'That is the whole loop: every edit tracked with its reasoning, reviewed one at a time or by the prompt that caused it, and resolved without git. This is a shortened version — the demo bundled with the CLI and both editors adds a second agent, a deletion, a failed call and a guided tour of every panel. <a href="demo.html" style="color:var(--accent-ink);text-decoration:underline">Try it yourself in the full demo</a>.'},
     ];
     var N=STEPS.length;
     var el=function(id){return document.getElementById(id);};
