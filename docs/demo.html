@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Claude Observatory — interactive demo</title>
-<meta name="description" content="A scripted, in-browser replay of the bundled demo session laid out like the real VS Code panels: watch Observatory track a simulated Claude request over a Python training pipeline, then keep, undo, and accept the edits yourself. No model is called.">
+<meta name="description" content="A scripted, in-browser replay of the bundled demo session laid out like the real VS Code panels: watch Claude Observatory track the work one simulated prompt causes across a Python training pipeline, then keep, undo, and accept the edits yourself. No model is called.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%AC%3C/text%3E%3C/svg%3E">
 <style>
   :root{
@@ -174,7 +174,7 @@
   .ovwrap{display:grid;grid-template-columns:200px 1fr;flex:1}
   @media (max-width:640px){.ovwrap{grid-template-columns:1fr}.ovnav{display:none}}
   .ovnav{border-right:1px solid var(--line-soft);display:flex;flex-direction:column;min-width:0}
-  /* four tabs do not fit side by side in a narrow nav column, so the row wraps rather than clipping one */
+  /* five tabs do not fit side by side in a narrow nav column, so the row wraps rather than clipping one */
   .ovtabs{display:flex;flex-wrap:wrap;gap:2px;padding:6px 8px;border-bottom:1px solid var(--line-soft);font-size:.68rem}
   .ovtabs span{padding:2px 6px;border-radius:6px;color:var(--ink-faint);white-space:nowrap}
   .ovtabs .on{background:var(--accent-soft);color:var(--accent-ink)}
@@ -185,11 +185,6 @@
   .fr.sub{padding-left:20px}
   .collide{margin-top:auto;padding:5px 8px;font-size:.6rem;color:var(--ink-faint);border-top:1px solid var(--line-soft)}
   .ovdetail{min-width:0;display:flex;flex-direction:column}
-  .rr{display:flex;gap:9px;align-items:center;padding:4px 12px;border-bottom:1px solid var(--line-soft)}
-  .rr .rd.todo{color:var(--ink-faint)} .rr .rd.part{color:var(--pending)} .rr .rd.done{color:var(--kept)}
-  .rr .rt{color:var(--ink);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .rr .rc{margin-left:auto;flex:none;font-family:var(--mono);font-size:.66rem;color:var(--ink-faint)}
-  .rr .mini-acts{flex:none;display:flex;gap:5px;font-size:.7rem;color:var(--ink-faint)}
   .strip{display:flex;height:15px;border-radius:5px;overflow:hidden;margin:9px 12px 2px;border:1px solid var(--line-soft)}
   .strip .seg{display:grid;place-items:center;font-family:var(--mono);font-size:.56rem;color:var(--ink-soft);background:var(--accent-soft);white-space:nowrap;overflow:hidden}
   .strip .seg:nth-child(2n){background:var(--surface-3)}
@@ -285,10 +280,10 @@
   <div class="wrap row">
     <a class="brand" href="showcase.html"><span class="m">🔬</span> Claude Observatory</a>
     <div class="links">
-      <a href="showcase.html">Overview</a>
+      <a href="showcase.html">Home</a>
       <a href="demo.html" style="color:var(--ink)">Demo</a>
       <a href="getting-started.html">Getting started</a>
-      <a href="panels.html">Panels</a>
+      <a href="concepts.html">Concepts</a>
       <a class="more" href="features.html">Features&nbsp;→</a>
       <a href="https://github.com/cell-observatory/claude-observatory">GitHub</a>
     </div>
@@ -304,7 +299,7 @@
   <div class="wrap">
     <span class="eyebrow">Interactive demo</span>
     <h1>The full panels, <span class="hl">step by step</span></h1>
-    <p class="lede">A scripted replay of the bundled demo session over a small Python training pipeline, laid out the way it all sits in the editor: the Claude Edits sidebar and the file on top, the Observatory dashboards docked below. Nothing calls a model — the review clicks are yours, and each one applies itself if you just watch.</p>
+    <p class="lede">A scripted replay of the bundled demo session over a small Python training pipeline, laid out the way it sits in the editor: the Claude Edits sidebar and the file on top, the Claude Observatory panels below. Nothing calls a model. The review clicks are yours, and each step applies itself after a short pause if you only watch.</p>
   </div>
 </header>
 
@@ -324,7 +319,7 @@
       </div>
     </div>
 
-    <div class="ide" aria-label="Simulated editor with the Claude Edits sidebar and the Observatory dashboards docked below">
+    <div class="ide" aria-label="Simulated editor with the Claude Edits sidebar above and the Observations, Overview, and Stats panels below">
       <div class="ide-top">
         <aside class="side" aria-label="Claude Edits sidebar (simulated)">
           <div class="side-h">Claude Edits</div>
@@ -341,7 +336,7 @@
         </div>
       </div>
 
-      <div class="dockhead"><span>Claude Observatory Dashboards</span></div>
+      <div class="dockhead"><span>Claude Observatory panels</span></div>
       <div class="dock">
         <section class="pane" aria-label="Observations timeline (simulated)">
           <div class="ph"><span>Observations</span><span id="obs-count"></span></div>
@@ -353,11 +348,10 @@
           <div class="ovbar" id="ovbar" aria-hidden="true"></div>
           <div class="ovwrap">
             <div class="ovnav">
-              <div class="ovtabs"><span class="on">Fleet</span><span id="wf-tab">Workflows</span><span id="tk-tab" title="The session's numbered task list — statuses update as chapters land">Tasks</span><span id="pr-tab" title="Background shells this session launched with run_in_background — state, runtime and output volume. Shell ids are the harness's own; a transcript records no OS process id.">Processes</span></div>
+              <div class="ovtabs"><span class="on">Fleet</span><span id="wf-tab">Workflows</span><span id="tk-tab" title="Claude's own numbered task list. An edit joins a task only if it was captured while that task was in progress; anything outside those windows stays unassigned.">Tasks</span><span id="pr-tab" title="Background shells this session launched with run_in_background — state, runtime and output volume. Shell ids are the harness's own; a transcript records no OS process id.">Processes</span><span title="Every Claude Code session for this workspace, ordered by when its conversation was last active. Selecting a row switches the whole review to that session.">Sessions 1</span></div>
               <div id="fleet"></div>
             </div>
             <div class="ovdetail">
-              <div id="ov-ribbon"></div>
               <div class="strip" id="ov-strip" hidden></div>
               <div id="ov-ledger"></div>
               <div class="readout" id="ov-readout"></div>
@@ -396,13 +390,13 @@
   <div class="wrap">
     <span class="eyebrow">Run it for real</span>
     <h2>The same session, in your editor</h2>
-    <p class="lede" style="margin-inline:auto;max-width:52ch">Once Observatory is installed, the bundled demo replays this exact scenario through the real capture pipeline — panels, lenses, and review included, still at zero tokens.</p>
+    <p class="lede" style="margin-inline:auto;max-width:52ch">Once the observatory is installed, the bundled demo replays this exact scenario through the real capture pipeline — panels, lenses, and review included, still at zero tokens.</p>
     <div class="cmd"><span class="pr">❯</span><code>claude-observatory demo</code><button class="copy" data-copy="claude-observatory demo">Copy</button></div>
-    <p class="cmd-note">Installation first — see <a href="showcase.html#install" style="color:var(--accent-ink);text-decoration:underline">Install Observatory</a>.</p>
+    <p class="cmd-note">Installation first — see <a href="showcase.html#install" style="color:var(--accent-ink);text-decoration:underline">Install Claude Observatory</a>.</p>
     <div class="install-cta">
       <a class="btn primary" href="getting-started.html">Getting started</a>
-      <a class="btn line" href="showcase.html#install">Install Observatory</a>
-      <a class="btn line" href="panels.html">Panels reference</a>
+      <a class="btn line" href="showcase.html#install">Install Claude Observatory</a>
+      <a class="btn line" href="concepts.html#surfaces">Every surface, named</a>
     </div>
   </div>
 </section>
@@ -413,6 +407,7 @@
       <span class="brand"><span class="m">🔬</span> Claude Observatory</span>
       <div class="flinks">
         <a href="features.html">Features</a>
+        <a href="concepts.html">Concepts</a>
         <a href="https://github.com/cell-observatory/claude-observatory/blob/main/docs/DEMO.md">Demo</a>
         <a href="https://github.com/cell-observatory/claude-observatory/blob/main/docs/ARCHITECTURE.md">How it works</a>
         <a href="https://github.com/cell-observatory/claude-observatory/blob/main/docs/REMOTE.md">Remote</a>
@@ -549,39 +544,40 @@
         L(12,'<span class="st">```</span>','add'),
        ]},
     ];
-    var CHAPTERS=[
+    // Claude's own numbered tasks, with the edits captured while each was in progress.
+    var TASKS=[
       {title:'Add feature scaling to the pipeline',edits:[1,2]},
       {title:'Validate the training dataset',edits:[3]},
       {title:'Tests and docs',edits:[4,5]},
     ];
     var STEPS=[
       {ed:'seed',landed:0,typing:true,
-       narr:'You ask Claude for a change. Observatory sits beside the session — hooks, not a wrapper — and records what happens, at zero extra tokens. Below the editor: the same three dashboards the extensions dock at the bottom of the IDE.'},
+       narr:'You send Claude a prompt. The observatory sits beside the session — hooks, not a wrapper — and records what happens, at zero extra tokens. Below the editor are three of its panels: Observations from the Claude Edits sidebar, with the Overview and Stats dashboards from the bottom dock.'},
       {ed:'seed',landed:0,plan:true,
-       narr:'Claude plans three to-dos. The Overview adopts them as chapters — the session’s own structure — and tracks them as numbered tasks too (watch the Tasks tab count down as chapters land).'},
+       narr:'Claude plans three to-dos and opens the matching numbered task list. Attribution is strict: an edit joins a task only if it was captured while that task was in progress. Anything outside those windows stays unassigned.'},
       {ed:1,landed:1,
-       narr:'The first edit lands and becomes a reviewable entry: an inline lens over the changed lines, a timeline entry carrying Claude’s reasoning, and a churn-ranked ledger row in the Overview detail.'},
+       narr:'Task one adds feature scaling. Its first edit becomes a reviewable entry: an inline lens over the changed lines, a timeline entry carrying Claude’s reasoning, and a churn-ranked ledger row in the Overview detail.'},
       {ed:2,landed:2,
-       narr:'A second edit wires scaling into the training entrypoint. Chapter one is complete — the ribbon marks it half-moon: finished, but both edits still pending your review. The nav bar’s File and Diff counters track exactly where you are.'},
+       narr:'A second edit wires scaling into the training entrypoint and completes task one. Both of its edits stay pending until you review them, and the Tasks tab rollup reports the lines, the edit count, and how many remain. The nav bar carries four review axes — Diff, File, Folder, and Prompt — and its counters track where you are.'},
       {ed:3,landed:3,
-       narr:'Chapter two adds dataset validation. The folder strip apportions the churn across src, src/models, tests, and docs; commands Claude runs (a quick python src/train.py sanity check here) land in the Actions timeline the same way. Two more are backgrounded — a test watcher and a docs preview — so the Processes tab picks them up, one still running.'},
+       narr:'Task two adds dataset validation. The Folders strip apportions the churn across src, src/models, tests, and docs. Commands Claude runs land in the Actions timeline the same way, starting with the python src/train.py sanity check that closed task one. Two more are backgrounded — a test watcher and a docs preview — so the Processes tab picks them up, one still running.'},
       {ed:4,landed:4,
-       narr:'Claude hands the test-writing to a subagent — watch it appear under the session in the Fleet nav. Its edit is attributed to it in the timeline and reviewed exactly like any other.'},
+       narr:'Task three is tests and docs. Claude hands the test-writing to a subagent — watch it appear under the session in the Fleet nav. Its edit is attributed to it in the timeline and reviewed exactly like any other.'},
       {ed:5,landed:5,
-       narr:'A workflow run writes the docs — the Workflows tab picks up the run. Under the change map, the feed reads what the selected row is doing, straight from the file it writes: it is marked live while that source is still writing, and becomes an audit log once it has finished. Five edits are now pending across three chapters; the Next steps list at the bottom of Observations says what remains.'},
+       narr:'A workflow run writes the documentation, one level above the subagents — the Workflows tab picks up the run. Under the change map, the feed reads what the selected row is doing, straight from the file it writes: it is marked live while that source is still writing, and becomes an audit log once it has finished. Five edits are now pending across the three tasks; the Next steps list at the bottom of Observations says what remains.'},
       {ed:1,landed:5,gate:'keep',hint:'Click ✓ Keep on the lens in the editor.',
        narr:'Review the first edit: the scaling function is correct — <span class="hl">keep it</span>. Keeping one edit resolves it and nothing else.'},
       {ed:2,landed:5,gate:'undo',hint:'Click ↩ Undo on the lens in the editor.',
-       narr:'The entrypoint wiring isn’t wanted — <span class="hl">undo just this edit</span>. The revert is surgical: a position-anchored line merge, so every other pending change stays exactly as Claude left it.'},
-      {ed:2,landed:5,gate:'acceptall',hint:'Click ✓ Accept all in the Overview toolbar.',
-       narr:'Sweep the rest in one motion: <span class="hl">Accept all</span> resolves everything still pending. Clicking a chapter row scopes the same bulk actions to just that task.'},
+       narr:'The entrypoint wiring is not wanted — <span class="hl">undo just this edit</span>. The revert is surgical: a position-anchored line merge, so every other pending change stays exactly as Claude left it.'},
+      {ed:2,landed:5,gate:'acceptall',hint:'Click ✓ Accept All in the Overview toolbar.',
+       narr:'Sweep the rest in one motion: <span class="hl">Accept All</span> resolves everything still pending. Accept Prompt narrows the same sweep to the work one prompt caused; in the editor, picking that prompt in the Prompts window scopes the whole Overview to it.'},
       {ed:1,landed:5,recap:true,
-       narr:'That is the whole loop: every edit tracked with its reasoning, reviewed one at a time or by the chapter, and resolved without git. The session has stopped writing, so its feed is now an audit log rather than a live tail. Run the same session in your own editor below — or start with the <a href="getting-started.html" style="color:var(--accent-ink);text-decoration:underline">recorded walkthrough</a>.'},
+       narr:'That is the whole loop: every edit tracked with its reasoning, reviewed one at a time or by file, folder, or prompt, and resolved without git. The plan is complete, the session has stopped writing, and its feed is now an audit log rather than a live tail. Run the same session in your own editor below — or start with the <a href="getting-started.html" style="color:var(--accent-ink);text-decoration:underline">recorded walkthrough</a>.'},
     ];
     var N=STEPS.length;
     var el=function(id){return document.getElementById(id);};
     var step=0, resolved={}, timer=null, playing=false, typeTimer=null, advanceTok=0;
-    // Gate countdown: the visitor can act, and if they don't, the action applies itself when the
+    // Gate countdown: the visitor can act, and if they do not, the action applies itself when the
     // timer runs out — the walkthrough never stalls.
     var gateTimer=null, gateLeft=0, armedStep=-1;
     var GATE_SECONDS=reduce?3:9;
@@ -696,16 +692,27 @@
       el('obs-count').textContent=landed.length?landed.length+' edit'+(landed.length===1?'':'s'):'';
 
       // ---- overview: toolbar + fleet nav + detail ----
-      var pendingFiles=[],curFile=fn;
-      landed.forEach(function(e){if(statusOf(e.id,step,res)==='pending'&&pendingFiles.indexOf(e.file)<0)pendingFiles.push(e.file);});
-      var fIdx=pendingFiles.indexOf(curFile);
+      // The four review axes, as the editors' nav bar groups them: Diff · File · Folder · Prompt.
+      var pendingFiles=[],pendingFolders=[],curFile=fn;
+      landed.forEach(function(e){
+        if(statusOf(e.id,step,res)!=='pending')return;
+        if(pendingFiles.indexOf(e.file)<0)pendingFiles.push(e.file);
+        if(pendingFolders.indexOf(e.module)<0)pendingFolders.push(e.module);
+      });
+      var curFolder=ed==='seed'?'':EDITS[ed-1].module;
+      var fIdx=pendingFiles.indexOf(curFile), gIdx=pendingFolders.indexOf(curFolder);
       var fileCounter=pendingFiles.length?('File '+(fIdx>=0?fIdx+1:'–')+'/'+pendingFiles.length):'';
+      var folderCounter=pendingFolders.length?('Folder '+(gIdx>=0?gIdx+1:'–')+'/'+pendingFolders.length):'';
       var diffCounter=(ed!=='seed'&&statusOf(EDITS[ed-1].id,step,res)==='pending')?'Diff 1/1':'';
+      // The scenario is one prompt, so the Prompt axis holds a single entry while it still has work to review.
+      var promptCounter=p0?'Prompt 1/1':'';
       var bar='<span class="g"><span class="ts">Search</span> · 🔬 demo-session</span><span class="sep"></span>';
       if(diffCounter) bar+='<span class="g"><span class="nvb">▲</span> <span class="on">'+diffCounter+'</span> <span class="nvb">▼</span> <span class="tk">✓ Keep</span> <span class="tu">↩ Undo</span></span><span class="sep"></span>';
       if(fileCounter) bar+='<span class="g"><span class="nvb">◀</span> <span class="on">'+fileCounter+'</span> <span class="nvb">▶</span> <span class="tk">✓✓ Accept File</span> <span class="tu">✗ Reject File</span></span><span class="sep"></span>';
+      if(folderCounter) bar+='<span class="g"><span class="nvb">◀</span> <span class="on">'+folderCounter+'</span> <span class="nvb">▶</span> <span class="tk">✓✓ Accept Folder</span> <span class="tu">✗ Reject Folder</span></span><span class="sep"></span>';
+      if(promptCounter) bar+='<span class="g"><span class="nvb">◀</span> <span class="on">'+promptCounter+'</span> <span class="nvb">▶</span> <span class="tk">✓✓ Accept Prompt</span> <span class="tu">✗ Reject Prompt</span></span><span class="sep"></span>';
       bar+='<span class="g ts">Spotlight</span>';
-      if(st.gate==='acceptall'&&!res[step]) bar+='<span class="sep"></span><button id="ov-acceptall" class="hint">✓ Accept all</button>';
+      if(st.gate==='acceptall'&&!res[step]) bar+='<span class="sep"></span><button id="ov-acceptall" class="hint">✓ Accept All</button>';
       el('ovbar').innerHTML=bar;
       var ab=el('ov-acceptall');
       if(ab)ab.addEventListener('click',function(){resolveGate();});
@@ -715,31 +722,16 @@
       var fleetHtml='<div class="fr"><span class="gl">▶</span><span class="st2 '+(sessDone?'done':'working')+'">'+(sessDone?'● done':'● working')+'</span> you · demo/pipeline</div>';
       if(landed.length>=4) fleetHtml+='<div class="fr sub"><span class="gl">▷</span><span class="st2 done">● done</span> general-purpose — Write pipeline tests</div>';
       el('fleet').innerHTML=fleetHtml;
-      el('wf-tab').textContent='Workflows'+(landed.length>=5?' (1)':'');
-      // Tasks tab badge — the demo's three chapters are also tracked as numbered tasks (0.8.3).
+      el('wf-tab').textContent='Workflows'+(landed.length>=5?' 1':'');
+      // Tasks tab badge — the demo's three numbered tasks, complete once their strict spans have landed.
       var tkDone=0;
-      if(showPlan) CHAPTERS.forEach(function(ch){ if(ch.edits.every(function(id){return id<=landed.length;})) tkDone++; });
+      if(showPlan) TASKS.forEach(function(ch){ if(ch.edits.every(function(id){return id<=landed.length;})) tkDone++; });
       el('tk-tab').textContent=showPlan?('Tasks '+tkDone+'/3'):'Tasks';
-      // Processes tab — the demo session backgrounds two shells alongside chapter two: a test watcher
+      // Processes tab — the demo session backgrounds two shells alongside task two: a test watcher
       // that exits 0, and a docs preview left running. The badge is running/total, as in the editors.
       el('pr-tab').textContent=(landed.length>=3)?'Processes 1/2':'Processes';
 
-      var rib='';
-      if(showPlan){
-        CHAPTERS.forEach(function(ch){
-          var chEdits=landed.filter(function(e){return ch.edits.indexOf(e.id)>=0;});
-          var pend=chEdits.filter(function(e){return statusOf(e.id,step,res)==='pending';}).length;
-          var dot,cls;
-          if(!chEdits.length){dot='○';cls='todo';}
-          else if(pend>0){dot='◐';cls='part';}
-          else{dot='●';cls='done';}
-          var plus=chEdits.reduce(function(a,e){return a+e.plus;},0),minus=chEdits.reduce(function(a,e){return a+e.minus;},0);
-          rib+='<div class="rr"><span class="rd '+cls+'">'+dot+'</span><span class="rt">'+esc(ch.title)+'</span>'+
-            (chEdits.length?'<span class="mini-acts" aria-hidden="true">✓ ↩ 🧹</span>':'')+
-            '<span class="rc">'+(chEdits.length?('+'+plus+' −'+minus+(pend?' · '+pend+' pending':' · reviewed')):'planned')+'</span></div>';
-        });
-      }
-      el('ov-ribbon').innerHTML=rib||'<div class="empty">Claude’s to-dos become the chapter ribbon.</div>';
+      // The change-map detail: Folders strip, churn-ranked Files ledger, summary bar, then the feed.
       var strip=el('ov-strip');
       var mods={};landed.forEach(function(e){mods[e.module]=(mods[e.module]||0)+e.plus+e.minus;});
       var modKeys=Object.keys(mods);
@@ -752,12 +744,12 @@
         }).join('');
       }else{strip.hidden=true;strip.innerHTML='';}
       var maxChurn=landed.reduce(function(a,e){return Math.max(a,e.plus+e.minus);},1);
-      el('ov-ledger').innerHTML=landed.slice().sort(function(a,b){return (b.plus+b.minus)-(a.plus+a.minus);}).map(function(e){
+      el('ov-ledger').innerHTML=landed.length?landed.slice().sort(function(a,b){return (b.plus+b.minus)-(a.plus+a.minus);}).map(function(e){
         var s2=statusOf(e.id,step,res);
         return '<div class="lr"><span class="sd '+s2+'"></span><span class="lf">'+esc(e.file)+'</span>'+
           '<span class="lb"><i style="width:'+Math.round(100*(e.plus+e.minus)/maxChurn)+'%"></i></span>'+
           '<span class="lc"><span class="p">+'+e.plus+'</span> <span class="m">−'+e.minus+'</span></span></div>';
-      }).join('');
+      }).join(''):'<div class="empty">Changed files appear here as edits land.</div>';
       var addAll=landed.reduce(function(a,e){return a+e.plus;},0),remAll=landed.reduce(function(a,e){return a+e.minus;},0);
       el('ov-readout').textContent=landed.length?(landed.length+' file'+(landed.length===1?'':'s')+' · +'+addAll+' −'+remAll+(p0?' · '+p0+' pending':' · reviewed clean')):'';
 

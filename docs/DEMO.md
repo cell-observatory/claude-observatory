@@ -6,33 +6,32 @@ needs facts that run did not produce — from the bundled `claude-observatory de
 capture pipeline against a real transcript. Nothing is staged; the session id in each block's header says
 which run it came from.
 
-![The observatory layout — the sidebar "Claude Edits" (Edits · Diffs · File History · Actions · Observations) plus the bottom panel "Claude Observatory" (Requests · Overview · Stats)](media/layout.png)
+![The observatory layout — the sidebar "Claude Edits" (Edits · Diffs · File History · Actions · Observations) plus the bottom panel "Claude Observatory" (Prompts · Overview · Stats)](media/layout.png)
 
-> Prefer pictures? See the **[visual showcase](https://cell-observatory.github.io/claude-observatory/showcase.html)**
-> in your browser (rendered from [showcase.html](showcase.html) via GitHub Pages).
+> The **[visual showcase](https://cell-observatory.github.io/claude-observatory/showcase.html)** presents
+> the same material in the browser (rendered from [showcase.html](showcase.html) via GitHub Pages).
 
 ## Zero-setup demo — try it without Claude
 
-Don't want to burn a session just to see the panels move? The
-**[interactive demo](https://cell-observatory.github.io/claude-observatory/demo.html)** replays the
-scenario in the browser — no editor needed. Locally, the built-in simulator replays the same scripted
-session through the **real pipeline** — a genuine transcript, edits captured by the same hooks, a
-subagent, and a workflow run — inside an isolated `demo-…` session and an `observatory-demo/` folder it
-creates in the current directory:
+The **[interactive demo](https://cell-observatory.github.io/claude-observatory/demo.html)** replays the
+scenario in the browser, with no editor and no Claude session required. Locally, the built-in simulator
+replays the same scripted session through the **real pipeline** — a genuine transcript, edits captured
+by the same hooks, a subagent, and a workflow run — inside an isolated `demo-…` session and an
+`observatory-demo/` folder it creates in the current directory:
 
 ```bash
 claude-observatory demo          # run it in an open workspace and watch every panel update live
 ```
 
-Open the Overview while it runs: the chapter ribbon fills chapter by chapter, a **compaction marker**
-appears between two of the chapters where the scenario runs the context window out, the Fleet nav gains a
-subagent and a workflow, the Tasks tab counts down three numbered tasks linked to those same chapters
-(live statuses + per-task edit counts), and the **Processes** tab picks up two background shells — one
-that exits 0 and one left running. Click any row and the **feed** below the change-map fills with what
-that thing is doing. Observations streams the reasoning throughout. The scenario also runs a command
-`risk` flags, reads a file outside the workspace, fetches a URL and calls an MCP server, so both audits
-have something real to report. The edits are real store records on real files, so Accept / Reject /
-task-scoped review all genuinely work. When you're done:
+Open the Overview while it runs: the **Tasks** tab counts down three numbered tasks (live statuses and
+per-task edit counts), the Folders strip and the Files ledger fill in as each edit lands, the Fleet nav
+gains a subagent and a workflow, and the **Processes** tab picks up two background shells — one that
+exits 0 and one left running. Partway through, the scenario runs the context window out; the compaction
+that follows is reported in the Actions timeline and in Stats. Click any row and the **feed** below the
+change map fills with what that thing is doing. Observations streams the reasoning throughout. The
+scenario also runs a command `risk` flags, reads a file outside the workspace, fetches a URL and calls an
+MCP server, so both audits have something real to report. The edits are real store records on real files,
+so Accept / Reject / task-scoped review all genuinely work. To remove it:
 
 ```bash
 claude-observatory demo --clean  # removes the demo session, its store, and the demo folder
@@ -67,14 +66,14 @@ claude-observatory init --with-statusline # capture hooks + the bundled status l
 > Install the hooks **before** launching Claude Code — a running session reverts hook edits made
 > mid-session. Then launch Claude Code and let it edit; every session after that captures automatically.
 
-Confirm it's live:
+Confirm it is live:
 
 ```console
 $ claude-observatory status
 capture hooks:   installed
 hook script:     claude-observatory (on PATH) [ok]
-active session:  0c396c6b-2da9-4be2-9c6d-c8c5797de7a5
-store:           ~/.claude/claude-observatory/0c396c6b-2da9-4be2-9c6d-c8c5797de7a5
+active session:  demo-0c396c6b
+store:           ~/.claude/claude-observatory/demo-0c396c6b
 last capture:    1m ago
 edits:           3  (3 pending · 0 kept · 0 undone)
 ```
@@ -87,7 +86,7 @@ Edits are grouped by file, newest ids last, with the line delta and status:
 
 ```console
 $ claude-observatory list
-3 edit(s)  ·  3 pending  ·  session 0c396c6b-2da9-4be2-9c6d-c8c5797de7a5
+3 edit(s)  ·  3 pending  ·  session demo-0c396c6b
 
 src/models/dataset.py
   #1  pending  +11 -0  Write  1m ago
@@ -101,8 +100,16 @@ diff <id> · keep <id> · undo <id>
 
 ![the terminal front-end — the running log grouped by file, with the diff/keep/undo verbs](media/cli.png)
 
-Filter with `--pending` / `--kept` / `--undone` or `--file <substr>`. List every session in the store
-with `claude-observatory sessions` (a `●` marks the one that resolves for your current directory).
+Filter with `--pending` / `--kept` / `--undone` or `--file <substr>`. `claude-observatory sessions`
+lists this workspace's sessions, each led by Claude's own title for it and ordered by when the
+conversation was last active; `●` marks the one that resolves for your current directory:
+
+```console
+$ claude-observatory sessions
+● Pipeline: scaling, validation, tests  demo-5b039d80  5 edit(s) · 5 file(s) · 5 pending · 0s ago
+
+● = resolves for this directory · use `--session <id>` to target another
+```
 
 ## 3 · Diff — inspect one edit
 
@@ -150,31 +157,35 @@ against a demo session, whose third edit adds `validate()` the same way:
 
 ```console
 $ claude-observatory undo 3
-✓ undid edit #3 (/private/tmp/claude-502/obsdoc/observatory-demo/src/models/dataset.py)
+✓ undid edit #3 (/tmp/obs-demo/observatory-demo/src/models/dataset.py)
 
 $ claude-observatory redo 3
-✓ re-applied edit #3 (/private/tmp/claude-502/obsdoc/observatory-demo/src/models/dataset.py)
+✓ re-applied edit #3 (/tmp/obs-demo/observatory-demo/src/models/dataset.py)
 ```
 
 **Redo** re-applies an undone edit; `--force` on either falls back to a whole-file restore. Note that
 `undo` and `redo` name the file by its full path, while `keep` prints it relative to the workspace.
 
-**Keep or undo a whole task at once.** Claude's own to-dos define stable, content-hash `taskId`s (see
-the [Overview](#overview--the-master-detail-multi-agent-panel)). `task-keep` / `task-undo` act **WYSIWYG
-on every pending edit displayed under that chapter** — exactly the set the ribbon row shows, gap-filled
-members and the synthesized session chapter included — so accepting a chapter never leaves stragglers:
+**Keep or undo a whole task at once.** Claude's own numbered to-dos define stable, content-hash
+`taskId`s (see the [Overview](#overview--the-master-detail-multi-agent-panel)). `task-keep` and
+`task-undo` act on a task's **strict span** — the edits captured while that task was actually in
+progress, and no others:
 
 ```console
-$ claude-observatory task-keep 4d9f1a2b3c4d
-✓ kept 6 edit(s) in task 4d9f1a2b3c4d
+$ claude-observatory task-keep 57e216e743ae
+✓ kept 2 edit(s) in task 57e216e743ae
 
-$ claude-observatory task-undo 4d9f1a2b3c4d
-⚠ reverted 5 edit(s) in task 4d9f1a2b3c4d · 1 conflict(s) left (undo individually with --force)
+$ claude-observatory task-undo 12d5f37a19c4
+✓ reverted 2 edit(s) in task 12d5f37a19c4
 ```
 
-Both take `--json` — `task-keep` returns `{ kept, total, ids }`, `task-undo` `{ undone, conflicts,
-total, ids }` — and both stay zero-token: the task↔edit mapping is mined from the transcript's to-dos,
-never a model call.
+An edit made outside every in-progress window belongs to no task: it stays in the `unassigned` bucket
+rather than joining the task before or after it, so keeping or undoing a task never touches work that
+task did not produce. Each revert stays conflict-guarded per edit, so a task whose edits a later change
+built on reports the conflicts it left instead of forcing them. Both verbs take `--json` — `task-keep`
+returns `{ kept, total, ids }`, `task-undo` `{ undone, conflicts, total, ids }` — and both stay
+zero-token: the task↔edit mapping is mined from the transcript's own to-do checkpoints, never a model
+call.
 
 ## 5 · Clean up
 
@@ -184,6 +195,20 @@ $ claude-observatory clean --resolved     # drop kept/undone edits, keep pending
 
 $ claude-observatory clean                # GC orphaned blobs across all sessions
 ✓ garbage-collected 2 orphaned blob(s), freed 1.4 KB
+```
+
+Two narrower scopes clear part of a session. `--ids` takes an explicit set of edit ids, which is how the
+Overview clears one prompt's resolved edits: the work one ask produced is spread across files and
+folders, so no path expresses it. `task-clear <taskId>` does the same for one task's strict span, and
+`task-clear --completed` for every settled task at once — the ones whose edits are present and all
+kept:
+
+```console
+$ claude-observatory clean --resolved --ids 4,5
+✓ cleared 2 resolved edit(s)
+
+$ claude-observatory task-clear 57e216e743ae
+✓ cleared 2 resolved edit(s) in task 57e216e743ae
 ```
 
 ---
@@ -230,22 +255,23 @@ in the others instantly. The layout is deliberately identical; only the host chr
 | Install | `code --install-extension claude-observatory.vsix` | `./scripts/install-jetbrains.sh` (or Install Plugin from Disk) |
 | Auto-update | daily background check → one-click **Update now** | add the [plugin repository](../packages/jetbrains/README.md#auto-updates) once → IDE-native updates |
 | **Edits · Diffs · File History · Actions** (the sidebar) | **Claude Edits** — microscope in the Activity Bar, badged with the pending count | **Claude Observatory** tool window, left stripe |
-| **Requests · Overview · Stats** (the bottom panel) | **Claude Observatory** bottom panel, side by side (like Terminal/Problems) | **Claude Observatory Dashboards** tool window, bottom stripe — the same three panes side by side |
+| **Prompts · Overview · Stats** (the bottom panel) | **Claude Observatory** bottom panel, side by side (like Terminal/Problems) | **Claude Observatory Dashboards** tool window, bottom stripe — the same three panes side by side |
 | Inline menu (**✨ #N · +A −R · view changes · Keep · Undo · Chat · View diff**) | CodeLens above each edit + ✨ gutter star + bold green/red highlight + coral ruler mark | lens above each edit + clickable ✨ gutter star + bold green/red highlight + coral stripe |
-| Click **view changes** | opens the **inline review bubble** at the edit — the diff in git's colors + reasoning + `+A −R`, Accept/Revert/Chat/Prev/Next on its toolbar (no tab) | opens the edit's unified **diff** (reasoning in title, Keep/Undo/Chat on toolbar) |
+| Click **view changes** | opens the **inline review bubble** at the edit — the diff in git's colors + reasoning + `+A −R`, Keep/Undo/Chat/Prev/Next on its toolbar (no tab) | opens the edit's unified **diff** (reasoning in title, Keep/Undo/Chat on toolbar) |
 | File spotlight | 📄 spotlight (tab-bar) | 📄 spotlight (editor banner) |
 | Scoreboard | status-bar `🔬 N` (amber while pending) + live bar in Stats | status-bar `🔬 N` + live bar in Stats |
-| Keyboard loop | `⌥⌘N` next · `⌥⌘Y` keep · `⌥⌘U` undo · `⌥⌘[`/`⌥⌘]` revisions (`Ctrl+Alt` on Win/Linux) | same keys |
+| Keyboard loop | `⌥⌘N` next · `⌥⌘Y` keep · `⌥⌘U` undo · `⌥⌘-`/`⌥⌘=` revisions (`Ctrl+Alt` on Win/Linux) | `⌥⌘N` next · `⌥⌘Y` keep · `⌥⌘U` undo · `⌥⌘[`/`⌥⌘]` revisions |
 
 The **sidebar** ("Claude Edits") carries the five review-and-audit panes — **Edits · Diffs · File
 History · Actions · Observations** — and the **bottom panel** ("Claude Observatory") carries the three
-dashboards — **Requests · Overview · Stats**. (Timeline is gone as a standalone pane — its coalesced
+dashboards — **Prompts · Overview · Stats**. (Timeline is gone as a standalone pane — its coalesced
 change-feed now leads **Observations**, which moved into the sidebar in 0.8.7 to make room for the
-**Requests** window beside the Overview it scopes; **Actions** moved up there in 0.8.0; and the old
-Multitasking window folded into **Overview** as its **Fleet** tab.) Both front-ends drive the review surfaces from **icon-only tabs**
-(hover for the label), and JetBrains is at full **feature parity** with VS Code: the toggle-inline button,
-**Accept/Revert this file** on the Edits toolbar, revision-nav buttons, Overview bulk actions, Observations
-clear/switch/doctor, a 5th **⧉ View diff** lens segment, and a pending badge on the tool-window stripe.
+**Prompts** window beside the Overview it scopes; **Actions** moved up there in 0.8.0; and the former
+multi-agent window folded into **Overview** as its **Fleet** tab.) Both front-ends drive the review
+surfaces from **icon-only tabs** (hover for the label), and JetBrains is at full **feature parity** with
+VS Code: the toggle-inline button, **Accept/Revert this file** on the Edits toolbar, revision-nav
+buttons, Overview bulk actions, Observations clear/switch/doctor, a 5th **⧉ View diff** lens segment,
+and a pending badge on the tool-window stripe.
 
 The **status-bar microscope** shows the pending count in realtime — the moment Claude writes a
 change. Click it (or **Review next pending edit**) to jump straight to the oldest unreviewed edit;
@@ -289,18 +315,18 @@ buttons (Prev/Next step through that file's edits). In **PyCharm**, the ✨ gutt
 edit's before ⟷ after as a **unified diff** (reasoning in the title, Keep/Undo/Chat on its toolbar).
 
 GitLens-style extras, in both editors: the **file spotlight** (📄) dims every unmodified line so Claude's
-edits pop; **revision navigation** (`⌥⌘[` / `⌥⌘]`) steps a file's edit history in a current-vs-revision
-diff.
+edits pop; **revision navigation** (`⌥⌘-` / `⌥⌘=` in VS Code, `⌥⌘[` / `⌥⌘]` in PyCharm) steps a file's
+edit history in a current-vs-revision diff.
 
-![the file spotlight — every unmodified line dimmed so Claude's edits stand out](media/heatmap.png)
+![the file spotlight — every unmodified line dimmed so Claude's edits stand out](media/spotlight.png)
 
 ### The review nav bar
 
 One combined review bar, mirrored across four surfaces so the surgical loop is always a click away: the
 **status bar** (both editors), the **editor tab bar** (VS Code's editor-title actions; a banner
 across the top of the editor in JetBrains), a single floating **review bubble** (VS Code's
-Comments API) parked over the edit you're on, and — new in 0.8.0 — the **Overview title bar**, where
-it rides alongside the session selector and the bulk actions.
+Comments API) parked over the current edit, and — new in 0.8.0 — the **Overview title bar**, where
+it rides alongside the name of the session under review and the bulk actions.
 
 ```text
 🔬 3  Search  ▲ Diff 1/2 ▼  ◀ File 1/3 ▶  ✓ Keep  ↩ Undo  ✓✓ Accept File  ✕ Reject File  Clear Resolved  Spotlight
@@ -316,10 +342,12 @@ undo/reject **red**, the nav chevrons **blue**, clear **orange**, search/spotlig
 same chart palette the Overview uses, so the destructive half of the bar never reads like the safe half.
 No icon serves two actions: the session-wide bulk pair get their own glyphs (Accept All a checklist,
 Revert All a history-rewind), distinct from the file-scoped double-check / ✕ and the per-edit ✓ / ↩.
-On the **Overview title bar** the bar expands to **two rows**. The **top row** carries the controls: a
-**session selector** — which now shows the session's human-readable **name** (its title or first prompt;
-the raw id sits in the tooltip), and whose switch-session picker lists every session by name too — the session-wide bulk actions **Accept All · Revert All · Clear
-Resolved · Export**, and on the right **Search · Active only · Spotlight · Refresh**. The **bottom row**
+On the **Overview title bar** the bar expands to **two rows**. The **top row** carries the controls: the
+**name of the session under review** (its title or first prompt; the raw id sits in the tooltip) — a
+label since 0.8.8, because the **Sessions** tab is where the session changes — the session-wide bulk
+actions **Accept All · Reject All · Clear Resolved · Export**, and on the right **Search · Active only · Spotlight · Refresh**. **Active only** —
+which hides finished agents, finished runs, exited shells and fully reviewed work — is **on by default**
+and is remembered across panel hides and restarts, in both editors. The **bottom row**
 steps the pending edits on **four review axes**, each a coarser grain than the last:
 
 - **Diff** — the open file's edits; carries **Keep · Undo · Chat** (hands this edit's before/after to
@@ -329,13 +357,13 @@ steps the pending edits on **four review axes**, each a coarser grain than the l
   Reject File**.
 - **Folder** *(new)* — every changed folder; shows the directory and its file / edit totals, with
   **Accept Folder / Reject Folder**, which act on that folder's edits alone.
-- **Chapter** — the session's subtasks (the chapters mined from Claude's own to-dos); shows the
-  chapter's folder / file / edit totals, with **Review · Accept Chapter · Reject Chapter · Chat**.
+- **Prompt** — your own asks, in order; shows what each one produced, with **Review · Accept Prompt ·
+  Reject Prompt**.
 
-It's **two-tier**. The File axis plus Clear / Spotlight / Search show whenever *any* edit is pending
+The bar is **two-tier**. The File axis plus Clear / Spotlight / Search show whenever *any* edit is pending
 anywhere; the Diff axis and the per-edit / per-file actions appear only when the **open** file has
 pending edits. The counters **track the active editor**, so `Diff 1/2` always means "this file." The
-keyboard loop is unchanged — `⌥⌘N`/`⌥⌘P`, `⌥⌘Y`/`⌥⌘U`, `⌥⌘K`/`⌥⌘R`, `⌥⌘[`/`⌥⌘]` still drive it.
+keyboard loop is unchanged — `⌥⌘N`/`⌥⌘P`, `⌥⌘Y`/`⌥⌘U`, `⌥⌘K`/`⌥⌘R` and the revision keys still drive it.
 
 ### File History — the active file's edits, in order
 
@@ -350,7 +378,7 @@ keep / undo / diff it; the toolbar steps revisions and does **Accept all in this
 
 The whole session as a typed record of **every tool call Claude made**: reads, greps, shell commands,
 web fetches, subagent spawns, to-do updates, not just the file writes the store captures. Like
-everything else here it costs **zero tokens** — it's mined straight from the Claude Code transcript —
+everything else here it costs **zero tokens** — mined straight from the Claude Code transcript —
 and each action is correlated with its **result** (`ok` / `error`). File-edit actions **link back to
 their store record**, so you can jump from the trace into the review in one click.
 
@@ -380,7 +408,7 @@ editors render the grouped-by-category view above from the same data:
 
 ```console
 $ claude-observatory actions
-Actions  9 total · 3 edit · 3 read · 2 exec · 1 todo · 1 error(s) · session 0c396c6b-2da9-4be2-9c6d-c8c5797de7a5
+Actions  9 total · 3 edit · 3 read · 2 exec · 1 todo · 1 error(s) · session demo-0c396c6b
 
 2m ago       [edit]    Write      src/models/dataset.py edit#1  (create the Dataset class)
 2m ago       [edit]    Edit       src/models/dataset.py edit#2  (add a validate() method)
@@ -455,32 +483,34 @@ rows, which now show an estimated **used / total** — the 100% total inferred f
 ÷ percent. The full scoreboard (`3 pending · 42 accepted · 5 reverted · 89% accepted · oldest 12m`)
 also lives in the status-bar microscope's tooltip. Compaction is surfaced in two more places: as its own
 curated **Compactions** group in the Actions timeline (`auto · 178k→12k · 166k dropped · 1m 32s`), and as
-a **marker between chapters** in the Overview, drawn where the harness ran out of context. The stats
+a **⤺ count** on the Prompts row of the ask that was interrupted by it. The stats
 scan runs in a subprocess with an
 incremental cache — and the session-token counters keep a per-transcript byte cursor, parsing only
 what was appended since the last refresh — so the UI never blocks.
 
 ### Overview — the master-detail multi-agent panel
 
-The flagship 0.8.0 surface, and the one that replaces both the old **Change Map** and the old
-**Multitasking** window. **Overview** is a **master-detail** panel (both editors): a **left nav**
+The flagship 0.8.0 surface, and the one that replaces both the old **Change Map** window and the old
+multi-agent window. **Overview** is a **master-detail** panel (both editors): a **left nav**
 (~25%) that lists every agent and every workflow, and a **right detail** (~75%) that shows the selected
-one's **change-map**. The left nav groups its rows under four tabs — **Fleet**, **Workflows**, **Tasks**
-(the session's numbered tasks, or, on newer Claude Code builds, its background **Agent runs**) and
+one's **change-map**. The left nav groups its rows under five tabs — **Fleet**, **Workflows**, **Tasks**
+(the session's numbered tasks, or, on newer Claude Code builds, its background **Agent runs**),
 **Processes** (the background shells it started with `run_in_background`; see
-[Processes](#processes--the-background-shells-still-running)) — each of which opens with a one-line
-description of what it lists; every tab and change-map section also carries a hover description.
-Selecting a row in any of them opens that thing's **feed** below the change-map (see
-[Feed](#feed--what-one-thing-is-doing-right-now)). A **title bar** across the top carries a **session
+[Processes](#processes--the-background-shells-still-running)) and **Sessions** (every Claude Code
+session for this workspace; see [Sessions](#sessions--every-session-in-this-workspace)) — each of which
+opens with a one-line description of what it lists; every tab and change-map section also carries a
+hover description. Selecting a row in the first four opens that thing's **feed** below the change-map
+(see [Feed](#feed--what-one-thing-is-doing-right-now)); selecting a **Sessions** row pins what the whole
+observatory reviews. A **title bar** across the top carries a **session
 selector** (showing the session by its name), the combined **two-row review nav bar**, and the
 session-wide bulk actions. It answers two questions at once — *what is my whole fleet doing right now*
 and *where did the work land, what still needs my eyes*.
 
-![Overview — the master-detail panel: a left nav listing the running agents, workflow runs and tasks, feeding the right-hand change-map detail (Chapters ribbon, Folders strip, Files ledger), under a two-row title bar with the review nav bar and bulk actions](media/overview-tabs.png)
+![Overview — the master-detail panel: a left nav listing the running agents, workflow runs, tasks and sessions, feeding the right-hand change-map detail (Folders strip, Files ledger, summary bar), under a two-row title bar with the review nav bar and bulk actions](media/overview-tabs.png)
 
 #### Left nav → **Fleet** — every running agent, live
 
-The **Fleet** tab (this is where the old Multitasking window went) lists **one row per running agent**
+The **Fleet** tab lists **one row per running agent**
 across every git **worktree** of the repo. Worktrees are correlated **git-free** — the observatory reads
 the `.git` **pointer files** (a linked worktree's `.git` is a *file* naming its admin dir; that dir's
 `commondir` points back at the shared repo), never shelling out to the git binary — so sessions launched
@@ -488,7 +518,7 @@ from sibling worktrees of one logical repo unify into a **single fleet** keyed b
 
 Each agent row carries a live **phase** badge — `working` · `awaiting-input` · `awaiting-permission` ·
 `idle` · `errored` · `done` — its **worktree + branch**, an activity **sparkline**, its **±diff**,
-**tokens · time**, **risk** flags, a **collision** badge, and an **↗** suffix counting the files that
+**tokens · time**, **risk** flags, a **conflict** badge, and an **↗** suffix counting the files that
 agent read or wrote **outside the workspace** (`↗ 3 read · 22 written outside`) — the one glanceable
 fact left over from the 0.8.6 footprint row, with the Actions panel's Risk and Egress nodes naming the
 files themselves. Unfold the row for the agent's nested
@@ -501,7 +531,7 @@ The **phase** is detected **zero-token, from the transcript tail**: an active `t
 `awaiting-input`; a pending permission prompt reads `awaiting-permission`; otherwise `idle` / `errored` /
 `done`, staleness-gated. The querying (self) session shows **working** while it is actively running.
 
-![The Fleet / Workflows left nav — the fleet of running agents across the repo's git worktrees, each with a live phase, branch, activity sparkline, ±lines, tokens·time, risk and collision counts; nested subagents with their task, to-dos and a chat button](media/multitasking.png)
+![The Fleet / Workflows left nav — the fleet of running agents across the repo's git worktrees, each with a live phase, branch, activity sparkline, ±lines, tokens·time, risk and conflict counts; nested subagents with their task, to-dos and a chat button](media/multitasking.png)
 
 The view is one JSON payload — both editors render it thin, no client-side aggregation. `multitask`
 (its output is JSON either way) emits `agents[]`, `workflows[]`, `worktrees[]`, and `collisions[]`:
@@ -543,6 +573,51 @@ $ claude-observatory multitask --json | jq '.workflows[0].agents[] | {agentType,
 { "agentType": "general-purpose", "done": false, "tokens": 18300, "ms": 5100, "edits": 5 }
 ```
 
+#### Left nav → **Tasks** — Claude's own numbered plan
+
+The **Tasks** tab lists the active session's numbered to-dos — the `TaskCreate` / `TaskUpdate` plan
+Claude keeps for itself — with a live status glyph (a filled ● done, a half ◐ in progress, a hollow ○
+still planned) and, beside each row, the edits made while that task was in progress: **±lines, edit
+count, pending count**. Each task is keyed by a **stable content-hash `taskId`** (a 12-char sha1 of the
+to-do text), so reordering or inserting to-dos never renumbers one. Selecting a row opens that task's
+feed — the main chain's calls inside its in-progress window.
+
+![The Overview's Tasks tab — the session's numbered plan with live statuses and each task's ±lines, edit count and pending count](media/overview-tasks.png)
+
+Attribution is **strict**: an edit belongs to a task only if it was captured while that task was
+actually in progress. Edits made before the first to-do went in progress, or after the last one closed,
+fall in no task's span and are reported in an explicit **unassigned** bucket rather than swept into the
+neighboring task. The same rollup drives the tab, the task verbs of [section 4](#4--keep-vs-undo), and
+`tasklog`:
+
+```console
+$ claude-observatory changemap --json | jq -c '.rollupByTask[] | {taskId, edits, added, removed, pending}'
+{"taskId":"12d5f37a19c4","edits":2,"added":24,"removed":0,"pending":2}
+{"taskId":"57e216e743ae","edits":2,"added":9,"removed":3,"pending":2}
+{"taskId":"a671afe1744f","edits":1,"added":7,"removed":0,"pending":1}
+
+$ claude-observatory changemap --json | jq -c '.unassigned | {edits, added, removed}'
+{"edits":0,"added":0,"removed":0}
+```
+
+`feed --kind task` prints the same window from the terminal — every call the main chain made while that
+task was in progress:
+
+```console
+$ claude-observatory feed --kind task --id 57e216e743ae
+Add feature scaling to the pipeline  ▣ audit log · 0s ago · task
+
+20:37:07   TodoWrite Add feature scaling to the pipeline
+20:37:07   TaskCreate Add feature scaling to the pipeline
+20:37:07   TaskCreate Validate the training dataset
+20:37:07   TaskCreate Tests and docs
+20:37:07   TaskUpdate 1
+20:37:07   Edit /tmp/obs-demo/observatory-demo/src/features.py
+20:37:07   Edit /tmp/obs-demo/observatory-demo/src/train.py
+20:37:07   Bash python src/train.py
+20:37:07   TodoWrite Validate the training dataset
+```
+
 #### Right detail → the change-map
 
 Select an agent or a workflow and the right pane fills with its **change-map** — the whole of that
@@ -551,38 +626,28 @@ session.)
 
 ```text
 🔬 ad93a29f   185 edits · 20 pending · 27 kept · 57% reviewed · 3 agents · 2 err · 🛰 13 · ⇅ 3
-● 1. Scaffold subagent tracking   ◐ 2. Risk + Egress audit   ○ 3. Update docs + showcase
 [██████████ core ██████████|████ vscode ████|██ docs ██|cli]
 extension.ts    vscode   ████████████  +751   6⧗
 changemap.ts    core     █████         +285   ✓
 README.md       docs     █              +44   2⧗
 ```
 
-Three labeled sections, top to bottom:
+Two labeled sections, top to bottom:
 
-- **Chapters** — a ribbon of subtask chips, one per to-do Claude worked, each showing its **lines /
-  edits / pending**. Claude's own to-dos become **named chapters**, each keyed by a **stable
-  content-hash `taskId`** (a 12-char sha1 of the to-do text, so reordering or inserting to-dos never
-  renumbers a task). A filled ● is done, a half ◐ is in progress, a hollow ○ is still planned. **Click a
-  chip to step the Chapter axis to it** — opening the chapter's first pending edit and scoping the map,
-  and the bulk actions, to that chapter, so everything the task didn't produce fades to context. Chapters
-  are **total**: work done between to-dos joins the nearest preceding chapter, and a session with no
-  to-dos gets a single dimmed **session chapter** named after the session's own goal — never an
-  "unassigned" bucket. Destructive ops stay honest underneath: a chapter's Accept/Reject acts
-  **WYSIWYG** on exactly the edits its row shows — the session chapter included — while the strict
-  per-task intervals keep powering `tasklog` and the analytics rollups.
-- **Folders** — a proportional strip of tiles, one per changed folder: **tile width is the lines changed,
-  colour is review status**. It answers "where did this session actually land" before you read a single
+- **Folders** — a strip of equal tiles, one per changed folder, **ranked by lines changed and colored by
+  review status**. It shows where the session's changes landed before you read a single
   row. **Click a tile to step the Folder axis to it** — opening that folder's first pending edit and
-  filtering the map to that folder.
-- **Files** — a churn-ranked ledger of every changed file, each with a ±line bar. Colour is
+  filtering the map to that folder. A repo-wide session spans more folders than one row can label, so the
+  strip leads with the eleven that moved most and folds the rest into **+K more**; click that to see every
+  folder (the strip wraps, capped at five rows and scrolling) and **show fewer** to fold it back.
+- **Files** — a churn-ranked ledger of every changed file, each with a ±line bar. Color is
   **worst-unreviewed-wins**: a folder never reads green while something under it is still pending. Hover
   for the class touched and Claude's own reasoning; **click to open the real diff** — the same review
   surface as everywhere else.
 
 A **summary bar** runs along the bottom: for whatever is currently in scope it tallies the **pending /
-accepted / reverted** edit counts alongside the **file** and **folder** totals, and names the current
-**chapter** (or folder filter), so you always know what the numbers describe.
+accepted / reverted** edit counts alongside the **file** and **folder** totals, and names the picked
+prompt (or folder filter), so you always know what the numbers describe.
 
 Below the summary bar sits the selected row's **feed** (0.8.7) — what that agent, workflow, task or
 background shell is actually doing, read from the file it writes as it works. It is the editors'
@@ -594,11 +659,12 @@ The map always sizes by **±lines** (churn). Under the hood the same change-map 
 levels** — **per task**, **per subagent**, **per agent**, and **per workflow** — with **honest
 attribution** throughout: where a subagent/workflow placement is ambiguous the edit is left
 unattributed, never guessed. From the shell, the same model both editors render (the `unassigned` key
-is the strict rollup's honest leftover — the display chapters are total, this is for scripts):
+holds what strict attribution could not place):
 
 ```bash
-claude-observatory changemap --json | jq '.modules[]     | {label, churn, status, files}'
+claude-observatory changemap --json | jq '.modules[]      | {label, churn, status, files}'
 claude-observatory changemap --json | jq '.rollupByTask[] | {taskId, edits, added, removed}'
+claude-observatory changemap --json | jq '.prompts[]      | {index, text, editIds}'
 claude-observatory changemap --json | jq '.unassigned     | {edits, added, removed}'
 ```
 
@@ -606,18 +672,20 @@ Every rollup — churn, status precedence, module labels, the per-task / per-sub
 breakdowns, the drill-through target — is computed once in `core`, so the VS Code webview and the
 JetBrains panel show identical numbers by construction.
 
-#### Title bar → review nav + chapter-scoped bulk actions
+#### Title bar → review nav + prompt-scoped bulk actions
 
-Across the top of Overview sits a **session selector** (showing the session by name), then the combined
-**[review nav bar](#the-review-nav-bar)** laid out over **two rows**: a **top row** of controls — the
-selector, the **Accept All · Revert All · Clear Resolved · Export** bulk actions, and **Search · Active
-only · Spotlight · Refresh** — over a **bottom row** stepping the **Diff · File · Folder · Chapter** axes
-with live n/m counters. Selecting a ribbon chapter (or stepping the **Chapter** axis to it) **re-scopes**
-Accept/Revert/Clear to *just that chapter*, so you can accept a whole to-do's worth of edits in one click.
-The icons are consistent everywhere: ✓ = accept/keep, ↩ = reject/revert/undo, 🧹 = clear.
+Across the top of Overview sits the **name of the session under review**, then the combined
+**[review nav bar](#the-review-nav-bar)** laid out over **two rows**: a **top row** of controls — that
+label, the **Accept All · Reject All · Clear Resolved · Export** bulk actions, and **Search · Active
+only · Spotlight · Refresh** — over a **bottom row** stepping the **Diff · File · Folder · Prompt**
+axes with live n/m counters. Picking a prompt in the Prompts window (or stepping the **Prompt** axis to
+it) **re-scopes** Accept/Reject/Clear to *just that ask*, so a whole ask's worth of edits can be
+accepted in one click and the buttons relabel to say so ("Accept All in #1"). The icons are consistent
+everywhere: ✓ = accept/keep, ↩ = reject/undo, 🧹 = clear.
 
-The bulk actions are the same task-scoped verbs the CLI exposes — `task-keep` / `task-undo` /
-`task-clear` on a `taskId`, or `keep --all` / `undo --all` for the whole session.
+The task verbs the CLI exposes work the same way from the shell — `task-keep` / `task-undo` /
+`task-clear` on a `taskId`, `clean --resolved --ids <a,b,c>` for the set one prompt names, or
+`keep --all` / `undo --all` for the whole session.
 
 **A task log across the whole fleet.** `tasklog` folds every worktree-sibling's change-map by stable
 `taskId`, so **one logical task spanning agents or worktrees reads as a single row** — edit counts and
@@ -636,7 +704,7 @@ context and hands it to *your own* Claude; it **never calls a model itself**:
 ```console
 $ claude-observatory chat-context --edit 2 --json                # → { "prompt": "…before/after + reasoning…" }
 $ claude-observatory chat-context --task 4d9f1a2b3c4d --json
-$ claude-observatory chat-context --agent a669a284d111a7745 --json
+$ claude-observatory chat-context --agent demosub1 --json
 ```
 
 Both `tasklog` and `chat-context` are **additive** — mined from the transcript + the local store, they
@@ -654,7 +722,7 @@ moved into the audits where they belong. Reading a file outside the workspace is
 Egress; writing outside it is **damage**, so it is Risk. One audit surface instead of two. The `footprint`
 and `capabilities` verbs still run — they print both audits, with a deprecation note on stderr.
 
-**Risk** answers *"what did this session do that can hurt?"* It flags the shell commands that can bite:
+**Risk** states what the session did that could cause harm. It flags the dangerous shell commands:
 data-destroying (`rm -rf`, `git reset --hard`, force push), remote code execution (`curl … | sh`),
 privilege escalation (`sudo`), or reads/writes of credential files. Flagged rows wear a ⚠ **HIGH** /
 **medium** badge in place on the command they describe. It then reports the **edits that landed outside
@@ -662,7 +730,7 @@ the workspace** — the fact nothing else in the product can state, because the 
 path workspace-relative. That is an observation about where the work went, not a score: it is reported
 under its own heading rather than folded into the risk count.
 
-**Egress** answers *"where did this session reach?"* — every **web** host, **MCP** server, network-shell
+**Egress** states where the session reached: every **web** host, **MCP** server, network-shell
 command, and every **file read from outside the workspace**, each tagged with a scope: `remote` (it left
 the machine), `outside` (it stayed on the machine but left the workspace), or `unknown` (the destination
 could not be classified). `outside` is a fact and `unknown` is an admission, so the two are never
@@ -718,8 +786,8 @@ Risk  1 flagged · 1 high · session demo-86aa629c
        recursive/forced delete (rm -rf)
 
 Outside the workspace  2 edit(s) across 2 file(s)
-  ↗ /private/tmp/claude-502/obsdoc/observatory-demo/src/features.py
-  ↗ /private/tmp/claude-502/obsdoc/observatory-demo/src/train.py
+  ↗ /tmp/obs-demo/observatory-demo/src/features.py
+  ↗ /tmp/obs-demo/observatory-demo/src/train.py
 ```
 
 Both audits report what was **exercised, never what was approved**. Claude Code writes **nothing** to the
@@ -731,40 +799,63 @@ worse than no list.
 Both are **additive** — mined from the transcript's action trace, they add nothing to the store and
 change no on-disk format.
 
-### Requests — the session as the conversation you had
+### Prompts — the session as the conversation you had
 
 Every other view organizes the work the way the *agent* saw it: its worktrees, its runs, its own to-dos,
-the files it touched. `requests` is the one that answers the question a person actually arrives with —
-*what happened when I asked for X?* One row per turn you took, in order, each carrying what that ask
-produced:
+the files it touched. `prompts` is the one that answers the question a person actually arrives with —
+*what happened when I asked for X?* A **prompt** is one of your own turns, and it owns the work it
+caused. One row per turn you took, in order, each carrying what that ask produced:
 
 ```console
-$ claude-observatory requests
-Requests  1 asked · 1 produced edits · 5 edit(s) total · session demo-08d42f20
+$ claude-observatory prompts
+Prompts  1 asked · 1 produced edits · 5 edit(s) total · session demo-5b039d80
 
 #1  Add feature scaling and dataset validation to the training pipeline, then bring in tests and
      docs.
-       134ms  5e 4f 2fo · 82k tok · 3t · 1a · 1w · ⤺
+       126ms  5e 5f 4fo · 7k tok · 3t · 1a · 1w · ⤺
 
-work is attributed to the request that STARTED it — a shell launched here belongs here even if it exits later
+work is attributed to the prompt that STARTED it — a shell launched here belongs here even if it exits later
 ```
 
-Each ask carries its own headline stats — **edits** (`5e`) across **files** (`4f`) and **folders**
-(`2fo`), the **tokens** it spent answering, the **tasks** it worked (`3t`), and its subagents (`a`),
+Each ask carries its own headline stats — **edits** (`5e`) across **files** (`5f`) and **folders**
+(`4fo`), the **tokens** it spent answering, the **tasks** it worked (`3t`), and its subagents (`a`),
 workflow runs (`w`), shells (`p`) and compactions (`⤺`). The ask itself is printed **whole**, wrapped
 over as many lines as it needs — a truncated prompt is unrecognisable, and it is the only copy of what
-you actually said. `--id <n>` prints one ask with everything it caused; `--id <n> --response` prints
-**Claude's own reply** to it — its prose with the tool calls stripped, the log you expand to review.
+you actually said. `--id <n>` prints one ask with everything it caused:
+
+```console
+$ claude-observatory prompts --id 1
+#1  0s ago · 126ms
+
+Add feature scaling and dataset validation to the training pipeline, then bring in tests and docs.
+
+  5 edit(s) (+40/−3) · 5 pending · 0 accepted · 0 reverted
+  5 file(s) · 4 folder(s)
+  7k tokens
+  25 tool call(s)
+  3 task(s) worked
+  1 subagent(s)
+  1 workflow run(s)
+  1 compaction(s)
+
+  edits: 1, 2, 3, 4, 5
+```
+
+`--id <n> --response` prints **Claude's own reply** to that ask — its prose with the tool calls
+stripped, the log you expand to review. `--json` emits the same rows as
+`{ session, summary, prompts[] }`, and the change map carries them under its own `prompts[]` key.
 
 In both editors this is a **window of its own**, in the bottom dock immediately left of the Overview —
 so the list of asks stays visible while you read what one of them produced. Each row **expands to show
 Claude's response** to that ask. Selecting a row **scopes the Overview beside it**: its fleet (only the
-subagents that ask spawned), its workflow runs, its tasks, its background shells, and the whole change
-map — chapters, folders, files. The bulk actions retarget to it ("Accept All in #1"), and any pane that
+subagents that ask spawned), its workflow runs, its background shells, and the whole change map —
+folders and files. The bulk actions retarget to it ("Accept All in #1"), and any pane that
 dropped rows says how many and why. Clearing the scope puts everything back.
 
+![The Prompts window — one row per ask, each with the edits, files, folders, tokens, tasks, subagents and runs it produced, and Claude's response expanded under the selected one](media/prompts.png)
+
 Attribution is by what **started** the work, never by what happened to be running when it finished: a
-shell launched by request #4 stays #4's even when it exits during #7. Attributing by completion would
+shell launched by prompt #4 stays #4's even when it exits during #7. Attributing by completion would
 credit whatever you happened to be typing when a job ended.
 
 ### Processes — the background shells still running
@@ -772,9 +863,9 @@ credit whatever you happened to be typing when a job ended.
 Claude can leave shells running in the background (`run_in_background`) — a test watcher, a build, a
 poll loop. Claude Code's own Background panel lists them; the observatory reconstructs the same set from
 the transcript and adds what that panel omits: how long each has been going, what it exited with, and how
-much output it has produced. They are a fourth tab in the Overview, beside Fleet · Workflows · Tasks, and
-a verb. Shells that are **still running sort first** — the one you might act on should not be at the
-bottom of a narrow pane:
+much output it has produced. They are a tab in the Overview, beside Fleet · Workflows · Tasks ·
+Sessions, and a verb. Shells that are **still running sort first** — the one you might act on should not
+be at the bottom of a narrow pane:
 
 ```console
 $ claude-observatory processes
@@ -799,7 +890,7 @@ Serve the docs preview
 
 python -m http.server 8000
 
-output → /private/tmp/claude-502/obsdoc/observatory-demo/.observatory-demo-demo-serve.log
+output → /tmp/obs-demo/observatory-demo/.observatory-demo-demo-serve.log
 
 --- last output ---
 Serve the docs preview
@@ -810,6 +901,41 @@ There is deliberately **no process id**: the transcript never records one, and i
 local processes would be wrong the moment the agent runs somewhere else (SSH, a devcontainer, another
 worktree), which is a supported setup. The harness's shell id is the honest identity, and it is what the
 agent itself uses to read or kill the shell.
+
+### Sessions — every session in this workspace
+
+One workspace accumulates many Claude Code sessions, and the work you want to review is not always the
+one running now. The **Sessions** tab — the first tab of the Overview's left nav in both editors — lists
+every session for this workspace, each led by Claude's own title for it, ordered by when that
+**conversation** was last active (the transcript's modification time), with the live session marked.
+Ordering by the conversation rather than by the edits means accepting old work never moves a finished
+session back to the top.
+
+![The Overview's Sessions tab — this workspace's sessions led by Claude's own title, ordered by when each conversation was last active, the live one marked](media/sessions.png)
+
+Clicking a row does something the other tabs do not: it **pins what the whole observatory reviews**,
+the same choice **Switch Session** makes, so every panel follows it at once. The other tabs only
+re-point the change map and the feed.
+
+The **Switch Session** picker reads the same rows. Each entry leads with the session's title, the live
+session comes first, the rest follow by conversation recency, the row currently in effect is
+preselected, and typing filters by title or id. The listing is built from directory stats plus a bounded
+title scan cached in a small on-disk sidecar per session. Each row also reports what that session did —
+its captured edits, the files they touched, how many still await review — read from its edit log and
+cached in the same sidecar under the log's own `(mtime, size)`: a finished session is never re-read, and
+a live one is re-read only for those three numbers. What made the old picker slow was doing that work
+for every session on every open, uncached, alongside a full transcript parse for each title.
+
+`claude-observatory sessions` prints the same listing as text; `--json` emits it whole:
+
+```console
+$ claude-observatory sessions --json
+{"active":"demo-5b039d80","sessions":[{"id":"demo-5b039d80","title":"Pipeline: scaling, validation, tests","lastActiveMs":1784939827172.3428,"current":true,"edits":5,"pending":5,"files":5}]}
+```
+
+`active` is the session that resolves for the current directory, and each row carries its `id`, its
+`title` (null when the transcript offers none), `lastActiveMs`, `current`, and the three counts —
+`edits`, `pending`, `files`.
 
 ### Feed — what one thing is doing right now
 
@@ -826,19 +952,19 @@ a completed run is a record rather than a stream, and the editors stop polling i
 reports how many earlier entries it did not show, above the rows, since entries are oldest-first and
 anything dropped was dropped off the top.
 
-An agent that has finished, capped to its last four entries — note the title is the agent's own
-description, not its id, and that the id must be the full one the transcript recorded:
+An agent that has finished reads the same way — note the title is the agent's own description, not its
+id, and that the id must be the full one the transcript recorded (here the demo session's subagent):
 
 ```console
-$ claude-observatory feed --kind agent --id acd032a2e5350afaf --limit 4
-Inventory Observatory features  ▣ audit log · 22h ago · agent
+$ claude-observatory feed --kind agent --id demosub1 --limit 4
+Write pipeline tests  ▣ audit log · 0s ago · agent
 
-… 35 earlier entries not shown
-11:32:13   Bash cd /Users/thayer/Github/claude-observatory; awk '/^## /{n++} n<=2' CHANGELOG.md | head -70
-11:32:17   Bash cd /Users/thayer/Github/claude-observatory; echo "=== update flow (vscode) ==="; grep -nE 
-11:32:34   Read /Users/thayer/Github/claude-observatory/packages/core/src/demo.ts
-11:32:37   Bash cd /Users/thayer/Github/claude-observatory; echo "=== Overview dimensions / tabs in webvie
+21:23:58   TodoWrite Write tests for scale/summarize/validate
+21:23:58   Write observatory-demo/tests/test_pipeline.py
 ```
+
+A finished agent's feed is an **audit log**: it is fetched once and left alone, because re-polling a run
+that can no longer change would spend a process per tick to re-read the same file.
 
 A background shell that is still going reads the same way, but live — and for a shell the entries are its
 output, so they carry no timestamp of their own:
@@ -856,7 +982,7 @@ Serve the docs preview
 The Actions timeline already records that Claude **spawned a subagent** (the Task / Agent tool); the
 observatory opens each one up. Every subagent gets its **own nested action timeline** and **per-subagent
 metrics** — duration, tokens, tool-use count, status — which is what makes the observatory a
-**multi-agent view**. Like everything else here it costs **zero tokens**: it's mined from
+**multi-agent view**. Like everything else here it costs **zero tokens**: it is mined from
 `~/.claude/projects/<proj>/<session>/subagents/agent-<id>.jsonl` and correlated back to the spawning
 Task call via the transcript's `toolUseResult` block (which conveniently carries the `agentId`,
 `totalDurationMs`, `totalTokens`, `totalToolUseCount`, and `status`).
@@ -880,7 +1006,7 @@ status), followed by its own timeline (`--all` expands every action):
 
 ```console
 $ claude-observatory subagents
-Subagents  2 subagent(s) · 13 action(s) · session 0c396c6b-2da9-4be2-9c6d-c8c5797de7a5
+Subagents  2 subagent(s) · 13 action(s) · session demo-0c396c6b
 
 ▸ general-purpose  9 action(s) · done
    Explore tests, then update the Dataset model
@@ -915,7 +1041,7 @@ $ claude-observatory siblings
 Fleet  16 session(s) · 1 active · 15 sibling(s) · 117 pending across siblings
 
 ● ad93a29f (you)  1 edit(s) · 1 pending · 0s ago ⚠ 2 high
-   docs/panels.html
+   docs/concepts.html#surfaces
 ○ f9b72393        47 edit(s) · 20 pending · 1d ago ⚠ 3 high
    packages/core/src/actions.ts, packages/core/src/subagents.ts +9 more
 ○ dcf61fae        5 edit(s) · 5 pending · 3d ago
@@ -936,7 +1062,7 @@ each `tool_use → tool_result` timestamp gap):
 
 ```console
 $ claude-observatory metrics
-Metrics  session 0c396c6b-2da9-4be2-9c6d-c8c5797de7a5
+Metrics  session demo-0c396c6b
 
   edits         3  +19 -1  0 pending · 2 kept · 1 undone
   actions       9  1 error(s)

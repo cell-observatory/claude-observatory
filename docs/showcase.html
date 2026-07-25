@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Claude Observatory — per-edit review for Claude Code</title>
-<meta name="description" content="Per-edit Keep and Undo review for Claude Code, in the terminal, VS Code, and JetBrains, at zero extra tokens. Git-free, local-first, and reversible one change at a time.">
+<title>Claude Observatory — record and review what your coding agent did</title>
+<meta name="description" content="Claude Observatory records every edit a Claude Code session makes to an established codebase and presents it for review at the scope that fits the work, by several abstractions over what the agent changed for a given prompt. When several agents work at once — subagents, workflow runs, sessions in parallel git worktrees — their work does not blur together: every edit is correlated back to the agent that made it. Local, git-free, no extra tokens.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%AC%3C/text%3E%3C/svg%3E">
 <style>
   :root{
@@ -298,11 +298,10 @@
   <div class="wrap row">
     <a class="brand" href="#hero"><span class="m">🔬</span> Claude Observatory</a>
     <div class="links">
-      <a href="#hero">Overview</a>
       <a href="demo.html">Demo</a>
       <a href="#install">Install</a>
       <a href="getting-started.html">Getting started</a>
-      <a href="panels.html">Panels</a>
+      <a href="concepts.html">Concepts</a>
       <a class="more" href="features.html">Features&nbsp;→</a>
       <a href="https://github.com/cell-observatory/claude-observatory">GitHub</a>
     </div>
@@ -326,7 +325,7 @@
   <div class="wrap">
     <div class="stagger hero-lead">
       <h1 style="--i:1">Claude Observatory</h1>
-      <p class="lede" style="--i:2">Coding agents now change code faster than anyone can read it. On established codebases and infrastructure you are accountable for, the hard part is no longer making a change but knowing what each one did — and being able to reverse any single one without unwinding the rest. Claude Observatory keeps that record as the agent works: a per-edit history, in your terminal and editor, that you review and reverse one change at a time. It is built for engineers accountable for the code they ship, not for throwaway prototypes.</p>
+      <p class="lede" style="--i:2">Coding agents change code faster than anyone can read it, and a change accepted without being understood is a liability. The observatory is built for established codebases rather than throwaway prototypes: it records every edit a Claude Code session makes, through local hooks that cost no tokens. You review at the scope that fits the work, by several abstractions over what the agent changed for a given prompt. Every edit keeps its own diff and its own conflict-guarded undo, so reverting one leaves the others standing. When several agents work at once — subagents, workflow runs, sessions in parallel git worktrees — their work does not blur together: every edit is correlated back to the agent that made it. Everything stays local and git-free, and one store serves the terminal, VS Code, and JetBrains IDEs.</p>
       <div class="cta" style="--i:3">
         <a class="btn primary" href="#install">Get started</a>
         <a class="btn line" href="demo.html">Full interactive demo →</a>
@@ -372,31 +371,23 @@
 <section class="essay" id="manifesto">
   <div class="wrap rv">
     <span class="eyebrow">The gap</span>
-    <h2>One change at a time</h2>
-    <p>A change accepted without being understood is a liability. A large diff reviewed only at the end of a session is understood too late to steer — by then the code is already in.</p>
-    <p>Existing tools address parts of this: Usage meters count tokens; log viewers replay a session; editor assistants and Claude Code's own <code>/rewind</code> roll back to a checkpoint; orchestrators launch fleets of agents and review each branch as a diff to merge. A checkpoint is coarse, though: it reverts a whole turn rather than one edit, does not track the files a shell command changed, and clears when the session does. None keeps a finer, longer-lived record you can act on one change at a time — accept or reverse any single edit while the rest stand, including the files a Bash command touched, from the terminal or either editor. That is the record Claude Observatory keeps.</p>
+    <h2>Interpretability at crunch time</h2>
+    <p>A backlog of changes reviewed at the end of an agent's session creates a bottleneck, moving the work of verifying and evaluating every change onto the reviewer at once, after the context that produced them is gone. Existing tools address parts of the problem: usage meters count tokens, log viewers replay a session, editor assistants and Claude Code's own <code>/rewind</code> roll back to a checkpoint, and orchestrators launch fleets of agents and present each branch as one diff to merge. A checkpoint is coarse — it reverts a whole turn rather than one edit, does not track the files a shell command changed, and clears when the session ends. The observatory records each edit instead, tracing each action back to the chain of thought the model recorded for it.</p>
   </div>
 </section>
 
 <section class="essay" id="how">
   <div class="wrap rv">
-    <span class="eyebrow">How it runs</span>
-    <h2>Outside the model loop</h2>
-    <p>Capture runs in local hooks, outside the model loop: it costs no tokens and changes nothing about what the agent sees or the decisions it makes. The record builds itself as the agent works, so it is there before you need it — not something you reconstruct after the context is gone. Everything stays on your machine; nothing is sent anywhere.</p>
-  </div>
-</section>
-
-<section class="essay">
-  <div class="wrap rv">
     <span class="eyebrow">What sets it apart</span>
     <h2>From one edit to the whole trace</h2>
     <ul>
-      <li><b>Any edit, reversible on its own.</b> Undo a single change while the edits around it stay — a position-anchored merge preserves them, and when a later edit genuinely overlaps, the undo is refused rather than applied blindly. No clean git state required, and never a silent clobber.</li>
-      <li><b>Review by the unit of work, not just the edit.</b> Follow a whole subtask — its edits in the order the agent made them, across files — as one coherent sequence, and scale the same review up to a chapter, a task, or a workflow run. Single edits when you want precision; traces when you want the shape of the work.</li>
-      <li><b>Every edit, recorded.</b> Each text edit is saved the moment an agent makes it — including the files a shell command changed. Anything it cannot snapshot, such as a binary or an oversized file, is marked as an explicit skip, never dropped silently.</li>
-      <li><b>Cross-platform support.</b> VS Code, JetBrains IDEs, and the terminal read the same local store, so review never depends on a particular editor or an outside service.</li>
-      <li><b>Every tool call, explained.</b> Reasoning, a timeline of each tool call, flags of risky shell commands, and a record of the edits and reads that landed outside the workspace and of everywhere the session reached off-machine — read from the transcript the session already produced.</li>
-      <li><b>Many agents, one view.</b> When several agents run in parallel across your git worktrees, it unifies them — who is working, on what, and where their changes collide.</li>
+      <li><b>The record is built outside the model loop.</b> Capture runs in local hooks: it costs no tokens and changes nothing about what the agent sees or the decisions it makes. The record builds itself as the agent works, so it exists before you need it rather than being reconstructed once the context is gone. Everything stays on your machine; nothing is sent anywhere.</li>
+      <li><b>Any edit can be reversed on its own.</b> A position-anchored merge removes one change while the edits around it stay in place. When a later edit genuinely overlaps, the undo is refused rather than applied blindly: no clean git state is required, and nothing is silently overwritten.</li>
+      <li><b>Review follows the unit of work.</b> The edits one prompt produced read as one sequence, in the order the agent made them, across files; the same review scales down to a single edit or up to a task or a workflow run. Single edits give precision; sequences give the shape of the work.</li>
+      <li><b>Every edit is recorded.</b> Each text change is saved the moment the agent makes it, including the files a shell command changed. When a named file cannot be snapshotted — a binary, or one past the size cap — the record marks it an explicit skip rather than dropping it quietly. The shell walk is bounded: it skips vendor and build directories and stops at a file-count cap, so changes beneath those are not captured at all.</li>
+      <li><b>Every surface reads one store.</b> VS Code, JetBrains IDEs, and the terminal share the same local record, so review does not depend on a particular editor or on an outside service.</li>
+      <li><b>Every tool call is explained.</b> The transcript the session already produced yields Claude's reasoning, a timeline of each tool call, flags on risky shell commands, and the two audits: the edits and reads that landed outside the workspace, and everywhere the session reached off the machine.</li>
+      <li><b>Many agents appear in one view.</b> When several agents run in parallel across git worktrees, the observatory unifies them: who is working, on what, and where their changes conflict.</li>
     </ul>
   </div>
 </section>
@@ -406,9 +397,9 @@
   <div class="wrap rv">
     <span class="eyebrow">Terminal, VS Code, JetBrains</span>
     <h2>The same review in every editor</h2>
-    <p class="lede">One backend serves the CLI, VS Code, and JetBrains, so a review can start in the terminal and finish in either editor with nothing to reconcile. A Claude Edits sidebar holds Edits, Diffs, File History, and the Actions timeline; a bottom Observatory panel holds Observations, the multi-agent Overview, and Stats. A navigation bar steps through pending edits from the status bar, the editor’s title bar, a bubble over the change, or the Overview panel — where it opens as two rows, session-wide controls above and, below, four axes that step the edits by diff, file, folder, and chapter. The Actions timeline records every tool call Claude made, not just the edits: it leads with any file two agents are touching at once, flags risky commands, and closes with the two audits — the edits that landed outside the workspace, and everywhere the session reached. Per-subagent timelines and the fleet of agents at work across the repo's worktrees live in the Overview. All of it is read from the transcript, at zero extra tokens.</p>
+    <p class="lede">One backend serves the CLI, VS Code, and JetBrains, so a review can start in the terminal and finish in either editor with nothing to reconcile. The Claude Edits sidebar holds Edits, Diffs, File History, Actions, and Observations; the Claude Observatory bottom panel holds Prompts, the multi-agent Overview, and Stats. A navigation bar steps through pending edits from the status bar, the editor’s title bar, a bubble over the change, or the Overview panel, where it opens as two rows: session-wide controls above, and four axes below that step the edits by diff, file, folder, and prompt. Actions records every tool call Claude made, not just the edits: it leads with any file two agents are touching at once, flags risky commands, and closes with the two audits — the edits that landed outside the workspace, and everywhere the session reached. Per-subagent timelines and the fleet of agents across the repository's worktrees live in the Overview. All of it is read from the transcript, at zero extra tokens.</p>
   </div>
-  <div class="wrap"><a href="panels.html" title="Panels reference — every control named"><div class="panel rv scale"><img src="media/layout.png" loading="lazy" alt="The observatory in VS Code: sidebar edits, inline review, and the bottom dashboards"></div></a></div>
+  <div class="wrap"><a href="concepts.html#surfaces" title="Concepts — every surface beside the term it presents"><div class="panel rv scale"><img src="media/layout.png" loading="lazy" alt="The observatory in VS Code: the Claude Edits sidebar, inline review in the editor, and the bottom Claude Observatory panel"></div></a></div>
 </section>
 
 <!-- RECORDED DEMO: the Overview as a session runs -->
@@ -417,7 +408,7 @@
   <div class="wrap rv">
     <span class="eyebrow">Feature tour</span>
     <h2><a href="features.html">Everything it does, on every surface</a></h2>
-    <p class="lede">Every surface, one slide at a time: inline, in the panel, in the terminal, and in both editors.</p>
+    <p class="lede">The tour covers every surface, one slide at a time: inline in the editor, in the panels, in the terminal, and in both editors.</p>
   </div>
   <div class="wrap">
     <div class="tour rv" role="region" aria-roledescription="carousel" aria-label="Feature tour">
@@ -427,24 +418,24 @@
           <article class="slide" role="group" aria-roledescription="slide" aria-label="Overview — master-detail multi-agent panel">
             <div class="slide-in">
               <div><span class="eyebrow">Overview</span><h3>Every agent and its changes in one panel</h3>
-                <p>A master-detail panel. The left nav has four tabs: <b>Fleet</b>, every running agent across the repo's worktrees; <b>Workflows</b>, every multi-agent run; <b>Tasks</b>, the session's numbered task list; and <b>Processes</b>, the background shells it launched. Each pane opens with a one-line description of what it holds, and its tabs and change-map sections carry hover descriptions. Fleet and Workflows rows each show a live phase and an activity sparkline; an interrupted run that never completed is not shown as running. Selecting one fills the right side with its change map, three labeled sections top to bottom: <b>Chapters</b>, a ribbon of subtask chips taken from Claude's own to-dos, each chip showing its lines, edits, and pending count; <b>Folders</b>, a proportional strip of tiles, one per changed directory, each tile's width set by the lines it changed and its color by review status; and <b>Files</b>, a churn-ranked ledger of every changed file. Clicking a Folder tile or a Chapter chip steps the matching nav-bar axis to that folder's or chapter's first pending edit; clicking a file opens its diff. A summary bar along the bottom reports the pending, accepted, and reverted edit counts with the file and folder totals for whatever is in scope, and names the current chapter or folder filter. Below the summary bar, the selected row's feed shows what that thing is doing.</p></div>
-              <div class="panel"><figure><img src="media/overview-tabs.png" loading="lazy" alt="The master-detail Overview: Fleet, Workflows, and Tasks in the left nav; the selected session's change map — the Chapters ribbon, the Folders strip, and the churn-ranked Files ledger — on the right, with a scope summary bar below"><figcaption class="cap">Captured before the Processes tab and the feed pane</figcaption></figure></div>
+                <p>The Overview is a master-detail panel. Its left nav has five tabs, led by <b>Sessions</b>, this workspace's recorded sessions — the one tab whose selection switches what the whole observatory reviews. Then <b>Fleet</b>, every running agent across the repository's worktrees; <b>Workflows</b>, every multi-agent run; <b>Tasks</b>, the session's numbered task list; and <b>Processes</b>, the background shells it launched. Fleet and Workflows rows show a live phase and an activity sparkline, and an interrupted run that never recorded completion is not shown as running. Selecting a row fills the right side with its change map, two labeled sections top to bottom: <b>Folders</b>, a strip of equal tiles, one per changed directory, ranked by lines changed and colored by review status; and <b>Files</b>, a churn-ranked ledger of every changed file. Clicking a Folder tile steps the nav bar's Folder axis to that folder's first pending edit; clicking a file opens its diff. A summary bar reports the pending, accepted, and reverted counts for whatever is in scope and names the picked prompt or folder filter; beneath it, the selected row's feed shows what that thing is doing.</p></div>
+              <div class="panel"><figure><img src="media/overview-tabs.png" loading="lazy" alt="The master-detail Overview: Sessions, Fleet, Workflows, Tasks, and Processes in the left nav; the selected session's change map — the Folders strip and the churn-ranked Files ledger — on the right, with a scope summary bar below"></figure></div>
             </div>
           </article>
 
-          <article class="slide" role="group" aria-roledescription="slide" aria-label="Multitasking across worktrees">
+          <article class="slide" role="group" aria-roledescription="slide" aria-label="The fleet">
             <div class="slide-in">
-              <div><span class="eyebrow">The fleet</span><h3>Multitasking across worktrees</h3>
-                <p>Every running Claude session appears in one live board, including sessions in separate git worktrees of one repo, correlated without the git binary. Each row carries a live phase (working · awaiting-input · awaiting-permission · idle · done, with heuristic phases marked ~), its worktree and branch, a sparkline, ±lines, tokens · time, risk, and live file conflicts (in the Actions view) flagging any file two agents are touching. Tracking is path-only, at zero tokens.</p></div>
-              <div class="panel"><figure><img src="media/multitasking.png" loading="lazy" alt="Multitasking: one row per running agent across the repo's git worktrees — live phase, branch, sparkline, ±lines, risk, a per-row collision count, nested subagents, and below them the File Collisions strip this capture still shows in the Overview"><figcaption class="cap">Captured before live conflicts moved to the Actions view</figcaption></figure></div>
+              <div><span class="eyebrow">The fleet</span><h3>Parallel agents across worktrees</h3>
+                <p>Every running Claude session appears in one live board, including sessions in separate git worktrees of one repository, correlated without the git binary. Each row carries a live phase (working · awaiting-input · awaiting-permission · idle · done, with heuristic phases marked ~), its worktree and branch, a sparkline, ±lines, tokens · time, and risk; live file conflicts in the Actions view flag any file two agents are touching. Tracking is path-only, at zero tokens.</p></div>
+              <div class="panel"><figure><img src="media/multitasking.png" loading="lazy" alt="The fleet: one row per running agent across the repo's git worktrees — live phase, branch, sparkline, ±lines, risk, a per-row conflict count, nested subagents, and below them the file-conflicts strip this capture still shows in the Overview"><figcaption class="cap">Captured before live conflicts moved to the Actions view</figcaption></figure></div>
             </div>
           </article>
 
-          <article class="slide" role="group" aria-roledescription="slide" aria-label="Task chapters">
+          <article class="slide" role="group" aria-roledescription="slide" aria-label="Sessions">
             <div class="slide-in">
-              <div><span class="eyebrow">Task chapters</span><h3>Review organized by Claude's to-dos</h3>
-                <p>Every edit belongs to a named chapter; work outside any to-do lands in a session chapter titled from the session's goal. A chapter can be accepted, rejected, or cleared at once — the buttons act on exactly the edits the row shows.</p></div>
-              <div class="panel"><img src="media/chapters.png" loading="lazy" alt="Task chapters: the chapter ribbon — Claude's own to-dos as named chapters with per-chapter review actions"></div>
+              <div><span class="eyebrow">Sessions</span><h3>Every session in the workspace, newest conversation first</h3>
+                <p>The Sessions tab lists each Claude Code session recorded for this workspace, led by Claude's own title for it and ordered by when its conversation was last active. Selecting a row switches what every window reviews, so a session you left yesterday is one click away. The listing is built from directory stats and cached titles rather than from the sessions' edit logs, which is why it opens at once however many edits have accumulated.</p></div>
+              <div class="panel"><img src="media/sessions.png" loading="lazy" alt="The Sessions tab: one row per session in this workspace — the live session marked, each row showing Claude's title for the session and when its conversation was last active"></div>
             </div>
           </article>
 
@@ -480,9 +471,9 @@
             </div>
           </article>
 
-          <article class="slide" role="group" aria-roledescription="slide" aria-label="Action timeline">
+          <article class="slide" role="group" aria-roledescription="slide" aria-label="Actions">
             <div class="slide-in">
-              <div><span class="eyebrow">Action timeline</span><h3>A timeline of every tool call</h3>
+              <div><span class="eyebrow">Actions</span><h3>A timeline of every tool call</h3>
                 <p>Every read, grep, shell command, web fetch, and subagent spawn is grouped by kind in the Claude Edits sidebar, with each category collapsed by default and errors always surfaced. Edit rows link directly to their review.</p></div>
               <div class="panel"><div class="mock">
                 <div class="mh">Actions · sidebar</div>
@@ -508,11 +499,11 @@
             </div>
           </article>
 
-          <article class="slide" role="group" aria-roledescription="slide" aria-label="Requests">
+          <article class="slide" role="group" aria-roledescription="slide" aria-label="Prompts">
             <div class="slide-in">
-              <div><span class="eyebrow">Requests</span><h3>The session, as the conversation you had</h3>
-                <p>Every other view organizes the work the way the agent saw it — worktrees, runs, its own to-dos, files. The Requests window is one row per thing you asked for, in order, each with its own stats: edits, files, folders, tokens, subagents, workflow runs, tasks and shells. The ask is printed whole, wrapped, never clipped, and each row expands to show Claude's own reply to it. Selecting a row scopes the Overview beside it — fleet, runs, tasks, shells and the entire change map narrow to the work that ask caused. Work belongs to the ask that started it, not the one that was current when it finished.</p></div>
-              <div class="panel"><figure><img src="media/requests.png" loading="lazy" alt="The Requests window: one row per ask, newest first, each with what it produced and then the ask itself wrapped over several lines; the selected row is outlined"><figcaption class="cap">Select an ask to scope everything beside it</figcaption></figure></div>
+              <div><span class="eyebrow">Prompts</span><h3>The session, as the conversation you had</h3>
+                <p>Every other view organizes the work the way the agent saw it: worktrees, runs, its own plan, files. The Prompts window is one row per thing you asked for, in order, each with its own counts — edits, files, folders, tokens, subagents, workflow runs, tasks, and shells. The prompt is printed whole, wrapped rather than clipped, and each row expands to show Claude's reply to it. Selecting a row scopes the Overview beside it: the fleet, the runs, the tasks, the shells, and the entire change map narrow to the work that prompt caused, and the review actions retarget to it. Work belongs to the prompt that started it, not the one that was current when it finished.</p></div>
+              <div class="panel"><figure><img src="media/prompts.png" loading="lazy" alt="The Prompts window: one row per prompt, newest first, each with what it produced and then the prompt itself, shown in full; the selected row is outlined and its response expanded beneath it"><figcaption class="cap">Select a prompt to scope everything beside it</figcaption></figure></div>
             </div>
           </article>
 
@@ -533,7 +524,7 @@
           <article class="slide" role="group" aria-roledescription="slide" aria-label="Live feed and audit log">
             <div class="slide-in">
               <div><span class="eyebrow">Live feed</span><h3>What one thing is doing, read from what it writes</h3>
-                <p>Selecting an agent, workflow, task, process, or the session itself shows its activity, read from the file that thing writes. While it is still writing, the feed is followed live and stamped with how long ago it last moved — the age of the newest evidence, not a claim of realtime. Once it has finished, the same view becomes an audit log, a record rather than a stream, and polling stops. Entries read oldest first, and a capped feed says how many earlier ones it did not show.</p></div>
+                <p>Selecting an agent, a workflow, a task, a process, or the session itself shows its activity, read from the file that thing writes. While the source is still writing, the feed is followed live and stamped with how long ago it last moved — the age of the newest evidence, not a claim of real time. Once the source has finished, the same view becomes an audit log, a record rather than a stream, and polling stops. Entries read oldest first, and a capped feed states how many earlier ones it did not show.</p></div>
               <div class="panel"><div class="mock">
                 <div class="mh">Feed · selected row</div>
                 <div><b>Write pipeline tests</b> <span class="k">● live</span> <span class="d">· updated 4s ago · agent</span></div>
@@ -548,7 +539,7 @@
           <article class="slide" role="group" aria-roledescription="slide" aria-label="Risk and egress">
             <div class="slide-in">
               <div><span class="eyebrow">Risk &amp; egress</span><h3>Risk and egress audits</h3>
-                <p>Risk flags the shell commands that were destructive or privileged, and reports the edits that landed outside the workspace. Egress lists everywhere the session reached off-machine, and the files it read from outside the workspace — each destination scoped remote, outside, or unknown, because a local path that left the workspace is a fact and an unclassifiable destination is an admission. Both report what was exercised, never what was permitted: approval prompts are never written to the transcript.</p></div>
+                <p>Risk flags the shell commands that were destructive or privileged, and reports the edits that landed outside the workspace. Egress lists everywhere the session reached off the machine, and the files it read from outside the workspace — each destination scoped remote, outside, or unknown, because a local path that left the workspace is a fact and an unclassifiable destination is an admission. Both report what was exercised, never what was permitted: approval prompts are never written to the transcript.</p></div>
               <div class="panel"><div class="mock">
                 <div class="mh">Risk · Egress</div>
                 <div><span class="r">● HIGH</span> &nbsp;rm -rf build/ <span class="d">recursive/forced delete (rm -rf)</span></div>
@@ -572,7 +563,7 @@
           <article class="slide" role="group" aria-roledescription="slide" aria-label="Metrics">
             <div class="slide-in">
               <div><span class="eyebrow">Metrics</span><h3>Session metrics</h3>
-                <p>Line deltas, action and error counts, per-subagent duration and tokens, and how long Claude's tools took.</p></div>
+                <p>Metrics reports the session's derived numbers: line deltas, action and error counts, per-subagent duration and tokens, and how long Claude's tools took.</p></div>
               <div class="panel"><div class="mock">
                 <div class="mh">Metrics</div>
                 <div>edits &nbsp;&nbsp;&nbsp;&nbsp;<b>185</b> &nbsp;<span class="k">+1220</span> <span class="r">−40</span> <span class="d">· 20 pending</span></div>
@@ -586,7 +577,7 @@
           <article class="slide" role="group" aria-roledescription="slide" aria-label="Stats">
             <div class="slide-in">
               <div><span class="eyebrow">Stats</span><h3>Progress, tokens, and usage</h3>
-                <p>The session's cumulative tokens — input, output, cached, and the cache hit rate — sit right under its name, which also carries the model and effort level the session ran on and, when the harness has compacted the conversation, how many times and how much the last compaction dropped. Below them: a live scoreboard of pending / accepted / reverted edits, token plots by window, and context and plan usage. The session is identified by name rather than its raw id, and the 5-hour and weekly usage rows show an estimated used of total — the 100% figure inferred from the tokens spent divided by the percent reported.</p></div>
+                <p>The session's cumulative tokens — input, output, cached, and the cache hit rate — sit under its name, which also carries the model and effort level the session runs on and, when the harness has compacted the conversation, how many times and how much the last compaction dropped. Below them sit a live scoreboard of pending, accepted, and reverted edits; token plots by time window; and context and plan usage. The session is identified by name rather than by its raw id, and the 5-hour and weekly usage rows show an estimated used-of-total figure, inferred from the tokens spent divided by the percentage reported.</p></div>
               <div class="panel"><figure><img src="media/stats.png" loading="lazy" alt="Stats: the review scoreboard, the Today / 7 days / 30 days toggle, the tokens step-line plot, and the ctx / 5h / weekly usage bars"><figcaption class="cap">Captured before the model-and-effort and compaction chips and the Session tokens row</figcaption></figure></div>
             </div>
           </article>
@@ -594,11 +585,11 @@
           <article class="slide" role="group" aria-roledescription="slide" aria-label="Navigation bar">
             <div class="slide-in">
               <div><span class="eyebrow">Navigation bar</span><h3>Review controls on four surfaces</h3>
-                <p>One review bar appears on four surfaces: the status bar, the editor's title bar, a floating bubble over the live edit, and the Overview panel. On the Overview it opens as two rows. The top row holds the session controls: a selector that names the current session — its title or first prompt, with the raw id in the tooltip — then the session-wide Accept All, Revert All, Clear Resolved, and Export actions, and, on the right, Search, Active only, Spotlight, and Refresh. The bottom row holds four review axes that step the pending edits at four granularities. The <b>Diff</b> axis steps the open file's edits and carries Keep, Undo, Chat, View diff — which opens a real side-by-side diff editor — and the edit's relative time. The <b>File</b> axis steps changed files, showing each file's name and edit count with Accept File and Reject File. The <b>Folder</b> axis steps changed directories, showing a folder with its file and edit totals and acting on only that folder's edits. The <b>Chapter</b> axis steps the session's subtasks, showing each chapter's folder, file, and edit totals with Review, Accept Chapter, Reject Chapter, and Chat.</p></div>
+                <p>One review bar appears on four surfaces: the status bar, the editor's title bar, a floating bubble over the live edit, and the Overview panel. On the Overview it opens as two rows. The top row holds the session controls: the name of the session under review — its title or first prompt, with the raw id in the tooltip, and a label rather than a control, since the Sessions tab is where the session changes — then the session-wide Accept All, Reject All, Clear Resolved, and Export actions, and, on the right, Search, Active only, Spotlight, and Refresh. The bottom row holds four review axes that step the pending edits at four granularities. The <b>Diff</b> axis steps the open file's edits and carries Keep, Undo, Chat, and View diff, which opens a real side-by-side diff editor. The <b>File</b> axis steps changed files with Accept File and Reject File; the <b>Folder</b> axis steps changed directories, acting on only that folder's edits. The <b>Prompt</b> axis steps your own prompts, showing each one's file and edit totals with Review, Accept Prompt, and Reject Prompt.</p></div>
               <div class="panel"><div class="mock">
                 <div class="mh">Overview review bar · two rows</div>
-                <div><b>demo-session</b> <span class="d">·</span> Accept All · Revert All · Clear Resolved · Export <span class="d">·</span> Search · Active only · Spotlight · Refresh</div>
-                <div style="margin-top:6px">▲ Diff 1/2 ▼ <span class="d">·</span> ◀ File 1/3 ▶ <span class="d">·</span> ◀ Folder 1/2 ▶ <span class="d">·</span> ◀ Chapter 1/3 ▶</div>
+                <div><b>demo-session</b> <span class="d">·</span> Accept All · Reject All · Clear Resolved · Export <span class="d">·</span> Search · Active only · Spotlight · Refresh</div>
+                <div style="margin-top:6px">▲ Diff 1/2 ▼ <span class="d">·</span> ◀ File 1/3 ▶ <span class="d">·</span> ◀ Folder 1/2 ▶ <span class="d">·</span> ◀ Prompt 1/2 ▶</div>
                 <div class="d" style="margin-top:6px">Also on the status bar, editor title, and review bubble</div>
               </div></div>
             </div>
@@ -608,7 +599,7 @@
             <div class="slide-in">
               <div><span class="eyebrow">Spotlight</span><h3>A focused view of changed lines</h3>
                 <p>Spotlight dims every line Claude did not touch, so the changes read at full contrast.</p></div>
-              <div class="panel"><img src="media/heatmap.png" loading="lazy" alt="Heatmap: unmodified lines dimmed so Claude's edits stand out"></div>
+              <div class="panel"><img src="media/spotlight.png" loading="lazy" alt="Spotlight: unmodified lines dimmed so Claude's edits stand out"></div>
             </div>
           </article>
 
@@ -624,7 +615,7 @@
             <div class="slide-in">
               <div><span class="eyebrow">Live demo</span><h3>The built-in demo</h3>
                 <p><code>claude-observatory demo</code> replays a scripted session through the real pipeline — a real transcript, captured edits, a subagent, a workflow, a context compaction, and two background shells — in an isolated demo session. Every panel fills in live and review works normally; <code>demo --clean</code> removes every trace. The recording below shows the Overview during a demo run.</p></div>
-              <div class="panel"><figure><img src="media/demo-live.gif" loading="lazy" alt="The demo recorded live: the Overview's chapter ribbon, folder strip, and file ledger filling in beat by beat — a fleet agent with its subagent appears, then a workflow run"><figcaption class="cap">Recorded before the Processes tab and the feed pane</figcaption></figure></div>
+              <div class="panel"><figure><img src="media/demo-live.gif" loading="lazy" alt="The demo recorded live: the Overview's Folders strip and Files ledger filling in beat by beat — a fleet agent with its subagent appears, then a workflow run"></figure></div>
             </div>
           </article>
 
@@ -640,7 +631,7 @@
             <div class="slide-in">
               <div><span class="eyebrow">Cross-editor parity</span><h3>The same tool in both editors</h3>
                 <p>VS Code and JetBrains render the same model from the same backend, so a review can start in one editor and finish in the other.</p></div>
-              <div class="panel"><img src="media/layout.png" loading="lazy" alt="The observatory in VS Code: sidebar edits, inline review, and the bottom dashboards"></div>
+              <div class="panel"><img src="media/layout.png" loading="lazy" alt="The observatory in VS Code: the Claude Edits sidebar, inline review in the editor, and the bottom Claude Observatory panel"></div>
             </div>
           </article>
 
@@ -649,7 +640,7 @@
       <div class="tour-ui">
         <button class="tbtn" id="tprev" type="button" aria-label="Previous feature">‹</button>
         <div class="dots" id="tdots" role="tablist" aria-label="Choose a feature"></div>
-        <span class="tcount" id="tcount" aria-live="polite">01 / 21</span>
+        <span class="tcount" id="tcount" aria-live="polite">01 / 22</span>
         <button class="tbtn" id="tnext" type="button" aria-label="Next feature">›</button>
       </div>
     </div>
@@ -683,7 +674,7 @@
   <div class="wrap rv">
     <span class="eyebrow">Open source</span>
     <h2>License &amp; credits</h2>
-    <p>Claude Observatory is developed in the open by the <a href="https://github.com/cell-observatory" style="color:var(--accent-ink);text-decoration:underline">Cell Observatory</a> project, licensed under <a href="https://github.com/cell-observatory/claude-observatory/blob/main/LICENSE" style="color:var(--accent-ink);text-decoration:underline">Apache-2.0</a>, with a <a href="https://github.com/cell-observatory/claude-observatory/blob/main/CODE_OF_CONDUCT.md" style="color:var(--accent-ink);text-decoration:underline">Contributor Covenant</a> code of conduct. It is built with and for <a href="https://claude.com/claude-code" style="color:var(--accent-ink);text-decoration:underline">Claude Code</a>. Adjacent work informed its direction: <a href="https://github.com/matt1398/claude-devtools" style="color:var(--accent-ink);text-decoration:underline">claude-devtools</a> on reading the on-disk transcript, <a href="https://github.com/ryoppippi/ccusage" style="color:var(--accent-ink);text-decoration:underline">ccusage</a> and <a href="https://github.com/chiphuyen/sniffly" style="color:var(--accent-ink);text-decoration:underline">sniffly</a> on local-first analytics, and the worktree-fleet tools (<a href="https://www.conductor.build/" style="color:var(--accent-ink);text-decoration:underline">Conductor</a>, <a href="https://github.com/smtg-ai/claude-squad" style="color:var(--accent-ink);text-decoration:underline">claude-squad</a>, <a href="https://github.com/BloopAI/vibe-kanban" style="color:var(--accent-ink);text-decoration:underline">vibe-kanban</a>) on running agents in parallel — where Observatory adds the layer that observes them.</p>
+    <p>Claude Observatory is developed in the open by the <a href="https://github.com/cell-observatory" style="color:var(--accent-ink);text-decoration:underline">Cell Observatory</a> project, licensed under <a href="https://github.com/cell-observatory/claude-observatory/blob/main/LICENSE" style="color:var(--accent-ink);text-decoration:underline">Apache-2.0</a>, with a <a href="https://github.com/cell-observatory/claude-observatory/blob/main/CODE_OF_CONDUCT.md" style="color:var(--accent-ink);text-decoration:underline">Contributor Covenant</a> code of conduct. It is built with and for <a href="https://claude.com/claude-code" style="color:var(--accent-ink);text-decoration:underline">Claude Code</a>. Adjacent work informed its direction: <a href="https://github.com/matt1398/claude-devtools" style="color:var(--accent-ink);text-decoration:underline">claude-devtools</a> on reading the on-disk transcript, <a href="https://github.com/ryoppippi/ccusage" style="color:var(--accent-ink);text-decoration:underline">ccusage</a> and <a href="https://github.com/chiphuyen/sniffly" style="color:var(--accent-ink);text-decoration:underline">sniffly</a> on local-first analytics, and the worktree-fleet tools (<a href="https://www.conductor.build/" style="color:var(--accent-ink);text-decoration:underline">Conductor</a>, <a href="https://github.com/smtg-ai/claude-squad" style="color:var(--accent-ink);text-decoration:underline">claude-squad</a>, <a href="https://github.com/BloopAI/vibe-kanban" style="color:var(--accent-ink);text-decoration:underline">vibe-kanban</a>) on running agents in parallel. The observatory adds the layer that observes them.</p>
   </div>
 </section>
 
@@ -693,6 +684,7 @@
       <span class="brand"><span class="m">🔬</span> Claude Observatory</span>
       <div class="flinks">
         <a href="features.html">Features</a>
+        <a href="concepts.html">Concepts</a>
         <a href="https://github.com/cell-observatory/claude-observatory/blob/main/docs/DEMO.md">Demo</a>
         <a href="https://github.com/cell-observatory/claude-observatory/blob/main/docs/ARCHITECTURE.md">How it works</a>
         <a href="https://github.com/cell-observatory/claude-observatory/blob/main/docs/REMOTE.md">Remote</a>
@@ -901,34 +893,34 @@
         L(12,'<span class="st">```</span>','add'),
        ]},
     ];
-    var CHAPTERS=[
+    var TASKS=[
       {title:'Add feature scaling to the pipeline',edits:[1,2]},
       {title:'Validate the training dataset',edits:[3]},
       {title:'Tests and docs',edits:[4,5]},
     ];
     var STEPS=[
       {ed:'seed',landed:0,typing:true,
-       narr:'You ask Claude for a change. Observatory sits beside the session — hooks, not a wrapper — and records what happens, at zero extra tokens.'},
+       narr:'You ask Claude for a change. The observatory sits beside the session — hooks, not a wrapper — and records what happens, at zero extra tokens.'},
       {ed:'seed',landed:0,plan:true,
-       narr:'Claude plans three to-dos. The Overview adopts them as chapters: the session’s own structure, not a file list.'},
+       narr:'Claude plans three to-dos. The Overview lists them under Tasks, with the edits each one produces attributed to it.'},
       {ed:1,landed:1,
        narr:'The first edit lands and becomes a reviewable entry: an inline lens over the changed lines, a timeline entry carrying Claude’s reasoning, and a ledger row ranked by churn.'},
       {ed:2,landed:2,
-       narr:'A second edit wires scaling into the training entrypoint. Chapter one is complete — both of its edits stay pending until you review them.'},
+       narr:'A second edit wires scaling into the training entrypoint. Task one is complete; both of its edits stay pending until you review them.'},
       {ed:3,landed:3,
-       narr:'Chapter two adds dataset validation. The folder strip and the churn ledger keep the growing change set legible; commands Claude runs land in the Actions timeline the same way.'},
+       narr:'Task two adds dataset validation. The Folders strip and the churn ledger keep the growing change set legible; commands Claude runs land in the Actions timeline the same way.'},
       {ed:4,landed:4,
-       narr:'Claude hands the test-writing to a subagent. Its edit is attributed to it in the timeline — and reviewed exactly like any other.'},
+       narr:'Claude hands the test-writing to a subagent. Its edit is attributed to it in the timeline and reviewed exactly like any other.'},
       {ed:5,landed:5,
-       narr:'A workflow run writes the docs. Five edits are now pending across three chapters — time to review.'},
+       narr:'A workflow run writes the docs. Five edits are now pending across three tasks; the review can begin.'},
       {ed:1,landed:5,gate:'keep',
-       narr:'Review begins: the scaling function is correct, so its edit is <span class="hl">kept</span> — one click on the lens resolves that edit and nothing else.'},
+       narr:'The review begins: the scaling function is correct, so its edit is <span class="hl">kept</span> — one click on the lens resolves that edit and nothing else.'},
       {ed:2,landed:5,gate:'undo',
-       narr:'The entrypoint wiring isn’t wanted — <span class="hl">undone</span>, surgically. Every other pending change stays exactly as Claude left it.'},
+       narr:'The entrypoint wiring is not wanted, so that edit is <span class="hl">undone</span> — surgically. Every other pending change stays exactly as Claude left it.'},
       {ed:2,landed:5,gate:'acceptall',
-       narr:'The rest is swept in one motion: <span class="hl">Accept all</span> resolves everything still pending. Chapter-scoped accepts on the ribbon work the same way.'},
+       narr:'The rest is swept in one motion: <span class="hl">Accept all</span> resolves everything still pending. Accepting one prompt, or one task, works the same way over a smaller scope.'},
       {ed:1,landed:5,recap:true,
-       narr:'That is the whole loop: every edit tracked with its reasoning, reviewed one at a time or by the chapter, and resolved without git. <a href="demo.html" style="color:var(--accent-ink);text-decoration:underline">Try it yourself in the full demo</a>.'},
+       narr:'That is the whole loop: every edit tracked with its reasoning, reviewed one at a time or by the prompt that caused it, and resolved without git. <a href="demo.html" style="color:var(--accent-ink);text-decoration:underline">Try it yourself in the full demo</a>.'},
     ];
     var N=STEPS.length;
     var el=function(id){return document.getElementById(id);};
@@ -1021,7 +1013,7 @@
 
       var showPlan=st.plan||landed.length>0||step>1, rib='';
       if(showPlan){
-        CHAPTERS.forEach(function(ch){
+        TASKS.forEach(function(ch){
           var chEdits=landed.filter(function(e){return ch.edits.indexOf(e.id)>=0;});
           var pend=chEdits.filter(function(e){return statusOf(e.id,step,res)==='pending';}).length;
           var dot,cls;
@@ -1033,7 +1025,7 @@
             '<span class="rc">'+(chEdits.length?('+'+plus+' −'+minus+(pend?' · '+pend+' pending':' · reviewed')):'planned')+'</span></div>';
         });
       }
-      el('sd-ribbon').innerHTML=rib||'<div class="empty">Claude’s to-dos become the chapter ribbon.</div>';
+      el('sd-ribbon').innerHTML=rib||'<div class="empty">Claude’s own to-dos appear here as tasks.</div>';
       var strip=el('sd-strip');
       var mods={};landed.forEach(function(e){mods[e.module]=(mods[e.module]||0)+e.plus+e.minus;});
       var modKeys=Object.keys(mods);

@@ -26,8 +26,9 @@ contract the machine-readable surface guarantees. Every claim below is grounded 
   `emitJson(v) = process.stdout.write(JSON.stringify(v))`.
 - **`cli` → `vscode` (in-process).** `packages/vscode/src/extension.ts` does
   `import * as core from '@claude-observatory/core'` and calls `core.buildEditTree`,
-  `core.undoEdit`, `core.setStatus`, `core.readLog`, `core.fileMemory`, … directly. It only *spawns*
-  the CLI for `stats --json` and `changemap --json` (potentially GBs of transcripts — kept off the UI thread).
+  `core.undoEdit`, `core.setStatus`, `core.readLog`, `core.fileMemory`, … directly. It *spawns* the CLI
+  for the transcript-wide scans — `stats`, `changemap`, `multitask`, `processes`, `prompts`, `feed` —
+  so a multi-gigabyte parse never runs on the UI thread.
 - **`cli` → `jetbrains` (over the CLI).** The Kotlin plugin never links `core`. It shells out to
   `claude-observatory … --json` via `core/ObservatoryCli.kt` for every **mutation**
   (`keep`/`undo`/`redo`/`clean`) and every **diff-dependent read** (`locate`, `tree`, `observe`,
@@ -78,8 +79,10 @@ A status change is a one-line op, not an in-place edit:
 `readLog(session)` streams the file, pushes each `EditRecord`, and folds each `{op:"status"}` line
 onto the matching record (last op wins). Because writers only ever *append*, the capture hook and an
 editor marking an edit "kept" can run concurrently without either clobbering the other. `setStatus`
-appends the op (skipping a redundant no-op) and never rewrites — the one rewrite path is
-`clearResolved`, which compacts the log to just the pending records and GCs the orphaned blobs.
+appends the op (skipping a redundant no-op) and never rewrites. Two paths do rewrite: `clearResolved`
+compacts the log to just the pending records and GCs the orphaned blobs, and `clearResolvedIds` does the
+same for an explicit id set (`clean --resolved --ids <a,b,c>`). That id set is the scope one prompt or
+one task names, which no path can express.
 
 ## Core data shapes
 
@@ -133,6 +136,42 @@ interface StatsResult {
 Computed by `computeStats(session?)` with an incremental on-disk cache keyed on each transcript's
 `(mtime, size)` — only changed files are re-parsed. Meant to run in the `stats` subprocess.
 
+### `SessionMeta` — the fast session listing (`observe.ts`)
+
+```ts
+interface SessionMetaRow {
+  id: string;
+  title: string | null;   // Claude's latest ai-title, else the first user prompt; null when neither exists
+  lastActiveMs: number;   // conversation recency: the TRANSCRIPT's mtime (log.jsonl's when it vanished)
+  current: boolean;       // the session `resolveSessionId(cwd)` currently answers with
+  edits: number;          // captured edits, from the store log
+  pending: number;        // …of which still awaiting review
+  files: number;          // distinct files they touched
+}
+interface SessionMeta { active: string | null; sessions: SessionMetaRow[] }
+```
+
+`sessionMeta(cwd, reviewing?)` lists this workspace's sessions, newest conversation first, plus the
+session being reviewed (a conversation that only asked and read has no store, and would otherwise be
+missing from its own workspace's list). Each row costs one `stat` of the transcript plus cached facts,
+never a fresh parse of either file. Titles come from
+`fastSessionTitle`, a bounded scan — the transcript's last 4 MB for the newest `ai-title`, its first
+256 KB for the first real user prompt. Each scan's result is cached in a per-session sidecar at
+`<root>/session-meta/<id>.json`, keyed to the transcript's `(mtime, size)` exactly as the stats cache is,
+and written through a pid-scoped temp file plus a rename, so a concurrent reader sees old-or-new and
+never a torn file. A cold CLI process answers a listing from those stats plus one sidecar read per
+session, and pays the bounded scan only where a transcript changed since its last scan.
+
+That sidecar is now the general mechanism, not a title cache: `sidecarMemo(sessionId, field, stamp, fn)`
+holds one derived fact per field with **its own** stamp, so a fact keyed to the store log survives a
+transcript that grew, and the other way round. Four facts live there — the title (transcript stamp), the
+row counts (log stamp), a sibling's risk tally (transcript stamp), and the subagent digests (the
+subagent directory's stamps). Every editor surface runs in fresh CLI processes seconds apart, where an
+in-process memo can never survive, so anything derived from a finished session's files was otherwise
+recomputed forever: re-parsing every sibling's transcript for its risk count was most of what made a
+session switch slow. Liveness-derived facts are deliberately excluded — an agent's phase comes from how
+long ago its file was written, and a remembered phase would report a working agent as done.
+
 ## The hand-mirrored Kotlin models
 
 The JetBrains plugin **hand-mirrors** the TS types field-for-field (Gson has no shared schema), so
@@ -152,24 +191,23 @@ they must never drift. The mirrors:
   asserts append-only `log.jsonl` semantics: `EditRecord` lines + `{op:"status"}` folding (last op
   wins), tolerance of unparseable lines, and blob reads, against fixtures written in the TS format.
 - `packages/jetbrains/src/test/kotlin/com/cellobservatory/observatory/core/SessionResolverTest.kt` —
-  asserts `session.ts` behaviour: cwd mangling, stub-proof selection (command-only and bridge-session
+  asserts `session.ts` behavior: cwd mangling, stub-proof selection (command-only and bridge-session
   transcripts never outrank a real session; all-stub dirs fall back to newest), and the parent-dir walk.
 
 If you change a store or session read, update the port **and** these tests in the same PR.
 
 ### `ChangeMap` — the session's changes, rolled up (`changemap.ts`)
 
-`buildChangeMap(cwd, session, { root })` places every review-unit edit as `module → file → class`, then
-rolls it up **once** so no front-end re-aggregates: `files[]` and `modules[]` arrive churn-sorted, each
-with a pre-rendered `moduleLabel`, a worst-unreviewed-wins `status`, and `maxId` — the drill-through
-target a click opens. Chapters come from Claude's own `TodoWrite` checkpoints, and the display dimension
-is **total**: a to-do flipping to `in_progress` opens a window that fills forward to the next flip (and
-the final chapter runs to the end of the session), while anything left over — a session with no to-dos,
-a timestamp-less edit — lands in one **synthesized session chapter** (`id: 'ch:session'`,
-`synthetic: true`), titled from the session title or first prompt. Every edit therefore carries a
-non-null `chapter`. The synthesized chapter and any duplicate-content to-do row are display-only:
-`ChangeMapChapter.taskId` names the STRICT task destructive ops resolve against and is `null` there, so
-task-scoped keep/undo never widen past a real in-progress interval.
+`buildChangeMap(cwd, session, { root, prompts })` places every review-unit edit as
+`module → file → class`, then rolls it up **once** so no front-end re-aggregates: `files[]` and
+`modules[]` arrive churn-sorted, each with a pre-rendered `moduleLabel`, a worst-unreviewed-wins
+`status`, and `maxId` — the drill-through target a click opens. Tasks come from Claude's own plan: the
+`TodoWrite` checkpoints merged with the numbered task list `tasks.ts` mines from the same transcript.
+Attribution to them is **strict** — an edit joins a task only when its commit timestamp falls inside a
+real `in_progress` interval — so an edit outside every interval carries `taskId: null` and collects in
+the explicit unassigned bucket. Setting `prompts: true` costs one more transcript pass and fills
+`prompts[]`, the same session sliced by the user's own turns. The fleet leaves that flag off, because no
+ask typed into this window scopes a sibling worktree's map.
 
 0.8.0 adds **three per-edit attribution dimensions** on top of that — every `ChangeMapEdit` gains a
 stable-content-hash `taskId` (`sha1(todo-content).slice(0,12)`), a `subagentId` (the subagent that
@@ -183,13 +221,14 @@ intervals, the honest unassigned rule, and the cross-worktree fold) is detailed 
 
 ```ts
 interface ChangeMap {
-  summary: ChangeMapSummary; edits: ChangeMapEdit[]; chapters: ChangeMapChapter[];
+  summary: ChangeMapSummary; edits: ChangeMapEdit[]; compactions: CompactionMarker[];
   files: ChangeMapFile[]; modules: ChangeMapModule[];
   tasks: TaskInfo[];                 // strict-span task identities: stable taskId → to-do content
   rollupByTask: TaskRoll[];          // per-task rollup (strict spans); taskId:null = the unassigned bucket
   rollupBySubagent: SubagentRoll[];  // per-subagent rollup; subagentId:null = main-chain / unattributed
   rollupByWorkflow: WorkflowRoll[];  // per-workflow rollup; workflowId:null = no-workflow / ambiguous
-  workflows: ChangeMapWorkflow[];    // per-workflow Overview slice: rollup + files + its OWN chapter rollup
+  workflows: ChangeMapWorkflow[];    // per-workflow Overview slice: rollup + files + its taskIds
+  prompts: ChangeMapPrompt[];        // per-prompt slice; built only when `prompts: true`, else empty
 }
 interface ChangeMapFile {
   rel: string; module: string; moduleLabel: string; file: string;
@@ -197,22 +236,28 @@ interface ChangeMapFile {
   kept: number; pending: number; undone: number;
   status: EditStatus;        // worst-unreviewed-wins: pending > undone > kept
   maxId: number;             // newest edit id — what a click on this row opens
-  classes: string[]; chapters: string[];
+  classes: string[];
   agent: boolean; risk: string | null; reason: string | null;
 }
 interface ChangeMapModule {
   module: string; label: string; churn: number; cnt: number;
+  added: number; removed: number;
   kept: number; pending: number; undone: number;
-  status: EditStatus; files: number; chapters: string[];
+  status: EditStatus; files: number;
 }
-interface ChangeMapChapter {
-  id: string;                        // stable content-hash brush key; 'ch:session' for the synthetic chapter
-  taskId: string | null;             // the STRICT task destructive ops resolve to; null = display-only
-  synthetic: boolean;                // true for the synthesized session chapter (work outside any to-do)
-  index: number; title: string;
-  status: 'done' | 'wip' | 'todo';   // from Claude's own to-do status
-  startTs: number; endTs: number;
-  edits: number; kept: number; pending: number; undone: number; agent: boolean;
+interface ChangeMapPrompt {
+  id: string;                        // stable prompt id — the same one `prompts --json` emits
+  index: number;                     // 1-based chronological position, the way a person counts turns
+  text: string;                      // the ask itself, whitespace-collapsed and COMPLETE — renderers wrap it
+  title: string;                     // its first line, capped — for a button label or a tooltip head
+  ts: number; endTs: number;         // endTs is 0 while this is the ask still being answered
+  rollup: { edits: number; added: number; removed: number; pending: number; kept: number; undone: number };
+  files: ChangeMapFile[]; modules: ChangeMapModule[];
+  editIds: number[];                 // raw store ids this ask committed — the scope its review ops act on
+  agentIds: string[];                // subagents spawned while answering
+  workflowIds: string[];             // workflow runs started while answering
+  processIds: string[];              // background shells launched while answering
+  actions: number; errors: number; compactions: number; durationMs: number;
 }
 ```
 
@@ -288,7 +333,7 @@ session reading "working" *between* tool calls instead of flickering to idle aft
 **done** past `DONE_STALE_MS`. `agentPhaseDetail` also returns a `confidence` (`high` = structural,
 `heuristic` = staleness-derived) so a front-end never asserts an inferred state as certain.
 
-**Honest, content-hashed attribution (`changemap.ts`).** The Overview task ribbon and every task-scoped
+**Honest, content-hashed attribution (`changemap.ts`).** The Overview's Tasks tab and every task-scoped
 op key on a **stable `taskId`** — `taskId(content) = sha1(content).slice(0,12)` — so reordering or
 inserting to-dos never renumbers a task, and two identical to-dos deterministically share one id.
 Attribution uses **strict `in_progress` intervals** (`inProgressSpansStrict`) with **no edge fill**: a
@@ -296,10 +341,10 @@ span starts exactly when a to-do enters `in_progress` (the first span does *not*
 and an open, never-completed span ends at its **last observed** `in_progress` mtime, never `+∞`. An edit
 whose commit ts falls in **no** real interval is honestly `taskId: null` — the explicit **unassigned**
 bucket — never force-filed onto the head/tail task. That is the destructive-safety invariant behind
-`tasklog` and the strict rollups: `taskEditIds` selects raw store ids by the same strict rule, so an edge edit
-is never in a task's set. The rollup runs **once**, four ways — `rollupByTask` (`taskId: null` sorted
-last), `rollupBySubagent`, `rollupByWorkflow`, and `rollupByAgent` (unions the subagent rolls across a
-fleet of change-maps).
+`task-keep` / `task-undo` / `task-clear`, `tasklog`, and the strict rollups: `taskEditIds` selects raw
+store ids by the same strict rule, so an edge edit is never in a task's set. The rollup runs **once**,
+four ways — `rollupByTask` (`taskId: null` sorted last), `rollupBySubagent`, `rollupByWorkflow`, and
+`rollupByAgent` (unions the subagent rolls across a fleet of change-maps).
 `crossAgentTaskLog` (`taskLog.ts`) folds every worktree-sibling's change-map by `taskId`, so one logical
 task spanning agents/worktrees is a single `TaskLogEntry`; `unassigned` edits are excluded, never swept in.
 
@@ -325,7 +370,7 @@ degrading loudly-but-functionally.
 
 **Hot-path memoization (`fscache.ts`, 0.8.0).** One Overview refresh derives several views that each
 re-read the same multi-megabyte transcripts, so the pure parsers (`parseTranscriptActions`, `todoSnaps`,
-`transcriptInsights`, `reasoningByEdit`, `subagentMeta`, `agentMetrics`, `sessionUsage`) are memoized per
+`transcriptInsights`, `reasoningByEdit`, `subagentMeta`, `agentMetrics`) are memoized per
 `(path, mtimeMs, size)` — one parse per file per process, revalidated on every call so a long-lived host
 (the VS Code extension calls core in-process) can never serve a stale parse. Cached values are treated as
 immutable; `parseTranscriptActions` hands out per-call record copies because editId attribution mutates
@@ -350,17 +395,18 @@ VS Code renderers key on them by name. Add fields; don't rename them. (`emitJson
 | --- | --- | --- |
 | `list --json` | `{ session, edits: [{ id, ts, tool, file, status, added, removed }] }` | scripts / terminal; JetBrains reads the same records off-disk via `StoreReader` |
 | `status --json` | `{ hooksInstalled, hookScript, session, store, lastCaptureTs, counts: { total, pending, kept, undone } }` | doctor / scripts / setup checks |
-| `sessions --json` | `{ active, sessions: [{ id, edits, pending, lastMs }] }` | Switch-session pickers |
+| `sessions --json` | `{ active, sessions: [{ id, title, lastActiveMs, current, edits, pending, files }] }` — this workspace's sessions, newest conversation first. Identity and ordering come from directory stats plus the sidecar-cached title scan; the three counts come from the session's edit log, re-parsed only when its `(mtime, size)` moved and cached in the same sidecar | Switch Session pickers + the Overview's Sessions tab — JetBrains via `ObservatoryCli.sessionsJson` → `SessionsParser`, VS Code via in-process `core.sessionMeta` |
 | `tree [--root <d>] [--filter <q>]` | `EditTree` (`{ folders[], files[] }` → folder → file → class → edit w/ `added`/`removed`) | **both editors** — VS Code via in-process `buildEditTree`, JetBrains via `ObservatoryCli.treeJson` → `TreeParser` → `EditsTreePanel` |
 | `observe` | `{ session, recap, insights, suggestions, edits: [{ id, ts, tool, file, status, summary, reasoning, flags, memory, analysis }] }` | Observations panel (JetBrains `ObserveParser`; VS Code builds the equivalent in-process) |
-| `actions [--all]` | `{ session, summary{ total, byCategory, errors, firstTs, lastTs }, actions: [{ ts, tool, category, target, detail, ok, isError, reasoning, editId }], groups: [{ category, label, count, errors, actions[] }], subagents, subagentsSummary, fleet, fleetSummary }` | Actions timeline — **both editors** — VS Code in-process `parseActions`/`buildActionGroups`; JetBrains `ObservatoryCli.actionsJson` → `ActionsParser` → `ActionsPanel`. `groups` is curated by default; `--all` includes reads/searches/meta. `subagents`/`subagentsSummary`/`fleet`/`fleetSummary` are additive 0.7.0 fields (same shapes as the `subagents`/`siblings` commands); existing parsers ignore them |
+| `actions [--all]` | `{ session, summary{ total, byCategory, errors, firstTs, lastTs }, actions: [{ ts, tool, category, target, detail, ok, isError, reasoning, editId }], groups: [{ category, label, count, errors, actions[] }], subagents, subagentsSummary, fleet, fleetSummary }` | Actions timeline — **both editors** — VS Code in-process `parseActions`/`buildActionGroups`; JetBrains reads the same curated `actions` section out of the shared `multitask` payload through `ActionsParser` → `ActionsPanel`. `groups` is curated by default; `--all` includes reads/searches/meta. `subagents`/`subagentsSummary`/`fleet`/`fleetSummary` are additive 0.7.0 fields (same shapes as the `subagents`/`siblings` commands); existing parsers ignore them |
 | `subagents [--json]` (alias `agents`) | `{ session, summary, subagents: [{ agentId, agentType, description, status, ts, durationMs, tokens, toolUseCount, actions[], edits, summary }] }` | Subagents node in the Actions view — **both editors**; each subagent's nested timeline is mined zero-token from `subagents/agent-<id>.jsonl` and correlated via the spawning tool call's `toolUseResult` |
 | `siblings [--json]` (alias `fleet`) | `{ session, summary, siblings: [{ id, self, active, lastMs, edits, pending, files[], moreFiles, risk{ total, high } }] }` | Fleet node in the Actions view — **both editors** — plus an agent-facing digest a run can poll mid-flight; READ-ONLY / PATH-ONLY (no file contents cross agents). `--json` = siblings only; `--all` includes self |
 | `metrics [--json]` | `{ session, spanMs, actions{ total, errors, byCategory }, edits{ count, added, removed, pending, kept, undone }, subagents{…}, toolLatency{ count, medianMs, p95Ms, maxMs } }` | Session metrics roll-up — diff stats, action/error counts, per-subagent duration/tokens, and tool latency (from each `tool_use`→`tool_result` timestamp gap) |
-| `changemap [--root <d>] [--json]` | `{ summary, edits[], chapters[], files[], modules[], tasks[], rollupByTask[], rollupBySubagent[], rollupByWorkflow[], workflows[], rollupByAgent[], agents[], unassigned }` — `files`/`modules` are the churn + worst-unreviewed-wins rollups (pre-labelled, churn-sorted); `chapters[]` is TOTAL (0.8.0: every edit has a chapter; `taskId`/`synthetic` mark display-only rows) and each `workflows[]` entry carries its own scoped `chapters[]`; the three `rollupBy*` each keep their explicit `null` strict-unassigned/main-chain bucket (scripts still see the honest strict view); `agents[]` is one full change-map per worktree-sibling (the master-detail per-agent view, active session first) | Overview panel (master-detail; Fleet/Workflows nav → change-map detail) — VS Code webview + JetBrains `ChangeMapPanel` (both render as-given) |
+| `changemap [--root <d>] [--json]` | `{ summary, edits[], compactions[], files[], modules[], tasks[], rollupByTask[], rollupBySubagent[], rollupByWorkflow[], workflows[], prompts[], rollupByAgent[], agents[], unassigned }` — `files`/`modules` are the churn + worst-unreviewed-wins rollups (pre-labeled, churn-sorted); `tasks[]` carries the strict-span identities `rollupByTask` joins by `taskId`, and `unassigned` surfaces that rollup's `taskId: null` row directly so a renderer never digs it out; the three `rollupBy*` each keep their explicit `null` strict-unassigned/main-chain bucket (scripts still see the honest strict view); `prompts[]` slices the session by the user's own turns and is built for the active session only; `agents[]` is one full change-map per worktree-sibling (the master-detail per-agent view, most-recently-active first) with its `edits`/`prompts` projected out — the top-level `edits[]` is the one tools read | Overview panel (master-detail; Fleet/Workflows nav → change-map detail) — VS Code webview + JetBrains `ChangeMapPanel` (both render as-given) |
+| `prompts [--json]` \| `prompts --id <n> [--response] --json` | `{ session, summary{ total, withEdits, edits }, prompts: [{ id, index, ts, endTs, text, title, editIds[], edits, added, removed, pending, kept, undone, files, folders, tokens, tasks, actions, errors, agents[], workflows[], processes[], compactions, durationMs }] }`; `--id` narrows to `{ session, prompt }`, and `--response` returns `{ session, response: { promptId, index, text, turns, bytes, truncated } }` — Claude's own prose for that ask, its tool calls stripped, capped, with `truncated` reporting the bytes past the cap | Prompts window — both editors (JetBrains `PromptsParser`); selecting a row scopes the Overview to that ask |
 | `multitask [--root <d>] [--json]` | `{ agents: [{ session, worktree, gitBranch, self, phase, phaseConfidence, sparkline[], todos, subagents[], files[], diff{ added, removed }, tokens, durationMs, risk }], collisions: FileCollision[], worktrees[], workflows: WorkflowRun[], actions{ groups[], egress }, summary{ active, conflicts } }` | Overview Fleet/Workflows nav — **both editors** (render thin); assembled in the CLI from `listRepoSiblings` + per-agent `buildChangeMap` + `parseWorkflows`. Git-free / path-only |
 | `tasklog` (always JSON) | `TaskLogEntry[]` — `{ taskId, content, agentIds[], subagentIds[], firstTs, lastTs, edits, added, removed, status }`, one row per stable `taskId` unioned across worktrees + subagents (`unassigned` excluded) | Cross-agent task log — both editors |
-| `task-keep <id> --json` / `task-undo <id> --json` | `{ kept, total, ids }` / `{ undone, conflicts, total, ids }` — **WYSIWYG**: acts on the chapter's DISPLAYED edit set (`reviewEditIds`; the synthetic session chapter included), falling back to the strict span for analytics-only task ids | chapter-scoped Keep/Undo — both editors |
+| `task-keep <taskId> --json` / `task-undo <taskId> --json` / `task-clear <taskId> --json` | `{ kept, total, ids }` / `{ undone, conflicts, total, ids }` / `{ cleared, ids }` — each acts on the task's STRICT edit set (`taskEditIds`), so an edit made outside every `in_progress` interval is never in the scope; `task-clear --completed` clears every settled task and returns `{ cleared, ids, tasks[] }` | task-scoped Accept/Reject/Clear — both editors |
 | `demo [--fast] [--speed <n>] [--dir <d>] [--clean] [--json]` | `{ session, workspace, transcript, edits, steps }` (`--clean` → `{ sessions[], workspaces[] }`) — replays a scripted session through the REAL pipeline in an isolated `demo-<hex>` session + marked folder | Live showcase + the e2e fixture (`demo.ts`); a fully reviewed demo auto-clears its store (`autoClearDemo`) |
 | `chat-context [--tool-use-id <id> \| --edit <n> \| --agent <id> \| --task <id>]` | `{ prompt }` — a ready-to-paste chat prompt built by `assembleChatContext`; **never** spawns a process or calls a model | Chat handoff — both editors |
 | `locate --file <f>` (buffer on stdin) | `{ file, placements: [{ id, lines: [int] }] }` | inline overlays — JetBrains `ObservatoryCli.locate`; VS Code computes in-process via `core.locateEditInCurrent` |
