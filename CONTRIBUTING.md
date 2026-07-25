@@ -141,14 +141,16 @@ Copy this shape for any new structured view.
 | Unit + smoke tests | `npm test` (runs `version:check` → build → build:vscode → `node --test` on core + smoke) |
 | End-to-end CLI + hook | `npm run e2e` (`bash test/e2e.sh`, isolated temp `$HOME`) |
 
-**Do not point your editor at `node_modules/typescript`.** Since TypeScript 7 the npm package ships only
-the `tsc` driver — the language service, the `lib.*.d.ts` files, and the compiler API all live inside a
-per-platform native binary — so `node_modules/typescript/lib` holds no `tsserver.js` and
-`require('typescript')` returns nothing but a version. An editor configured to use the *workspace*
-TypeScript (VS Code's `typescript.tsdk` / "Use Workspace Version", the IntelliJ TypeScript service's
-directory setting) will silently lose inline errors and IntelliSense while every build here keeps
-passing. Use the editor's own bundled TypeScript; it reads this repo's `tsconfig` settings fine from
-5.6 onward.
+**TypeScript is held at 5.x on purpose.** Your editor needs no setup: IntelliJ's TypeScript service
+auto-detects `node_modules/typescript`, and VS Code works with its own bundled copy either way.
+
+The reason for the pin is that TypeScript 7 — the native rewrite — ships only the `tsc` driver on npm.
+`node_modules/typescript/lib` holds no `tsserver.js` and no `lib.*.d.ts`, and `require('typescript')`
+returns nothing but a version, because the compiler lives in a per-platform binary. Builds and CI pass
+on it (they only ever invoke `tsc`), so the breakage is invisible to automation and shows up only as an
+editor that has quietly stopped reporting type errors. `.github/dependabot.yml` therefore ignores
+TypeScript majors; when the language service ships, take the major deliberately —
+`tsconfig.base.json` already uses `node16` resolution, which is all 7.x needs from this repo.
 | JetBrains port tests | `gradle test` (in `packages/jetbrains`) |
 | Everything | `npm run test:all` |
 | Check/bump version | `node scripts/version.mjs [<x.y.z>]` |
