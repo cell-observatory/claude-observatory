@@ -732,10 +732,12 @@ test('extension: three views, click commands, inline annotations, chat, status s
     // kills the whole panel at runtime with a SyntaxError. Compile each <script> the page ships.
     for (const [label, view] of [['overview', cmView], ['prompts', rqView], ['stats', stView]]) {
       if (!view) continue;
-      const scripts = String(view.webview.html).match(/<script[^>]*>([\s\S]*?)<\/script>/g) || [];
+      // Case-insensitive on purpose: a tag-matching regex that only sees lowercase would silently skip a
+      // <SCRIPT> block and report "every shipped script parses" having compiled none of it.
+      const scripts = String(view.webview.html).match(/<script[^>]*>([\s\S]*?)<\/script>/gi) || [];
       assert.ok(scripts.length, `${label}: the panel ships at least one script`);
       for (const block of scripts) {
-        const body = block.replace(/^<script[^>]*>/, '').replace(/<\/script>$/, '');
+        const body = block.replace(/^<script[^>]*>/i, '').replace(/<\/script>$/i, '');
         assert.doesNotThrow(() => new Function(body), `${label}: every shipped script parses`);
       }
     }
