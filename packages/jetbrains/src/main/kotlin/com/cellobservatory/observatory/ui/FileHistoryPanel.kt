@@ -21,7 +21,6 @@ import com.intellij.ui.PopupHandler
 import com.intellij.ui.SimpleTextAttributes
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.treeStructure.Tree
-import com.intellij.util.ui.tree.TreeUtil
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import java.text.SimpleDateFormat
@@ -97,13 +96,13 @@ class FileHistoryPanel(private val project: Project) : SimpleToolWindowPanel(tru
         root.removeAllChildren()
         for (rec in edits) root.add(DefaultMutableTreeNode(rec))
         model.reload()
-        TreeUtil.expandAll(tree)
+        expandAllBounded(tree)
     }
 
     private fun buildToolbar(): JComponent {
         val group = DefaultActionGroup(
             action("Accept All Edits in File", NavTint.ACCEPT_FILE) { acceptFile() },
-            action("Revert All Edits in File", NavTint.REJECT) { revertFile() },
+            action("Reject All Edits in File", NavTint.REJECT) { revertFile() },
             // Directional icons so prev/next read at a glance without hovering (they shared one Diff icon).
             action("Diff Previous Revision", AllIcons.Actions.Back) { stepRevision(-1) },
             action("Diff Next Revision", AllIcons.Actions.Forward) { stepRevision(1) },

@@ -47,37 +47,6 @@ class ReviewPrevAction : AnAction(), DumbAware {
     }
 }
 
-/** Chapter axis (cascaded edits) — step to the previous/next pending edit in the CURRENT edit's
- *  chapter (one subtask's edits, in capture order, across files) and flash the chapter title. */
-private fun stepChapter(e: AnActionEvent, dir: Int) {
-    val project = e.project ?: return
-    val service = ObservatoryService.getInstance(project)
-    val session = service.currentSession()
-        ?: return ReviewOps.notify(project, "No active Claude Code session for this project", NotificationType.WARNING)
-    val anchor = service.currentPendingEdit() ?: service.nextPendingEdit()
-        ?: return ReviewOps.notify(project, "No pending Claude edits — all caught up")
-    val ch = com.cellobservatory.observatory.core.ObservatoryCli.chapterForEdit(session, anchor.id, project.basePath)
-        ?: return Navigate.openFileAtEdit(project, session, anchor)
-    val target = service.stepInChapter(dir, ch.editIds)
-        ?: return ReviewOps.notify(project, "“${ch.title}” — nothing left to review")
-    Navigate.openFileAtEdit(project, session, target)
-    ReviewOps.notify(project, "${ch.title} — reviewing this chapter")
-}
-
-/** ⌥⌘. — next pending edit in the current edit's chapter. */
-class ReviewNextInChapterAction : AnAction(), DumbAware {
-    override fun getActionUpdateThread() = ActionUpdateThread.BGT
-    override fun update(e: AnActionEvent) { e.presentation.isEnabled = e.project != null }
-    override fun actionPerformed(e: AnActionEvent) = stepChapter(e, 1)
-}
-
-/** ⌥⌘, — previous pending edit in the current edit's chapter. */
-class ReviewPrevInChapterAction : AnAction(), DumbAware {
-    override fun getActionUpdateThread() = ActionUpdateThread.BGT
-    override fun update(e: AnActionEvent) { e.presentation.isEnabled = e.project != null }
-    override fun actionPerformed(e: AnActionEvent) = stepChapter(e, -1)
-}
-
 /** ⌥⌘Y — keep the pending edit under the cursor. */
 class KeepAtCursorAction : AnAction(), DumbAware {
     override fun getActionUpdateThread() = ActionUpdateThread.BGT

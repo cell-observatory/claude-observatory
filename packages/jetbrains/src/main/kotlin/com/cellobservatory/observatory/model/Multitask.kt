@@ -149,8 +149,9 @@ data class SessionTask(
     val activeForm: String?,
     val blocks: List<String>,
     val blockedBy: List<String>,
-    /** Joins this task to its change-map chapter (tasks ARE chapters, 0.8.3) — '' for an older CLI. */
-    val chapterId: String,
+    /** The STRICT task id (core.taskIdForSubject) — what joins this row to the change map's per-task
+     *  rollup and to `feed --kind task`. Blank for an older CLI that predates the field. */
+    val taskId: String,
 )
 
 object MultitaskParser {
@@ -180,7 +181,7 @@ object MultitaskParser {
                     activeForm = str(to, "activeForm"),
                     blocks = arr(to, "blocks").mapNotNull { it.takeIf { e -> !e.isJsonNull }?.asString },
                     blockedBy = arr(to, "blockedBy").mapNotNull { it.takeIf { e -> !e.isJsonNull }?.asString },
-                    chapterId = str(to, "chapterId") ?: "",
+                    taskId = str(to, "taskId") ?: "",
                 )
             },
         )

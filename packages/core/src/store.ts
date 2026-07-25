@@ -13,6 +13,7 @@
  * Pure local filesystem — no network, no model calls, zero tokens.
  */
 import * as fs from 'fs';
+import { cachedByFiles } from './fscache';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { claudeConfigDir } from './paths';
@@ -360,10 +361,21 @@ export interface SkipOp {
   ts: number;
 }
 
-/** Read the log, folding append-only status ops onto their edit records (in file order). */
+/**
+ * Read the log, folding append-only status ops onto their edit records (in file order).
+ *
+ * The parse is memoized per (mtime,size) of log.jsonl — with many edits it is called a dozen times per
+ * change-map build, and it was the one parser without a memo. Each call returns fresh SHALLOW COPIES of
+ * the cached records, so a caller that mutates a record (or the array) can never poison the cache or a
+ * concurrent caller.
+ */
 export function readLog(sessionId: string): EditRecord[] {
   const p = logPath(sessionId);
   if (!fs.existsSync(p)) return [];
+  return cachedByFiles('readLog', [p], () => parseLogFile(p)).map((r) => ({ ...r }));
+}
+
+function parseLogFile(p: string): EditRecord[] {
   const records: EditRecord[] = [];
   const byId = new Map<number, EditRecord>();
   const usedIds = new Set<number>();
@@ -429,10 +441,47 @@ export function readSkips(sessionId: string): SkipOp[] {
 
 /**
  * Next display id = max existing (reconciled) id + 1. `appendLog` calls this INSIDE the append lock so
- * two concurrent writers can't read the same max and collide (§2.7); reads the reconciled log, so a
- * re-keyed duplicate id is counted too and a subsequent append can't re-collide with it.
+ * two concurrent writers can't read the same max and collide (§2.7); the fallback reads the reconciled
+ * log, so a re-keyed duplicate id is counted too and a subsequent append can't re-collide with it.
+ *
+ * Fast path: appends allocate max+1, so a clean log's ids are strictly increasing and the LAST record's
+ * id is the reconciled max — a bounded tail read answers in O(64 KB) instead of parsing the whole log
+ * on every capture (which made the capture hot path O(N²) over a session's lifetime). The tail is
+ * trusted only when it holds ≥2 edit records in strictly increasing order; a duplicate in the tail (an
+ * unlocked §2.7 collision) or a tiny file falls back to the full reconciled read.
  */
 export function nextId(sessionId: string): number {
+  const p = logPath(sessionId);
+  let size = 0;
+  try {
+    size = fs.statSync(p).size;
+  } catch {
+    return 1;
+  }
+  const TAIL = 64 * 1024;
+  if (size > TAIL) {
+    try {
+      const fd = fs.openSync(p, 'r');
+      const buf = Buffer.alloc(TAIL);
+      const n = fs.readSync(fd, buf, 0, TAIL, size - TAIL);
+      fs.closeSync(fd);
+      const lines = buf.toString('utf8', 0, n).split('\n').slice(1); // first line may be partial
+      const ids: number[] = [];
+      for (const line of lines) {
+        const t = line.trim();
+        if (!t) continue;
+        try {
+          const o = JSON.parse(t);
+          if (o && !o.op && typeof o.id === 'number') ids.push(o.id);
+        } catch {
+          /* partial line */
+        }
+      }
+      if (ids.length >= 2 && ids.every((v, i) => i === 0 || v > ids[i - 1])) return ids[ids.length - 1] + 1;
+    } catch {
+      /* fall through to the full read */
+    }
+  }
   const log = readLog(sessionId);
   return log.reduce((m, r) => Math.max(m, r.id), 0) + 1;
 }
@@ -479,6 +528,65 @@ export function setStatus(sessionId: string, id: number, status: EditStatus): Ed
   );
   rec.status = status;
   return rec;
+}
+
+/**
+ * Set the status of MANY edits at once — one parse, one lock, one append.
+ *
+ * The per-edit [setStatus] is O(log) each time: it resolves the record through `readLog`, whose memo the
+ * append it then performs immediately invalidates. Looping it over a bulk scope is therefore quadratic,
+ * and at real scale that is not a slow path but a broken one — accepting 26,000 pending edits took eight
+ * minutes before this existed, against a few milliseconds now. Every bulk verb (Accept All, accept a
+ * file, a folder, a task, a prompt) must come through here.
+ *
+ * Returns the ids that actually changed; an edit already in [status] is skipped rather than re-stated,
+ * which is what keeps the log from doubling on a second Accept All.
+ */
+/**
+ * Memoize one derived FACT about a session on disk, keyed to a stamp the caller owns.
+ *
+ * Every editor surface runs in fresh CLI processes a few seconds apart, so an in-process memo never
+ * survives to the next tick; anything derived from a finished session's files was therefore recomputed
+ * forever. Facts share one file per session (`<root>/session-meta/<id>.json`) with a stamp per field, so
+ * a change to one input never invalidates a fact derived from another.
+ */
+export function sidecarMemo<T>(sessionId: string, field: string, stamp: string, compute: () => T): T {
+  if (!stamp || !isSafeSessionId(sessionId)) return compute(); // nothing stable to key on
+  const p = path.join(rootDir(), 'session-meta', `${sessionId}.json`);
+  let side: Record<string, unknown> = {};
+  try {
+    side = JSON.parse(fs.readFileSync(p, 'utf8'));
+    if (side && side[`${field}Stamp`] === stamp && side[field] !== undefined) return side[field] as T;
+  } catch {
+    /* absent or unreadable — compute */
+  }
+  const value = compute();
+  try {
+    fs.mkdirSync(path.dirname(p), { recursive: true, mode: 0o700 });
+    const tmp = `${p}.${process.pid}.tmp`;
+    // Merge, never replace: the other fields in this file are keyed to other inputs.
+    // 0600/0700 like the rest of the store (SECURITY.md) — this file carries titles and plan text.
+    fs.writeFileSync(tmp, JSON.stringify({ ...side, [field]: value, [`${field}Stamp`]: stamp }), { mode: 0o600 });
+    fs.renameSync(tmp, p);
+  } catch {
+    /* a cache we could not write is a cache we recompute — never an error */
+  }
+  return value;
+}
+
+export function setStatusMany(sessionId: string, ids: Iterable<number>, status: EditStatus): number[] {
+  const want = new Set(ids);
+  if (!want.size) return [];
+  const changed = readLog(sessionId)
+    .filter((r) => want.has(r.id) && r.status !== status)
+    .map((r) => r.id);
+  if (!changed.length) return [];
+  const ts = Date.now();
+  const payload = changed.map((id) => JSON.stringify({ op: 'status', id, status, ts })).join('\n') + '\n';
+  withLock(sessionId, MAINT_LOCK_BUDGET_MS, () =>
+    fs.appendFileSync(logPath(sessionId), payload, { mode: 0o600 })
+  );
+  return changed;
 }
 
 export function findRecord(sessionId: string, id: number): EditRecord | null {
@@ -583,9 +691,15 @@ export function gcSession(sessionId: string): { removed: number; bytes: number }
 /** Every session dir present in the store — INCLUDING log-less stub dirs that listSessions skips
  *  (whole-tree Bash snapshots from sessions that never edited). `clean` iterates THIS so those
  *  dirs are reclaimable; every other consumer keeps the listSessions view. */
+/** Directories under the store root that are CACHES, not sessions. `clean` walks the root looking for
+ *  reclaimable session husks; without this list it finds these, sees no log.jsonl, and deletes the very
+ *  caches this release's speed depends on — reporting them to the reader as "pruned stub sessions". */
+const RESERVED_STORE_DIRS = new Set(['changemap-cache', 'session-meta', 'usage-cursors']);
+
 export function allStoreSessionIds(): string[] {
   try {
     return fs.readdirSync(rootDir()).filter((id) => {
+      if (RESERVED_STORE_DIRS.has(id)) return false;
       if (!isSafeSessionId(id)) return false;
       try {
         return fs.statSync(path.join(rootDir(), id)).isDirectory();
@@ -627,6 +741,12 @@ export function removeSession(sessionId: string): void {
     throw new Error(`refusing to remove ${resolved}: outside the store`);
   }
   fs.rmSync(dir, { recursive: true, force: true });
+  // The derived caches hold the session's own content — its prompt text, its title, its file list — so
+  // they go with it. Anything that deletes a session (clean --drop/--all/--older-than, demo --clean,
+  // uninstall --purge-store, both editors' Drop action) comes through here, so this is the one place
+  // that has to remember them.
+  fs.rmSync(path.join(root, 'changemap-cache', sessionId), { recursive: true, force: true });
+  fs.rmSync(path.join(root, 'session-meta', `${sessionId}.json`), { force: true });
 }
 
 /** True when `file` is the scope path itself (exact file) or lives beneath it (folder prefix). The one
@@ -661,7 +781,7 @@ export function clearResolved(sessionId: string, under?: string): number {
 
 /**
  * Drop resolved (kept + undone) edits whose id is in `ids`, keeping every pending one — the id-scoped
- * counterpart to `clearResolved`, so a chapter's strict-span edit set (taskEditIds) can be cleared
+ * counterpart to `clearResolved`, so a task's strict-span edit set (taskEditIds) can be cleared
  * without touching edits outside it. Pending edits in the set, and every edit outside it, are preserved.
  * Returns the count + the ids actually dropped.
  */

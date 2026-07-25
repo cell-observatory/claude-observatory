@@ -6,9 +6,9 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { diffArrays } from 'diff';
-import { EditRecord, EditStatus, readLog, readBlob, logPath, maxOf, listSessions, SessionInfo } from './store';
+import { EditRecord, EditStatus, readLog, readBlob, logPath, maxOf, listSessions, SessionInfo, allStoreSessionIds, rootDir, isSafeSessionId } from './store';
 import { lineDelta } from './format';
-import { projectDir } from './session';
+import { projectDir, resolveSessionId } from './session';
 import { claudeConfigDir } from './paths';
 import { cachedAnalysis } from './analyze';
 import { cachedByFiles } from './fscache';
@@ -225,21 +225,263 @@ export function listSessionsWithTitles(cwd: string): (SessionInfo & { title: str
     let title: string | null = null;
     try {
       const ins = transcriptInsights(cwd, s.id);
-      title = (ins.title ?? ins.firstUserPrompt ?? '').replace(/\s+/g, ' ').trim() || null;
-      // Keep list rows SHORT but informative: ai-titles already are ("Steps to publish on
-      // marketplace"), but the first-PROMPT fallback can be a whole pasted brief (headless sessions
-      // never get an ai-title) — take its first sentence, then hard-cap. The full text still shows
-      // where there's a hover surface: the session chip's tooltip renders it uncapped.
-      if (title) {
-        const sentence = /^(.*?[.?!])(?:\s|$)/.exec(title);
-        if (sentence && sentence[1].length >= 12) title = sentence[1]; // a bare "Hi." is no title
-        if (title.length > 64) title = title.slice(0, 63).trimEnd() + '…';
-      }
+      title = normalizeSessionTitle(ins.title ?? ins.firstUserPrompt ?? '');
     } catch {
       /* unreadable transcript — the id still identifies the session */
     }
     return { ...s, title };
   });
+}
+
+/** Keep list rows SHORT but informative: ai-titles already are, but the first-PROMPT fallback can be a
+ *  whole pasted brief — take its first sentence, then hard-cap at 64. Hover surfaces show it uncapped. */
+function normalizeSessionTitle(raw: string): string | null {
+  let title = raw.replace(/\s+/g, ' ').trim();
+  if (!title) return null;
+  const sentence = /^(.*?[.?!])(?:\s|$)/.exec(title);
+  if (sentence && sentence[1].length >= 12) title = sentence[1]; // a bare "Hi." is no title
+  if (title.length > 64) title = title.slice(0, 63).trimEnd() + '…';
+  return title;
+}
+
+// --- fast session listing: the session selector + the Overview's Sessions tab ---
+
+export interface SessionMetaRow {
+  id: string;
+  /** Human-readable name (latest ai-title, else the first user prompt), normalized; null when neither
+   *  could be found in the bounded scan — renderers fall back to the short id. */
+  title: string | null;
+  /** Conversation recency: the TRANSCRIPT's mtime (a review click on the store must not resurrect a
+   *  dead session), falling back to log.jsonl mtime for a transcript that vanished. */
+  lastActiveMs: number;
+  /** True for the session `resolveSessionId(cwd)` currently answers with. */
+  current: boolean;
+  /** What the session did to this workspace, in the terms the log itself carries: how many edits were
+   *  captured, how many still await review, and how many distinct files they touched. Zeros for a
+   *  session with no store — a conversation that only asked and read changed nothing, which is a fact,
+   *  not a gap. Line deltas are deliberately absent: they live in the content blobs, and reading two per
+   *  edit is exactly the cost this listing exists to avoid. */
+  edits: number;
+  pending: number;
+  files: number;
+}
+
+export interface SessionMeta {
+  active: string | null;
+  /** This WORKSPACE's sessions, newest conversation first. */
+  sessions: SessionMetaRow[];
+}
+
+/**
+ * The cheap session list both pickers and the Sessions tab render. Deliberately carries NO pending or
+ * edit counts: computing them meant a full `readLog` of every session in the store per open (2.2 MB of
+ * JSONL on a mature machine), and recency plus name is what the switch decision actually needs. Titles
+ * come from a BOUNDED transcript scan (tail for the latest ai-title, head for the first prompt) behind
+ * an on-disk sidecar keyed to the transcript's (mtime,size), so even a cold CLI spawn answers in stats.
+ */
+export function sessionMeta(cwd: string, reviewing?: string | null): SessionMeta {
+  const active = (() => {
+    try {
+      return resolveSessionId(cwd);
+    } catch {
+      return null;
+    }
+  })();
+  const rows: SessionMetaRow[] = [];
+  const seen = new Set<string>();
+  const push = (id: string): void => {
+    if (seen.has(id)) return;
+    seen.add(id);
+    const transcript = findTranscript(cwd, id);
+    if (!transcript) return; // another workspace's session — not offered here
+    let lastActiveMs = 0;
+    try {
+      lastActiveMs = fs.statSync(transcript).mtimeMs;
+    } catch {
+      try {
+        lastActiveMs = fs.statSync(logPath(id)).mtimeMs;
+      } catch {
+        /* neither file — skip the row below */
+      }
+    }
+    if (!lastActiveMs) return;
+    rows.push({
+      id,
+      title: fastSessionTitle(transcript, id),
+      lastActiveMs,
+      current: id === active,
+      ...sessionCounts(id),
+    });
+  };
+  for (const id of allStoreSessionIds()) push(id);
+  if (active) push(active); // the live conversation may have no store yet (no edits) — still listed
+  // …and the session the reader has PINNED, which may equally have no store: a conversation that only
+  // asked and read never triggers the capture hook. Provenance is still decided by `push` (a transcript
+  // that does not resolve under this cwd is dropped), so a genuinely foreign pin stays unlisted — but a
+  // local one is no longer reported as "recorded for another workspace" merely for having no edits.
+  if (reviewing) push(reviewing);
+  rows.sort((a, b) => b.lastActiveMs - a.lastActiveMs);
+  return { active, sessions: rows };
+}
+
+/** A session's review numbers, cached beside its title. */
+export interface SessionCounts {
+  edits: number;
+  pending: number;
+  files: number;
+}
+
+const COUNTS_SIDECAR_VERSION = 2; // 2: added `files`; a v1 entry lacks it and must be recomputed
+
+/**
+ * A session's captured-edit counts, cached in the same sidecar the title uses and keyed to the LOG's
+ * mtime:size — so a listing pays one `stat` per session and re-reads only the logs that changed since.
+ *
+ * The counts exist because a session row is only useful next to what the session did: a fleet row would
+ * never show a name alone. Reading them from the log is what the sidecar makes cheap; reading them from
+ * the transcript would not be, which is why nothing here parses one.
+ */
+export function sessionCounts(sessionId: string): SessionCounts {
+  const empty: SessionCounts = { edits: 0, pending: 0, files: 0 };
+  let stamp = '';
+  try {
+    const st = fs.statSync(logPath(sessionId));
+    stamp = `${COUNTS_SIDECAR_VERSION}|${st.mtimeMs}:${st.size}`;
+  } catch {
+    return empty; // no store — the session captured nothing
+  }
+  const sidecar = path.join(rootDir(), 'session-meta', `${sessionId}.json`);
+  let side: { stamp?: string; title?: string | null; counts?: SessionCounts; countsStamp?: string } = {};
+  try {
+    side = JSON.parse(fs.readFileSync(sidecar, 'utf8'));
+    if (side && side.countsStamp === stamp && side.counts) return side.counts;
+  } catch {
+    /* absent or unreadable — count */
+  }
+  const counts = { ...empty };
+  const files = new Set<string>();
+  for (const r of readLog(sessionId)) {
+    counts.edits++;
+    if (r.status === 'pending') counts.pending++;
+    files.add(r.file);
+  }
+  counts.files = files.size;
+  try {
+    fs.mkdirSync(path.dirname(sidecar), { recursive: true, mode: 0o700 });
+    const tmp = `${sidecar}.${process.pid}.tmp`;
+    // Merge, never replace: the title half of this file is keyed to the TRANSCRIPT and must survive a
+    // log-only change (and the other way round).
+    fs.writeFileSync(tmp, JSON.stringify({ ...side, counts, countsStamp: stamp }), { mode: 0o600 });
+    fs.renameSync(tmp, sidecar);
+  } catch {
+    /* a cache we could not write is a cache we recompute — never an error */
+  }
+  return counts;
+}
+
+const TITLE_SIDECAR_VERSION = 1;
+const TITLE_TAIL_SCAN = 4 * 1024 * 1024; // ai-title rides near the end; latest wins
+const TITLE_HEAD_SCAN = 256 * 1024; // the first user prompt sits near the top
+
+/**
+ * A session's display title from a BOUNDED transcript scan, cached in an on-disk sidecar
+ * (`<store>/session-meta/<id>.json`, keyed to the transcript's mtime:size — the usage-cursors
+ * pattern). The scan replicates transcriptInsights' rules on a budget: the LATEST `ai-title` from the
+ * tail, else the first REAL user prompt from the head (no sidechains, no compact summaries, no
+ * command/caveat wrappers).
+ */
+export function fastSessionTitle(transcriptPath: string, sessionId: string): string | null {
+  let stamp = '';
+  try {
+    const st = fs.statSync(transcriptPath);
+    stamp = `${TITLE_SIDECAR_VERSION}|${st.mtimeMs}:${st.size}`;
+  } catch {
+    return null;
+  }
+  // The id reaches here from a pinned setting or a --session flag, so it is not trusted to be a single
+  // path segment: without this, `../../evil` would resolve OUTSIDE the store and then be written to.
+  if (!isSafeSessionId(sessionId)) return scanTitle(transcriptPath);
+  const sidecar = path.join(rootDir(), 'session-meta', `${sessionId}.json`);
+  try {
+    const hit = JSON.parse(fs.readFileSync(sidecar, 'utf8')) as { stamp: string; title: string | null };
+    if (hit && hit.stamp === stamp) return hit.title;
+  } catch {
+    /* absent or unreadable — scan */
+  }
+  const title = scanTitle(transcriptPath);
+  try {
+    fs.mkdirSync(path.dirname(sidecar), { recursive: true, mode: 0o700 });
+    const tmp = `${sidecar}.${process.pid}.tmp`;
+    // Merge: the counts half of this file is keyed to the LOG and must survive a transcript-only change.
+    let prev: Record<string, unknown> = {};
+    try {
+      prev = JSON.parse(fs.readFileSync(sidecar, 'utf8'));
+    } catch {
+      /* first write */
+    }
+    fs.writeFileSync(tmp, JSON.stringify({ ...prev, stamp, title }), { mode: 0o600 });
+    fs.renameSync(tmp, sidecar); // atomic — a concurrent reader sees old-or-new, never a torn file
+  } catch {
+    /* sidecar is best-effort */
+  }
+  return title;
+}
+
+function scanTitle(transcriptPath: string): string | null {
+  let fd: number;
+  let size = 0;
+  try {
+    fd = fs.openSync(transcriptPath, 'r');
+    size = fs.fstatSync(fd).size;
+  } catch {
+    return null;
+  }
+  try {
+    // Tail: the LATEST ai-title wins, so walk the last chunk's lines backwards.
+    const tailLen = Math.min(size, TITLE_TAIL_SCAN);
+    const tail = Buffer.alloc(tailLen);
+    fs.readSync(fd, tail, 0, tailLen, size - tailLen);
+    const tailLines = tail.toString('utf8').split('\n');
+    if (tailLen < size) tailLines.shift(); // first line may be partial
+    for (let i = tailLines.length - 1; i >= 0; i--) {
+      const t = tailLines[i];
+      if (t.indexOf('"ai-title"') === -1) continue;
+      try {
+        const o = JSON.parse(t);
+        if (o && o.type === 'ai-title' && typeof o.aiTitle === 'string' && o.aiTitle.trim())
+          return normalizeSessionTitle(o.aiTitle);
+      } catch {
+        /* partial line */
+      }
+    }
+    // Head: the first REAL user prompt (same filters as transcriptInsights).
+    const headLen = Math.min(size, TITLE_HEAD_SCAN);
+    const head = Buffer.alloc(headLen);
+    fs.readSync(fd, head, 0, headLen, 0);
+    for (const line of head.toString('utf8').split('\n')) {
+      const t = line.trim();
+      if (!t) continue;
+      let o: any;
+      try {
+        o = JSON.parse(t);
+      } catch {
+        continue; // the last line may be cut by the byte budget
+      }
+      const msg = o.message;
+      if (!msg || msg.role !== 'user' || o.isSidechain === true || o.isCompactSummary === true) continue;
+      let text: string | null = null;
+      if (typeof msg.content === 'string') text = msg.content;
+      else if (Array.isArray(msg.content)) {
+        const tb = msg.content.find((b: any) => b && b.type === 'text' && typeof b.text === 'string');
+        if (tb) text = tb.text;
+      }
+      const clean = text ? text.trim() : '';
+      if (clean && !clean.startsWith('<') && !/^caveat:/i.test(clean)) return normalizeSessionTitle(clean);
+    }
+    return null;
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 function transcriptInsightsUncached(p: string): TranscriptInsights {
@@ -269,12 +511,12 @@ function transcriptInsightsUncached(p: string): TranscriptInsights {
       continue;
     }
     const msg = o.message;
-    // First REAL user prompt — the fallback chapter title for sessions without to-dos. String or
+    // First REAL user prompt — the fallback session title for sessions without to-dos. String or
     // text-block content both occur; skip sidechains, tool_result-only turns, and the harness's
     // command/caveat wrappers (`<command-name>…`, `Caveat: …`) — those aren't what the user asked.
     // A compaction summary is likewise excluded: it's a synthesized user turn ("This session is being
     // continued from a previous conversation…"), so on a compacted session it would otherwise become
-    // the session title, the synthetic chapter's title and the session picker's label.
+    // the session title and the session picker's label.
     if (firstUserPrompt === null && msg && msg.role === 'user' && o.isSidechain !== true && o.isCompactSummary !== true) {
       let text: string | null = null;
       if (typeof msg.content === 'string') text = msg.content;
@@ -518,13 +760,21 @@ export function transcriptSuggestions(cwd: string, sessionId: string): string[] 
 // --- heuristic summary + flags (zero-token) ---
 
 function blobText(sessionId: string, sha: string | null): string | null {
-  return sha === null ? null : readBlob(sessionId, sha).toString('utf8');
+  if (sha === null) return null;
+  try {
+    return readBlob(sessionId, sha).toString('utf8');
+  } catch {
+    return null; // a GC'd blob is a missing input, not a crash in the Observations tree
+  }
 }
 
 function addedLines(before: string, after: string): string[] {
   const tok = (s: string) => s.match(/[^\n]*\n|[^\n]+$/g) || [];
   const out: string[] = [];
-  for (const p of diffArrays(tok(before), tok(after))) if (p.added) out.push(...p.value);
+  // Loop, never out.push(...p.value): a whole-file Write of a >65k-line file would blow the arg limit.
+  for (const p of diffArrays(tok(before), tok(after))) {
+    if (p.added) for (const v of p.value) out.push(v);
+  }
   return out;
 }
 
@@ -612,10 +862,11 @@ export function heuristicSuggestions(sessionId: string): string[] {
     const hasTest = [...files].some((g) => /\.(test|spec)\.|_test\.|test_/.test(g) && g.includes(stem));
     if (!hasTest) out.push(`Add or update tests for ${path.basename(f)}.`);
   }
+  // Rides flagInputs' blob-pair memo — the previous version re-read both blobs and re-diffed every
+  // record on every Observations render (O(edits) blob reads + line diffs for an already-memoized answer).
   const todoFiles = log.filter((r) => {
-    const after = blobText(sessionId, r.afterBlob);
-    const before = blobText(sessionId, r.beforeBlob);
-    return after !== null && /\b(TODO|FIXME)\b/.test(addedLines(before ?? '', after).join(''));
+    const blob = flagInputs(sessionId, r);
+    return blob !== null && /\b(TODO|FIXME)\b/.test(blob.addedText);
   });
   for (const r of todoFiles) out.push(`Follow up on the TODO/FIXME added in ${path.basename(r.file)}.`);
   if (out.length === 0) out.push('No obvious follow-ups from these heuristics.');

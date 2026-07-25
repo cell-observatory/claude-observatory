@@ -10,7 +10,8 @@
  * thin renderers over the tree/keep/undo this backs.
  */
 import { diffArrays } from 'diff';
-import { EditRecord, EditStatus, readLog, readBlob } from './store';
+import { EditRecord, EditStatus, readLog, readBlob, logPath } from './store';
+import { cachedByFiles } from './fscache';
 
 function tokenizeLines(s: string): string[] {
   return s.match(/[^\n]*\n|[^\n]+$/g) || [];
@@ -53,6 +54,23 @@ function diffRegions(before: string, after: string): { afterAdded: Set<number>; 
   return { afterAdded, beforeChanged };
 }
 
+/** Memo for `diffRegions` keyed on the (session, beforeBlob, afterBlob) pair. Blobs are
+ *  content-addressed and immutable, so a pair always yields the same regions — and computeGroups ran
+ *  three blob reads + two whole-file line diffs per adjacent pending pair on EVERY tree build, which
+ *  was the dominant cost of a many-edit refresh. Callers only READ the sets. */
+const regionsMemo = new Map<string, { afterAdded: Set<number>; beforeChanged: Set<number> }>();
+const REGIONS_MEMO_CAP = 20000;
+
+function regionsFor(session: string, beforeSha: string | null, afterSha: string | null): { afterAdded: Set<number>; beforeChanged: Set<number> } {
+  const key = `${session}|${beforeSha ?? ''}|${afterSha ?? ''}`;
+  const hit = regionsMemo.get(key);
+  if (hit) return hit;
+  const value = diffRegions(blobText(session, beforeSha), blobText(session, afterSha));
+  if (regionsMemo.size >= REGIONS_MEMO_CAP) regionsMemo.clear();
+  regionsMemo.set(key, value);
+  return value;
+}
+
 function overlaps(a: Set<number>, b: Set<number>): boolean {
   for (const x of a) if (b.has(x)) return true;
   return false;
@@ -64,6 +82,12 @@ function overlaps(a: Set<number>, b: Set<number>): boolean {
  * per-status so keep/undo work on the pending group and redo works on the undone group.
  */
 function computeGroups(session: string, status: EditStatus): Map<number, number[]> {
+  // Memoized per (mtime,size) of log.jsonl: one refresh builds the tree at least twice (Edits + Diffs
+  // providers) and every CLI spawn rebuilds it again. Callers only read the returned map.
+  return cachedByFiles(`groups:${status}`, [logPath(session)], () => computeGroupsUncached(session, status));
+}
+
+function computeGroupsUncached(session: string, status: EditStatus): Map<number, number[]> {
   const pending = readLog(session).filter((r) => r.status === status);
   const byFile = new Map<string, EditRecord[]>();
   for (const r of pending) {
@@ -93,9 +117,8 @@ function computeGroups(session: string, status: EditStatus): Map<number, number[
       const f = recs[i + 1];
       // Perfectly chained? (nothing else changed the file between them.)
       if (e.afterBlob === null || f.beforeBlob === null || e.afterBlob !== f.beforeBlob) continue;
-      const shared = blobText(session, e.afterBlob); // == f.before
-      const eProduced = diffRegions(blobText(session, e.beforeBlob), shared).afterAdded;
-      const fTouches = diffRegions(shared, blobText(session, f.afterBlob)).beforeChanged;
+      const eProduced = regionsFor(session, e.beforeBlob, e.afterBlob).afterAdded;
+      const fTouches = regionsFor(session, f.beforeBlob, f.afterBlob).beforeChanged;
       if (overlaps(eProduced, fTouches)) union(e.id, f.id); // f edits what e produced → same code
     }
   }

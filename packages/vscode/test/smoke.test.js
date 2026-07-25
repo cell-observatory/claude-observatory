@@ -229,7 +229,7 @@ test('extension: three views, click commands, inline annotations, chat, status s
 
     // The Actions view lives in the "Claude Edits" SIDEBAR container (activity-bar) — NOT in the
     // bottom-panel dock. 0.8.7: Observations joined it there (LAST, with the edits/diffs trees), which
-    // freed the dock for Requests · Overview · Stats — three windows side by side, so the list of asks
+    // freed the dock for Prompts · Overview · Stats — three windows side by side, so the list of asks
     // and the Overview it scopes are visible at the same time.
     const pkg = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../package.json'), 'utf8'));
     const sidebar = pkg.contributes.views.claudeObservatory;
@@ -239,17 +239,17 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.equal(sidebarIds[sidebarIds.length - 1], 'claudeObservatory.observations', 'Observations is the LAST sidebar view (0.8.7)');
     assert.equal(sidebarIds[sidebarIds.indexOf('claudeObservatory.actions') - 1], 'claudeObservatory.fileHistory', 'Actions sits directly after File History');
     assert.ok(!dock.some((v) => v.id === 'claudeObservatory.actions'), 'Actions is no longer in the bottom-panel dock');
-    assert.deepEqual(dock.map((v) => v.id), ['claudeObservatory.requests', 'claudeObservatory.changemap', 'claudeObservatory.stats'], 'the dock is Requests · Overview · Stats (0.8.7)');
-    assert.ok(webviewProviders['claudeObservatory.requests'], 'the Requests window is registered as a webview view');
+    assert.deepEqual(dock.map((v) => v.id), ['claudeObservatory.prompts', 'claudeObservatory.changemap', 'claudeObservatory.stats'], 'the dock is Prompts · Overview · Stats (0.8.8)');
+    assert.ok(webviewProviders['claudeObservatory.prompts'], 'the Prompts window is registered as a webview view');
     // 0.8.7 QoL: the sidebar trees carry VS Code's native Collapse-All button (showCollapseAll) — the
     // file-Explorer affordance the user asked for, on Edits · Diffs · Actions (+ Observations).
     for (const id of ['claudeObservatory.edits', 'claudeObservatory.diffs', 'claudeObservatory.actions', 'claudeObservatory.observations'])
       assert.equal(treeViewOpts[id] && treeViewOpts[id].showCollapseAll, true, `${id} tree offers Collapse All`);
     // …and the palette command that reveals the Requests window after a VS Code layout-persistence hide.
-    assert.ok(typeof commands['claudeObservatory.showRequests'] === 'function', 'the Show Requests command is registered');
+    assert.ok(typeof commands['claudeObservatory.showPrompts'] === 'function', 'the Show Prompts command is registered');
     assert.ok(
-      pkg.contributes.commands.some((c) => c.command === 'claudeObservatory.showRequests'),
-      'Show Requests is contributed to the command palette'
+      pkg.contributes.commands.some((c) => c.command === 'claudeObservatory.showPrompts'),
+      'Show Prompts is contributed to the command palette'
     );
     assert.ok(contentProviders['claude-edit'] && contentProviders['claude-observation'], 'blob + markdown content providers registered');
     assert.ok(decoProvider, 'status FileDecorationProvider registered');
@@ -518,7 +518,7 @@ test('extension: three views, click commands, inline annotations, chat, status s
 
     // Overview webview (0.8.0 round 3 — MASTER–DETAIL): the standalone Multitasking view is folded IN.
     // LEFT NAV = two sub-tabs Fleet · Workflows (rendered from multitask --json). RIGHT DETAIL = the
-    // change-map (named-chapter ribbon · module strip · churn ledger) for the SELECTED nav item (from
+    // change-map (Folders strip · churn-ranked Files ledger) for the SELECTED nav item (from
     // changemap --json). The count/size toggle is GONE (always sizes by ± lines).
     const cmProvider = webviewProviders['claudeObservatory.changemap'];
     assert.ok(cmProvider, 'Overview view registered in the panel');
@@ -529,17 +529,25 @@ test('extension: three views, click commands, inline annotations, chat, status s
       visible: false, // no subprocess spawn while hidden
     };
     cmProvider.resolveWebviewView(cmView);
-    // TOP NAVBAR (like Observations): a session selector (Switch Session) + the same session-wide review
-    // actions — Accept All · Revert All · Clear Resolved · Refresh — each posting to the host command.
+    // TOP NAVBAR: the session-wide review actions — Accept All · Reject All · Clear Resolved · Refresh —
+    // each posting to the host command. No session picker: the Sessions tab below IS the selector (0.8.8),
+    // and a dropdown over it would be the same control twice.
     assert.match(cmView.webview.html, /id="ov-toolbar"|class="ov-toolbar"/, 'Overview: a top navbar is present');
-    assert.match(cmView.webview.html, /id="ov-sess"/, 'Overview: the top navbar has a session-selector control');
-    assert.match(cmView.webview.html, /id="ov-sess-label"/, 'the session selector shows the active session (updated via postMessage)');
+    assert.ok(!/id="ov-sess"/.test(cmView.webview.html), 'Overview: the session dropdown is gone');
+    assert.ok(/data-sess-auto/.test(cmView.webview.html),
+      '…and the Sessions tab offers the one thing only the dropdown could: going back to automatic resolution');
     assert.ok(/id="ov-keepall"/.test(cmView.webview.html) && /id="ov-undoall"/.test(cmView.webview.html) && /id="ov-clearres"/.test(cmView.webview.html) && /id="ov-refresh"/.test(cmView.webview.html),
-      'the navbar carries Accept All · Revert All · Clear Resolved · Refresh');
-    assert.ok(/Switch session/i.test(cmView.webview.html) && /Accept All/.test(cmView.webview.html) && /Revert All/.test(cmView.webview.html) && /Clear Resolved/.test(cmView.webview.html),
+      'the navbar carries Accept All · Reject All · Clear Resolved · Refresh');
+    assert.ok(/Accept All/.test(cmView.webview.html) && /Reject All/.test(cmView.webview.html) && /Clear Resolved/.test(cmView.webview.html),
       'the navbar buttons are labelled to match the Observations toolbar');
     // LEFT NAV = 25% of the panel width (change-map detail gets the remaining 75%).
-    assert.ok(/\.ov-nav \{[^}]*flex:0 0 25%/.test(cmView.webview.html), 'Overview: the left nav column is a fixed 25% (flex:0 0 25%)');
+    // The split is the reader's to set (0.8.8): 25% is where it OPENS, not where it is stuck.
+    assert.ok(/\.ov-nav \{[^}]*flex:0 0 var\(--ov-nav, 25%\)/.test(cmView.webview.html),
+      'Overview: the left nav opens at 25%, sized by a variable rather than a constant');
+    assert.ok(/id="ov-gutter"/.test(cmView.webview.html) && /addEventListener\('pointerdown'/.test(cmView.webview.html),
+      '…and a draggable gutter sits between the panes');
+    assert.ok(/navW:NAV_W, navH:NAV_H/.test(cmView.webview.html) && /--ov-navv/.test(cmView.webview.html),
+      '…and the split is remembered per axis (a nav WIDTH side by side, a nav HEIGHT stacked)');
     // LEFT NAV: the Fleet · Workflows sub-tabs + item list.
     assert.match(cmView.webview.html, /id="ov-navtabs"/, 'Overview: left-nav sub-tab bar present (Fleet · Workflows)');
     assert.ok(/'Fleet'/.test(cmView.webview.html) && /'Workflows'/.test(cmView.webview.html), 'the left nav labels Fleet/Workflows');
@@ -548,10 +556,10 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.match(cmView.webview.html, /id="ov-workflows"/, 'Overview: the Workflows list container is present');
     // Live conflicts MOVED to the Actions panel (0.8.3) — the Overview must no longer render them.
     assert.ok(!/ov-collisions/.test(cmView.webview.html), 'Overview: the live-collisions strip is gone (it lives in the Actions panel now)');
-    // The Tasks tab (0.8.3): third nav pane, chapter-joined rows, done-collapse toggle.
+    // The Tasks tab: third nav pane, strict-rollup-joined rows, done-collapse toggle.
     assert.match(cmView.webview.html, /id="ov-tasks"/, 'Overview: the Tasks pane container is present');
     assert.ok(/'Tasks'/.test(cmView.webview.html) && /renderTasks/.test(cmView.webview.html), 'the left nav labels Tasks and renders it');
-    assert.ok(/chapterId/.test(cmView.webview.html) && /mt-ttog/.test(cmView.webview.html), 'task rows join their chapters + completed tasks collapse behind a toggle');
+    assert.ok(/rollupByTask/.test(cmView.webview.html) && /mt-ttog/.test(cmView.webview.html), 'task rows join the strict rollup + completed tasks collapse behind a toggle');
     assert.ok(/awaiting permission/.test(cmView.webview.html), 'the awaiting-permission needs-attention phase is surfaced');
     assert.ok(/mt-spark/.test(cmView.webview.html) && /renderFleet/.test(cmView.webview.html), 'Fleet rows carry a per-agent activity sparkline (+ ±lines/tokens/time/risk)');
     assert.ok(/fmtTok/.test(cmView.webview.html) && /fmtDur/.test(cmView.webview.html), 'Fleet + Workflows show tokens/time (fmtTok/fmtDur)');
@@ -566,18 +574,27 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.ok(/show all/.test(cmView.webview.html), 'an "N hidden · show all" un-dismiss affordance is present');
     assert.ok(/agentActive/.test(cmView.webview.html), 'the pure multitaskFilter body is embedded verbatim into the webview (one source of truth for test + UI)');
     // RIGHT DETAIL: the change-map for the selected nav item.
-    assert.match(cmView.webview.html, /id="cm-ribbon"/, 'Overview: named-chapter ribbon present (right detail)');
+    assert.ok(!/id="cm-ribbon"/.test(cmView.webview.html), 'Overview: the subtask ribbon is gone (0.8.8) — the detail is Folders + Files');
     assert.match(cmView.webview.html, /id="cm-strip"/, 'Overview: module proportion strip present');
     assert.match(cmView.webview.html, /id="cm-ledger"/, 'Overview: ranked file ledger present');
+    // The folded folders EXPAND (0.8.8). A "+K more" that is only a label leaves the tail unreachable,
+    // which is exactly the bug this replaced: the chip has to be a control, and it has to fold back.
+    assert.ok(/data-more="1"/.test(cmView.webview.html) && /data-less="1"/.test(cmView.webview.html),
+      'Overview: the strip\'s tail chip opens every folder, and a second chip folds them back');
+    assert.ok(/getAttribute\('data-more'\)\)\{ STRIP_ALL=true/.test(cmView.webview.html)
+      && /getAttribute\('data-less'\)\)\{ STRIP_ALL=false/.test(cmView.webview.html),
+      '…and both chips are wired to the expansion state, not to the folder filter');
+    assert.ok(/\.cm-strip \{[^}]*flex-wrap:wrap/.test(cmView.webview.html)
+      && /\.cm-sg \{[^}]*flex:1 1 86px/.test(cmView.webview.html),
+      'the strip wraps and its tiles hold a readable floor width (no slivers in a narrow panel)');
+    assert.ok(/\.cm-strip\.open \{[^}]*max-height:[^}]*overflow-y:auto/.test(cmView.webview.html),
+      'expanded, the strip is capped and scrolls — opening 90 folders cannot push the ledger off-screen');
     assert.match(cmView.webview.html, /id="cm-readout"/, 'Overview: footer readout present');
     assert.ok(!/id="cm-area"|data-area=/.test(cmView.webview.html), 'the count/size toggle is gone (always ± lines)');
     assert.ok(!/buildFiles|buildModules|buildChangeMap|listRepoSiblings|fleetConflicts|buildActionGroups/.test(cmView.webview.html), 'the client must not re-aggregate — core/CLI ship both payloads (changemap + multitask)');
-    // the ribbon is a VERTICAL stacked list (one chapter per row), not wrapping pills.
-    assert.ok(/\.cm-rwrap \{[^}]*flex-direction:column/.test(cmView.webview.html), 'Overview: the chapter ribbon is a vertical stacked list (cm-rwrap is a column)');
-    // the ribbon renders the NAMED CHAPTERS (chapters[]) for the slice, not the strict tasks[].
-    assert.ok(/a\.chapters/.test(cmView.webview.html) && /ch\.status==='wip'/.test(cmView.webview.html), 'Overview: the ribbon renders the slice’s named chapters[] (current work shows under its chapter, not unassigned)');
+    assert.ok(!/renderRibbon/.test(cmView.webview.html) && !/a\.subtasks/.test(cmView.webview.html), 'Overview: no ribbon renderer and no subtasks[] reads remain');
     // a WORKFLOW nav item renders a synthetic per-workflow detail slice (rollup → chips, files → ledger,
-    // taskIds → the named-chapter ribbon), joined to CM by workflow id.
+    // taskIds), joined to CM by workflow id.
     assert.ok(/function workflowSlice/.test(cmView.webview.html) && /kind==='workflow'/.test(cmView.webview.html), 'Overview: a selected workflow renders a per-workflow detail slice (workflowSlice)');
     assert.ok(/function detailSlice/.test(cmView.webview.html) && /cmAgent/.test(cmView.webview.html), 'Overview: the detail joins the nav selection to the changemap slice by session/workflowId');
     // 0.8.7: the footprint badge row and its drill-down are GONE — folded into the Risk and Egress audits
@@ -589,7 +606,7 @@ test('extension: three views, click commands, inline annotations, chat, status s
       'nothing in the Overview reads the removed footprint key (the comments explaining the fold are fine)');
     assert.ok(!/openPath/.test(cmView.webview.html), 'the drill-down’s openPath message went with it (the Actions tree opens its own file rows)');
     // 0.8.7: the fleet lists every sibling session, so a session switch must re-point the DETAIL selection.
-    assert.ok(/SEL = k \? \{kind:'agent', session:k\} : null; SEL_CH=null;/.test(cmView.webview.html), 'switching sessions re-points the Overview selection (and drops the old chapter scope)');
+    assert.ok(/SEL = k \? \{kind:'agent', session:k\} : null; PR_ID=null;/.test(cmView.webview.html), 'switching sessions re-points the Overview selection (and drops the old prompt scope)');
     // 0.8.7 (3) the PROCESSES tab: background shells left running. No pid column — the transcript records
     // no OS pid, so the harness's shell id is the identity.
     assert.match(cmView.webview.html, /id="ov-pane-processes"/, 'Overview: the Processes pane container is present');
@@ -624,8 +641,8 @@ test('extension: three views, click commands, inline annotations, chat, status s
     // 0.8.7 (5) REQUESTS — its own WINDOW in the dock (left of the Overview), not a tab inside it, so
     // the list of asks and the view it scopes are visible at the same time. Picking one filters the
     // Overview beside it: fleet · runs · tasks · shells, and the whole change map.
-    const rqProvider = webviewProviders['claudeObservatory.requests'];
-    assert.ok(rqProvider, 'the Requests window is registered');
+    const rqProvider = webviewProviders['claudeObservatory.prompts'];
+    assert.ok(rqProvider, 'the Prompts window is registered');
     let rqMsgHandler = null;
     const rqView = {
       webview: { options: {}, html: '', postMessage: () => {}, onDidReceiveMessage: (cb) => { rqMsgHandler = cb; return { dispose() {} }; } },
@@ -633,7 +650,7 @@ test('extension: three views, click commands, inline annotations, chat, status s
       visible: false, // no subprocess spawn while hidden
     };
     rqProvider.resolveWebviewView(rqView);
-    assert.match(rqView.webview.html, /id="rq-list"/, 'Requests: the list container is present');
+    assert.match(rqView.webview.html, /id="rq-list"/, 'Prompts: the list container is present');
     assert.ok(/#'\+r\.index/.test(rqView.webview.html) && /esc\(r\.text\|\|r\.title\)/.test(rqView.webview.html),
       'a row carries the ask’s own number and the ask itself');
     // NO TRUNCATION anywhere: the ask wraps over as many lines as it needs (user rule 2026-07-23). An
@@ -656,9 +673,9 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.ok(/if\(r\.added\|\|r\.removed\)/.test(rqView.webview.html), 'the ±lines cell is omitted when there are none, never a fabricated +0 −0');
     assert.ok(/\(r\.endTs\?''\:'~'\)\+fmtDur\(r\.durationMs\)/.test(rqView.webview.html), 'the in-flight ask’s duration is marked "~" (endTs 0 is not a finished number)');
     // The same three states every list in this product keeps apart.
-    assert.ok(/Reading this session’s requests…/.test(rqView.webview.html), 'state 1: nothing has been read yet');
-    assert.ok(/No answer for <b>requests<\/b>/.test(rqView.webview.html), 'state 2: the CLI returned nothing — stated, not blamed on the session');
-    assert.ok(/No requests recorded yet/.test(rqView.webview.html), 'state 3: this session genuinely has none');
+    assert.ok(/Reading this session’s prompts…/.test(rqView.webview.html), 'state 1: nothing has been read yet');
+    assert.ok(/No answer for <b>prompts<\/b>/.test(rqView.webview.html), 'state 2: the CLI returned nothing — stated, not blamed on the session');
+    assert.ok(/No prompts recorded yet/.test(rqView.webview.html), 'state 3: this session genuinely has none');
     // A failed tool call is not a risk flag — it must not borrow ⚠ + the risk colour.
     assert.ok(/rq-err[^>]*>✗ '\+r\.errors/.test(rqView.webview.html) && /\.rq-err \{[^}]*var\(--mt-warn\)/.test(rqView.webview.html),
       'failed tool calls are marked ✗ in the warn colour');
@@ -678,34 +695,68 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.ok(/\.rq-rtext \{[^}]*white-space:pre-wrap/.test(rqView.webview.html), 'the response wraps and never clips');
     assert.ok(/closest\('\.rq-exp'\)/.test(rqView.webview.html) && /ev\.stopPropagation\(\); toggleResp/.test(rqView.webview.html),
       'a caret click toggles the response without changing the scope selection');
-    // The Overview no longer carries a Requests tab — it carries the SCOPE the window sets.
-    assert.ok(!/id="ov-pane-requests"/.test(cmView.webview.html) && !/function renderRequests/.test(cmView.webview.html),
-      'the Overview’s Requests tab is gone (it is a window now)');
-    assert.ok(/var ids=\['fleet','workflows','tasks','processes'\]/.test(cmView.webview.html), 'the Overview’s panes are Fleet · Workflows · Tasks · Processes');
-    assert.ok(/NAV='fleet'/.test(cmView.webview.html), 'the Overview opens on Fleet');
-    // No scope banner IN the Overview: the Requests window beside it already shows the picked ask, so
-    // repeating it here was pure duplication. The scope is still applied (setRequestScope on the relayed
-    // message) and still visible where it matters — the pane notes, the bulk labels, the bottom summary.
+    // The Overview carries no Prompts tab — Prompts is the window beside it. It DOES carry the new
+    // Sessions tab (0.8.8): this workspace's sessions, click to SWITCH the review.
+    assert.ok(!/id="ov-pane-requests"/.test(cmView.webview.html) && !/id="ov-pane-prompts"/.test(cmView.webview.html),
+      'the Overview has no prompts tab (it is a window)');
+    assert.ok(/var ids=\['sessions','fleet','workflows','tasks','processes'\]/.test(cmView.webview.html),
+      'the Overview’s panes are Sessions · Fleet · Workflows · Tasks · Processes — Sessions leads, since which session you are reviewing precedes every other question');
+    assert.ok(/NAV='sessions'/.test(cmView.webview.html), 'and the panel opens on it');
+    assert.ok(/id="ov-pane-sessions"/.test(cmView.webview.html) && /function renderSessions/.test(cmView.webview.html),
+      'the Sessions tab renders this workspace’s sessions');
+    assert.ok(/switchToSession/.test(cmView.webview.html), 'selecting a Sessions row switches the review (a different selection semantic, stated in its desc)');
+    // No scope banner IN the Overview: the Prompts window beside it already shows the picked ask.
     assert.ok(!/id="ov-reqbar"/.test(cmView.webview.html) && !/function renderReqBar/.test(cmView.webview.html),
-      'the Overview carries no request-scope banner (the Requests window shows the ask)');
-    assert.ok(/function setRequestScope/.test(cmView.webview.html) && /m\.type==='request'/.test(cmView.webview.html),
+      'the Overview carries no prompt-scope banner (the Prompts window shows the ask)');
+    assert.ok(/function setPromptScope/.test(cmView.webview.html) && /m\.type==='prompt'/.test(cmView.webview.html),
       'the Overview still applies the ask scope the host relays');
     // The filtering itself: one helper, applied by every pane, over core's per-ask id sets.
-    assert.ok(/function reqFilter/.test(cmView.webview.html) && /function reqSlice/.test(cmView.webview.html),
-      'one filter helper, reading core’s per-request slice (CM.requests)');
-    assert.ok(/reqFilter\(wf, 'workflowIds'/.test(cmView.webview.html) && /reqFilter\(ts, 'chapterIds'/.test(cmView.webview.html)
+    assert.ok(/function reqFilter/.test(cmView.webview.html) && /function prSlice/.test(cmView.webview.html),
+      'one filter helper, reading core’s per-prompt slice (CM.prompts)');
+    assert.ok(/reqFilter\(wf, 'workflowIds'/.test(cmView.webview.html)
       && /reqFilter\(all, 'processIds'/.test(cmView.webview.html) && /has\(rqf\.agentIds/.test(cmView.webview.html),
-      'runs, tasks, shells and subagents each filter by the ask that STARTED them');
-    assert.ok(/function requestSlice/.test(cmView.webview.html) && /var rq=requestSlice\(\); if\(rq\) return rq;/.test(cmView.webview.html),
-      'the change map draws the ask’s own slice (files/folders/chapters aggregated in core)');
+      'runs, shells and subagents each filter by the ask that STARTED them');
+    assert.ok(/function promptSliceView/.test(cmView.webview.html) && /var rq=promptSliceView\(\); if\(rq\) return rq;/.test(cmView.webview.html),
+      'the change map draws the ask’s own slice (files/folders aggregated in core)');
     assert.ok(/if\(!r\) return \{ rows:list, hidden:0, scoped:false \}/.test(cmView.webview.html),
       'with no slice to filter by (an older CLI), nothing is filtered — a scoped banner over unfiltered rows would be a lie');
-    assert.ok(/hidden — not started by request #/.test(cmView.webview.html), 'a pane whose rows dropped says how many and why');
-    assert.ok(/if\(REQ_ID\) vscode\.postMessage\(\{type:req, requestId:REQ_ID\}\)/.test(cmView.webview.html),
+    // OBS_DUMP_HTML=<dir> writes each panel's real HTML out, so a layout check can render the shipped
+    // markup at several widths instead of guessing at it. Off by default; the assertions below are the test.
+    if (process.env.OBS_DUMP_HTML) {
+      fs.mkdirSync(process.env.OBS_DUMP_HTML, { recursive: true });
+      for (const [name, view] of [['overview', cmView], ['prompts', rqView], ['stats', stView]])
+        if (view) fs.writeFileSync(path.join(process.env.OBS_DUMP_HTML, name + '.html'), String(view.webview.html));
+    }
+    // The webview's scripts must PARSE. They are built as template literals in TS, so a bare apostrophe
+    // inside a single-quoted JS string is invisible to tsc and to every string assertion here, yet it
+    // kills the whole panel at runtime with a SyntaxError. Compile each <script> the page ships.
+    for (const [label, view] of [['overview', cmView], ['prompts', rqView], ['stats', stView]]) {
+      if (!view) continue;
+      // Scanned, not regex-matched. A tag-matching regex has to be written case-insensitively AND to
+      // tolerate `</script >`, and getting either wrong makes this guard silently vacuous: it would
+      // find no blocks and still report that every shipped script parses. Index scanning has neither
+      // failure mode (CodeQL flags the regex form as js/bad-tag-filter for exactly this reason).
+      const html = String(view.webview.html);
+      const hay = html.toLowerCase();
+      const scripts = [];
+      for (let at = hay.indexOf('<script'); at >= 0; ) {
+        const bodyStart = hay.indexOf('>', at);
+        if (bodyStart < 0) break;
+        const bodyEnd = hay.indexOf('</script', bodyStart);
+        if (bodyEnd < 0) break;
+        scripts.push(html.slice(bodyStart + 1, bodyEnd));
+        at = hay.indexOf('<script', bodyEnd);
+      }
+      assert.ok(scripts.length, `${label}: the panel ships at least one script`);
+      for (const body of scripts) {
+        assert.doesNotThrow(() => new Function(body), `${label}: every shipped script parses`);
+      }
+    }
+    assert.ok(/hidden — not started by prompt #/.test(cmView.webview.html),
+      'a pane whose rows dropped says how many and why — in prompt vocabulary (0.8.8), never "request"');
+    assert.ok(!/request #/.test(cmView.webview.html), 'no user-visible copy still says "request"');
+    assert.ok(/if\(PR_ID\) vscode\.postMessage\(\{type:pr, promptId:PR_ID\}\)/.test(cmView.webview.html),
       'the bulk actions retarget to the picked ask');
-    assert.ok(/setRequestScope\(id\)\{ REQ_ID = id \|\| null; if\(REQ_ID\) SEL_CH=null;/.test(cmView.webview.html),
-      'picking an ask drops the chapter scope — a bulk action never has two answers to "in what"');
-    assert.ok(/SEL_CH=null; REQ_ID=null;/.test(cmView.webview.html), 'switching sessions drops the picked ask with the picked chapter');
     // The bottom summary names the picked ask — and since core aggregates its files/folders, it reports them.
     assert.ok(/rq\.rollup\.pending/.test(cmView.webview.html) && /\(rq\.files\|\|\[\]\)\.length/.test(cmView.webview.html),
       'the bottom summary names the ask with its own review counts, files and folders');
@@ -732,11 +783,8 @@ test('extension: three views, click commands, inline annotations, chat, status s
       'the feed shell is built once per selection, not on every tick');
     assert.ok(/if\(h===FEED_BODY\) return;/.test(cmView.webview.html), 'an identical payload skips the repaint entirely');
     assert.ok(/if\(live && rows>FEED_ROWS\) body\.scrollTop=body\.scrollHeight;/.test(cmView.webview.html), 'a live tail is followed only when the row count GREW');
-    // 0.8.7 review (B35): a compaction core could not anchor to a DRAWN chapter clamps by ts to the nearest
-    // visible chip; only an event that precedes every chip aggregates into the header marker.
-    assert.ok(/vc\.ts>0 && vc\.ts<=cm2\.ts && vc\.ts>bestTs/.test(cmView.webview.html), 'an unanchored compaction clamps to the latest visible chapter that had already started');
-    assert.ok(/ts:ch\.startTs\|\|0/.test(cmView.webview.html), 'ribbon chips carry their window start, so the clamp is resolved by TIME not array position');
-    assert.ok(/Context compacted before any chapter shown here/.test(cmView.webview.html), 'the aggregate says what it actually is (events preceding every drawn chapter)');
+    // 0.8.8: the ribbon (and its compaction anchoring) is gone — compactions live in Actions + Stats.
+    assert.ok(!/afterChapterId|afterSubtaskId/.test(cmView.webview.html), 'no ribbon compaction anchoring remains (the field shipped as afterChapterId)');
     // 0.8.7: the one footprint fact worth a glance survives on the fleet row — that the session reached
     // OUTSIDE the workspace — re-pointed at the multitask payload's `outside:{reads,writes}`.
     assert.ok(/function outsideSuffix/.test(cmView.webview.html) && /\(a&&a\.outside\)\|\|null/.test(cmView.webview.html),
@@ -785,9 +833,8 @@ test('extension: three views, click commands, inline annotations, chat, status s
     commands['claudeObservatory.chatAction'] = realChatAction;
     assert.deepEqual(cmChat, [{ taskId: 'abc123' }], 'a task-ribbon click hands off a zero-token chat by taskId');
 
-    // Chapter review actions (0.8.0): each task chip's ✓/↩/🧹 mini-buttons post taskKeep/taskUndo/taskClear,
-    // which the provider routes to the strict-span task-keep/undo/clear commands. Plus a "Clear completed
-    // chapters" affordance. The commands are registered; verify the message handler routes each correctly.
+    // Task review actions: the Tasks tab rows route to the STRICT task ops. The commands are
+    // registered; verify the message handler routes each correctly.
     for (const [msg, cmd] of [
       ['taskKeep', 'claudeObservatory.taskKeep'],
       ['taskUndo', 'claudeObservatory.taskUndo'],
@@ -801,16 +848,16 @@ test('extension: three views, click commands, inline annotations, chat, status s
       commands[cmd] = real;
       assert.deepEqual(seen, ['chap1'], `a chip ${msg} routes to ${cmd} with the taskId`);
     }
-    assert.ok(typeof commands['claudeObservatory.clearCompletedChapters'] === 'function', 'clearCompletedChapters registered');
+    assert.ok(typeof commands['claudeObservatory.clearCompletedTasks'] === 'function', 'clearCompletedTasks registered');
     const ccSeen = [];
-    const realCC = commands['claudeObservatory.clearCompletedChapters'];
-    commands['claudeObservatory.clearCompletedChapters'] = () => { ccSeen.push(1); };
-    cmMsgHandler({ type: 'clearCompletedChapters' });
-    commands['claudeObservatory.clearCompletedChapters'] = realCC;
-    assert.equal(ccSeen.length, 1, 'the "clear completed chapters" control routes to its command');
+    const realCC = commands['claudeObservatory.clearCompletedTasks'];
+    commands['claudeObservatory.clearCompletedTasks'] = () => { ccSeen.push(1); };
+    cmMsgHandler({ type: 'clearCompletedTasks' });
+    commands['claudeObservatory.clearCompletedTasks'] = realCC;
+    assert.equal(ccSeen.length, 1, 'the "clear completed tasks" control routes to its command');
 
     // Top-navbar review actions route to the existing session-wide commands (the same the Observations
-    // toolbar drives): the session selector + Accept All / Revert All / Clear Resolved / Refresh.
+    // toolbar drives): the session selector + Accept All / Reject All / Clear Resolved / Refresh.
     for (const [msg, cmd] of [
       ['switchSession', 'claudeObservatory.switchSession'],
       ['keepAll', 'claudeObservatory.keepAll'],
@@ -827,25 +874,16 @@ test('extension: three views, click commands, inline annotations, chat, status s
       assert.equal(seen, 1, `the Overview navbar "${msg}" control routes to ${cmd}`);
     }
 
-    // (1) CHAPTER-SCOPED BULK ACTIONS: selecting a chapter chip in the ribbon scopes the title-bar
-    // Accept All / Revert All / Clear Resolved buttons to that chapter (reusing the strict-span task ops)
-    // and relabels them "…in <chapter>". Deselecting returns them to session-wide. Verified from the
-    // embedded webview source (the smoke harness renders the shell but doesn't execute its script).
-    assert.ok(/SEL_CH/.test(cmView.webview.html), 'Overview: a selected-chapter var (SEL_CH) scopes the bulk actions');
-    assert.match(cmView.webview.html, /data-sel=/, 'ribbon chips carry a selectable handle (data-sel)');
-    assert.match(cmView.webview.html, /\.cm-task\.sel/, 'a selected chapter chip gets a highlighted state (.cm-task.sel)');
-    assert.ok(/function toggleChapter/.test(cmView.webview.html), 'clicking a chip toggles the chapter selection (toggleChapter)');
+    // (1) PROMPT-SCOPED BULK ACTIONS: a picked prompt scopes the title-bar Accept All / Reject All /
+    // Clear Resolved buttons to that ask and relabels them "…in #N". Verified from the embedded
+    // webview source (the smoke harness renders the shell but doesn't execute its script).
     assert.ok(/function relabelBulk/.test(cmView.webview.html), 'the bulk buttons relabel to the selected scope (relabelBulk)');
-    assert.ok(/Accept All in /.test(cmView.webview.html) && /Revert All in /.test(cmView.webview.html) && /Clear in /.test(cmView.webview.html),
-      'the scoped bulk buttons read "… in <chapter>"');
-    // the bulk wiring posts the strict-span task ops when a chapter is selected, the request ops when a
-    // REQUEST is selected (0.8.7), else the session-wide op.
-    assert.ok(/bulk\('ov-keepall','keepAll','taskKeep','requestKeep'\)/.test(cmView.webview.html)
-      && /bulk\('ov-undoall','undoAll','taskUndo','requestUndo'\)/.test(cmView.webview.html)
-      && /bulk\('ov-clearres','clearResolved','taskClear','requestClear'\)/.test(cmView.webview.html),
-      'a selected chapter reroutes Accept All / Revert All / Clear to the strict-span task ops (and a selected request to the request ops)');
-    // the folded-in per-chip chat still hands off a zero-token chat by taskId (unchanged routing).
-    assert.match(cmView.webview.html, /data-chat=/, 'each chapter chip keeps a zero-token chat handoff (💬)');
+    assert.ok(/Accept All in /.test(cmView.webview.html) && /Reject All in /.test(cmView.webview.html) && /Clear in /.test(cmView.webview.html),
+      'the scoped bulk buttons read "… in #N"');
+    assert.ok(/bulk\('ov-keepall','keepAll','promptKeep'\)/.test(cmView.webview.html)
+      && /bulk\('ov-undoall','undoAll','promptUndo'\)/.test(cmView.webview.html)
+      && /bulk\('ov-clearres','clearResolved','promptClear'\)/.test(cmView.webview.html),
+      'a selected prompt reroutes Accept All / Reject All / Clear to the prompt ops');
 
     // (2) STATUS-BAR REVIEW NAV BAR IN THE TITLE BAR: File ◄►, Diff ◄► with live n/m · i/k counters, plus
     // Keep, Undo, Accept File, Reject File, Spotlight, Search — the compact step-through controls, next to
@@ -876,23 +914,29 @@ test('extension: three views, click commands, inline annotations, chat, status s
       commands[cmd] = real;
       assert.equal(seen, 1, `the Overview nav-bar "${msg}" control routes to ${cmd}`);
     }
-    // (3) THE REQUEST AXIS (0.8.7) — the LAST axis on the review nav bar, after Chapter. Same
-    // step/Review/Accept/Reject affordances the Chapter axis has, scoped to one of the user's own asks.
-    for (const id of ['ov-requestprev', 'ov-requestcount', 'ov-requestnext', 'ov-reviewrequest', 'ov-acceptrequest', 'ov-rejectrequest']) {
-      assert.ok(cmView.webview.html.includes(`id="${id}"`), `the review nav bar carries the Request-axis control ${id}`);
+    // (3) THE PROMPT AXIS — the LAST axis on the review nav bar. Step/Review/Accept/Reject
+    // affordances scoped to one of the user's own asks (the Subtask axis is gone in 0.8.8).
+    for (const id of ['ov-promptprev', 'ov-promptcount', 'ov-promptnext', 'ov-reviewprompt', 'ov-acceptprompt', 'ov-rejectprompt']) {
+      assert.ok(cmView.webview.html.includes(`id="${id}"`), `the review nav bar carries the Prompt-axis control ${id}`);
     }
-    assert.ok(cmView.webview.html.indexOf('id="ov-chaptercount"') < cmView.webview.html.indexOf('id="ov-requestcount"'),
-      'Request is the LAST axis — it comes after Chapter on the bar');
-    assert.ok(/id="ov-requestcount"[^>]*>Request –\/–</.test(cmView.webview.html), 'the Request counter starts at –/– (no position is claimed before one is known)');
-    assert.ok(/'Request '\+\(p\.request\.i\|\|'–'\)\+'\/'\+p\.request\.n/.test(cmView.webview.html) && /'\ · #'\+p\.request\.index/.test(cmView.webview.html),
+    for (const gone of ['ov-chaptercount', 'ov-subtaskcount', 'ov-acceptchapter', 'ov-rejectchapter']) {
+      assert.ok(!cmView.webview.html.includes(`id="${gone}"`), `the fifth axis is gone (${gone}) — four axes: Diff · File · Folder · Prompt`);
+    }
+    // The strict per-task ops must be REACHABLE, not merely registered: the Tasks rows post them.
+    assert.ok(/data-tkeep/.test(cmView.webview.html) && /data-tundo/.test(cmView.webview.html) && /data-tclear/.test(cmView.webview.html),
+      'Tasks tab: each row with edits offers Accept / Reject / Clear over its strict span');
+    assert.ok(/type:'taskKeep'|type:msg/.test(cmView.webview.html), 'Tasks tab: the chips post the task ops to the host');
+    assert.ok(/mt-tclrall/.test(cmView.webview.html), 'Tasks tab: a clear-resolved-in-completed-tasks affordance exists');
+    assert.ok(/id="ov-promptcount"[^>]*>Prompt –\/–</.test(cmView.webview.html), 'the Prompt counter starts at –/– (no position is claimed before one is known)');
+    assert.ok(/'Prompt '\+\(p\.prompt\.i\|\|'–'\)\+'\/'\+p\.prompt\.n/.test(cmView.webview.html) && /'\ · #'\+p\.prompt\.index/.test(cmView.webview.html),
       'the counter shows both the review position (i/n) and the ask’s OWN session number (#k) — they differ');
     // …and it routes to the host commands, which resolve the scope in core (never re-derived here).
     for (const [msg, cmd] of [
-      ['navRequestPrev', 'claudeObservatory.navRequestPrev'],
-      ['navRequestNext', 'claudeObservatory.navRequestNext'],
-      ['reviewCurrentRequest', 'claudeObservatory.reviewCurrentRequest'],
-      ['acceptCurrentRequest', 'claudeObservatory.acceptCurrentRequest'],
-      ['rejectCurrentRequest', 'claudeObservatory.rejectCurrentRequest'],
+      ['navPromptPrev', 'claudeObservatory.navPromptPrev'],
+      ['navPromptNext', 'claudeObservatory.navPromptNext'],
+      ['reviewCurrentPrompt', 'claudeObservatory.reviewCurrentPrompt'],
+      ['acceptCurrentPrompt', 'claudeObservatory.acceptCurrentPrompt'],
+      ['rejectCurrentPrompt', 'claudeObservatory.rejectCurrentPrompt'],
     ]) {
       assert.ok(typeof commands[cmd] === 'function', `${cmd} registered`);
       let seen = 0;
@@ -902,30 +946,29 @@ test('extension: three views, click commands, inline annotations, chat, status s
       commands[cmd] = real;
       assert.equal(seen, 1, `the Overview nav-bar "${msg}" control routes to ${cmd}`);
     }
-    // the Requests tab's selected row drives the id-scoped ops directly (the same shape the task ops use).
+    // the Prompts window's selected row drives the id-scoped ops directly (the same shape the task ops use).
     for (const [msg, cmd] of [
-      ['requestKeep', 'claudeObservatory.requestKeep'],
-      ['requestUndo', 'claudeObservatory.requestUndo'],
-      ['requestClear', 'claudeObservatory.requestClear'],
-      ['reviewRequest', 'claudeObservatory.reviewRequest'],
+      ['promptKeep', 'claudeObservatory.promptKeep'],
+      ['promptUndo', 'claudeObservatory.promptUndo'],
+      ['promptClear', 'claudeObservatory.promptClear'],
+      ['reviewPrompt', 'claudeObservatory.reviewPrompt'],
     ]) {
       assert.ok(typeof commands[cmd] === 'function', `${cmd} registered`);
       const seen = [];
       const real = commands[cmd];
       commands[cmd] = (id) => { seen.push(id); };
-      cmMsgHandler({ type: msg, requestId: 'req7' });
+      cmMsgHandler({ type: msg, promptId: 'req7' });
       commands[cmd] = real;
-      assert.deepEqual(seen, ['req7'], `a scoped ${msg} routes to ${cmd} with the request id`);
+      assert.deepEqual(seen, ['req7'], `a scoped ${msg} routes to ${cmd} with the prompt id`);
     }
-    // The Requests WINDOW fetches its own list (one spawn, its own visibility gate); the Overview does
-    // NOT spawn `requests --json` any more — the per-ask slices it filters by ride the changemap payload
-    // it already asks for, so the panel got one spawn cheaper, not one dearer.
-    assert.ok(/"requests", "--json", "--session", session/.test(bundleSrc), 'the Requests window fetches requests --json for the active session');
-    assert.ok(/rq = d && Array\.isArray\(d\.requests\) && d\.summary \? d : null/.test(bundleSrc), 'a CLI that cannot answer requests lands as null, not as a crash');
-    assert.ok(/cm === void 0 \|\| mt === void 0 \|\| pr === void 0\)/.test(bundleSrc), 'the Overview paint waits for its three spawns (requests is no longer one of them)');
-    assert.ok(!/setInterval[^;]*requests/.test(bundleSrc), 'the Requests window adds no polling timer of its own');
-    assert.ok(/"requests", "--id", id, "--response", "--json", "--session", session/.test(bundleSrc),
-      'a row expand fetches Claude’s reply via requests --id --response --json');
+    // The Prompts WINDOW fetches its own list (one spawn, its own visibility gate); the Overview does
+    // NOT spawn `prompts --json` — the per-ask slices it filters by ride the changemap payload.
+    assert.ok(/"prompts", "--json", "--session", session/.test(bundleSrc), 'the Prompts window fetches prompts --json for the active session');
+    assert.ok(/rq = d && Array\.isArray\(d\.prompts\) && d\.summary \? d : null/.test(bundleSrc), 'a CLI that cannot answer prompts lands as null, not as a crash');
+    assert.ok(/cm === void 0 \|\| mt === void 0 \|\| pr === void 0\)/.test(bundleSrc), 'the Overview paint waits for its three spawns (prompts is no longer one of them)');
+    assert.ok(!/setInterval[^;]*prompts/.test(bundleSrc), 'the Prompts window adds no polling timer of its own');
+    assert.ok(/"prompts", "--id", id, "--response", "--json", "--session", session/.test(bundleSrc),
+      'a row expand fetches Claude’s reply via prompts --id --response --json');
 
     // the live position push: setNavPos posts a {navpos} message to a VISIBLE Overview so the counters update.
     assert.ok(typeof cmProvider.setNavPos === 'function', 'the Overview exposes setNavPos (the host pushes the live Diff/File position)');
@@ -943,15 +986,9 @@ test('extension: three views, click commands, inline annotations, chat, status s
     // Fleet/Workflows master–detail nav and removed — the export must stay gone (dead code guard).
     assert.equal(ext.overviewTabs, undefined, 'overviewTabs prototype removed — per-agent views are the Fleet nav rows');
 
-    // Chapter totality (0.8.0): the ribbon draws chapters[] as given — the residual "unassigned" math is
-    // gone (core appends a synthetic session chapter instead), and destructive ops gate on the STRICT
-    // chapter.taskId (null → the synthetic/duplicate rows render display-only).
-    assert.ok(!/label:'unassigned'/.test(cmView.webview.html), 'no "unassigned" ribbon row can render — chapters are total');
-    assert.ok(/data-keep="'\+cid/.test(cmView.webview.html), 'chapter ✓/↩/🧹 act WYSIWYG via the CHAPTER id (reviewEditIds — synthetic included)');
-    assert.ok(/ch\.taskId/.test(cmView.webview.html), 'chapter chips still carry the strict taskId (the 💬 chat gate)');
-    assert.ok(/ch\.synthetic/.test(cmView.webview.html), 'the synthetic session chapter is recognized and styled');
-    assert.ok(/cm-task syn|cm-task'\+\(it\.syn/.test(cmView.webview.html), 'synthetic chapters get the dimmed style');
-    assert.ok(/w\.chapters/.test(cmView.webview.html), 'a workflow slice renders its own core-built chapter ribbon (no residual math)');
+    // 0.8.8: the display-subtask layer is gone entirely — strict per-task attribution only.
+    assert.ok(!/label:'unassigned'/.test(cmView.webview.html), 'no "unassigned" ribbon row can render');
+    assert.ok(!/w\.subtasks/.test(cmView.webview.html) && !/ch\.synthetic/.test(cmView.webview.html), 'no subtask reads remain in the webview');
 
     // Workflow auto-focus (0.8.0): a NEWLY-appeared running workflow switches the nav to Workflows,
     // selects it, and pulses its row; the FIRST payload only seeds the seen-set (no focus-steal on open).

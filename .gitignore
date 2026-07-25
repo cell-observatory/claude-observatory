@@ -6,3 +6,5 @@ packages/*/dist/
 release/
 .idea/
 *.code-workspace
+# the demo simulator's scratch workspace, created in the CWD by `claude-observatory demo`
+observatory-demo/

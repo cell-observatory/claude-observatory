@@ -3,6 +3,9 @@ package com.cellobservatory.observatory.ui
 import com.cellobservatory.observatory.core.ChatRef
 import com.cellobservatory.observatory.core.ObservatoryCli
 import com.cellobservatory.observatory.model.EditRecord
+import com.cellobservatory.observatory.model.SessionRow
+import com.cellobservatory.observatory.model.SessionsParser
+import com.cellobservatory.observatory.model.relTime
 import com.cellobservatory.observatory.model.UndoResult
 import com.cellobservatory.observatory.services.ObservatoryService
 import com.intellij.notification.NotificationGroupManager
@@ -64,15 +67,13 @@ object ReviewOps {
             return
         }
         runBg(project, "Accepting ${pending.size} edit(s) in $scope") {
-            val okCount = pending.count { ObservatoryCli.keep(session, it.id, project.basePath) }
-            if (okCount == pending.size) {
-                done(project, "Accepted ${pending.size} edit(s) in $scope")
-            } else {
-                done(
-                    project,
-                    "Accepted $okCount of ${pending.size} edit(s) in $scope — ${pending.size - okCount} failed (is the CLI installed?)",
-                    if (okCount > 0) NotificationType.WARNING else NotificationType.ERROR,
-                )
+            // ONE call for the whole set: a per-edit loop spawned a process per edit, which on a long
+            // session is thousands of them and reads to the user as a hang.
+            val kept = ObservatoryCli.keepIds(session, pending.map { it.id }, project.basePath)
+            when {
+                kept == null -> done(project, cliFailMsg("accept the edits in $scope"), NotificationType.ERROR)
+                kept == 0 -> done(project, "No pending edits to accept in $scope")
+                else -> done(project, "Accepted $kept edit(s) in $scope")
             }
         }
     }
@@ -207,7 +208,7 @@ object ReviewOps {
     }
 
     /** Reject (revert) every PENDING edit in an EXPLICIT id set — the shared implementation behind the
-     *  Folder axis and the Request axis ("revert everything from this ask"). Same dirty-buffer guard +
+     *  Folder axis and the Prompt axis ("revert everything from this ask"). Same dirty-buffer guard +
      *  confirm + refresh as [undoAll]; the revert is ONE CLI call (`undo --ids`), not a per-id loop, so
      *  the front-ends can't drift. [shortScope] names the set in the terse "nothing to do" notice;
      *  [longScope] names it in the destructive prompt and the result. */
@@ -273,70 +274,93 @@ object ReviewOps {
         }
     }
 
-    // --- chapter (task) review, over the strict-span task edit sets (0.8.0 Overview ribbon) ---
+    /** Clear the resolved (kept/undone) edits of an explicit id set — the scope a PROMPT names (its
+     *  edits span whatever folders the ask happened to touch, so no path expresses it). */
+    fun clearResolvedIds(project: Project, session: String, ids: List<Int>, scope: String) {
+        val resolved = ObservatoryService.getInstance(project).log().count { it.id in ids && !it.pending }
+        if (resolved == 0) {
+            notify(project, "No resolved edits to clear in $scope")
+            return
+        }
+        val ok = Messages.showYesNoDialog(
+            project, "Clear $resolved resolved edit(s) in $scope? Pending edits are kept.",
+            "Claude Observatory", "Clear", "Cancel", Messages.getQuestionIcon(),
+        )
+        if (ok != Messages.YES) return
+        runBg(project, "Clearing resolved edits in $scope") {
+            val n = ObservatoryCli.clearResolvedIds(session, ids, project.basePath)
+            if (n != null) done(project, "Cleared $n resolved edit(s) in $scope")
+            else done(project, cliFailMsg("clear resolved edits"), NotificationType.ERROR)
+        }
+    }
 
-    /** Accept a chapter: keep every PENDING edit in the task's STRICT-span set (`task-keep`). Non-destructive. */
+    // --- Task review, over a to-do's STRICT in-progress span (the Tasks tab's per-row ops).
+    // Each op resolves the task's strict edit set in core (taskEditIds): only edits captured while that
+    // to-do was actually in progress. An edit that cannot be strictly placed is never swept into a
+    // task's destructive scope — the unassigned bucket stays unassigned.
+
+    /** Accept a task: keep every PENDING edit in its strict span (`task-keep`). Non-destructive. */
     fun keepTask(project: Project, session: String, taskId: String, label: String) {
-        runBg(project, "Accepting chapter “$label”") {
+        runBg(project, "Accepting task “$label”") {
             val kept = ObservatoryCli.taskKeep(session, taskId, project.basePath)
             when {
-                kept == null -> done(project, cliFailMsg("accept chapter “$label”"), NotificationType.ERROR)
-                kept == 0 -> done(project, "No pending edits to accept in chapter “$label”")
-                else -> done(project, "Accepted $kept edit(s) in chapter “$label”")
+                kept == null -> done(project, cliFailMsg("accept task “$label”"), NotificationType.ERROR)
+                kept == 0 -> done(project, "No pending edits to accept in task “$label”")
+                else -> done(project, "Accepted $kept edit(s) in task “$label”")
             }
         }
     }
 
-    /** Reject a chapter: revert every PENDING edit in the task's STRICT-span set (`task-undo`). Writes to
-     *  disk, so save dirty buffers first (with consent) and refresh the workspace subtree after. */
+    /** Reject a task: revert every PENDING edit in its strict span (`task-undo`). Writes to disk, so
+     *  save dirty buffers first (with consent) and refresh the workspace subtree after. */
     fun undoTask(project: Project, session: String, taskId: String, label: String) {
         val ok = Messages.showYesNoDialog(
             project,
-            "Reject all pending edits in chapter “$label”? This reverts them on disk. " +
+            "Reject all pending edits in task “$label”? This reverts them on disk. " +
                 "Unsaved changes to affected files are saved first; later-overlapping edits may conflict " +
                 "(revert those individually to force).",
-            "Claude Observatory", "Reject Chapter", "Cancel", Messages.getWarningIcon(),
+            "Claude Observatory", "Reject Task", "Cancel", Messages.getWarningIcon(),
         )
         if (ok != Messages.YES) return
         FileDocumentManager.getInstance().saveAllDocuments()
-        runBg(project, "Rejecting chapter “$label”") {
+        runBg(project, "Rejecting task “$label”") {
             val res = ObservatoryCli.taskUndo(session, taskId, project.basePath)
-            project.basePath?.let { refreshRecursive(it) } // covers every reverted file in the chapter
+            project.basePath?.let { refreshRecursive(it) } // covers every reverted file in the task
             if (res == null) {
-                done(project, cliFailMsg("reject chapter “$label”"), NotificationType.ERROR)
+                done(project, cliFailMsg("reject task “$label”"), NotificationType.ERROR)
             } else if (res.undone == 0 && res.conflicts == 0) {
-                done(project, "No pending edits to reject in chapter “$label”")
+                done(project, "No pending edits to reject in task “$label”")
             } else {
                 done(
                     project,
-                    "Rejected ${res.undone} edit(s) in chapter “$label”" +
+                    "Rejected ${res.undone} edit(s) in task “$label”" +
                         if (res.conflicts > 0) " · ${res.conflicts} conflict(s) — revert those individually to force" else "",
                 )
             }
         }
     }
 
-    /** Clear a chapter: drop the RESOLVED (kept/undone) edits of the task's STRICT-span set (`task-clear`).
+    /** Clear a task: drop the RESOLVED (kept/undone) edits of its strict span (`task-clear`).
      *  Pending edits are preserved. */
     fun clearTask(project: Project, session: String, taskId: String, label: String) {
-        runBg(project, "Clearing resolved edits in chapter “$label”") {
+        runBg(project, "Clearing resolved edits in task “$label”") {
             val cleared = ObservatoryCli.taskClear(session, taskId, project.basePath)
             when {
-                cleared == null -> done(project, cliFailMsg("clear chapter “$label”"), NotificationType.ERROR)
-                cleared == 0 -> done(project, "No resolved edits to clear in chapter “$label”")
-                else -> done(project, "Cleared $cleared resolved edit(s) in chapter “$label”")
+                cleared == null -> done(project, cliFailMsg("clear task “$label”"), NotificationType.ERROR)
+                cleared == 0 -> done(project, "No resolved edits to clear in task “$label”")
+                else -> done(project, "Cleared $cleared resolved edit(s) in task “$label”")
             }
         }
     }
 
-    /** Clear the resolved edits of EVERY settled chapter (`task-clear --completed`). */
-    fun clearCompletedChapters(project: Project, session: String) {
-        runBg(project, "Clearing completed chapters") {
+    /** Clear the resolved edits of EVERY settled task (`task-clear --completed`). */
+    fun clearCompletedTasks(project: Project, session: String) {
+        runBg(project, "Clearing completed tasks") {
             val res = ObservatoryCli.taskClearCompleted(session, project.basePath)
             when {
-                res == null -> done(project, cliFailMsg("clear completed chapters"), NotificationType.ERROR)
-                res.cleared == 0 -> done(project, "No resolved edits to clear in completed chapters")
-                else -> done(project, "Cleared ${res.cleared} resolved edit(s) across ${res.chapters} completed chapter(s)")
+                res == null -> done(project, cliFailMsg("clear completed tasks"), NotificationType.ERROR)
+                res.cleared == 0 -> done(project, "No resolved edits to clear in completed tasks")
+                else -> done(project, "Cleared ${res.cleared} resolved edit(s) across ${res.tasks} completed task(s)")
             }
         }
     }
@@ -498,49 +522,44 @@ object ReviewOps {
         }
     }
 
-    private data class SessionEntry(val id: String, val title: String?, val pending: Int, val lastMs: Long)
-
-    /** `sessions --json` rows (id + title + pending + lastMs); falls back to the in-process store list
-     *  (ids only, no titles) when the CLI is missing — the chooser must never fail to open. */
-    private fun sessionEntries(project: Project): List<SessionEntry> {
-        val json = ObservatoryCli.sessionsJson(project.basePath)
-        if (json != null) {
-            try {
-                val o = com.google.gson.JsonParser.parseString(json).asJsonObject
-                return o.getAsJsonArray("sessions").map { el ->
-                    val s = el.asJsonObject
-                    SessionEntry(
-                        id = s.get("id").asString,
-                        title = s.get("title")?.takeIf { it.isJsonPrimitive }?.asString?.takeIf { it.isNotBlank() },
-                        pending = s.get("pending")?.takeIf { it.isJsonPrimitive }?.asInt ?: 0,
-                        lastMs = s.get("lastMs")?.takeIf { it.isJsonPrimitive }?.asLong ?: 0L,
-                    )
-                }
-            } catch (_: Exception) {
-                /* malformed / foreign JSON — fall through to the store reader */
-            }
-        }
-        return com.cellobservatory.observatory.core.StoreReader.listSessions().map {
-            SessionEntry(it.id, null, it.pending, it.lastMs)
-        }
+    /** `sessions --json` rows (0.8.8): id + title + conversation recency + which session is live. The
+     *  listing is stat-only in core — no store log is parsed, so the popup opens without the multi-second
+     *  stall the old pending-count listing paid. Falls back to the in-process store list (ids only) when
+     *  the CLI is missing: the chooser must never fail to open. */
+    private fun sessionEntries(project: Project): List<SessionRow> {
+        val parsed = ObservatoryCli.sessionsJson(project.basePath, ObservatoryService.getInstance(project).currentSession())
+            ?.let { SessionsParser.parse(it) }
+        if (parsed != null) return parsed.sessions
+        // CLI-less fallback: the in-process store reader knows the counts but no titles, so rows carry
+        // what it has and nothing invented.
+        return com.cellobservatory.observatory.core.StoreReader.listSessions()
+            .map { SessionRow(it.id, null, it.lastMs, false, edits = it.edits, pending = it.pending, files = 0) }
     }
 
-    private fun chooseSessionPopup(project: Project, entries: List<SessionEntry>): com.intellij.openapi.ui.popup.JBPopup {
+    /** The chooser. Rows lead with Claude's own title and are ordered live-session-first, then by
+     *  conversation recency; the row currently in effect is pre-selected, so the popup opens showing
+     *  what you are looking at rather than making you find it. */
+    private fun chooseSessionPopup(project: Project, entries: List<SessionRow>): com.intellij.openapi.ui.popup.JBPopup {
         val settings = com.cellobservatory.observatory.settings.ObservatorySettings.instance
         val pinned = settings.state.session?.takeIf { it.isNotBlank() }
         val auto = project.basePath?.let { com.cellobservatory.observatory.core.SessionResolver.resolveSessionId(it) }
+        val autoLabel = "Auto — newest for this workspace" + (auto?.let { " ($it)" } ?: "")
         val labelToId = LinkedHashMap<String, String?>()
-        labelToId["Auto — newest for this workspace" + (auto?.let { " ($it)" } ?: "")] = null
-        for (s in entries) {
-            val mark = if (s.id == pinned) "● " else ""
-            val autoTag = if (s.id == auto) " · auto" else ""
-            val name = s.title ?: "session ${s.id.take(8)}"
+        labelToId[autoLabel] = null
+        var selected = autoLabel
+        // Live session first (it is the answer most of the time), then everything else newest-first.
+        for (s in entries.sortedByDescending { it.current }) {
+            val mark = if (s.current) "● " else ""
             // The 8-char id keeps labels unique when two sessions share a title (the map is label-keyed).
-            labelToId["$mark$name  —  ${s.id.take(8)} · ${s.pending} pending · ${com.cellobservatory.observatory.model.relTime(s.lastMs)}$autoTag"] = s.id
+            val label = "$mark${s.displayName}  —  ${s.id.take(8)} · ${relTime(s.lastActiveMs)}" +
+                (if (s.current) " · active" else "")
+            labelToId[label] = s.id
+            if (s.id == pinned) selected = label
         }
         return com.intellij.openapi.ui.popup.JBPopupFactory.getInstance()
             .createPopupChooserBuilder(labelToId.keys.toList())
             .setTitle("Review which session?")
+            .setSelectedValue(selected, true)
             .setItemChosenCallback { chosen ->
                 settings.state.session = labelToId[chosen]
                 for (p in com.intellij.openapi.project.ProjectManager.getInstance().openProjects) {

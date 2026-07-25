@@ -55,6 +55,38 @@ export interface ActionRecord {
   toolUseId?: string;
   /** For 'compact' rows: what the harness dropped and when. */
   compact?: CompactionEvent;
+  /** For the plan tools (TodoWrite · TaskCreate · TaskUpdate) only: the facts a counter needs, verbatim.
+   *  [target] is a DISPLAY string — one line, clipped at 160 characters — so identity must never be
+   *  derived from it: a to-do longer than that would hash to something no task ever equals. */
+  plan?: PlanFacts;
+}
+
+/** What a plan call did, unabbreviated. [subject] is a to-do's own text (the in-progress item for a
+ *  TodoWrite, the subject for a TaskCreate); [taskId] and [status] are what a TaskUpdate carries, and a
+ *  TaskUpdate that changes neither status nor subject reports neither. */
+export interface PlanFacts {
+  subject?: string;
+  taskId?: string;
+  status?: string;
+}
+
+/** The plan facts for one call, or undefined when the tool does not touch the plan. */
+function planFactsOf(tool: string, input: any): PlanFacts | undefined {
+  const i = input && typeof input === 'object' ? input : {};
+  if (tool === 'TodoWrite' && Array.isArray(i.todos)) {
+    const inProg = i.todos.find((t: any) => t && t.status === 'in_progress');
+    const subject = inProg && typeof inProg.content === 'string' ? inProg.content.trim() : '';
+    return subject ? { subject, status: 'in_progress' } : undefined; // nothing in progress names no task
+  }
+  if (tool === 'TaskCreate' && typeof i.subject === 'string' && i.subject.trim())
+    return { subject: i.subject.trim(), status: 'created' };
+  if (tool === 'TaskUpdate' && i.taskId != null) {
+    const facts: PlanFacts = { taskId: String(i.taskId) };
+    if (typeof i.status === 'string' && i.status) facts.status = i.status;
+    if (typeof i.subject === 'string' && i.subject.trim()) facts.subject = i.subject.trim();
+    return facts;
+  }
+  return undefined;
 }
 
 /** One context compaction: the harness summarized the conversation so far and continued on the summary.
@@ -302,6 +334,7 @@ function parseTranscriptActionsUncached(transcriptPath: string, includeSidechain
         category: categoryOf(b.name),
         target,
         detail,
+        plan: planFactsOf(b.name, b.input),
         ok: true, // provisional — folded from resultErr below
         isError: false,
         reasoning: lastReasoning || undefined,
@@ -410,7 +443,7 @@ export function attributeEditIds(sessionId: string, authors: EditAttributionAuth
 
     // Multiple authors touched this file: partition by ts-window, or bail to null on any overlap.
     // BY DESIGN (0.8.0 stabilization review): genuinely interleaved same-file work stays unattributed on
-    // BOTH sides rather than guessed — the null folds into the main-chain display bucket, and the chapter
+    // BOTH sides rather than guessed — the null folds into the main-chain display bucket, and the strict-task
     // dimension is total regardless, so nothing disappears from the Overview. Pinned by a core test.
     const windows = fileAuthors.map((a) => editWindow(a.acts));
     if (windowsOverlap(windows)) continue; // interleaved/ambiguous → BOTH sides null (§6.3)

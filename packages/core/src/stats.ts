@@ -260,9 +260,9 @@ export function computeStats(activeSessionId?: string, nowMs?: number): StatsRes
   if (!dirty) dirty = Object.keys(prev).length !== Object.keys(files).length;
   if (dirty) {
     try {
-      fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+      fs.mkdirSync(path.dirname(cachePath), { recursive: true, mode: 0o700 });
       const tmp = cachePath + '.tmp';
-      fs.writeFileSync(tmp, JSON.stringify({ v: CACHE_VERSION, tz: tzOffset, files }));
+      fs.writeFileSync(tmp, JSON.stringify({ v: CACHE_VERSION, tz: tzOffset, files }), { mode: 0o600 });
       fs.renameSync(tmp, cachePath); // atomic: a concurrent reader never sees a torn cache
     } catch {
       /* cache is best-effort */

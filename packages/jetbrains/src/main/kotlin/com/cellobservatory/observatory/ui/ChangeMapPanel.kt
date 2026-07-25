@@ -7,22 +7,25 @@ import com.cellobservatory.observatory.model.BackgroundProcess
 import com.cellobservatory.observatory.model.Feed
 import com.cellobservatory.observatory.model.FeedEntry
 import com.cellobservatory.observatory.model.ProcessSummary
+import com.cellobservatory.observatory.model.TaskRoll
 import com.cellobservatory.observatory.model.ProcessesResult
 import com.cellobservatory.observatory.model.ChangeMap
 import com.cellobservatory.observatory.model.ChangeMapAgent
-import com.cellobservatory.observatory.model.ChangeMapChapter
 import com.cellobservatory.observatory.model.ChangeMapFile
 import com.cellobservatory.observatory.model.ChangeMapModule
 import com.cellobservatory.observatory.model.ChangeMapSummary
+import com.cellobservatory.observatory.model.EditRecord
 import com.cellobservatory.observatory.model.ChangeMapWorkflow
 import com.cellobservatory.observatory.model.Collision
-import com.cellobservatory.observatory.model.CompactBoundary
 import com.cellobservatory.observatory.model.MtSubagent
 import com.cellobservatory.observatory.model.MultitaskResult
-import com.cellobservatory.observatory.model.ChangeMapRequest
-import com.cellobservatory.observatory.model.RequestsResult
-import com.cellobservatory.observatory.model.SessionRequest
+import com.cellobservatory.observatory.model.ChangeMapPrompt
+import com.cellobservatory.observatory.model.PromptsResult
+import com.cellobservatory.observatory.model.SessionPrompt
+import com.cellobservatory.observatory.model.SessionRow
 import com.cellobservatory.observatory.model.SessionTask
+import com.cellobservatory.observatory.model.SessionsResult
+import com.cellobservatory.observatory.model.relTime
 import com.cellobservatory.observatory.model.MultitaskFilter
 import com.cellobservatory.observatory.model.RunningAgent
 import com.cellobservatory.observatory.model.WorkflowAgent
@@ -64,6 +67,7 @@ import java.awt.FlowLayout
 import java.awt.Graphics
 import java.awt.Graphics2D
 import java.awt.LayoutManager2
+import java.awt.Rectangle
 import java.awt.RenderingHints
 import java.awt.event.ComponentAdapter
 import java.awt.event.ComponentEvent
@@ -81,6 +85,7 @@ import javax.swing.JPopupMenu
 import javax.swing.JSeparator
 import javax.swing.JTree
 import javax.swing.ListCellRenderer
+import javax.swing.Scrollable
 import javax.swing.ScrollPaneConstants
 import javax.swing.SwingConstants
 import javax.swing.tree.DefaultMutableTreeNode
@@ -103,32 +108,40 @@ internal val MT_ERROR = JBColor(Color(0xE5534B), Color(0xE5534B))
 private val MT_AGENT = JBColor(Color(0x9A6AC2), Color(0x9A6AC2))
 internal val MT_ADD = SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, MT_DONE)
 internal val MT_REM = SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, MT_ERROR)
-/** Where each ribbon compaction marker goes: [after] maps a VISIBLE chapter id → the markers drawn under
- *  its row; [unplaced] is what no visible row can carry (the head marker's contents). */
-private class CompactionPlan(
-    val after: Map<String, List<CompactBoundary>>,
-    val unplaced: List<CompactBoundary>,
-)
-
 /** The module strip shows at most this many segments; the churn-ranked tail merges into "+K more". */
 private const val MAX_SEGMENTS = 11
 
 // The SESSION-SCOPED left-nav panes. Their text is re-worded live (refreshScopeNotes) when a fleet row
 // from another session drives the detail, because none of them follows that selection.
 private const val TASKS_DESC =
-    "This session’s numbered task list (Claude’s TaskCreate/TaskUpdate plan) — with live statuses; each row joins its change-map chapter."
+    "This session’s numbered task list (Claude’s TaskCreate/TaskUpdate plan) — with live statuses; each row shows the edits made while it was in progress."
 private const val PROCESSES_DESC =
     "Background shells Claude launched with run_in_background and left running — state, runtime, and how much output each has produced."
 private const val PROCESSES_TIP =
     "The session's background shells — always THIS project's active session, never a selected sibling agent's. Identity is the harness's own shell id: the transcript records no OS pid, and inferring one from local processes would be wrong whenever the agent runs over SSH or in a container. Select one to follow its output."
-// Left-nav tab indices. Requests is NOT among them since 0.8.7 — it is the WINDOW to the left, so the
-// list of asks and the view one of them scopes stay visible together. Processes is appended by
-// repaintProcesses once the CLI answers for it.
-private const val WORKFLOWS_TAB = 1
-private const val TASKS_TAB = 2
-private const val PROCESSES_TAB = 3
-/** Sentinel module id for the strip's merged overflow segment — never a real module, never clickable. */
+private const val SESSIONS_DESC =
+    "This workspace’s recorded sessions, most recent conversation first — click one to review it instead of the live session."
+private const val SESSIONS_TIP =
+    "This workspace's sessions, ordered by when each conversation was last active. Selecting a row PINS the review to that session (the same choice Switch Session makes) — unlike the other tabs, which only re-point the map and the feed."
+// Left-nav tab indices. Prompts is NOT among them since 0.8.7 — it is the WINDOW to the left, so the
+// list of asks and the view one of them scopes stay visible together. Processes is INSERTED at its index
+// by repaintProcesses once the CLI answers for it, which is why Sessions is addressed by component
+// rather than by a constant: it moves right by one the moment Processes appears.
+private const val SESSIONS_TAB = 0
+private const val FLEET_TAB = 1
+private const val WORKFLOWS_TAB = 2
+private const val TASKS_TAB = 3
+private const val PROCESSES_TAB = 4
+/** Below this width the Overview stacks its master and detail instead of splitting them side by side. */
+private const val NARROW_PANEL_PX = 620
+
+/** Sentinel module ids for the strip's two tail chips — never real modules, never ledger filters:
+ *  one opens the folded folders, the other folds them back. */
 private const val OVERFLOW_MODULE = "+more"
+private const val COLLAPSE_MODULE = "-less"
+
+/** A strip segment narrower than this cannot hold a readable folder label, so the strip wraps instead. */
+private const val MIN_SEGMENT_PX = 88
 
 /** status → colour. "undone" surfaces as "reverted" grey, matching the VS Code renderer. */
 private fun statusColor(status: String): JBColor = when (status) {
@@ -140,20 +153,18 @@ private fun statusColor(status: String): JBColor = when (status) {
 /**
  * Overview (0.8.0 r3): a MASTER–DETAIL panel that folds the former standalone Multitasking window in.
  *
- * LEFT NAV — Requests · Fleet · Workflows · Tasks · Processes:
- *   · Requests  = what the USER asked for, in order, over `requests --json` — the one axis that reads the
- *                 session the way a person lived it, rather than the way the agent organized it.
+ * LEFT NAV — Fleet · Workflows · Tasks · Processes · Sessions (Processes appears once the CLI answers
+ * for it). What the USER asked for lives one window over, in Prompts, whose selection scopes this panel.
+ *   · Sessions  = this workspace's recorded sessions, newest conversation first — the one tab whose
+ *                 selection PINS what the whole observatory reviews rather than re-pointing this panel.
  *   · Fleet     = running agents across every worktree-sibling (+ nested subagents), each with its live
  *                 phase, sparkline, ±lines, tokens, time, and risk; a live file-conflict strip below.
  *   · Workflows = the Claude Code Workflow runs — informative name, per-phase progress, ±lines/tokens/time.
  *   An Active-only toggle + Clear-completed (a dismiss, never a delete) filter these, display-only.
  *
- * RIGHT DETAIL — the change-map (named-chapter ribbon · module strip · churn-ranked file ledger) for the
+ * RIGHT DETAIL — the change-map (folder strip · churn-ranked file ledger · scope summary) for the
  * SELECTED nav item, from `changemap --json`'s `agents[]` / `workflows[]`, joined by session / workflowId.
- * The default is the main/orchestrator session (the top-level map). The ribbon renders the change-map's
- * `chapters[]` — TOTAL as of 0.8.0 (core appends a synthesized session chapter for work outside any
- * to-do, so no "unassigned" row can render); ch.taskId is the strict task Accept/Reject/Clear resolve
- * against and is null on the synthesized/duplicate display-only rows (no destructive buttons there).
+ * The default is the main/orchestrator session (the top-level map).
  *
  * Both payloads are aggregated in core (the single backend) — this panel only paints. Realtime rides on
  * the transcript watcher / store watcher via ObservatoryService.refresh. Parity with the VS Code Overview.
@@ -176,25 +187,24 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         data class Process(val id: String) : NavSel()
     }
 
-    /** A ribbon chapter picked for the top toolbar's chapter-scoped bulk actions, or null for session-wide.
-     *  Carries the slice's resolved session so the scoped op targets the right session even on an agent
-     *  slice (chapter.id === the strict taskId task-keep/undo/clear resolve against). */
-    private data class PickedChapter(val session: String, val id: String, val title: String)
-
     @Volatile private var map: ChangeMap? = null
     private var selected: NavSel = NavSel.Main
-    private var pickedChapter: PickedChapter? = null
 
-    /** The Overview title-bar toolbars (one ActionToolbar per group), kept so a chapter pick / nav step can
-     *  refresh their scoped labels + counters. */
+    /** The Overview title-bar toolbars (one ActionToolbar per group), kept so a nav step or a change of
+     *  prompt scope can refresh their scoped labels + counters. */
     private var overviewToolbars: List<ActionToolbar> = emptyList()
     /** The shared step-through review nav bar (parity with the status-bar widget), hosted in this toolbar. */
     private val reviewNavBar = ReviewNavBar(project) { onNavChanged() }
     /** The live detail panel — kept so a nav step can refresh its bottom summary without a full rebuild. */
     private var currentDetail: AgentDetail? = null
+    /** Is the Folders strip showing every folder? Panel-level, because [renderDetail] rebuilds the detail
+     *  (and its strip) on every refresh — state held by the strip itself would fold back within one
+     *  refresh cycle. Keyed by scope, so another agent, workflow, or prompt starts folded again. */
+    private var stripExpanded = false
+    private var stripScope: String? = null
 
-    /** A Diff/File/Folder/Chapter/Request nav step landed — refresh the scoped toolbar labels + counters
-     *  AND the change-map bottom summary (which names the current request / chapter / folder scope). */
+    /** A Diff/File/Folder/Prompt nav step landed — refresh the scoped toolbar labels + counters AND the
+     *  change-map bottom summary (which names the current prompt / folder scope). */
     private fun onNavChanged() {
         refreshOverviewToolbar()
         currentDetail?.refreshSummary()
@@ -220,8 +230,8 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         cellRenderer = SparklineTreeRenderer(WorkflowRenderer())
     }
     // --- LEFT NAV, third tab: the session's numbered task list (TaskCreate/TaskUpdate) ---
-    /** One Tasks-tab row: the task + its change-map chapter (per-task ±/edit counts), when it has one. */
-    private data class TaskRow(val task: SessionTask, val chapter: ChangeMapChapter?)
+    /** One Tasks-tab row: the task + its STRICT per-task rollup (±/edit counts), when core has one for it. */
+    private data class TaskRow(val task: SessionTask, val roll: TaskRoll?)
     /** The "N done · show all" collapse row — completed tasks fold behind it (fleet dismiss pattern). */
     private data class DoneTasksToggle(val count: Int, val open: Boolean)
     private var tasksOpen = false
@@ -237,6 +247,21 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
     private val processesList = JBList(processesModel).apply {
         cellRenderer = ProcessRowRenderer()
     }
+    // --- LEFT NAV, last tab: every session in this workspace (0.8.8). The only tab whose selection is a
+    //     CHOICE OF SUBJECT — clicking a row pins what the whole observatory reviews ---
+    /** The leading row of the Sessions tab: stop following one session and take whichever is newest.
+     *  Without it, pinning would be a one-way door once the Switch Session dropdown was removed. */
+    private object AutoSessionRow
+
+    private val sessionsModel = DefaultListModel<Any>()
+    private val sessionsList = JBList(sessionsModel).apply {
+        emptyText.text = "Reading this workspace’s sessions…"
+        cellRenderer = SessionRowRenderer { com.cellobservatory.observatory.settings.ObservatorySettings.instance.state.session?.takeIf { s -> s.isNotBlank() } }
+    }
+    /** Held so [repaintSessions] can disclose that the pinned session is not one of this workspace's. */
+    private val sessionsDesc = descLabel(SESSIONS_DESC)
+    private val sessionsPane: JComponent by lazy { descPane(sessionsDesc, JBScrollPane(sessionsList)) }
+
     /** The session-scoped panes' description labels — held so [refreshScopeNotes] can disclose that they
      *  do NOT follow a fleet row from another session. */
     private val tasksDesc = descLabel(TASKS_DESC)
@@ -254,9 +279,12 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
     private var feed: Feed? = null
 
     // --- Active-only + Clear-completed (display-only; a thin filter over the same payload). Persist across
-    //     repaints; default OFF. The dismissed sets HIDE completed items (never delete); reset on a session
+    //     repaints; Active only defaults ON and is remembered in settings (0.8.8) — this panel is about work
+    //     still awaiting review. The dismissed sets HIDE completed items (never delete); reset on a session
     //     change. A dismissed item reappears if it goes active again. ---
-    private var activeOnly = false
+    private var activeOnly: Boolean
+        get() = com.cellobservatory.observatory.settings.ObservatorySettings.instance.state.overviewActiveOnly
+        set(value) { com.cellobservatory.observatory.settings.ObservatorySettings.instance.state.overviewActiveOnly = value }
     private val dismissedAgents = HashSet<String>()
     private val dismissedWorkflows = HashSet<String>()
     /** Background shells folded by Clear completed. A shell that has EXITED is finished work exactly like
@@ -265,13 +293,13 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
     private val dismissedProcesses = HashSet<String>()
     private var lastResult: MultitaskResult? = null
     private var lastProcesses: ProcessesResult? = null
-    private var lastRequests: RequestsResult? = null
+    private var lastPrompts: PromptsResult? = null
     private var lastSelfSession: String? = null
     /** Suppress the tree selection listeners while we programmatically reload / restore selection. */
     private var suppressSel = false
 
     /** Workflow ids already seen in a payload — null until the FIRST payload seeds it, so opening the
-     *  panel never steals focus; afterwards a newly-appeared RUNNING run auto-focuses (user request). */
+     *  panel never steals focus; afterwards a newly-appeared RUNNING run auto-focuses (user prompt). */
     private var seenWorkflows: HashSet<String>? = null
 
     /** The left nav's Fleet · Workflows tabs — a field so a new workflow run can switch to Workflows. */
@@ -281,44 +309,74 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         // (Live conflicts moved to the Actions panel in 0.8.3 — the fleet tab is just the tree now.)
         navTabs = JBTabbedPane().apply {
             // Each pane leads with a one-line description (VS Code .ov-desc parity) above its tree/list.
+            // Sessions FIRST: which session you are reviewing is the question that precedes every other
+            // tab, and answering it re-points the whole observatory rather than just this panel.
+            addTab("Sessions", sessionsPane)
+            setToolTipTextAt(SESSIONS_TAB, SESSIONS_TIP)
             addTab("Fleet", descPane("Every Claude agent working in this repo’s worktrees — live phase, tokens, and risk. Select one to map just its edits.", JBScrollPane(fleetTree)))
-            setToolTipTextAt(0, "Running agents across every worktree — siblings + their subagents — with the live file-conflict strip below. Select one to map its changes.")
+            setToolTipTextAt(FLEET_TAB, "Running agents across every worktree — siblings + their subagents — with the live file-conflict strip below. Select one to map its changes.")
             addTab("Workflows", descPane("Multi-agent runs (an orchestrator and its subagents) — each run’s phases and the edits attributed to it.", JBScrollPane(workflowsTree)))
             setToolTipTextAt(WORKFLOWS_TAB, "Claude Code Workflow runs — agents grouped by phase, with tokens/time/edits per run. Select one to map its changes.")
             addTab("Tasks", descPane(tasksDesc, JBScrollPane(tasksList)))
             setToolTipTextAt(TASKS_TAB, "The session's task list (Claude's numbered TaskCreate/TaskUpdate tasks) — live statuses; completed tasks leave the list when the runtime archives them. Always THIS project's active session, never a selected sibling agent's.")
-            // No Processes tab here: it is added by repaintProcesses once `processes --json` answers, so an
-            // older CLI on PATH shows no tab at all instead of an empty one that can never fill (VS Code parity).
+            // No Processes tab here: it is APPENDED by repaintProcesses once `processes --json` answers,
+            // so an older CLI on PATH shows no tab at all instead of an empty one that can never fill
+            // (VS Code parity).
         }
         // Left nav (Fleet · Workflows · Tasks · Processes) = 25% of the panel; the change-map
         // detail and the selection's feed share the remaining 75%.
-        val split = OnePixelSplitter(false, 0.25f).apply {
+        // Master–detail SIDE BY SIDE while there is width for both, STACKED when there is not. This tool
+        // window is usually wide (bottom dock) but can be dragged to a side stripe, where a 25% nav
+        // column leaves neither half readable — the nav tabs wrap to three rows and the ledger's file
+        // names are squeezed to a few characters. Below the threshold the same two components split
+        // vertically instead, which costs height (a narrow window has it) and gives back width.
+        val settings = com.cellobservatory.observatory.settings.ObservatorySettings.instance
+        val split = OnePixelSplitter(false, settings.state.overviewSplitWide).apply {
             firstComponent = navTabs
             secondComponent = feedSplit
         }
-        // No request-scope banner here: the Requests WINDOW beside this panel already shows the picked
+        split.addComponentListener(object : ComponentAdapter() {
+            private var stacked: Boolean? = null
+            override fun componentResized(e: ComponentEvent) {
+                val narrow = e.component.width in 1 until NARROW_PANEL_PX
+                if (stacked == narrow) return // orientation changes reset the divider — only on a real flip
+                // Remember where the reader left THIS layout's divider before flipping to the other one,
+                // which then comes back where they left it rather than at a constant.
+                stacked?.let { was ->
+                    if (was) settings.state.overviewSplitNarrow = split.proportion
+                    else settings.state.overviewSplitWide = split.proportion
+                }
+                stacked = narrow
+                split.orientation = narrow
+                split.proportion = if (narrow) settings.state.overviewSplitNarrow else settings.state.overviewSplitWide
+            }
+        })
+        // A drag is only recorded when the divider settles — Splitter fires this on every pixel of one.
+        split.addPropertyChangeListener("proportion") {
+            if (split.orientation) settings.state.overviewSplitNarrow = split.proportion
+            else settings.state.overviewSplitWide = split.proportion
+        }
+        // No prompt-scope banner here: the Prompts WINDOW beside this panel already shows the picked
         // ask (selected, with its full text and a clear action), so naming it again in the Overview was
         // duplication. The scope is still evident — the panes note what they hid, the bulk buttons read
         // "…in #N", and the bottom summary names the ask.
         setContent(split)
 
-        // Feed the shared nav bar the current session's change-map chapters — their editIds drive the
-        // Chapter axis + the bottom summary's chapter scope (the status-bar host leaves this empty).
-        reviewNavBar.chaptersProvider = { map?.chapters ?: emptyList() }
-        // …and the session's requests, whose editIds drive the Request axis (same contract, one tab over).
-        reviewNavBar.requestsProvider = { lastRequests?.requests ?: emptyList() }
+        // Feed the shared nav bar the session's prompts, whose editIds drive the Prompt axis (the
+        // status-bar host leaves this empty — it carries no Prompt axis).
+        reviewNavBar.promptsProvider = { lastPrompts?.prompts ?: emptyList() }
         // The Overview shows the RICH Diff/File counters (edit time · filename · edit count); the status bar
         // stays terse (VS Code parity — that detail rides only the Overview's counters).
         reviewNavBar.richCounters = true
 
         // TWO rows (user swap 2026-07-17, VS Code parity — its .ov-toolbar is a flex column-reverse):
-        //   BOTTOM row = the review AXES: Diff · File · Folder · Chapter · Request (centered, dividers between).
-        //   TOP row (split) = controls: LEFT cluster = session selector + Accept All + Revert All +
+        //   BOTTOM row = the review AXES: Diff · File · Folder · Prompt (centered, dividers between).
+        //   TOP row (split) = controls: LEFT cluster = session selector + Accept All + Reject All +
         //     Clear Resolved + Export ; RIGHT cluster = Search · Active only | Spotlight · Refresh.
         // The nav-bar actions come from the shared ReviewNavBar (labels shown, like VS Code). Each cluster is
-        // its own ActionToolbar so a chapter pick / nav step can refresh its scoped labels + counters.
+        // its own ActionToolbar so a nav step or a change of prompt scope can refresh its labels + counters.
 
-        // --- BOTTOM row: the five review axes ---
+        // --- BOTTOM row: the four review axes ---
         val diffGroup = DefaultActionGroup().apply {
             reviewNavBar.diffAxis().forEach(::add)
             add(reviewNavBar.keepAction()); add(reviewNavBar.undoAction())
@@ -332,38 +390,33 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             reviewNavBar.folderAxis().forEach(::add)
             add(reviewNavBar.acceptFolderAction()); add(reviewNavBar.rejectFolderAction())
         }
-        val chapterGroup = DefaultActionGroup().apply {
-            reviewNavBar.chapterAxis().forEach(::add)
-            add(reviewNavBar.reviewChapterAction()); add(reviewNavBar.acceptChapterAction())
-            add(reviewNavBar.rejectChapterAction()); add(reviewNavBar.chatChapterAction())
-        }
-        // Request is the LAST axis: the coarsest scope on the bar, and the one a person names out loud
-        // ("accept everything from that ask"). No Chat button — `chat-context` has no request ref, and a
+        // Prompt is the LAST axis: the coarsest scope on the bar, and the one a person names out loud
+        // ("accept everything from that ask"). No Chat button — `chat-context` has no prompt ref, and a
         // button that silently framed the prompt as something else would be worse than its absence.
-        val requestGroup = DefaultActionGroup().apply {
-            reviewNavBar.requestAxis().forEach(::add)
-            add(reviewNavBar.reviewRequestAction()); add(reviewNavBar.acceptRequestAction())
-            add(reviewNavBar.revertRequestAction())
+        val promptGroup = DefaultActionGroup().apply {
+            reviewNavBar.promptAxis().forEach(::add)
+            add(reviewNavBar.reviewPromptAction()); add(reviewNavBar.acceptPromptAction())
+            add(reviewNavBar.revertPromptAction())
         }
 
         // --- TOP row LEFT cluster: session selector + session-wide bulk + Export. Bulk actions RETARGET to
-        //     the picked ribbon chapter when one is selected (task-keep/undo/clear on chapter.id). ---
+        //     the picked ASK when the Prompts window has one selected — that is the explicit scope the
+        //     reader named, and every pane on this panel is already filtered to it. ---
         val leftGroup = DefaultActionGroup().apply {
-            add(sessionSelectorAction())
-            add(bulkAction("Accept All", NavTint.ACCEPT_ALL, { "Accept All in “$it”" },
+            add(bulkAction("Accept All", NavTint.ACCEPT_ALL, { "Accept All in $it" },
                 { withSession { s -> ReviewOps.keepAll(project, s) } },
-                { p -> ReviewOps.keepTask(project, p.session, p.id, p.title) }))
-            add(bulkAction("Revert All", NavTint.REVERT_ALL, { "Revert All in “$it”" },
+                { r -> withSession { s -> ReviewOps.keepAll(project, s, editsOfPrompt(r), "prompt #${r.index}") } }))
+            add(bulkAction("Reject All", NavTint.REVERT_ALL, { "Reject All in $it" },
                 { withSession { s -> ReviewOps.undoAll(project, s, service().log(), "this session") } },
-                { p -> ReviewOps.undoTask(project, p.session, p.id, p.title) }))
-            add(bulkAction("Clear Resolved", NavTint.CLEAR, { "Clear in “$it”" },
+                { r -> withSession { s -> ReviewOps.undoIds(project, s, editsOfPrompt(r), "prompt #${r.index}", "prompt #${r.index}") } }))
+            add(bulkAction("Clear Resolved", NavTint.CLEAR, { "Clear in $it" },
                 {
                     withSession { s ->
                         val resolved = service().log().count { !it.pending }
                         if (resolved > 0) ReviewOps.clearResolved(project, s, resolved) else ReviewOps.notify(project, "No resolved edits to clear")
                     }
                 },
-                { p -> ReviewOps.clearTask(project, p.session, p.id, p.title) }))
+                { r -> withSession { s -> ReviewOps.clearResolvedIds(project, s, r.editIds, "prompt #${r.index}") } }))
             add(exportAction())
         }
         // --- TOP row RIGHT cluster: Search · Active only · Clear completed | Spotlight · Refresh ---
@@ -384,11 +437,10 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         val diffTb = mkTb("Diff", diffGroup)
         val fileTb = mkTb("File", fileGroup)
         val folderTb = mkTb("Folder", folderGroup)
-        val chapterTb = mkTb("Chapter", chapterGroup)
-        val requestTb = mkTb("Request", requestGroup)
+        val promptTb = mkTb("Prompt", promptGroup)
         val leftTb = mkTb("Left", leftGroup)
         val rightTb = mkTb("Right", rightGroup)
-        overviewToolbars = listOf(diffTb, fileTb, folderTb, chapterTb, requestTb, leftTb, rightTb)
+        overviewToolbars = listOf(diffTb, fileTb, folderTb, promptTb, leftTb, rightTb)
 
         // TOP row: left cluster pinned LEFT, right cluster pinned RIGHT while both fit; when the tool
         // window is too narrow for both, the right cluster WRAPS onto a second line (VS Code's
@@ -407,13 +459,13 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
                 }
             })
         }
-        // BOTTOM row: the five review axes, centered, with a divider between each. WrapLayout (a wrapping
+        // BOTTOM row: the four review axes, centered, with a divider between each. WrapLayout (a wrapping
         // FlowLayout) flows them onto ADDITIONAL centered lines when the pane is too narrow for one row —
         // instead of the axis toolbars shrinking below preferred and collapsing into an IntelliJ "…" overflow.
         val bottomRow = JPanel(WrapLayout(FlowLayout.CENTER, JBUI.scale(2), JBUI.scale(3))).apply {
             isOpaque = false
             alignmentX = Component.LEFT_ALIGNMENT
-            listOf(diffTb, fileTb, folderTb, chapterTb, requestTb).forEachIndexed { i, tb ->
+            listOf(diffTb, fileTb, folderTb, promptTb).forEachIndexed { i, tb ->
                 if (i > 0) add(navDivider())
                 add(tb.component)
             }
@@ -484,6 +536,47 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             if (suppressSel || it.valueIsAdjusting) return@addListSelectionListener
             (tasksList.selectedValue as? TaskRow)?.let { row -> selectDetail(NavSel.Task(taskFeedId(row))) }
         }
+        // Right-click a task row → the strict per-task review ops. They live in a menu rather than as
+        // row buttons because they are destructive-adjacent and the list is dense; the menu names the
+        // scope in words ("its strict in-progress span") so nothing is accepted by accident.
+        tasksList.addMouseListener(object : MouseAdapter() {
+            override fun mousePressed(e: MouseEvent) = maybePopup(e)
+            override fun mouseReleased(e: MouseEvent) = maybePopup(e)
+            private fun maybePopup(e: MouseEvent) {
+                if (!e.isPopupTrigger) return
+                val i = tasksList.locationToIndex(e.point)
+                if (i < 0) return
+                val row = tasksModel.get(i) as? TaskRow ?: return
+                tasksList.selectedIndex = i
+                taskMenu(row)?.show(tasksList, e.x, e.y)
+            }
+        })
+        // Choosing a session is a change of SUBJECT — it pins what the whole observatory reviews — so it
+        // happens on ACTIVATION (a click, or Enter on the keyboard), never on mere selection: arrowing
+        // through the list to read it would otherwise re-point every window once per row.
+        sessionsList.addMouseListener(object : MouseAdapter() {
+            override fun mouseClicked(e: MouseEvent) {
+                if (e.isPopupTrigger || e.button != MouseEvent.BUTTON1) return
+                val i = sessionsList.locationToIndex(e.point)
+                if (i < 0 || !sessionsList.getCellBounds(i, i).contains(e.point)) return
+                when (val row = sessionsModel.get(i)) {
+                    is SessionRow -> pinSession(row)
+                    AutoSessionRow -> pinSession(null)
+                    else -> {}
+                }
+            }
+        })
+        sessionsList.registerKeyboardAction(
+            {
+                when (val row = sessionsList.selectedValue) {
+                    is SessionRow -> pinSession(row)
+                    AutoSessionRow -> pinSession(null)
+                    else -> {}
+                }
+            },
+            javax.swing.KeyStroke.getKeyStroke(java.awt.event.KeyEvent.VK_ENTER, 0),
+            JComponent.WHEN_FOCUSED,
+        )
         processesList.addListSelectionListener {
             if (suppressSel || it.valueIsAdjusting) return@addListSelectionListener
             processesList.selectedValue?.let { p -> selectDetail(NavSel.Process(p.id)) }
@@ -509,7 +602,6 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
     }
 
     private fun selectDetail(sel: NavSel) {
-        if (sel != selected) pickedChapter = null // a new slice — drop any chapter scope
         selected = sel
         // A new selection is a new feed: the shared fetch hands back null until this ref's tail lands, so
         // the pane can never show the previously selected row's activity under this one.
@@ -519,13 +611,37 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         refreshOverviewToolbar()
     }
 
-    /** What `feed --kind task` resolves against: the row's chapter's STRICT taskId, falling back to the
-     *  task's own chapterId (identical for a first-occurrence chapter, and all an older CLI carries).
-     *  NEVER the task list's display number — core keys tasks by the 12-hex strict-span id, so a display
-     *  id resolves to nothing and the pane reports "no such task in this session" about a task this very
-     *  panel is listing. Blank when neither exists: there is then nothing to follow, and the feed pane
-     *  detaches rather than asking about an id core cannot answer for. */
-    private fun taskFeedId(row: TaskRow): String = row.chapter?.taskId ?: row.task.chapterId
+    /** What `feed --kind task` resolves against: the row's STRICT 12-hex task id (core.taskIdForSubject).
+     *  NEVER the task list's display number — core keys tasks by that strict id, so a display id resolves
+     *  to nothing and the pane would report "no such task in this session" about a task this very panel is
+     *  listing. Blank on an older CLI that predates the field: there is then nothing to follow, and the
+     *  feed pane detaches rather than asking about an id core cannot answer for. */
+    private fun taskFeedId(row: TaskRow): String = row.task.taskId
+
+    /** The per-task review menu: Accept / Reject / Clear over the task's STRICT in-progress span, plus
+     *  the session-wide clear of every settled task. Null for a row core has no strict id for (an older
+     *  CLI): a menu that cannot name its scope must not offer to act on one. */
+    private fun taskMenu(row: TaskRow): JPopupMenu? {
+        val taskId = row.task.taskId.takeIf { it.isNotBlank() } ?: return null
+        val session = service().currentSession() ?: return null
+        val label = row.task.subject.ifBlank { "task #${row.task.id}" }
+        val pending = row.roll?.pending ?: 0
+        val resolved = (row.roll?.kept ?: 0) + (row.roll?.undone ?: 0)
+        return JPopupMenu().apply {
+            add(menuItem("Accept — keep this task’s ${pending} pending edit(s)") { ReviewOps.keepTask(project, session, taskId, label) }
+                .apply { isEnabled = pending > 0 })
+            add(menuItem("Reject — revert this task’s ${pending} pending edit(s)") { ReviewOps.undoTask(project, session, taskId, label) }
+                .apply { isEnabled = pending > 0 })
+            add(menuItem("Clear — drop this task’s ${resolved} resolved edit(s)") { ReviewOps.clearTask(project, session, taskId, label) }
+                .apply { isEnabled = resolved > 0 })
+            addSeparator()
+            add(menuItem("Clear resolved edits of every completed task") { ReviewOps.clearCompletedTasks(project, session) })
+            addSeparator()
+            add(menuItem("Chat About This Task") {
+                ReviewOps.chatContext(project, session, ChatRef.Task(taskId), "task “$label”")
+            })
+        }
+    }
 
     /** The session the RIGHT detail is showing — a fleet row can name a sibling worktree's session, and
      *  the session-scoped tabs (Tasks, Processes) do NOT follow it. */
@@ -547,7 +663,10 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         } else {
             ""
         }
-        tasksDesc.text = "<html>$TASKS_DESC$note</html>"
+        // A picked ask filters the fleet, the runs and the shells — but NOT the task list, because a
+        // prompt slice carries no task-id set. Saying so is the difference between a scope and a lie.
+        val promptNote = if (scopedPrompt() != null) " <b>Not filtered by the picked prompt — an ask names no tasks.</b>" else ""
+        tasksDesc.text = "<html>$TASKS_DESC$note$promptNote</html>"
         processesDesc.text = "<html>$PROCESSES_DESC$note</html>"
     }
 
@@ -565,13 +684,13 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             // than asking about an id that will come back "no such task".
             is NavSel.Task -> sel.id.takeIf { it.isNotBlank() }?.let { id -> active?.let { ObservatoryService.FeedRef(it, "task", id) } }
             is NavSel.Process -> active?.let { ObservatoryService.FeedRef(it, "process", sel.id) }
-            // No feed for a request: core's `feed --kind` answers for agents, workflows, tasks, shells and
+            // No feed for a prompt: core's `feed --kind` answers for agents, workflows, tasks, shells and
             // the session — not for a turn. Rather than tail one of those and label it this ask's window,
             // the pane detaches: an absent feed renders absent.
         }
     }
 
-    /** Force the Overview toolbar to recompute its labels (chapter scope) + nav counters immediately. */
+    /** Force the Overview toolbar to recompute its labels (prompt scope) + nav counters immediately. */
     @Suppress("DEPRECATION") // updateActionsImmediately: still the way to force a toolbar refresh
     private fun refreshOverviewToolbar() {
         overviewToolbars.forEach { it.updateActionsImmediately() }
@@ -624,7 +743,8 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         val mt = service.multitask(force)
         val cm = service.changemap(force)
         val ps = service.processes(force)
-        val rq = service.requests(force)
+        val rq = service.prompts(force)
+        val ss = service.sessions(force)
         // The feed rides this same tick — no timer of its own. A finished ('audit') feed is not refetched
         // at all: the service hands the recorded one back, so a completed run stops costing a spawn.
         val fd = feedRef()?.let { service.feed(it, force) }
@@ -633,8 +753,9 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             map = cm
             feed = fd
             lastProcesses = ps
-            lastRequests = rq
+            lastPrompts = rq
             repaintNav(mt)
+            repaintSessions(ss)
             renderDetail()
             refreshOverviewToolbar() // keep the nav counters + scoped labels live on store changes
         }
@@ -651,7 +772,7 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             // …and the detail selection with them. The fleet lists EVERY sibling session in this repo, so a
             // row picked against the old session still resolves after the switch and would keep the detail
             // pinned to the session you just left — silently the wrong change-map.
-            selected = NavSel.Main; pickedChapter = null
+            selected = NavSel.Main
         }
         if (self != null) lastSelfSession = self
         lastResult = res
@@ -677,10 +798,10 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         fleetRoot.removeAllChildren()
         val collisionFiles = res?.collisions?.map { it.file }?.toHashSet() ?: emptySet()
         val allAgents = res?.agents ?: emptyList()
-        // Under an ask scope: only THIS window's session can own the request (a sibling worktree's
+        // Under an ask scope: only THIS window's session can own the prompt (a sibling worktree's
         // session is its own conversation, answering to nobody who typed here), and its subagent rows
         // narrow to the ones that ask spawned.
-        val rq = scopedRequest()
+        val rq = scopedPrompt()
         val scopedAgents =
             if (rq == null) allAgents
             else allAgents.filter { self == null || it.session == self }
@@ -701,7 +822,7 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
                 if (hiddenAgents > 0) bits.add("$hiddenAgents sibling session${if (hiddenAgents == 1) "" else "s"}")
                 if (hiddenSubs > 0) bits.add("$hiddenSubs subagent${if (hiddenSubs == 1) "" else "s"}")
                 fleetRoot.insert(
-                    DefaultMutableTreeNode(ScopeInfo("${bits.joinToString(" · ")} hidden — not started by request #${rq.index}")),
+                    DefaultMutableTreeNode(ScopeInfo("${bits.joinToString(" · ")} hidden — not started by prompt #${rq.index}")),
                     0,
                 )
             }
@@ -727,7 +848,7 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         // Folded by Clear completed — dismissed, never deleted, and the tab header says how many are
         // hidden so a shrunken list never reads as "these never happened". A shell that goes back to
         // running would reappear, the same rule the fleet's dismiss uses.
-        val rqP = scopedRequest()
+        val rqP = scopedPrompt()
         // Under an ask scope: the shells that ask launched. Attribution is by START, so a long-lived
         // shell never migrates to a later ask just because it was still running when that one arrived.
         val scoped = (res?.processes ?: emptyList()).let { list -> if (rqP == null) list else list.filter { it.id in rqP.processIds } }
@@ -741,14 +862,16 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         processesModel.clear()
         shown.forEach { processesModel.addElement(it) }
         processesList.emptyText.text = when {
-            rqP != null && scoped.isEmpty() -> "Request #${rqP.index} launched no background shell"
+            rqP != null && scoped.isEmpty() -> "Prompt #${rqP.index} launched no background shell"
             activeOnly && all.isEmpty() ->
                 "No running shells" + (if (exitedHidden > 0) " — clear Active only to see the $exitedHidden that ${if (exitedHidden == 1) "has" else "have"} exited" else "")
             folded > 0 && shown.isEmpty() -> "Every shell has been cleared from this list — click the Processes tab header to bring them back"
             else -> processesEmptyText(res)
         }
         if (!::navTabs.isInitialized) return
-        val present = navTabs.tabCount > PROCESSES_TAB
+        // Presence is asked of the COMPONENT, never of the tab count: Sessions is always mounted, so a
+        // count-based test would report Processes present before it has ever been added.
+        val present = navTabs.indexOfComponent(processesPane) >= 0
         if (res == null && !present) return // never answered — no tab to add or badge
         if (!present) {
             navTabs.addTab("Processes", processesPane)
@@ -778,30 +901,84 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         else -> "The claude-observatory CLI on PATH did not answer `processes --json` — update it to list background shells"
     }
 
-    /** Paint the Tasks tab (the session's numbered task list, newest first) and badge the tab with
-     *  done/total. Each row joins its change-map chapter by chapterId (tasks ARE chapters) for per-task
-     *  ±/edits. Completed tasks fold behind a "N done · show all" row; Active-only hides them outright
-     *  (the same semantics the fleet's filters use). */
+    /** Paint the Tasks tab (the session's numbered task list) and badge the tab with done/total. Each row
+     *  joins core's STRICT per-task rollup by taskId, so its ±/edit counts cover exactly the edits captured
+     *  while that to-do was in progress — nothing is swept in from around it. Completed tasks fold behind a
+     *  "N done · show all" row; Active-only hides them outright (the fleet's filter semantics).
+     *
+     *  A picked ask does NOT filter this list: a prompt slice carries no task-id set, and quietly showing a
+     *  subset would state an attribution core never made. The scope note above the list says so. */
     private fun repaintTasks(tasks: List<SessionTask>) {
         lastTasks = tasks
-        val chBy = map?.chapters?.associateBy { it.id } ?: emptyMap()
-        // Under an ask scope: the to-dos that ask worked in — the ones its edits landed under plus any
-        // in flight while it was being answered (core's chapterIds). A task IS a chapter here (0.8.3).
-        val rqT = scopedRequest()
-        val scopedTasks =
-            if (rqT == null) tasks
-            else tasks.filter { it.chapterId in rqT.chapterIds }
-        val (done, active) = scopedTasks.partition { it.status == "completed" }
+        val rollBy = map?.rollupByTask?.filter { it.taskId != null }?.associateBy { it.taskId } ?: emptyMap()
+        val (done, active) = tasks.partition { it.status == "completed" }
         tasksModel.clear()
-        active.forEach { tasksModel.addElement(TaskRow(it, chBy[it.chapterId])) }
-        if (rqT != null && scopedTasks.isEmpty()) tasksList.emptyText.text = "Request #${rqT.index} worked in no task on the list"
+        // An empty list means three different things and must not read as one: the session planned
+        // nothing, Active only is hiding a finished plan, or the payload has not landed yet.
+        tasksList.emptyText.text = when {
+            tasks.isNotEmpty() && activeOnly ->
+                "Every task is finished — Active only is hiding ${done.size} completed task(s); untoggle it to see them"
+            else -> "No tasks — this session plans with a task list only when Claude creates one"
+        }
+        active.forEach { tasksModel.addElement(TaskRow(it, rollBy[it.taskId])) }
         if (!activeOnly && done.isNotEmpty()) {
             tasksModel.addElement(DoneTasksToggle(done.size, tasksOpen))
-            if (tasksOpen) done.forEach { tasksModel.addElement(TaskRow(it, chBy[it.chapterId])) }
+            if (tasksOpen) done.forEach { tasksModel.addElement(TaskRow(it, rollBy[it.taskId])) }
         }
         if (::navTabs.isInitialized && navTabs.tabCount > TASKS_TAB) {
-            navTabs.setTitleAt(TASKS_TAB, if (scopedTasks.isEmpty()) "Tasks" else "Tasks ${done.size}/${scopedTasks.size}")
+            navTabs.setTitleAt(TASKS_TAB, if (tasks.isEmpty()) "Tasks" else "Tasks ${done.size}/${tasks.size}")
         }
+    }
+
+    /** Paint the Sessions tab: this workspace's sessions, newest conversation first, with the live one
+     *  marked. The rows come from the stat-only `sessions --json` listing — no session's edit log is read
+     *  to build them, which is what makes opening this tab (and the Switch Session popup) instant. */
+    private fun repaintSessions(res: SessionsResult?) {
+        val rows = res?.sessions ?: emptyList()
+        sessionsList.emptyText.text = when {
+            res != null -> "No sessions for this workspace yet — this fills in when Claude Code first edits a file here"
+            !service().sessionsAttempted -> "Reading this workspace’s sessions…"
+            else -> "The claude-observatory CLI on PATH did not answer `sessions --json` — update it to list sessions"
+        }
+        sessionsModel.clear()
+        if (res != null) sessionsModel.addElement(AutoSessionRow)
+        rows.forEach { sessionsModel.addElement(it) }
+        val tabIdx = navTabs.indexOfComponent(sessionsPane)
+        if (tabIdx >= 0) navTabs.setTitleAt(tabIdx, if (rows.isEmpty()) "Sessions" else "Sessions ${rows.size}")
+        // Mark which row the observatory is on now (the pinned one, else the live one) without firing the
+        // selection listener — restoring a highlight must never re-pin anything.
+        val pinnedId = com.cellobservatory.observatory.settings.ObservatorySettings.instance.state.session
+            ?.takeIf { it.isNotBlank() }
+            ?: rows.firstOrNull { it.current }?.id
+        suppressSel = true
+        val idx = rows.indexOfFirst { it.id == pinnedId }
+        // The model is [Auto] + rows when the CLI answered, so a row index is one short of its model
+        // index. Selecting `idx` highlighted the row ABOVE the session under review — and since the
+        // Enter handler acts on the selected value, it re-pinned that neighbour.
+        sessionsList.selectedIndex = if (idx < 0) -1 else idx + (if (res != null) 1 else 0)
+        suppressSel = false
+        // Pinned to a session this workspace has no row for (another repo's, or one since dropped): the
+        // panels are showing it, so say which, instead of leaving every row unhighlighted with no reason.
+        // Only once a listing has ANSWERED: before that, "not in this workspace" is a claim about a
+        // payload we do not have. (Same three-state discipline as the empty text above.)
+        sessionsDesc.text = if (res != null && pinnedId != null && idx < 0) {
+            "<html>$SESSIONS_DESC <b>Reviewing ${pinnedId.take(8)} — recorded for another workspace.</b></html>"
+        } else {
+            "<html>$SESSIONS_DESC</html>"
+        }
+    }
+
+    /** Pin the review to [row]'s session, or to NOTHING ([row] null) to follow whichever session is
+     *  newest. Writing the setting is the whole action: every surface re-reads it on the refresh that
+     *  follows, so the edits, the change map, the feed and the audits all move together. */
+    private fun pinSession(row: SessionRow?) {
+        val settings = com.cellobservatory.observatory.settings.ObservatorySettings.instance
+        if (settings.state.session == row?.id) return
+        settings.state.session = row?.id
+        for (p in com.intellij.openapi.project.ProjectManager.getInstance().openProjects) {
+            ObservatoryService.getInstance(p).refresh(force = true)
+        }
+        ReviewOps.notify(project, row?.let { "Reviewing “${it.displayName}”" } ?: "Following this workspace’s newest session")
     }
 
     /** Paint the Workflows tab: one node per run — its INFORMATIVE name (description/summary) · agents ·
@@ -809,13 +986,13 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
      *  label + tokens/time/edits. Thin — builds userObject nodes; [WorkflowRenderer] paints them. */
     private fun repaintWorkflows(workflows: List<WorkflowRun>?) {
         workflowsRoot.removeAllChildren()
-        val rqW = scopedRequest()
+        val rqW = scopedPrompt()
         // Under an ask scope: the runs THAT ask started (core attributes by start, so a run still going
         // stays with the ask that launched it).
         val allWf = (workflows ?: emptyList()).let { list -> if (rqW == null) list else list.filter { it.id in rqW.workflowIds } }
         val shownWf = allWf.filter { MultitaskFilter.showWorkflow(it, activeOnly, dismissedWorkflows) }
         if (rqW == null) workflowsInfoNode(allWf, shownWf)?.let { workflowsRoot.add(it) }
-        else if (allWf.isEmpty()) workflowsRoot.add(DefaultMutableTreeNode(ScopeInfo("Request #${rqW.index} started no workflow run")))
+        else if (allWf.isEmpty()) workflowsRoot.add(DefaultMutableTreeNode(ScopeInfo("Prompt #${rqW.index} started no workflow run")))
         shownWf.forEach { w ->
             val node = DefaultMutableTreeNode(WfRunRow(w))
             val grouped = HashSet<String>()
@@ -835,15 +1012,15 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
     }
 
     /**
-     * The ask the Requests window has picked, resolved against THIS payload's per-request slices.
+     * The ask the Prompts window has picked, resolved against THIS payload's per-prompt slices.
      *
      * Null when nothing is picked — and also when the payload cannot describe the pick (an older CLI
-     * with no `requests` in `changemap --json`). Both mean the same thing here: nothing is filtered. A
+     * with no `prompts` in `changemap --json`). Both mean the same thing here: nothing is filtered. A
      * panel that showed a scope banner over unfiltered rows would be asserting something untrue.
      */
-    private fun scopedRequest(): ChangeMapRequest? {
-        val id = service().selectedRequestId ?: return null
-        return map?.requests?.firstOrNull { it.id == id }
+    private fun scopedPrompt(): ChangeMapPrompt? {
+        val id = service().selectedPromptId ?: return null
+        return map?.prompts?.firstOrNull { it.id == id }
     }
 
     /** Re-select the nav row for the current [selected] after a reload wiped the selection (best-effort). */
@@ -905,7 +1082,10 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             // choice. Selecting a row inside the filtered nav still re-points the FEED, which doesn't
             // conflict with it.
             val td = if (m == null || feedOnly) null
-                else scopedRequest()?.let { requestTabData(it, m) } ?: (tabDataFor(selected, m) ?: tabDataFor(NavSel.Main, m))
+                else scopedPrompt()?.let { promptTabData(it, m) } ?: (tabDataFor(selected, m) ?: tabDataFor(NavSel.Main, m))
+            // A CHANGE of scope folds the strip; a refresh of the same scope leaves it as the reader left it.
+            val scope = "${service().selectedPromptId ?: ""}|$selected"
+            if (scope != stripScope) { stripScope = scope; stripExpanded = false }
             if (td == null) {
                 if (!feedOnly) detailHost.add(emptyLabel("No edits in this session yet — this fills in as Claude edits files"), BorderLayout.CENTER)
             } else {
@@ -933,27 +1113,21 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
      *  back to Main). */
     private fun tabDataFor(sel: NavSel, m: ChangeMap): TabData? = when (sel) {
         NavSel.Main ->
-            if (m.summary == null && m.files.isEmpty() && m.chapters.isEmpty()) null
+            if (m.summary == null && m.files.isEmpty()) null
             else TabData(
                 session = m.summary?.session ?: "", summary = m.summary, files = m.files, modules = m.modules,
-                chapters = m.chapters,
-                compactions = m.compactions,
             )
         is NavSel.Agent -> m.agents.firstOrNull { it.session == sel.session }?.let { agentTabData(it) }
         is NavSel.Subagent -> m.agents.firstOrNull { it.session == sel.session }?.let { agentTabData(it) }
         is NavSel.Workflow -> m.workflows.firstOrNull { it.id == sel.id }?.let { workflowTabData(it, m) }
-        // Neither a task, a background shell, nor a request owns a change-map slice — a task's edits live
-        // in the session map's chapter for it, a shell makes none, and core slices by agent/workflow, not
-        // by turn. The caller falls back to the session map (a request narrows the SUMMARY, not the map).
-        // Neither a task nor a background shell owns a change-map slice — a task's edits live in the
-        // session map's chapter for it, and a shell makes none. The caller falls back to the session map.
+        // Neither a task nor a background shell owns a change-map slice: core slices by agent and by
+        // workflow, and a shell edits nothing at all. The caller falls back to the session map.
         is NavSel.Task, is NavSel.Process -> null
     }
 
-    /** One ASK's detail: its own rollup, its churn-ranked files and folders, and its edits regrouped by
-     *  chapter — all aggregated in core (ChangeMapRequest), so this only re-labels them. Compactions are
-     *  filtered to the ask's window: one that happened while it was being answered is part of its story. */
-    private fun requestTabData(r: ChangeMapRequest, m: ChangeMap): TabData {
+    /** One ASK's detail: its own rollup and its churn-ranked files and folders — all aggregated in core
+     *  (ChangeMapPrompt), so this only re-labels them. */
+    private fun promptTabData(r: ChangeMapPrompt, m: ChangeMap): TabData {
         val summary = ChangeMapSummary(
             session = m.summary?.session ?: "", title = "#${r.index} ${r.title}", units = r.rollup.edits,
             pending = r.rollup.pending, kept = r.rollup.kept, undone = r.rollup.undone,
@@ -962,20 +1136,14 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         )
         return TabData(
             session = m.summary?.session ?: "", summary = summary, files = r.files, modules = r.modules,
-            chapters = r.chapters,
-            compactions = m.compactions.filter { it.ts >= r.ts && (r.endTs == 0L || it.ts < r.endTs) },
         )
     }
 
     private fun agentTabData(a: ChangeMapAgent) = TabData(
         session = a.session, summary = a.summary, files = a.files, modules = a.modules,
-        chapters = a.chapters,
-        compactions = a.compactions,
     )
 
-    /** One workflow's detail: a synthetic summary from its rollup, its churn-ranked touched files, and its
-     *  OWN chapter ribbon (w.chapters — the run's edits regrouped by session chapter, aggregated in core).
-     *  Total chapters partition the run exactly, so the old residual "unassigned" math is gone. */
+    /** One workflow's detail: a synthetic summary from its rollup and its churn-ranked touched files. */
     private fun workflowTabData(w: ChangeMapWorkflow, m: ChangeMap): TabData {
         val r = w.rollup
         val summary = ChangeMapSummary(
@@ -984,10 +1152,7 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         )
         return TabData(
             session = m.summary?.session ?: "", summary = summary, files = w.files, modules = emptyList(),
-            chapters = w.chapters,
             running = w.running,
-            // No compaction default is filled in here: compactions are a session-scoped fact core does
-            // not slice per workflow run, and attributing the session's to one run would overstate it.
         )
     }
 
@@ -1013,19 +1178,6 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
 
     /** The session selector — shows the human-readable session NAME in FULL (title / first prompt), the
      *  raw id in the tooltip (VS Code parity, 2026-07-17); clicking it opens the Switch-session chooser. */
-    private fun sessionSelectorAction(): AnAction = object : AnAction("Session", null, AllIcons.Vcs.Branch), DumbAware {
-        override fun getActionUpdateThread() = ActionUpdateThread.EDT
-        @Suppress("OVERRIDE_DEPRECATION") // displayTextInToolbar: still honored; renders the session name
-        override fun displayTextInToolbar() = true
-        override fun update(e: AnActionEvent) {
-            val title = map?.summary?.title?.takeIf { it.isNotBlank() }
-            val sess = map?.summary?.session?.takeIf { it.isNotBlank() } ?: service().currentSession()
-            e.presentation.text = title ?: ("session " + (sess?.take(8) ?: "—"))
-            e.presentation.description = (title?.let { "$it — " } ?: "") + "session ${sess ?: "—"} · click to switch"
-        }
-        override fun actionPerformed(e: AnActionEvent) = ReviewOps.chooseSession(project, fleetTree)
-    }
-
     /** Export — a shareable review summary (kept / reverted per file) as markdown, opened in an editor tab
      *  (mirrors the VS Code exportSummary; core.reviewSummaryMarkdown via `summary --markdown`). */
     private fun exportAction(): AnAction =
@@ -1047,28 +1199,35 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             override fun actionPerformed(e: AnActionEvent) = run()
         }
 
-    /** A top-toolbar bulk action that RETARGETS to the picked ribbon chapter when one is selected: it runs
-     *  [chapterRun] against that chapter (task-keep/undo/clear on chapter.id) and presents [scopedText];
-     *  with nothing picked it runs [sessionRun] session-wide and presents [baseText]. */
+    /** A top-toolbar bulk action that RETARGETS to the ask the Prompts window has picked: it runs
+     *  [promptRun] against that ask's own edits and presents [scopedText]; with nothing picked it runs
+     *  [sessionRun] session-wide and presents [baseText]. */
     private fun bulkAction(
         baseText: String,
         icon: Icon,
         scopedText: (String) -> String,
         sessionRun: () -> Unit,
-        chapterRun: (PickedChapter) -> Unit,
+        promptRun: (ChangeMapPrompt) -> Unit,
     ): AnAction = object : AnAction(baseText, null, icon), DumbAware {
         override fun getActionUpdateThread() = ActionUpdateThread.EDT
         @Suppress("OVERRIDE_DEPRECATION") // displayTextInToolbar: still honored; renders the scoped label
         override fun displayTextInToolbar() = true
         override fun update(e: AnActionEvent) {
-            val pick = pickedChapter
-            e.presentation.text = if (pick != null) scopedText(pick.title) else baseText
+            val pick = scopedPrompt()
+            e.presentation.text = if (pick != null) scopedText("#${pick.index}") else baseText
         }
 
         override fun actionPerformed(e: AnActionEvent) {
-            val pick = pickedChapter
-            if (pick != null) chapterRun(pick) else sessionRun()
+            val pick = scopedPrompt()
+            if (pick != null) promptRun(pick) else sessionRun()
         }
+    }
+
+    /** The store records one PICKED ask attributed to — resolved against the live log so a bulk op acts on
+     *  what is there now, not on what the payload said when it was fetched. */
+    private fun editsOfPrompt(r: ChangeMapPrompt): List<EditRecord> {
+        val ids = r.editIds.toHashSet()
+        return service().log().filter { it.id in ids }.sortedBy { it.id }
     }
 
     private fun service() = ObservatoryService.getInstance(project)
@@ -1152,9 +1311,9 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         override fun toString(): String = text
     }
 
-    /** The ask-scope note ("N hidden — not started by request #7"). Deliberately NOT a [FilterInfo]:
+    /** The ask-scope note ("N hidden — not started by prompt #7"). Deliberately NOT a [FilterInfo]:
      *  clicking that one restores what "Clear completed" folded away, which has nothing to do with a
-     *  request scope, and a row whose click does something unrelated to what it says is worse than none. */
+     *  prompt scope, and a row whose click does something unrelated to what it says is worse than none. */
     private class ScopeInfo(val text: String) {
         override fun toString(): String = text
     }
@@ -1324,7 +1483,7 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
     }
 
     /** Paints one Tasks-tab row: status glyph (the fleet's state colors) · #id · subject (struck through
-     *  when completed) · per-task ±/edits from its chapter · the in-progress activeForm · a blocked-by
+     *  when completed) · per-task ±/edits from its strict rollup · the in-progress activeForm · a blocked-by
      *  note. Tooltip = the description. */
     private class TaskRowRenderer : com.intellij.ui.ColoredListCellRenderer<Any>() {
         override fun customizeCellRenderer(
@@ -1348,14 +1507,54 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
                 clip(t.subject, 64),
                 if (done) SimpleTextAttributes(SimpleTextAttributes.STYLE_STRIKEOUT, JBColor.GRAY) else SimpleTextAttributes.REGULAR_ATTRIBUTES,
             )
-            row.chapter?.takeIf { it.edits > 0 }?.let { ch ->
-                append("  +${ch.added}", MT_ADD)
-                append(" −${ch.removed}", MT_REM)
-                append(" · ${ch.edits} edit${if (ch.edits == 1) "" else "s"}" + if (ch.pending > 0) " · ${ch.pending} pending" else "", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
+            row.roll?.takeIf { it.edits > 0 }?.let { r ->
+                append("  +${r.added}", MT_ADD)
+                append(" −${r.removed}", MT_REM)
+                append(" · ${r.edits} edit${if (r.edits == 1) "" else "s"}" + if (r.pending > 0) " · ${r.pending} pending" else "", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
             }
             if (wip && t.activeForm != null) append("  ${t.activeForm}…", SimpleTextAttributes(SimpleTextAttributes.STYLE_ITALIC, MT_WORKING))
             if (t.blockedBy.isNotEmpty()) append("  blocked ×${t.blockedBy.size}", SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, MT_ATTENTION))
             toolTipText = t.description.ifBlank { t.subject }
+        }
+    }
+
+    /** Paints one Sessions-tab row: ● live / ○ past · Claude's own title for the session · when its
+     *  conversation was last active. No pending count: the listing is deliberately stat-only (that count
+     *  is what used to make opening this list slow), and the row you pick shows its own counts at once. */
+    private class SessionRowRenderer(private val pinned: () -> String?) : com.intellij.ui.ColoredListCellRenderer<Any>() {
+        override fun customizeCellRenderer(
+            list: javax.swing.JList<out Any>, value: Any?, index: Int, selected: Boolean, hasFocus: Boolean,
+        ) {
+            if (value === AutoSessionRow) {
+                val following = pinned() == null
+                append(
+                    if (following) "● " else "○ ",
+                    SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, if (following) MT_WORKING else JBColor.GRAY),
+                )
+                append("Auto — newest session in this workspace", SimpleTextAttributes.REGULAR_ATTRIBUTES)
+                if (following) append("  following", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
+                toolTipText = "Follow whichever session is newest, instead of staying on one you picked."
+                return
+            }
+            val row = value as? SessionRow ?: return
+            append(
+                if (row.current) "● " else "○ ",
+                SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, if (row.current) MT_WORKING else JBColor.GRAY),
+            )
+            append(row.displayName, SimpleTextAttributes.REGULAR_ATTRIBUTES)
+            // The same facts a fleet row carries, in the same style: what it did, then how long ago.
+            if (row.edits > 0) {
+                append("  ${row.edits} edit${if (row.edits == 1) "" else "s"}", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
+                if (row.files > 0) append(" · ${row.files} file${if (row.files == 1) "" else "s"}", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
+                if (row.pending > 0) append(" · ${row.pending}⧗", SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, CM_PENDING))
+                else append(" · reviewed", SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, CM_KEPT))
+            } else {
+                append("  no edits", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
+            }
+            append("  ${relTime(row.lastActiveMs)}" + if (row.current) "  · active" else "", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
+            toolTipText = "${row.displayName}\nsession ${row.id}" +
+                (if (row.current) "\nthe live session for this workspace" else "") +
+                "\nClick to review this session — it becomes the subject of every observatory window."
         }
     }
 
@@ -1394,38 +1593,14 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         val summary: ChangeMapSummary?,
         val files: List<ChangeMapFile>,
         val modules: List<ChangeMapModule>,
-        /** The named chapter ribbon — TOTAL for every slice kind (a workflow carries its own rollup). */
-        val chapters: List<ChangeMapChapter>,
         /** Non-null on a workflow slice — its run state, shown as a badge in the chips row. */
         val running: Boolean? = null,
-        /** Context compactions in this slice, oldest first — markers spliced into the chapter ribbon. */
-        val compactions: List<CompactBoundary> = emptyList(),
     )
 
-    /** One slice's Overview detail: chips headline · named-chapter ribbon · module strip · churn ledger. */
+    /** One slice's Overview detail: chips headline · folder strip · churn-ranked file ledger · summary. */
     private inner class AgentDetail(private val data: TabData) : JPanel(BorderLayout()) {
         private var modFilter: String? = null
 
-        // Scrollable + tracksViewportWidth so the ribbon fills its scroll pane's width — the empty-area
-        // click (clear the chapter pick) and the picked-row highlight keep working edge to edge.
-        private val ribbon = object : JPanel(), javax.swing.Scrollable {
-            override fun getPreferredScrollableViewportSize(): Dimension = preferredSize
-            override fun getScrollableUnitIncrement(visible: java.awt.Rectangle, orientation: Int, direction: Int) = JBUI.scale(18)
-            override fun getScrollableBlockIncrement(visible: java.awt.Rectangle, orientation: Int, direction: Int) = visible.height
-            override fun getScrollableTracksViewportWidth() = true
-            override fun getScrollableTracksViewportHeight() = false
-        }.apply { layout = BoxLayout(this, BoxLayout.Y_AXIS); border = JBUI.Borders.empty(2, 0) }
-        // The ribbon scrolls past ~150px instead of squeezing the ledger out (VS Code .cm-ribbon's
-        // max-height + overflow-y:auto); hidden as a whole when the ribbon has no rows.
-        private val ribbonScroll = JBScrollPane(
-            ribbon, ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED, ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER,
-        ).apply {
-            border = JBUI.Borders.empty()
-            isOpaque = false
-            viewport.isOpaque = false
-            maximumSize = Dimension(Int.MAX_VALUE, JBUI.scale(150))
-        }
-        private var ribOpen = false
         private val strip = StripBar()
         private val listModel = DefaultListModel<ChangeMapFile>()
         // Held directly — JBList wraps the assigned renderer (ExpandedItemListCellRendererWrapper), so
@@ -1439,7 +1614,6 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
 
         // Section captions (VS Code .cm-caption) + the bottom summary bar. The caption tooltips describe
         // each section; the summary names the current scope's pending/accepted/file/folder totals.
-        private val capChapters = caption("Chapters", "Chapters — the subtasks (Claude’s to-dos / tasks) this work fell under. Each chip shows ±lines · edits · pending; click it to review that chapter in the nav bar.")
         private val capFolders = caption("Folders", "Folders — the directories Claude changed. Color = review status (amber pending · green kept · red reverted); click a tile to filter the files below and open that folder in the nav bar.")
         private val capFiles = caption("Files", "Files — every changed file, ranked by churn. Dot = review status, bar = relative churn, +N = lines, ⧗/✓ = pending/reviewed; click a row to open the edit.")
         private val summaryLabel = JBLabel().apply { font = JBUI.Fonts.miniFont(); border = JBUI.Borders.empty(2, 4, 2, 4) }
@@ -1453,16 +1627,28 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             alignmentX = Component.LEFT_ALIGNMENT
         }
 
+        /** The strip's viewport: expanded, a repo-wide session runs to dozens of rows, so the strip is
+         *  capped at five and scrolls — opening the folders never pushes the file ledger out of view. */
+        private val stripScroll = object : JBScrollPane(strip) {
+            override fun getPreferredSize(): Dimension =
+                Dimension(JBUI.scale(200), minOf(strip.preferredSize.height, JBUI.scale(18 * 5)))
+            override fun getMaximumSize(): Dimension = Dimension(Int.MAX_VALUE, preferredSize.height)
+        }.apply {
+            border = JBUI.Borders.empty()
+            isOpaque = false
+            viewport.isOpaque = false
+            horizontalScrollBarPolicy = ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER
+            verticalScrollBarPolicy = ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED
+        }
+
         init {
-            ribbonScroll.alignmentX = Component.LEFT_ALIGNMENT
             strip.alignmentX = Component.LEFT_ALIGNMENT
+            stripScroll.alignmentX = Component.LEFT_ALIGNMENT
             val north = JPanel().apply {
                 layout = BoxLayout(this, BoxLayout.Y_AXIS)
                 border = JBUI.Borders.empty(2, 4)
-                add(capChapters)   // above the Chapters ribbon
-                add(ribbonScroll)
                 add(capFolders)    // above the Folders strip
-                add(strip)
+                add(stripScroll)
                 add(capFiles)      // above the Files ledger (which is the CENTER list below)
             }
             add(north, BorderLayout.NORTH)
@@ -1493,62 +1679,12 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
                     Navigate.openFileAtEdit(project, data.session, rec)
                 }
             })
-            // Click the ribbon's empty area → clear any chapter scope (back to session-wide bulk actions).
-            ribbon.addMouseListener(object : MouseAdapter() {
-                override fun mouseClicked(e: MouseEvent) {
-                    if (pickedChapter != null) { pickedChapter = null; paintTab(); refreshOverviewToolbar() }
-                }
-            })
             paintTab()
         }
 
         private fun paintTab() {
-            // Drop a chapter pick whose chapter no longer exists in this slice (accepted-away / switched).
-            // Picks are keyed by the CHAPTER id — the WYSIWYG key reviewEditIds resolves (synthetic incl.).
-            pickedChapter?.let { p -> if (data.chapters.none { it.id == p.id }) pickedChapter = null }
-
-            // The ribbon — named chapters as a VERTICAL stacked list (one chapter per row: dot · title ·
-            // ±counts · Accept/Reject/Clear). Chapters are TOTAL (0.8.0): core appends a synthetic session
-            // chapter for work outside any to-do, so no "unassigned" row exists in ANY slice — agent, main,
-            // or workflow (a workflow carries its own core-built chapter rollup). Settled ("done") chapters
-            // collapse behind a "N done" toggle so many stay readable.
-            ribbon.removeAll()
-            val done = ArrayList<ChangeMapChapter>()
-            val active = ArrayList<ChangeMapChapter>()
-            data.chapters.forEach { ch ->
-                // Task-born chapters live on the Tasks tab — never duplicate them here (VS Code parity);
-                // and planned zero-edit rows stay hidden like VS Code's ribbon filter.
-                if (ch.fromTask) return@forEach
-                // Active-only scopes the DETAIL, not just the nav (VS Code parity): with it on, a chapter
-                // with nothing left to review drops out of the ribbon entirely.
-                if (activeOnly) {
-                    if (ch.pending == 0) return@forEach
-                } else if (ch.edits == 0 && ch.status != "wip") {
-                    return@forEach
-                }
-                if (ch.edits > 0 && ch.pending == 0 && ch.undone == 0) done.add(ch) else active.add(ch)
-            }
-            val marks = placeCompactions(active, done)
-            // Compactions that no visible row can carry lead the ribbon as ONE marker — they happened
-            // before everything on screen, so parking them at the tail would put them after chapters they
-            // actually preceded (VS Code's header marker, agreed across both editors).
-            marks.unplaced.takeIf { it.isNotEmpty() }?.let { ribbon.add(compactHeadRow(it)) }
-            active.forEach { ch ->
-                ribbon.add(chapterRow(ch))
-                marks.after[ch.id]?.forEach { ribbon.add(compactRow(it, timePlaced = it.afterChapterId != ch.id)) }
-            }
-            if (done.isNotEmpty()) {
-                ribbon.add(doneToggle(done.size))
-                if (ribOpen) done.forEach { ch ->
-                    ribbon.add(chapterRow(ch))
-                    marks.after[ch.id]?.forEach { ribbon.add(compactRow(it, timePlaced = it.afterChapterId != ch.id)) }
-                }
-            }
-            ribbonScroll.isVisible = ribbon.componentCount > 0
-            capChapters.isVisible = ribbonScroll.isVisible
-
-            strip.isVisible = data.modules.isNotEmpty()
-            capFolders.isVisible = strip.isVisible
+            stripScroll.isVisible = data.modules.isNotEmpty()
+            capFolders.isVisible = stripScroll.isVisible
             strip.update(data.modules, modFilter)
 
             // The Search-edits filter narrows this ledger too (parity with the sidebar trees + VS Code),
@@ -1582,42 +1718,28 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             readout.text = notes.joinToString("  ·  ")
 
             refreshSummary()
-            ribbon.revalidate(); ribbon.repaint()
             strip.repaint()
             revalidate(); repaint()
         }
 
         /** The bottom summary bar: for the CURRENT scope, `[name ·] N pending · N accepted · [N reverted ·]
-         *  N files · N folders`. Scope precedence (VS Code renderSummary): a SELECTED request (the most
-         *  explicit pick there is — the user named the ask) → a picked chapter chip → else the nav-bar
-         *  Chapter axis's current chapter (unless a folder tile filters) → else an active folder filter →
-         *  else the whole visible view. A request/chapter/folder scope is NAMED; the whole view is unnamed. */
+         *  N files · N folders`. Scope precedence (VS Code renderSummary): a SELECTED prompt (the most
+         *  explicit pick there is — the user named the ask) → else an active folder filter → else the whole
+         *  visible view. A prompt or folder scope is NAMED; the whole view is unnamed. */
         fun refreshSummary() {
-            // A picked ask outranks every other scope — it is the most explicit thing the reader did.
-            // A folder-tile filter still narrows it further, so it only wins while none is active.
-            if (modFilter == null) scopedRequest()?.let { req -> paintRequestSummary(req); return }
-            val chapters = data.chapters
-            val navCh = if (modFilter == null) reviewNavBar.currentChapterId() else null
-            val chId = pickedChapter?.id ?: navCh
-            val ch = chId?.let { id -> chapters.firstOrNull { it.id == id } }
-            val sp: Int; val sk: Int; val su: Int; val nfiles: Int; val folders: Set<String>; val name: String?
-            if (ch != null) {
-                val seen = HashSet<String>()
-                val fol = HashSet<String>()
-                var nf = 0
-                for (f in data.files) if (f.chapters.contains(ch.id) && seen.add(f.rel)) { nf++; fol.add(f.moduleLabel) }
-                sp = ch.pending; sk = ch.kept; su = ch.undone; nfiles = nf; folders = fol
-                name = ch.title.ifBlank { null }
-            } else {
-                sp = lastShown.sumOf { it.pending }; sk = lastShown.sumOf { it.kept }; su = lastShown.sumOf { it.undone }
-                nfiles = lastShown.size; folders = lastShown.map { it.moduleLabel }.toHashSet(); name = modFilter
-            }
-            paintSummary(name, sp, sk, su, nfiles, folders.size)
+            // A picked ask outranks the folder filter — it is the more explicit thing the reader did — but
+            // a folder tile still narrows within it, so the ask only wins while no tile is active.
+            if (modFilter == null) scopedPrompt()?.let { req -> paintPromptSummary(req); return }
+            paintSummary(
+                modFilter,
+                lastShown.sumOf { it.pending }, lastShown.sumOf { it.kept }, lastShown.sumOf { it.undone },
+                lastShown.size, lastShown.map { it.moduleLabel }.toHashSet().size,
+            )
         }
 
-        /** The picked ask's scope — every number here is core's own (the per-request slice in
+        /** The picked ask's scope — every number here is core's own (the per-prompt slice in
          *  `changemap --json`), including the files and folders it touched. Nothing is recomputed. */
-        private fun paintRequestSummary(req: ChangeMapRequest) {
+        private fun paintPromptSummary(req: ChangeMapPrompt) {
             // Named by NUMBER only: the ask itself is on the scope banner above, whole and wrapped. A
             // one-line bar could only carry it by clipping it, which is the thing we stopped doing.
             paintSummary(
@@ -1640,291 +1762,156 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             summaryLabel.text = "<html>${parts.joinToString(" · ")}</html>"
         }
 
-        private fun rowPanel(): JPanel = JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(4), JBUI.scale(1))).apply {
-            isOpaque = false
-            alignmentX = Component.LEFT_ALIGNMENT
-            maximumSize = Dimension(Int.MAX_VALUE, JBUI.scale(24))
-        }
-
-        private fun miniButton(icon: Icon, tip: String, run: () -> Unit): JComponent =
-            javax.swing.JButton(icon).apply {
-                toolTipText = tip
-                margin = JBUI.insets(0, 3)
-                isFocusable = false
-                putClientProperty("JButton.buttonType", "square")
-                addActionListener { run() }
-            }
-
-        private fun withSession(run: (String) -> Unit) {
-            val s = data.session.takeIf { it.isNotBlank() }
-                ?: ObservatoryService.getInstance(project).currentSession()
-            if (s == null) ReviewOps.notify(project, "No active Claude Code session for this project", com.intellij.notification.NotificationType.WARNING)
-            else run(s)
-        }
-
-        /** Toggle the picked ribbon chapter, capturing this slice's session so the top toolbar's scoped
-         *  bulk actions target the right session; re-picking or clicking empty ribbon clears the scope. */
-        private fun toggleChapterPick(id: String, title: String) {
-            if (pickedChapter?.id == id) {
-                pickedChapter = null
-            } else {
-                val sess = data.session.takeIf { it.isNotBlank() }
-                    ?: ObservatoryService.getInstance(project).currentSession()
-                if (sess == null) {
-                    ReviewOps.notify(project, "No active Claude Code session for this project", com.intellij.notification.NotificationType.WARNING)
-                    return
-                }
-                pickedChapter = PickedChapter(sess, id, title)
-                reviewNavBar.revealChapter(id) // jump the nav-bar Chapter axis to this chapter (VS Code parity)
-            }
-            paintTab()
-            refreshOverviewToolbar()
-        }
-
-        /** One chapter row: [status dot] [title] [±counts] [Accept] [Reject] [Clear]. The actions
-         *  and the scoped pick key on ch.id and act WYSIWYG — core.reviewEditIds resolves exactly the
-         *  edits the row displays (the synthetic session chapter included, so a fully-reviewable ribbon).
-         *  A planned (edits==0) chapter is an informational ○ row. */
-        private fun chapterRow(ch: ChangeMapChapter): JComponent {
-            val (glyph, color) = when {
-                ch.edits == 0 -> "○" to UIUtil.getContextHelpForeground()
-                ch.pending > 0 -> "◐" to CM_PENDING
-                ch.undone > 0 -> "◑" to UIUtil.getContextHelpForeground()
-                else -> "●" to CM_KEPT
-            }
-            val title = ch.title.ifBlank { "chapter ${ch.index + 1}" }
-            val actable = ch.edits > 0
-            val picked = pickedChapter?.id == ch.id
-            val row = rowPanel()
-            if (picked) {
-                // Selected-chapter highlight — the top toolbar's bulk actions now scope to this chapter.
-                row.isOpaque = true
-                row.background = UIUtil.getListSelectionBackground(false)
-            }
-            row.add(JBLabel(glyph).apply { font = JBUI.Fonts.label(); foreground = color })
-            row.add(JBLabel(clipText(title + (if (ch.agent) " ●" else ""), 44)).apply {
-                font = JBUI.Fonts.label()
-                if (ch.synthetic) foreground = UIUtil.getContextHelpForeground() // dimmed — display-only
-                toolTipText = buildString {
-                    append(title)
-                    if (ch.synthetic) append("\nwork outside any to-do — attributed to the session")
-                    if (ch.edits > 0) {
-                        append("\n${ch.edits} edit(s) · +${ch.added} -${ch.removed}")
-                        if (ch.pending > 0) append(" · ${ch.pending} pending")
-                        if (ch.kept > 0) append(" · ${ch.kept} kept")
-                        if (ch.undone > 0) append(" · ${ch.undone} reverted")
-                    } else {
-                        append("\nplanned — no attributed edits yet")
-                    }
-                    if (actable) {
-                        append("\nClick to " + (if (picked) "clear the scope" else "scope the toolbar's bulk actions to this chapter"))
-                        append("\nRight-click to accept / reject / clear this chapter")
-                    }
-                }
-                if (actable) {
-                    addMouseListener(chapterMenu(ch.id, title))
-                    // Left-click a chapter with edits → pick it for the toolbar's chapter-scoped bulk actions
-                    // (click again, or empty ribbon, to clear). Planned (edits==0) chapters stay informational.
-                    cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
-                    addMouseListener(object : MouseAdapter() {
-                        override fun mouseClicked(e: MouseEvent) {
-                            if (e.button == MouseEvent.BUTTON1) toggleChapterPick(ch.id, title)
-                        }
-                    })
-                }
-            })
-            if (ch.edits > 0) {
-                row.add(JBLabel("+${ch.added} −${ch.removed}").apply { font = JBUI.Fonts.miniFont(); foreground = UIUtil.getContextHelpForeground() })
-            }
-            if (actable) {
-                // The chips ARE the bulk actions retargeted to this chapter — same glyphs + tints as the
-                // toolbar's Accept All / Revert All / Clear Resolved (VS Code chip parity, one icon per action).
-                row.add(miniButton(NavTint.ACCEPT_ALL, "Accept — keep the pending edits shown in this chapter") { withSession { s -> ReviewOps.keepTask(project, s, ch.id, title) } })
-                row.add(miniButton(NavTint.REVERT_ALL, "Reject — revert the pending edits shown in this chapter") { withSession { s -> ReviewOps.undoTask(project, s, ch.id, title) } })
-                row.add(miniButton(NavTint.CLEAR, "Clear — drop this chapter's resolved edits") { withSession { s -> ReviewOps.clearTask(project, s, ch.id, title) } })
-            }
-            return row
-        }
-
         /**
-         * Place the slice's compactions against the rows this ribbon is actually drawing. Core resolved
-         * each event to the chapter whose window CONTAINS it, but this ribbon drops chapters (task-born,
-         * zero-edit, the collapsed "done" rows, everything without pending work under Active only), so an
-         * anchor is often not on screen. The fallback is TIME, never array position: `chapters` is in plan
-         * order and the synthetic session chapter is appended last though its work usually starts first —
-         * so a marker clamps to the last visible chapter that had already STARTED when it happened.
+         * The module proportion strip: equal-width clickable chips, colour = worst-unreviewed-wins.
          *
-         * Only what genuinely precedes every visible window is left unplaced, for the head marker.
+         * It WRAPS. A segment narrower than [MIN_SEGMENT_PX] cannot hold a folder label, so rather than
+         * shrink into unreadable slivers the strip spills onto further rows — which is what keeps it
+         * legible in a narrow panel and what makes the expanded (every-folder) form usable at all. The
+         * churn-ranked tail folds into a "+K more" chip that OPENS the rest; a "show fewer" chip folds
+         * it back. Both chips are controls, never ledger filters.
          */
-        private fun placeCompactions(active: List<ChangeMapChapter>, done: List<ChangeMapChapter>): CompactionPlan {
-            if (data.compactions.isEmpty()) return CompactionPlan(emptyMap(), emptyList())
-            val visible = active + if (ribOpen) done else emptyList()
-            val ids = visible.mapTo(HashSet()) { it.id }
-            val after = HashMap<String, MutableList<CompactBoundary>>()
-            val unplaced = ArrayList<CompactBoundary>()
-            data.compactions.forEach { cb ->
-                val anchor = cb.afterChapterId?.takeIf { it in ids }
-                    ?: visible.filter { it.startTs in 1..cb.ts }.maxByOrNull { it.startTs }?.id
-                if (anchor == null) unplaced.add(cb) else after.getOrPut(anchor) { ArrayList() }.add(cb)
-            }
-            return CompactionPlan(after, unplaced)
-        }
-
-        /** The head marker for compactions no visible row can carry: one row stating that they happened
-         *  and how many, with every core-built label in its tooltip. Aggregated, never dropped — losing
-         *  context is the single most consequential thing that happens to a long session. */
-        private fun compactHeadRow(list: List<CompactBoundary>): JComponent {
-            val row = rowPanel()
-            row.add(JBLabel("⌁").apply { font = JBUI.Fonts.label(); foreground = MT_ATTENTION })
-            val head = "context compacted ×${list.size}" + if (list.size == 1) " · ${list[0].label}" else ""
-            row.add(JBLabel(clipText(head, 52)).apply {
-                font = JBUI.Fonts.miniFont()
-                foreground = UIUtil.getContextHelpForeground()
-                toolTipText = buildString {
-                    append("Context compacted before any chapter shown here:")
-                    list.forEach { append("\n  ${it.label}") }
-                    append("\nOlder turns were summarized away; the session continued from that summary.")
-                }
-            })
-            return row
-        }
-
-        /** One compaction marker between chapter rows: the moment the harness summarized older turns away
-         *  and carried on from the summary. The line is core's `label`, rendered verbatim — re-deriving the
-         *  numbers here is exactly how the two editors would start disagreeing about the same event. */
-        private fun compactRow(cb: CompactBoundary, timePlaced: Boolean): JComponent {
-            val row = rowPanel()
-            row.add(JBLabel("⌁").apply { font = JBUI.Fonts.label(); foreground = MT_ATTENTION })
-            row.add(JBLabel(clipText("context compacted · ${cb.label}", 52)).apply {
-                font = JBUI.Fonts.miniFont()
-                foreground = UIUtil.getContextHelpForeground()
-                toolTipText = buildString {
-                    append("Context compacted — ${cb.label}")
-                    if (cb.cumulativeDropped > 0) append("\n${fmtTok(cb.cumulativeDropped)} tokens dropped so far this session")
-                    append("\nOlder turns were summarized away; the session continued from that summary.")
-                    // Say when the position is INFERRED: the chapter core anchored it to isn't on screen,
-                    // so this row sits after the last chapter that had started by then, not inside it.
-                    if (timePlaced) append("\nThe chapter it happened in isn’t shown here — placed by time.")
-                }
-            })
-            return row
-        }
-
-        /** Right-click context menu on a chapter row: Accept / Reject / Clear — WYSIWYG over the
-         *  chapter's DISPLAYED edit set (keyed by ch.id; the synthetic session chapter included). */
-        private fun chapterMenu(taskId: String, title: String) = object : MouseAdapter() {
-            override fun mousePressed(e: MouseEvent) = maybePopup(e)
-            override fun mouseReleased(e: MouseEvent) = maybePopup(e)
-            private fun maybePopup(e: MouseEvent) {
-                if (!e.isPopupTrigger) return
-                val session = data.session.takeIf { it.isNotBlank() }
-                    ?: ObservatoryService.getInstance(project).currentSession() ?: return
-                javax.swing.JPopupMenu().apply {
-                    add(menuItem("Accept — keep this chapter's pending edits") { ReviewOps.keepTask(project, session, taskId, title) })
-                    add(menuItem("Reject — revert this chapter's pending edits") { ReviewOps.undoTask(project, session, taskId, title) })
-                    add(menuItem("Clear — drop this chapter's resolved edits") { ReviewOps.clearTask(project, session, taskId, title) })
-                }.show(e.component, e.x, e.y)
-            }
-        }
-
-        private fun menuItem(text: String, run: () -> Unit) =
-            javax.swing.JMenuItem(text).apply { addActionListener { run() } }
-
-        /** The collapse/expand toggle row for settled ("done") chapters, plus a "clear completed" affordance. */
-        private fun doneToggle(count: Int): JComponent {
-            val row = rowPanel()
-            row.add(JBLabel("● $count done").apply {
-                font = JBUI.Fonts.label()
-                foreground = CM_KEPT
-                icon = if (ribOpen) AllIcons.General.ArrowDown else AllIcons.General.ArrowRight
-                horizontalTextPosition = SwingConstants.LEADING // the caret icon trails the text
-                cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
-                toolTipText = "$count completed chapter(s) — click to ${if (ribOpen) "collapse" else "expand"}"
-                addMouseListener(object : MouseAdapter() {
-                    override fun mouseClicked(e: MouseEvent) { ribOpen = !ribOpen; paintTab() }
-                })
-            })
-            row.add(miniButton(AllIcons.Actions.GC, "Clear resolved edits of every completed chapter") {
-                withSession { s -> ReviewOps.clearCompletedChapters(project, s) }
-            })
-            return row
-        }
-
-        /** The one-row module proportion strip: equal-width clickable chips, colour = worst-unreviewed-wins. */
-        private inner class StripBar : JComponent() {
+        private inner class StripBar : JComponent(), Scrollable {
+            private var all: List<ChangeMapModule> = emptyList()
             private var mods: List<ChangeMapModule> = emptyList()
             private var sel: String? = null
-            private var hit: List<Triple<Int, Int, ChangeMapModule>> = emptyList()
+            private var hit: List<Pair<Rectangle, ChangeMapModule>> = emptyList()
             var onClick: ((String) -> Unit)? = null
 
             init {
-                preferredSize = Dimension(JBUI.scale(200), JBUI.scale(18))
-                maximumSize = Dimension(Int.MAX_VALUE, JBUI.scale(18))
-                minimumSize = Dimension(JBUI.scale(60), JBUI.scale(18))
                 toolTipText = ""
                 addMouseListener(object : MouseAdapter() {
                     override fun mouseClicked(e: MouseEvent) {
-                        hit.firstOrNull { e.x >= it.first && e.x < it.second }
-                            ?.takeIf { it.third.module != OVERFLOW_MODULE } // the "+K more" tail isn't a filter
-                            ?.let { onClick?.invoke(it.third.module) }
+                        when (val m = hit.firstOrNull { it.first.contains(e.point) }?.second?.module) {
+                            null -> {}
+                            OVERFLOW_MODULE -> { stripExpanded = true; rebuild() }
+                            COLLAPSE_MODULE -> { stripExpanded = false; rebuild() }
+                            else -> onClick?.invoke(m)
+                        }
+                    }
+                })
+                // Wrapping changes the row count with the width, and the row count is the height — so a
+                // resize has to re-ask the layout for space, not just repaint.
+                addComponentListener(object : ComponentAdapter() {
+                    private var rows = -1
+                    override fun componentResized(e: ComponentEvent) {
+                        val now = rowsFor(width)
+                        if (now == rows) return
+                        rows = now
+                        relayout()
                     }
                 })
             }
 
+            private val rowH: Int get() = JBUI.scale(18)
+            private fun perRow(w: Int): Int = maxOf(1, w / JBUI.scale(MIN_SEGMENT_PX))
+            private fun rowsFor(w: Int): Int =
+                if (mods.isEmpty()) 1 else (mods.size + perRow(w) - 1) / perRow(w)
+            /** Before the first layout the strip has no width of its own; the row count then comes from
+             *  the container that is about to size it, so the first paint is not a tall mis-guess. */
+            private fun usableWidth(): Int =
+                if (width > 0) width else (parent?.width ?: 0).takeIf { it > 0 } ?: JBUI.scale(600)
+
+            // Explicit sizes rather than setPreferredSize: the height is a function of the current width.
+            override fun getPreferredSize(): Dimension =
+                Dimension(JBUI.scale(200), rowsFor(usableWidth()) * rowH)
+            override fun getMaximumSize(): Dimension = Dimension(Int.MAX_VALUE, preferredSize.height)
+            override fun getMinimumSize(): Dimension = Dimension(JBUI.scale(60), rowH)
+
+            // Scrollable: fill the viewport's width (segments are laid out against it), scroll by rows.
+            override fun getPreferredScrollableViewportSize(): Dimension = preferredSize
+            override fun getScrollableTracksViewportWidth(): Boolean = true
+            override fun getScrollableTracksViewportHeight(): Boolean = false
+            override fun getScrollableUnitIncrement(r: Rectangle, orientation: Int, direction: Int): Int = rowH
+            override fun getScrollableBlockIncrement(r: Rectangle, orientation: Int, direction: Int): Int = rowH * 2
+
             fun update(modules: List<ChangeMapModule>, selected: String?) {
-                // Cap the strip (VS Code parity): a busy session can span dozens of modules, which
-                // squeezes every segment into unreadable slivers — keep the top movers (modules arrive
-                // churn-ranked from core), merge the tail into one gray non-clickable "+K more" segment.
-                mods = if (modules.size > MAX_SEGMENTS) {
-                    val tail = modules.drop(MAX_SEGMENTS)
-                    modules.take(MAX_SEGMENTS) + ChangeMapModule(
-                        module = OVERFLOW_MODULE, label = "+${tail.size} more",
-                        churn = tail.sumOf { it.churn }, cnt = tail.sumOf { it.cnt },
-                        kept = tail.sumOf { it.kept }, pending = tail.sumOf { it.pending },
-                        undone = tail.sumOf { it.undone }, status = "undone", // → the gray status color
-                        files = tail.sumOf { it.files }, chapters = emptyList(),
-                    )
-                } else modules
+                all = modules
                 sel = selected
+                rebuild()
+            }
+
+            /** Recompute the displayed segments (head + tail chip, or everything + a fold-back chip). */
+            private fun rebuild() {
+                mods = when {
+                    all.size <= MAX_SEGMENTS -> all
+                    stripExpanded -> all + chip(COLLAPSE_MODULE, "show fewer", all.drop(MAX_SEGMENTS))
+                    else -> all.take(MAX_SEGMENTS) + chip(
+                        OVERFLOW_MODULE, "+${all.size - MAX_SEGMENTS} more", all.drop(MAX_SEGMENTS),
+                    )
+                }
+                relayout()
+            }
+
+            /**
+             * Re-lay-out the strip AND the panel that sizes it.
+             *
+             * A JScrollPane is a Swing validate root: revalidate() inside it stops there, so the strip's
+             * new row count changed its preferred height and nothing above ever asked for the new size —
+             * "+K more" expanded the model and the viewport kept its old two rows behind a scrollbar.
+             * Invalidating the scroll pane's PARENT is what carries the change into the BoxLayout.
+             */
+            private fun relayout() {
+                revalidate()
+                stripScroll.invalidate()
+                (stripScroll.parent as? JComponent)?.revalidate()
                 repaint()
             }
 
+            /** A tail chip carries the folded folders' totals so its tooltip can report what it hides. */
+            private fun chip(id: String, label: String, tail: List<ChangeMapModule>) = ChangeMapModule(
+                module = id, label = label,
+                churn = tail.sumOf { it.churn }, cnt = tail.sumOf { it.cnt },
+                kept = tail.sumOf { it.kept }, pending = tail.sumOf { it.pending },
+                undone = tail.sumOf { it.undone }, status = "undone", // → the gray status color
+                files = tail.sumOf { it.files },
+            )
+
             override fun getToolTipText(e: MouseEvent): String? =
-                hit.firstOrNull { e.x >= it.first && e.x < it.second }?.third?.let { m ->
-                    "${m.label} · ${m.churn} lines · ${m.files} file(s)"
+                hit.firstOrNull { it.first.contains(e.point) }?.second?.let { m ->
+                    when (m.module) {
+                        OVERFLOW_MODULE -> "${m.label.removePrefix("+")} folder(s) · ${m.churn} lines · ${m.files} file(s) — click to show them all"
+                        COLLAPSE_MODULE -> "Show only the top $MAX_SEGMENTS folders by lines changed"
+                        else -> "${m.label} · ${m.churn} lines · ${m.files} file(s)"
+                    }
                 }
 
             override fun paintComponent(g: Graphics) {
                 val g2 = g as Graphics2D
                 g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
                 if (mods.isEmpty()) return
-                val h = height
-                val n = mods.size
                 g2.font = JBUI.Fonts.miniFont()
-                val acc = mutableListOf<Triple<Int, Int, ChangeMapModule>>()
+                val per = perRow(width)
+                val n = mods.size
+                val acc = mutableListOf<Pair<Rectangle, ChangeMapModule>>()
                 for ((i, m) in mods.withIndex()) {
-                    val x0 = i * width / n
-                    val x1 = (i + 1) * width / n
+                    val row = i / per
+                    val col = i % per
+                    val inRow = minOf(per, n - row * per) // a short last row divides the width among its own
+                    val x0 = col * width / inRow
+                    val x1 = (col + 1) * width / inRow
+                    val y0 = row * rowH
                     val w = x1 - x0
+                    val h = rowH - if (row < rowsFor(width) - 1) JBUI.scale(1) else 0 // 1px gutter between rows
                     val isSel = sel == m.module
                     val base = statusColor(m.status)
                     g2.color = if (sel != null && !isSel) UIUtil.toAlpha(base, 90) else base
-                    g2.fillRect(x0, 0, w, h)
-                    if (i > 0) {
+                    g2.fillRect(x0, y0, w, h)
+                    if (col > 0) {
                         g2.color = UIUtil.getPanelBackground()
-                        g2.fillRect(x0, 0, JBUI.scale(1), h)
+                        g2.fillRect(x0, y0, JBUI.scale(1), h)
                     }
                     val lbl = clipStr(g2, m.label, w - JBUI.scale(4))
                     if (lbl.isNotEmpty()) {
                         g2.color = JBColor(Color(0x22, 0x22, 0x22), Color(0x1a, 0x1a, 0x1a))
                         val tw = g2.fontMetrics.stringWidth(lbl)
-                        g2.drawString(lbl, x0 + (w - tw) / 2, h / 2 + g2.fontMetrics.ascent / 2 - JBUI.scale(1))
+                        g2.drawString(lbl, x0 + (w - tw) / 2, y0 + h / 2 + g2.fontMetrics.ascent / 2 - JBUI.scale(1))
                     }
                     if (isSel) {
                         g2.color = UIUtil.getLabelForeground()
-                        g2.drawRect(x0, 0, w - 1, h - 1)
+                        g2.drawRect(x0, y0, w - 1, h - 1)
                     }
-                    acc.add(Triple(x0, x1, m))
+                    acc.add(Rectangle(x0, y0, w, h) to m)
                 }
                 hit = acc
             }
@@ -2353,7 +2340,7 @@ internal class SplitWrapLayout(private val vgap: Int) : LayoutManager2 {
  * A FlowLayout that actually WRAPS its rows. Stock FlowLayout reports a single-row preferred size, so a
  * BoxLayout/BorderLayout host never gives it height for extra rows and its children clip or (for an
  * IntelliJ ActionToolbar) collapse into a "…" overflow. This computes the true wrapped height for the
- * current width, so the Overview's centered review-axes row flows Diff/File/Folder/Chapter onto more
+ * current width, so the Overview's centered review-axes row flows Diff/File/Folder/Prompt onto more
  * lines when the pane is narrow. (Rob Camick's well-known WrapLayout, ported to Kotlin.)
  */
 internal class WrapLayout(align: Int, hgap: Int, vgap: Int) : FlowLayout(align, hgap, vgap) {

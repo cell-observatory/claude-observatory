@@ -1,16 +1,17 @@
 /**
  * Change-map model (zero-token): the whole session's edits assembled as one bird's-eye review diagram.
  * Reuses the folder→file→class tree, flattens it to a per-edit list carrying churn (±lines), review
- * status, Claude's own reasoning, and subagent/risk overlays — then turns Claude's to-dos into
- * time-windowed "chapters" so each edit can be traced back to the goal it realized. One assembly, so
- * the treemap + chapter ribbon render identically in VS Code and JetBrains off the CLI `changemap --json`.
+ * status, Claude's own reasoning, and subagent/risk overlays — with strict per-task attribution from
+ * Claude's own plan (to-dos ∪ the task system) and per-prompt slices of everything an ask produced.
+ * One assembly, so the Folders strip + Files ledger render identically in VS Code and JetBrains off
+ * the CLI `changemap --json`.
  *
  * Everything here is derived from what the observatory already parses — no model calls, nothing stored.
  */
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import { EditStatus, EditRecord, readLog, minOf, maxOf, logPath, rootDir } from './store';
+import { EditStatus, EditRecord, readLog, minOf, maxOf, logPath, rootDir, isSafeSessionId } from './store';
 import { buildEditTree, EditTree, TreeEdit, TreeFolder, TreeFile } from './tree';
 import { reasoningByEdit, transcriptInsights, findTranscript, flagsFor } from './observe';
 import { parseActions, summarizeActions, compactLabel } from './actions';
@@ -19,7 +20,7 @@ import { buildEgressReport } from './egress';
 import { projectSessionIds } from './fleet';
 import { parseWorkflows, workflowWindows, workflowForTs } from './workflows';
 import { taskSnaps, digest12 } from './tasks';
-import { sessionRequests } from './requests';
+import { sessionPrompts } from './prompts';
 import { sessionProcesses } from './processes';
 import { cachedByFiles } from './fscache';
 
@@ -37,31 +38,9 @@ export interface ChangeMapEdit {
   agent: boolean; // best-effort: a subagent authored this edit (only set when correlated, never guessed)
   risk: string | null; // a warn-level flag (secret / debug / large deletion / deleted file), else null
   reasoning: string | null; // first line of Claude's words for this edit (from the transcript)
-  chapter: string; // display-brush key — TOTAL: the chapter (to-do) whose gap-filled window this edit fell in, else the synthetic session chapter. Never null.
   taskId: string | null; // per-TASK: the stable taskId whose STRICT in_progress interval this edit fell in, else null (unassigned)
   subagentId: string | null; // per-SUBAGENT: the subagent (agentId) that authored this edit, else null (main-chain or unattributed)
   workflowId: string | null; // per-WORKFLOW: the wf_<id> whose agent ts-window this edit fell in, else null (none / ambiguous)
-}
-
-/** A to-do Claude tracked, turned into a chapter: the goal + how much of the session it accounts for. */
-export interface ChangeMapChapter {
-  id: string; // stable content-hash brush key — ALSO the WYSIWYG review-op key (reviewEditIds); duplicate-content to-dos get an occurrence-salted id (first occurrence keeps the plain hash); the synthetic session chapter is 'ch:session'
-  taskId: string | null; // the STRICT task this chapter joins for analytics + 💬 chat framing; null = no strict task (synthetic chapter, or a duplicate-content occurrence beyond the first)
-  synthetic: boolean; // true for the fallback session chapter that claims work outside any to-do (never a real task)
-  fromTask: boolean; // true when this chapter was born from the numbered task list (0.8.3) — attribution + review + the Tasks-tab join use it, but ribbons don't draw it (its home is the Tasks tab)
-  index: number;
-  title: string; // Claude's own to-do text (or the session title / first prompt for the synthetic chapter)
-  status: 'done' | 'wip' | 'todo'; // completed | in_progress | pending
-  startTs: number; // window start (0 if this to-do never became in_progress → no attributed edits)
-  endTs: number; // window end (0 if open-ended / none)
-  edits: number;
-  added: number;
-  removed: number;
-  pending: number;
-  kept: number;
-  undone: number;
-  agent: boolean; // any attributed edit was subagent-authored
-  editIds: number[]; // raw store edit ids DISPLAYED under this chapter, in capture order — the model the nav-bar CHAPTER axis walks; mirrors chapterEditIds/sessionChapters exactly ([] for a planned zero-edit row or a duplicate-content occurrence)
 }
 
 /** One touched file, rolled up — the row a "ranked ledger" renders. */
@@ -82,7 +61,6 @@ export interface ChangeMapFile {
   /** Most-recent edit id in this file — the drill-through target (open its diff / review). */
   maxId: number;
   classes: string[]; // distinct classes/functions touched
-  chapters: string[]; // distinct chapter ids this file's edits belong to (the brush key)
   agent: boolean; // any edit subagent-authored
   risk: string | null; // first warn-level flag, if any
   reason: string | null; // first line of Claude's reasoning for this file
@@ -101,7 +79,6 @@ export interface ChangeMapModule {
   undone: number;
   status: EditStatus;
   files: number;
-  chapters: string[];
 }
 
 export interface ChangeMapSummary {
@@ -138,11 +115,10 @@ export interface TaskRoll {
  * A task identity from the STRICT-span model — the authoritative taskId↔content mapping that keys
  * `edit.taskId`, `rollupByTask`, task-scoped keep/undo, and the cross-agent task log. Built from the
  * to-dos that actually held an in_progress interval (so it joins `rollupByTask` by `taskId`), NOT from
- * the latest snapshot. This is the join source; the display `chapters[]` (the full plan, incl.
- * never-started to-dos) are a separate view whose ids only overlap where content matches.
+ * the latest snapshot.
  */
 export interface TaskInfo {
-  taskId: string; // === taskId(content); the join key for rollupByTask / tasklog / the Overview ribbon
+  taskId: string; // === taskId(content); the join key for rollupByTask / tasklog / the Tasks tab
   content: string; // the to-do text
   firstTs: number; // earliest in_progress start
   lastTs: number; // latest in_progress end
@@ -178,23 +154,19 @@ export interface ChangeMapWorkflow {
   rollup: { edits: number; added: number; removed: number; pending: number; kept: number; undone: number };
   files: ChangeMapFile[]; // this workflow's touched files, churn-desc (a per-workflow rollupFiles)
   taskIds: string[]; // distinct non-null taskIds among this workflow's edits (cross-dimension join)
-  /** This workflow's edits regrouped by chapter — session-chapter identity (id/title/status/…) with
-   *  counts scoped to the workflow. Rendered directly as the workflow slice's ribbon, replacing the
-   *  per-editor "run total minus chaptered" residual math (total chapters → no residual exists). */
-  chapters: ChangeMapChapter[];
 }
 
 /**
- * One user REQUEST as a change-map slice: everything that ask produced, aggregated exactly the way a
- * workflow's slice is, so a renderer can swap one for the other and draw the same ribbon/strip/ledger.
+ * One user PROMPT as a change-map slice: everything that ask produced, aggregated exactly the way a
+ * workflow's slice is, so a renderer can swap one for the other and draw the same strip/ledger.
  *
- * This is the axis a PERSON reads a session by. Selecting a request narrows every other view to the
- * work that ask caused — its chapters, folders and files on the right; its subagents, workflow runs,
- * to-dos and background shells on the left. Attribution is by START time (core's rule for requests):
- * a shell launched by #4 stays #4's even when it exits during #7.
+ * This is the axis a PERSON reads a session by. Selecting a prompt narrows every other view to the
+ * work that ask caused — its folders and files on the right; its subagents, workflow runs, tasks and
+ * background shells on the left. Attribution is by START time (core's rule for prompts): a shell
+ * launched by #4 stays #4's even when it exits during #7.
  */
-export interface ChangeMapRequest {
-  id: string; // stable request id — the same one `requests --json` emits
+export interface ChangeMapPrompt {
+  id: string; // stable prompt id — the same one `prompts --json` emits
   index: number; // 1-based chronological position, the way a person counts their own turns
   /** The ask itself, whitespace-collapsed and COMPLETE — renderers wrap it; nothing here is clipped. */
   text: string;
@@ -203,15 +175,10 @@ export interface ChangeMapRequest {
   ts: number;
   endTs: number; // 0 while this is the ask still being answered
   rollup: { edits: number; added: number; removed: number; pending: number; kept: number; undone: number };
-  files: ChangeMapFile[]; // this ask's touched files, churn-desc (a per-request rollupFiles)
+  files: ChangeMapFile[]; // this ask's touched files, churn-desc (a per-prompt rollupFiles)
   modules: ChangeMapModule[]; // …and their folder buckets, so the strip needs no re-aggregation
-  /** This ask's edits regrouped by chapter — session-chapter identity, counts scoped to the request. */
-  chapters: ChangeMapChapter[];
   /** Raw store edit ids this ask committed, capture order — the review scope of "accept this ask". */
   editIds: number[];
-  /** Chapters (to-dos) this ask worked in: the ones its edits landed in, plus any whose in_progress
-   *  window overlapped it — a to-do can be in flight across an ask that produced no edits of its own. */
-  chapterIds: string[];
   /** Subagents spawned while answering (their own agentIds — what a fleet row is keyed by). */
   agentIds: string[];
   /** Workflow runs started while answering (wf_<id>). */
@@ -236,7 +203,7 @@ export interface AgentRoll {
   files: number;
 }
 
-/** A context compaction, placed for rendering against the session's chapter timeline. */
+/** A context compaction, ordered by time — the Actions timeline and the Stats readout render these. */
 export interface CompactionMarker {
   ts: number;
   trigger: string;
@@ -249,21 +216,13 @@ export interface CompactionMarker {
   durationMs: number;
   /** The one-line summary every surface prints (built once in core — see `compactLabel`). */
   label: string;
-  /** The chapter whose window CONTAINS this compaction, or null when the session had no chapter
-   *  windows at all. Renderers draw the marker after that chapter's chip — and because they filter
-   *  chapters (fromTask, zero-edit, collapsed 'done' rows), a marker whose chapter isn't drawn should
-   *  clamp to the nearest visible neighbour or fall back to a header count, using `ts` to order it.
-   *  Resolved by TIME, never by array position: `chapters` is in plan order, and the synthetic chapter
-   *  is appended last though its work usually starts first. */
-  afterChapterId: string | null;
 }
 
 export interface ChangeMap {
   summary: ChangeMapSummary;
   edits: ChangeMapEdit[];
-  chapters: ChangeMapChapter[];
-  /** Context compactions during this session, oldest first — the Overview draws each as a marker
-   *  between chapter chips, and the Actions timeline carries the same events as 'compact' rows. */
+  /** Context compactions during this session, oldest first — the Actions timeline carries the same
+   *  events as 'compact' rows, and Stats prints the one-line readout. */
   compactions: CompactionMarker[];
   /** Per-file rollup, churn-desc. Rendered directly — front-ends must not re-aggregate. */
   files: ChangeMapFile[];
@@ -279,16 +238,15 @@ export interface ChangeMap {
    *  (edits rolled up + touched files), aggregated here so renderers stay thin. */
   workflows: ChangeMapWorkflow[];
   /**
-   * The session partitioned by what the USER asked for — one slice per request, in order. Only built
-   * when `opts.requests` is set (the Requests window's own scope source), because it costs one more
+   * The session partitioned by what the USER asked for — one slice per prompt, in order. Only built
+   * when `opts.prompts` is set (the Prompts window's own scope source), because it costs one more
    * transcript pass and the fleet builds dozens of sibling maps per refresh that never need it.
    */
-  requests: ChangeMapRequest[];
+  prompts: ChangeMapPrompt[];
   /**
    * Strict-span task identities (taskId → content), the authoritative label + join source for
-   * `rollupByTask`, the Overview task ribbon, and the cross-agent task log. Covers exactly the tasks
-   * that held a real in_progress interval — so it joins `rollupByTask` by `taskId` (unlike `chapters`,
-   * which is the full plan and only overlaps where content matches).
+   * `rollupByTask`, the Tasks tab, and the cross-agent task log. Covers exactly the tasks that held
+   * a real in_progress interval — so it joins `rollupByTask` by `taskId`.
    */
   tasks: TaskInfo[];
 }
@@ -328,19 +286,17 @@ export function fileStatus(c: { pending: number; undone: number }): EditStatus {
 function rollupFiles(edits: ChangeMapEdit[]): ChangeMapFile[] {
   const by = new Map<string, ChangeMapFile>();
   const classes = new Map<string, Set<string>>();
-  const chapters = new Map<string, Set<string>>();
   for (const e of edits) {
     let f = by.get(e.rel);
     if (!f) {
       f = {
         rel: e.rel, module: e.module, moduleLabel: moduleLabel(e.module), file: e.file,
         churn: 0, cnt: 0, added: 0, removed: 0,
-        kept: 0, pending: 0, undone: 0, status: 'kept', maxId: -1, classes: [], chapters: [],
+        kept: 0, pending: 0, undone: 0, status: 'kept', maxId: -1, classes: [],
         agent: false, risk: null, reason: null,
       };
       by.set(e.rel, f);
       classes.set(e.rel, new Set());
-      chapters.set(e.rel, new Set());
     }
     f.churn += e.added + e.removed;
     f.added += e.added;
@@ -350,7 +306,6 @@ function rollupFiles(edits: ChangeMapEdit[]): ChangeMapFile[] {
     else if (e.status === 'undone') f.undone++;
     else f.pending++;
     if (e.cls) classes.get(e.rel)!.add(e.cls);
-    if (e.chapter) chapters.get(e.rel)!.add(e.chapter);
     if (e.agent) f.agent = true;
     if (e.risk && !f.risk) f.risk = e.risk;
     if (e.reasoning && !f.reason) f.reason = e.reasoning;
@@ -359,7 +314,6 @@ function rollupFiles(edits: ChangeMapEdit[]): ChangeMapFile[] {
   const out = [...by.values()];
   for (const f of out) {
     f.classes = [...classes.get(f.rel)!];
-    f.chapters = [...chapters.get(f.rel)!];
     f.status = fileStatus(f);
   }
   out.sort((a, b) => b.churn - a.churn || a.rel.localeCompare(b.rel));
@@ -375,17 +329,15 @@ function rollupFiles(edits: ChangeMapEdit[]): ChangeMapFile[] {
  */
 function rollupModules(files: ChangeMapFile[]): ChangeMapModule[] {
   const by = new Map<string, ChangeMapModule>();
-  const chapters = new Map<string, Set<string>>();
   for (const f of files) {
     const key = f.moduleLabel;
     let m = by.get(key);
     if (!m) {
       m = {
         module: key, label: key, churn: 0, cnt: 0, added: 0, removed: 0,
-        kept: 0, pending: 0, undone: 0, status: 'kept', files: 0, chapters: [],
+        kept: 0, pending: 0, undone: 0, status: 'kept', files: 0,
       };
       by.set(key, m);
-      chapters.set(key, new Set());
     }
     m.churn += f.churn;
     m.cnt += f.cnt;
@@ -395,13 +347,9 @@ function rollupModules(files: ChangeMapFile[]): ChangeMapModule[] {
     m.pending += f.pending;
     m.undone += f.undone;
     m.files++;
-    for (const c of f.chapters) chapters.get(key)!.add(c);
   }
   const out = [...by.values()];
-  for (const m of out) {
-    m.chapters = [...chapters.get(m.label)!];
-    m.status = fileStatus(m);
-  }
+  for (const m of out) m.status = fileStatus(m);
   out.sort((a, b) => b.churn - a.churn || a.module.localeCompare(b.module));
   return out;
 }
@@ -429,16 +377,15 @@ function flattenTree(tree: EditTree): { rel: string; cls: string | null; edit: T
 
 interface TodoSnap {
   ts: number;
-  /** src marks TASK-born items (tasks.ts snapshots) — their chapters carry `fromTask`, so ribbons
-   *  leave them to the Overview's Tasks tab instead of drawing duplicate rows. */
+  /** src marks TASK-born items (tasks.ts snapshots) — provenance for the merged plan timeline. */
   todos: { content: string; status: string; src?: 'task' }[];
 }
 
 /**
- * The PLAN snapshots the span model consumes: TodoWrite ∪ the task system (TaskCreate/TaskUpdate,
+ * The PLAN snapshots the strict-span model consumes: TodoWrite ∪ the task system (TaskCreate/TaskUpdate,
  * mined in tasks.ts), merged on one timeline into the same full-list shape — so task-planned sessions
- * get real chapters (attribution + WYSIWYG review) through the identical machinery. Todos win
- * duplicate titles (the bundled demo plans both ways) so the two systems never mint twin chapters.
+ * get real per-task attribution through the identical machinery. Todos win duplicate titles (the
+ * bundled demo plans both ways) so the two systems never mint twin tasks.
  */
 function planSnaps(transcriptPath: string): TodoSnap[] {
   const todos = todoSnaps(transcriptPath);
@@ -523,43 +470,6 @@ function toMs(v: unknown): number {
   return 0;
 }
 
-interface Span {
-  content: string;
-  start: number;
-  end: number;
-}
-
-/**
- * The disjoint timeline of "which to-do was in_progress, and when" — one span per contiguous run.
- * A span closes the instant a DIFFERENT to-do becomes in_progress (or none is), so spans never
- * overlap: a to-do revisited later gets a second, separate span instead of one that swallows the
- * work done in between (the bug in the old window model). The display brush is TOTAL — once any
- * span exists, every ts>0 falls in exactly one:
- *   - the FIRST span extends back to the session start, so edits made before the first `in_progress`
- *     flip attribute to the opening chapter instead of falling through;
- *   - each span's end is filled forward to the NEXT span's start, so work done in a lull between
- *     to-dos attributes to the chapter that was just in progress (the nearest preceding one);
- *   - the LAST span runs to +∞ even if it closed, so trailing edits attribute to the final chapter.
- * The STRICT model (`inProgressSpansStrict`) keeps the honest gaps — destructive ops never widen.
- */
-function inProgressSpans(snaps: TodoSnap[]): Span[] {
-  const spans: Span[] = [];
-  let cur: Span | null = null;
-  for (const s of snaps) {
-    if (!s.ts) continue;
-    const ip = s.todos.find((t) => t.status === 'in_progress');
-    const content = ip ? ip.content : null;
-    if (content === (cur ? cur.content : null)) continue; // nothing changed about what's in progress
-    if (cur) cur.end = s.ts; // close the running span at this checkpoint
-    cur = content ? { content, start: s.ts, end: Number.MAX_SAFE_INTEGER } : null;
-    if (cur) spans.push(cur);
-  }
-  if (spans.length) spans[0].start = 0; // opening work counts toward the first chapter, not nothing
-  for (let i = 0; i + 1 < spans.length; i++) spans[i].end = spans[i + 1].start; // fill gaps forward
-  if (spans.length) spans[spans.length - 1].end = Number.MAX_SAFE_INTEGER; // trailing work → final chapter
-  return spans;
-}
-
 /** Stable per-task identity (first-seen wins), tracked while building strict spans. */
 export type TaskIdentity = { taskId: string; content: string; firstTs: number };
 
@@ -568,26 +478,13 @@ export type TaskIdentity = { taskId: string; content: string; firstTs: number };
  * never shifts it, and two to-dos with identical text deterministically share ONE id (an honest
  * collision → one task) instead of the old last-wins. `firstSeenTs` pins a task's first-seen time in
  * the identity map so its `firstTs` doesn't drift if the to-do reappears later; it does NOT enter the
- * hash (identical text must stay one id). The hash core is shared with tasks.taskChapterId() via
+ * hash (identical text must stay one id). The hash core is shared with tasks.taskIdForSubject() via
  * digest12(), so the two can't drift; `firstSeenTs` stays in the signature (callers + tests pass it
  * positionally) but remains intentionally unhashed.
  */
 export function taskId(content: string, firstSeenTs: number): string {
   return digest12(content);
 }
-
-/**
- * Display-only chapter id for the nth (n ≥ 1) duplicate-content to-do — every ribbon row needs its own
- * brush key, but identical text is ONE strict task, so later occurrences render display-only rows
- * (`taskId: null`). Occurrence 0 keeps the plain content hash: existing sessions' ids never change.
- */
-function dupChapterId(content: string, n: number): string {
-  return crypto.createHash('sha1').update(`${content}\u0000${n}`).digest('hex').slice(0, 12);
-}
-
-/** The synthetic fallback chapter's id — claims every edit outside any to-do window, so the display
- *  dimension is total. Contains a ':' so it can never collide with a 12-hex content hash. */
-const SYNTHETIC_CHAPTER_ID = 'ch:session';
 
 /** A REAL in_progress interval for the taskId model — no edge extension (cf. `Span`). */
 interface StrictSpan {
@@ -598,12 +495,12 @@ interface StrictSpan {
 }
 
 /**
- * The honest counterpart to `inProgressSpans` for the taskId model, with NO edge fill. `start` is
- * exactly when a to-do entered in_progress; `end` is when it left (a later checkpoint no longer shows
- * it in_progress). A to-do that never completes ends at its LAST observed in_progress mtime, not +∞.
+ * The strict in_progress timeline for the taskId model, with NO edge fill. `start` is exactly when a
+ * to-do entered in_progress; `end` is when it left (a later checkpoint no longer shows it
+ * in_progress). A to-do that never completes ends at its LAST observed in_progress mtime, not +∞.
  * So an edit made before the first in_progress, or after the last one closed, falls in NO interval and
  * is honestly `unassigned` — never force-filed onto the head/tail task. This is the destructive-safety
- * fix: a task's keep/undo set must never include an edit that was never part of that task.
+ * rule: a task's keep/undo set must never include an edit that was never part of that task.
  */
 function inProgressSpansStrict(snaps: TodoSnap[]): StrictSpan[] {
   const spans: StrictSpan[] = [];
@@ -739,7 +636,7 @@ export function rollupByAgent(maps: ChangeMap[]): AgentRoll[] {
 export function buildChangeMap(
   cwd: string,
   session: string,
-  opts: { root?: string; requests?: boolean } = {},
+  opts: { root?: string; prompts?: boolean } = {},
 ): ChangeMap {
   const root = opts.root ?? cwd;
   const tree = buildEditTree(session, { root });
@@ -760,56 +657,8 @@ export function buildChangeMap(
   const insights = transcriptInsights(cwd, session);
   const transcript = findTranscript(cwd, session);
   const snaps = transcript ? planSnaps(transcript) : [];
-  const spans = inProgressSpans(snaps); // legacy edge-extended windows — the display brush only
-  const strictSpans = inProgressSpansStrict(snaps); // REAL intervals — the taskId model (rollups + destructive ops)
-  const firstSpan = new Map<string, Span>(); // a chapter's display start/end = its first in_progress span
-  for (const sp of spans) if (!firstSpan.has(sp.content)) firstSpan.set(sp.content, sp);
-  const firstSeenTs = new Map<string, number>(); // a to-do's first appearance ts — pins its taskId's firstTs
-  for (const s of snaps) for (const td of s.todos) if (!firstSeenTs.has(td.content)) firstSeenTs.set(td.content, s.ts);
-
-  // Chapters from the FINAL plan list (the full plan, in order) — the last merged snapshot, so a
-  // task-planned session (TaskCreate, no TodoWrite) gets real chapters too; spans attach by content
-  // match. Duplicate-content items: the timeline can't tell the occurrences apart (spans key by
-  // content), so the FIRST occurrence keeps the plain content-hash id (stable for every existing
-  // session) and claims the edits + the strict taskId; later occurrences get an occurrence-salted id
-  // and are display-only (`taskId: null`) — two ribbon rows never share a brush key, nothing
-  // double-counts.
-  const finalPlan: TodoSnap['todos'] = snaps.length ? snaps[snaps.length - 1].todos : insights.todos;
-  const occurrence = new Map<string, number>();
-  const chapters: ChangeMapChapter[] = finalPlan.map((td, i) => {
-    const n = occurrence.get(td.content) ?? 0;
-    occurrence.set(td.content, n + 1);
-    const baseId = taskId(td.content, firstSeenTs.get(td.content) ?? 0);
-    const sp = n === 0 ? firstSpan.get(td.content) : undefined; // a duplicate row owns no window
-    return {
-      id: n === 0 ? baseId : dupChapterId(td.content, n),
-      taskId: n === 0 ? baseId : null,
-      synthetic: false,
-      fromTask: td.src === 'task',
-      index: i,
-      title: td.content,
-      status: td.status === 'completed' ? 'done' : td.status === 'in_progress' ? 'wip' : 'todo',
-      startTs: sp ? sp.start : 0,
-      endTs: sp && sp.end !== Number.MAX_SAFE_INTEGER ? sp.end : 0,
-      edits: 0,
-      added: 0,
-      removed: 0,
-      pending: 0,
-      kept: 0,
-      undone: 0,
-      agent: false,
-      editIds: [], // filled in one pass below (raw-log capture order)
-    };
-  });
-  const chapterByContent = new Map<string, ChangeMapChapter>();
-  for (const c of chapters) if (!chapterByContent.has(c.title)) chapterByContent.set(c.title, c); // FIRST occurrence claims the content's spans
-  const chapterForTs = (ts: number): ChangeMapChapter | null => {
-    if (!ts) return null;
-    // spans are disjoint + in order → at most one contains ts (no overlap ambiguity)
-    for (const sp of spans) if (ts >= sp.start && ts < sp.end) return chapterByContent.get(sp.content) ?? null;
-    return null;
-  };
-  // Strict ts→taskId lookup for the taskId model — NO edge fill: an edit in no REAL interval → null (unassigned).
+  const strictSpans = inProgressSpansStrict(snaps); // REAL intervals — the taskId model (rollups + task review ops)
+  // Strict ts→taskId lookup — NO edge fill: an edit in no REAL interval → null (unassigned).
   const taskForTs = (ts: number): string | null => strictTaskForTs(strictSpans, ts);
 
   // Workflow ts-windows for workflow→edit attribution (§C): an edit whose ts lands in exactly one
@@ -821,7 +670,6 @@ export function buildChangeMap(
     const flags = rec ? flagsFor(session, rec, log) : [];
     const warn = flags.find((f) => f.level === 'warn');
     const rsn = reasoning.get(edit.id);
-    const ch = chapterForTs(edit.ts);
     return {
       id: edit.id,
       rel,
@@ -835,100 +683,22 @@ export function buildChangeMap(
       agent: agentEditIds.has(edit.id),
       risk: warn ? warn.message : null,
       reasoning: rsn ? firstLine(rsn) : null,
-      chapter: ch ? ch.id : SYNTHETIC_CHAPTER_ID, // TOTAL — anything outside every window lands in the session chapter
       taskId: taskForTs(edit.ts),
       subagentId: editIdToSubagent.get(edit.id) ?? null,
       workflowId: workflowForTs(wfWindows, edit.ts),
     };
   });
 
-  // The synthetic session chapter — appended only when something actually fell outside every to-do
-  // window (no-TodoWrite session, ts===0 edit, or a span whose to-do left the final list). Titled from
-  // the session itself so the ribbon reads as a real goal, never a bookkeeping bucket. Display-only:
-  // `taskId: null` → renderers offer no destructive ops (the strict model has no such task).
-  if (edits.some((e) => e.chapter === SYNTHETIC_CHAPTER_ID)) {
-    const orphanTs = edits.filter((e) => e.chapter === SYNTHETIC_CHAPTER_ID && e.ts > 0).map((e) => e.ts);
-    chapters.push({
-      id: SYNTHETIC_CHAPTER_ID,
-      taskId: null,
-      synthetic: true,
-      fromTask: false,
-      index: chapters.length,
-      title: insights.title ?? (insights.firstUserPrompt ? firstLine(insights.firstUserPrompt, 80) : 'Session work'),
-      status: 'wip', // refined to 'done' below once counts are folded
-      startTs: orphanTs.length ? minOf(orphanTs) : 0,
-      endTs: 0,
-      edits: 0,
-      added: 0,
-      removed: 0,
-      pending: 0,
-      kept: 0,
-      undone: 0,
-      agent: false,
-      editIds: [], // filled in one pass below (raw-log capture order)
-    });
-  }
-
-  // Roll chapter stats from the edits attributed to each.
-  const chById = new Map(chapters.map((c) => [c.id, c]));
-  for (const e of edits) {
-    const c = chById.get(e.chapter);
-    if (!c) continue;
-    c.edits++;
-    c.added += e.added;
-    c.removed += e.removed;
-    if (e.status === 'kept') c.kept++;
-    else if (e.status === 'undone') c.undone++;
-    else c.pending++;
-    if (e.agent) c.agent = true;
-  }
-  // The synthetic chapter's status follows its review state (it has no to-do to inherit from).
-  const synth = chById.get(SYNTHETIC_CHAPTER_ID);
-  if (synth) synth.status = synth.pending > 0 ? 'wip' : 'done';
-
-  // Per-chapter ordered edit ids (RAW store ids, capture order) — the model the nav-bar CHAPTER axis
-  // walks and the source it computes chapter-for-edit from, so the plugin needs no per-chapter CLI
-  // round-trip. Computed ONCE over the raw log with the SAME display attribution chapterEditIds /
-  // sessionChapters use (chapterForTs → the first-occurrence content chapter, else the synthetic
-  // session chapter), so `chapter.editIds` === `chapterEditIds(cwd, session, chapter.id)` and can't
-  // drift. A planned zero-edit or duplicate-content row gets [] (nothing attributes to it).
-  const editIdsByChapter = new Map<string, number[]>();
-  for (const r of log) {
-    const ch = chapterForTs(r.ts);
-    const cid = ch ? ch.id : SYNTHETIC_CHAPTER_ID;
-    let arr = editIdsByChapter.get(cid);
-    if (!arr) {
-      arr = [];
-      editIdsByChapter.set(cid, arr);
-    }
-    arr.push(r.id);
-  }
-  for (const c of chapters) c.editIds = editIdsByChapter.get(c.id) ?? [];
-
   // Summary — headline counts, all from pieces already parsed above (+ one action scan for errors/egress).
   const actions = parseActions(cwd, session);
   const aSum = summarizeActions(actions);
 
-  // Compactions ride that SAME action scan (they're 'compact' rows) — no extra transcript read, which
-  // matters because buildChangeMap runs once per fleet sibling. Each is placed by TIME, into the
-  // chapter whose display window CONTAINS it. The placement reads the spans directly rather than the
-  // chapters' own startTs/endTs, because those two fields are deliberately lossy: the first span is
-  // edge-extended to 0 ("opening work counts toward the first chapter") and the last span's open end
-  // is stored as 0, so `startTs === 0` can't tell "began the session" from "never started". The
-  // windows tile the timeline, so any timestamp lands in exactly one of them.
-  const chapterWindows: { id: string; start: number; end: number }[] = [];
-  for (const c of chapters) {
-    if (c.synthetic || c.taskId === null) continue; // a duplicate-content row owns no window
-    const sp = firstSpan.get(c.title);
-    if (sp) chapterWindows.push({ id: c.id, start: sp.start, end: sp.end });
-  }
+  // Compactions ride that SAME action scan (they are 'compact' rows) — no extra transcript read, which
+  // matters because buildChangeMap runs once per fleet sibling. Ordered by time; the Actions timeline
+  // and the Stats readout render them.
   const compactions: CompactionMarker[] = actions
     .filter((a) => a.compact)
-    .map((a) => {
-      const ce = a.compact!;
-      const win = chapterWindows.find((w) => w.start <= ce.ts && ce.ts < w.end);
-      return { ...ce, label: compactLabel(ce), afterChapterId: win ? win.id : null };
-    })
+    .map((a) => ({ ...a.compact!, label: compactLabel(a.compact!) }))
     .sort((a, b) => a.ts - b.ts);
 
   const summary: ChangeMapSummary = {
@@ -956,7 +726,7 @@ export function buildChangeMap(
   const modules = rollupModules(files);
 
   // Strict-span task identities — the authoritative taskId↔content join source (covers exactly the
-  // edit-producing tasks, so `tasklog` labels + the Overview ribbon join `rollupByTask` by taskId).
+  // edit-producing tasks, so `tasklog` labels + the Tasks tab join `rollupByTask` by taskId).
   const taskById = new Map<string, TaskInfo>();
   for (const sp of strictSpans) {
     const t = taskById.get(sp.taskId);
@@ -982,29 +752,9 @@ export function buildChangeMap(
   const workflows: ChangeMapWorkflow[] = [...editsByWorkflow.entries()].map(([id, wfEdits]) => {
     const rollup = { edits: 0, added: 0, removed: 0, pending: 0, kept: 0, undone: 0 };
     const taskIds = new Set<string>();
-    // The workflow slice's own ribbon: this workflow's edits regrouped by chapter — session-chapter
-    // identity with counts scoped to the run. Total chapters → this partitions the slice exactly, so
-    // renderers draw it as-is (no residual math).
-    const wfChapters = new Map<string, ChangeMapChapter>();
     for (const e of wfEdits) {
       foldStatus(rollup, e);
       if (e.taskId) taskIds.add(e.taskId);
-      const src = chById.get(e.chapter);
-      if (!src) continue;
-      let c = wfChapters.get(src.id);
-      if (!c) {
-        // editIds: [] — the Chapter axis reads the session's own chapters, never a workflow slice's;
-        // carrying the full chapter's raw ids here (spread from src) would misrepresent the run's scope.
-        c = { ...src, edits: 0, added: 0, removed: 0, pending: 0, kept: 0, undone: 0, agent: false, editIds: [] };
-        wfChapters.set(src.id, c);
-      }
-      c.edits++;
-      c.added += e.added;
-      c.removed += e.removed;
-      if (e.status === 'kept') c.kept++;
-      else if (e.status === 'undone') c.undone++;
-      else c.pending++;
-      if (e.agent) c.agent = true;
     }
     const meta = wfMeta.get(id);
     return {
@@ -1014,21 +764,20 @@ export function buildChangeMap(
       rollup,
       files: rollupFiles(wfEdits),
       taskIds: [...taskIds],
-      chapters: [...wfChapters.values()].sort((a, b) => a.index - b.index),
     };
   });
   workflows.sort((a, b) => b.rollup.edits - a.rollup.edits || a.id.localeCompare(b.id));
 
   return {
-    summary, edits, chapters, compactions, files, modules, tasks,
+    summary, edits, compactions, files, modules, tasks,
     rollupByTask: rollupByTask(edits),
     rollupBySubagent: rollupBySubagent(edits),
     rollupByWorkflow: rollupByWorkflow(edits),
     workflows,
-    // Per-REQUEST slices are opt-in: they need the user's turns, which is one more transcript pass, and
+    // Per-PROMPT slices are opt-in: they need the user's turns, which is one more transcript pass, and
     // the fleet builds a map per worktree sibling on every refresh — none of which is ever scoped by an
     // ask typed into THIS window. The self map asks for them; siblings don't.
-    requests: opts.requests ? requestSlices(cwd, session, { edits, chById, spans, chapterByContent, subs }) : [],
+    prompts: opts.prompts ? promptSlices(cwd, session, { edits, subs }) : [],
   };
 }
 
@@ -1036,24 +785,21 @@ export function buildChangeMap(
  * Group the session's work by the ask that caused it.
  *
  * Everything here is a fold over pieces `buildChangeMap` already computed — the only new reads are the
- * user's turns (`sessionRequests`, memoized against the transcript + log) and the background shells,
+ * user's turns (`sessionPrompts`, memoized against the transcript + log) and the background shells,
  * whose ids are what a Processes row is keyed by. Attribution is by START time throughout, so a slice
  * answers "what did asking for this set in motion", not "what finished while I was typing".
  */
-function requestSlices(
+function promptSlices(
   cwd: string,
   session: string,
   ctx: {
     edits: ChangeMapEdit[];
-    chById: Map<string, ChangeMapChapter>;
-    spans: Span[];
-    chapterByContent: Map<string, ChangeMapChapter>;
     subs: { agentId: string; ts: number }[];
   }
-): ChangeMapRequest[] {
-  const reqs = sessionRequests(cwd, session);
-  if (!reqs.length) return [];
-  const slices: ChangeMapRequest[] = reqs.map((r) => ({
+): ChangeMapPrompt[] {
+  const asks = sessionPrompts(cwd, session);
+  if (!asks.length) return [];
+  const slices: ChangeMapPrompt[] = asks.map((r) => ({
     id: r.id,
     index: r.index,
     text: r.text,
@@ -1063,9 +809,7 @@ function requestSlices(
     rollup: { edits: 0, added: 0, removed: 0, pending: 0, kept: 0, undone: 0 },
     files: [],
     modules: [],
-    chapters: [],
     editIds: r.editIds.slice(),
-    chapterIds: [],
     agentIds: [],
     workflowIds: [],
     processIds: [],
@@ -1074,9 +818,9 @@ function requestSlices(
     compactions: r.compactions,
     durationMs: r.durationMs,
   }));
-  // Which ask owned a given moment — the same binary search `sessionRequests` attributes with, over
+  // Which ask owned a given moment — the same binary search `sessionPrompts` attributes with, over
   // ask times that are sorted and tile the session from the first prompt onward. A moment BEFORE the
-  // first ask belongs to no request (session setup answers to nobody).
+  // first ask belongs to no prompt (session setup answers to nobody).
   const owner = (ts: number): number => {
     if (!ts || ts < slices[0].ts) return -1;
     let lo = 0;
@@ -1088,28 +832,17 @@ function requestSlices(
     }
     return lo;
   };
-  const endOf = (i: number): number => (slices[i].endTs || Number.MAX_SAFE_INTEGER);
 
-  // 1. the edits, and with them the files/folders/chapters each ask touched
-  const editsByReq = new Map<number, ChangeMapEdit[]>();
-  const chapterIds = slices.map(() => new Set<string>());
+  // 1. the edits, and with them the files/folders each ask touched
+  const editsByAsk = new Map<number, ChangeMapEdit[]>();
   for (const e of ctx.edits) {
     const i = owner(e.ts);
     if (i < 0) continue;
-    let arr = editsByReq.get(i);
-    if (!arr) editsByReq.set(i, (arr = []));
+    let arr = editsByAsk.get(i);
+    if (!arr) editsByAsk.set(i, (arr = []));
     arr.push(e);
-    chapterIds[i].add(e.chapter);
   }
-  // 2. the to-dos that were in flight while it was being answered, even when they produced no edits
-  //    inside this window — "what was Claude working on when I asked" is a question about the plan,
-  //    not about the diff.
-  for (const sp of ctx.spans) {
-    const ch = ctx.chapterByContent.get(sp.content);
-    if (!ch) continue;
-    for (let i = 0; i < slices.length; i++) if (sp.start < endOf(i) && sp.end > slices[i].ts) chapterIds[i].add(ch.id);
-  }
-  // 3. subagents by SPAWN time — a fleet row is keyed by the subagent's own agentId, so resolve to that
+  // 2. subagents by SPAWN time — a fleet row is keyed by the subagent's own agentId, so resolve to that
   //    rather than to the spawning tool_use id (which only the action timeline speaks).
   for (const s of ctx.subs) {
     const i = owner(s.ts);
@@ -1126,44 +859,22 @@ function requestSlices(
 
   for (let i = 0; i < slices.length; i++) {
     const sl = slices[i];
-    sl.chapterIds = [...chapterIds[i]];
-    const mine = editsByReq.get(i);
+    const mine = editsByAsk.get(i);
     if (!mine || !mine.length) continue;
-    // Regroup this ask's edits by chapter — session-chapter identity, counts scoped to the request, the
-    // same shape a workflow slice's ribbon renders. editIds: [] for the same reason it is there: the
-    // Chapter axis walks the SESSION's chapters, and a slice's partial set would misstate its scope.
-    const chs = new Map<string, ChangeMapChapter>();
-    for (const e of mine) {
-      foldStatus(sl.rollup, e);
-      const src = ctx.chById.get(e.chapter);
-      if (!src) continue;
-      let c = chs.get(src.id);
-      if (!c) {
-        c = { ...src, edits: 0, added: 0, removed: 0, pending: 0, kept: 0, undone: 0, agent: false, editIds: [] };
-        chs.set(src.id, c);
-      }
-      c.edits++;
-      c.added += e.added;
-      c.removed += e.removed;
-      if (e.status === 'kept') c.kept++;
-      else if (e.status === 'undone') c.undone++;
-      else c.pending++;
-      if (e.agent) c.agent = true;
-    }
+    for (const e of mine) foldStatus(sl.rollup, e);
     sl.files = rollupFiles(mine);
     sl.modules = rollupModules(sl.files);
-    sl.chapters = [...chs.values()].sort((a, b) => a.index - b.index);
   }
   return slices;
 }
 
 /**
  * The RAW store edit ids whose commit ts falls inside a REAL (strict) in_progress interval for `taskId`
- * — the honest per-task attribution that backs the cross-agent task log and the strict rollups. Reads
- * raw store records (never the collapsed change-map units): an edit joins a task's set ONLY via a real
- * interval — never a start=0/end=+∞ edge fill. Composes S6's single strict-span builder
- * (inProgressSpansStrict), so it can't diverge from the change-map's own attribution. Zero token.
- * (Review ops resolve via `reviewEditIds` below — WYSIWYG over the DISPLAYED chapter set.)
+ * — the honest per-task attribution that backs task review ops, the cross-agent task log, and the
+ * strict rollups. Reads raw store records (never the collapsed change-map units): an edit joins a
+ * task's set ONLY via a real interval — never a start=0/end=+∞ edge fill. Composes the single
+ * strict-span builder (inProgressSpansStrict), so it can't diverge from the change-map's own
+ * attribution. Zero token.
  */
 export function taskEditIds(cwd: string, session: string, taskId: string): number[] {
   const transcript = findTranscript(cwd, session);
@@ -1173,157 +884,60 @@ export function taskEditIds(cwd: string, session: string, taskId: string): numbe
     .map((r) => r.id);
 }
 
-/**
- * The RAW store edit ids DISPLAYED under a chapter — including the synthetic session chapter
- * ('ch:session'). This is the WYSIWYG review set (0.8.0 stabilization): a chapter row's Accept/Reject/
- * Clear act on exactly the edits the row shows, so accepting a chapter never leaves gap-filled members
- * behind (the "accepted the chapter but edits remain" confusion). Mirrors buildChangeMap's display
- * attribution — gap-filled spans, first-occurrence content → plain-hash chapter id, synthetic fallback
- * for everything else — and is pinned against it by tests. Returns [] for an id that names no display
- * chapter (callers fall back to the strict set).
- */
-export function chapterEditIds(cwd: string, session: string, chapterId: string): number[] {
-  const transcript = findTranscript(cwd, session);
-  const snaps = transcript ? planSnaps(transcript) : [];
-  const spans = inProgressSpans(snaps);
-  const insights = transcriptInsights(cwd, session);
-  // First occurrence of each plan item's content claims the content's spans (mirrors chapterByContent).
-  // The FINAL merged snapshot, so task-chapters resolve here too (WYSIWYG review on task rows).
-  const finalPlan = snaps.length ? snaps[snaps.length - 1].todos : insights.todos;
-  const idByContent = new Map<string, string>();
-  for (const td of finalPlan) if (!idByContent.has(td.content)) idByContent.set(td.content, taskId(td.content, 0));
-  const chapterOf = (ts: number): string => {
-    if (ts) {
-      // Display spans are gap-filled and disjoint → at most one contains ts.
-      for (const sp of spans) if (ts >= sp.start && ts < sp.end) return idByContent.get(sp.content) ?? SYNTHETIC_CHAPTER_ID;
-    }
-    return SYNTHETIC_CHAPTER_ID;
-  };
-  return readLog(session)
-    .filter((r) => chapterOf(r.ts) === chapterId)
-    .map((r) => r.id);
-}
-
-/**
- * Resolve a chapter/task id to the edit set REVIEW OPS act on: the displayed chapter set when the id
- * names a chapter (WYSIWYG — the buttons touch exactly what the row shows, including the synthetic
- * session chapter), else the strict-span set (an analytics-side task id — e.g. a tasklog row whose
- * to-do no longer heads a chapter). Chapter ids and strict taskIds share the same content-hash value
- * for real chapters, so one resolver serves the CLI, both editors, and scripts.
- */
-export function reviewEditIds(cwd: string, session: string, id: string): number[] {
-  const display = chapterEditIds(cwd, session, id);
-  return display.length ? display : taskEditIds(cwd, session, id);
-}
-
-export interface EditChapter {
-  id: string; // the chapter (brush) id the edit belongs to; SYNTHETIC_CHAPTER_ID for unplanned work
-  title: string; // human-readable subtask name (Claude's to-do text; the session title for synthetic)
-  synthetic: boolean; // true = the residual 'session' bucket, not a real planned subtask
-  editIds: number[]; // every edit DISPLAYED under this chapter, in capture order (the WYSIWYG set)
-}
-
-/**
- * Reverse lookup for the review-by-chapter ("cascaded edits") navigation: which chapter an edit
- * belongs to, that chapter's human-readable title, and its ordered sibling edit ids. Mirrors the
- * DISPLAY attribution of `chapterEditIds` (same gap-filled spans, first-occurrence → plain-hash id,
- * synthetic fallback) so the axis walks exactly the set a chapter row's Accept/Reject acts on — and
- * reuses `chapterEditIds` for the member list so the two can never diverge. Returns null for an edit
- * id that names no record. Ordered by capture id = the order Claude made the edits. Zero token.
- */
-export function chapterForEditId(cwd: string, session: string, editId: number): EditChapter | null {
-  const rec = readLog(session).find((r) => r.id === editId);
-  if (!rec) return null;
-  const transcript = findTranscript(cwd, session);
-  const snaps = transcript ? planSnaps(transcript) : [];
-  const spans = inProgressSpans(snaps);
-  const insights = transcriptInsights(cwd, session);
-  const finalPlan = snaps.length ? snaps[snaps.length - 1].todos : insights.todos;
-  const idByContent = new Map<string, string>();
-  const contentById = new Map<string, string>();
-  for (const td of finalPlan) {
-    if (!idByContent.has(td.content)) {
-      const cid = taskId(td.content, 0);
-      idByContent.set(td.content, cid);
-      contentById.set(cid, td.content);
-    }
-  }
-  let chapterId = SYNTHETIC_CHAPTER_ID;
-  if (rec.ts) {
-    for (const sp of spans) {
-      if (rec.ts >= sp.start && rec.ts < sp.end) {
-        chapterId = idByContent.get(sp.content) ?? SYNTHETIC_CHAPTER_ID;
-        break;
-      }
-    }
-  }
-  const synthetic = chapterId === SYNTHETIC_CHAPTER_ID;
-  const title = synthetic
-    ? insights.title ?? (insights.firstUserPrompt ? firstLine(insights.firstUserPrompt, 80) : 'Session work')
-    : firstLine(contentById.get(chapterId) ?? chapterId, 80);
-  return { id: chapterId, title, synthetic, editIds: chapterEditIds(cwd, session, chapterId) };
-}
-
-export interface SessionChapterRow extends EditChapter {
-  index: number; // plan order (synthetic session chapter sorts last)
-}
-
-/**
- * The session's chapters in plan order, each with its ordered member edit ids — the model behind the
- * nav-bar CHAPTER axis (step BETWEEN subtasks). Mirrors the same DISPLAY attribution as
- * chapterForEditId/chapterEditIds so a chapter here holds exactly the edits its Accept/Reject acts on.
- * Only chapters that actually claimed edits appear. The synthetic session chapter sorts last. Zero token.
- */
-export function sessionChapters(cwd: string, session: string): SessionChapterRow[] {
-  const transcript = findTranscript(cwd, session);
-  const snaps = transcript ? planSnaps(transcript) : [];
-  const spans = inProgressSpans(snaps);
-  const insights = transcriptInsights(cwd, session);
-  const finalPlan = snaps.length ? snaps[snaps.length - 1].todos : insights.todos;
-  const idByContent = new Map<string, string>();
-  const contentById = new Map<string, string>();
-  const orderById = new Map<string, number>();
-  let order = 0;
-  for (const td of finalPlan) {
-    if (!idByContent.has(td.content)) {
-      const cid = taskId(td.content, 0);
-      idByContent.set(td.content, cid);
-      contentById.set(cid, td.content);
-      orderById.set(cid, order++);
-    }
-  }
-  const chapterOf = (ts: number): string => {
-    if (ts) for (const sp of spans) if (ts >= sp.start && ts < sp.end) return idByContent.get(sp.content) ?? SYNTHETIC_CHAPTER_ID;
-    return SYNTHETIC_CHAPTER_ID;
-  };
-  const members = new Map<string, number[]>();
-  for (const r of readLog(session)) {
-    const cid = chapterOf(r.ts);
-    (members.get(cid) ?? members.set(cid, []).get(cid)!).push(r.id);
-  }
-  const rows: SessionChapterRow[] = [];
-  for (const [cid, editIds] of members) {
-    const synthetic = cid === SYNTHETIC_CHAPTER_ID;
-    rows.push({
-      id: cid,
-      synthetic,
-      title: synthetic
-        ? insights.title ?? (insights.firstUserPrompt ? firstLine(insights.firstUserPrompt, 80) : 'Session work')
-        : firstLine(contentById.get(cid) ?? cid, 80),
-      editIds,
-      index: synthetic ? Number.MAX_SAFE_INTEGER : orderById.get(cid) ?? Number.MAX_SAFE_INTEGER - 1,
-    });
-  }
-  return rows.sort((a, b) => a.index - b.index);
-}
-
-
 // --- cross-process change-map cache (the Overview's dominant cost) ---
 
 /** Bump to invalidate every persisted map after a shape or semantics change. */
 const MAP_CACHE_VERSION = 1;
 
 /** (mtimeMs:size) for a file, or '' when it can't be stat'd. */
+/**
+ * A digest of every file in `dir` (name, mtime, size) — the stamp for an input that is a DIRECTORY.
+ *
+ * A directory's own mtime moves when an entry is added or removed but not when one grows, and a
+ * subagent's transcript grows for as long as that agent works. Stat-only, over a handful of files.
+ */
+function dirStamp(dir: string | null): string {
+  if (!dir) return '';
+  try {
+    return fs
+      .readdirSync(dir)
+      .sort()
+      .map((n) => {
+        try {
+          const st = fs.statSync(path.join(dir, n));
+          return `${n}:${st.mtimeMs}:${st.size}`;
+        } catch {
+          return `${n}:?`;
+        }
+      })
+      .join(',');
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Everything a change map is derived from, beyond the session's own transcript and store log.
+ *
+ * `buildChangeMap` also reads the session's subagent transcripts (summary.subagents, rollupBySubagent,
+ * prompts[].agentIds), its workflow journals (workflows[]), and the project's OTHER session transcripts
+ * (summary.fleet). Keying the cache on the transcript and log alone froze all of that: subagents that
+ * only read, and siblings starting in other worktrees, changed no keyed file, so the Overview kept
+ * reporting zero of them until something unrelated moved.
+ */
+function derivedInputsStamp(cwd: string, session: string): string {
+  const transcript = findTranscript(cwd, session);
+  const base = transcript ? transcript.replace(/\.jsonl$/, '') : null;
+  const subs = base ? path.join(base, 'subagents') : null;
+  return [
+    dirStamp(subs),
+    dirStamp(subs ? path.join(subs, 'workflows') : null),
+    dirStamp(base ? path.join(base, 'workflows') : null),
+    // The project dir is one file per session: this covers every sibling transcript at once.
+    dirStamp(transcript ? path.dirname(transcript) : null),
+  ].join('|');
+}
+
 function fileStamp(p: string | null): string {
   if (!p) return '';
   try {
@@ -1360,6 +974,56 @@ export interface SiblingOverview {
 }
 
 /**
+ * The session's own change map, memoized on disk exactly as a sibling's payload is.
+ *
+ * `changemap --json` runs in a FRESH process on every refresh tick, so the in-process memo never helps
+ * it: rebuilding a finished session's map cost seconds of transcript parsing every time, which is what
+ * made switching to a long session feel like a hang. The map is a pure function of the transcript and
+ * the store log, so keying the result to their stamps is safe — either file changing rebuilds it.
+ */
+/**
+ * Where a session's cached map lives: `<root>/changemap-cache/<sessionId>/<key>.json`.
+ *
+ * Filed under the session id, not flat, so dropping a session can reap its derived copies — a flat
+ * key is a one-way hash of (cwd, session, root) and cannot be reversed to find them. The payload holds
+ * the session's prompt text verbatim; leaving it behind after a drop would keep deleted content.
+ */
+function mapCachePath(session: string, key: string): string {
+  const dir = isSafeSessionId(session)
+    ? path.join(rootDir(), 'changemap-cache', session)
+    : path.join(rootDir(), 'changemap-cache');
+  return path.join(dir, `${key}.json`);
+}
+
+export function cachedChangeMap(cwd: string, session: string, opts: { root: string; prompts?: boolean }): ChangeMap {
+  const transcript = findTranscript(cwd, session);
+  const tStamp = fileStamp(transcript);
+  const lStamp = fileStamp(logPath(session));
+  const build = (): ChangeMap => buildChangeMap(cwd, session, opts);
+  if (!tStamp && !lStamp) return build(); // nothing stable to key on
+  const stamp = `${MAP_CACHE_VERSION}|${tStamp}|${lStamp}|${opts.prompts ? 'p' : '-'}|${derivedInputsStamp(cwd, session)}`;
+  const key = crypto.createHash('sha256').update(`map ${cwd} ${session} ${opts.root}`).digest('hex').slice(0, 16);
+  const p = mapCachePath(session, key);
+  try {
+    const hit = JSON.parse(fs.readFileSync(p, 'utf8')) as { stamp: string; map: ChangeMap };
+    if (hit && hit.stamp === stamp && hit.map && hit.map.summary) return hit.map;
+  } catch {
+    /* absent or unreadable — rebuild */
+  }
+  const map = build();
+  try {
+    fs.mkdirSync(path.dirname(p), { recursive: true, mode: 0o700 });
+    const tmp = `${p}.${process.pid}.tmp`;
+    // 0600/0700 like every other file in the store (SECURITY.md): this payload carries prompt text.
+    fs.writeFileSync(tmp, JSON.stringify({ stamp, map }), { mode: 0o600 });
+    fs.renameSync(tmp, p);
+  } catch {
+    /* cache is best-effort */
+  }
+  return map;
+}
+
+/**
  * One sibling's whole fleet payload, memoized on disk.
  *
  * The Overview derives several things per sibling — its change map, an activity sparkline, its current
@@ -1383,9 +1047,9 @@ export function siblingOverview(cwd: string, session: string, opts: { root: stri
   });
   // Nothing stable to key on (neither input exists) — just build it.
   if (!tStamp && !lStamp) return build();
-  const stamp = `${MAP_CACHE_VERSION}|${tStamp}|${lStamp}|${bins}`;
+  const stamp = `${MAP_CACHE_VERSION}|${tStamp}|${lStamp}|${bins}|${derivedInputsStamp(cwd, session)}`;
   const key = crypto.createHash('sha256').update(`${cwd} ${session} ${opts.root}`).digest('hex').slice(0, 16);
-  const p = path.join(rootDir(), 'changemap-cache', `${key}.json`);
+  const p = mapCachePath(session, key);
   try {
     const hit = JSON.parse(fs.readFileSync(p, 'utf8')) as { stamp: string; view: SiblingOverview };
     if (hit && hit.stamp === stamp && hit.view && hit.view.map) return hit.view;
@@ -1394,9 +1058,9 @@ export function siblingOverview(cwd: string, session: string, opts: { root: stri
   }
   const view = build();
   try {
-    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.mkdirSync(path.dirname(p), { recursive: true, mode: 0o700 });
     const tmp = `${p}.${process.pid}.tmp`; // pid-scoped so concurrent CLI processes can't collide
-    fs.writeFileSync(tmp, JSON.stringify({ stamp, view }));
+    fs.writeFileSync(tmp, JSON.stringify({ stamp, view }), { mode: 0o600 });
     fs.renameSync(tmp, p); // atomic: a concurrent reader sees old-or-new, never a torn view
   } catch {
     /* cache is best-effort */

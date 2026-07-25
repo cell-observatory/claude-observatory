@@ -8,7 +8,7 @@ import java.awt.FlowLayout
 import javax.swing.JPanel
 
 /**
- * Geometry test for the Overview's review-axes row. WrapLayout keeps Diff/File/Folder/Chapter on one
+ * Geometry test for the Overview's review-axes row. WrapLayout keeps Diff/File/Folder/Prompt on one
  * centered line when they fit, and FLOWS them onto additional lines (growing the row's preferred height)
  * when the pane is too narrow — instead of the axis toolbars collapsing into an IntelliJ "…" overflow.
  */

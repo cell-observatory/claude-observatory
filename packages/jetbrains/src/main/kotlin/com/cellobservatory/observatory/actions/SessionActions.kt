@@ -14,7 +14,7 @@ import com.intellij.openapi.ui.Messages
 
 /**
  * Session-level utility actions, registered in plugin.xml so the panel-only commands (Setup Check,
- * Export, Switch Session, Clean Store, Accept/Revert All, Clear Resolved, Spotlight, Search, Install
+ * Export, Switch Session, Clean Store, Accept/Reject All, Clear Resolved, Spotlight, Search, Install
  * Hooks) are reachable from Find Action and can be keybound — parity with VS Code, where the same
  * commands live in the palette. Each reuses the SAME shared handler the tree toolbars call (ReviewOps
  * / the service), so behavior never forks.
@@ -92,7 +92,7 @@ class RevertAllEditsAction : SessionAction() {
     }
 }
 
-/** Re-apply every undone Claude edit in the session (the forward mirror of Revert All). */
+/** Re-apply every undone Claude edit in the session (the forward mirror of Reject All). */
 class RedoAllEditsAction : SessionAction() {
     override fun actionPerformed(e: AnActionEvent) {
         val project = e.project ?: return

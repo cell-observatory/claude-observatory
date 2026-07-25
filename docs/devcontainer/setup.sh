@@ -44,6 +44,7 @@ else
       https://api.github.com/repos/cell-observatory/claude-observatory/releases/latest \
       | grep -o '"browser_download_url": *"[^"]*\.tgz"' | head -1 | sed 's/.*"\(https[^"]*\)"/\1/')"
     if [ -n "$TGZ_URL" ]; then
+      # privacy-ok: a download target inside the container, not a path on anyone's machine
       curl -fsSL "$TGZ_URL" -o /tmp/claude-observatory.tgz && npm i -g /tmp/claude-observatory.tgz --silent \
         || say "  CLI install failed — mount the repo and set OBSERVATORY_REPO."
     else

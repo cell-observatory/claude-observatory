@@ -51,7 +51,7 @@ export function crossAgentTaskLog(cwd: string): TaskLogEntry[] {
   for (const sib of listRepoSiblings(cwd)) {
     const map = buildChangeMap(sib.worktree, sib.id, { root: sib.worktree });
     // Label from the STRICT-span task identities (map.tasks), which cover exactly the edit-producing
-    // tasks and share ids with edit.taskId — NOT map.chapters (the latest-snapshot plan), whose ids
+    // tasks and share ids with edit.taskId — the strict identities, whose ids
     // only overlap where content matches, leaving most strict-span tasks unlabelled.
     const contentByTask = new Map<string, string>();
     for (const t of map.tasks) contentByTask.set(t.taskId, t.content);

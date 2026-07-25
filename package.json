@@ -1,8 +1,8 @@
 {
   "name": "claude-observatory-monorepo",
-  "version": "0.8.7",
+  "version": "0.8.8",
   "private": true,
-  "description": "Standalone, git-free, per-edit Keep/Undo for Claude Code — terminal + VS Code, zero extra tokens.",
+  "description": "Standalone, git-free, per-edit Keep/Undo for Claude Code \u2014 terminal + VS Code, zero extra tokens.",
   "workspaces": [
     "packages/core",
     "packages/cli",
@@ -13,13 +13,14 @@
     "build:core": "npm run build -w @claude-observatory/core",
     "build:cli": "npm run build -w claude-observatory",
     "build:vscode": "npm run build -w claude-observatory-vscode",
-    "test": "npm run version:check && npm run build && npm run build:vscode && node --test packages/core/test/core.test.js packages/vscode/test/smoke.test.js",
+    "test": "npm run version:check && npm run check:privacy && npm run build && npm run build:vscode && node --test packages/core/test/core.test.js packages/vscode/test/smoke.test.js",
     "e2e": "npm run build && bash test/e2e.sh",
     "test:all": "npm test && bash test/e2e.sh",
     "version:check": "node scripts/version.mjs",
     "version:set": "node scripts/version.mjs",
     "release": "bash scripts/release.sh",
-    "clean": "rm -rf packages/*/dist release"
+    "clean": "rm -rf packages/*/dist release",
+    "check:privacy": "node scripts/check-docs-privacy.mjs"
   },
   "devDependencies": {
     "gifenc": "^1.0.3",

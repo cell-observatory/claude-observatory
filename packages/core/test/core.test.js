@@ -1226,6 +1226,11 @@ test('contract: each --json command emits the documented key set (rename-guard f
   seedEdit(S, F, 'a\n', 'a\nb\n'); // #1
   seedEdit(S, F, 'a\nb\n', 'a\nB\n'); // #2
   seedEdit(S, path.join(path.dirname(F), 'sub', 'nested.js'), 'x\n', 'x\ny\n'); // #3 — forces a folder node
+  // A minimal transcript under THIS cwd's project dir: `sessions` is workspace-filtered (0.8.8), so a
+  // session must have a transcript findable from the spawn's cwd to be listed.
+  const proj = core.projectDir(process.cwd());
+  fs.mkdirSync(proj, { recursive: true });
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), JSON.stringify({ timestamp: new Date(500).toISOString(), message: { role: 'user', content: 'Contract fixture session' } }) + '\n');
   const env = { ...process.env, HOME: home, USERPROFILE: home, CLAUDE_OBSERVATORY_SESSION: S };
   const runJson = (args) => JSON.parse(cp.execFileSync('node', [CLI, ...args], { env, encoding: 'utf8' }));
   const hasKeys = (obj, keys, where) => {
@@ -1238,7 +1243,7 @@ test('contract: each --json command emits the documented key set (rename-guard f
   hasKeys(runJson(['status', '--json']), ['hooksInstalled', 'hookScript', 'session', 'store', 'lastCaptureTs', 'counts', 'skipped'], 'status');
   const sessions = runJson(['sessions', '--json']);
   hasKeys(sessions, ['active', 'sessions'], 'sessions');
-  hasKeys(sessions.sessions[0], ['id', 'edits', 'pending', 'lastMs'], 'sessions.sessions[]');
+  hasKeys(sessions.sessions[0], ['id', 'title', 'lastActiveMs', 'current'], 'sessions.sessions[]'); // recency + name — no per-row log parse (0.8.8)
   const tree = runJson(['tree', '--json']);
   hasKeys(tree, ['folders', 'files'], 'tree');
   hasKeys(tree.folders[0], ['label', 'path', 'folders', 'files'], 'tree.folders[]'); // `path` drives scoped folder ops
@@ -1255,7 +1260,7 @@ test('contract: each --json command emits the documented key set (rename-guard f
 test('contract 0.8.0: every machine surface the editors consume emits its documented key set (rename-guard)', async () => {
   // The gap this closes: the fast rename-guard above predates 0.8.0 — a key rename in multitask/
   // changemap/tasklog/chat-context/observations/metrics/siblings only failed the slow bash e2e.
-  // The demo simulator is the fixture: a real-pipeline session with chapters, a subagent, a workflow.
+  // The demo simulator is the fixture: a real-pipeline session with tasks, a subagent, a workflow.
   const home = freshHome();
   delete process.env.CLAUDE_CONFIG_DIR;
   const ws = tmpWork();
@@ -1278,20 +1283,24 @@ test('contract 0.8.0: every machine surface the editors consume emits its docume
 
   // changemap — the Overview detail (ribbon · strip · ledger) + per-agent slices.
   const cm = runJson(['changemap', '--json']);
-  hasKeys(cm, ['summary', 'edits', 'chapters', 'compactions', 'files', 'modules', 'tasks', 'rollupByTask', 'rollupBySubagent', 'rollupByWorkflow', 'workflows', 'rollupByAgent', 'agents', 'unassigned'], 'changemap');
+  hasKeys(cm, ['summary', 'edits', 'compactions', 'files', 'modules', 'tasks', 'prompts', 'rollupByTask', 'rollupBySubagent', 'rollupByWorkflow', 'workflows', 'rollupByAgent', 'agents', 'unassigned'], 'changemap');
+  assert.ok(!('subtasks' in cm) && !('chapters' in cm), 'the display-subtask layer is gone (0.8.8) — neither key is emitted');
   // 0.8.7 folded the footprint into the risk/egress audits — see `risk --json`.outsideWrites and the
   // `file` channels in `egress --json`. The change map no longer carries a badge-row payload.
   assert.ok(!('footprint' in cm), 'changemap carries no footprint — it folded into risk + egress');
   hasKeys(cm.summary, ['session', 'title'], 'changemap.summary'); // title drives the Overview selector + Stats session name (JetBrains)
-  hasKeys(cm.chapters[0], ['id', 'taskId', 'synthetic', 'index', 'title', 'status', 'startTs', 'endTs', 'edits', 'added', 'removed', 'pending', 'kept', 'undone', 'agent', 'editIds'], 'changemap.chapters[]'); // editIds drives the JetBrains Chapter axis
-  hasKeys(cm.edits[0], ['id', 'rel', 'module', 'file', 'added', 'removed', 'status', 'ts', 'agent', 'risk', 'reasoning', 'chapter', 'taskId', 'subagentId', 'workflowId'], 'changemap.edits[]');
-  hasKeys(cm.workflows[0], ['id', 'name', 'running', 'rollup', 'files', 'taskIds', 'chapters'], 'changemap.workflows[]');
-  hasKeys(cm.agents[0], ['session', 'worktree', 'gitBranch', 'phase', 'lastMs', 'summary', 'chapters', 'files', 'modules'], 'changemap.agents[]');
+  hasKeys(cm.tasks[0], ['taskId', 'content', 'firstTs', 'lastTs'], 'changemap.tasks[]'); // the strict identities the Tasks tab + tasklog join
+  hasKeys(cm.prompts[0], ['id', 'index', 'text', 'title', 'ts', 'endTs', 'rollup', 'files', 'modules', 'editIds', 'agentIds', 'workflowIds', 'processIds', 'actions', 'errors', 'compactions', 'durationMs'], 'changemap.prompts[]');
+  hasKeys(cm.edits[0], ['id', 'rel', 'module', 'file', 'added', 'removed', 'status', 'ts', 'agent', 'risk', 'reasoning', 'taskId', 'subagentId', 'workflowId'], 'changemap.edits[]');
+  hasKeys(cm.workflows[0], ['id', 'name', 'running', 'rollup', 'files', 'taskIds'], 'changemap.workflows[]');
+  hasKeys(cm.agents[0], ['session', 'worktree', 'gitBranch', 'phase', 'lastMs', 'summary', 'files', 'modules'], 'changemap.agents[]');
   // Per-sibling `edits` is deliberately projected out: 1.95 MB of a 3.30 MB payload that no renderer
   // read. The ACTIVE session's own top-level edits stay — that is the list tools consume.
   assert.ok(!('edits' in cm.agents[0]), 'changemap.agents[] carries no per-sibling edit list');
   assert.ok(Array.isArray(cm.edits), 'the session\'s own edits are untouched');
-  assert.ok(cm.edits.every((e) => typeof e.chapter === 'string' && e.chapter.length > 0), 'changemap: the chapter dimension is TOTAL');
+  const sess = runJson(['sessions', '--json']);
+  hasKeys(sess, ['active', 'sessions'], 'sessions');
+  hasKeys(sess.sessions[0], ['id', 'title', 'lastActiveMs', 'current'], 'sessions.sessions[]'); // no pending counts — recency + name only (0.8.8)
 
   // tasklog / chat-context / observations / metrics / siblings --repo.
   const tl = runJson(['tasklog']);
@@ -2960,7 +2969,7 @@ test('metrics: sessionMetrics rolls up ±lines, actions, subagents, and tool lat
   assert.equal(m.toolLatency.maxMs, 4000, 'max latency = the 4s gap');
 });
 
-test('changemap: rolls edits into per-file/per-module rows + chapters from Claude’s to-dos (0.7.6)', () => {
+test('changemap: rolls edits into per-file/per-module rows + strict task attribution', () => {
   freshHome();
   const S = 'cmap';
   const cwd = tmpWork();
@@ -3044,44 +3053,23 @@ test('changemap: rolls edits into per-file/per-module rows + chapters from Claud
   const sum = (rows) => rows.reduce((n, r) => n + r.churn, 0);
   assert.equal(sum(m.files), sum(m.modules), 'churn is conserved from files up to modules');
 
-  // --- chapters, mined from Claude's own to-dos ---
-  // Status comes from the FINAL to-do list; the last snapshot marks both completed, so both read 'done'.
-  assert.deepEqual(m.chapters.map((c) => c.title), ['Scaffold the map', 'Ship it'], 'the final to-do list, in order');
-  assert.equal(m.chapters[0].status, 'done', 'completed -> done');
-  assert.equal(m.chapters[1].status, 'done', 'completed -> done');
-
-  // --- attribution: the first span is extended back to the session start (0.7.6) ---
-  assert.equal(m.chapters[0].edits, 3, 'edits #1/#2/#3 fall in the first span (extended back to session start)');
-  assert.equal(m.chapters[0].pending, 1, 'edit #1 is pending');
-  assert.equal(m.chapters[0].kept, 2, 'edits #2/#3 were kept');
-  assert.equal(m.chapters[1].edits, 3, 'edits #4/#5 fall in the second span; #6 (trailing) fills forward onto it (0.8.0 totality)');
-  assert.equal(m.chapters[1].undone, 1, 'edit #4 was reverted');
+  // --- strict per-task attribution: no edge fill, ever ---
   const ch0 = core.taskId('Scaffold the map', 0); // stable content-hash key replaced positional `ch0` (0.8.0 S6)
   const ch1 = core.taskId('Ship it', 0);
   const e1 = m.edits.find((e) => e.id === id1);
-  assert.equal(e1.chapter, ch0, 'a pre-first-flip edit still attributes to the opening chapter for the legacy brush');
-  // …but the STRICT taskId model does NOT edge-fill: edit #1 (ts 1000) precedes the first in_progress (ts 1500) → unassigned.
   assert.equal(e1.taskId, null, 'strict spans never force-file a pre-first-flip edit onto the head task');
-
-  // --- total display attribution (0.8.0): a trailing edit joins the final chapter; strict stays honest ---
   const e6 = m.edits.find((e) => e.id === id6);
-  assert.equal(e6.chapter, ch1, 'edit #6 lands after everything is completed — the display brush fills forward to the final chapter');
-  assert.equal(e6.taskId, null, 'but strict spans never widen — a trailing gap edit is unassigned for destructive ops');
-  assert.ok(m.chapters.every((c) => !c.synthetic), 'every edit fell in a to-do window — no synthetic chapter appended');
-  assert.deepEqual(m.files.find((f) => f.file === 'y.md').chapters, [ch1], 'the trailing edit lights its file under the final chapter');
-  assert.deepEqual(m.files.find((f) => f.file === 'b.ts').chapters, [ch0], 'attributed files carry the brush key');
-  assert.equal(m.chapters[0].taskId, ch0, 'a real chapter exposes the strict taskId its destructive ops resolve to');
+  assert.equal(e6.taskId, null, 'strict spans never widen — a trailing gap edit is unassigned');
+  assert.ok(!('subtasks' in m), 'the display-subtask layer is gone (0.8.8) — no subtasks key');
+  assert.ok(!('subtask' in m.edits[0]), 'edits carry strict taskId attribution only');
 
-  // --- editIds: the nav-bar Chapter axis model, computed once in buildChangeMap; must equal the
-  //     standalone chapterEditIds() (same display attribution) so the axis walks exactly the WYSIWYG set ---
-  assert.deepEqual(m.chapters[0].editIds, core.chapterEditIds(cwd, S, ch0), 'chapter.editIds === chapterEditIds (raw store ids, capture order)');
-  assert.deepEqual(m.chapters[1].editIds, core.chapterEditIds(cwd, S, ch1), 'the second chapter carries its own displayed edit ids too');
-  assert.deepEqual(m.chapters[0].editIds, [id1, id2, id3], 'first span (extended back to session start) holds edits #1/#2/#3 in capture order');
-  assert.deepEqual(m.chapters[1].editIds, [id4, id5, id6], 'second span + the trailing fill-forward edit #6');
+  // --- taskEditIds: the strict review-op set, in capture order ---
+  assert.deepEqual(core.taskEditIds(cwd, S, ch0), [id2, id3], 'Scaffold strictly holds edits #2/#3 (never #1)');
+  assert.deepEqual(core.taskEditIds(cwd, S, ch1), [id4, id5], 'Ship strictly holds edits #4/#5 (never the trailing #6)');
   assert.equal(typeof m.summary.title, 'string', 'summary.title is the human-readable session name (empty string when unknown)');
 
   // --- 0.8.0 fix: tasks[] (strict-span identities) unify the taskId space (rollupByTask + tasklog join) ---
-  // Regression for the disjoint-id-space defect: chapters (latest plan) and rollupByTask (strict spans)
+  // Regression for the disjoint-id-space defect: subtasks (latest plan) and rollupByTask (strict spans)
   // used to key differently, so tasklog content came up empty. tasks[] is the shared join+label source.
   const shipId = core.taskId('Ship it', 0); // firstSeenTs is not hashed, so 0 matches the real id
   const scaffoldId = core.taskId('Scaffold the map', 0);
@@ -3664,7 +3652,7 @@ test('changemap: taskId is a content hash — stable across to-do reorder + iden
   assert.equal(core.taskId('Build the parser', 0).length, 12, 'sha1 truncated to 12 hex chars');
   assert.notEqual(core.taskId('Build the parser', 0), core.taskId('Ship the parser', 0), 'different text → different id');
 
-  // Build-level: the same content keeps its id no matter WHERE it sits in the final to-do list.
+  // Build-level: the same content keeps its id no matter WHERE the to-do sits, via tasks[] (strict identities).
   const build = (S, todos) => {
     const cwd = tmpWork();
     const proj = core.projectDir(cwd);
@@ -3675,24 +3663,17 @@ test('changemap: taskId is a content hash — stable across to-do reorder + iden
     fs.writeFileSync(path.join(proj, S + '.jsonl'), snap);
     return core.buildChangeMap(cwd, S, { root: cwd });
   };
-  const m1 = build('order1', [{ content: 'Alpha', status: 'pending' }, { content: 'Beta', status: 'pending' }]);
-  const m2 = build('order2', [{ content: 'Beta', status: 'pending' }, { content: 'Alpha', status: 'pending' }]); // reordered
-  const idOf = (m, title) => m.chapters.find((c) => c.title === title).id;
-  assert.equal(idOf(m1, 'Alpha'), core.taskId('Alpha', 0), 'chapter id is the content hash, not `ch0`');
+  const m1 = build('order1', [{ content: 'Alpha', status: 'in_progress' }, { content: 'Beta', status: 'pending' }]);
+  const m2 = build('order2', [{ content: 'Beta', status: 'pending' }, { content: 'Alpha', status: 'in_progress' }]); // reordered
+  const idOf = (m, content) => m.tasks.find((t) => t.content === content).taskId;
+  assert.equal(idOf(m1, 'Alpha'), core.taskId('Alpha', 0), 'a task id is the content hash, not `ch0`');
   assert.equal(idOf(m1, 'Alpha'), idOf(m2, 'Alpha'), 'Alpha keeps its id though it moved from slot 0 to slot 1');
-  assert.equal(idOf(m1, 'Beta'), idOf(m2, 'Beta'), 'Beta keeps its id though it moved from slot 1 to slot 0');
 
-  // Duplicate-content to-dos (0.8.0): identical text is still ONE strict task, but each ribbon row now
-  // gets its OWN brush key — the first occurrence keeps the plain content hash (id stability), later
-  // occurrences are occurrence-salted and display-only (taskId null → no destructive ops offered).
-  const dup = build('dup', [{ content: 'Dup', status: 'pending' }, { content: 'Dup', status: 'pending' }]);
-  assert.equal(dup.chapters.length, 2, 'the final to-do list is preserved verbatim');
-  assert.notEqual(dup.chapters[0].id, dup.chapters[1].id, 'two ribbon rows never share a brush key (0.8.0)');
-  assert.equal(dup.chapters[0].id, core.taskId('Dup', 0), 'the FIRST occurrence keeps the plain content hash — existing ids never change');
-  assert.equal(dup.chapters[0].taskId, core.taskId('Dup', 0), 'and it owns the strict task (destructive ops resolve here)');
-  assert.equal(dup.chapters[1].taskId, null, 'the later occurrence is display-only — acting on it would silently hit the first\'s edit set');
+  // Duplicate-content to-dos: identical text is deterministically ONE strict task (an honest collision).
+  const dup = build('dup', [{ content: 'Dup', status: 'in_progress' }, { content: 'Dup', status: 'pending' }]);
+  assert.equal(dup.tasks.filter((t) => t.content === 'Dup').length, 1, 'identical text is one strict task, never two');
+  assert.equal(dup.tasks[0].taskId, core.taskId('Dup', 0), 'keyed by the plain content hash');
 });
-
 test('changemap: strict spans never edge-fill — head/trailing edits are unassigned; 3-level rollups sum (S6)', () => {
   freshHome();
   delete process.env.CLAUDE_CONFIG_DIR;
@@ -3767,7 +3748,7 @@ test('changemap: strict spans never edge-fill — head/trailing edits are unassi
   assert.deepEqual(byAgent[1], { session: 'other', edits: 1, added: 4, removed: 1, pending: 0, kept: 1, undone: 0, files: 2 }, 'the sibling\'s totals, kept separate');
 });
 
-test('changemap: display chapters are TOTAL — no-todo sessions get a synthetic session chapter; strict stays honest (0.8.0)', () => {
+test('changemap: session titles — ai-title outranks the first prompt; wrappers never win; strict stays honest', () => {
   freshHome();
   delete process.env.CLAUDE_CONFIG_DIR;
 
@@ -3782,34 +3763,27 @@ test('changemap: display chapters are TOTAL — no-todo sessions get a synthetic
     return { m: core.buildChangeMap(cwd, S, { root: cwd }), id };
   };
 
-  // --- a session with NO TodoWrite at all: the historical "everything is unassigned" case ---
+  // --- a session with NO TodoWrite at all: everything is honestly unassigned ---
   const userMsg = JSON.stringify({ timestamp: new Date(500).toISOString(), message: { role: 'user', content: 'Fix the login flow so sessions persist' } });
   const { m: noTodo, id: e1 } = build('nt', [userMsg]);
-  assert.equal(noTodo.chapters.length, 1, 'exactly one chapter — the synthetic session chapter');
-  const syn = noTodo.chapters[0];
-  assert.equal(syn.synthetic, true, 'flagged synthetic so renderers can style it');
-  assert.equal(syn.id, 'ch:session', 'a fixed id that can never collide with a 12-hex content hash');
-  assert.equal(syn.taskId, null, 'display-only: no strict task exists → destructive ops are not offered');
-  assert.equal(syn.title, 'Fix the login flow so sessions persist', 'titled from the first user prompt — a goal, not a bucket');
-  assert.equal(syn.edits, 1, 'it claims the session\'s work');
-  assert.equal(syn.status, 'wip', 'pending edits → the session chapter reads wip');
-  assert.equal(noTodo.edits.find((e) => e.id === e1).chapter, 'ch:session', 'every edit carries a chapter — never null');
-  assert.equal(noTodo.edits.find((e) => e.id === e1).taskId, null, 'the strict dimension still reports the honest truth');
+  assert.ok(!('subtasks' in noTodo), 'no display-subtask layer (0.8.8)');
+  assert.equal(noTodo.edits.find((e) => e.id === e1).taskId, null, 'no plan → the strict dimension reports unassigned');
+  assert.equal(noTodo.summary.title, 'Fix the login flow so sessions persist', 'the session is titled from the first user prompt');
 
-  // --- ai-title outranks the first prompt; no user line at all falls back to "Session work" ---
+  // --- ai-title outranks the first prompt; no user line at all leaves the title empty ---
   const title = JSON.stringify({ type: 'ai-title', aiTitle: 'Login session persistence' });
   const { m: titled } = build('ntt', [title, userMsg]);
-  assert.equal(titled.chapters[0].title, 'Login session persistence', 'the session title names the chapter when Claude Code has one');
+  assert.equal(titled.summary.title, 'Login session persistence', 'Claude Code\'s own title wins when present');
   const { m: bare } = build('ntb', ['']);
-  assert.equal(bare.chapters[0].title, 'Session work', 'last-resort name when the transcript offers nothing');
+  assert.equal(bare.summary.title, '', 'no title, no prompt → empty string, never a guessed name');
 
-  // --- command wrappers and tool_result-only user turns never become the chapter title ---
+  // --- command wrappers and tool_result-only user turns never become the session title ---
   const wrapper = JSON.stringify({ timestamp: new Date(100).toISOString(), message: { role: 'user', content: '<command-name>/effort</command-name>' } });
   const toolResult = JSON.stringify({ timestamp: new Date(200).toISOString(), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'x', content: 'ok' }] } });
   const { m: filtered } = build('ntf', [wrapper, toolResult, userMsg]);
-  assert.equal(filtered.chapters[0].title, 'Fix the login flow so sessions persist', 'skips harness wrappers and tool_result turns to find the real prompt');
+  assert.equal(filtered.summary.title, 'Fix the login flow so sessions persist', 'skips harness wrappers and tool_result turns to find the real prompt');
 
-  // --- a ts===0 edit (no timestamp) also lands in the synthetic chapter, even alongside real chapters ---
+  // --- a ts===0 edit (no timestamp) is unassigned even alongside a real plan ---
   const cwd0 = tmpWork();
   const proj0 = core.projectDir(cwd0);
   fs.mkdirSync(proj0, { recursive: true });
@@ -3821,16 +3795,8 @@ test('changemap: display chapters are TOTAL — no-todo sessions get a synthetic
     { type: 'tool_use', id: 't1', name: 'TodoWrite', input: { todos: [{ content: 'Real task', status: 'in_progress' }] } }] } });
   fs.writeFileSync(path.join(proj0, 'nt0.jsonl'), snap0);
   const m0 = core.buildChangeMap(cwd0, 'nt0', { root: cwd0 });
-  assert.equal(m0.edits[0].chapter, 'ch:session', 'a timestamp-less edit can\'t be placed in a window → session chapter');
-  assert.deepEqual(m0.chapters.map((c) => c.synthetic), [false, true], 'the synthetic chapter is appended AFTER the real plan');
-  assert.equal(m0.chapters[1].index, 1, 'and continues the index sequence');
-
-  // --- the totality invariant, stated once: chapters partition the edit set exactly ---
-  for (const m of [noTodo, titled, bare, filtered, m0]) {
-    assert.ok(m.edits.every((e) => typeof e.chapter === 'string' && e.chapter.length > 0), 'every edit has a chapter');
-    const claimed = m.chapters.reduce((n, c) => n + c.edits, 0);
-    assert.equal(claimed, m.edits.length, 'chapter counts sum to the edit count — nothing dropped, nothing double-counted');
-  }
+  assert.equal(m0.edits[0].taskId, null, 'a timestamp-less edit can\'t be placed in a strict interval → unassigned');
+  assert.ok(m0.rollupByTask.some((r) => r.taskId === null && r.edits === 1), 'the explicit unassigned bucket claims it');
 });
 
 test('observations: buildObservations coalesces 3 consecutive same-file edits into ONE ×3 run (0.8.0 r2)', () => {
@@ -3911,14 +3877,6 @@ test('workflows: workflow→edit attribution by ts-window; ambiguous overlap →
   assert.equal(one.rollup.pending, 1, 'and carries its review status');
   assert.deepEqual(one.files.map((f) => f.file), ['w1.ts'], 'wf_one files: its touched file(s), churn-desc');
 
-  // (0.8.0 totality) each workflow tab carries its OWN chapter ribbon — the run's edits regrouped by
-  // session chapter, counts scoped to the run. Renderers draw it as-is; the residual math is gone.
-  assert.equal(one.chapters.length, 1, 'wf_one\'s single edit rolls into one chapter row');
-  assert.equal(one.chapters[0].id, 'ch:session', 'no to-dos in this session → the synthetic session chapter');
-  assert.equal(one.chapters[0].edits, 1, 'scoped to the RUN\'s edits, not the session totals');
-  assert.equal(one.chapters[0].taskId, null, 'synthetic → display-only in the workflow slice too');
-  assert.equal(one.chapters.reduce((n, c) => n + c.edits, 0), one.rollup.edits, 'the workflow ribbon partitions the run exactly');
-
   // rollupByWorkflow: per-workflow rows + an EXPLICIT null bucket (ambiguous + unwindowed), null-last.
   const rw = m.rollupByWorkflow;
   assert.ok(rw.find((r) => r.workflowId === 'wf_one') && rw.find((r) => r.workflowId === 'wf_two'), 'both workflows rolled up');
@@ -3974,7 +3932,7 @@ test('taskLog: crossAgentTaskLog unions one logical task across two worktree sib
   assert.equal(rows.length, 1, 'one logical task across two worktrees folds into ONE row (unassigned edit excluded)');
   const row = rows[0];
   assert.equal(row.taskId, core.taskId(TASK, 0), 'keyed by the stable content-hash taskId');
-  assert.equal(row.content, TASK, 'the to-do text is carried from the chapters');
+  assert.equal(row.content, TASK, 'the to-do text is carried onto the task row');
   assert.deepEqual(row.agentIds, [MAIN, WTA].sort(), 'both worktree sessions contributed → both agents named');
   assert.deepEqual(row.subagentIds, [], 'no subagents authored these edits');
   assert.equal(row.edits, 2, 'exactly the two in-interval edits (one per worktree); the unassigned edit is NOT counted');
@@ -4005,47 +3963,40 @@ function seedTaskSession(S, task) {
   return { cwd, S, taskId: core.taskId(task, 0), ids: [id1, id2, id3], files: [F1, F2, F3] };
 }
 
-test('undo: chapter revert is WYSIWYG — exactly the DISPLAYED set; strict analytics stay honest (0.8.0)', () => {
+test('undo: task revert is STRICT — exactly the real in_progress interval, never a gap fill (0.8.8)', () => {
   freshHome();
   const f = seedTaskSession('s7-undo', 'Task A');
   const [id1, id2, id3] = f.ids;
   assert.deepEqual([id1, id2, id3], [1, 2, 3], 'serial ids, ts = id*1000');
 
-  // The STRICT analytics set is unchanged: #3 (ts 3000 > completed 2500) is outside the real interval…
+  // The strict set: #3 (ts 3000 > completed 2500) is outside the real interval.
   const strict = core.taskEditIds(f.cwd, f.S, f.taskId).sort((a, b) => a - b);
   assert.deepEqual(strict, [id1, id2], 'taskEditIds: only edits inside the real in_progress interval');
   const m = core.buildChangeMap(f.cwd, f.S, { root: f.cwd });
   assert.equal(m.edits.find((e) => e.id === id3).taskId, null, 'strict attribution: the trailing edit is honestly unassigned');
-  // …but the DISPLAY dimension is total: #3 fills forward onto the final chapter, and that is what the row shows.
-  assert.equal(m.edits.find((e) => e.id === id3).chapter, f.taskId, 'display: the trailing edit sits under the final chapter');
-  assert.deepEqual(core.chapterEditIds(f.cwd, f.S, f.taskId).sort((a, b) => a - b), [id1, id2, id3], 'chapterEditIds = the displayed set');
 
-  // Chapter revert acts WYSIWYG (the "accepted the chapter but edits remain" fix): everything the row
-  // shows reverts — including the gap-filled #3 — so the ribbon empties exactly as the counts promise.
+  // Task revert acts on the strict set and NOTHING else: a trailing edit the task never owned stays put.
   const res = core.undoTask(f.cwd, f.S, f.taskId);
-  assert.equal(res.undone, 3, 'every displayed edit reverted');
-  assert.deepEqual(res.ids.sort((a, b) => a - b), [id1, id2, id3], 'exactly the displayed set was reverted');
+  assert.equal(res.undone, 2, 'exactly the strict set reverted');
+  assert.deepEqual(res.ids.sort((a, b) => a - b), [id1, id2], 'never the trailing gap edit');
   assert.equal(fs.readFileSync(f.files[0], 'utf8'), 'a1\n', '#1 reverted to its pre-edit state');
   assert.equal(fs.readFileSync(f.files[1], 'utf8'), 'b1\n', '#2 reverted');
-  assert.equal(fs.readFileSync(f.files[2], 'utf8'), 'c1\n', '#3 (displayed under the chapter) reverted too');
-  assert.equal(core.findRecord('s7-undo', id3).status, 'undone', 'its status matches what the row showed');
+  assert.equal(core.findRecord('s7-undo', id3).status, 'pending', '#3 was never part of the task — untouched');
 });
 
-test('undo: keepTask accepts the whole DISPLAYED chapter — a partial accept never strands leftovers (0.8.0)', () => {
+test('undo: keepTask accepts the STRICT task set — an unowned edit is never swept in (0.8.8)', () => {
   freshHome();
   const f = seedTaskSession('s7-keep', 'Task K');
   const [id1, id2, id3] = f.ids;
   const res = core.keepTask(f.cwd, f.S, f.taskId);
-  assert.equal(res.kept, 3, 'every edit displayed under the chapter is kept — nothing left behind');
-  assert.equal(res.total, 3, 'total = the displayed set');
-  assert.deepEqual(res.ids.sort((a, b) => a - b), [id1, id2, id3], 'exactly the displayed set was kept');
-  for (const id of [id1, id2, id3]) assert.equal(core.findRecord('s7-keep', id).status, 'kept');
-  // Accepting the chapter leaves NOTHING pending under it (the bug-feel this rule fixes).
-  const m = core.buildChangeMap(f.cwd, f.S, { root: f.cwd });
-  assert.equal(m.chapters.find((c) => c.id === f.taskId).pending, 0, 'the chapter row reads fully accepted');
+  assert.equal(res.kept, 2, 'the strict set is kept');
+  assert.equal(res.total, 2, 'total = the strict set');
+  assert.deepEqual(res.ids.sort((a, b) => a - b), [id1, id2], 'exactly the strict set was kept');
+  for (const id of [id1, id2]) assert.equal(core.findRecord('s7-keep', id).status, 'kept');
+  assert.equal(core.findRecord('s7-keep', id3).status, 'pending', 'the trailing gap edit stays pending — it was never this task\'s');
 });
 
-test('changemap: TaskCreate/TaskUpdate tasks become CHAPTERS — span attribution, WYSIWYG resolution, tab join, TodoWrite dedupe (0.8.3)', () => {
+test('changemap: TaskCreate/TaskUpdate tasks get STRICT attribution + the Tasks-tab taskId join + TodoWrite dedupe', () => {
   freshHome();
   delete process.env.CLAUDE_CONFIG_DIR;
   const S = 'tasklink';
@@ -4075,71 +4026,26 @@ test('changemap: TaskCreate/TaskUpdate tasks become CHAPTERS — span attributio
       { type: 'tool_use', id: 'u3', name: 'TaskUpdate', input: { taskId: '2', status: 'in_progress' } },
     ]),
     tu(4000, [{ type: 'tool_use', id: 'u4', name: 'TaskUpdate', input: { taskId: '2', status: 'completed' } }]),
-    // The demo plans BOTH ways: a TodoWrite naming the same title must NOT mint a twin chapter.
+    // The demo plans BOTH ways: a TodoWrite naming the same title must NOT mint a twin task.
     tu(4100, [{ type: 'tool_use', id: 'td', name: 'TodoWrite', input: { todos: [{ content: 'Wire the reader', status: 'completed' }] } }]),
   ].join('\n'));
   const cm = core.buildChangeMap(cwd, S, { root: cwd });
-  const byTitle = new Map(cm.chapters.map((c) => [c.title, c]));
-  assert.equal(byTitle.size, cm.chapters.length, 'no twin chapters — todos win duplicate titles in the merged plan');
-  const c1 = byTitle.get('Wire the reader');
-  const c2 = byTitle.get('Render the tab');
-  assert.equal(c1.edits, 2, 'task #1 claims the back-extended head edit + its in-span edit');
-  assert.equal(c2.edits, 1, 'task #2 claims its in-span edit');
-  assert.equal(c1.status, 'done');
-  // fromTask: the ribbon leaves task-born chapters to the Tasks tab. 'Wire the reader' is claimed by
-  // the TodoWrite occurrence in the merged plan (todos win), so only the task-only chapter is flagged.
-  assert.equal(c2.fromTask, true, 'a task-only chapter is marked fromTask (ribbons skip it)');
-  assert.equal(c1.fromTask, false, 'a title the todos also carry stays a todo chapter');
-  assert.equal(core.chapterEditIds(cwd, S, c1.id).length, 2, 'WYSIWYG review resolves the same set the chapter displays');
-  // The tab join: rows come from transcript HISTORY (no task dir exists) with the chapter's own id.
+  // The merged plan (tasks ∪ todos, todos winning duplicate titles) feeds ONE strict identity per title.
+  const byContent = new Map(cm.tasks.map((t) => [t.content, t]));
+  assert.equal(byContent.size, cm.tasks.length, 'no twin tasks — todos win duplicate titles in the merged plan');
+  const t1 = byContent.get('Wire the reader');
+  const t2 = byContent.get('Render the tab');
+  assert.ok(t1 && t2, 'both TaskCreate subjects hold strict identities');
+  const roll = new Map(cm.rollupByTask.map((r) => [r.taskId, r]));
+  assert.equal(roll.get(t1.taskId).edits, 1, 'task #1 strictly claims its in-span edit (the ts-500 head edit is unassigned)');
+  assert.equal(roll.get(t2.taskId).edits, 1, 'task #2 strictly claims its in-span edit');
+  assert.ok(roll.get(null) && roll.get(null).edits === 1, 'the pre-first-flip edit lands in the explicit unassigned bucket');
+  assert.deepEqual(core.taskEditIds(cwd, S, t1.taskId), [2], 'taskEditIds resolves the same strict set');
+  // The tab join: rows come from transcript HISTORY (no task dir exists) with the strict taskId.
   const rows = core.sessionTaskRows(cwd, S);
   assert.deepEqual(rows.map((r) => r.id), ['2', '1'], 'history mined from the transcript, NEWEST first');
-  assert.equal(rows[1].chapterId, c1.id, 'taskChapterId joins the tab row to its chapter');
+  assert.equal(rows[1].taskId, t1.taskId, 'taskIdForSubject joins the tab row to rollupByTask');
   assert.equal(rows[1].activeForm, 'Wiring the reader');
-});
-
-test('changemap: chapterEditIds partitions the RAW log exactly as the display attribution (drift guard)', () => {
-  freshHome();
-  delete process.env.CLAUDE_CONFIG_DIR;
-  const S = 'chpart';
-  const cwd = tmpWork();
-  const proj = core.projectDir(cwd);
-  fs.mkdirSync(proj, { recursive: true });
-  core.ensureStore(S);
-  const seedAt = (file, before, after, ts) => {
-    const b = core.writeBlob(S, Buffer.from(before));
-    const a = core.writeBlob(S, Buffer.from(after));
-    return core.appendLog(S, { ts, tool: 'Edit', file, beforeBlob: b, afterBlob: a, status: 'pending' }).id;
-  };
-  const F = (n) => path.join(cwd, `f${n}.ts`);
-  seedAt(F(1), 'a\n', 'a\nb\n', 1000); // head → back-extended onto Task A
-  seedAt(F(2), 'a\n', 'a\nc\n', 2500); // inside Task A
-  seedAt(F(3), 'a\n', 'a\nd\n', 4500); // gap → fills forward onto Task A
-  seedAt(F(4), 'a\n', 'a\ne\n', 5500); // inside Task B
-  seedAt(F(5), 'a\n', 'a\nf\n', 9000); // trailing → final chapter (Task B)
-  const zb = core.writeBlob(S, Buffer.from('z\n'));
-  core.appendLog(S, { ts: 0, tool: 'Edit', file: F(6), beforeBlob: zb, afterBlob: core.writeBlob(S, Buffer.from('z\nq\n')), status: 'pending' }); // ts-less → synthetic
-  const snap = (ts, todos) => JSON.stringify({ timestamp: new Date(ts).toISOString(), message: { role: 'assistant', content: [
-    { type: 'tool_use', id: 't' + ts, name: 'TodoWrite', input: { todos } }] } });
-  fs.writeFileSync(path.join(proj, S + '.jsonl'), [
-    snap(2000, [{ content: 'Task A', status: 'in_progress' }, { content: 'Task B', status: 'pending' }]),
-    snap(4000, [{ content: 'Task A', status: 'completed' }, { content: 'Task B', status: 'pending' }]), // gap
-    snap(5000, [{ content: 'Task A', status: 'completed' }, { content: 'Task B', status: 'in_progress' }]),
-    snap(6000, [{ content: 'Task A', status: 'completed' }, { content: 'Task B', status: 'completed' }]),
-  ].join('\n'));
-  const A = core.taskId('Task A', 0), B = core.taskId('Task B', 0);
-  const setA = core.chapterEditIds(cwd, S, A);
-  const setB = core.chapterEditIds(cwd, S, B);
-  const setSyn = core.chapterEditIds(cwd, S, 'ch:session');
-  assert.deepEqual(setA, [1, 2, 3], 'A = head-extended + in-interval + gap-filled');
-  assert.deepEqual(setB, [4, 5], 'B = in-interval + trailing (final chapter runs to the end)');
-  assert.deepEqual(setSyn, [6], 'ts-less edit → the synthetic session chapter');
-  // The partition law: every raw id in exactly one chapter set — mirrors the map's per-unit attribution.
-  const all = [...setA, ...setB, ...setSyn].sort((a, b) => a - b);
-  assert.deepEqual(all, core.readLog(S).map((r) => r.id), 'chapter sets partition the raw log exactly');
-  // reviewEditIds: chapter ids resolve the display set; an id naming no chapter falls back to strict.
-  assert.deepEqual(core.reviewEditIds(cwd, S, A), setA, 'a chapter id resolves WYSIWYG');
-  assert.deepEqual(core.reviewEditIds(cwd, S, 'ch:session'), [6], 'the synthetic chapter is fully reviewable');
 });
 
 // --- S8: zero-token chat-context assembler (§2.6/§7) ---
@@ -4269,7 +4175,7 @@ test('barrel: index.ts re-exports every new 0.8.0 public symbol (CLI-as-single-b
     'crossAgentTaskLog', 'taskEditIds', 'undoTask', 'keepTask',
     // S8 — zero-token chat-context assembler (actions.ts)
     'assembleChatContext',
-    // 0.8.0 — panel consolidation: Observations view-model (observe.ts) + chapter-scoped clear (store.ts)
+    // 0.8.0 — panel consolidation: Observations view-model (observe.ts) + task-scoped clear (store.ts)
     'buildObservations', 'clearResolvedIds',
     // 0.8.0 — workflow-run tracking (workflows.ts)
     'parseWorkflows',
@@ -4278,6 +4184,8 @@ test('barrel: index.ts re-exports every new 0.8.0 public symbol (CLI-as-single-b
     // 0.8.6 — session vitals (metrics.ts), compaction primitives (actions.ts), footprint
     // (capabilities.ts), context sources (observe.ts), shared model labeller (format.ts)
     'sessionVitals', 'parseCompactLine', 'compactLabel', 'outsideReads', 'outsideWrites', 'contextSources', 'friendlyModel',
+    // 0.8.8 — prompts (prompts.ts), fast session listing (observe.ts), the tab join (tasks.ts)
+    'sessionPrompts', 'promptEditIds', 'promptResponse', 'summarizePrompts', 'sessionMeta', 'fastSessionTitle', 'taskIdForSubject',
   ];
   const missing = publicFns.filter((k) => typeof core[k] !== 'function');
   assert.deepEqual(missing, [], `barrel is missing public symbol(s): ${missing.join(', ')}`);
@@ -4397,7 +4305,7 @@ test('workflows: parseScriptMeta survives braces/quotes in string fields; journa
   assert.equal(b2.phase, null, 'a per-agent-unique undeclared key is an identifier — never a bogus phase');
 });
 
-test('demo: runDemo replays a real-pipeline session — named total chapters, attributed subagent + workflow, no-residue lifecycle (0.8.0)', async () => {
+test('demo: runDemo replays a real-pipeline session — strict task attribution, attributed subagent + workflow, no-residue lifecycle', async () => {
   freshHome();
   delete process.env.CLAUDE_CONFIG_DIR;
   const ws = fs.realpathSync(tmpWork()); // physical path — the demo records under the shell's getcwd()
@@ -4406,11 +4314,11 @@ test('demo: runDemo replays a real-pipeline session — named total chapters, at
   assert.equal(res.edits, 5, 'five captured store edits (2 scaling, 1 validation, 1 tests, 1 docs)');
   assert.ok(fs.existsSync(res.transcript), 'a real transcript in the real project dir');
 
-  // Chapters are total AND fully named — the scenario keeps a to-do in_progress for every edit.
+  // Every demo edit is strictly attributed — the scenario keeps a to-do in_progress for every edit.
   const m = core.buildChangeMap(ws, res.session, { root: ws });
-  assert.ok(m.edits.every((e) => typeof e.chapter === 'string' && e.chapter.length > 0), 'no edit is chapterless');
-  assert.equal(m.chapters.filter((c) => c.synthetic).length, 0, 'every demo edit lands in a NAMED chapter');
-  assert.deepEqual(m.chapters.map((c) => c.edits), [2, 1, 2], 'the three chapters claim 2/1/2 edits');
+  assert.ok(!('subtasks' in m), 'no display-subtask layer (0.8.8)');
+  assert.ok(m.edits.every((e) => typeof e.taskId === 'string' && e.taskId.length > 0), 'every demo edit sits in a real strict interval');
+  assert.deepEqual(m.rollupByTask.filter((r) => r.taskId !== null).map((r) => r.edits).sort(), [1, 2, 2], 'the three tasks claim 2/1/2 edits');
   assert.ok(m.rollupByTask.every((r) => r.taskId !== null), 'strict model: nothing unassigned either');
 
   // Subagent + workflow attribution ride the real windows.
@@ -4418,7 +4326,6 @@ test('demo: runDemo replays a real-pipeline session — named total chapters, at
   assert.equal(subs.length, 1, 'one subagent (the test writer)');
   assert.ok(subs[0].actions.some((a) => a.editId != null), 'its edit is window-attributed to a store record');
   assert.ok(m.workflows.some((w) => w.id === 'wf_demo' && w.rollup.edits === 1), 'the docs workflow owns one edit');
-  assert.ok(m.workflows[0].chapters.length >= 1, 'and carries its own chapter rollup for the workflow slice');
 
   // No-residue review: resolve everything → autoClearDemo drops the records; never for a real id.
   for (const r of core.readLog(res.session)) core.setStatus(res.session, r.id, 'kept');
@@ -4832,93 +4739,6 @@ test('undo: an oversized current file routes to conflict instead of throwing', (
   }
 });
 
-test('changemap: chapterForEditId maps an edit to its chapter + title + ordered cross-file members', () => {
-  freshHome();
-  const S = 'chfor';
-  const cwd = tmpWork();
-  const proj = core.projectDir(cwd);
-  fs.mkdirSync(proj, { recursive: true });
-  const F1 = path.join(cwd, 'a.ts'), F2 = path.join(cwd, 'b.ts');
-  // Two chapters; the first spans two files. (Display attribution is TOTAL — the last chapter's span
-  // runs to +∞ — so there is no separate "gap" bucket here; synthetic is exercised below.)
-  const i1 = seedEdit(S, F1, 'a\n', 'a\nx\n'); // ts=1000 chapter "Add rate limiting"
-  const i2 = seedEdit(S, F2, 'b\n', 'b\ny\n'); // ts=2000 same chapter, DIFFERENT file
-  const i3 = seedEdit(S, F1, 'a\nx\n', 'a\nx\nz\n'); // ts=3000 chapter "Write tests"
-  const main = [
-    { timestamp: new Date(500).toISOString(), message: { role: 'user', content: 'add rate limiting and tests' } },
-    { timestamp: new Date(900).toISOString(), message: { role: 'assistant', content: [
-      { type: 'tool_use', id: 't1', name: 'TodoWrite', input: { todos: [
-        { content: 'Add rate limiting', status: 'in_progress' },
-        { content: 'Write tests', status: 'pending' }] } }] } },
-    { timestamp: new Date(2500).toISOString(), message: { role: 'assistant', content: [
-      { type: 'tool_use', id: 't2', name: 'TodoWrite', input: { todos: [
-        { content: 'Add rate limiting', status: 'completed' },
-        { content: 'Write tests', status: 'in_progress' }] } }] } },
-    { timestamp: new Date(3500).toISOString(), message: { role: 'assistant', content: [
-      { type: 'tool_use', id: 't3', name: 'TodoWrite', input: { todos: [
-        { content: 'Add rate limiting', status: 'completed' },
-        { content: 'Write tests', status: 'completed' }] } }] } },
-  ].map((o) => JSON.stringify(o)).join('\n');
-  fs.writeFileSync(path.join(proj, S + '.jsonl'), main);
-
-  const c1 = core.chapterForEditId(cwd, S, i1);
-  assert.ok(c1, 'edit resolves to a chapter');
-  assert.equal(c1.title, 'Add rate limiting', 'human-readable subtask title from the to-do');
-  assert.equal(c1.synthetic, false);
-  assert.deepEqual(c1.editIds, [i1, i2], 'ordered members span files, in capture order');
-  // an edit in the SAME chapter but a different file resolves to the same chapter + member list
-  assert.deepEqual(core.chapterForEditId(cwd, S, i2).editIds, [i1, i2], 'cross-file sibling shares the chapter');
-
-  const c3 = core.chapterForEditId(cwd, S, i3);
-  assert.equal(c3.title, 'Write tests', 'second chapter title');
-  assert.deepEqual(c3.editIds, [i3], 'members are that chapter only');
-
-  assert.equal(core.chapterForEditId(cwd, S, 9999), null, 'unknown edit id → null');
-
-  // A session with edits but NO to-dos: every edit lands in the synthetic chapter, titled from the
-  // session goal (the first user prompt) — never a bare bucket label.
-  const S2 = 'chsyn';
-  const cwd2 = tmpWork();
-  const proj2 = core.projectDir(cwd2);
-  fs.mkdirSync(proj2, { recursive: true });
-  const G = path.join(cwd2, 'g.ts');
-  const j1 = seedEdit(S2, G, 'g\n', 'g\nh\n');
-  fs.writeFileSync(path.join(proj2, S2 + '.jsonl'), JSON.stringify(
-    { timestamp: new Date(500).toISOString(), message: { role: 'user', content: 'refactor the parser' } }
-  ));
-  const cs = core.chapterForEditId(cwd2, S2, j1);
-  assert.equal(cs.synthetic, true, 'no to-dos → synthetic session chapter');
-  assert.match(cs.title, /refactor the parser/i, 'synthetic chapter titled from the session goal');
-  assert.deepEqual(cs.editIds, [j1], 'synthetic chapter still returns its ordered members');
-});
-
-test('changemap: sessionChapters lists chapters in plan order with their edit ids', () => {
-  freshHome();
-  const S = 'schaps';
-  const cwd = tmpWork();
-  const proj = core.projectDir(cwd);
-  fs.mkdirSync(proj, { recursive: true });
-  const F1 = path.join(cwd, 'a.ts'), F2 = path.join(cwd, 'b.ts');
-  const i1 = seedEdit(S, F1, 'a\n', 'a\nx\n');   // ts=1000  chapter A
-  const i2 = seedEdit(S, F2, 'b\n', 'b\ny\n');   // ts=2000  chapter A (other file)
-  const i3 = seedEdit(S, F1, 'a\nx\n', 'a\nx\nz\n'); // ts=3000  chapter B
-  fs.writeFileSync(path.join(proj, S + '.jsonl'), [
-    { timestamp: new Date(900).toISOString(), message: { role: 'assistant', content: [
-      { type: 'tool_use', id: 't1', name: 'TodoWrite', input: { todos: [
-        { content: 'Add rate limiting', status: 'in_progress' }, { content: 'Write tests', status: 'pending' }] } }] } },
-    { timestamp: new Date(2500).toISOString(), message: { role: 'assistant', content: [
-      { type: 'tool_use', id: 't2', name: 'TodoWrite', input: { todos: [
-        { content: 'Add rate limiting', status: 'completed' }, { content: 'Write tests', status: 'in_progress' }] } }] } },
-  ].map((o) => JSON.stringify(o)).join('\n'));
-
-  const chaps = core.sessionChapters(cwd, S);
-  assert.equal(chaps.length, 2, 'two chapters');
-  assert.equal(chaps[0].title, 'Add rate limiting', 'plan order: first chapter first');
-  assert.deepEqual(chaps[0].editIds, [i1, i2], 'first chapter spans files, capture order');
-  assert.equal(chaps[1].title, 'Write tests');
-  assert.deepEqual(chaps[1].editIds, [i3]);
-});
-
 test('actions: agentPhase counts child agent activity — a live agent fleet keeps the session working (0.8.6)', () => {
   freshHome();
   delete process.env.CLAUDE_CONFIG_DIR;
@@ -5134,7 +4954,7 @@ test('actions: a compact_boundary becomes a first-class row, with this event\'s 
   assert.ok(groups.some((g) => g.category === 'compact' && g.label === 'Compactions'), 'curated by default — a lost context is never hidden behind "show all"');
 });
 
-test('changemap: compactions are placed by TIME against started chapters, not by array position (0.8.6)', () => {
+test('changemap: compactions ride the map ordered by time, with the shared label', () => {
   freshHome();
   delete process.env.CLAUDE_CONFIG_DIR;
   const S = 'compactPlace';
@@ -5143,27 +4963,16 @@ test('changemap: compactions are placed by TIME against started chapters, not by
   fs.mkdirSync(proj, { recursive: true });
   const F = path.join(cwd, 'a.js');
   seedEdit(S, F, 'a\n', 'a\nb\n'); // ts = 1000 (seedEdit's synthetic clock)
-  const todo = (ts, list) =>
-    JSON.stringify({ timestamp: new Date(ts).toISOString(), type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 't' + ts, name: 'TodoWrite', input: { todos: list } } ] } });
   const boundary = (ts) =>
     JSON.stringify({ timestamp: new Date(ts).toISOString(), type: 'system', subtype: 'compact_boundary', compactMetadata: { trigger: 'auto', preTokens: 900, postTokens: 100, cumulativeDroppedTokens: 800, durationMs: 5 } });
-  // Chapter "first" starts at 500, "second" at 3000; the compaction happens at 2000 — between them.
-  fs.writeFileSync(
-    path.join(proj, S + '.jsonl'),
-    [
-      todo(500, [{ content: 'first', status: 'in_progress' }, { content: 'second', status: 'pending' }]),
-      boundary(2000),
-      todo(3000, [{ content: 'first', status: 'completed' }, { content: 'second', status: 'in_progress' }]),
-    ].join('\n') + '\n'
-  );
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), [boundary(4000), boundary(2000)].join('\n') + '\n');
   const cm = core.buildChangeMap(cwd, S);
-  assert.equal(cm.summary.compactions, 1, 'the headline count reaches the Overview');
-  const first = cm.chapters.find((c) => c.title === 'first');
-  assert.equal(cm.compactions[0].afterChapterId, first.id, 'anchored to the chapter that had actually started at that moment');
+  assert.equal(cm.summary.compactions, 2, 'the headline count reaches the Overview');
+  assert.deepEqual(cm.compactions.map((x) => x.ts), [2000, 4000], 'oldest first, by time — never transcript order');
+  assert.equal(cm.compactions[0].droppedTokens, 800, 'per-event drop = pre − post, never the cumulative figure');
   assert.ok(cm.compactions[0].label.includes('→'), 'the shared label rides along so renderers stay thin');
-  // The synthetic session chapter is appended LAST but usually starts FIRST, and unstarted chapters
-  // carry startTs 0 — which is exactly why placement must never use the chapters array's order.
-  assert.ok(cm.chapters.some((c) => c.startTs === 0) || true, 'plan order is not chronological order');
+  assert.ok(!('afterChapterId' in cm.compactions[0]) && !('afterSubtaskId' in cm.compactions[0]),
+    'no display-anchor field — Actions and Stats render by ts (0.8.8); the field shipped as afterChapterId');
 });
 
 test('observe: contextSources separates what the transcript PROVES from what is merely present (0.8.6)', () => {
@@ -5211,17 +5020,466 @@ test('observe: a compaction summary can never become the session title (0.8.6)',
   fs.mkdirSync(proj, { recursive: true });
   // On a compacted session the injected summary is a synthesized USER turn that arrives before the
   // real prompt survives — it passes the '<'/'Caveat:' guards, so without an explicit exclusion it
-  // becomes firstUserPrompt, and from there the session title, the synthetic chapter's title and the
-  // session-picker label: every surface renaming itself to "This session is being continued…".
+  // becomes firstUserPrompt, and from there the session title and the session-picker label: every
+  // surface renaming itself to "This session is being continued…".
   fs.writeFileSync(
     path.join(proj, S + '.jsonl'),
     [
       JSON.stringify({ timestamp: new Date(500).toISOString(), type: 'user', isCompactSummary: true, message: { role: 'user', content: 'This session is being continued from a previous conversation that ran out of context. Summary: …' } }),
       JSON.stringify({ timestamp: new Date(1000).toISOString(), type: 'user', message: { role: 'user', content: 'Add retry logic to the uploader' } }),
+      // A real assistant turn: this is what makes S the session this workspace RESOLVES to, whatever
+      // the mtimes say — the stub-proofing added in 0.8.4.
+      JSON.stringify({ timestamp: new Date(1100).toISOString(), type: 'assistant', message: { role: 'assistant', id: 'a1', content: [{ type: 'text', text: 'On it.' }] } }),
     ].join('\n') + '\n'
   );
   const ins = core.transcriptInsights(cwd, S);
   assert.equal(ins.firstUserPrompt, 'Add retry logic to the uploader', 'the real prompt wins over the injected summary');
+
+  // The BOUNDED title scan applies the same filters (0.8.8) — and the sidecar answers repeat calls.
+  const tx = path.join(proj, S + '.jsonl');
+  assert.equal(core.fastSessionTitle(tx, S), 'Add retry logic to the uploader', 'fastSessionTitle skips the injected summary too');
+  assert.equal(core.fastSessionTitle(tx, S), 'Add retry logic to the uploader', 'sidecar-cached second call agrees');
+  core.ensureStore(S); // a store makes it a listed session
+  const meta = core.sessionMeta(cwd);
+  const row = meta.sessions.find((r) => r.id === S);
+  assert.ok(row, 'sessionMeta lists this workspace\'s session');
+  assert.equal(row.title, 'Add retry logic to the uploader', 'rows carry the fast title');
+  // Each row carries what the session DID, the way a fleet row does — from the log, never the blobs.
+  assert.deepEqual(
+    { edits: row.edits, pending: row.pending, files: row.files },
+    { edits: 0, pending: 0, files: 0 },
+    'a session that captured nothing reports zeros, not absent fields'
+  );
+  assert.ok(row.lastActiveMs > 0, 'recency comes from the transcript mtime');
+
+  // Counts that are only ever asserted at zero are counts nobody checked. Capture real work, and the
+  // row must report it — and must NOT keep reporting the old numbers once the log moves, which is the
+  // whole risk of caching them in a sidecar keyed to the log's stamp.
+  const f1 = path.join(cwd, 'up.ts');
+  const f2 = path.join(cwd, 'retry.ts');
+  fs.writeFileSync(f1, 'a\n');
+  fs.writeFileSync(f2, 'b\n');
+  const e1 = core.appendLog(S, { tool: 'Edit', file: f1, before: null, after: null, added: 3, removed: 0, status: 'pending', ts: 1200 });
+  core.appendLog(S, { tool: 'Edit', file: f2, before: null, after: null, added: 1, removed: 1, status: 'pending', ts: 1300 });
+  const withWork = core.sessionMeta(cwd).sessions.find((r) => r.id === S);
+  assert.deepEqual(
+    { edits: withWork.edits, pending: withWork.pending, files: withWork.files },
+    { edits: 2, pending: 2, files: 2 },
+    'the row reports the work the log holds'
+  );
+  // Accepting one edit changes only `pending` — and the sidecar is keyed to the log's stamp, so the
+  // next listing has to see it rather than serve the counts it cached a moment ago.
+  core.setStatus(S, e1.id, 'kept');
+  const after = core.sessionMeta(cwd).sessions.find((r) => r.id === S);
+  assert.deepEqual(
+    { edits: after.edits, pending: after.pending, files: after.files },
+    { edits: 2, pending: 1, files: 2 },
+    'a status change invalidates the counts sidecar — the row follows the log'
+  );
+
+  // 0.8.8 — the two properties the Sessions tab and the picker are BUILT on: rows come back ordered by
+  // conversation recency (newest first), and exactly the session this workspace resolves to is flagged
+  // `current`. Both are invisible to a shape assertion, and both decide what the reader is looking at.
+  const S2 = 'compactTitle2';
+  fs.writeFileSync(
+    path.join(proj, S2 + '.jsonl'),
+    JSON.stringify({ timestamp: new Date(2000).toISOString(), type: 'user', message: { role: 'user', content: 'Rewrite the uploader tests' } }) + '\n'
+  );
+  core.ensureStore(S2);
+  // Make S2's conversation the newer one, by a margin no filesystem timestamp granularity can blur.
+  const older = new Date(Date.now() - 60_000);
+  fs.utimesSync(path.join(proj, S + '.jsonl'), older, older);
+  const m2 = core.sessionMeta(cwd);
+  const ids = m2.sessions.map((r) => r.id);
+  assert.ok(
+    ids.indexOf(S2) < ids.indexOf(S),
+    'ordered by CONVERSATION recency — the session written to most recently leads, whatever its store says'
+  );
+  const active = core.resolveSessionId(cwd);
+  assert.equal(m2.active, active, 'the payload names the session this workspace resolves to');
+  assert.deepEqual(
+    m2.sessions.filter((r) => r.current).map((r) => r.id),
+    active ? [active] : [],
+    'exactly one row is flagged current — the live session, never a guess'
+  );
+  // Pull the two properties apart: make the RESOLVED session the OLDEST conversation, so a row flagged
+  // `current` can no longer be explained by "it happens to sort first".
+  const S3 = 'compactTitle3';
+  fs.writeFileSync(
+    path.join(proj, S3 + '.jsonl'),
+    JSON.stringify({ timestamp: new Date(3000).toISOString(), type: 'user', message: { role: 'user', content: 'Third session' } }) + '\n'
+  );
+  core.ensureStore(S3);
+  const newest = new Date();
+  fs.utimesSync(path.join(proj, S3 + '.jsonl'), newest, newest);
+  const older2 = new Date(Date.now() - 120_000);
+  // S2 and S3 are command-only stubs (no assistant record), so resolution stays on S even though S3 is
+  // the newest file — the two properties now disagree, which is the only way this assertion can fail.
+  fs.utimesSync(path.join(proj, S + '.jsonl'), older2, older2);
+  const m3 = core.sessionMeta(cwd);
+  assert.equal(core.resolveSessionId(cwd), S, 'resolution follows the real conversation, not the newest stub');
+  assert.deepEqual(
+    m3.sessions.filter((r) => r.current).map((r) => r.id),
+    [S],
+    'current tracks the RESOLVED session — a row is not current merely for sorting first'
+  );
+  assert.equal(m3.sessions[0].id, S3, '…while the ordering still puts the newest conversation first');
+  assert.notEqual(m3.sessions[0].id, S, 'the two properties are genuinely separated in this fixture');
+});
+
+test('prompts: the ask that WORKS a task is credited, not the one that planned it (0.8.8)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'taskCredit';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const ask = (ts, text) =>
+    JSON.stringify({ timestamp: new Date(ts).toISOString(), type: 'user', message: { role: 'user', content: text } });
+  const call = (ts, id, name, input) =>
+    JSON.stringify({
+      timestamp: new Date(ts).toISOString(), type: 'assistant',
+      message: { role: 'assistant', id: 'm' + id, content: [{ type: 'tool_use', id, name, input }] },
+    });
+  // Prompt #1 only PLANS (TaskCreate). Prompt #2 does the work, and says so the only way the newer task
+  // system can: TaskUpdate, which carries a display number and a status and no subject at all.
+  fs.writeFileSync(
+    path.join(proj, S + '.jsonl'),
+    [
+      ask(1000, 'plan the work'),
+      call(1100, 'tc1', 'TaskCreate', { subject: 'Wire the loader', description: 'stream it' }),
+      // The runtime answers a TaskCreate with the number it assigned — that result is where a task's id
+      // comes from, and without it an update can be anchored to nothing.
+      JSON.stringify({
+        timestamp: new Date(1150).toISOString(), type: 'user',
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tc1', content: 'Task #1 created' }] },
+      }),
+      ask(2000, 'now do it'),
+      call(2100, 'tu1', 'TaskUpdate', { taskId: '1', status: 'in_progress' }),
+      call(2200, 'tu2', 'TaskUpdate', { taskId: '1', status: 'completed' }),
+    ].join('\n') + '\n'
+  );
+  const rs = core.sessionPrompts(cwd, S);
+  assert.equal(rs.length, 2, 'two asks');
+  assert.equal(rs[0].tasks, 0, 'writing a plan is not working a task — the planning ask is credited with none');
+  assert.equal(rs[1].tasks, 1, 'the ask that moved the task is credited, though TaskUpdate names no subject');
+});
+
+test('prompts: a task count survives long titles, description-only edits, and later renames (0.8.8)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'taskEdges';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const ask = (ts, text) =>
+    JSON.stringify({ timestamp: new Date(ts).toISOString(), type: 'user', message: { role: 'user', content: text } });
+  const call = (ts, id, name, input) =>
+    JSON.stringify({
+      timestamp: new Date(ts).toISOString(), type: 'assistant',
+      message: { role: 'assistant', id: 'm' + id, content: [{ type: 'tool_use', id, name, input }] },
+    });
+  const result = (ts, forId, text) =>
+    JSON.stringify({
+      timestamp: new Date(ts).toISOString(), type: 'user',
+      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: forId, content: text }] },
+    });
+
+  // A to-do whose text runs past the 160-character display clip. Its identity must come from the FULL
+  // text, or it hashes to something no task equals — and the same item planned twice counts twice.
+  const LONG =
+    'Rewrite the uploader so that a partial multipart upload can resume from its last acknowledged ' +
+    'chunk instead of restarting, including the retry budget and the backoff schedule it uses';
+  assert.ok(LONG.length > 160, 'the fixture actually exceeds the display clip');
+
+  fs.writeFileSync(
+    path.join(proj, S + '.jsonl'),
+    [
+      ask(1000, 'plan and start the upload work'),
+      call(1100, 'tc1', 'TaskCreate', { subject: LONG, description: 'resumable uploads' }),
+      result(1150, 'tc1', 'Task #1 created'),
+      // The same item, named again as a to-do — one task, whichever way it was planned.
+      call(1200, 'tw1', 'TodoWrite', { todos: [{ content: LONG, status: 'in_progress' }] }),
+      call(1300, 'tu1', 'TaskUpdate', { taskId: '1', status: 'in_progress' }),
+
+      ask(2000, 'tidy the notes'),
+      // A description-only edit: it moves nothing, so this ask worked no task.
+      call(2100, 'tu2', 'TaskUpdate', { taskId: '1', description: 'note the backoff table' }),
+
+      ask(3000, 'rename it and finish'),
+      call(3100, 'tu3', 'TaskUpdate', { taskId: '1', subject: 'Resumable uploads' }),
+      call(3200, 'tu4', 'TaskUpdate', { taskId: '1', status: 'completed' }),
+    ].join('\n') + '\n'
+  );
+
+  const rs = core.sessionPrompts(cwd, S);
+  assert.equal(rs.length, 3, 'three asks');
+  assert.equal(
+    rs[0].tasks,
+    1,
+    'the long item counts ONCE: identity comes from the full text, so the TaskCreate, the TodoWrite and ' +
+      'the TaskUpdate all resolve to the same task'
+  );
+  assert.equal(rs[1].tasks, 0, 'an update that only edits a description is not work');
+  assert.equal(rs[2].tasks, 1, 'the ask that renamed and finished it worked one task');
+
+  // …and the rename does not reach back: the first ask is still credited with exactly one task, keyed
+  // by the subject in force when it worked, not by the name the task has now.
+  const again = core.sessionPrompts(cwd, S);
+  assert.equal(again[0].tasks, 1, 'a later rename does not rewrite an earlier prompt\'s count');
+  assert.deepEqual(
+    again.map((r) => r.tasks),
+    [1, 0, 1],
+    'the whole session reads the same on a second pass'
+  );
+});
+
+test('subagents: the digest is cached per transcript state, but the phase is asked every time (0.8.8)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'subDigest';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  const subs = path.join(proj, S, 'subagents');
+  fs.mkdirSync(subs, { recursive: true });
+  fs.writeFileSync(
+    path.join(proj, S + '.jsonl'),
+    JSON.stringify({ timestamp: new Date(1000).toISOString(), type: 'user', message: { role: 'user', content: 'write the tests' } }) + '\n'
+  );
+  const agent = path.join(subs, 'agent-a1.jsonl');
+  // The agent's turn is COMPLETE (its last message calls no tool), so its phase is decided by how long
+  // ago the file was written — the part of the phase that a cache would freeze. A transcript ending on
+  // an unanswered tool_use would be structurally "working" whatever its age, and would prove nothing.
+  fs.writeFileSync(
+    agent,
+    [
+      JSON.stringify({ timestamp: new Date(Date.now() - 1000).toISOString(), type: 'assistant', isSidechain: true, message: { role: 'assistant', id: 'x1', content: [{ type: 'tool_use', id: 't1', name: 'TodoWrite', input: { todos: [{ content: 'write the tests', status: 'in_progress' }] } }] } }),
+      JSON.stringify({ timestamp: new Date(Date.now() - 900).toISOString(), type: 'user', isSidechain: true, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] } }),
+      JSON.stringify({ timestamp: new Date(Date.now() - 800).toISOString(), type: 'assistant', isSidechain: true, message: { role: 'assistant', id: 'x2', content: [{ type: 'text', text: 'done' }] } }),
+    ].join('\n') + '\n'
+  );
+
+  const live = core.subagentDigests(cwd, S);
+  assert.equal(live.length, 1, 'the subagent is listed');
+  assert.equal(live[0].currentTask, 'write the tests', 'its plan comes from the cached digest');
+
+  // Is the identity half REALLY served from the sidecar? Put a value in the cache that the file cannot
+  // produce, leaving the stamp alone, and see which one comes back. (Aging the file instead proves
+  // nothing: mtime IS the stamp, so the whole digest recomputes and the assertion passes with the cache
+  // removed. Rewriting the file in place is no better — the filesystem's mtime precision is not ours to
+  // hold fixed.)
+  const sidePath = path.join(core.rootDir(), 'session-meta', S + '.json');
+  const side = JSON.parse(fs.readFileSync(sidePath, 'utf8'));
+  assert.ok(Array.isArray(side.subagentDigests) && side.subagentDigests.length === 1, 'the digest was written to the sidecar');
+  // The phase is deliberately NOT in there: it is derived from how long ago the agent last wrote, so a
+  // remembered copy would report an agent that stopped hours ago as still going.
+  for (const k of ['phase', 'phaseConfidence', 'running']) {
+    assert.ok(!(k in side.subagentDigests[0]), `the sidecar holds no ${k} — liveness is asked of the file every time`);
+  }
+  side.subagentDigests[0].currentTask = 'served from the sidecar';
+  fs.writeFileSync(sidePath, JSON.stringify(side));
+  const cached = core.subagentDigests(cwd, S);
+  assert.equal(cached[0].currentTask, 'served from the sidecar', 'the identity half is read from the sidecar, not re-parsed');
+  assert.ok(cached[0].phase, '…while the phase is still derived on every call');
+
+  // Aging the file moves the stamp, which rebuilds the identity half too — that is how a renamed task
+  // or a new to-do reaches the panel at all — and moves the phase with it.
+  const old = new Date(Date.now() - 12 * 60 * 60 * 1000);
+  fs.utimesSync(agent, old, old);
+  const later = core.subagentDigests(cwd, S);
+  assert.equal(later.length, 1, 'still listed');
+  assert.equal(later[0].currentTask, 'write the tests', 'a changed stamp rebuilds the identity half from the file');
+  assert.notEqual(later[0].phase, live[0].phase, 'and the phase followed the file, not the cache');
+});
+
+test('changemap: the map is memoized on disk across processes, and invalidated by either input (0.8.8)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'mapCache';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const tx = path.join(proj, S + '.jsonl');
+  fs.writeFileSync(
+    tx,
+    [
+      JSON.stringify({ timestamp: new Date(1000).toISOString(), type: 'user', message: { role: 'user', content: 'do the thing' } }),
+      JSON.stringify({ timestamp: new Date(1100).toISOString(), type: 'assistant', message: { role: 'assistant', id: 'a1', content: [{ type: 'text', text: 'ok' }] } }),
+    ].join('\n') + '\n'
+  );
+  core.ensureStore(S);
+  const f = path.join(cwd, 'a.ts');
+  fs.writeFileSync(f, 'one\n');
+  core.appendLog(S, { tool: 'Edit', file: f, before: null, after: null, added: 1, removed: 0, status: 'pending', ts: 1200 });
+
+  const first = core.cachedChangeMap(cwd, S, { root: cwd, prompts: true });
+  assert.equal(first.summary?.units, 1, 'the map is built');
+  // The cache file is what a FRESH process would read; assert it exists and that a second call agrees.
+  const cacheDir = path.join(core.rootDir(), 'changemap-cache');
+  assert.ok(fs.existsSync(cacheDir) && fs.readdirSync(cacheDir).length > 0, 'a cache entry was written');
+  assert.deepEqual(core.cachedChangeMap(cwd, S, { root: cwd, prompts: true }), first, 'the cached map is the same map');
+
+  // A new edit must invalidate it — a stale map is worse than a slow one.
+  core.appendLog(S, { tool: 'Edit', file: f, before: null, after: null, added: 2, removed: 0, status: 'pending', ts: 1300 });
+  assert.equal(core.cachedChangeMap(cwd, S, { root: cwd, prompts: true }).summary?.units, 2, 'the log changing rebuilds it');
+
+  // …and so must a transcript that grew (new prompts, tasks, actions all live there).
+  fs.appendFileSync(tx, JSON.stringify({ timestamp: new Date(2000).toISOString(), type: 'user', message: { role: 'user', content: 'and another thing' } }) + '\n');
+  assert.equal(
+    core.cachedChangeMap(cwd, S, { root: cwd, prompts: true }).prompts.length,
+    2,
+    'the transcript changing rebuilds it too'
+  );
+});
+
+test('store: a bulk status change is one parse and one append, and skips no-ops (0.8.8)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'bulkKeep';
+  core.ensureStore(S);
+  const lp = path.join(core.storeDir(S), 'log.jsonl');
+  const N = 4000;
+  const lines = [];
+  for (let id = 1; id <= N; id++)
+    lines.push(JSON.stringify({ id, ts: 1000 + id, tool: 'Edit', file: '/w/f' + (id % 30) + '.ts', added: 1, removed: 0, status: 'pending' }));
+  fs.writeFileSync(lp, lines.join('\n') + '\n');
+
+  // Per-edit setStatus re-resolves the record through readLog, whose memo its own append invalidates —
+  // quadratic, and unusable at the size a real session reaches. The bulk path parses once.
+  const before = fs.statSync(lp).size;
+  const t0 = Date.now();
+  const changed = core.setStatusMany(S, core.readLog(S).map((r) => r.id), 'kept');
+  const ms = Date.now() - t0;
+  assert.equal(changed.length, N, 'every pending edit changed');
+  assert.ok(ms < 2000, `accepting ${N} edits stays interactive (took ${ms}ms)`);
+  assert.equal(core.readLog(S).filter((r) => r.status === 'kept').length, N, 'and the log reads back kept');
+
+  // A second Accept All must be a no-op, not another N ops appended: a log that doubles on every
+  // repeated bulk action is how a session's store runs away.
+  const after = fs.statSync(lp).size;
+  assert.deepEqual(core.setStatusMany(S, core.readLog(S).map((r) => r.id), 'kept'), [], 'nothing left to change');
+  assert.equal(fs.statSync(lp).size, after, 'and nothing was written');
+  assert.ok(after > before, 'the first pass did append its ops');
+
+  // Clearing the resolved set then leaves an empty log rather than a rewritten one.
+  assert.equal(core.clearResolved(S), N, 'clear drops exactly the resolved edits');
+  assert.equal(core.readLog(S).length, 0, 'the log is empty afterwards');
+});
+
+test('store: nextId reads the log TAIL past 64 KB and still agrees with a full parse (0.8.8)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'tailIds';
+  core.ensureStore(S);
+  const lp = path.join(core.storeDir(S), 'log.jsonl');
+  // Grow the log past the 64 KB threshold the fast path is gated on — asserted, never assumed from a
+  // record count, because the record size is not this test's business.
+  let n = 0;
+  while (!fs.existsSync(lp) || fs.statSync(lp).size <= 64 * 1024) {
+    core.appendLog(S, {
+      tool: 'Edit', file: '/w/f' + (n % 7) + '.ts', before: null, after: null,
+      added: 1, removed: 0, status: 'pending', ts: 1000 + n, reason: 'x'.repeat(180),
+    });
+    n++;
+    assert.ok(n < 5000, 'the log should cross 64 KB long before this');
+  }
+  assert.ok(fs.statSync(lp).size > 64 * 1024, 'the fast path is actually exercised (log is past 64 KB)');
+
+  // The tail read must agree with the full parse it replaces — the whole point is that it is a
+  // shortcut, not a different answer.
+  const full = core.readLog(S);
+  const maxId = full.reduce((m, r) => Math.max(m, r.id), 0);
+  assert.equal(core.nextId(S), maxId + 1, 'the tail read returns the same next id a full parse would');
+
+  // …and a capture on top of it lands at that id, with no gap and no reuse.
+  const rec = core.appendLog(S, {
+    tool: 'Edit', file: '/w/after.ts', before: null, after: null,
+    added: 1, removed: 0, status: 'pending', ts: 2_000_000,
+  });
+  assert.equal(rec.id, maxId + 1, 'the appended record takes the id the tail read predicted');
+  const reread = core.readLog(S);
+  assert.equal(new Set(reread.map((r) => r.id)).size, reread.length, 'no id is reused');
+
+  // A status op appended after the last edit does NOT carry an id — the tail must skip ops, or the
+  // next capture would collide with an existing edit.
+  core.setStatus(S, rec.id, 'kept');
+  assert.equal(core.nextId(S), rec.id + 1, 'trailing status ops do not disturb the id sequence');
+});
+
+test('store: a 64 KB tail of nothing but status ops never yields an id an edit already owns (0.8.8)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'tailOps';
+  core.ensureStore(S);
+  const lp = path.join(core.storeDir(S), 'log.jsonl');
+  // The shape the tail read has to survive, written directly because a session reaches it only after
+  // thousands of reviews: a few edits, then status ops all the way down. The ops carry the ids of the
+  // edits they resolve, ASCENDING and ending far below the highest edit id — so a reader that does not
+  // skip ops sees a perfectly monotonic sequence, trusts it, and hands back an id that is already taken.
+  const EDITS = 2000;
+  const OPS = 1400; // reviewed oldest-first, so their ids ascend and stop well below the newest edit
+  const edits = [];
+  for (let id = 1; id <= EDITS; id++)
+    edits.push(JSON.stringify({ id, ts: 1000 + id, tool: 'Edit', file: '/w/f' + (id % 9) + '.ts', added: 1, removed: 0, status: 'pending' }));
+  const ops = [];
+  for (let id = 1; id <= OPS; id++)
+    ops.push(JSON.stringify({ op: 'status', id, status: 'kept', ts: 9_000_000 + id }));
+  fs.writeFileSync(lp, edits.concat(ops).join('\n') + '\n');
+  assert.ok(fs.statSync(lp).size > 64 * 1024, 'the log is past the tail-read threshold');
+  // The last 64 KB must be ops ONLY — otherwise an edit id in the tail would give the right answer for
+  // the wrong reason, and this test would pass against a reader that ignores the op marker.
+  const tail = fs.readFileSync(lp).subarray(-64 * 1024).toString('utf8').split('\n').slice(1).filter(Boolean);
+  assert.ok(tail.every((l) => JSON.parse(l).op === 'status'), 'the tail read will see nothing but status ops');
+  assert.ok(tail.length > 2, 'and enough of them for the fast path to trust the sequence');
+
+  // Proof that the FAST PATH answered, not the fallback: count the bytes the call reads. The tail read
+  // takes one 64 KB window; a full parse reads the whole file, which here is several times that.
+  const realRead = fs.readSync;
+  let bytesRead = 0;
+  fs.readSync = function (...args) {
+    const n = realRead.apply(fs, args);
+    bytesRead += n;
+    return n;
+  };
+  let answer;
+  try {
+    answer = core.nextId(S);
+  } finally {
+    fs.readSync = realRead;
+  }
+  assert.ok(bytesRead <= 64 * 1024, `the tail shortcut answered (read ${bytesRead} bytes, not the whole ${fs.statSync(lp).size})`);
+  assert.equal(answer, EDITS + 1, 'the next id follows the highest EDIT, not the last status op');
+  const rec = core.appendLog(S, {
+    tool: 'Edit', file: '/w/after.ts', before: null, after: null, added: 1, removed: 0, status: 'pending', ts: 9_900_000,
+  });
+  assert.equal(rec.id, EDITS + 1, 'the capture takes that id');
+  const ids = core.readLog(S).map((r) => r.id);
+  assert.equal(new Set(ids).size, ids.length, 'and no edit id is reused');
+});
+
+test('store: a non-increasing tail falls back to the full parse rather than trusting it (0.8.8)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'tailDup';
+  core.ensureStore(S);
+  const lp = path.join(core.storeDir(S), 'log.jsonl');
+  // Ids are strictly increasing in a healthy log, so the tail read trusts a sequence only while it
+  // stays that way. Two interleaved writers (or a partially-written line) can break that, and the
+  // shortcut must then defer to the full parse instead of returning the last id it happened to see.
+  const lines = [];
+  for (let id = 1; id <= 1500; id++)
+    lines.push(JSON.stringify({ id, ts: 1000 + id, tool: 'Edit', file: '/w/f' + (id % 9) + '.ts', added: 1, removed: 0, status: 'pending' }));
+  // …then one id repeated out of order, at the very end — inside the window the fast path reads.
+  lines.push(JSON.stringify({ id: 900, ts: 99_999, tool: 'Edit', file: '/w/dup.ts', added: 1, removed: 0, status: 'pending' }));
+  fs.writeFileSync(lp, lines.join('\n') + '\n');
+  assert.ok(fs.statSync(lp).size > 64 * 1024, 'the log is past the tail-read threshold');
+  // A tail that trusted its last id would answer 901 and hand the next capture an id three records
+  // deep in the log. It defers instead, and the full parse reconciles the repeat to a fresh id (1501),
+  // so the next one is 1502 — the duplicate is repaired rather than propagated.
+  const full = core.readLog(S);
+  assert.equal(full.length, 1501, 'every record survives — the duplicate is renumbered, not dropped');
+  assert.equal(new Set(full.map((r) => r.id)).size, full.length, 'and the ids are unique afterwards');
+  assert.equal(core.nextId(S), 1502, 'the next id follows the reconciled maximum, not the tail');
 });
 
 test('metrics: the usage cursor survives across processes — a cold reader delta-parses instead of re-reading (0.8.6)', () => {
@@ -5486,7 +5744,7 @@ test('audits: boundary crossings land in the audit that owns them (0.8.7)', () =
   assert.ok(/exercised, not approved/.test(core.EXERCISED_NOTE), 'the product rule survives the fold, in one place');
 });
 
-test('requests: the session splits by what the USER asked, and work belongs to the ask that started it (0.8.7)', () => {
+test('prompts: the session splits by what the USER asked, and work belongs to the ask that started it', () => {
   freshHome();
   delete process.env.CLAUDE_CONFIG_DIR;
   const S = 'reqSplit';
@@ -5516,12 +5774,19 @@ test('requests: the session splits by what the USER asked, and work belongs to t
       JSON.stringify({ timestamp: new Date(1550).toISOString(), type: 'assistant', message: { role: 'assistant', id: 'msgA', usage: { input_tokens: 100, output_tokens: 50, cache_read_input_tokens: 1000, cache_creation_input_tokens: 200 } } }),
       // A to-do marked in_progress during request #1 → one "task worked".
       JSON.stringify({ timestamp: new Date(1600).toISOString(), type: 'assistant', message: { role: 'assistant', id: 'msgT', content: [{ type: 'tool_use', id: 'tuTodo', name: 'TodoWrite', input: { todos: [{ content: 'build the thing', status: 'in_progress' }] } }] } }),
+      // The SAME item planned the other way (0.8.8): a TaskCreate naming it, then TaskUpdate flipping
+      // its status twice. Identity is the content digest, and TaskUpdate names nothing — so this whole
+      // group still counts ONE task, not four. (The old counter keyed on the raw target string and
+      // reported "1", "2" and the subject as three separate tasks.)
+      JSON.stringify({ timestamp: new Date(1620).toISOString(), type: 'assistant', message: { role: 'assistant', id: 'msgT2', content: [{ type: 'tool_use', id: 'tuTc', name: 'TaskCreate', input: { subject: 'build the thing', description: 'the same item, planned twice' } }] } }),
+      JSON.stringify({ timestamp: new Date(1640).toISOString(), type: 'assistant', message: { role: 'assistant', id: 'msgT3', content: [{ type: 'tool_use', id: 'tuTu1', name: 'TaskUpdate', input: { taskId: '1', status: 'in_progress' } }] } }),
+      JSON.stringify({ timestamp: new Date(1660).toISOString(), type: 'assistant', message: { role: 'assistant', id: 'msgT4', content: [{ type: 'tool_use', id: 'tuTu2', name: 'TaskUpdate', input: { taskId: 1, status: 'completed' } }] } }),
       ask(2500, 'now the second thing'),
       JSON.stringify({ timestamp: new Date(2600).toISOString(), type: 'assistant', message: { role: 'assistant', id: 'msgB', usage: { input_tokens: 300, output_tokens: 200 } } }),
     ].join('\n') + '\n'
   );
 
-  const rs = core.sessionRequests(cwd, S);
+  const rs = core.sessionPrompts(cwd, S);
   assert.equal(rs.length, 2, 'command stubs, compaction summaries, tool results and sidechains are not asks');
   assert.deepEqual(rs.map((r) => r.index), [1, 2], 'numbered the way a person counts their own turns');
   // Edits 1 and 2 landed before the second ask; edit 3 after it.
@@ -5529,42 +5794,46 @@ test('requests: the session splits by what the USER asked, and work belongs to t
   assert.deepEqual(rs[1].editIds, [3], 'and the second owns what followed');
   assert.equal(rs[0].added > 0, true, '±lines are accumulated, not left at zero');
   assert.equal(rs[1].endTs, 0, 'the ask being answered has no end yet');
-  assert.deepEqual(core.requestEditIds(cwd, S, rs[0].id), [1, 2], 'the review scope for "accept everything from this ask"');
-  assert.deepEqual(core.summarizeRequests(rs), { total: 2, withEdits: 2, edits: 3 }, 'headline for the Requests tab');
+  assert.deepEqual(core.promptEditIds(cwd, S, rs[0].id), [1, 2], 'the review scope for "accept everything from this ask"');
+  assert.deepEqual(core.summarizePrompts(rs), { total: 2, withEdits: 2, edits: 3 }, 'headline for the Prompts window');
   // 0.8.7: each ask carries files, folders, tokens and tasks — the per-request headline stats.
-  assert.equal(rs[0].files, 2, 'request #1 touched a.js and b.js');
+  assert.equal(rs[0].files, 2, 'prompt #1 touched a.js and b.js');
   assert.equal(rs[0].folders, 1, '…both in the one folder');
-  assert.equal(rs[1].files, 1, 'request #2 touched only c.js');
+  assert.equal(rs[1].files, 1, 'prompt #2 touched only c.js');
   assert.equal(rs[0].tokens, 1350, 'tokens are summed from assistant usage and deduped by message id (counted once, not twice)');
   assert.equal(rs[1].tokens, 500, 'the second ask gets only the usage in its own window');
-  assert.equal(rs[0].tasks, 1, 'a to-do marked in_progress during the ask counts as one task worked');
+  assert.equal(
+    rs[0].tasks,
+    1,
+    'one item planned as BOTH a to-do and a task, then moved twice, counts once — identity is the ' +
+      'content digest shared by TodoWrite, TaskCreate and TaskUpdate'
+  );
   assert.equal(rs[1].tasks, 0, 'an ask that touched no to-do reports zero, not a guess');
-  assert.deepEqual(core.sessionRequests(cwd, 'nope'), [], 'no transcript -> no requests');
+  assert.deepEqual(core.sessionPrompts(cwd, 'nope'), [], 'no transcript -> no prompts');
 
   // …and the SLICES the Requests window scopes everything by (0.8.7). Same partition, aggregated the
   // way a workflow's slice is, so a renderer can swap one for the other.
   const plain = core.buildChangeMap(cwd, S, { root: cwd });
-  assert.deepEqual(plain.requests, [], 'slices are opt-in — the fleet builds a map per sibling and none of them needs one');
-  const map = core.buildChangeMap(cwd, S, { root: cwd, requests: true });
-  assert.equal(map.requests.length, 2, 'one slice per ask');
-  assert.equal(map.requests[0].rollup.edits, 2, 'the first ask’s own edit count');
-  assert.equal(map.requests[1].rollup.edits, 1, '…and the second’s');
+  assert.deepEqual(plain.prompts, [], 'slices are opt-in — the fleet builds a map per sibling and none of them needs one');
+  const map = core.buildChangeMap(cwd, S, { root: cwd, prompts: true });
+  assert.equal(map.prompts.length, 2, 'one slice per ask');
+  assert.equal(map.prompts[0].rollup.edits, 2, 'the first ask’s own edit count');
+  assert.equal(map.prompts[1].rollup.edits, 1, '…and the second’s');
   assert.equal(
-    map.requests[0].rollup.added + map.requests[1].rollup.added,
+    map.prompts[0].rollup.added + map.prompts[1].rollup.added,
     map.summary.added,
     'the slices partition the session exactly — every line is claimed once'
   );
-  assert.deepEqual(map.requests[0].files.map((f) => f.file).sort(), ['a.js', 'b.js'], 'a slice carries its own file rollup (no renderer re-aggregates)');
-  assert.deepEqual(map.requests[1].files.map((f) => f.file), ['c.js'], '…and only its own files — never a neighbouring ask’s');
-  assert.equal(map.requests[0].modules.length, 1, '…plus its own folder buckets, for the strip');
-  assert.equal(map.requests[0].chapters.length >= 1, true, '…and its edits regrouped by chapter, for the ribbon');
-  assert.equal(map.requests[0].text, 'first, add the thing', 'the slice carries the ask in FULL — renderers wrap it, nothing is clipped');
-  assert.deepEqual(map.requests[0].editIds, [1, 2], 'the review scope rides along');
+  assert.deepEqual(map.prompts[0].files.map((f) => f.file).sort(), ['a.js', 'b.js'], 'a slice carries its own file rollup (no renderer re-aggregates)');
+  assert.deepEqual(map.prompts[1].files.map((f) => f.file), ['c.js'], '…and only its own files — never a neighbouring ask’s');
+  assert.equal(map.prompts[0].modules.length, 1, '…plus its own folder buckets, for the strip');
+  assert.equal(map.prompts[0].text, 'first, add the thing', 'the slice carries the ask in FULL — renderers wrap it, nothing is clipped');
+  assert.deepEqual(map.prompts[0].editIds, [1, 2], 'the review scope rides along');
 
   // Accept/reject by REQUEST scope resolves to exactly that ask's edits and flips only those — the set
   // keepRequest/undoRequest apply in the editors. #1 owns edits 1 & 2; accepting it must leave #2's
-  // edit 3 pending. (Chapter/folder/file scopes are covered end-to-end in test/e2e.sh.)
-  for (const id of core.requestEditIds(cwd, S, rs[0].id)) core.setStatus(S, id, 'kept');
+  // edit 3 pending. (Task/folder/file scopes are covered end-to-end in test/e2e.sh.)
+  for (const id of core.promptEditIds(cwd, S, rs[0].id)) core.setStatus(S, id, 'kept');
   const afterKeep = core.readLog(S);
   assert.deepEqual(afterKeep.filter((r) => r.status === 'kept').map((r) => r.id).sort((a, b) => a - b), [1, 2],
     'accepting a request flips exactly its own edits');

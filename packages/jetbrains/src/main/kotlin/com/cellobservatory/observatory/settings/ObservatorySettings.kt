@@ -22,6 +22,16 @@ class ObservatorySettings : PersistentStateComponent<ObservatorySettings.State> 
         var inlineReview: Boolean = true // inline editor overlay (lenses + line highlights)
         var unifiedDiff: Boolean = true // open edit diffs in the unified (inline) viewer, not side-by-side
         var session: String? = null // pinned session id to show; empty/null = auto-resolve newest
+        // The Overview's Active-only toggle. ON by default (0.8.8): the panel's job is work still awaiting
+        // review, and a session's finished work otherwise buries it. Persisted so the toggle survives a
+        // panel hide, a project reopen, and an IDE restart — a filter that silently resets is a filter the
+        // reader has to re-check every time.
+        var overviewActiveOnly: Boolean = true
+        // Where the Overview's master/detail divider sits, as the master's share of the panel — one value
+        // per layout, because a good nav WIDTH side by side is not a good nav HEIGHT stacked. Persisted for
+        // the same reason the toggle above is: a divider that resets is one the reader re-drags every time.
+        var overviewSplitWide: Float = 0.25f
+        var overviewSplitNarrow: Float = 0.38f
     }
 
     private var myState = State()

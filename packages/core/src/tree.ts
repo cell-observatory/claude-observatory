@@ -135,7 +135,7 @@ function buildFile(session: string, rel: string, file: string, recs: EditRecord[
   // One hash per FILE (not per edit) identifies the current text for the memo below.
   const textKey = `${text.length}:${crypto.createHash('sha1').update(text).digest('hex').slice(0, 16)}`;
   for (const r of recs) {
-    const line = locateCached(textKey, session, r.beforeBlob, r.afterBlob, readText(r.beforeBlob), readText(r.afterBlob), text);
+    const line = locateCached(textKey, session, r.beforeBlob, r.afterBlob, () => readText(r.beforeBlob), () => readText(r.afterBlob), text);
     const cls = line !== undefined ? classAt(spans, line) : null;
     if (cls) {
       const key = `${cls.name}@${cls.start}`;
@@ -163,11 +163,11 @@ function buildFile(session: string, rel: string, file: string, recs: EditRecord[
 const lineMemo = new Map<string, number | undefined>();
 const LINE_MEMO_CAP = 20000;
 
-function locateCached(textKey: string, session: string, beforeBlob: string | null | undefined, afterBlob: string | null | undefined, before: string, after: string, text: string): number | undefined {
+function locateCached(textKey: string, session: string, beforeBlob: string | null | undefined, afterBlob: string | null | undefined, before: () => string, after: () => string, text: string): number | undefined {
   const key = `${textKey}\u0000${beforeBlob ?? ''}\u0000${afterBlob ?? ''}`;
   const hit = lineMemo.get(key);
   if (hit !== undefined || lineMemo.has(key)) return hit;
-  const line = locateEditInCurrent(before, after, text)[0];
+  const line = locateEditInCurrent(before(), after(), text)[0]; // blob reads only on a miss
   if (lineMemo.size >= LINE_MEMO_CAP) lineMemo.clear();
   lineMemo.set(key, line);
   return line;

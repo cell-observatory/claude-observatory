@@ -1,10 +1,10 @@
 // The demo session as it looks in PYCHARM — an animated mockup of the JetBrains Overview tool window
 // (docs/media/demo-pyc.gif), beat-for-beat the same story record-demo.mjs records from the real VS Code
-// webview: plan → chapters filling → a subagent → a workflow run → WYSIWYG review → auto-clear.
+// webview: plan → the task list filling → a subagent → a workflow run → review → auto-clear.
 //
 // This one is a hand-authored mockup animation (the Swing panel can't render headlessly), faithful to
-// ChangeMapPanel.kt's real layout: the Fleet/Workflows nav tabs, vertical chapter rows with the tinted
-// mini-buttons, the module strip, and the ledger list — in the PyCharm 2026 New UI dark palette
+// ChangeMapPanel.kt's real layout: the Fleet/Workflows/Tasks/Sessions nav tabs, the folder strip, and
+// the churn-ranked file ledger — in the PyCharm 2026 New UI dark palette
 // (same tokens as docs/media/pyc-layout.src.html).
 //
 // Usage: node scripts/render-pyc-demo.mjs   (≈10s; requires Google Chrome)
@@ -104,11 +104,20 @@ const agentRow = ({ phase, phaseColor, added, removed, sub, sel }) => `
     ${sub ? `<div class="sub"><span class="badge" style="background:${sub.done ? F : B};font-size:8px">${sub.phase}</span> general-purpose · <i>Write pipeline tests</i> · +12 −0</div>` : ''}
   </div>`;
 
-const chRow = ({ g, gc, title, syn, m, pending, act, kept }) => `
+// One row of the Tasks tab — Claude's own numbered to-do, with the ±/edit counts of its STRICT span
+// (the edits captured while it was actually in progress). ● done · ◐ in progress · ○ planned.
+const taskRow = ({ g, gc, num, title, m, pending }) => `
   <div class="chrow"><span class="g" style="color:${gc}">${g}</span>
-    <span class="t${syn ? ' dim' : ''}">${title}</span>${syn ? '<span class="chip">session</span>' : ''}
+    <span style="font-family:var(--mono);font-size:10.5px;color:${F};flex:none">#${num}</span>
+    <span class="t">${title}</span>
     <span class="m">${m}${pending ? ` · <span style="color:${Y}">${pending}</span>` : ''}</span>
-    ${act ? `<span class="acts"><span style="color:${G}">${icoCommit}</span><span style="color:${R}">${icoHistory}</span><span style="color:${O}">${icoTrash}</span></span>` : '<span style="width:44px"></span>'}
+  </div>`;
+
+// One row of the Sessions tab — every session in this workspace, most recent conversation first.
+const sessRow = ({ live, title, when }) => `
+  <div class="chrow"><span class="g" style="color:${live ? B : F}">${live ? '●' : '○'}</span>
+    <span class="t"${live ? '' : ' style="color:var(--dim)"'}>${title}</span>
+    <span class="m">${when}${live ? ' · active' : ''}</span>
   </div>`;
 
 const led = ({ c, f, mod, w, pm, st, stc }) => `
@@ -126,18 +135,22 @@ const wfRun = ({ running, sel }) => `
     <div class="sub" style="padding-left:6px"><span style="color:${running ? B : G}">${running ? '○' : '●'}</span> docs-writer ${spark([0.5, 0.9, 0.4])} · 240 tok · 1 edit</div>
   </div>`;
 
-/** One frame of the PyCharm Overview: nav tab + rows, chapters, strip, ledger, caption. */
-const frame = ({ tab = 'fleet', agent, wf, chapters, mods, files, empty, cap }) => `<!doctype html><html><head><meta charset="utf-8"><style>${CSS}</style></head><body>
+/** One frame of the PyCharm Overview: nav tab + rows, folder strip, file ledger, caption. */
+const frame = ({ tab = 'fleet', agent, wf, tasks, sessions, mods, files, empty, cap }) => `<!doctype html><html><head><meta charset="utf-8"><style>${CSS}</style></head><body>
   <div class="tw-head"><span class="title">Claude Observatory Dashboards</span>
     <span class="tw-tabs"><span>Observations</span><span class="on">Overview</span><span>Stats</span></span>
-    <span class="toolbar"><span class="b" style="color:${P}">${icoFind} Search</span><span class="b tog">Active only</span><span class="sep"></span><span class="b" style="color:${G}">✓ Keep</span><span class="b" style="color:${R}">↩ Undo</span><span class="sep"></span><span class="b" style="color:${G}">✓✓ Accept File</span><span class="b" style="color:${R}">✕ Reject File</span><span class="sep"></span><span class="b" style="color:${G}">${icoCommit} Accept All</span><span class="b" style="color:${R}">${icoHistory} Revert All</span><span class="b" style="color:${O}">${icoTrash} Clear Resolved</span><span class="sep"></span><span class="b" style="color:${P}">${icoBulb} Spotlight</span><span class="b">⟳</span></span></div>
+    <span class="toolbar"><span class="b" style="color:${P}">${icoFind} Search</span><span class="b tog">Active only</span><span class="sep"></span><span class="b" style="color:${G}">✓ Keep</span><span class="b" style="color:${R}">↩ Undo</span><span class="sep"></span><span class="b" style="color:${G}">✓✓ Accept File</span><span class="b" style="color:${R}">✕ Reject File</span><span class="sep"></span><span class="b" style="color:${G}">${icoCommit} Accept All</span><span class="b" style="color:${R}">${icoHistory} Reject All</span><span class="b" style="color:${O}">${icoTrash} Clear Resolved</span><span class="sep"></span><span class="b" style="color:${P}">${icoBulb} Spotlight</span><span class="b">⟳</span></span></div>
   <div class="main">
     <div class="nav">
-      <div class="nav-tabs"><span class="${tab === 'fleet' ? 'on' : ''}">Fleet</span><span class="${tab === 'workflows' ? 'on' : ''}">Workflows</span><span>Tasks 2/3</span></div>
-      <div class="nav-body">${tab === 'fleet' ? (agent ? agentRow(agent) : '<div class="none">No agents yet — this fills in as Claude Code sessions run</div>') : (wf ? wfRun(wf) : '<div class="none">No workflow runs — orchestrations appear here</div>')}</div>
+      <div class="nav-tabs"><span class="${tab === 'sessions' ? 'on' : ''}">Sessions ${sessions ? sessions.length : 4}</span><span class="${tab === 'fleet' ? 'on' : ''}">Fleet</span><span class="${tab === 'workflows' ? 'on' : ''}">Workflows</span><span class="${tab === 'tasks' ? 'on' : ''}">Tasks ${tasks ? `${tasks.filter((t) => t.g === '●').length}/${tasks.length}` : '2/3'}</span></div>
+      <div class="nav-body">${
+        tab === 'tasks' ? (tasks || []).map(taskRow).join('')
+        : tab === 'sessions' ? (sessions || []).map(sessRow).join('')
+        : tab === 'workflows' ? (wf ? wfRun(wf) : '<div class="none">No workflow runs — orchestrations appear here</div>')
+        : (agent ? agentRow(agent) : '<div class="none">No agents yet — this fills in as Claude Code sessions run</div>')
+      }</div>
     </div>
     <div class="detail">
-      ${(chapters || []).map(chRow).join('')}
       ${mods ? strip(mods) : ''}
       ${(files || []).map(led).join('')}
       ${empty ? `<div class="empty">${empty}</div>` : ''}
@@ -147,98 +160,101 @@ const frame = ({ tab = 'fleet', agent, wf, chapters, mods, files, empty, cap }) 
 </body></html>`;
 
 // --- the beats (mirrors the demo scenario + the recorded VS Code angles) ----------------------------
+// Captions are the demo's OWN narration lines and the CLI's own output, so the recording never claims
+// something the commands did not print.
+const T1 = 'Add feature scaling to the pipeline';
+const T2 = 'Validate the training dataset';
+const T3 = 'Tests and docs';
 const beats = [
   {
-    cap: '▸ plan — three to-dos become the chapters',
-    agent: { phase: 'working', phaseColor: G, added: 0, removed: 0 },
-    chapters: [
-      { g: '◐', gc: Y, title: 'Add feature scaling to the pipeline', m: '', act: false },
-      { g: '○', gc: F, title: 'Validate the training dataset', m: '', act: false },
-      { g: '○', gc: F, title: 'Tests and docs', m: '', act: false },
+    tab: 'tasks',
+    cap: '\u25B8 plan \u2014 three to-dos + the numbered task list',
+    tasks: [
+      { g: '\u25D0', gc: Y, num: 1, title: T1, m: '' },
+      { g: '\u25CB', gc: F, num: 2, title: T2, m: '' },
+      { g: '\u25CB', gc: F, num: 3, title: T3, m: '' },
     ],
     empty: 'No edits yet. This fills in as Claude edits files.',
   },
   {
-    cap: '▸ chapter 1 — feature scaling (2 edits land)',
-    agent: { phase: 'working', phaseColor: G, added: 9, removed: 3 },
-    chapters: [
-      { g: '◐', gc: Y, title: 'Add feature scaling to the pipeline', m: '+9 −3', pending: '2⧗', act: true },
-      { g: '○', gc: F, title: 'Validate the training dataset', m: '', act: false },
-      { g: '○', gc: F, title: 'Tests and docs', m: '', act: false },
+    tab: 'tasks',
+    cap: '\u25B8 task 1 \u2014 feature scaling (2 edits)',
+    tasks: [
+      { g: '\u25D0', gc: Y, num: 1, title: T1, m: '+9 \u22123', pending: '2\u29D7' },
+      { g: '\u25CB', gc: F, num: 2, title: T2, m: '' },
+      { g: '\u25CB', gc: F, num: 3, title: T3, m: '' },
     ],
     mods: [['observatory-demo', Y]],
     files: [
-      { c: Y, f: 'features.py', mod: 'observatory-demo', w: 80, pm: '+6', st: '1⧗', stc: Y },
-      { c: Y, f: 'train.py', mod: 'observatory-demo', w: 55, pm: '+3', st: '1⧗', stc: Y },
+      { c: Y, f: 'features.py', mod: 'observatory-demo', w: 80, pm: '+6', st: '1\u29D7', stc: Y },
+      { c: Y, f: 'train.py', mod: 'observatory-demo', w: 55, pm: '+3', st: '1\u29D7', stc: Y },
     ],
   },
   {
-    cap: '▸ chapter 2 — dataset validation',
-    agent: { phase: 'working', phaseColor: G, added: 16, removed: 3 },
-    chapters: [
-      { g: '◐', gc: Y, title: 'Add feature scaling to the pipeline', m: '+9 −3', pending: '2⧗', act: true },
-      { g: '◐', gc: Y, title: 'Validate the training dataset', m: '+7 −0', pending: '1⧗', act: true },
-      { g: '○', gc: F, title: 'Tests and docs', m: '', act: false },
+    tab: 'tasks',
+    cap: '\u25B8 task 2 \u2014 dataset validation',
+    tasks: [
+      { g: '\u25CF', gc: G, num: 1, title: T1, m: '+9 \u22123', pending: '2\u29D7' },
+      { g: '\u25D0', gc: Y, num: 2, title: T2, m: '+7 \u22120', pending: '1\u29D7' },
+      { g: '\u25CB', gc: F, num: 3, title: T3, m: '' },
     ],
     mods: [['observatory-demo', Y], ['src/models', Y]],
     files: [
-      { c: Y, f: 'dataset.py', mod: 'src/models', w: 80, pm: '+7', st: '1⧗', stc: Y },
-      { c: Y, f: 'features.py', mod: 'observatory-demo', w: 75, pm: '+6', st: '1⧗', stc: Y },
-      { c: Y, f: 'train.py', mod: 'observatory-demo', w: 50, pm: '+3', st: '1⧗', stc: Y },
+      { c: Y, f: 'dataset.py', mod: 'src/models', w: 80, pm: '+7', st: '1\u29D7', stc: Y },
+      { c: Y, f: 'features.py', mod: 'observatory-demo', w: 75, pm: '+6', st: '1\u29D7', stc: Y },
+      { c: Y, f: 'train.py', mod: 'observatory-demo', w: 50, pm: '+3', st: '1\u29D7', stc: Y },
     ],
   },
   {
-    cap: '▸ chapter 3 — tests, written by a subagent',
+    cap: '\u25B8 task 3 \u2014 tests, written by a subagent',
     agent: { phase: 'working', phaseColor: G, added: 28, removed: 3, sub: { phase: 'working' } },
-    chapters: [
-      { g: '◐', gc: Y, title: 'Add feature scaling to the pipeline', m: '+9 −3', pending: '2⧗', act: true },
-      { g: '◐', gc: Y, title: 'Validate the training dataset', m: '+7 −0', pending: '1⧗', act: true },
-      { g: '◐', gc: Y, title: 'Tests and docs', m: '+12 −0', pending: '1⧗', act: true },
-    ],
     mods: [['observatory-demo', Y], ['tests', Y], ['src/models', Y]],
     files: [
-      { c: Y, f: 'test_pipeline.py', mod: 'tests', w: 95, pm: '+12', st: '1⧗', stc: Y },
-      { c: Y, f: 'dataset.py', mod: 'src/models', w: 58, pm: '+7', st: '1⧗', stc: Y },
-      { c: Y, f: 'features.py', mod: 'observatory-demo', w: 55, pm: '+6', st: '1⧗', stc: Y },
-      { c: Y, f: 'train.py', mod: 'observatory-demo', w: 30, pm: '+3', st: '1⧗', stc: Y },
+      { c: Y, f: 'test_pipeline.py', mod: 'tests', w: 95, pm: '+12', st: '1\u29D7', stc: Y },
+      { c: Y, f: 'dataset.py', mod: 'src/models', w: 58, pm: '+7', st: '1\u29D7', stc: Y },
+      { c: Y, f: 'features.py', mod: 'observatory-demo', w: 55, pm: '+6', st: '1\u29D7', stc: Y },
+      { c: Y, f: 'train.py', mod: 'observatory-demo', w: 30, pm: '+3', st: '1\u29D7', stc: Y },
     ],
   },
   {
     tab: 'workflows',
-    cap: '▸ a workflow run starts — the nav focuses it',
+    cap: '\u25B8 a workflow run starts \u2014 the nav focuses it',
     wf: { running: true, sel: true },
-    chapters: [{ g: '◐', gc: Y, title: 'Tests and docs', m: '+0 −0', act: false }],
-    empty: 'The run’s change-map fills in as its agents edit.',
+    empty: 'The run\u2019s change-map fills in as its agents edit.',
   },
   {
     tab: 'workflows',
-    cap: '▸ the workflow completes — phases, agents, and its own chapter rollup',
+    cap: '\u25B8 the workflow completes \u2014 phases, agents, and its own change-map slice',
     wf: { running: false, sel: true },
-    chapters: [{ g: '◐', gc: Y, title: 'Tests and docs', m: '+12 −0', pending: '1⧗', act: true }],
     mods: [['docs', Y]],
-    files: [{ c: Y, f: 'USAGE.md', mod: 'docs', w: 95, pm: '+12', st: '1⧗', stc: Y }],
+    files: [{ c: Y, f: 'USAGE.md', mod: 'docs', w: 95, pm: '+12', st: '1\u29D7', stc: Y }],
   },
   {
-    cap: '✓ kept 1 edit(s) in task 500567ef — per-chapter accept',
-    agent: { phase: '~idle', phaseColor: F, added: 40, removed: 3, sub: { phase: 'done', done: true } },
-    chapters: [
-      { g: '●', gc: G, title: 'Add feature scaling to the pipeline', m: '+9 −3', act: true },
-      { g: '●', gc: G, title: 'Validate the training dataset', m: '+7 −0', act: true },
-      { g: '◐', gc: Y, title: 'Tests and docs', m: '+24 −0', pending: '2⧗', act: true },
+    tab: 'tasks',
+    cap: '\u2713 kept 2 edit(s) in task \u201CAdd feature scaling\u201D \u2014 its strict in-progress span',
+    tasks: [
+      { g: '\u25CF', gc: G, num: 1, title: T1, m: '+9 \u22123' },
+      { g: '\u25CF', gc: G, num: 2, title: T2, m: '+7 \u22120' },
+      { g: '\u25D0', gc: Y, num: 3, title: T3, m: '+24 \u22120', pending: '2\u29D7' },
     ],
     mods: [['docs', Y], ['tests', Y], ['observatory-demo', G], ['src/models', G]],
     files: [
-      { c: Y, f: 'USAGE.md', mod: 'docs', w: 95, pm: '+12', st: '1⧗', stc: Y },
-      { c: Y, f: 'test_pipeline.py', mod: 'tests', w: 95, pm: '+12', st: '1⧗', stc: Y },
-      { c: G, f: 'dataset.py', mod: 'src/models', w: 58, pm: '+7', st: '✓', stc: G },
-      { c: G, f: 'features.py', mod: 'observatory-demo', w: 55, pm: '+6', st: '✓', stc: G },
+      { c: Y, f: 'USAGE.md', mod: 'docs', w: 95, pm: '+12', st: '1\u29D7', stc: Y },
+      { c: Y, f: 'test_pipeline.py', mod: 'tests', w: 95, pm: '+12', st: '1\u29D7', stc: Y },
+      { c: G, f: 'dataset.py', mod: 'src/models', w: 58, pm: '+7', st: '\u2713', stc: G },
+      { c: G, f: 'features.py', mod: 'observatory-demo', w: 55, pm: '+6', st: '\u2713', stc: G },
     ],
   },
   {
-    cap: '✓ kept 2 edit(s) — the fully reviewed demo session clears its own store',
-    agent: { phase: '~idle', phaseColor: F, added: 0, removed: 0, sub: { phase: 'done', done: true } },
-    chapters: [],
-    empty: 'No edits for this agent yet. This fills in as Claude edits files.',
+    tab: 'sessions',
+    cap: '\u2713 kept 2 edit(s) \u2014 the fully reviewed demo session clears its own store',
+    sessions: [
+      { live: true, title: 'Extend the training pipeline', when: 'now' },
+      { live: false, title: 'Split the training loop out of models.py', when: '2h ago' },
+      { live: false, title: 'Add type hints to the dataset module', when: 'yesterday' },
+      { live: false, title: 'session 9f2ab6c1', when: '3d ago' },
+    ],
+    empty: 'Nothing left to review in this session \u2014 every edit was accepted, and the store cleared itself.',
   },
 ];
 

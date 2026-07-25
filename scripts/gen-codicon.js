@@ -14,7 +14,7 @@ const glyphs = {
   'check': 'eab2', 'discard': 'eae2', 'check-all': 'ebb1', 'close-all': 'eac1', 'clear-all': 'eabf',
   'lightbulb': 'ea61', 'search': 'ea6d', 'refresh': 'eb37',
   'checklist': 'eab3', 'history': 'ea82', 'comment-discussion': 'eac7',
-  'list-ordered': 'eb16', // chapter chip: step through the chapter's edits in order
+  'list-ordered': 'eb16', // Prompt axis Review: step through one prompt's edits in order
   'diff': 'eae1', // nav bar: open the current edit as a full diff tab
   'export': 'ebac', // nav bar: export a shareable review summary
 };

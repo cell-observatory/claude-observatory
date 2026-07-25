@@ -110,6 +110,15 @@ object ObservatoryCli {
     fun keep(session: String, id: Int, workDir: String?): Boolean =
         run(listOf("keep", id.toString(), "--session", session, "--json"), workDir).ok
 
+    /** `keep --ids <a,b,c>` — accept an explicit set in ONE process. A scoped accept used to spawn the
+     *  CLI once per edit, which on a long session is thousands of processes; this is one. Returns the
+     *  kept count, or null if the call failed. */
+    fun keepIds(session: String, ids: List<Int>, workDir: String?): Int? {
+        if (ids.isEmpty()) return 0
+        val r = run(listOf("keep", "--ids", ids.joinToString(","), "--session", session, "--json"), workDir)
+        return if (r.ok) parseInt(r.stdout, "kept") else null
+    }
+
     /** Kept count, or null if the CLI call failed (distinct from a genuine 0-pending result). */
     fun keepAll(session: String, workDir: String?): Int? {
         val r = run(listOf("keep", "--all", "--session", session, "--json"), workDir)
@@ -193,6 +202,18 @@ object ObservatoryCli {
             workDir,
         ).ok
 
+    /** `clean --resolved --ids <a,b,c>` — clear the resolved (kept/undone) edits of an EXPLICIT id set:
+     *  the scope one prompt names, which no path can express (a single ask edits many folders). Returns
+     *  the cleared count, or null if the CLI call failed. */
+    fun clearResolvedIds(session: String, ids: List<Int>, workDir: String?): Int? {
+        if (ids.isEmpty()) return 0
+        val r = run(
+            listOf("clean", "--resolved", "--ids", ids.joinToString(","), "--session", session, "--json"),
+            workDir,
+        )
+        return if (r.ok) parseInt(r.stdout, "cleared") else null
+    }
+
     /** Per-pending-edit current line indices in the LIVE buffer text (may be unsaved). */
     fun locate(session: String, file: String, currentText: String, workDir: String?): List<Placement> {
         val r = run(listOf("locate", "--file", file, "--session", session), workDir, stdin = currentText)
@@ -208,8 +229,14 @@ object ObservatoryCli {
     }
 
     /** `sessions --json` — every store session incl. its human-readable title (0.8.6), for the chooser. */
-    fun sessionsJson(workDir: String?): String? {
-        val r = run(listOf("sessions", "--json"), workDir)
+    fun sessionsJson(workDir: String?, reviewing: String? = null): String? {
+        // --session names the session being reviewed, so a pinned conversation that has made no edits
+        // yet is still listed rather than looking like another workspace's.
+        val args = buildList {
+            add("sessions"); add("--json")
+            reviewing?.takeIf { it.isNotBlank() }?.let { add("--session"); add(it) }
+        }
+        val r = run(args, workDir)
         return if (r.ok) r.stdout else null
     }
 
@@ -248,8 +275,8 @@ object ObservatoryCli {
         return if (r.ok) r.stdout else null
     }
 
-    /** `task-keep <taskId>` — accept every PENDING edit in a chapter's STRICT-span set. Returns the kept
-     *  count, or null if the CLI call failed (distinct from a genuine 0-pending chapter). */
+    /** `task-keep <taskId>` — keep every PENDING edit in a task's STRICT in_progress span. Returns
+     *  the kept count, or null if the CLI call failed (distinct from a genuine 0-pending task). */
     fun taskKeep(session: String, taskId: String, workDir: String?): Int? {
         val r = run(listOf("task-keep", taskId, "--session", session, "--json"), workDir)
         return if (r.ok) parseInt(r.stdout, "kept") else null
@@ -257,7 +284,7 @@ object ObservatoryCli {
 
     data class TaskUndoResult(val undone: Int, val conflicts: Int, val total: Int)
 
-    /** `task-undo <taskId>` — revert every PENDING edit in a chapter's STRICT-span set, newest-first.
+    /** `task-undo <taskId>` — revert every PENDING edit in a task's STRICT span, newest-first.
      *  Writes to disk. Returns {undone, conflicts, total}, or null if the CLI call failed. */
     fun taskUndo(session: String, taskId: String, workDir: String?): TaskUndoResult? {
         val r = run(listOf("task-undo", taskId, "--session", session, "--json"), workDir)
@@ -270,45 +297,23 @@ object ObservatoryCli {
         }
     }
 
-    /** `task-clear <taskId>` — drop the RESOLVED (kept/undone) edits of a chapter's STRICT-span set;
+    /** `task-clear <taskId>` — drop the RESOLVED (kept/undone) edits of a task's STRICT span;
      *  pending edits are preserved. Returns the cleared count, or null if the CLI call failed. */
     fun taskClear(session: String, taskId: String, workDir: String?): Int? {
         val r = run(listOf("task-clear", taskId, "--session", session, "--json"), workDir)
         return if (r.ok) parseInt(r.stdout, "cleared") else null
     }
 
-    data class TaskClearCompletedResult(val cleared: Int, val chapters: Int)
-    data class ChapterOfEdit(val id: String, val title: String, val synthetic: Boolean, val editIds: List<Int>)
+    data class TaskClearCompletedResult(val cleared: Int, val tasks: Int)
 
-    /** `task-clear --completed` — clear the resolved edits of EVERY settled chapter (all edits kept).
-     *  Returns {cleared, chapters}, or null if the CLI call failed. */
+    /** `task-clear --completed` — clear the resolved edits of EVERY settled task (all kept).
+     *  Returns {cleared, tasks}, or null if the CLI call failed. */
     fun taskClearCompleted(session: String, workDir: String?): TaskClearCompletedResult? {
         val r = run(listOf("task-clear", "--completed", "--session", session, "--json"), workDir)
         if (!r.ok) return null
         return try {
             val o = JsonParser.parseString(r.stdout).asJsonObject
-            TaskClearCompletedResult(o.get("cleared").asInt, o.getAsJsonArray("chapters")?.size() ?: 0)
-        } catch (_: Exception) {
-            null
-        }
-    }
-
-    /** Cascaded edits: the chapter an edit belongs to — its id, human-readable title, whether it is the
-     *  synthetic session bucket, and its ordered sibling edit ids (capture order, across files). Backs
-     *  the JetBrains Chapter review axis. Returns null when the edit id names no record. */
-    fun chapterForEdit(session: String, editId: Int, workDir: String?): ChapterOfEdit? {
-        val r = run(listOf("chapter", "--of-edit", editId.toString(), "--session", session, "--json"), workDir)
-        if (!r.ok) return null
-        return try {
-            val el = JsonParser.parseString(r.stdout)
-            if (el.isJsonNull) return null
-            val o = el.asJsonObject
-            ChapterOfEdit(
-                id = o.get("id").asString,
-                title = o.get("title").asString,
-                synthetic = o.get("synthetic")?.asBoolean ?: false,
-                editIds = o.getAsJsonArray("editIds").map { it.asInt },
-            )
+            TaskClearCompletedResult(o.get("cleared").asInt, o.getAsJsonArray("tasks")?.size() ?: 0)
         } catch (_: Exception) {
             null
         }
@@ -325,7 +330,7 @@ object ObservatoryCli {
         return if (r.ok) r.stdout else null
     }
 
-    /** The session change-map: to-do chapters + per-file / per-module rollups of everything Claude
+    /** The session change-map: per-file / per-module rollups of everything Claude
      *  touched. Every number (churn, status precedence, module labels) is computed by core — this
      *  plugin only renders the result, exactly like the VS Code webview. */
     fun changemapJson(session: String, workDir: String?): String? {
@@ -391,17 +396,17 @@ object ObservatoryCli {
     }
 
     /** The session as the list of things the USER asked for — each ask with the edits, tool calls,
-     *  subagents, workflow runs and background shells it produced. Work is attributed to the request that
+     *  subagents, workflow runs and background shells it produced. Work is attributed to the prompt that
      *  STARTED it (core's rule), so nothing here re-attributes by completion. */
-    fun requestsJson(session: String, workDir: String?): String? {
-        val r = run(listOf("requests", "--session", session, "--json"), workDir)
+    fun promptsJson(session: String, workDir: String?): String? {
+        val r = run(listOf("prompts", "--session", session, "--json"), workDir)
         return if (r.ok) r.stdout else null
     }
 
     /** Claude's prose reply to one ask (its tool calls stripped) — the log a reviewer expands to read.
      *  Fetched on demand because it can be large. */
-    fun requestResponseJson(session: String, requestId: String, workDir: String?): String? {
-        val r = run(listOf("requests", "--id", requestId, "--response", "--session", session, "--json"), workDir)
+    fun promptResponseJson(session: String, promptId: String, workDir: String?): String? {
+        val r = run(listOf("prompts", "--id", promptId, "--response", "--session", session, "--json"), workDir)
         return if (r.ok) r.stdout else null
     }
 

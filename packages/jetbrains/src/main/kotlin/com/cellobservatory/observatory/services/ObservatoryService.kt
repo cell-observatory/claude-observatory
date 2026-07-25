@@ -18,16 +18,21 @@ import com.cellobservatory.observatory.model.Observations
 import com.cellobservatory.observatory.model.ObservationsParser
 import com.cellobservatory.observatory.model.ProcessesParser
 import com.cellobservatory.observatory.model.ProcessesResult
-import com.cellobservatory.observatory.model.RequestsParser
-import com.cellobservatory.observatory.model.RequestsResult
+import com.cellobservatory.observatory.model.PromptsParser
+import com.cellobservatory.observatory.model.PromptsResult
 import com.cellobservatory.observatory.model.SessionAudit
+import com.cellobservatory.observatory.model.SessionsParser
+import com.cellobservatory.observatory.model.SessionsResult
 import com.cellobservatory.observatory.model.TreeParser
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.startup.ProjectActivity
+import com.intellij.util.concurrency.EdtScheduledExecutorService
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Project-level hub: resolves the active session for this project's root, caches the folded log
@@ -41,6 +46,9 @@ class ObservatoryService(private val project: Project) : Disposable {
     @Volatile private var cachedAutoSession: String? = null
     @Volatile private var cachedAutoRoot: String? = null
     private val watchListener = Runnable { refresh() }
+
+    /** True while a coalesced repaint is queued on the EDT — see [notifyListeners]. */
+    private val repaintQueued = AtomicBoolean(false)
 
     init {
         StoreWatcher.instance.addListener(watchListener)
@@ -116,20 +124,6 @@ class ObservatoryService(private val project: Project) : Disposable {
             dir > 0 -> pending.firstOrNull { it.id > cursor } ?: pending.first() // resolved — resume just past it
             else -> pending.lastOrNull { it.id < cursor } ?: pending.last()
         }
-        reviewCursorId = next.id
-        return next
-    }
-
-    /** Cascaded edits: step the review cursor to the previous/next PENDING edit WITHIN a chapter's edit
-     *  set (given in capture order), wrapping at the ends. Returns null when the chapter has nothing
-     *  left to review. */
-    fun stepInChapter(dir: Int, chapterEditIds: List<Int>): EditRecord? {
-        val order = chapterEditIds.withIndex().associate { (i, id) -> id to i }
-        val pending = log().filter { it.pending && it.id in order }.sortedBy { order[it.id] }
-        if (pending.isEmpty()) return null
-        val cursor = reviewCursorId
-        val idx = pending.indexOfFirst { it.id == cursor }
-        val next = if (idx >= 0) pending[(idx + dir + pending.size) % pending.size] else pending.first()
         reviewCursorId = next.id
         return next
     }
@@ -226,7 +220,7 @@ class ObservatoryService(private val project: Project) : Disposable {
                     if (v != null) {
                         value = v
                         fetchedKey = key
-                        ApplicationManager.getApplication().invokeLater { listeners.forEach { it.run() } }
+                        notifyListeners()
                     }
                 } finally {
                     attempted = true
@@ -256,10 +250,16 @@ class ObservatoryService(private val project: Project) : Disposable {
     private val processesFetch = ThrottledFetch { session ->
         ObservatoryCli.processesJson(session, workspaceRoot)?.let { ProcessesParser.parse(it) }
     }
-    // The user's own turns (0.8.7) — the Overview's first nav tab AND the Request review axis. Rides the
+    // The user's own turns (0.8.7) — the Overview's first nav tab AND the Prompt review axis. Rides the
     // same throttled tick as every other view; never a timer of its own.
-    private val requestsFetch = ThrottledFetch { session ->
-        ObservatoryCli.requestsJson(session, workspaceRoot)?.let { RequestsParser.parse(it) }
+    private val promptsFetch = ThrottledFetch { session ->
+        ObservatoryCli.promptsJson(session, workspaceRoot)?.let { PromptsParser.parse(it) }
+    }
+    // Every session in this workspace, newest CONVERSATION first (0.8.8) — the Overview's Sessions tab
+    // and the Switch Session popup read the same rows. Cheap by construction in core (stats + a bounded,
+    // sidecar-cached title scan; no store log is parsed), so it rides the shared tick like any other view.
+    private val sessionsFetch = ThrottledFetch { _ ->
+        ObservatoryCli.sessionsJson(workspaceRoot, currentSession())?.let { SessionsParser.parse(it) }
     }
     // The folded footprint's two surviving facts (0.8.7): the writes that left the workspace (`risk`) and
     // the reads that did (`egress`'s `file` channels). Neither rides the shared multitask payload, so both
@@ -306,26 +306,34 @@ class ObservatoryService(private val project: Project) : Disposable {
      *  reading" from "this CLI cannot answer for background shells" (an older one on PATH). */
     val processesAttempted: Boolean get() = processesFetch.attempted
 
-    /** The shared `requests --json` view (the Overview's Requests tab + the Request review axis). */
-    fun requests(force: Boolean = false): RequestsResult? = currentSession()?.let { requestsFetch.get(it, force) }
+    /** The shared `prompts --json` view (the Overview's Prompts tab + the Prompt review axis). */
+    fun prompts(force: Boolean = false): PromptsResult? = currentSession()?.let { promptsFetch.get(it, force) }
 
-    /** True once a `requests --json` fetch has completed — with [requests] null, this separates "still
-     *  reading" from "this CLI cannot answer for requests" (an older one on PATH). */
-    val requestsAttempted: Boolean get() = requestsFetch.attempted
+    /** The shared `sessions --json` view (the Overview's Sessions tab). Keyed on the active session so
+     *  switching re-marks which row is live. */
+    fun sessions(force: Boolean = false): SessionsResult? = sessionsFetch.get(currentSession() ?: "", force)
+
+    /** True once a `sessions --json` fetch has completed — with [sessions] null, this separates "still
+     *  reading" from "this CLI cannot answer for sessions" (an older one on PATH). */
+    val sessionsAttempted: Boolean get() = sessionsFetch.attempted
+
+    /** True once a `prompts --json` fetch has completed — with [prompts] null, this separates "still
+     *  reading" from "this CLI cannot answer for prompts" (an older one on PATH). */
+    val promptsAttempted: Boolean get() = promptsFetch.attempted
 
     /**
-     * The ask picked in the Requests window — the SCOPE every other dashboard narrows to (0.8.7).
+     * The ask picked in the Prompts window — the SCOPE every other dashboard narrows to (0.8.7).
      *
      * It lives on the service rather than in either panel because two windows have to agree about it:
-     * the Requests window owns the pick, the Overview filters its fleet · runs · tasks · shells and its
+     * the Prompts window owns the pick, the Overview filters its fleet · runs · tasks · shells and its
      * whole change map by it, and either one can clear it. Setting it re-renders every registered
      * surface through the existing listener path — no new channel, no new timer.
      */
-    var selectedRequestId: String? = null
+    var selectedPromptId: String? = null
         set(value) {
             if (field == value) return
             field = value
-            listeners.forEach { it.run() }
+            notifyListeners()
         }
 
     /**
@@ -370,13 +378,33 @@ class ObservatoryService(private val project: Project) : Disposable {
         cachedAutoSession = null // re-resolve the session (a new session may have appeared)
         if (force) sharedViews.forEach { it.forceNext() }
         refreshEditTree() // kick a background tree fetch; repaints when it lands
-        listeners.forEach { it.run() }
+        notifyListeners()
+    }
+
+    /**
+     * Fan a repaint out to every registered surface, coalescing bursts (0.8.8).
+     *
+     * Eight throttled CLI views land within milliseconds of each other on a single refresh tick, and each
+     * landing used to rebuild all six registered panels synchronously — dozens of full Swing rebuilds per
+     * tick, every one of them discarded by the next. The first notification now schedules one repaint on
+     * the EDT and every notification arriving before it runs folds into that repaint; the delay is far
+     * below the threshold where a repaint reads as delayed, and no notification is ever dropped.
+     */
+    private fun notifyListeners() {
+        if (!repaintQueued.compareAndSet(false, true)) return
+        EdtScheduledExecutorService.getInstance().schedule({
+            repaintQueued.set(false)
+            if (!project.isDisposed) listeners.forEach { it.run() }
+        }, NOTIFY_COALESCE_MS, TimeUnit.MILLISECONDS)
     }
 
     /** Every shared throttled view, so a forced refresh reaches all of them (feeds included — a reverted
      *  edit changes what the selected row's window shows). */
     private val sharedViews: List<ThrottledFetch<*>>
-        get() = listOf(multitaskFetch, changemapFetch, observationsFetch, processesFetch, requestsFetch, auditFetch, feedFetch)
+        get() = listOf(
+            multitaskFetch, changemapFetch, observationsFetch, processesFetch,
+            promptsFetch, sessionsFetch, auditFetch, feedFetch,
+        )
 
     override fun dispose() {
         StoreWatcher.instance.removeListener(watchListener)
@@ -388,6 +416,9 @@ class ObservatoryService(private val project: Project) : Disposable {
 
         /** Minimum interval between spawns of the same CLI view (matches VS Code's Overview throttle). */
         private const val MIN_FETCH_MS = 3_000L
+
+        /** Window over which listener notifications collapse into one repaint (see [notifyListeners]). */
+        private const val NOTIFY_COALESCE_MS = 90L
 
         /** Feed rows per fetch — enough scrollback to be useful, bounded so a busy agent's tail stays
          *  cheap to post on every tick. Anything older comes back as the feed's `truncated` count. */
