@@ -50,7 +50,7 @@ object Diffs {
     fun show(project: Project, session: String, rec: EditRecord) {
         val app = ApplicationManager.getApplication()
         // Read the (potentially large) before/after blobs OFF the EDT — this is invoked from
-        // double-click / menu handlers on the UI thread. Build the diff request + show on the EDT.
+        // double-click / menu handlers on the UI thread. Build the diff prompt + show on the EDT.
         app.executeOnPooledThread {
             val before = StoreReader.readBlob(session, rec.beforeBlob)
             val after = StoreReader.readBlob(session, rec.afterBlob)
@@ -64,14 +64,14 @@ object Diffs {
                 val factory = DiffContentFactory.getInstance()
                 val title = if (reason != null) "#${rec.id} · ${if (reason.length > 80) reason.take(79) + "…" else reason}"
                 else "$name — edit #${rec.id}"
-                val request = SimpleDiffRequest(
+                val prompt = SimpleDiffRequest(
                     title,
                     factory.create(project, before, type),
                     factory.create(project, after, type),
                     if (rec.beforeBlob == null) "(new file)" else "before",
                     if (rec.afterBlob == null) "(deleted)" else "after",
                 )
-                request.putUserData(
+                prompt.putUserData(
                     DiffUserDataKeys.CONTEXT_ACTIONS,
                     listOf(
                         action("Keep #${rec.id}", NavTint.KEEP) { ReviewOps.keep(project, session, rec.id) },
@@ -83,7 +83,7 @@ object Diffs {
                         action("Next edit in this file", NavTint.tint(AllIcons.Actions.NextOccurence, NavTint.BLUE)) { stepInFile(project, session, rec, 1) },
                     ),
                 )
-                DiffManager.getInstance().showDiff(project, request.preferUnified())
+                DiffManager.getInstance().showDiff(project, prompt.preferUnified())
             }
         }
     }
@@ -99,14 +99,14 @@ object Diffs {
                 val name = File(rec.file).name
                 val type = FileTypeManager.getInstance().getFileTypeByFileName(name)
                 val factory = DiffContentFactory.getInstance()
-                val request = SimpleDiffRequest(
+                val prompt = SimpleDiffRequest(
                     "edit #${rec.id} ⟶ (this file)",
                     factory.create(project, revision, type), // left: recorded revision (read-only)
                     factory.create(project, currentFile),    // right: live, editable current file
                     "edit #${rec.id}",
                     "(this file)",
                 )
-                DiffManager.getInstance().showDiff(project, request.preferUnified())
+                DiffManager.getInstance().showDiff(project, prompt.preferUnified())
             }
         }
     }

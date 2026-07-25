@@ -23,7 +23,6 @@ import com.intellij.ui.PopupHandler
 import com.intellij.ui.SimpleTextAttributes
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.treeStructure.Tree
-import com.intellij.util.ui.tree.TreeUtil
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import java.io.File
@@ -169,7 +168,7 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
             for (s in d.nextSteps) root.add(DefaultMutableTreeNode(s))
         }
         model.reload()
-        TreeUtil.expandAll(tree)
+        expandAllBounded(tree)
         // expandAll just opened every section; a long Context list would push the recap and timeline off
         // screen, so fold it back when it runs past a handful of rows (its header still carries the count).
         ctxNode?.takeIf { it.childCount > 5 }?.let { tree.collapsePath(TreePath(it.path)) }
@@ -234,7 +233,7 @@ class ObservationsPanel(private val project: Project) : SimpleToolWindowPanel(tr
     private fun buildToolbar(): JComponent {
         val group = DefaultActionGroup(
             action("Accept All Edits", NavTint.ACCEPT_ALL) { withSession { s -> ReviewOps.keepAll(project, s) } },
-            action("Revert All Edits", NavTint.REVERT_ALL) {
+            action("Reject All Edits", NavTint.REVERT_ALL) {
                 withSession { s -> ReviewOps.undoAll(project, s, service().log(), "this session") }
             },
             action("Clear Resolved Edits", NavTint.CLEAR) {

@@ -28,7 +28,6 @@ import com.intellij.ui.PopupHandler
 import com.intellij.ui.SimpleTextAttributes
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.treeStructure.Tree
-import com.intellij.util.ui.tree.TreeUtil
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import java.io.File
@@ -157,7 +156,7 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
             for (file in vm.files) addFileNode(root, file)
         }
         model.reload()
-        TreeUtil.expandAll(tree)
+        expandAllBounded(tree)
     }
 
     private fun addFolderNode(parent: DefaultMutableTreeNode, f: TreeFolderNode) {
@@ -233,7 +232,7 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
             action("Accept All Edits", NavTint.ACCEPT_ALL) {
                 withSession { s -> ReviewOps.keepAll(project, s) }
             },
-            action("Revert All Edits", NavTint.REVERT_ALL) {
+            action("Reject All Edits", NavTint.REVERT_ALL) {
                 withSession { s -> ReviewOps.undoAll(project, s, service().log(), "this session") }
             },
             action("Redo All Edits", AllIcons.Actions.Redo) {
@@ -242,7 +241,7 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
             fileScopedAction("Accept All Edits in Current File", NavTint.ACCEPT_FILE) { s, vf ->
                 ReviewOps.keepAll(project, s, service().log().filter { it.file == vf.path }, vf.name)
             },
-            fileScopedAction("Revert All Edits in Current File", NavTint.REJECT) { s, vf ->
+            fileScopedAction("Reject All Edits in Current File", NavTint.REJECT) { s, vf ->
                 ReviewOps.undoAll(project, s, service().log().filter { it.file == vf.path }, vf.name, vf.path)
             },
             action("Clear Resolved Edits", NavTint.CLEAR) {
@@ -323,7 +322,7 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
         action("Accept All in Folder", NavTint.ACCEPT_FILE) {
             selectedFolder()?.let { f -> withSession { s -> ReviewOps.keepAll(project, s, f.edits, f.label) } }
         },
-        action("Revert All in Folder", NavTint.REJECT) {
+        action("Reject All in Folder", NavTint.REJECT) {
             selectedFolder()?.let { f -> withSession { s -> ReviewOps.undoAll(project, s, f.edits, f.label, f.path) } }
         },
         action("Clear Resolved in Folder", NavTint.CLEAR) {

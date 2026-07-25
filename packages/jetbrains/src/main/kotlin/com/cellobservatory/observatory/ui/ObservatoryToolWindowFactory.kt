@@ -12,7 +12,7 @@ import javax.swing.JComponent
 
 /** Sidebar review window (VS Code activity-bar analog): Edits + Diffs + File History + Actions +
  *  Observations. 0.8.7: Observations moved here from the bottom dock, which freed that dock for the
- *  Requests window beside the Overview. */
+ *  Prompts window beside the Overview. */
 class ObservatoryToolWindowFactory : ToolWindowFactory, DumbAware {
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
         val factory = ContentFactory.getInstance()
@@ -40,7 +40,7 @@ class ObservatoryToolWindowFactory : ToolWindowFactory, DumbAware {
 
 /** Bottom dashboards window (VS Code panel analog, next to Terminal/Problems). 0.8.7 layout —
  *  three panes side by side in one split (dividers draggable, each pane carrying its name):
- *    · Requests — what the USER asked for, in order. Selecting one SCOPES the Overview beside it, which
+ *    · Prompts — what the USER asked for, in order. Selecting one SCOPES the Overview beside it, which
  *                 is why the two are neighbours rather than tabs: you keep the list of asks in view
  *                 while you read what one of them produced.
  *    · Overview — the combined MASTER–DETAIL: a Fleet · Workflows · Tasks · Processes nav on the left
@@ -50,14 +50,14 @@ class ObservatoryToolWindowFactory : ToolWindowFactory, DumbAware {
 class ObservatoryDashboardsFactory : ToolWindowFactory, DumbAware {
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
         val stats = com.cellobservatory.observatory.ui.stats.StatsPanel(project)
-        // Default split: Requests 20% | Overview 65% | Stats 15% — the master-detail Overview stays the
-        // centerpiece, and the Requests pane is wide enough to read a prompt wrapped over a few lines.
+        // Default split: Prompts 20% | Overview 65% | Stats 15% — the master-detail Overview stays the
+        // centerpiece, and the Prompts pane is wide enough to read a prompt wrapped over a few lines.
         val right = com.intellij.ui.OnePixelSplitter(false, 0.81f).apply {
             firstComponent = titled("Overview", ChangeMapPanel(project))
             secondComponent = titled("Stats", stats)
         }
         val split = com.intellij.ui.OnePixelSplitter(false, 0.20f).apply {
-            firstComponent = titled("Requests", RequestsPanel(project))
+            firstComponent = titled("Prompts", PromptsPanel(project))
             secondComponent = right
         }
         val factory = ContentFactory.getInstance()

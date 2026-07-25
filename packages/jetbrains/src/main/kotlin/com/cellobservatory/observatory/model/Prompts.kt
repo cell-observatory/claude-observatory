@@ -5,23 +5,23 @@ import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 
 /**
- * Kotlin mirror of core's REQUESTS view-model, parsed from `claude-observatory requests --json`: the
+ * Kotlin mirror of core's PROMPTS view-model, parsed from `claude-observatory prompts --json`: the
  * session as the list of things the USER asked for, each carrying what it produced.
  *
- * Every other axis here organizes work the way the AGENT saw it — chapters come from Claude's own
+ * Every other axis here organizes work the way the AGENT saw it — tasks come from Claude's own
  * to-dos, rollups come from files, folders, subagents and workflow runs. None of them answer the
  * question a person actually has: *what happened when I asked for X?*
  *
- * Attribution is by START time, decided in core: a shell launched by request #4 belongs to #4 even when
+ * Attribution is by START time, decided in core: a shell launched by prompt #4 belongs to #4 even when
  * it exits during #7, because #4 is what caused it. Nothing here re-attributes by completion.
  */
-data class SessionRequest(
+data class SessionPrompt(
     /** Stable id (content+time hash) — safe to key UI state and review ops on. */
     val id: String,
     /** 1-based chronological position — the way a person counts their own turns. */
     val index: Int,
     val ts: Long,
-    /** When the NEXT request arrived; 0 while this is the one still being answered. */
+    /** When the NEXT prompt arrived; 0 while this is the one still being answered. */
     val endTs: Long,
     /** The prompt itself, whitespace-collapsed. */
     val text: String,
@@ -51,24 +51,24 @@ data class SessionRequest(
     val compactions: Int,
     val durationMs: Long,
 ) {
-    /** True while this is the request being answered — core leaves [endTs] 0 until the next ask lands. */
+    /** True while this is the prompt being answered — core leaves [endTs] 0 until the next ask lands. */
     val current: Boolean get() = endTs == 0L
 }
 
-/** The Requests headline (core.summarizeRequests) — the tab badge reads this. */
-data class RequestSummary(val total: Int, val withEdits: Int, val edits: Int)
+/** The Prompts headline (core.summarizePrompts) — the tab badge reads this. */
+data class PromptSummary(val total: Int, val withEdits: Int, val edits: Int)
 
-data class RequestsResult(
+data class PromptsResult(
     val session: String,
-    val summary: RequestSummary,
+    val summary: PromptSummary,
     /** Chronological, oldest first — exactly as core ordered them. */
-    val requests: List<SessionRequest>,
+    val prompts: List<SessionPrompt>,
 )
 
-/** Claude's prose reply to one ask (core.RequestResponse) — its tool calls stripped, so the reader gets
+/** Claude's prose reply to one ask (core.PromptResponse) — its tool calls stripped, so the reader gets
  *  the narrative. Fetched on demand (it can be large), never on the list payload. */
-data class RequestResponse(
-    val requestId: String,
+data class PromptResponse(
+    val promptId: String,
     val index: Int,
     /** The concatenated assistant text, turns separated by a blank line, capped by core. */
     val text: String,
@@ -77,12 +77,12 @@ data class RequestResponse(
     val truncated: Long,
 )
 
-object RequestsParser {
-    /** Parse `requests --id N --response --json` → the response, or null when the CLI answered none. */
-    fun parseResponse(json: String): RequestResponse? = try {
+object PromptsParser {
+    /** Parse `prompts --id N --response --json` → the response, or null when the CLI answered none. */
+    fun parseResponse(json: String): PromptResponse? = try {
         val r = JsonParser.parseString(json).asJsonObject.getAsJsonObject("response") ?: return null
-        RequestResponse(
-            requestId = str(r, "requestId") ?: "",
+        PromptResponse(
+            promptId = str(r, "promptId") ?: "",
             index = int(r, "index"),
             text = str(r, "text") ?: "",
             turns = int(r, "turns"),
@@ -92,18 +92,18 @@ object RequestsParser {
         null
     }
 
-    fun parse(json: String): RequestsResult? = try {
+    fun parse(json: String): PromptsResult? = try {
         val o = JsonParser.parseString(json).asJsonObject
         val sum = o.getAsJsonObject("summary")
-        RequestsResult(
+        PromptsResult(
             session = str(o, "session") ?: "",
-            summary = RequestSummary(
+            summary = PromptSummary(
                 total = sum?.let { int(it, "total") } ?: 0,
                 withEdits = sum?.let { int(it, "withEdits") } ?: 0,
                 edits = sum?.let { int(it, "edits") } ?: 0,
             ),
-            requests = (o.getAsJsonArray("requests") ?: JsonArray())
-                .mapNotNull { it.takeIf { e -> e.isJsonObject }?.asJsonObject?.let(::request) },
+            prompts = (o.getAsJsonArray("prompts") ?: JsonArray())
+                .mapNotNull { it.takeIf { e -> e.isJsonObject }?.asJsonObject?.let(::prompt) },
         )
     } catch (_: Exception) {
         null
@@ -117,7 +117,7 @@ object RequestsParser {
     private fun strs(o: JsonObject, k: String): List<String> =
         o.getAsJsonArray(k)?.mapNotNull { it.takeIf { e -> e.isJsonPrimitive }?.asString } ?: emptyList()
 
-    private fun request(o: JsonObject) = SessionRequest(
+    private fun prompt(o: JsonObject) = SessionPrompt(
         id = str(o, "id") ?: "",
         index = int(o, "index"),
         ts = long(o, "ts"),

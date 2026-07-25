@@ -9,41 +9,6 @@ import com.google.gson.JsonParser
  * target (`maxId`) are all computed server-side in core.buildChangeMap — this plugin only renders the
  * result (no local aggregation, so VS Code and JetBrains can never disagree about the numbers).
  */
-data class ChangeMapChapter(
-    /** Stable brush key AND the WYSIWYG review-op key: ✓/↩/🧹 resolve via core.reviewEditIds(id) —
-     *  exactly the edits the row displays, the synthetic session chapter included. */
-    val id: String,
-    /** The STRICT task this chapter joins for analytics + 💬 chat framing; null = no strict task (the
-     *  synthetic session chapter, or a duplicate-content occurrence beyond the first). 0.8.0 chapters
-     *  are TOTAL — no "unassigned" row exists; work outside any to-do lands in the synthetic chapter. */
-    val taskId: String?,
-    /** True for the fallback session chapter that claims work outside any to-do. */
-    val synthetic: Boolean,
-    /** True when born from the numbered task list (0.8.3) — the Tasks tab is its home; the ribbon
-     *  never draws it (attribution, review, and the tab's count join still use it). */
-    val fromTask: Boolean,
-    val index: Int,
-    val title: String,
-    /** "done" | "wip" | "todo" — from Claude's own to-do status. */
-    val status: String,
-    /** The chapter's display window (0 = never started / open-ended). Renderers place a compaction whose
-     *  anchor chapter isn't drawn by TIME against these, never by array position — `chapters` is in plan
-     *  order and the synthetic chapter is appended last though its work usually starts first. */
-    val startTs: Long,
-    val endTs: Long,
-    val edits: Int,
-    val added: Int,
-    val removed: Int,
-    val kept: Int,
-    val pending: Int,
-    val undone: Int,
-    val agent: Boolean,
-    /** Raw store edit ids DISPLAYED under this chapter, in capture order — the model the nav-bar CHAPTER
-     *  axis walks (mirrors core.chapterEditIds exactly). Empty for a planned zero-edit / duplicate row,
-     *  and for a workflow-slice chapter (core zeroes it there — the axis only reads the session's own). */
-    val editIds: List<Int>,
-)
-
 data class ChangeMapFile(
     val rel: String,
     val module: String,
@@ -59,7 +24,6 @@ data class ChangeMapFile(
     /** Most-recent edit id — what a double-click opens. */
     val maxId: Int,
     val classes: List<String>,
-    val chapters: List<String>,
     val agent: Boolean,
     val risk: String?,
     val reason: String?,
@@ -75,7 +39,6 @@ data class ChangeMapModule(
     val undone: Int,
     val status: String,
     val files: Int,
-    val chapters: List<String>,
 )
 
 data class ChangeMapSummary(
@@ -87,7 +50,7 @@ data class ChangeMapSummary(
     val pending: Int,
     val kept: Int,
     val undone: Int,
-    /** ±lines across the slice (headline counts; chapters are total, so no residual math needs these). */
+    /** ±lines across the slice. */
     val added: Int,
     val removed: Int,
     val errors: Int,
@@ -99,11 +62,9 @@ data class ChangeMapSummary(
 )
 
 /**
- * One context compaction, placed in the chapter whose window CONTAINS it (core.CompactionMarker).
- * [label] is core's one-line summary ("auto · 1M→14k · 986k dropped · 2m 5s") — rendered VERBATIM, never
- * re-derived, so both editors word a compaction identically. [afterChapterId] is null when the session
- * had no chapter windows at all; a renderer whose anchor chapter isn't drawn clamps the marker rather
- * than dropping it.
+ * One context compaction (core.CompactionMarker), positioned by [ts]. [label] is core's one-line summary
+ * ("auto · 1M→14k · 986k dropped · 2m 5s") — rendered VERBATIM, never re-derived, so both editors word a
+ * compaction identically.
  */
 data class CompactBoundary(
     val ts: Long,
@@ -113,11 +74,10 @@ data class CompactBoundary(
     val cumulativeDropped: Long,
     val durationMs: Long,
     val label: String,
-    val afterChapterId: String?,
 )
 
-/** A stable-id task (0.8.0) — content-hash identity spanning strict in-progress intervals. The Overview
- *  ribbon is built from these, JOINED to [TaskRoll] by [taskId] (NOT keyed off chapters). */
+/** A stable-id task (0.8.0) — content-hash identity spanning the STRICT in-progress intervals of one
+ *  to-do. The Tasks tab is built from these, JOINED to [TaskRoll] by [taskId]. */
 data class ChangeMapTask(
     val taskId: String,
     val content: String,
@@ -178,20 +138,17 @@ data class ChangeMapWorkflow(
     val rollup: WorkflowRollup,
     val files: List<ChangeMapFile>,
     val taskIds: List<String>,
-    /** The run's edits regrouped by session chapter (counts scoped to the run) — rendered as the
-     *  workflow slice's ribbon as-is; total chapters made the residual "unassigned" math obsolete. */
-    val chapters: List<ChangeMapChapter>,
 )
 
 /**
- * One REQUEST as a change-map slice (0.8.7) — everything one of the user's asks produced, aggregated in
+ * One PROMPT as a change-map slice (0.8.7) — everything one of the user's asks produced, aggregated in
  * core exactly the way a workflow's slice is, so the same ribbon/strip/ledger renders it unchanged.
  *
- * Picking an ask in the Requests window scopes the whole Overview to its slice: [files]/[modules]/
- * [chapters] drive the change map, and the id sets filter the left nav. Attribution is by START time —
+ * Picking an ask in the Prompts window scopes the whole Overview to its slice: [files]/[modules]
+ * drive the change map, and the id sets filter the left nav. Attribution is by START time —
  * a shell launched by one ask stays that ask's even when it exits during a later one.
  */
-data class ChangeMapRequest(
+data class ChangeMapPrompt(
     val id: String,
     val index: Int,
     /** The ask in FULL — renderers wrap it over as many lines as it needs; nothing here is clipped. */
@@ -203,10 +160,7 @@ data class ChangeMapRequest(
     val rollup: WorkflowRollup,
     val files: List<ChangeMapFile>,
     val modules: List<ChangeMapModule>,
-    val chapters: List<ChangeMapChapter>,
     val editIds: List<Int>,
-    /** Chapters this ask worked in — its edits' chapters plus any to-do in flight while it was answered. */
-    val chapterIds: List<String>,
     val agentIds: List<String>,
     val workflowIds: List<String>,
     val processIds: List<String>,
@@ -237,7 +191,6 @@ data class ChangeMapAgent(
     val gitBranch: String,
     val phase: String,
     val summary: ChangeMapSummary?,
-    val chapters: List<ChangeMapChapter>,
     val files: List<ChangeMapFile>,
     val modules: List<ChangeMapModule>,
     val tasks: List<ChangeMapTask>,
@@ -249,7 +202,6 @@ data class ChangeMapAgent(
 
 data class ChangeMap(
     val summary: ChangeMapSummary?,
-    val chapters: List<ChangeMapChapter>,
     val files: List<ChangeMapFile>,
     val modules: List<ChangeMapModule>,
     // 0.8.0 additions — the three-level attribution + per-agent tabs.
@@ -264,12 +216,12 @@ data class ChangeMap(
     val rollupByWorkflow: List<WorkflowRoll>,
     /** One entry per workflow that produced attributed edits — the Overview's per-workflow tabs. */
     val workflows: List<ChangeMapWorkflow>,
-    /** Context compactions during this session, oldest first — the ribbon draws one marker per boundary,
-     *  positioned by [CompactBoundary.afterChapterId]. Empty for an older CLI without the field. */
+    /** Context compactions during this session, oldest first — the Actions feed and the Stats panel
+     *  render them by time. Empty for an older CLI without the field. */
     val compactions: List<CompactBoundary>,
-    /** The session partitioned by what the USER asked for (0.8.7) — the scope the Requests window sets.
+    /** The session partitioned by what the USER asked for (0.8.7) — the scope the Prompts window sets.
      *  Empty for an older CLI, and empty on every SIBLING's map: only the active session builds them. */
-    val requests: List<ChangeMapRequest>,
+    val prompts: List<ChangeMapPrompt>,
 )
 
 object ChangeMapParser {
@@ -277,7 +229,6 @@ object ChangeMapParser {
         val o = JsonParser.parseString(json).asJsonObject
         ChangeMap(
             o.getAsJsonObject("summary")?.let { summary(it) },
-            arr(o, "chapters").map { chapter(it.asJsonObject) },
             arr(o, "files").map { file(it.asJsonObject) },
             arr(o, "modules").map { module(it.asJsonObject) },
             arr(o, "tasks").map { task(it.asJsonObject) },
@@ -289,7 +240,7 @@ object ChangeMapParser {
             arr(o, "rollupByWorkflow").map { workflowRoll(it.asJsonObject) },
             arr(o, "workflows").map { workflow(it.asJsonObject) },
             arr(o, "compactions").map { compaction(it.asJsonObject) },
-            arr(o, "requests").map { request(it.asJsonObject) },
+            arr(o, "prompts").map { prompt(it.asJsonObject) },
         )
     } catch (_: Exception) {
         null
@@ -321,32 +272,18 @@ object ChangeMapParser {
     private fun ints(o: JsonObject, k: String): List<Int> =
         (o.getAsJsonArray(k) ?: com.google.gson.JsonArray()).mapNotNull { it.takeIf { e -> !e.isJsonNull }?.asInt }
 
-    private fun chapter(o: JsonObject) = ChangeMapChapter(
-        str(o, "id") ?: "",
-        // Version-skew tolerance: an older CLI has no `taskId` key — there, chapter.id WAS the strict
-        // taskId, so fall back to it. An explicit JSON null (synthetic/duplicate row) must stay null.
-        if (o.has("taskId")) str(o, "taskId") else str(o, "id"),
-        bool(o, "synthetic"),
-        bool(o, "fromTask"),
-        int(o, "index"), str(o, "title") ?: "", str(o, "status") ?: "todo",
-        long(o, "startTs"), long(o, "endTs"),
-        int(o, "edits"), int(o, "added"), int(o, "removed"),
-        int(o, "kept"), int(o, "pending"), int(o, "undone"), bool(o, "agent"),
-        ints(o, "editIds"),
-    )
-
     private fun file(o: JsonObject) = ChangeMapFile(
         str(o, "rel") ?: "", str(o, "module") ?: "", str(o, "moduleLabel") ?: "", str(o, "file") ?: "",
         int(o, "churn"), int(o, "cnt"), int(o, "kept"), int(o, "pending"), int(o, "undone"),
         str(o, "status") ?: "kept", int(o, "maxId"),
-        strings(o, "classes"), strings(o, "chapters"),
+        strings(o, "classes"),
         bool(o, "agent"), str(o, "risk"), str(o, "reason"),
     )
 
     private fun module(o: JsonObject) = ChangeMapModule(
         str(o, "module") ?: "", str(o, "label") ?: "", int(o, "churn"), int(o, "cnt"),
         int(o, "kept"), int(o, "pending"), int(o, "undone"), str(o, "status") ?: "kept",
-        int(o, "files"), strings(o, "chapters"),
+        int(o, "files"),
     )
 
     private fun long(o: JsonObject, k: String): Long =
@@ -365,7 +302,6 @@ object ChangeMapParser {
         // core builds this line once (compactLabel) so both editors word a compaction identically; an
         // older CLI without it degrades to the bare trigger rather than to a blank row.
         label = str(o, "label") ?: (str(o, "trigger") ?: "compact"),
-        afterChapterId = str(o, "afterChapterId"),
     )
 
     private fun taskRoll(o: JsonObject) = TaskRoll(
@@ -395,13 +331,12 @@ object ChangeMapParser {
             ),
             files = arr(o, "files").map { file(it.asJsonObject) },
             taskIds = strings(o, "taskIds"),
-            chapters = arr(o, "chapters").map { chapter(it.asJsonObject) },
         )
     }
 
-    private fun request(o: JsonObject): ChangeMapRequest {
+    private fun prompt(o: JsonObject): ChangeMapPrompt {
         val r = o.getAsJsonObject("rollup")
-        return ChangeMapRequest(
+        return ChangeMapPrompt(
             id = str(o, "id") ?: "",
             index = int(o, "index"),
             text = str(o, "text") ?: "",
@@ -414,9 +349,7 @@ object ChangeMapParser {
             ),
             files = arr(o, "files").map { file(it.asJsonObject) },
             modules = arr(o, "modules").map { module(it.asJsonObject) },
-            chapters = arr(o, "chapters").map { chapter(it.asJsonObject) },
             editIds = o.getAsJsonArray("editIds")?.mapNotNull { it.takeIf { e -> e.isJsonPrimitive }?.asInt } ?: emptyList(),
-            chapterIds = strings(o, "chapterIds"),
             agentIds = strings(o, "agentIds"),
             workflowIds = strings(o, "workflowIds"),
             processIds = strings(o, "processIds"),
@@ -438,7 +371,6 @@ object ChangeMapParser {
         gitBranch = str(o, "gitBranch") ?: "",
         phase = str(o, "phase") ?: "idle",
         summary = o.getAsJsonObject("summary")?.let { summary(it) },
-        chapters = arr(o, "chapters").map { chapter(it.asJsonObject) },
         files = arr(o, "files").map { file(it.asJsonObject) },
         modules = arr(o, "modules").map { module(it.asJsonObject) },
         tasks = arr(o, "tasks").map { task(it.asJsonObject) },

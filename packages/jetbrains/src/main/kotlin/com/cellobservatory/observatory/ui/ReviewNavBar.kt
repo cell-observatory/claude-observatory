@@ -1,9 +1,8 @@
 package com.cellobservatory.observatory.ui
 
 import com.cellobservatory.observatory.core.ChatRef
-import com.cellobservatory.observatory.model.ChangeMapChapter
 import com.cellobservatory.observatory.model.EditRecord
-import com.cellobservatory.observatory.model.SessionRequest
+import com.cellobservatory.observatory.model.SessionPrompt
 import com.cellobservatory.observatory.model.folderLabelOf
 import com.cellobservatory.observatory.model.relTime
 import com.cellobservatory.observatory.services.ObservatoryService
@@ -43,7 +42,7 @@ internal object NavTint {
     // Used by every surface (nav bars, panel toolbars, context menus, the editor banner, the floating
     // lens) so the same action always looks the same. Three scope tiers, mirroring the VS Code
     // codicons: per-edit Keep ✓/Undo ↩ · scoped (file/folder) Accept ✓✓/Reject ✕ · session-wide
-    // Accept All (commit)/Revert All (history, VS Code $(timeline-view-icon)). Row STATE badges stay
+    // Accept All (commit)/Reject All (history, VS Code $(timeline-view-icon)). Row STATE badges stay
     // neutral except kept-green (a reverted STATE is not a destructive ACTION — it never wears red).
     val KEEP: Icon = tint(AllIcons.Actions.Checked, GREEN)
     val ACCEPT_FILE: Icon = tint(Icons.CheckAll, GREEN)
@@ -80,11 +79,6 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
 
     // The pending edit the Diff axis is parked on within the open file (mirrors the VS Code navEditId).
     @Volatile private var navEditId: Int? = null
-
-    /** The current session's change-map chapters (with editIds) — the model the Chapter axis walks. The
-     *  Overview title bar feeds it `map.chapters`; the status bar leaves it empty (it carries no Chapter
-     *  axis, VS Code parity), so a null map degrades to an axis that simply hides. */
-    var chaptersProvider: () -> List<ChangeMapChapter> = { emptyList() }
 
     /** The Overview nav bar shows the RICH Diff/File counters (the current edit's relative time · the open
      *  file's name + pending-edit count); the STATUS BAR stays terse ("Diff n/m" · "File n/m"), matching
@@ -274,8 +268,8 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
             override fun actionPerformed(e: AnActionEvent) = run()
         }
 
-    /** A text toolbar button (the Diff/File/Folder/Chapter counter); hidden when [dynamicText] returns
-     *  null. [dynamicTip], when given, becomes the button's hover tooltip (the Chapter axis shows its
+    /** A text toolbar button (the Diff/File/Folder/Prompt counter); hidden when [dynamicText] returns
+     *  null. [dynamicTip], when given, becomes the button's hover tooltip (the Prompt axis shows its
      *  title there rather than inline — VS Code parity). */
     private fun textAct(dynamicText: () -> String?, dynamicTip: (() -> String?)? = null, run: () -> Unit): AnAction =
         object : AnAction(), DumbAware {
@@ -358,177 +352,78 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
         onNavChange()
     }
 
-    // ============================ Chapter axis (Overview only) ============================
-    // Steps BETWEEN the session's chapters (subtasks). The counter carries NO title inline — the title is
-    // the counter's hover tooltip (the change-map bottom summary names the chapter). Mirrors VS Code's
-    // pendingChapters / navChapter, driven by the change-map chapters' editIds (fed via chaptersProvider).
-
-    /** Chapters with pending edits, in plan order (the synthetic session chapter sorts last by its index). */
-    private fun pendingChapters(): List<ChangeMapChapter> {
-        val pending = service.log().filter { it.pending }.map { it.id }.toHashSet()
-        if (pending.isEmpty()) return emptyList()
-        return chaptersProvider().filter { ch -> ch.editIds.any { it in pending } }.sortedBy { it.index }
-    }
-    private fun hasPendingChapters(): Boolean = pendingChapters().isNotEmpty()
-
-    /** The pending chapter the Diff anchor (navEditId) falls in, or null (mirrors NAVPOS.chapter). */
-    private fun currentChapter(): ChangeMapChapter? {
-        val anchor = navEditId ?: return null
-        return pendingChapters().firstOrNull { anchor in it.editIds }
-    }
-    private fun hasCurrentChapter(): Boolean = currentChapter() != null
-    private fun canChatCurrentChapter(): Boolean = currentChapter()?.taskId != null
-
-    /** The current chapter's id — the Overview bottom summary's chapter-axis scope (mirrors NAVPOS.chapter.id). */
-    fun currentChapterId(): String? = currentChapter()?.id
-
-    private fun chapterLabel(ch: ChangeMapChapter): String = ch.title.ifBlank { "chapter ${ch.index + 1}" }
-
-    fun chapterAxis(): List<AnAction> = listOf(
-        iconAct("Previous chapter (subtask)", NavTint.tint(AllIcons.Actions.Back, NavTint.BLUE), ::hasPendingChapters) { navChapter(-1) },
-        textAct(::chapterCounterText, ::chapterCounterTip) { currentChapter()?.let { revealChapter(it.id) } },
-        iconAct("Next chapter (subtask)", NavTint.tint(AllIcons.Actions.Forward, NavTint.BLUE), ::hasPendingChapters) { navChapter(1) },
-    )
-
-    fun reviewChapterAction(showText: Boolean = true): AnAction =
-        labelAct(showText, "Review", "Review this chapter — jump to its first pending edit", NavTint.tint(AllIcons.Actions.Preview, NavTint.BLUE), ::hasCurrentChapter) {
-            currentChapter()?.let { revealChapter(it.id) }
-        }
-
-    fun acceptChapterAction(showText: Boolean = true): AnAction =
-        labelAct(showText, "Accept Chapter", "Accept every pending edit in this chapter", NavTint.ACCEPT_ALL, ::hasCurrentChapter) {
-            currentChapter()?.let { ch -> withSession { s -> ReviewOps.keepTask(project, s, ch.id, chapterLabel(ch)) } }
-        }
-
-    fun rejectChapterAction(showText: Boolean = true): AnAction =
-        labelAct(showText, "Reject Chapter", "Reject (revert) every pending edit in this chapter", NavTint.REVERT_ALL, ::hasCurrentChapter) {
-            currentChapter()?.let { ch -> withSession { s -> ReviewOps.undoTask(project, s, ch.id, chapterLabel(ch)) } }
-        }
-
-    fun chatChapterAction(showText: Boolean = true): AnAction =
-        labelAct(showText, "Chat", "Chat about this chapter — copies its context, opens your Claude", NavTint.CHAT, ::canChatCurrentChapter) {
-            currentChapter()?.let { ch -> withSession { s -> ReviewOps.chatContext(project, s, ChatRef.Task(ch.id), "chapter “${chapterLabel(ch)}”") } }
-        }
-
-    /** Chapter-axis counter ("Chapter i/n · N folders · N files · N edits"), or null when no chapter is
-     *  pending. NO title inline — see [chapterCounterTip]. */
-    private fun chapterCounterText(): String? {
-        val chaps = pendingChapters()
-        if (chaps.isEmpty()) return null
-        val cur = currentChapter()
-        val idx = if (cur != null) chaps.indexOf(cur) else -1
-        val base = "Chapter ${if (idx >= 0) idx + 1 else "–"}/${chaps.size}"
-        if (cur == null) return base
-        val log = service.log()
-        val files = cur.editIds.mapNotNull { id -> log.find { it.id == id }?.file }
-        val nFiles = files.distinct().size
-        val nFolders = files.map { folderOf(it) }.distinct().size
-        val bits = mutableListOf<String>()
-        if (nFolders > 0) bits.add("$nFolders folder${if (nFolders == 1) "" else "s"}")
-        if (nFiles > 0) bits.add("$nFiles file${if (nFiles == 1) "" else "s"}")
-        if (cur.editIds.isNotEmpty()) bits.add("${cur.editIds.size} edit${if (cur.editIds.size == 1) "" else "s"}")
-        return "$base" + (if (bits.isNotEmpty()) " · ${bits.joinToString(" · ")}" else "")
-    }
-    private fun chapterCounterTip(): String? = currentChapter()?.let { chapterLabel(it) } ?: "the current edit’s chapter"
-
-    private fun navChapter(dir: Int) {
-        val chaps = pendingChapters()
-        if (chaps.isEmpty()) return
-        val anchor = navEditId
-        val curIdx = if (anchor != null) chaps.indexOfFirst { anchor in it.editIds } else -1
-        val start = if (curIdx < 0) (if (dir == 1) -1 else 0) else curIdx
-        val target = chaps[(start + dir + chaps.size) % chaps.size]
-        val log = service.log()
-        val firstId = target.editIds.firstOrNull { id -> log.any { it.id == id && it.pending } } ?: return
-        val rec = log.find { it.id == firstId } ?: return
-        navEditId = firstId
-        session()?.let { Navigate.openFileAtEdit(project, it, rec) }
-        onNavChange()
-    }
-
-    /** Jump the Chapter axis straight to a chapter (a ribbon-chip click) — opens its first pending edit. */
-    fun revealChapter(chapterId: String) {
-        val ch = chaptersProvider().firstOrNull { it.id == chapterId } ?: return
-        val log = service.log()
-        val firstId = ch.editIds.firstOrNull { id -> log.any { it.id == id && it.pending } } ?: return
-        val rec = log.find { it.id == firstId } ?: return
-        navEditId = firstId
-        session()?.let { Navigate.openFileAtEdit(project, it, rec) }
-        onNavChange()
-    }
-
-    // ============================ Request axis (Overview only) ============================
+    // ============================ Prompt axis (Overview only) ============================
     // The LAST axis on the bar, and the only one that walks the session the way the PERSON experienced it:
     // one step per thing they asked for. Everything else groups work the way the agent saw it (its own
-    // to-dos, its files, its subagents). Scope = the request's editIds, exactly as core attributed them —
+    // to-dos, its files, its subagents). Scope = the prompt's editIds, exactly as core attributed them —
     // by what STARTED the work, never by what happened to be running when it finished.
 
-    /** The session's requests (with editIds) — the model this axis walks. The Overview feeds it
-     *  `requests --json`; the status bar leaves it empty (it carries no Request axis, as with Chapter). */
-    var requestsProvider: () -> List<SessionRequest> = { emptyList() }
+    /** The session's prompts (with editIds) — the model this axis walks. The Overview feeds it
+     *  `prompts --json`; the status bar leaves it empty — it carries no Prompt axis. */
+    var promptsProvider: () -> List<SessionPrompt> = { emptyList() }
 
-    /** Requests with something still pending, in the order they were asked. */
-    private fun pendingRequests(): List<SessionRequest> {
+    /** Prompts with something still pending, in the order they were asked. */
+    private fun pendingPrompts(): List<SessionPrompt> {
         val pending = service.log().filter { it.pending }.map { it.id }.toHashSet()
         if (pending.isEmpty()) return emptyList()
-        return requestsProvider().filter { r -> r.editIds.any { it in pending } }.sortedBy { it.index }
+        return promptsProvider().filter { r -> r.editIds.any { it in pending } }.sortedBy { it.index }
     }
-    private fun hasPendingRequests(): Boolean = pendingRequests().isNotEmpty()
+    private fun hasPendingPrompts(): Boolean = pendingPrompts().isNotEmpty()
 
-    /** The pending request the Diff anchor (navEditId) falls in, or null. */
-    private fun currentRequest(): SessionRequest? {
+    /** The pending prompt the Diff anchor (navEditId) falls in, or null. */
+    private fun currentPrompt(): SessionPrompt? {
         val anchor = navEditId ?: return null
-        return pendingRequests().firstOrNull { anchor in it.editIds }
+        return pendingPrompts().firstOrNull { anchor in it.editIds }
     }
-    private fun hasCurrentRequest(): Boolean = currentRequest() != null
+    private fun hasCurrentPrompt(): Boolean = currentPrompt() != null
 
-    /** The current request's id — the Overview bottom summary's request-axis scope. */
-    fun currentRequestId(): String? = currentRequest()?.id
+    /** The current prompt's id — the Overview bottom summary's prompt-axis scope. */
+    fun currentPromptId(): String? = currentPrompt()?.id
 
-    /** How a request is named in a prompt / notification: its turn number plus the ask itself, so a
+    /** How a prompt is named in a prompt / notification: its turn number plus the ask itself, so a
      *  destructive confirmation says which ask it is about and not just a number. */
-    private fun requestLabel(r: SessionRequest): String =
+    private fun promptLabel(r: SessionPrompt): String =
         "#${r.index}" + r.title.takeIf { it.isNotBlank() }?.let { " “${clipAsk(it)}”" }.orEmpty()
 
     private fun clipAsk(s: String): String = if (s.length <= 48) s else s.take(47) + "…"
 
-    /** The edits this request produced that are still in the store (its review scope). */
-    private fun editsOfRequest(r: SessionRequest): List<EditRecord> {
+    /** The edits this prompt produced that are still in the store (its review scope). */
+    private fun editsOfPrompt(r: SessionPrompt): List<EditRecord> {
         val ids = r.editIds.toHashSet()
         return service.log().filter { it.id in ids }.sortedBy { it.id }
     }
 
-    fun requestAxis(): List<AnAction> = listOf(
-        iconAct("Previous request (what you asked for)", NavTint.tint(AllIcons.Actions.Back, NavTint.BLUE), ::hasPendingRequests) { navRequest(-1) },
-        textAct(::requestCounterText, ::requestCounterTip) { currentRequest()?.let { revealRequest(it.id) } },
-        iconAct("Next request (what you asked for)", NavTint.tint(AllIcons.Actions.Forward, NavTint.BLUE), ::hasPendingRequests) { navRequest(1) },
+    fun promptAxis(): List<AnAction> = listOf(
+        iconAct("Previous prompt (what you asked for)", NavTint.tint(AllIcons.Actions.Back, NavTint.BLUE), ::hasPendingPrompts) { navPrompt(-1) },
+        textAct(::promptCounterText, ::promptCounterTip) { currentPrompt()?.let { revealPrompt(it.id) } },
+        iconAct("Next prompt (what you asked for)", NavTint.tint(AllIcons.Actions.Forward, NavTint.BLUE), ::hasPendingPrompts) { navPrompt(1) },
     )
 
-    fun reviewRequestAction(showText: Boolean = true): AnAction =
-        labelAct(showText, "Review", "Review this request — jump to the first pending edit it produced", NavTint.tint(AllIcons.Actions.Preview, NavTint.BLUE), ::hasCurrentRequest) {
-            currentRequest()?.let { revealRequest(it.id) }
+    fun reviewPromptAction(showText: Boolean = true): AnAction =
+        labelAct(showText, "Review", "Review this prompt — jump to the first pending edit it produced", NavTint.tint(AllIcons.Actions.Preview, NavTint.BLUE), ::hasCurrentPrompt) {
+            currentPrompt()?.let { revealPrompt(it.id) }
         }
 
-    fun acceptRequestAction(showText: Boolean = true): AnAction =
-        labelAct(showText, "Accept Request", "Accept every pending edit this request produced", NavTint.ACCEPT_ALL, ::hasCurrentRequest) {
-            currentRequest()?.let { r -> withSession { s -> ReviewOps.keepAll(project, s, editsOfRequest(r), "request ${requestLabel(r)}") } }
+    fun acceptPromptAction(showText: Boolean = true): AnAction =
+        labelAct(showText, "Accept Prompt", "Accept every pending edit this prompt produced", NavTint.ACCEPT_ALL, ::hasCurrentPrompt) {
+            currentPrompt()?.let { r -> withSession { s -> ReviewOps.keepAll(project, s, editsOfPrompt(r), "prompt ${promptLabel(r)}") } }
         }
 
-    fun revertRequestAction(showText: Boolean = true): AnAction =
-        labelAct(showText, "Revert Request", "Revert every pending edit this request produced", NavTint.REVERT_ALL, ::hasCurrentRequest) {
-            currentRequest()?.let { r ->
-                withSession { s -> ReviewOps.undoIds(project, s, editsOfRequest(r), "request #${r.index}", "request ${requestLabel(r)}") }
+    fun revertPromptAction(showText: Boolean = true): AnAction =
+        labelAct(showText, "Reject Prompt", "Reject (revert) every pending edit this prompt produced", NavTint.REVERT_ALL, ::hasCurrentPrompt) {
+            currentPrompt()?.let { r ->
+                withSession { s -> ReviewOps.undoIds(project, s, editsOfPrompt(r), "prompt #${r.index}", "prompt ${promptLabel(r)}") }
             }
         }
 
-    /** Request-axis counter ("Request i/n · N files · N edits"), or null when no request has pending work.
-     *  The ask itself is the hover tooltip — a prompt is far too long to sit inline (Chapter parity). */
-    private fun requestCounterText(): String? {
-        val reqs = pendingRequests()
+    /** Prompt-axis counter ("Prompt i/n · N files · N edits"), or null when no prompt has pending work.
+     *  The ask itself is the hover tooltip — a prompt is far too long to sit inline. */
+    private fun promptCounterText(): String? {
+        val reqs = pendingPrompts()
         if (reqs.isEmpty()) return null
-        val cur = currentRequest()
+        val cur = currentPrompt()
         val idx = if (cur != null) reqs.indexOf(cur) else -1
-        val base = "Request ${if (idx >= 0) idx + 1 else "–"}/${reqs.size}"
+        val base = "Prompt ${if (idx >= 0) idx + 1 else "–"}/${reqs.size}"
         if (cur == null) return base
         val log = service.log()
         val files = cur.editIds.mapNotNull { id -> log.find { it.id == id }?.file }
@@ -539,25 +434,25 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
         return base + (if (bits.isNotEmpty()) " · ${bits.joinToString(" · ")}" else "")
     }
 
-    private fun requestCounterTip(): String? =
-        currentRequest()?.let { "#${it.index}: ${clipAsk(it.text.ifBlank { it.title })}" }
-            ?: "the request the current edit came from"
+    private fun promptCounterTip(): String? =
+        currentPrompt()?.let { "#${it.index}: ${clipAsk(it.text.ifBlank { it.title })}" }
+            ?: "the prompt the current edit came from"
 
-    private fun navRequest(dir: Int) {
-        val reqs = pendingRequests()
+    private fun navPrompt(dir: Int) {
+        val reqs = pendingPrompts()
         if (reqs.isEmpty()) return
         val anchor = navEditId
         val curIdx = if (anchor != null) reqs.indexOfFirst { anchor in it.editIds } else -1
         val start = if (curIdx < 0) (if (dir == 1) -1 else 0) else curIdx
         val target = reqs[(start + dir + reqs.size) % reqs.size]
-        revealRequest(target.id)
+        revealPrompt(target.id)
     }
 
-    /** Jump the Request axis straight to one request (a Requests-tab row click) — opens its first pending
-     *  edit. A request with nothing pending is left alone: there is nothing to review, and moving the
+    /** Jump the Prompt axis straight to one prompt (a Prompts-tab row click) — opens its first pending
+     *  edit. A prompt with nothing pending is left alone: there is nothing to review, and moving the
      *  cursor to a resolved edit would silently change what every other axis is scoped to. */
-    fun revealRequest(requestId: String) {
-        val r = requestsProvider().firstOrNull { it.id == requestId } ?: return
+    fun revealPrompt(promptId: String) {
+        val r = promptsProvider().firstOrNull { it.id == promptId } ?: return
         val log = service.log()
         val firstId = r.editIds.firstOrNull { id -> log.any { it.id == id && it.pending } } ?: return
         val rec = log.find { it.id == firstId } ?: return

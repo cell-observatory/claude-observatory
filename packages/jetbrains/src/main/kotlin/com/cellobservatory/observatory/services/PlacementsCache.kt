@@ -14,6 +14,13 @@ import java.util.concurrent.CopyOnWriteArrayList
 
 private const val MAX_ENTRIES = 300
 
+/** How long the buffer must sit still before a locate is spawned for it. Typing changes the document's
+ *  modification stamp on EVERY keystroke, and each new stamp is a cache miss — without this quiet period
+ *  a burst of typing spawns one `locate` subprocess per character, all but the last of them describing a
+ *  buffer that no longer exists. The overlay keeps its previous lenses while the wait runs (its markers
+ *  track the edits), so the delay costs nothing on screen. */
+private const val QUIET_MS = 350L
+
 /**
  * Where each pending edit currently sits in a file — the JetBrains analog of the VS Code
  * `cachedPlacements` (extension.ts:617). The mapping itself is the CLI's `locate` (positional
@@ -31,6 +38,9 @@ class PlacementsCache(private val project: Project) : Disposable {
     private val insertionOrder = ConcurrentLinkedQueue<String>()
     private val inflight = ConcurrentHashMap.newKeySet<String>()
     private val listeners = CopyOnWriteArrayList<(String) -> Unit>()
+    /** file → the newest key asked for. A scheduled locate that no longer matches has been superseded by
+     *  a later keystroke and is dropped rather than run. */
+    private val newest = ConcurrentHashMap<String, String>()
 
     /** Called on the EDT with the file path whenever fresh placements arrive. */
     fun addUpdateListener(l: (String) -> Unit) = listeners.add(l)
@@ -46,8 +56,15 @@ class PlacementsCache(private val project: Project) : Disposable {
         if (service.log().none { it.pending && it.file == file }) return emptyList()
         val key = "$file|$textKey|$session:${StoreReader.logKey(session)}"
         cache[key]?.let { return it }
+        newest[file] = key
         if (inflight.add(key)) {
-            AppExecutorUtil.getAppExecutorService().submit {
+            AppExecutorUtil.getAppScheduledExecutorService().schedule({
+                // Superseded while we waited: the buffer moved on, and the answer for this text would be
+                // discarded the moment it landed. Spawning for it would be pure cost.
+                if (newest[file] != key || project.isDisposed) {
+                    inflight.remove(key)
+                    return@schedule
+                }
                 try {
                     val placements = ObservatoryCli.locate(session, file, text, project.basePath)
                     put(key, placements)
@@ -57,7 +74,7 @@ class PlacementsCache(private val project: Project) : Disposable {
                 ApplicationManager.getApplication().invokeLater {
                     if (!project.isDisposed) listeners.forEach { it(file) }
                 }
-            }
+            }, QUIET_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
         }
         return null
     }
@@ -74,6 +91,7 @@ class PlacementsCache(private val project: Project) : Disposable {
     override fun dispose() {
         cache.clear()
         insertionOrder.clear()
+        newest.clear()
         listeners.clear()
     }
 

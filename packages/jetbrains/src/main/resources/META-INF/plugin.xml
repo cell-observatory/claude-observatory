@@ -64,20 +64,6 @@
         <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt U"/>
         <keyboard-shortcut keymap="Mac OS X 10.5+" first-keystroke="meta alt U" replace-all="true"/>
       </action>
-      <action id="ClaudeObservatory.ReviewPrevInChapter"
-              class="com.cellobservatory.observatory.actions.ReviewPrevInChapterAction"
-              text="Claude Observatory: Previous Edit in Chapter"
-              description="Step to the previous pending edit in the current edit's chapter (subtask)">
-        <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt COMMA"/>
-        <keyboard-shortcut keymap="Mac OS X 10.5+" first-keystroke="meta alt COMMA" replace-all="true"/>
-      </action>
-      <action id="ClaudeObservatory.ReviewNextInChapter"
-              class="com.cellobservatory.observatory.actions.ReviewNextInChapterAction"
-              text="Claude Observatory: Next Edit in Chapter"
-              description="Step to the next pending edit in the current edit's chapter (subtask)">
-        <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt PERIOD"/>
-        <keyboard-shortcut keymap="Mac OS X 10.5+" first-keystroke="meta alt PERIOD" replace-all="true"/>
-      </action>
       <action id="ClaudeObservatory.KeepOpenFile"
               class="com.cellobservatory.observatory.actions.KeepOpenFileAction"
               text="Claude Observatory: Accept All Edits in File"
@@ -87,7 +73,7 @@
       </action>
       <action id="ClaudeObservatory.UndoOpenFile"
               class="com.cellobservatory.observatory.actions.UndoOpenFileAction"
-              text="Claude Observatory: Revert All Edits in File"
+              text="Claude Observatory: Reject All Edits in File"
               description="Revert every pending Claude edit in the active file">
         <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt R"/>
         <keyboard-shortcut keymap="Mac OS X 10.5+" first-keystroke="meta alt R" replace-all="true"/>
@@ -134,7 +120,7 @@
               description="Accept every pending Claude edit in this session"/>
       <action id="ClaudeObservatory.RevertAll"
               class="com.cellobservatory.observatory.actions.RevertAllEditsAction"
-              text="Claude Observatory: Revert All Edits"
+              text="Claude Observatory: Reject All Edits"
               description="Revert every pending Claude edit in this session"/>
       <action id="ClaudeObservatory.RedoAll"
               class="com.cellobservatory.observatory.actions.RedoAllEditsAction"
@@ -146,6 +132,7 @@
               description="Clear the resolved (kept/undone) edits from the log; pending edits are kept"/>
       <action id="ClaudeObservatory.Spotlight"
               class="com.cellobservatory.observatory.actions.SpotlightAction"
+              icon="AllIcons.Actions.IntentionBulb"
               text="Claude Observatory: Toggle Spotlight"
               description="Dim the unedited lines to foreground Claude's changes"/>
       <action id="ClaudeObservatory.SearchEdits"
