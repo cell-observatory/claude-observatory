@@ -5,6 +5,151 @@ All notable changes to Claude Observatory are recorded here, following
 Per-tag release artifacts and auto-generated notes are on the
 [Releases page](https://github.com/cell-observatory/claude-observatory/releases).
 
+## [0.8.8] — 2026-07-25
+
+A subtraction and a speed-up. The **chapters** display layer is gone: it partitioned a session's edits
+across Claude's plan, filling the gaps with a synthesized session chapter so every edit had a row, and in
+practice nobody reviewed by it. What organizes review now is what you asked for — **prompts**, renamed
+from requests and used as the vocabulary everywhere — and what Claude planned, which survives as
+**tasks** under strict attribution and nothing else. A new **Sessions** tab lists this workspace's
+sessions, the session picker no longer parses a single edit log to open, and a session with thousands of
+edits renders in a fraction of the time it used to.
+
+### Added
+
+- **Sessions tab.** The Overview's left nav gains a fifth tab in both editors: every Claude Code session
+  recorded for this workspace, led by Claude's own title for it and ordered by when its *conversation*
+  was last active. The live session is marked. Selecting a row is a change of subject rather than of
+  view — it pins the session every window reviews, the same choice Switch Session makes.
+- **`sessions --json` reports the workspace listing.** `{ active, sessions: [{ id, title, lastActiveMs,
+  current }] }`, built from directory stats plus a bounded title scan cached in a per-session sidecar.
+  Each row also carries what that session did — edits captured, files touched, how many still pending —
+  from a per-session sidecar keyed to the store log, so the listing re-reads only logs that changed.
+- **`clean --resolved --ids <a,b,c>`.** Clears the resolved edits of an explicit id set — the scope one
+  prompt names, which no `--under <path>` can express, since a single prompt edits whatever it edits.
+- **Prompt-scoped bulk review in JetBrains.** With a prompt picked in the Prompts window, Accept All,
+  Reject All, and Clear Resolved retarget to that prompt, as they already did in VS Code.
+- **The Folders strip expands.** The change map's strip leads with the eleven folders that moved most
+  and folds the rest behind a **+K more** tile. That tile is now a control: it opens the strip to every
+  folder — wrapped onto further rows, capped at five and scrolling, so the file ledger stays in view —
+  and **show fewer** folds it back. Before, the tail was an inert label and the folders behind it could
+  not be reached from the strip at all. Tiles also hold a readable floor width instead of shrinking, so
+  a narrow panel gets more rows rather than slivers.
+- **The Overview's panes resize.** A gutter between the left nav and the change map drags in VS Code
+  (double-click restores the default), and JetBrains remembers where you left its splitter. Both keep a
+  separate position for each layout, because below about 620 px the panel stacks the two panes instead
+  of splitting them side by side — and the nav bar there gives each review axis its own row.
+- **Per-task review in both editors.** The Tasks tab now offers Accept, Reject, and Clear on each row —
+  chips in VS Code, a context menu in JetBrains — over that task's strict span. The CLI verbs existed
+  before; nothing in either editor reached them.
+
+### Changed
+
+- **Requests are now prompts.** The dock window is **Prompts**, the verb is `prompts`, the change-map key
+  is `prompts[]`, and the review axis is **Prompt**. The old `requests` verb is **gone**, not aliased: a
+  script that called it exits non-zero with `unknown command "requests"` instead of quietly printing a
+  payload whose array is now named something else. In VS Code the view identifier changed with the name, so the Prompts window
+  returns to its default dock position once; drag it back and it stays.
+- **Task review is strict, and says so.** `task-keep`, `task-undo`, and `task-clear` act on a task's
+  **strict in-progress span**: the edits captured while that to-do was actually in progress. Nothing is
+  swept in from the gaps around it, and an edit that fits no interval is reported in the explicit
+  unassigned bucket. `task-clear --completed` clears every settled task's resolved edits.
+- **The review axes are four**: Diff · File · Folder · Prompt.
+- **The Overview's change map is two sections** — the Folders strip over the churn-ranked Files ledger,
+  with the summary bar naming the picked prompt or folder filter.
+- **Dropping a session drops its derived copies.** 0.8.8 caches a session's title and its whole change
+  map — which carries its prompt text — on disk. `clean --drop`, `clean --all`, `clean --older-than`,
+  `demo --clean`, `uninstall --purge-store`, and either editor's Drop action remove those with the
+  session, and a routine `clean` never mistakes the caches themselves for reclaimable sessions.
+- **Active only defaults on, and is remembered.** The Overview opens showing work that still awaits
+  review; the toggle survives hiding the panel, reopening the project, and restarting the IDE.
+- **The session picker was rebuilt.** Rows lead with the session's title, order the live session first
+  and the rest by conversation recency, open with the session you are currently reviewing preselected,
+  and match on the raw id as you type. Pending counts are gone from it by design.
+- **Documentation.** The panels reference is merged into the concepts page as an annotated tour of each
+  surface (`panels.html` redirects), the feature reference is ordered by what a reader reaches for first
+  and gains Prompts and Sessions sections, and the landing page opens with an abstract.
+
+### Removed
+
+- **The chapters display layer, in full**: the ribbon, the Chapter review axis, the synthesized session
+  chapter, the `chapter --of-edit` query, the `chapters[]` / `edits[].chapter` / `chapterIds` /
+  `afterChapterId` JSON keys, and the editor commands and keybindings that drove them — VS Code's
+  `claudeObservatory.navChapterPrev` / `navChapterNext` (with their <kbd>ctrl/⌥⌘ ,</kbd> / <kbd>.</kbd>
+  bindings, now free) and `claudeObservatory.clearCompletedChapters`, and the JetBrains
+  `ClaudeObservatory.ReviewPrevInChapter` / `ReviewNextInChapter` actions on the same chord.
+
+  | 0.8.7 | 0.8.8 |
+  | --- | --- |
+  | `task-keep <id>` over the chapter's **displayed** edits | `task-keep <taskId>` over the task's **strict** in-progress span |
+  | `task-undo <id>` over the chapter's displayed edits | `task-undo <taskId>` over that same strict span |
+  | `task-clear <id>` (`--completed` = settled chapters) | `task-clear <taskId>` (`--completed` = settled tasks) |
+  | `chapter --of-edit <n>` | `changemap --json` → `tasks[]` + `rollupByTask` |
+  | `changemap --json` → `chapters[]`, `edits[].chapter`, `chapterIds`, `afterChapterId` | `tasks[]`, `rollupByTask`, `unassigned`, `prompts[]` |
+  | `multitask --json` → `tasks[].chapterId` | `tasks[].taskId` (the strict 12-hex task id) |
+  | `requests` (verb, window, `requests[]`) | `prompts`, `prompts[]` — the old verb is removed |
+  | `sessions --json` → `{active, sessions:[{id,title,edits,pending,lastMs}]}` (whole store) | `{active, sessions:[{id,title,lastActiveMs,current}]}` (this workspace) |
+  | VS Code command `claudeObservatory.showRequests` | `claudeObservatory.showPrompts` |
+  | VS Code view id `claudeObservatory.requests` | `claudeObservatory.prompts` |
+
+  The same three task verbs kept their names and changed their meaning: they used to act on the edits a
+  chapter row *displayed* (a total partition, so every edit was in one), and now act on a task's strict
+  in-progress span. On a session whose plan covered the work, the sets are identical; where they differ,
+  the edits that fall outside every in-progress window are reported unassigned instead of being swept in.
+
+### Performance
+
+Measured on a synthetic session of 3,000 edits across 150 files (Node v26.4.0, macOS, warm meaning a
+second call with the store unchanged), before and after this release:
+
+| Operation | 0.8.7 | 0.8.8 |
+| --- | --- | --- |
+| `appendLog` (one capture, including id allocation) | 2.1 ms | 0.3 ms |
+| `readLog` × 100 (warm) | 184.1 ms | 7.2 ms |
+| `buildEditTree` (warm) | 245.6 ms | 7.3 ms |
+| `buildChangeMap` (warm) | 358.0 ms | 148.9 ms |
+| `buildChangeMap` (cold) | 549.5 ms | 353.0 ms |
+| session listing | 1.9 ms | 0.1 ms |
+
+On this project's own store — 37 sessions, 31 of them for this workspace — the listing the picker opens
+with fell from 717 ms to 4 ms, and to 1 ms once each session's title sidecar is warm. The two listings
+are not identical: the old one parsed every session's transcript for a title and every session's log for
+counts, and returned the whole store; the new one stats directories, reads a cached title, and returns
+only this workspace's sessions.
+The capture path is no longer quadratic in a session's size — the next edit id is read from the tail of
+the log rather than by parsing all of it. In the editors, the VS Code status item indexes its records
+instead of scanning them per edit, inline placements are cached per file and no longer recomputed on
+every keystroke, and the store watcher only wakes for this workspace; the JetBrains plugin coalesces its
+refresh fan-out into one repaint, bounds tree expansion at 300 nodes, and waits for a buffer to settle
+before spawning a `locate`.
+
+### Fixed
+
+- **The store's caches were world-readable.** SECURITY.md has always described the store as 0700
+  directories and 0600 files, but the derived caches added in 0.8.5–0.8.7 (`stats-cache.json`,
+  `usage-cursors/`, the sibling-overview cache) were written with default permissions, and on a shared
+  host that is readable by every other account. All of them, and every cache this release adds, now
+  carry the store's own modes.
+- **Accept All was quadratic, and at real scale that is a hang, not a slow path.** Each per-edit status
+  write resolved its record through the folded log, whose memo the write then invalidated — so accepting
+  N edits re-parsed the log N times. On a 26,000-edit session it took **8 minutes**; it now takes **8 ms**
+  (`setStatusMany`: one parse, one lock, one append, and no-ops skipped so a second Accept All writes
+  nothing). Every bulk verb goes through it — Accept All, a file, a folder, a task, a prompt — and the
+  JetBrains plugin, which had been spawning one CLI process per edit, now sends the whole set at once
+  (`keep --ids <a,b,c>`).
+- **Switching sessions was slow in proportion to the session you switched TO.** Three causes, all fixed:
+  `changemap --json` had no on-disk memo at all, so a fresh process rebuilt an unchanged map every tick
+  (4.1 s → 0.78 s); `multitask --json` rebuilt "the active session" unconditionally, which is right for
+  the live conversation and wrong for a pinned one that can never change again (4.8 s → 1.0 s); and every
+  sibling's transcript was re-parsed for its risk tally on every refresh (`listRepoSiblings` 684 ms →
+  37 ms). A warm switch on this project's own store now costs **0.18 s of process time, against roughly
+  8 s before**. Selecting a session also takes effect immediately in the panel, which used to keep
+  showing the previous session's edits under the new session's name until the payload landed.
+- The Tasks tab joins each row to its strict rollup, so a task's ± and edit counts describe the work
+  captured while it was in progress rather than a display grouping's totals.
+- Ordering sessions by conversation recency rather than by store writes: accepting a batch of old edits
+  no longer moves a finished session back to the top of the list.
+
 ## [0.8.7] — 2026-07-23
 
 Follow-up to 0.8.6, and largely a subtraction: the separate capability panel folds into the Risk and

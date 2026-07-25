@@ -2,7 +2,7 @@
   "name": "claude-observatory-vscode",
   "displayName": "Claude Observatory",
   "description": "A running list of every file change Claude Code makes, each with its own Keep / Undo (surgical, git-free).",
-  "version": "0.8.7",
+  "version": "0.8.8",
   "publisher": "cell-observatory",
   "private": true,
   "engines": {
@@ -64,8 +64,8 @@
       ],
       "claudeObservatoryDock": [
         {
-          "id": "claudeObservatory.requests",
-          "name": "Requests",
+          "id": "claudeObservatory.prompts",
+          "name": "Prompts",
           "type": "webview",
           "initialSize": 2
         },
@@ -92,7 +92,7 @@
       {
         "view": "claudeObservatory.edits",
         "when": "claudeObservatory.hooksInstalled && claudeObservatory.priorSessionWithEdits",
-        "contents": "No edits in this session yet — the hooks are working.\n[Switch to previous session](command:claudeObservatory.switchToPreviousSession)\n[Pick a session…](command:claudeObservatory.switchSession)"
+        "contents": "No edits in this session yet \u2014 the hooks are working.\n[Switch to previous session](command:claudeObservatory.switchToPreviousSession)\n[Pick a session\u2026](command:claudeObservatory.switchSession)"
       },
       {
         "view": "claudeObservatory.edits",
@@ -136,8 +136,8 @@
         "icon": "$(refresh)"
       },
       {
-        "command": "claudeObservatory.clearCompletedChapters",
-        "title": "Clear completed chapters",
+        "command": "claudeObservatory.clearCompletedTasks",
+        "title": "Clear completed tasks",
         "category": "Claude Observatory",
         "icon": "$(clear-all)"
       },
@@ -221,13 +221,13 @@
       },
       {
         "command": "claudeObservatory.peekKeep",
-        "title": "Accept this edit",
+        "title": "Keep this edit",
         "category": "Claude Observatory",
         "icon": "$(check)"
       },
       {
         "command": "claudeObservatory.peekUndo",
-        "title": "Revert this edit",
+        "title": "Undo this edit",
         "category": "Claude Observatory",
         "icon": "$(discard)"
       },
@@ -323,7 +323,7 @@
         "command": "claudeObservatory.toggleHeatmap",
         "title": "Toggle spotlight (dim unmodified lines)",
         "category": "Claude Observatory",
-        "icon": "$(color-mode)"
+        "icon": "$(lightbulb)"
       },
       {
         "command": "claudeObservatory.switchSession",
@@ -438,16 +438,6 @@
         "icon": "$(chevron-right)"
       },
       {
-        "command": "claudeObservatory.navChapterPrev",
-        "title": "Previous edit in this chapter",
-        "category": "Claude Observatory"
-      },
-      {
-        "command": "claudeObservatory.navChapterNext",
-        "title": "Next edit in this chapter",
-        "category": "Claude Observatory"
-      },
-      {
         "command": "claudeObservatory.navViewDiff",
         "title": "View current edit diff",
         "category": "Claude Observatory",
@@ -512,8 +502,8 @@
         "icon": "$(cloud-download)"
       },
       {
-        "command": "claudeObservatory.showRequests",
-        "title": "Show Requests window",
+        "command": "claudeObservatory.showPrompts",
+        "title": "Show the Prompts window",
         "category": "Claude Observatory",
         "icon": "$(list-ordered)"
       },
@@ -583,18 +573,6 @@
         "command": "claudeObservatory.diffNextRevision",
         "key": "ctrl+alt+=",
         "mac": "alt+cmd+=",
-        "when": "editorTextFocus"
-      },
-      {
-        "command": "claudeObservatory.navChapterPrev",
-        "key": "ctrl+alt+,",
-        "mac": "alt+cmd+,",
-        "when": "editorTextFocus"
-      },
-      {
-        "command": "claudeObservatory.navChapterNext",
-        "key": "ctrl+alt+.",
-        "mac": "alt+cmd+.",
         "when": "editorTextFocus"
       }
     ],
@@ -737,14 +715,6 @@
           "when": "false"
         },
         {
-          "command": "claudeObservatory.navChapterPrev",
-          "when": "false"
-        },
-        {
-          "command": "claudeObservatory.navChapterNext",
-          "when": "false"
-        },
-        {
           "command": "claudeObservatory.navViewDiff",
           "when": "false"
         },
@@ -883,14 +853,9 @@
           "group": "navigation@10"
         },
         {
-          "command": "claudeObservatory.clearCompletedChapters",
+          "command": "claudeObservatory.clearCompletedTasks",
           "when": "view == claudeObservatory.changemap",
           "group": "navigation@0"
-        },
-        {
-          "command": "claudeObservatory.switchSession",
-          "when": "view == claudeObservatory.changemap",
-          "group": "navigation@1"
         },
         {
           "command": "claudeObservatory.refresh",
@@ -1124,7 +1089,7 @@
         "claudeObservatory.inlineDiffView": {
           "type": "boolean",
           "default": true,
-          "description": "Open a Claude edit's before ⟷ after diff in the unified (inline) view — the red/green single-column look — instead of side-by-side. Best-effort: flips a freshly opened diff via VS Code's built-in inline toggle when your editor defaults to side-by-side."
+          "description": "Open a Claude edit's before \u27f7 after diff in the unified (inline) view \u2014 the red/green single-column look \u2014 instead of side-by-side. Best-effort: flips a freshly opened diff via VS Code's built-in inline toggle when your editor defaults to side-by-side."
         },
         "claudeObservatory.claudeBin": {
           "type": "string",
@@ -1146,7 +1111,7 @@
     "package": "vsce package --no-dependencies -o claude-observatory.vsix"
   },
   "devDependencies": {
-    "@claude-observatory/core": "0.8.7",
+    "@claude-observatory/core": "0.8.8",
     "@types/node": "^22.0.0",
     "@types/vscode": "^1.85.0",
     "@vscode/codicons": "^0.0.45",
