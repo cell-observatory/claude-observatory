@@ -292,23 +292,26 @@ function cmdDoctor(args: string[]): void {
 
 function cmdSessions(args: string[] = []): void {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
-  // Titles ride along so pickers (and humans) see session NAMES — the raw id stays for --session.
-  const sessions = core.listSessionsWithTitles(process.cwd());
+  // This WORKSPACE's sessions by conversation recency, titled from a bounded sidecar-cached scan —
+  // no per-session log parse, no pending counts (recency + name is what the switch decision needs).
+  // --session pins the listing to the session being reviewed, so a pinned conversation with no edits
+  // yet still appears in it rather than looking like another workspace's.
+  const meta = core.sessionMeta(process.cwd(), args.includes('--session') ? getSessionId(args) : null);
   if (args.includes('--json')) {
-    emitJson({ active: core.resolveSessionId(process.cwd()), sessions });
+    emitJson(meta);
     return;
   }
-  if (sessions.length === 0) {
-    process.stdout.write(c.dim('no sessions in the store yet.\n'));
+  if (meta.sessions.length === 0) {
+    process.stdout.write(c.dim('no sessions for this workspace yet.\n'));
     return;
   }
-  const active = core.resolveSessionId(process.cwd());
-  for (const s of sessions) {
-    const mark = s.id === active ? c.green('● ') : '  ';
+  for (const s of meta.sessions) {
+    const mark = s.current ? c.green('● ') : '  ';
     const name = s.title ? `${c.bold(s.title)}  ${c.dim(s.id)}` : c.bold(s.id);
-    process.stdout.write(
-      `${mark}${name}  ${c.dim(`${s.edits} edit(s) · ${s.pending} pending · ${core.relTime(s.lastMs)}`)}\n`
-    );
+    const did = s.edits
+      ? `${s.edits} edit(s)` + (s.files ? ` · ${s.files} file(s)` : '') + (s.pending ? ` · ${s.pending} pending` : ' · reviewed')
+      : 'no edits';
+    process.stdout.write(`${mark}${name}  ${c.dim(`${did} · ${core.relTime(s.lastActiveMs)}`)}\n`);
   }
   process.stdout.write(c.dim('\n● = resolves for this directory · use `--session <id>` to target another\n'));
 }
@@ -669,28 +672,28 @@ function cmdFeed(args: string[]): void {
   if (!res.entries.length) process.stdout.write(c.dim('nothing recorded yet\n'));
 }
 
-/** `requests` — the session broken into what the USER asked for, in order, each carrying what it
- *  produced. Every other view organizes work the way the agent saw it (chapters from Claude's to-dos,
- *  rollups by file or agent); this is the only one that answers "what happened when I asked for X". */
-function cmdRequests(args: string[]): void {
+/** `prompts` — the session broken into what the USER asked for, in order, each carrying what it
+ *  produced. Every other view organizes work the way the agent saw it (rollups by task, file or
+ *  agent); this is the only one that answers "what happened when I asked for X". */
+function cmdPrompts(args: string[]): void {
   const core = require('@claude-observatory/core') as Core;
   const session = getSessionId(args);
   if (noTranscript(session, args.includes('--json'))) return;
-  const reqs = core.sessionRequests(process.cwd(), session);
+  const reqs = core.sessionPrompts(process.cwd(), session);
   const want = flagValue(args, '--id');
   if (want) {
     const r = reqs.find((x) => x.id === want || String(x.index) === want);
-    if (!r) fail(`no request "${want}" in session ${session} (1..${reqs.length}).`);
+    if (!r) fail(`no prompt "${want}" in session ${session} (1..${reqs.length}).`);
     // `--response`: Claude's own prose in reply to this ask (its tool calls stripped) — the log a
     // reviewer expands to read. Fetched lazily because it can be large.
     if (args.includes('--response')) {
-      const resp = core.requestResponse(process.cwd(), session, r!.id);
+      const resp = core.promptResponse(process.cwd(), session, r!.id);
       if (args.includes('--json')) {
         emitJson({ session, response: resp });
         return;
       }
       if (!resp || !resp.text) {
-        process.stdout.write(c.dim(`no assistant response recorded for request #${r!.index}.\n`));
+        process.stdout.write(c.dim(`no assistant response recorded for prompt #${r!.index}.\n`));
         return;
       }
       process.stdout.write(c.bold(`#${r!.index}`) + c.dim(`  Claude’s response · ${resp.turns} turn(s)\n\n`));
@@ -699,7 +702,7 @@ function cmdRequests(args: string[]): void {
       return;
     }
     if (args.includes('--json')) {
-      emitJson({ session, request: r });
+      emitJson({ session, prompt: r });
       return;
     }
     process.stdout.write(c.bold(`#${r!.index}`) + c.dim(`  ${core.relTime(r!.ts)} · ${fmtDur(r!.durationMs)}\n\n`));
@@ -719,15 +722,15 @@ function cmdRequests(args: string[]): void {
     return;
   }
   if (args.includes('--json')) {
-    emitJson({ session, summary: core.summarizeRequests(reqs), requests: reqs });
+    emitJson({ session, summary: core.summarizePrompts(reqs), prompts: reqs });
     return;
   }
-  const sum = core.summarizeRequests(reqs);
+  const sum = core.summarizePrompts(reqs);
   if (!reqs.length) {
-    process.stdout.write(c.dim(`no user requests recorded in session ${session}.\n`));
+    process.stdout.write(c.dim(`no user prompts recorded in session ${session}.\n`));
     return;
   }
-  process.stdout.write(c.bold('Requests') + c.dim(`  ${sum.total} asked · ${sum.withEdits} produced edits · ${sum.edits} edit(s) total · session ${session}\n\n`));
+  process.stdout.write(c.bold('Prompts') + c.dim(`  ${sum.total} asked · ${sum.withEdits} produced edits · ${sum.edits} edit(s) total · session ${session}\n\n`));
   for (const r of reqs) {
     const facts: string[] = [];
     if (r.edits) facts.push(c.cyan(`${r.edits}e`) + c.dim(` ${r.files}f ${r.folders}fo`));
@@ -744,7 +747,7 @@ function cmdRequests(args: string[]): void {
     for (const ln of lines.slice(1)) process.stdout.write(`     ${ln}\n`);
     process.stdout.write(c.dim(`     ${fmtDur(r.durationMs).padStart(7)}${facts.length ? '  ' + facts.join(' · ') : ''}\n`));
   }
-  process.stdout.write(c.dim('\nwork is attributed to the request that STARTED it — a shell launched here belongs here even if it exits later\n'));
+  process.stdout.write(c.dim('\nwork is attributed to the prompt that STARTED it — a shell launched here belongs here even if it exits later\n'));
 }
 
 /** Break text onto lines at word boundaries — used wherever a full sentence must survive a narrow
@@ -895,7 +898,7 @@ function activityBins(tsList: number[], bins = 20): number[] {
 
 /** `multitask` (§4) — the multi-agent bottom-panel view: one row per running agent across every
  *  worktree of this repo (live phase, sparkline, ±lines, risk), its nested subagents (phase + current
- *  task/todos + ±lines), and the cross-agent file collisions. One JSON payload; both editors render it
+ *  task/todos + ±lines), and the cross-agent live file conflicts. One JSON payload; both editors render it
  *  thin, no client aggregation. Zero token, git-free, path-only. */
 function cmdMultitask(args: string[]): void {
   const core = require('@claude-observatory/core') as Core;
@@ -912,24 +915,22 @@ function cmdMultitask(args: string[]): void {
       ? core.agentPhaseDetail(transcript)
       : { phase: 'idle' as const, confidence: 'heuristic' as const };
     // Full (slow-tier) payload: whole-file builds per agent — aggregated HERE so renderers stay thin.
-    // The ACTIVE session is always rebuilt (its transcript is still growing, and its live counts are
-    // what the user is watching); every other sibling comes from the on-disk cache, which carries its
-    // sparkline and to-dos too — those were the remaining per-sibling transcript re-parses.
-    const view =
-      sib.id === session
-        ? {
-            map: core.buildChangeMap(sib.worktree, sib.id, { root: sib.worktree }),
-            sparkline: core.activityBins(core.parseActions(sib.worktree, sib.id).map((a) => a.ts)),
-            todos: core.transcriptInsights(sib.worktree, sib.id).todos,
-          }
-        : core.siblingOverview(sib.worktree, sib.id, { root: sib.worktree });
+    // EVERY sibling, the session under review included, comes from the on-disk cache: it is keyed to the
+    // (transcript, log) stamps, so a session that is still being written misses it naturally and a
+    // finished one hits it. The old special case rebuilt "the active session" unconditionally, which is
+    // right for the live conversation and badly wrong for a PINNED one — switching to a long finished
+    // session paid seconds of transcript parsing on every refresh tick, forever. Live facts (phase,
+    // subagent phases) are computed below, outside the cache, so nothing frozen is reported as current.
+    const view = core.siblingOverview(sib.worktree, sib.id, { root: sib.worktree });
     const map = view.map;
     const sibActions = core.parseActions(sib.worktree, sib.id); // memoized — the sparkline used it too
     // Per-sibling tokens + wall-clock (one light transcript pass) — so Fleet shows the same metric style
     // as Workflows already do. Cached on this slow tier alongside buildChangeMap.
     const usage = core.sessionUsage(sib.worktree, sib.id);
     const subRoll = new Map(map.rollupBySubagent.map((r) => [r.subagentId, r])); // per-subagent ±lines
-    const subagents = core.parseSubagents(sib.worktree, sib.id).map((s) => {
+    // Digests, not full parses: a fleet row needs identity, plan and live phase — never the subagent's
+    // action list, which is what made this the slowest remaining part of a refresh.
+    const subagents = core.subagentDigests(sib.worktree, sib.id).map((s) => {
       const roll = subRoll.get(s.agentId);
       return {
         agentId: s.agentId,
@@ -999,7 +1000,7 @@ function cmdMultitask(args: string[]): void {
     // The ACTIVE session's task list for the Overview's Tasks tab, across BOTH task generations:
     // the legacy numbered TaskCreate/TaskUpdate list (transcript history ∪ live dir state) unioned
     // with one row per background Agent run — the current harness's task system. Each row carries the
-    // chapterId that joins it to its change-map chapter. [] for sessions with neither.
+    // strict taskId that joins it to rollupByTask / taskEditIds. [] for sessions with neither.
     tasks: core.allSessionTaskRows(cwd, session),
     actions,
     summary: { active: fleet.active, conflicts: fleet.conflicts },
@@ -1088,6 +1089,27 @@ function cmdKeep(args: string[]): void {
   // Bulk: --all (every pending), --file <substr> (pending edits in matching files), or --under <path>
   // (pending edits at-or-beneath a file/folder path — the editors' folder/file Accept action, so
   // file-scope and folder-scope share one exact rule).
+  // --ids <a,b,c>: an explicit set, so an editor accepting a file / folder / task / prompt spends ONE
+  // process instead of one per edit (the JetBrains plugin has no in-process core).
+  const idi = args.indexOf('--ids');
+  if (idi >= 0) {
+    const raw = args[idi + 1];
+    if (!raw) fail('`keep --ids <a,b,c>` requires a comma-separated id list');
+    const ids = raw.split(',').map((x) => parseInt(x.trim(), 10)).filter((n) => Number.isFinite(n));
+    if (!ids.length) fail('`keep --ids <a,b,c>` got no valid integer ids');
+    const kept = core.setStatusMany(session, ids, 'kept');
+    core.autoClearDemo(session);
+    if (json) {
+      emitJson({ kept: kept.length, ids: kept });
+      return;
+    }
+    if (!kept.length) {
+      process.stdout.write(c.dim('no pending edits to keep in that set\n'));
+      return;
+    }
+    process.stdout.write(c.green('✓ ') + `kept ${kept.length} edit(s)\n`);
+    return;
+  }
   const fi = args.indexOf('--file');
   const ui = args.indexOf('--under');
   if (args.includes('--all') || fi >= 0 || ui >= 0) {
@@ -1103,7 +1125,7 @@ function cmdKeep(args: string[]): void {
           (!fileSub || r.file.includes(fileSub)) &&
           (!under || core.isUnderPath(r.file, under))
       );
-    for (const r of targets) core.setStatus(session, r.id, 'kept');
+    core.setStatusMany(session, targets.map((r) => r.id), 'kept'); // one parse + one append
     core.autoClearDemo(session); // a fully reviewed demo session leaves no residue
     if (json) {
       emitJson({ kept: targets.length, ids: targets.map((r) => r.id) });
@@ -1248,7 +1270,7 @@ function cmdRedo(args: string[]): void {
 }
 
 /** Resolve the taskId argument: `--task <id>`, else the first positional (skipping flags + the
- *  --session value). taskId is a content-hash slug (§2.1), never a path — no traversal to guard. */
+ *  --session value). A taskId is a content-hash slug (§2.1), never a path — no traversal to guard. */
 function requireTaskId(args: string[]): string {
   const flag = flagValue(args, '--task');
   if (flag) return flag;
@@ -1259,11 +1281,12 @@ function requireTaskId(args: string[]): string {
     }
     if (!args[i].startsWith('--')) return args[i];
   }
-  fail('expected a taskId, e.g. `claude-observatory task-keep <taskId>` (see `changemap` rollupByTask)');
+  fail('expected a taskId, e.g. `claude-observatory task-keep <taskId>` (ids: `changemap` rollupByTask / `tasklog`)');
 }
 
-/** `task-keep` (§6) — mark every PENDING edit in a task's STRICT-span set kept. Destructive-safe: only
- *  edits inside a real in_progress interval are in the set (never a head/tail edge fill). */
+/** `task-keep` (§6) — mark every PENDING edit in a task's STRICT in_progress span kept. Honest by
+ *  construction: only edits made while the task was actually in progress are in the set (core
+ *  taskEditIds) — an edit that cannot be strictly placed is never included. */
 function cmdTaskKeep(args: string[]): void {
   const core = require('@claude-observatory/core') as Core;
   const session = getSessionId(args);
@@ -1277,13 +1300,13 @@ function cmdTaskKeep(args: string[]): void {
   process.stdout.write(
     c.green('✓ ') +
       `kept ${res.kept} edit(s) in task ${taskId}` +
-      (res.total !== res.kept ? c.dim(` (${res.total} in the task's strict-span set)`) : '') +
+      (res.total !== res.kept ? c.dim(` (${res.total} in the task's strict span)`) : '') +
       '\n'
   );
 }
 
-/** `task-undo` (§6) — revert every PENDING edit in a task's STRICT-span set, newest-first. Same
- *  destructive-safety invariant as task-keep: an edit in no real interval is never in the set. */
+/** `task-undo` (§6) — revert every PENDING edit in a task's STRICT in_progress span, newest-first.
+ *  Same strict set as task-keep; each revert stays conflict-guarded per edit. */
 function cmdTaskUndo(args: string[]): void {
   const core = require('@claude-observatory/core') as Core;
   const session = getSessionId(args);
@@ -1302,74 +1325,42 @@ function cmdTaskUndo(args: string[]): void {
   );
 }
 
-/** `task-clear` (§C) — drop the RESOLVED (kept/undone) edits of a chapter's DISPLAYED edit set
- *  (core.reviewEditIds → core.clearResolvedIds — WYSIWYG, same set task-keep/task-undo act on);
- *  pending edits are preserved. `--completed` clears every SETTLED chapter (all edits kept — none
- *  pending, none undone), including the synthetic session chapter once fully reviewed. */
+/** `task-clear` (§C) — drop the RESOLVED (kept/undone) edits of a task's STRICT edit set
+ *  (core.taskEditIds → core.clearResolvedIds); pending edits are preserved. `--completed` clears
+ *  every SETTLED task (edits present, none pending, none undone). */
 function cmdTaskClear(args: string[]): void {
   const core = require('@claude-observatory/core') as Core;
   const session = getSessionId(args);
   const json = args.includes('--json');
   if (args.includes('--completed')) {
     const map = core.buildChangeMap(process.cwd(), session, { root: process.cwd() });
-    // A settled chapter: every displayed edit kept (none pending, none undone). Chapters are total,
-    // so iterating them (not the strict rollup) covers gap-filled members + the synthetic chapter.
-    const settled = map.chapters.filter((ch) => ch.edits > 0 && ch.pending === 0 && ch.undone === 0);
+    // A settled task: strict-attributed edits present, none pending, none undone.
+    const settled = map.rollupByTask.filter((t) => t.taskId !== null && t.edits > 0 && t.pending === 0 && t.undone === 0);
     let cleared = 0;
     const ids: number[] = [];
-    const chapters: { taskId: string; cleared: number }[] = [];
-    for (const ch of settled) {
-      const res = core.clearResolvedIds(session, core.reviewEditIds(process.cwd(), session, ch.id));
+    const tasks: { taskId: string; cleared: number }[] = [];
+    for (const t of settled) {
+      const res = core.clearResolvedIds(session, core.taskEditIds(process.cwd(), session, t.taskId!));
       cleared += res.cleared;
       ids.push(...res.ids);
-      chapters.push({ taskId: ch.id, cleared: res.cleared });
+      tasks.push({ taskId: t.taskId!, cleared: res.cleared });
     }
     if (json) {
-      emitJson({ cleared, ids, chapters });
+      emitJson({ cleared, ids, tasks });
       return;
     }
     process.stdout.write(
-      c.green('✓ ') + `cleared ${cleared} resolved edit(s) across ${chapters.length} completed chapter(s)\n`
+      c.green('✓ ') + `cleared ${cleared} resolved edit(s) across ${tasks.length} completed task(s)\n`
     );
     return;
   }
   const taskId = requireTaskId(args);
-  const res = core.clearResolvedIds(session, core.reviewEditIds(process.cwd(), session, taskId));
+  const res = core.clearResolvedIds(session, core.taskEditIds(process.cwd(), session, taskId));
   if (json) {
     emitJson({ cleared: res.cleared, ids: res.ids });
     return;
   }
   process.stdout.write(c.green('✓ ') + `cleared ${res.cleared} resolved edit(s) in task ${taskId}\n`);
-}
-
-/** `chapter --of-edit <id>` (cascaded edits) — the chapter an edit belongs to, its human-readable
- *  title, and its ordered sibling edit ids (capture order, across files). Backs the JetBrains
- *  "review this chapter" flow + Chapter nav axis, which shell out to the CLI. Zero token. */
-function cmdChapter(args: string[]): void {
-  const core = require('@claude-observatory/core') as Core;
-  const session = getSessionId(args);
-  const raw = flagValue(args, '--of-edit');
-  const editId = raw ? parseInt(raw, 10) : NaN;
-  if (!Number.isFinite(editId)) {
-    fail('expected `claude-observatory chapter --of-edit <editId> [--json]`');
-  }
-  const ch = core.chapterForEditId(process.cwd(), session, editId);
-  if (args.includes('--json')) {
-    emitJson(ch); // null when the edit id names no record — the caller degrades
-    return;
-  }
-  if (!ch) {
-    process.stdout.write(c.dim(`no edit #${editId} in this session\n`));
-    return;
-  }
-  // Lead with the chapter id: it is the value task-keep / task-undo / task-clear / chat-context --task /
-  // feed --kind task all require, and it was the one thing this command didn't print. The sibling list
-  // is the bulky part (875 ids on one line for a big session), so it wraps and truncates.
-  process.stdout.write(c.bold(ch.title) + c.dim(`${ch.synthetic ? ' (session)' : ''}\n`));
-  process.stdout.write(`  ${c.cyan('id')}      ${ch.id}\n`);
-  const shown = ch.editIds.slice(0, 40);
-  process.stdout.write(`  ${c.cyan('edits')}   ${ch.editIds.length}${ch.editIds.length ? `: ${shown.join(', ')}` : ''}`);
-  process.stdout.write(ch.editIds.length > shown.length ? c.dim(` … ${ch.editIds.length - shown.length} more (--json)\n`) : '\n');
 }
 
 /** `demo` (0.8.0) — the live simulator: replays a scripted Claude session through the REAL pipeline
@@ -1409,7 +1400,7 @@ async function cmdDemo(args: string[]): Promise<void> {
   process.stdout.write(
     c.green('✓ ') +
       `demo session ${res.session} is live — ${res.edits} pending edits in ${relFile(res.workspace)}\n` +
-      c.dim('  open the Overview / Observations panels, review the chapters, then: claude-observatory demo --clean\n')
+      c.dim('  open the Overview / Observations panels, review the edits, then: claude-observatory demo --clean\n')
   );
 }
 
@@ -1433,6 +1424,25 @@ function cmdClean(args: string[]): void {
     const ui = args.indexOf('--under');
     const under = ui >= 0 ? args[ui + 1] : undefined;
     if (ui >= 0 && !under) fail('`clean --resolved --under <path>` requires a value');
+    // --ids <a,b,c> clears an EXPLICIT edit set — the scope a prompt names, which no path can express
+    // (one ask edits many folders). Same resolver both editors use, so neither invents its own scope.
+    const idi = args.indexOf('--ids');
+    if (idi >= 0) {
+      const raw = args[idi + 1];
+      if (!raw) fail('`clean --resolved --ids <a,b,c>` requires a comma-separated id list');
+      const ids = raw
+        .split(',')
+        .map((x) => parseInt(x.trim(), 10))
+        .filter((n) => Number.isFinite(n));
+      if (!ids.length) fail('`clean --resolved --ids <a,b,c>` got no valid integer ids');
+      const res = core.clearResolvedIds(getSessionId(args), ids);
+      if (json) {
+        emitJson({ cleared: res.cleared, ids: res.ids });
+        return;
+      }
+      process.stdout.write(c.green('✓ ') + `cleared ${res.cleared} resolved edit(s)\n`);
+      return;
+    }
     const n = core.clearResolved(getSessionId(args), under);
     if (json) {
       emitJson({ cleared: n, under: under ?? null });
@@ -1640,7 +1650,7 @@ function cmdTree(args: string[]): void {
   emitJson(core.buildEditTree(session, { root, filter }));
 }
 
-/** The session change-map: edits placed as module→file→class + to-do chapters, for the map webview.
+/** The session change-map: edits placed as module→file→class + strict per-task rollups, for the map webview.
  *  0.8.0 additive keys (removing nothing): the base build already carries per-edit `taskId` (strict
  *  spans) + `rollupByTask`/`rollupBySubagent`; this adds `rollupByAgent`, an `agents[]` array of a
  *  per-sibling change-map for every worktree of this repo (aggregated HERE — renderers stay thin), and
@@ -1651,10 +1661,12 @@ function cmdChangeMap(args: string[]): void {
   const ri = args.indexOf('--root');
   const root = ri >= 0 && args[ri + 1] ? args[ri + 1] : process.cwd();
   const cwd = process.cwd();
-  // `requests: true` — the per-ask slices the Requests window scopes everything by. Only the ACTIVE
+  // `prompts: true` — the per-ask slices the Prompts window scopes everything by. Only the ACTIVE
   // session builds them: they cost one more transcript pass, and no ask typed into this window scopes a
   // sibling worktree's map (the sibling builds below deliberately leave the flag off).
-  const base = core.buildChangeMap(cwd, session, { root, requests: true });
+  // Cached on disk against the transcript + log stamps: this command runs in a fresh process every
+  // refresh tick, and rebuilding an unchanged session's map cost seconds of transcript parsing.
+  const base = core.cachedChangeMap(cwd, session, { root, prompts: true });
   // One full change-map per worktree-sibling (the Overview per-agent tabs, §5). listRepoSiblings
   // includes self; when this cwd has no resolvable repo (no .git) it returns [] → degrade to just self.
   // Each entry carries a top-level session/worktree/gitBranch/phase so the per-agent-tab renderer has a
@@ -1663,7 +1675,7 @@ function cmdChangeMap(args: string[]): void {
   const sibs = core.listRepoSiblings(cwd, session);
   // Project each sibling slice down to what the renderers actually read. The full per-sibling `edits`
   // array was 1.95 MB of the 3.30 MB payload — re-emitted, re-parsed and re-posted every refresh while
-  // NOTHING consumed it (VS Code's detailSlice reads summary/chapters/files/modules/footprint/
+  // NOTHING consumed it (VS Code's detailSlice reads summary/files/modules/
   // compactions/rollupByTask; JetBrains' ChangeMapAgent has no edits field at all). Dropping a shipped
   // field is against the "add fields, don't rename or remove" contract, so it is called out in the
   // changelog — the active session's own top-level `edits` is untouched, which is what tools read.
@@ -1688,16 +1700,16 @@ function cmdChangeMap(args: string[]): void {
     { taskId: null, edits: 0, added: 0, removed: 0, pending: 0, kept: 0, undone: 0 };
   // Project each sibling slice down to what the renderers actually read before emitting. The full
   // per-sibling `edits` array was 1.95 MB of a 3.30 MB payload — re-emitted, re-parsed and re-posted on
-  // every refresh while NOTHING consumed it (VS Code's detailSlice reads summary/chapters/files/
-  // modules/footprint/compactions/rollupByTask; JetBrains' ChangeMapAgent has no `edits` field at all).
+  // every refresh while NOTHING consumed it (VS Code's detailSlice reads summary/files/
+  // modules/compactions/rollupByTask; JetBrains' ChangeMapAgent has no `edits` field at all).
   // Dropping a shipped field is against the "add fields, don't remove them" contract, so the changelog
   // says so. The rollup above still sees the full maps, and the ACTIVE session's own top-level `edits`
   // is untouched — that is the one tools actually read.
-  // `requests` goes the same way as `edits`: the SELF entry is the very `base` object emitted at the
+  // `prompts` goes the same way as `edits`: the SELF entry is the very `base` object emitted at the
   // top level, so leaving it here would serialize every per-ask slice twice in one payload. Siblings
   // never carry any (the flag is off for their builds), so this only ever drops the duplicate.
   const slimAgents = agents.map((a) => {
-    const { edits: _dropped, requests: _reqs, ...rest } = a as typeof a & { edits?: unknown; requests?: unknown };
+    const { edits: _dropped, prompts: _asks, ...rest } = a as typeof a & { edits?: unknown; prompts?: unknown };
     return rest;
   });
   emitJson({ ...base, rollupByAgent: core.rollupByAgent(agents), agents: slimAgents, unassigned });
@@ -2427,7 +2439,7 @@ function usage(): void {
       `                       the latest GitHub Release (VS Code via \`code --install-extension\`;\n` +
       `                       JetBrains by unzip into plugin dirs). --check reports only; --cli-only\n` +
       `                       skips the extensions; --force reinstalls even if already current\n` +
-      `  sessions             list all sessions in the store, by name (● = current dir)\n` +
+      `  sessions             this workspace's sessions, newest conversation first (● = this directory's)\n` +
       `  list [filters]       list edits (grouped by file); filters: --pending|--kept|--undone, --file <substr>\n` +
       `  timeline [--json]    edits newest-first as a chronological feed (time · id · Δ · file)\n` +
       `  actions [--json]     the full action timeline: EVERY tool call Claude made (reads, greps, bash,\n` +
@@ -2440,7 +2452,7 @@ function usage(): void {
       `                       (with risk tiers), MCP servers, network, subagents — exercised, not approved\n` +
       `  processes [--json]   background shells this session left running (runtime · exit code · output);\n` +
       `                       --id <shell> shows one shell's full command + a tail of its output\n` +
-      `  requests [--json]    the session as the list of things YOU asked for, each with the edits,\n` +
+      `  prompts [--json]     the session as the list of things YOU asked for, each with the edits,\n` +
       `                       files, folders, tokens, agents, workflows, tasks and shells it produced;\n` +
       `                       --id <n> drills into one; --id <n> --response prints Claude’s reply to it\n` +
       `  feed [--json]        what ONE thing is doing now — a tail of its activity;\n` +
@@ -2450,7 +2462,7 @@ function usage(): void {
       `                       agent-facing digest for cross-agent awareness (alias: fleet); --all includes self;\n` +
       `                       --repo widens to every WORKTREE of the repo (adds worktree/branch/phase + conflicts)\n` +
       `  multitask                the multi-agent view: one row per running agent across every worktree (live phase,\n` +
-      `                       sparkline, ±lines, risk) + nested subagents (phase/current task) + file collisions\n` +
+      `                       sparkline, ±lines, risk) + nested subagents (phase/current task) + live file conflicts\n` +
       `  tasklog                    cross-agent task log: one row per stable taskId, unioned across worktrees + subagents\n` +
       `  metrics [--json]     session numbers: ±lines, action/error counts, subagent duration/tokens, tool latency\n` +
       `  diff <id>            show before/after for an edit\n` +
@@ -2459,25 +2471,24 @@ function usage(): void {
       `                       bulk (pending only): --all | --file <substr> | --under <path> | --ids <a,b,c>\n` +
       `  redo <id> [--force]  re-apply an undone edit;\n` +
       `                       bulk (undone only): --all | --file <substr> | --under <path> | --ids <a,b,c>\n` +
-      `  task-keep <taskId>   keep every pending edit in a task's strict in_progress span (--json)\n` +
-      `  task-undo <taskId>   revert every pending edit in a task's strict in_progress span (--json)\n` +
-      `  task-clear <taskId>  drop the resolved (kept/undone) edits of a task's strict span (--json);\n` +
-      `                       --completed clears every settled chapter (all edits kept)\n` +
+      `  task-keep <taskId>   keep every pending edit in a task's strict in-progress span (--json)\n` +
+      `  task-undo <taskId>   revert every pending edit in a task's strict in-progress span (--json)\n` +
+      `  task-clear <taskId>  drop a task's resolved (kept/undone) edits (--json);\n` +
+      `                       --completed clears every settled task (edits present, all kept)\n` +
       `  demo [--fast] [--speed <n>] [--dir <folder>] [--json]\n` +
       `                       simulate a Claude session LIVE (a real transcript + captured edits + a\n` +
       `                       subagent + a workflow in an isolated demo-* session and folder) — watch\n` +
       `                       every panel update, then review/undo for real; --fast for scripts/tests;\n` +
       `                       demo --clean removes every trace (sessions, store, demo folder)\n` +
       `  clean [opts]         GC orphaned blobs (--session <id> scopes; --json for structured output);\n` +
-      `                       --drop <id> | --older-than <Nd> | --all | --resolved [--under <path>]\n` +
+      `                       --drop <id> | --older-than <Nd> | --all | --resolved [--under <path> | --ids <a,b,c>]\n` +
       `  stats [--json]       usage stats (edits/tokens/messages/thinking/output) by session & window\n` +
       `  summary [--markdown] per-session review recap (kept/reverted per file); --markdown to export\n` +
       `  insights [--json]    Observations view: recap + per-edit reasoning/flags/file-memory + next steps\n\n` +
       `machine-readable (for front-ends/scripts; list/status/sessions/keep/undo/redo also take --json):\n` +
       `  blob <sha>           raw blob bytes to stdout\n` +
       `  tree [--root <d>] [--filter <q>]   folder→file→class→edit view-model as JSON (both editors)\n` +
-      `  changemap [--root <d>]             session change-map (edits + total to-do chapters + per-agent slices) as JSON\n` +
-      `  chapter --of-edit <n>              the chapter an edit belongs to: title + ordered sibling edit ids [--json]\n` +
+      `  changemap [--root <d>]             session change-map (edits + per-file/per-folder rollups + per-agent slices) as JSON\n` +
       `  chat-context [--tool-use-id <id> | --edit <n> | --agent <id> | --task <id>]\n` +
       `                       assemble a zero-token, ready-to-paste chat prompt about an action/edit/subagent/task\n` +
       `  locate --file <f>    per-pending-edit line indices in the live buffer (text on stdin; JSON out)\n` +
@@ -2663,8 +2674,8 @@ function main(): void {
     case 'processes':
       cmdProcesses(rest);
       break;
-    case 'requests':
-      cmdRequests(rest);
+    case 'prompts':
+      cmdPrompts(rest);
       break;
     case 'feed':
       cmdFeed(rest);
@@ -2706,9 +2717,6 @@ function main(): void {
       break;
     case 'task-clear':
       cmdTaskClear(rest);
-      break;
-    case 'chapter':
-      cmdChapter(rest);
       break;
     case 'demo':
       void cmdDemo(rest);

@@ -94,8 +94,23 @@ ok "clean --session reports GC" "echo \"\$out\" | grep -qi 'garbage-collected'"
 node "$CLI" keep --session "$RS" 1 >/dev/null
 out=$(node "$CLI" clean --resolved --session "$RS" 2>&1)
 ok "clean --resolved clears the kept edit" "echo \"\$out\" | grep -qiE 'cleared 1'"
+STORE="$HOME/.claude/claude-observatory"
+( cd "$WS" && node "$CLI" changemap --session "$RS" --json >/dev/null 2>&1 )   # warm the derived caches
+ok "the session's map cache exists before the drop" "[ -d \"$STORE/changemap-cache/$RS\" ]"
 node "$CLI" clean --drop "$RS" >/dev/null
-ok "clean --drop removed the session" "! node \"$CLI\" sessions | grep -q \"$RS\""
+ok "clean --drop removed the session store"   "[ ! -d \"$STORE/$RS\" ]"
+ok "list on a dropped session finds nothing"  "! node \"$CLI\" list --session \"$RS\" | grep -q '#1'"
+# 0.8.8: the derived caches hold the session's own prompt text and title — dropping the session drops them.
+ok "…and its change-map cache went with it"   "[ ! -d \"$STORE/changemap-cache/$RS\" ]"
+ok "…and its title/counts sidecar too"        "[ ! -f \"$STORE/session-meta/$RS.json\" ]"
+# The caches are not sessions: a routine GC walks the store root for reclaimable husks and must not
+# find these — deleting them silently discards the very caches this release's speed depends on.
+( cd "$WS" && node "$CLI" changemap --json >/dev/null 2>&1 )   # a cache entry for the LIVE session
+CACHED=$(ls "$STORE/changemap-cache" 2>/dev/null | head -1)
+ok "a live session's map cache exists"        "[ -n \"$CACHED\" ]"
+node "$CLI" clean --json >/dev/null 2>&1
+ok "clean spares the cache directory"         "[ -d \"$STORE/changemap-cache\" ]"
+ok "…and the cached map inside it"            "[ -n \"$CACHED\" ] && [ -e \"$STORE/changemap-cache/$CACHED\" ]"
 
 echo "════════ E2E 9: init installs hooks, status reports them, uninstall removes them ════════"
 out=$(cc init 2>&1)
@@ -121,7 +136,16 @@ ok "list --kept shows the kept #1"        "node \"$CLI\" list --session \"$LS\" 
 ok "list --file filters by substring"     "node \"$CLI\" list --session \"$LS\" --file list.txt | grep -q '#2'"
 ok "list --file miss -> no matching edits" "node \"$CLI\" list --session \"$LS\" --file nope.zzz | grep -qi 'no matching'"
 ok "diff of the KEPT edit #1 renders"     "node \"$CLI\" diff --session \"$LS\" 1 | grep -q 'AA'"
-ok "sessions lists the session"           "node \"$CLI\" sessions | grep -q \"$LS\""
+# 0.8.8: `sessions` is workspace-filtered — a store-only session with no transcript under this cwd is
+# another project's (or a deleted conversation) and is deliberately NOT offered by the picker.
+ok "sessions is workspace-filtered (store-only session hidden)" "! node \"$CLI\" sessions | grep -q \"$LS\""
+ok "sessions --json emits the 0.8.8 shape"  "node \"$CLI\" sessions --json | jq -e 'has(\"active\") and has(\"sessions\")' >/dev/null"
+# …and the HUMAN listing, on a session this workspace really has: it must name it and report what it did.
+printf '%s\n' '{"type":"user","message":{"role":"user","content":"Add retry logic to the uploader"},"timestamp":"2026-07-25T00:00:00Z"}' > "$HOME/.claude/projects/$MANGLE/$SESSION.jsonl"
+out=$(cc sessions 2>&1)
+ok "sessions names the workspace session"   "echo \"$out\" | grep -q \"$SESSION\" || echo \"$out\" | grep -qi 'retry logic'"
+ok "sessions reports the session's counts"  "echo \"$out\" | grep -qE '[0-9]+ edit'"
+ok "sessions marks the live session"        "echo \"$out\" | grep -q '●'"
 
 echo "════════ E2E 11: error handling + exit codes ════════"
 node "$CLI" boguscmd >/dev/null 2>&1; rc=$?
@@ -195,7 +219,7 @@ ok "observe emits per-edit summaries"        "printf '%s' \"\$OBS\" | jq -e '.ed
 ok "observe carries memory + flags fields"   "printf '%s' \"\$OBS\" | jq -e '.edits[0] | has(\"memory\") and has(\"flags\")' >/dev/null"
 # changemap: the Change Map view-model — core does every rollup so both editors render it as given
 CM=$(cc changemap)
-ok "changemap emits summary/edits/chapters/files/modules" "printf '%s' \"\$CM\" | jq -e 'has(\"summary\") and has(\"edits\") and has(\"chapters\") and has(\"files\") and has(\"modules\")' >/dev/null"
+ok "changemap emits summary/edits/prompts/files/modules (no subtasks key)" "printf '%s' \"\$CM\" | jq -e 'has(\"summary\") and has(\"edits\") and has(\"prompts\") and has(\"files\") and has(\"modules\") and (has(\"subtasks\")|not)' >/dev/null"
 ok "changemap file rows carry the core-computed rollup"   "printf '%s' \"\$CM\" | jq -e '.files[0] | has(\"churn\") and has(\"status\") and has(\"maxId\") and has(\"moduleLabel\")' >/dev/null"
 ok "changemap module rows carry a label + churn"          "printf '%s' \"\$CM\" | jq -e '.modules[0] | has(\"label\") and has(\"churn\") and has(\"status\")' >/dev/null"
 ok "changemap churn is conserved from files up to modules" "printf '%s' \"\$CM\" | jq -e '([.files[].churn]|add) == ([.modules[].churn]|add)' >/dev/null"
@@ -227,6 +251,19 @@ ok "sibling pkgB edit is left pending"                 "cc list --json | jq -e '
 COUT=$(cc clean --resolved --under "$WS/pkgA")
 ok "clean --resolved --under folder clears the 2 kept"  "echo \"\$COUT\" | grep -qiE 'cleared 2'"
 ok "pkgA edits gone from the log; pkgB still present"    "cc list --json | jq -e '([.edits[]|select(.file|contains(\"pkgA\"))]|length==0) and ([.edits[]|select(.file|endswith(\"pkgB/b.txt\"))]|length==1)' >/dev/null"
+# clean --resolved --ids clears an EXPLICIT id set — the scope one PROMPT names (its edits span whatever
+# folders the ask touched, so no --under path can express it). Pending ids in the set are left alone.
+mkdir -p "$WS/pkgD"
+FD1="$WS/pkgD/d1.txt"; FD2="$WS/pkgD/d2.txt"
+printf 'd1\n' > "$FD1"; printf 'd2\n' > "$FD2"
+hook PreToolUse Edit "$FD1"; node "$SETLINE" "$FD1" 0 "D1b"; hook PostToolUse Edit "$FD1"   # kept below
+hook PreToolUse Edit "$FD2"; node "$SETLINE" "$FD2" 0 "D2b"; hook PostToolUse Edit "$FD2"   # stays pending
+ID_KEPT=$(cc list --json | jq -r '[.edits[]|select(.file|endswith("pkgD/d1.txt"))][0].id')
+ID_PEND=$(cc list --json | jq -r '[.edits[]|select(.file|endswith("pkgD/d2.txt"))][0].id')
+cc keep "$ID_KEPT" >/dev/null
+IOUT=$(cc clean --resolved --ids "$ID_KEPT,$ID_PEND" --json)
+ok "clean --resolved --ids clears only the resolved id"  "echo \"\$IOUT\" | jq -e '.cleared==1 and (.ids|length==1)' >/dev/null"
+ok "the pending id in the set is left in the log"        "cc list --json | jq -e --argjson p \"\$ID_PEND\" '[.edits[]|select(.id==\$p)]|length==1' >/dev/null"
 # undo --under an EXACT FILE reverts just that file's edit (folder-prefix rule matches the file itself).
 UOUT=$(cc undo --under "$FBP")
 ok "undo --under file reverts that file's edit"          "echo \"\$UOUT\" | grep -qiE 'reverted 1'"
@@ -369,9 +406,9 @@ ok "siblings --repo summary carries conflicts (uncapped)" "printf '%s' \"\$SR\" 
 
 # --- changemap: additive keys (removing nothing) — agents[] per-sibling builds + unassigned bucket ---
 CM2=$(cc changemap --session "$MTA" 2>/dev/null)
-ok "changemap still carries summary/edits/chapters/files/modules" "printf '%s' \"\$CM2\" | jq -e 'has(\"summary\") and has(\"edits\") and has(\"chapters\") and has(\"files\") and has(\"modules\")' >/dev/null"
+ok "changemap still carries summary/edits/files/modules" "printf '%s' \"\$CM2\" | jq -e 'has(\"summary\") and has(\"edits\") and has(\"files\") and has(\"modules\")' >/dev/null"
 ok "changemap adds rollupByAgent/agents/unassigned"     "printf '%s' \"\$CM2\" | jq -e 'has(\"rollupByAgent\") and has(\"agents\") and has(\"unassigned\")' >/dev/null"
-ok "changemap agents[] is a per-sibling change-map build (both worktrees)" "printf '%s' \"\$CM2\" | jq -e '[.agents[] | select(has(\"summary\") and has(\"chapters\") and has(\"rollupByTask\"))]|length>=2' >/dev/null"
+ok "changemap agents[] is a per-sibling change-map build (both worktrees)" "printf '%s' \"\$CM2\" | jq -e '[.agents[] | select(has(\"summary\") and has(\"rollupByTask\"))]|length>=2' >/dev/null"
 # 0.8.7: the per-sibling edit LIST is projected out of agents[] (1.95 MB of a 3.30 MB payload that no
 # renderer read); the session's own top-level edits are untouched.
 ok "changemap agents[] carries no per-sibling edit list"  "printf '%s' \"\$CM2\" | jq -e '[.agents[] | select(has(\"edits\"))]|length==0' >/dev/null"
@@ -394,21 +431,21 @@ TID=$(printf '%s' "$CM2" | jq -r '[.edits[] | select(.taskId!=null) | .taskId][0
 ok "an edit resolved to a strict-span taskId"           "[ -n \"$TID\" ] && [ \"$TID\" != null ]"
 ok "chat-context --task frames the task (no model call)" "cc chat-context --session \"$MTA\" --task \"$TID\" | jq -e '.prompt|test(\"task\")' >/dev/null"
 
-# --- task-keep / task-undo: resolve taskId -> STRICT-span edit set -> keep/undo (destructive, last) ---
+# --- task-keep / task-undo: resolve taskId -> STRICT in_progress edit set -> keep/undo (destructive, last) ---
 TK=$(cc task-keep --session "$MTA" "$TID" --json)
-ok "task-keep --json keeps agent A's strict-span edit(s)" "printf '%s' \"\$TK\" | jq -e '.kept>=1 and (.ids|length>=1)' >/dev/null"
+ok "task-keep --json keeps agent A's strict edit(s)" "printf '%s' \"\$TK\" | jq -e '.kept>=1 and (.ids|length>=1)' >/dev/null"
 TU=$(cc task-undo --session "$MTB" "$TID" --json)
-ok "task-undo --json reverts agent B's strict-span edit(s)" "printf '%s' \"\$TU\" | jq -e '.undone>=1 and (.conflicts==0)' >/dev/null"
+ok "task-undo --json reverts agent B's strict edit(s)" "printf '%s' \"\$TU\" | jq -e '.undone>=1 and (.conflicts==0)' >/dev/null"
 ok "task-undo restored shared.txt to A's content (A_X)"  "grep -qx 'A_X' '$SF'"
 
-# --- 0.8.0 (C): task-clear — drop a chapter's RESOLVED (kept/undone) strict-span edits; --completed
-#     clears every SETTLED chapter. Agent B's TID edit is now UNDONE; agent A's TID edit is now KEPT. ---
+# --- 0.8.0 (C): task-clear — drop a task's RESOLVED (kept/undone) strict edits; --completed clears
+#     every SETTLED task. Agent B's TID edit is now UNDONE; agent A's TID edit is now KEPT. ---
 TC=$(cc task-clear --session "$MTB" "$TID" --json)
 ok "task-clear --json drops agent B's resolved (undone) edit" "printf '%s' \"\$TC\" | jq -e '.cleared>=1 and (.ids|length>=1)' >/dev/null"
 ok "task-clear actually removed the edit from B's log"    "[ \$(cc list --session \"$MTB\" --json | jq '.edits|length') -eq 0 ]"
 TCC=$(cc task-clear --session "$MTA" --completed --json)
-ok "task-clear --completed clears the settled (all-kept) chapter" "printf '%s' \"\$TCC\" | jq -e '.cleared>=1' >/dev/null"
-ok "task-clear --completed reports the settled chapter's taskId" "printf '%s' \"\$TCC\" | jq -e --arg t \"$TID\" '[.chapters[] | select(.taskId==\$t)]|length>=1' >/dev/null"
+ok "task-clear --completed clears the settled (all-kept) task" "printf '%s' \"\$TCC\" | jq -e '.cleared>=1' >/dev/null"
+ok "task-clear --completed reports the settled task's taskId" "printf '%s' \"\$TCC\" | jq -e --arg t \"$TID\" '[.tasks[] | select(.taskId==\$t)]|length>=1' >/dev/null"
 ok "task-clear --completed removed agent A's kept edit"   "[ \$(cc list --session \"$MTA\" --json | jq '.edits|length') -eq 0 ]"
 
 echo "════════ E2E 18: 0.8.0 Observations view-model (timeline runs + reasoning + recap + next steps) ════════"
@@ -525,7 +562,7 @@ ok "feed: the session feed lists its tool calls"      "printf '%s' \"\$FEEDS\" |
 ok "feed: a capped feed reports what it dropped"      "printf '%s' \"\$(cc feed --session \"$P7\" --limit 1 --json 2>/dev/null)\" | jq -e '(.entries|length)==1 and (.truncated>=0)' >/dev/null"
 ok "feed: an unknown target is empty with a reason"   "printf '%s' \"\$(cc feed --kind agent --id nope --session \"$P7\" --json 2>/dev/null)\" | jq -e '(.entries|length)==0 and (.note|length)>0' >/dev/null"
 
-echo "════════ E2E 19: 0.8.0 demo simulator (real pipeline end-to-end, total chapters, no-residue lifecycle) ════════"
+echo "════════ E2E 19: 0.8.0 demo simulator (real pipeline end-to-end, strict task attribution, no-residue lifecycle) ════════"
 # The demo replays a scripted session through the REAL pipeline (transcript + captured edits + a
 # subagent + a workflow) in an isolated demo-* session + folder — then every 0.8.0 surface is asserted
 # against it, and the lifecycle (accept-all auto-clear, --clean) must leave zero residue.
@@ -534,11 +571,13 @@ DEMOJ=$( ( cd "$DEMOWS" && node "$CLI" demo --fast --json ) )
 DSESS=$(printf '%s' "$DEMOJ" | jq -r '.session')
 ok "demo --fast --json reports its isolated session + workspace" "printf '%s' \"\$DEMOJ\" | jq -e '(.session|test(\"^demo-[0-9a-f]{8}$\")) and .edits==5 and (.workspace|endswith(\"observatory-demo\"))' >/dev/null"
 DCM=$( ( cd "$DEMOWS" && node "$CLI" changemap --session "$DSESS" --json ) )
-ok "demo changemap: the chapter dimension is TOTAL (no null chapter)"  "printf '%s' \"\$DCM\" | jq -e '[.edits[] | select(.chapter==null or .chapter==\"\")]|length==0' >/dev/null"
-ok "demo changemap: three NAMED chapters (no synthetic needed)"        "printf '%s' \"\$DCM\" | jq -e '(.chapters|length)==3 and ([.chapters[]|select(.synthetic)]|length)==0' >/dev/null"
-ok "demo changemap: chapters carry taskId + synthetic (0.8.0 keys)"    "printf '%s' \"\$DCM\" | jq -e '.chapters[0] | has(\"taskId\") and has(\"synthetic\")' >/dev/null"
+ok "demo changemap: every edit is strictly attributed (no null taskId)" "printf '%s' \"\$DCM\" | jq -e '[.edits[] | select(.taskId==null)]|length==0' >/dev/null"
+ok "demo changemap: three strict task identities"                       "printf '%s' \"\$DCM\" | jq -e '(.tasks|length)==3 and (has(\"subtasks\")|not)' >/dev/null"
 ok "demo changemap: subagent edit attributed (rollupBySubagent)"       "printf '%s' \"\$DCM\" | jq -e '[.rollupBySubagent[] | select(.subagentId==\"demosub1\" and .edits==1)]|length==1' >/dev/null"
-ok "demo changemap: workflow slice carries its own chapter rollup"     "printf '%s' \"\$DCM\" | jq -e '.workflows[0] | .id==\"wf_demo\" and (.chapters|length>=1)' >/dev/null"
+ok "demo changemap: workflow slice rolls up its run"                    "printf '%s' \"\$DCM\" | jq -e '.workflows[0] | .id==\"wf_demo\" and (.rollup.edits>=1)' >/dev/null"
+DPR=$( ( cd "$DEMOWS" && node "$CLI" prompts --session "$DSESS" --json ) )
+ok "prompts --json lists the demo's ask with its edit ids"             "printf '%s' \"\$DPR\" | jq -e '(.prompts|length)>=1 and (.prompts[0].editIds|length)>=1' >/dev/null"
+ok "the pre-0.8.8 'requests' verb is gone, with the usage text"        "! ( cd \"\$DEMOWS\" && node \"\$CLI\" requests --session \"\$DSESS\" --json ) >/dev/null 2>&1"
 DMT=$( ( cd "$DEMOWS" && node "$CLI" multitask --session "$DSESS" --json ) )
 ok "demo multitask: the demo agent + its subagent + the workflow"      "printf '%s' \"\$DMT\" | jq -e '(.agents|length)>=1 and (.agents[0].subagents|length)==1 and (.workflows[0].id==\"wf_demo\")' >/dev/null"
 ok "demo multitask: subagent rows carry phaseConfidence (0.8.0)"       "printf '%s' \"\$DMT\" | jq -e '.agents[0].subagents[0] | has(\"phaseConfidence\")' >/dev/null"
