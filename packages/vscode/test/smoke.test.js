@@ -94,6 +94,21 @@ test('extension: three views, click commands, inline annotations, chat, status s
   const infoMessages = []; // every showInformationMessage — the first-run offer must not appear here
   const warnMessages = []; // every showWarningMessage — a refusal has to SAY why, not fail silently
   let infoPick; // what the mock reader clicks on the next showInformationMessage (undefined = dismiss)
+  /**
+   * The actions offered by a show*Message call, for BOTH of the API's overloads:
+   * `(message, ...items)` and `(message, options, ...items)`. Assuming the second argument is always an
+   * options object silently shifted every positional-items call by one — the extension has eleven of
+   * them — so the mock returned the SECOND button while the code under test believed it had the first.
+   * That is a mock that can only fail where the branch is rarely taken, which is the worst place for it.
+   */
+  const actionsOf = (rest) => {
+    const [first] = rest;
+    // An options object is an object WITHOUT a `title` — a MessageItem action has one. That is how the
+    // real API tells the two overloads apart, so the mock must too; testing only `typeof === 'object'`
+    // would swallow a MessageItem action the first time anyone used one.
+    const isOptions = first !== null && typeof first === 'object' && !('title' in first);
+    return isOptions ? rest.slice(1) : rest;
+  };
   const webviewPanels = []; // createWebviewPanel calls — the tour is a detachable panel
   let quickPick = null; // what showQuickPick should return (the tour's track chooser)
   let lensProvider = null;
@@ -200,13 +215,15 @@ test('extension: three views, click commands, inline annotations, chat, status s
       activeTextEditor: mockEditor,
       visibleTextEditors: [mockEditor],
       showTextDocument: (d) => { opened = d; lastShown = { document: d, selection: null, revealRange() {} }; return Promise.resolve(lastShown); },
-      showInformationMessage: (m, ...items) => {
+      showInformationMessage: (m, ...rest) => {
         infoMessages.push(String(m));
+        const items = actionsOf(rest);
         return Promise.resolve(items.includes(infoPick) ? infoPick : undefined);
       },
       showInputBox: () => Promise.resolve(inputBoxValue),
       showQuickPick: (items) => Promise.resolve(quickPick === null ? undefined : items[quickPick]),
-      showWarningMessage: (m, _o, ...items) => { warnMessages.push(String(m)); return Promise.resolve(items[0]); },
+      // The mock reader takes the FIRST action offered.
+      showWarningMessage: (m, ...rest) => { warnMessages.push(String(m)); return Promise.resolve(actionsOf(rest)[0]); },
       // Real since VS Code 1.67 and the extension requires ^1.85, so the mock carries it: exitDemo
       // closes the demo's editors before deleting their folder, and that has to be testable.
       tabGroups: {
@@ -1286,6 +1303,13 @@ test('extension: three views, click commands, inline annotations, chat, status s
     const flog = core.readLog(S);
     assert.equal(flog.find((r) => r.id === rF.id).status, 'kept', 'keepOpenFile accepted the active file (app.txt)');
     assert.equal(flog.find((r) => r.id === rG.id).status, 'pending', 'keepOpenFile left the other file (other.txt) untouched');
+
+    // The mock's own contract, pinned. Both overloads of show*Message must hand back the FIRST action;
+    // getting this wrong makes the code under test take a branch it never asked for, and only on the
+    // paths a local run happens not to exercise.
+    assert.equal(await vscode.window.showWarningMessage('probe', 'First', 'Second'), 'First', 'positional-items overload returns the first action');
+    assert.equal(await vscode.window.showWarningMessage('probe', { modal: true }, 'First', 'Second'), 'First', 'options-object overload returns the first action too');
+    assert.deepEqual(await vscode.window.showWarningMessage('probe', { title: 'First' }, { title: 'Second' }), { title: 'First' }, 'a MessageItem action is an action, not an options object');
 
     // --- demo mode + the guided tour (0.8.9) ---
     // Re-point the Overview's sink: the nav-position block above claimed it, and the tour's messages to
