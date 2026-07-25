@@ -263,9 +263,9 @@ function saveCursor(transcript: string, cur: UsageCursor): void {
     compactions: cur.compactions,
   };
   try {
-    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.mkdirSync(path.dirname(p), { recursive: true, mode: 0o700 });
     const tmp = `${p}.${process.pid}.tmp`; // pid-scoped: two CLI processes can't collide on the temp file
-    fs.writeFileSync(tmp, JSON.stringify(stored));
+    fs.writeFileSync(tmp, JSON.stringify(stored), { mode: 0o600 });
     fs.renameSync(tmp, p); // atomic: a concurrent reader sees old-or-new, never a torn cursor
   } catch {
     /* cache is best-effort */

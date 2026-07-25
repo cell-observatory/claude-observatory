@@ -5,7 +5,7 @@
  * editors lights up live, exactly as it would during a real session. Two jobs:
  *
  *   1. SHOWCASE — `claude-observatory demo` in an open workspace simulates a prompt to Claude and
- *      shows live changes: the Overview's chapter ribbon fills chapter by chapter, the Fleet nav
+ *      shows live changes: the Overview's change map fills task by task, the Fleet nav
  *      gains a subagent and a workflow run, Observations streams the reasoning, and Accept/Reject/
  *      task-scoped review genuinely work (the edits are real store records on real files).
  *   2. AUTOMATED TEST — `--fast` replays the whole scenario in under a second, hermetically under
@@ -224,7 +224,7 @@ export async function runDemo(opts: DemoOptions = {}): Promise<DemoResult> {
 
   // The NUMBERED task list (TaskCreate/TaskUpdate, 0.8.3) — seeded alongside the todos so the
   // Overview's Tasks tab shows live, LINKED data. Same titles as the to-dos: the merged plan dedupes
-  // (todos win), so this never mints twin chapters. Task state is written both ways a real session
+  // (todos win), so this never mints twin tasks. Task state is written both ways a real session
   // leaves it: transcript tool calls (the history + spans) AND the live task-dir files.
   const taskDir = path.join(claudeConfigDir(), 'tasks', session);
   const TASKS: { subject: string; description: string; activeForm: string }[] = [
@@ -290,7 +290,7 @@ export async function runDemo(opts: DemoOptions = {}): Promise<DemoResult> {
     result(id);
   };
 
-  // ---------- the story: a prompt, a plan, three chapters, a subagent, a workflow, a recap ----------
+  // ---------- the story: a prompt, a plan, three tasks, a subagent, a workflow, a recap ----------
 
   await beat('▸ prompt — asking Claude to extend the training pipeline');
   append({
@@ -304,7 +304,7 @@ export async function runDemo(opts: DemoOptions = {}): Promise<DemoResult> {
   append({ type: 'ai-title', aiTitle: 'Pipeline: scaling, validation, tests', timestamp: clock.iso() });
   assistant([{ type: 'text', text: 'I will plan this as three tasks: feature scaling, dataset validation, then tests and docs via a subagent and a workflow.' }]);
 
-  await beat('▸ plan — three to-dos (the Overview chapters) + the numbered task list');
+  await beat('▸ plan — three to-dos + the numbered task list');
   todos([
     { content: 'Add feature scaling to the pipeline', status: 'in_progress' },
     { content: 'Validate the training dataset', status: 'pending' },
@@ -313,7 +313,7 @@ export async function runDemo(opts: DemoOptions = {}): Promise<DemoResult> {
   taskCreateAll();
   taskUpdate(1, 'in_progress');
 
-  await beat('▸ chapter 1 — feature scaling (2 edits)');
+  await beat('▸ task 1 — feature scaling (2 edits)');
   edit(
     'src/features.py',
     'from statistics import mean, stdev\n\n\ndef summarize(values):\n    return {"count": len(values), "mean": mean(values)}\n\n\ndef scale(values):\n    mu, sigma = mean(values), stdev(values)\n    return [(v - mu) / sigma for v in values]\n',
@@ -335,7 +335,7 @@ export async function runDemo(opts: DemoOptions = {}): Promise<DemoResult> {
     result(id);
   }
 
-  await beat('▸ chapter 2 — dataset validation');
+  await beat('▸ task 2 — dataset validation');
   todos([
     { content: 'Add feature scaling to the pipeline', status: 'completed' },
     { content: 'Validate the training dataset', status: 'in_progress' },
@@ -381,7 +381,7 @@ export async function runDemo(opts: DemoOptions = {}): Promise<DemoResult> {
   });
   assistant([{ type: 'text', text: 'Picking up from the summary — tests are next.' }], { input_tokens: 900, output_tokens: 140 });
 
-  await beat('▸ chapter 3 — tests, written by a subagent');
+  await beat('▸ task 3 — tests, written by a subagent');
   todos([
     { content: 'Add feature scaling to the pipeline', status: 'completed' },
     { content: 'Validate the training dataset', status: 'completed' },
@@ -541,7 +541,7 @@ export async function runDemo(opts: DemoOptions = {}): Promise<DemoResult> {
     {
       type: 'text',
       text:
-        'Done. The pipeline now scales its features, datasets are validated before training, a subagent wrote the tests, and a workflow produced the usage docs.\n\nNext steps:\n- Review the pending edits in the Overview (try Accept on a chapter)\n- Run `python observatory-demo/tests/test_pipeline.py`\n- Remove the demo with `claude-observatory demo --clean`',
+        'Done. The pipeline now scales its features, datasets are validated before training, a subagent wrote the tests, and a workflow produced the usage docs.\n\nNext steps:\n- Review the pending edits in the Overview (try Accept on a whole prompt)\n- Run `python observatory-demo/tests/test_pipeline.py`\n- Remove the demo with `claude-observatory demo --clean`',
     },
   ]);
 

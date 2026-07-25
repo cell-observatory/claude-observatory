@@ -10,12 +10,14 @@
  * tool_result `toolUseResult` block — which conveniently also carries per-subagent metrics
  * (totalDurationMs / totalTokens / totalToolUseCount) straight from Claude Code. No model calls.
  */
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { findTranscript } from './observe';
+import { sidecarMemo } from './store';
 import { cachedByFiles } from './fscache';
 import { parseTranscriptActions, ActionRecord, ActionSummary, summarizeActions, agentPhaseDetail, Phase, PhaseConfidence, attributeEditIds, EditAttributionAuthor } from './actions';
-import { sessionTaskRows, taskChapterId, SessionTaskRow } from './tasks';
+import { sessionTaskRows, taskIdForSubject, SessionTaskRow } from './tasks';
 
 /** Spawn + result metadata for one subagent, mined from the parent transcript's Agent/Task result. */
 interface SubagentMeta {
@@ -286,6 +288,68 @@ export function parseSubagents(cwd: string, sessionId: string): SubagentInfo[] {
   return out;
 }
 
+/** What a fleet row needs to draw a subagent: identity, plan, and live phase — never its action list. */
+export interface SubagentDigest {
+  agentId: string;
+  agentType?: string;
+  description?: string;
+  todos: SubagentInfo['todos'];
+  currentTask: SubagentInfo['currentTask'];
+  phase: SubagentInfo['phase'];
+  phaseConfidence: SubagentInfo['phaseConfidence'];
+  running: boolean;
+}
+
+/**
+ * The subagent rows for the fleet, without the cost of their action lists.
+ *
+ * [parseSubagents] parses every subagent transcript in full and then attributes store edit ids across
+ * them — necessary when a caller wants the actions, and pure waste when it only wants to draw a row.
+ * A repo with dozens of siblings paid that on every refresh tick. The identity and plan of a subagent
+ * are fixed once its transcript stops changing, so they are memoized against the directory's state;
+ * the PHASE never is — it is derived from how long ago the file was last written, and a frozen copy
+ * would report a working agent as done.
+ */
+export function subagentDigests(cwd: string, sessionId: string): SubagentDigest[] {
+  const dir = findSubagentsDir(cwd, sessionId);
+  if (!dir) return [];
+  let files: string[];
+  try {
+    files = fs.readdirSync(dir).filter((f) => f.startsWith('agent-') && f.endsWith('.jsonl')).sort();
+  } catch {
+    return [];
+  }
+  const parts: string[] = [];
+  for (const f of files) {
+    try {
+      const st = fs.statSync(path.join(dir, f));
+      parts.push(`${f}:${st.mtimeMs}:${st.size}`);
+    } catch {
+      /* vanished mid-scan — its absence is part of the stamp */
+    }
+  }
+  const stamp = parts.length ? `1|${crypto.createHash('sha256').update(parts.join('|')).digest('hex').slice(0, 16)}` : '';
+  const stable = sidecarMemo(sessionId, 'subagentDigests', stamp, () =>
+    parseSubagents(cwd, sessionId).map((s) => ({
+      agentId: s.agentId,
+      agentType: s.agentType,
+      description: s.description,
+      todos: s.todos,
+      currentTask: s.currentTask,
+    }))
+  );
+  // Phase is asked of the file every time, never remembered.
+  return stable.map((s) => {
+    const { phase, confidence } = agentPhaseDetail(path.join(dir, `agent-${s.agentId}.jsonl`));
+    return {
+      ...s,
+      phase,
+      phaseConfidence: confidence,
+      running: phase === 'working' || phase === 'awaiting-input' || phase === 'awaiting-permission',
+    };
+  });
+}
+
 export interface SubagentsSummary {
   count: number;
   totalActions: number;
@@ -315,7 +379,7 @@ export function allSessionTaskRows(cwd: string, sessionId: string): SessionTaskR
       activeForm: s.running ? s.currentTask : null,
       blocks: [],
       blockedBy: [],
-      chapterId: taskChapterId(subject),
+      taskId: taskIdForSubject(subject),
     };
   });
   agents.reverse(); // newest spawn first, matching the legacy rows' newest-first order

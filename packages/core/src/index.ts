@@ -20,7 +20,7 @@ export * from './actions';
 export * from './risk';
 export * from './egress';
 export * from './processes';
-export * from './requests';
+export * from './prompts';
 export * from './feed';
 export * from './subagents';
 export * from './workflows';

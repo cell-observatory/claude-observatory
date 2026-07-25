@@ -14,7 +14,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { claudeConfigDir } from './paths';
 import { projectDir, commonDir, repoKeyForSession, firstCwdLine } from './session';
-import { readLog, isSafeSessionId } from './store';
+import { readLog, isSafeSessionId, sidecarMemo } from './store';
 import { parseTranscriptActions, agentPhaseDetail } from './actions';
 
 /** A session whose transcript mtime is within this of now is "active" (an agent is live in it). */
@@ -106,16 +106,28 @@ function buildSibling(
       distinct.push(r.file);
     }
   }
-  // Risk needs the transcript (Bash commands aren't in the store); parse it the same way the Actions
-  // view does. Repo-siblings are few, so the extra parse per refresh is acceptable.
-  let riskTotal = 0;
-  let riskHigh = 0;
-  for (const a of parseTranscriptActions(transcriptPath, { includeSidechain: false })) {
-    if (a.risk) {
-      riskTotal++;
-      if (a.risk.level === 'high') riskHigh++;
-    }
+  // Risk needs the transcript (Bash commands aren't in the store), so it is parsed the way the Actions
+  // view parses it — but ONCE per transcript state, not once per refresh. A repo with dozens of finished
+  // siblings was re-parsing every one of their transcripts on every tick, which is most of what made a
+  // refresh (and therefore a session switch) slow.
+  let stamp = '';
+  try {
+    const st = fs.statSync(transcriptPath);
+    stamp = `1|${st.mtimeMs}:${st.size}`;
+  } catch {
+    /* unreadable — compute without a cache */
   }
+  const { total: riskTotal, high: riskHigh } = sidecarMemo(id, 'risk', stamp, () => {
+    let total = 0;
+    let high = 0;
+    for (const a of parseTranscriptActions(transcriptPath, { includeSidechain: false })) {
+      if (a.risk) {
+        total++;
+        if (a.risk.level === 'high') high++;
+      }
+    }
+    return { total, high };
+  });
   const phaseDetail = agentPhaseDetail(transcriptPath);
   return {
     id,

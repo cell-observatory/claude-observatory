@@ -1,6 +1,6 @@
 /**
  * The session TASK LIST — Claude Code's newer task system (TaskCreate/TaskUpdate: numbered tasks with
- * statuses and dependencies), distinct from the older TodoWrite to-dos the chapter ribbon mines.
+ * statuses and dependencies), distinct from the older TodoWrite to-dos.
  * State lives OUTSIDE the transcript as one JSON file per task under
  * `<claudeConfigDir()>/tasks/<sessionId>/<id>.json` — this reader is the single backend for the
  * Overview's Tasks tab in both editors (zero token, no model calls, read-only).
@@ -76,7 +76,7 @@ export function readSessionTasks(sessionId: string): SessionTask[] {
 }
 
 /** One full-list snapshot of the task list at a moment — the SAME shape as changemap's TodoWrite
- *  snapshots, so tasks ride the identical span/attribution machinery (chapters, WYSIWYG review). */
+ *  snapshots, so tasks ride the identical strict-span attribution machinery. */
 export interface TaskSnap {
   ts: number;
   todos: { content: string; status: string }[];
@@ -96,17 +96,17 @@ export function digest12(s: string): string {
   return crypto.createHash('sha1').update(s).digest('hex').slice(0, 12);
 }
 
-/** The same digest changemap.taskId() computes for a chapter's content — kept in LOCKSTEP so a task
- *  row can join its chapter. Both now route through digest12(), so the hash core stays in one place.
+/** The same digest changemap.taskId() computes for a task's content — kept in LOCKSTEP so a task
+ *  row can join rollupByTask. Both route through digest12(), so the hash core stays in one place.
  *  The `.trim()` is deliberate and NOT shared: taskId() hashes the raw content, so the two ids match
  *  only for already-trimmed text; folding the trim into the core would change one hash, so it stays
  *  each function's own pre-processing. */
-export function taskChapterId(subject: string): string {
+export function taskIdForSubject(subject: string): string {
   return digest12(subject.trim());
 }
 
 /** TaskCreate/TaskUpdate events mined from the MAIN transcript → (a) full-list snapshots for the
- *  chapter span model, (b) the task history — which survives the runtime archiving completed task
+ *  strict span model, (b) the task history — which survives the runtime archiving completed task
  *  files, unlike the live dir. Memoized per (mtime,size) like todoSnaps. */
 function mineTasks(transcriptPath: string): { snaps: TaskSnap[]; history: MinedTask[] } {
   return cachedByFiles('taskMine', [transcriptPath], () => mineTasksUncached(transcriptPath));
@@ -135,7 +135,7 @@ function mineTasksUncached(transcriptPath: string): { snaps: TaskSnap[]; history
   const snap = (ts: number) => {
     const todos = [...state.values()]
       .sort((a, b) => Number(a.id) - Number(b.id))
-      // src marks the item TASK-born: its chapter carries fromTask, so ribbons leave it to the Tasks tab.
+      // src marks the item TASK-born (plan-timeline provenance).
       .map((t) => ({ content: t.subject, status: t.status, src: 'task' as const }));
     snaps.push({ ts, todos });
   };
@@ -195,16 +195,104 @@ function mineTasksUncached(transcriptPath: string): { snaps: TaskSnap[]; history
   return { snaps, history: [...state.values()].sort((a, b) => Number(a.id) - Number(b.id)) };
 }
 
-/** The task-list snapshots for the chapter span model — changemap merges these with the TodoWrite
- *  snapshots (todos win on duplicate titles) so task-planned sessions get real chapters. */
+/** The task-list snapshots for the strict span model — changemap merges these with the TodoWrite
+ *  snapshots (todos win on duplicate titles) so task-planned sessions get real per-task attribution. */
 export function taskSnaps(transcriptPath: string): TaskSnap[] {
   return mineTasks(transcriptPath).snaps;
 }
 
-/** A task enriched for the Overview's Tasks tab: [chapterId] joins it to its change-map chapter
+/** One moment at which a task number came to stand for a subject. */
+export interface TaskNaming {
+  ts: number;
+  id: string;
+  subject: string;
+}
+
+/**
+ * When each task NUMBER acquired the subject it then stood for, oldest first.
+ *
+ * A TaskUpdate names its task by display number and nothing else, so a reader that wants the task's
+ * identity has to resolve that number — and resolving it against the plan's CURRENT state lets a later
+ * rename, or a deletion, silently rewrite what an earlier moment meant. This timeline is append-only:
+ * every naming stays in it, so resolving as of a given timestamp answers what the number meant THEN.
+ */
+export function taskNamings(transcriptPath: string): TaskNaming[] {
+  return cachedByFiles('taskNamings', [transcriptPath], () => taskNamingsUncached(transcriptPath));
+}
+
+function taskNamingsUncached(transcriptPath: string): TaskNaming[] {
+  let lines: string[];
+  try {
+    lines = fs.readFileSync(transcriptPath, 'utf8').split('\n');
+  } catch {
+    return [];
+  }
+  const stamp = (v: unknown): number => {
+    if (typeof v === 'number' && isFinite(v)) return v > 1e12 ? v : v * 1000;
+    if (typeof v === 'string') {
+      const t = Date.parse(v);
+      return isNaN(t) ? 0 : t;
+    }
+    return 0;
+  };
+  const text = (c: unknown): string => {
+    if (typeof c === 'string') return c;
+    if (Array.isArray(c)) return c.map((b: any) => (b && typeof b.text === 'string' ? b.text : '')).join('\n');
+    return '';
+  };
+  const out: TaskNaming[] = [];
+  const pendingCreate = new Map<string, { ts: number; subject: string }>();
+  const known = new Map<string, string>(); // id → the subject it holds right now, to skip no-op renames
+  for (const line of lines) {
+    const t = line.trim();
+    if (!t) continue;
+    let o: any;
+    try {
+      o = JSON.parse(t);
+    } catch {
+      continue;
+    }
+    if (o.isSidechain === true) continue; // a subagent's tasks are not the main plan
+    const msg = o.message;
+    if (!msg || !Array.isArray(msg.content)) continue;
+    const ts = stamp(o.timestamp ?? o.ts);
+    for (const b of msg.content) {
+      if (!b) continue;
+      if (b.type === 'tool_use' && b.name === 'TaskCreate' && b.input && typeof b.input.subject === 'string') {
+        pendingCreate.set(String(b.id ?? ''), { ts, subject: String(b.input.subject).trim() });
+      } else if (
+        b.type === 'tool_use' &&
+        b.name === 'TaskUpdate' &&
+        b.input &&
+        b.input.taskId != null &&
+        typeof b.input.subject === 'string' &&
+        b.input.subject.trim()
+      ) {
+        // A rename: from here on the number stands for the new text, and every earlier resolution keeps
+        // pointing at the old one.
+        const id = String(b.input.taskId);
+        const subject = b.input.subject.trim();
+        if (known.get(id) !== subject) {
+          known.set(id, subject);
+          out.push({ ts, id, subject });
+        }
+      } else if (b.type === 'tool_result' && b.tool_use_id != null && pendingCreate.has(String(b.tool_use_id))) {
+        const pc = pendingCreate.get(String(b.tool_use_id))!;
+        pendingCreate.delete(String(b.tool_use_id));
+        const m = text(b.content).match(/Task #(\d+) created/);
+        if (!m) continue; // creation failed — the number never came to mean anything
+        known.set(m[1], pc.subject);
+        out.push({ ts: ts || pc.ts, id: m[1], subject: pc.subject });
+      }
+    }
+  }
+  return out.sort((a, b) => a.ts - b.ts);
+}
+
+/** A task enriched for the Overview's Tasks tab: [taskId] joins it to rollupByTask / taskEditIds
  *  (per-task edits/± and click-to-scope in the renderers). */
 export interface SessionTaskRow extends SessionTask {
-  chapterId: string;
+  taskId: string;
 }
 
 /** The Tasks-tab list: transcript HISTORY (complete — the runtime archives completed task files)
@@ -216,7 +304,7 @@ export function sessionTaskRows(cwd: string, sessionId: string): SessionTaskRow[
   for (const t of readSessionTasks(sessionId)) byId.set(t.id, t); // dir wins — it carries dependencies too
   return [...byId.values()]
     .sort((a, b) => Number(b.id) - Number(a.id)) // newest first — the current work tops the tab
-    .map((t) => ({ ...t, chapterId: taskChapterId(t.subject) }));
+    .map((t) => ({ ...t, taskId: taskIdForSubject(t.subject) }));
 }
 
 /** Counts for the tab badge ("7 done · 1 in progress") and the Observations recap. */
