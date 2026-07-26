@@ -22,6 +22,11 @@
                 factoryClass="com.cellobservatory.observatory.ui.ObservatoryToolWindowFactory"/>
     <toolWindow id="Claude Observatory Dashboards" anchor="bottom" icon="/icons/toolWindowObservatory.svg"
                 factoryClass="com.cellobservatory.observatory.ui.ObservatoryDashboardsFactory"/>
+    <!-- The guided tour's window. Declared (not registered at runtime, which invokes an override-only
+         platform API) and unavailable until a tour runs — see TourToolWindowFactory. -->
+    <toolWindow id="Claude Observatory Tour" anchor="right" canCloseContents="false"
+                icon="/icons/toolWindowObservatory.svg"
+                factoryClass="com.cellobservatory.observatory.ui.tour.TourToolWindowFactory"/>
     <statusBarWidgetFactory id="claudeObservatoryStatus" order="first"
                             implementation="com.cellobservatory.observatory.ui.ObservatoryStatusBarWidgetFactory"/>
     <statusBarWidgetFactory id="claudeObservatoryActions" order="after claudeObservatoryStatus"

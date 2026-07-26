@@ -58,8 +58,10 @@ function emitJson(v: unknown): void {
 function getSessionId(args: string[]): string {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const i = args.indexOf('--session');
+  const given = flagValue(args, '--session');
   let id: string | null = null;
-  if (i >= 0 && args[i + 1]) id = args[i + 1];
+  if (i >= 0 && !given) fail('`--session` requires a session id');
+  if (given) id = given;
   else if (process.env.CLAUDE_OBSERVATORY_SESSION) id = process.env.CLAUDE_OBSERVATORY_SESSION;
   else if (process.env.CLAUDE_CHANGES_SESSION) id = process.env.CLAUDE_CHANGES_SESSION; // legacy name
   else id = core.resolveSessionId(process.cwd());
@@ -202,7 +204,7 @@ function cmdStatus(args: string[] = []): void {
       hookScript,
       session,
       store: session ? core.storeDir(session) : null,
-      lastCaptureTs: log.length ? Math.max(...log.map((r) => r.ts)) : null,
+      lastCaptureTs: log.length ? core.maxOf(log.map((r) => r.ts)) : null,
       counts: session
         ? { total: log.length, pending: by('pending'), kept: by('kept'), undone: by('undone') }
         : null,
@@ -223,7 +225,7 @@ function cmdStatus(args: string[] = []): void {
     process.stdout.write(`active session:  ${c.dim('none for ' + process.cwd())}\n`);
     return;
   }
-  const last = log.length ? core.relTime(Math.max(...log.map((r) => r.ts))) : 'never';
+  const last = log.length ? core.relTime(core.maxOf(log.map((r) => r.ts))) : 'never';
   process.stdout.write(
     `active session:  ${session}\n` +
       `store:           ${core.storeDir(session)}\n` +
@@ -345,10 +347,9 @@ function cmdList(args: string[]): void {
         : null;
   if (only) log = log.filter((r) => r.status === only);
   const fi = args.indexOf('--file');
-  if (fi >= 0 && args[fi + 1]) {
-    const sub = args[fi + 1];
-    log = log.filter((r) => r.file.includes(sub));
-  }
+  const sub = flagValue(args, '--file');
+  if (fi >= 0 && !sub) fail('`list --file <substr>` requires a value');
+  if (sub) log = log.filter((r) => r.file.includes(sub));
 
   if (args.includes('--json')) {
     emitJson({
@@ -574,6 +575,30 @@ function cmdFootprint(args: string[]): void {
     c.dim('`footprint` was folded into `risk` and `egress` in 0.8.7 — reads that left the workspace are\n' +
       'reported by `egress`, writes that left it by `risk`. Showing both.\n\n')
   );
+  // `--json` has to stay ONE document. Running both verbs straight through emitted two concatenated
+  // objects, so every caller's JSON.parse threw ("Unexpected non-whitespace character after JSON").
+  if (args.includes('--json')) {
+    const grab = (run: () => void): unknown => {
+      const real = process.stdout.write.bind(process.stdout);
+      let buf = '';
+      (process.stdout as unknown as { write: (s: string) => boolean }).write = (chunk: string) => {
+        buf += chunk;
+        return true;
+      };
+      try {
+        run();
+      } finally {
+        (process.stdout as unknown as { write: typeof real }).write = real;
+      }
+      try {
+        return JSON.parse(buf);
+      } catch {
+        return null;
+      }
+    };
+    emitJson({ risk: grab(() => cmdRisk(args)), egress: grab(() => cmdEgress(args)) });
+    return;
+  }
   cmdRisk(args);
   process.stdout.write('\n');
   cmdEgress(args);
@@ -876,25 +901,6 @@ function cmdSiblings(args: string[]): void {
   }
 }
 
-/** Bucket a set of timestamps into a fixed-width activity sparkline (counts per bin, span-normalized). */
-function activityBins(tsList: number[], bins = 20): number[] {
-  const out = new Array(bins).fill(0);
-  const ts = tsList.filter((t) => t > 0);
-  if (ts.length === 0) return out;
-  const min = Math.min(...ts);
-  const max = Math.max(...ts);
-  if (max === min) {
-    out[bins - 1] = ts.length; // all at one instant → a single trailing spike, not a divide-by-zero
-    return out;
-  }
-  const span = max - min;
-  for (const t of ts) {
-    let i = Math.floor(((t - min) / span) * bins);
-    if (i >= bins) i = bins - 1;
-    out[i]++;
-  }
-  return out;
-}
 
 /** `multitask` (§4) — the multi-agent bottom-panel view: one row per running agent across every
  *  worktree of this repo (live phase, sparkline, ±lines, risk), its nested subagents (phase + current
@@ -904,7 +910,7 @@ function cmdMultitask(args: string[]): void {
   const core = require('@claude-observatory/core') as Core;
   const session = getSessionId(args);
   const ri = args.indexOf('--root'); // repo-scoped: honor --root like changemap/tree (editors point it at the workspace)
-  const cwd = ri >= 0 && args[ri + 1] ? args[ri + 1] : process.cwd();
+  const cwd = flagValue(args, '--root') ?? process.cwd();
   const siblings = core.listRepoSiblings(cwd, session);
   const fleet = core.summarizeFleet(siblings);
   const collisions = core.fleetConflicts(siblings); // live conflicts: a file pending in 2+ both-active siblings
@@ -1050,10 +1056,55 @@ function cmdMetrics(args: string[]): void {
   if (m.spanMs) process.stdout.write(`  span          ${c.dim(fmtDur(m.spanMs))}\n`);
 }
 
-/** The value following a `--flag`, or undefined when the flag is absent / has no value. */
+/**
+ * The value following a `--flag`, or undefined when the flag is absent OR was given without one.
+ *
+ * A following token that itself starts with `--` is NOT a value. Without that rule every caller here
+ * silently acted on a flag name: `locate --file --json` resolved `<cwd>/--json` as the path to place
+ * edits in, `list --file --json` filtered for files containing "--json" and reported an empty result,
+ * and `clean --session --json` operated on a session literally named `--json` — which passes
+ * `isSafeSessionId`, since `-` is in its character class. Returning undefined lets each caller fail
+ * loudly instead of acting on the wrong thing.
+ */
 function flagValue(args: string[], name: string): string | undefined {
   const i = args.indexOf(name);
-  return i >= 0 && args[i + 1] ? args[i + 1] : undefined;
+  if (i < 0) return undefined;
+  const v = args[i + 1];
+  return v !== undefined && !v.startsWith('--') ? v : undefined;
+}
+
+/** Flags that consume the token after them — so a numeric VALUE is never read as a positional id. */
+const VALUE_FLAGS = new Set(['--session', '--file', '--under', '--ids', '--root', '--filter', '--dir']);
+
+/**
+ * The positional edit id if one was typed, else undefined — requireId's scan without the failure.
+ *
+ * Used to REFUSE a scoped verb that also names an id. `keep`/`undo`/`redo` take the scope branch
+ * (`--all` / `--file` / `--under` / `--ids`) before `requireId` is ever reached, so the id was silently
+ * discarded: `undo --file src 2` reverted every pending edit under `src`, wrote them all to disk, and
+ * exited 0 reporting `{"undone":2}`. Asking for one edit must never revert a whole scope.
+ */
+function positionalId(args: string[]): number | undefined {
+  for (let i = 0; i < args.length; i++) {
+    if (VALUE_FLAGS.has(args[i])) {
+      i++; // skip the flag's VALUE
+      continue;
+    }
+    if (args[i].startsWith('--')) continue;
+    if (/^\d+$/.test(args[i])) return Number(args[i]);
+  }
+  return undefined;
+}
+
+/** Refuse a scope-wide verb that also names a single edit — the two mean different things. */
+function refuseScopeWithId(args: string[], verb: string): void {
+  const id = positionalId(args);
+  if (id === undefined) return;
+  fail(
+    `\`${verb}\` was given both a scope flag and edit id ${id}, which mean different things.\n` +
+      `  For just that edit:   claude-observatory ${verb} ${id}\n` +
+      `  For the whole scope:  drop the id and re-run.`
+  );
 }
 
 function requireId(args: string[]): number {
@@ -1113,9 +1164,10 @@ function cmdKeep(args: string[]): void {
   const fi = args.indexOf('--file');
   const ui = args.indexOf('--under');
   if (args.includes('--all') || fi >= 0 || ui >= 0) {
-    const fileSub = fi >= 0 ? args[fi + 1] : undefined;
+    refuseScopeWithId(args, "keep");
+    const fileSub = flagValue(args, "--file");
     if (fi >= 0 && !fileSub) fail('`keep --file <substr>` requires a value');
-    const under = ui >= 0 ? args[ui + 1] : undefined;
+    const under = flagValue(args, "--under");
     if (ui >= 0 && !under) fail('`keep --under <path>` requires a value');
     const targets = core
       .readLog(session)
@@ -1149,6 +1201,18 @@ function cmdKeep(args: string[]): void {
     emitJson({ kept: g.kept, ids: g.ids });
     return;
   }
+  if (g.kept === 0) {
+    // keepGroup flips only PENDING edits, so nothing happened — never a green ✓ over a no-op. Mirrors
+    // the scope branch's "no pending edits to keep" above; the --json path already reported kept: 0.
+    process.stdout.write(
+      c.dim(
+        rec.status === 'undone'
+          ? `edit #${id} is reverted — nothing kept (\`redo ${id}\` to restore it first)\n`
+          : `edit #${id} is already kept — nothing to do\n`
+      )
+    );
+    return;
+  }
   const label = g.kept > 1 ? `${g.kept} edits for this change` : `edit #${id}`;
   process.stdout.write(c.green('✓ ') + `kept ${label} (${relFile(rec.file)})\n`);
 }
@@ -1166,9 +1230,10 @@ function cmdUndo(args: string[]): void {
   const ui = args.indexOf('--under');
   const idi = args.indexOf('--ids');
   if (args.includes('--all') || fi >= 0 || ui >= 0 || idi >= 0) {
-    const fileSub = fi >= 0 ? args[fi + 1] : undefined;
+    refuseScopeWithId(args, "undo");
+    const fileSub = flagValue(args, "--file");
     if (fi >= 0 && !fileSub) fail('`undo --file <substr>` requires a value');
-    const under = ui >= 0 ? args[ui + 1] : undefined;
+    const under = flagValue(args, "--under");
     if (ui >= 0 && !under) fail('`undo --under <path>` requires a value');
     let ids: number[] | undefined;
     if (idi >= 0) {
@@ -1225,9 +1290,10 @@ function cmdRedo(args: string[]): void {
   const ui = args.indexOf('--under');
   const idi = args.indexOf('--ids');
   if (args.includes('--all') || fi >= 0 || ui >= 0 || idi >= 0) {
-    const fileSub = fi >= 0 ? args[fi + 1] : undefined;
+    refuseScopeWithId(args, "redo");
+    const fileSub = flagValue(args, "--file");
     if (fi >= 0 && !fileSub) fail('`redo --file <substr>` requires a value');
-    const under = ui >= 0 ? args[ui + 1] : undefined;
+    const under = flagValue(args, "--under");
     if (ui >= 0 && !under) fail('`redo --under <path>` requires a value');
     let bulkIds: number[] | undefined;
     if (idi >= 0) {
@@ -1271,17 +1337,39 @@ function cmdRedo(args: string[]): void {
 
 /** Resolve the taskId argument: `--task <id>`, else the first positional (skipping flags + the
  *  --session value). A taskId is a content-hash slug (§2.1), never a path — no traversal to guard. */
-function requireTaskId(args: string[]): string {
+function requireTaskId(args: string[], session: string): string {
   const flag = flagValue(args, '--task');
-  if (flag) return flag;
+  const found = flag || pickTaskIdArg(args);
+  if (!found) {
+    // `tasklog` unions taskIds across worktrees and subagents, so an id it lists may belong to a
+    // SIBLING session and have no strict span here. `changemap.tasks[]` is the per-session source.
+    fail('expected a taskId, e.g. `claude-observatory task-keep <taskId>` (ids: `changemap` tasks[] / rollupByTask)');
+  }
+  // A taskId this session never had is a MISTAKE, not an empty result. keepTask/undoTask answer both
+  // with a bare zero, so `task-keep <garbage>` printed a green "kept 0 edit(s)" and exited 0 — the
+  // caller could not tell a typo from a task that simply had nothing pending. (no-silent-fail)
+  const core = require('@claude-observatory/core') as Core;
+  const known = core.sessionTaskIds(process.cwd(), session);
+  if (!known.includes(found)) {
+    fail(
+      `no task ${found} in session ${session}.\n` +
+        (known.length
+          ? `  This session's task ids: ${known.join(', ')}`
+          : '  This session has no tasks (nothing ever entered in_progress).')
+    );
+  }
+  return found;
+}
+
+function pickTaskIdArg(args: string[]): string | undefined {
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === '--session') {
-      i++; // skip the session VALUE
+    if (VALUE_FLAGS.has(args[i])) {
+      i++; // skip the flag's VALUE
       continue;
     }
     if (!args[i].startsWith('--')) return args[i];
   }
-  fail('expected a taskId, e.g. `claude-observatory task-keep <taskId>` (ids: `changemap` rollupByTask / `tasklog`)');
+  return undefined;
 }
 
 /** `task-keep` (§6) — mark every PENDING edit in a task's STRICT in_progress span kept. Honest by
@@ -1290,7 +1378,7 @@ function requireTaskId(args: string[]): string {
 function cmdTaskKeep(args: string[]): void {
   const core = require('@claude-observatory/core') as Core;
   const session = getSessionId(args);
-  const taskId = requireTaskId(args);
+  const taskId = requireTaskId(args, session);
   const res = core.keepTask(process.cwd(), session, taskId);
   core.autoClearDemo(session); // a fully reviewed demo session leaves no residue
   if (args.includes('--json')) {
@@ -1310,7 +1398,7 @@ function cmdTaskKeep(args: string[]): void {
 function cmdTaskUndo(args: string[]): void {
   const core = require('@claude-observatory/core') as Core;
   const session = getSessionId(args);
-  const taskId = requireTaskId(args);
+  const taskId = requireTaskId(args, session);
   const res = core.undoTask(process.cwd(), session, taskId);
   core.autoClearDemo(session); // a fully reviewed demo session leaves no residue
   if (args.includes('--json')) {
@@ -1354,7 +1442,7 @@ function cmdTaskClear(args: string[]): void {
     );
     return;
   }
-  const taskId = requireTaskId(args);
+  const taskId = requireTaskId(args, session);
   const res = core.clearResolvedIds(session, core.taskEditIds(process.cwd(), session, taskId));
   if (json) {
     emitJson({ cleared: res.cleared, ids: res.ids });
@@ -1496,7 +1584,7 @@ function cmdClean(args: string[]): void {
   // a file/folder (the editors' folder/file Clear action).
   if (args.includes('--resolved')) {
     const ui = args.indexOf('--under');
-    const under = ui >= 0 ? args[ui + 1] : undefined;
+    const under = flagValue(args, "--under");
     if (ui >= 0 && !under) fail('`clean --resolved --under <path>` requires a value');
     // --ids <a,b,c> clears an EXPLICIT edit set — the scope a prompt names, which no path can express
     // (one ask edits many folders). Same resolver both editors use, so neither invents its own scope.
@@ -1569,7 +1657,11 @@ function cmdClean(args: string[]): void {
   // reclaim stub-session husks — dirs with no log that hold only Bash-walk snapshots. Iterates the
   // store root directly: listSessions skips log-less dirs, which made stubs unreclaimable.
   const si = args.indexOf('--session');
-  const only = si >= 0 ? args[si + 1] : undefined;
+  const only = flagValue(args, '--session');
+  // A missing value used to widen the scope from ONE session to the whole store — and this verb's sink
+  // is pruneEmptySession → removeSession → recursive rm. Scope-widening on a typo is not a default.
+  if (si >= 0 && !only) fail('`clean --session <id>` requires a session id');
+  if (only && !core.isSafeSessionId(only)) fail(`invalid session id: ${JSON.stringify(only)}`);
   const targets = only ? [only] : core.allStoreSessionIds();
   let removed = 0;
   let bytes = 0;
@@ -1693,7 +1785,7 @@ function cmdLocate(args: string[]): void {
   const fs = require('fs');
   const session = getSessionId(args);
   const fi = args.indexOf('--file');
-  const file = fi >= 0 ? args[fi + 1] : undefined;
+  const file = flagValue(args, '--file');
   if (!file) fail('`locate --file <path>` is required (current buffer text on stdin)');
   const abs = path.resolve(file);
   let current: string;
@@ -1702,14 +1794,18 @@ function cmdLocate(args: string[]): void {
   } catch {
     fail('locate reads the current buffer on stdin, e.g. `claude-observatory locate --file f.ts < f.ts`');
   }
-  const placements = core
-    .readLog(session)
-    .filter((r) => r.status === 'pending' && r.file === abs)
-    .map((r) => {
-      const before = r.beforeBlob ? core.readBlob(session, r.beforeBlob).toString('utf8') : '';
-      const after = r.afterBlob ? core.readBlob(session, r.afterBlob).toString('utf8') : '';
-      return { id: r.id, lines: core.locateEditInCurrent(before, after, current) };
-    });
+  // readLog is chronological and .filter keeps that order — which is what lets locateEditsInCurrent
+  // compose one-edit-wide hops instead of re-aligning the whole buffer once per edit.
+  const recs = core.readLog(session).filter((r) => r.status === 'pending' && r.file === abs);
+  const blob = (sha: string | null): string => (sha ? core.readBlob(session, sha).toString('utf8') : '');
+  const placed = core.locateEditsInCurrent(
+    recs.length,
+    (i) => ({ before: blob(recs[i].beforeBlob), after: blob(recs[i].afterBlob) }),
+    current
+  );
+  // `removed` rides along for free now that one pass computes both — JetBrains renders no deletion
+  // ghost text today only because this payload never carried it.
+  const placements = recs.map((r, i) => ({ id: r.id, lines: placed[i].lines, removed: placed[i].removed }));
   emitJson({ file: abs, placements });
 }
 
@@ -1718,9 +1814,10 @@ function cmdTree(args: string[]): void {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const session = getSessionId(args);
   const ri = args.indexOf('--root');
-  const root = ri >= 0 && args[ri + 1] ? args[ri + 1] : process.cwd();
+  const root = flagValue(args, '--root') ?? process.cwd();
   const fi = args.indexOf('--filter');
-  const filter = fi >= 0 ? args[fi + 1] : undefined;
+  const filter = flagValue(args, '--filter');
+  if (args.indexOf('--filter') >= 0 && !filter) fail('`tree --filter <substr>` requires a value');
   emitJson(core.buildEditTree(session, { root, filter }));
 }
 
@@ -1729,65 +1826,98 @@ function cmdTree(args: string[]): void {
  *  spans) + `rollupByTask`/`rollupBySubagent`; this adds `rollupByAgent`, an `agents[]` array of a
  *  per-sibling change-map for every worktree of this repo (aggregated HERE — renderers stay thin), and
  *  the explicit `unassigned` task bucket (§3/§5). */
+/**
+ * Several read-only views in ONE process.
+ *
+ * The JetBrains plugin is a thin renderer with no way to call core in-process the way the VS Code
+ * extension does, so it spawned one CLI per view — eight of them, every three-second tick. Two costs
+ * follow, and only the first is obvious:
+ *   · ~70 ms of node start-up per spawn before any work at all — measured, and paid eight times over;
+ *   · every process re-derives the SAME transcript and log parses from cold, because core's memoization
+ *     (`cachedByFiles`) dies with the process that holds it.
+ * Run together they share those parses, which is the larger of the two savings.
+ *
+ * Each view is produced by CALLING ITS OWN COMMAND and capturing what it writes, so a batched payload is
+ * byte-identical to the single-command one by construction — there is no second implementation to drift.
+ * A view that fails is `null` rather than fatal: one unbuildable section must not cost the reader the
+ * other seven, and `fail()`'s `process.exit` is caught for the same reason.
+ */
+function cmdViews(args: string[]): void {
+  const vi = args.indexOf('--views');
+  const DEFAULT = 'changemap,multitask,prompts,processes,sessions,observations,risk,egress';
+  if (vi >= 0 && !flagValue(args, '--views')) fail('`views --views <a,b,c>` requires a comma-separated list');
+  const names = (flagValue(args, '--views') ?? DEFAULT)
+    .split(',')
+    .map((n) => n.trim())
+    .filter(Boolean);
+  // Drop OUR selector, and only ours. `indexOf` returns -1 when `--views` is absent, and filtering on
+  // `i !== vi + 1` then quietly removes argument ZERO — which is `--session`. Every view resolved the
+  // newest session for the cwd instead of the one asked for, and the payloads looked plausible while
+  // describing the wrong session entirely.
+  const rest = vi >= 0 ? args.filter((_, i) => i !== vi && i !== vi + 1) : args;
+  const viewArgs = rest.includes('--json') ? rest : [...rest, '--json'];
+  const out: Record<string, unknown> = {};
+  const realWrite = process.stdout.write.bind(process.stdout);
+  const realExit = process.exit.bind(process);
+  for (const name of names) {
+    let buf = '';
+    (process.stdout as unknown as { write: (s: string) => boolean }).write = (chunk: string) => {
+      buf += chunk;
+      return true;
+    };
+    (process as unknown as { exit: (code?: number) => never }).exit = ((code?: number) => {
+      throw new Error(`view ${name} exited ${code ?? 0}`);
+    }) as (code?: number) => never;
+    try {
+      runView(name, viewArgs);
+      out[name] = buf ? JSON.parse(buf) : null;
+    } catch {
+      out[name] = null;
+    } finally {
+      (process.stdout as unknown as { write: typeof realWrite }).write = realWrite;
+      (process as unknown as { exit: typeof realExit }).exit = realExit;
+    }
+  }
+  emitJson(out);
+}
+
+/** The views `views` may batch. An allow-list on purpose: nothing that MUTATES belongs in a poll. */
+function runView(name: string, args: string[]): void {
+  switch (name) {
+    case 'changemap':
+      return cmdChangeMap(args);
+    case 'multitask':
+      return cmdMultitask(args);
+    case 'prompts':
+      return cmdPrompts(args);
+    case 'processes':
+      return cmdProcesses(args);
+    case 'sessions':
+      return cmdSessions(args);
+    case 'observations':
+      return cmdObservations(args);
+    case 'risk':
+      return cmdRisk(args);
+    case 'egress':
+      return cmdEgress(args);
+    case 'stats':
+      return cmdStats(args);
+    default:
+      throw new Error(`unknown view ${name}`);
+  }
+}
+
 function cmdChangeMap(args: string[]): void {
   const core = require('@claude-observatory/core') as Core;
   const session = getSessionId(args);
   const ri = args.indexOf('--root');
-  const root = ri >= 0 && args[ri + 1] ? args[ri + 1] : process.cwd();
-  const cwd = process.cwd();
-  // `prompts: true` — the per-ask slices the Prompts window scopes everything by. Only the ACTIVE
-  // session builds them: they cost one more transcript pass, and no ask typed into this window scopes a
-  // sibling worktree's map (the sibling builds below deliberately leave the flag off).
-  // Cached on disk against the transcript + log stamps: this command runs in a fresh process every
-  // refresh tick, and rebuilding an unchanged session's map cost seconds of transcript parsing.
-  const base = core.cachedChangeMap(cwd, session, { root, prompts: true });
-  // One full change-map per worktree-sibling (the Overview per-agent tabs, §5). listRepoSiblings
-  // includes self; when this cwd has no resolvable repo (no .git) it returns [] → degrade to just self.
-  // Each entry carries a top-level session/worktree/gitBranch/phase so the per-agent-tab renderer has a
-  // stable identity key without digging into summary.session. The SELF entry reuses `base` instead of
-  // rebuilding the whole map a second time — half the work for the common single-agent case.
-  const sibs = core.listRepoSiblings(cwd, session);
-  // Project each sibling slice down to what the renderers actually read. The full per-sibling `edits`
-  // array was 1.95 MB of the 3.30 MB payload — re-emitted, re-parsed and re-posted every refresh while
-  // NOTHING consumed it (VS Code's detailSlice reads summary/files/modules/
-  // compactions/rollupByTask; JetBrains' ChangeMapAgent has no edits field at all). Dropping a shipped
-  // field is against the "add fields, don't rename or remove" contract, so it is called out in the
-  // changelog — the active session's own top-level `edits` is untouched, which is what tools read.
-  const agents = (sibs.length ? sibs : [{ id: session, worktree: cwd, gitBranch: null, phase: null }]).map((sib) => ({
-    ...(sib.id === session && sib.worktree === cwd && root === cwd
-      ? base
-      : // A finished sibling's map is memoized on disk (keyed by its transcript + log stamps), so a
-        // repo with dozens of past sessions doesn't re-derive all of them on every Overview refresh.
-        core.siblingChangeMap(sib.worktree, sib.id, { root: sib.worktree })),
-    session: sib.id,
-    worktree: sib.worktree,
-    gitBranch: sib.gitBranch ?? null,
-    phase: (sib as { phase?: string | null }).phase ?? null,
-    lastMs: (sib as { lastMs?: number }).lastMs ?? 0, // transcript mtime — drives the tab order
-  }))
-    // Most-recently-active agent's tab FIRST (reverse chronological); the active session sorts to the front.
-    .sort((a, b) => b.lastMs - a.lastMs);
-  // Explicit unassigned bucket — the current session's `taskId: null` TaskRoll (edits in no strict
-  // interval), surfaced directly so a renderer never has to dig it out of rollupByTask.
-  const unassigned =
-    base.rollupByTask.find((r) => r.taskId === null) ??
-    { taskId: null, edits: 0, added: 0, removed: 0, pending: 0, kept: 0, undone: 0 };
-  // Project each sibling slice down to what the renderers actually read before emitting. The full
-  // per-sibling `edits` array was 1.95 MB of a 3.30 MB payload — re-emitted, re-parsed and re-posted on
-  // every refresh while NOTHING consumed it (VS Code's detailSlice reads summary/files/
-  // modules/compactions/rollupByTask; JetBrains' ChangeMapAgent has no `edits` field at all).
-  // Dropping a shipped field is against the "add fields, don't remove them" contract, so the changelog
-  // says so. The rollup above still sees the full maps, and the ACTIVE session's own top-level `edits`
-  // is untouched — that is the one tools actually read.
-  // `prompts` goes the same way as `edits`: the SELF entry is the very `base` object emitted at the
-  // top level, so leaving it here would serialize every per-ask slice twice in one payload. Siblings
-  // never carry any (the flag is off for their builds), so this only ever drops the duplicate.
-  const slimAgents = agents.map((a) => {
-    const { edits: _dropped, prompts: _asks, ...rest } = a as typeof a & { edits?: unknown; prompts?: unknown };
-    return rest;
-  });
-  emitJson({ ...base, rollupByAgent: core.rollupByAgent(agents), agents: slimAgents, unassigned });
+  const root = flagValue(args, '--root') ?? process.cwd();
+  // The composition lives in core (`overviewChangeMap`) so the VS Code extension — which bundles core
+  // and calls it in-process everywhere else — can have this payload WITHOUT spawning a node process for
+  // it. Two copies of fifty lines of sibling projection is how the front-ends stop agreeing.
+  emitJson(core.overviewChangeMap(process.cwd(), session, { root }));
 }
+
 
 /** `chat-context` (§2.6/§7) — the zero-token chat handoff: assemble a ready-to-paste prompt about one
  *  action (`--tool-use-id`)/edit (`--edit`)/subagent (`--agent`)/task (`--task`), built in core (the
@@ -1858,7 +1988,7 @@ function cmdObservations(args: string[]): void {
   const core = require('@claude-observatory/core') as Core;
   const session = getSessionId(args);
   const ri = args.indexOf('--root'); // display-relative paths (editors point it at the workspace)
-  const root = ri >= 0 && args[ri + 1] ? args[ri + 1] : process.cwd();
+  const root = flagValue(args, '--root') ?? process.cwd();
   emitJson(core.buildObservations(process.cwd(), session, { root }));
 }
 
@@ -2541,10 +2671,13 @@ function usage(): void {
       `  metrics [--json]     session numbers: ±lines, action/error counts, subagent duration/tokens, tool latency\n` +
       `  diff <id>            show before/after for an edit\n` +
       `  keep <id>            mark an edit kept; bulk: --all | --file <substr> | --under <path>\n` +
+      `                       an id and a bulk flag are mutually exclusive (they mean different things)\n` +
       `  undo <id> [--force]  surgically undo an edit (--force = per-file restore);\n` +
       `                       bulk (pending only): --all | --file <substr> | --under <path> | --ids <a,b,c>\n` +
+      `                       an id and a bulk flag are mutually exclusive\n` +
       `  redo <id> [--force]  re-apply an undone edit;\n` +
       `                       bulk (undone only): --all | --file <substr> | --under <path> | --ids <a,b,c>\n` +
+      `                       an id and a bulk flag are mutually exclusive\n` +
       `  task-keep <taskId>   keep every pending edit in a task's strict in-progress span (--json)\n` +
       `  task-undo <taskId>   revert every pending edit in a task's strict in-progress span (--json)\n` +
       `  task-clear <taskId>  drop a task's resolved (kept/undone) edits (--json);\n` +
@@ -2570,6 +2703,12 @@ function usage(): void {
       `  blob <sha>           raw blob bytes to stdout\n` +
       `  tree [--root <d>] [--filter <q>]   folder→file→class→edit view-model as JSON (both editors)\n` +
       `  changemap [--root <d>]             session change-map (edits + per-file/per-folder rollups + per-agent slices) as JSON\n` +
+      `  views [--views <a,b,c>] [--root <d>]\n` +
+      `                       run several READ-ONLY views in ONE process and emit {name: payload} —\n` +
+      `                       each is byte-identical to its own command. Default set: changemap,\n` +
+      `                       multitask, prompts, processes, sessions, observations, risk, egress.\n` +
+      `                       A view that fails is null rather than fatal to the batch; a mutating\n` +
+      `                       verb is refused. The JetBrains plugin drives its whole refresh through it.\n` +
       `  chat-context [--tool-use-id <id> | --edit <n> | --agent <id> | --task <id>]\n` +
       `                       assemble a zero-token, ready-to-paste chat prompt about an action/edit/subagent/task\n` +
       `  locate --file <f>    per-pending-edit line indices in the live buffer (text on stdin; JSON out)\n` +
@@ -2819,6 +2958,9 @@ function main(): void {
       break;
     case 'tree':
       cmdTree(rest);
+      break;
+    case 'views':
+      cmdViews(rest);
       break;
     case 'changemap':
       cmdChangeMap(rest);

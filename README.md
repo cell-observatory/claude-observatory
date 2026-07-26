@@ -112,7 +112,7 @@ Observatory** view in your editor (or run `claude-observatory list`) to review.
 **Try it without Claude** — the same scenario is clickable in the browser on the
 **[interactive demo](https://cell-observatory.github.io/claude-observatory/demo.html)** page, nothing to
 install. In your editor, run **Start Demo Mode** from the VS Code command palette or JetBrains Find Action, use
-the buttons at the end of the Edits panel's toolbar or the Overview's nav bar, or click **Try the demo** in an empty panel. It replays a scripted
+the buttons at the end of the Overview's nav bar, or click **Try the demo** in an empty panel. It replays a scripted
 session through the real pipeline in an isolated `demo-*` session and an `observatory-demo/` folder it
 creates in the current directory, then walks you through every panel. In the terminal the same replay is
 `claude-observatory demo`, and `claude-observatory demo --tour` prints the tour as prose. Starting it
@@ -356,6 +356,7 @@ claude-observatory multitask       # real-time multi-agent view: every running a
 claude-observatory tasklog         # cross-agent task log: one row per stable taskId, unioned across worktrees + subagents, zero-token; --json
 claude-observatory chat-context    # zero-token, ready-to-paste chat prompt about an action/edit/subagent/task (--tool-use-id | --edit | --agent | --task); --json
 claude-observatory changemap       # the Overview view-model: per-file/per-folder churn rollups (per task/subagent/workflow/agent), zero-token; --json
+claude-observatory views           # several read-only views in ONE process: {name: payload}, each byte-identical to its own command; --views a,b,c to pick. A failed view is null, never fatal to the batch; mutating verbs are refused
 claude-observatory metrics         # session rollup: per-edit diff stats · action/error counts · per-subagent duration/tokens · tool latency (median/p95/max); --json
 claude-observatory summary         # per-session review recap (kept/reverted per file); --markdown to export
 claude-observatory clean           # GC orphaned blobs; --resolved [--under <path> | --ids <a,b,c>] | --drop <id> | --older-than 30d | --all
@@ -504,6 +505,15 @@ Built to add **zero overhead** to your Claude sessions:
   allocation, which no longer parses the whole log) from 2.1 ms to 0.3 ms. On this project's own store of 37
   sessions, the listing the session picker opens with fell from 717 ms to 4 ms (1 ms once each session's
   title sidecar is warm), with the caveat that it now returns only this workspace's sessions.
+- **A refresh is one process, and edits are placed by composing the chain (0.8.9)** — the JetBrains
+  plugin's whole tick now goes through `views`, which runs the eight read-only views in a single spawn
+  instead of one each, and VS Code gets the Overview's three heavy payloads from one `views` spawn
+  rather than three. It stays a spawn on purpose: building the change map in-process was tried and
+  reverted after it was measured blocking the extension host for 2.8 s on a large session, where a
+  spawn blocks nothing. Placing an edit in the live buffer no longer re-aligns the whole file once per
+  edit: consecutive snapshots are one edit apart, so the hops compose backwards from the buffer —
+  6.3× faster on an 800-line file with 30 pending edits at 3 changed lines each, 39.4× at 15, 71.9× at
+  40, with identical placements, and a 5,000-line / 500-edit file holds +171 MB instead of +665 MB.
 
 ## Packages
 

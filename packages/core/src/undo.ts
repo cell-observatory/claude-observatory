@@ -393,9 +393,19 @@ export interface GroupResult extends UndoResult {
   ids: number[]; // the member edit ids acted on
 }
 
-/** Keep every edit in the review group containing `id`. */
+/**
+ * Keep every PENDING edit in the review group containing `id`.
+ *
+ * Only pending ones, exactly as [keepTask] does and for the same reason: keeping an already-undone edit
+ * asserts a change that is not on disk. `keep 1` on a reverted edit used to report `{"kept":1}` and flip
+ * the ledger to 'kept' while the file still held the reverted content — and since that also marks the
+ * edit RESOLVED, `clearResolved` would then drop it and the revert could never be redone.
+ */
 export function keepGroup(sessionId: string, id: number): { kept: number; ids: number[] } {
-  const ids = groupMembers(sessionId, id);
+  const members = new Set(groupMembers(sessionId, id));
+  const ids = readLog(sessionId)
+    .filter((r) => members.has(r.id) && r.status === 'pending')
+    .map((r) => r.id);
   setStatusMany(sessionId, ids, 'kept'); // one parse + one append, whatever the group's size
   return { kept: ids.length, ids };
 }

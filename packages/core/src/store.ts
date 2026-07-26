@@ -67,6 +67,17 @@ export interface StagingRecord {
   file: string;
   tool: string;
   beforeBlob: string | null;
+  /**
+   * The after-snapshot, once PostToolUse has written it but BEFORE it has appended the record.
+   *
+   * In that window the blob is referenced by nothing: not the log (no record yet) and not the staging
+   * record (which only knew the before side). A maintenance pass in between — `clean`, or the GC that
+   * `clearResolved`/`clearResolvedIds` run — collected it, and the append then wrote a record pointing
+   * at a blob that no longer existed: `lineDelta` silently reported the edit as a pure deletion and
+   * `undo` threw ENOENT. Publishing it here first makes gcSessionCore treat it as live, exactly as it
+   * already does for `beforeBlob`. Absent until PostToolUse gets that far.
+   */
+  afterBlob?: string | null;
 }
 
 export function rootDir(): string {
@@ -421,6 +432,41 @@ export function appendSkip(sessionId: string, file: string, reason: string): voi
   );
 }
 
+/**
+ * The raw control-op lines a log rewrite must CARRY OVER, verbatim and in order.
+ *
+ * `clearResolved`/`clearResolvedIds` rebuild the log from `readLog`, which returns edit records only —
+ * every `op` line is dropped on the floor. That silently erased the session's `skip` markers, the one
+ * record that a real edit went uncaptured (the whole point of SkipOp: surface the gap instead of
+ * swallowing it). A scoped clear of one folder erased skips for unrelated files too.
+ *
+ * 'status' ops are deliberately NOT carried: they are already folded into the records being rewritten,
+ * so re-emitting them would grow the log without changing what it means. Anything else — skips, and any
+ * op type added later — survives, which is the safe default for a rewrite that cannot know what it is
+ * discarding.
+ */
+function retainedOpLines(sessionId: string): string[] {
+  const p = logPath(sessionId);
+  let raw: string;
+  try {
+    raw = fs.readFileSync(p, 'utf8');
+  } catch {
+    return [];
+  }
+  const out: string[] = [];
+  for (const line of raw.split('\n')) {
+    const t = line.trim();
+    if (!t) continue;
+    try {
+      const o = JSON.parse(t);
+      if (o && o.op && o.op !== 'status') out.push(t);
+    } catch {
+      /* torn line — not a record we can vouch for */
+    }
+  }
+  return out;
+}
+
 /** The 'skip' markers in a session's log (dropped, untracked changes). */
 export function readSkips(sessionId: string): SkipOp[] {
   const p = logPath(sessionId);
@@ -653,7 +699,10 @@ function gcSessionCore(sessionId: string): { removed: number; bytes: number } {
     } else if (name.endsWith('.json')) {
       try {
         const rec = JSON.parse(fs.readFileSync(path.join(sdir, name), 'utf8')) as StagingRecord;
+        // BOTH sides: the after-blob is published here by PostToolUse before it appends the record,
+        // and is otherwise unreferenced for that whole window (see StagingRecord.afterBlob).
         if (rec && rec.beforeBlob) referenced.add(rec.beforeBlob);
+        if (rec && rec.afterBlob) referenced.add(rec.afterBlob);
       } catch {
         /* unparseable staging record — ignore */
       }
@@ -771,8 +820,10 @@ export function clearResolved(sessionId: string, under?: string): number {
     const removed = log.length - keep.length;
     if (removed === 0) return 0;
     const lp = logPath(sessionId);
-    const tmp = lp + '.tmp';
-    fs.writeFileSync(tmp, keep.length ? keep.map((r) => JSON.stringify(r)).join('\n') + '\n' : '', { mode: 0o600 });
+    const tmp = `${lp}.${process.pid}.tmp`; // pid-scoped: two rewrites can't share a temp file
+    // Op lines FIRST so the tail stays all-records for nextId's bounded tail read.
+    const lines = [...retainedOpLines(sessionId), ...keep.map((r) => JSON.stringify(r))];
+    fs.writeFileSync(tmp, lines.length ? lines.join('\n') + '\n' : '', { mode: 0o600 });
     fs.renameSync(tmp, lp);
     gcSessionCore(sessionId); // reclaim blobs referenced only by the removed edits (already locked)
     return removed;
@@ -794,8 +845,10 @@ export function clearResolvedIds(sessionId: string, ids: number[]): { cleared: n
     const drop = new Set(dropped);
     const keep = log.filter((r) => !drop.has(r.id));
     const lp = logPath(sessionId);
-    const tmp = lp + '.tmp';
-    fs.writeFileSync(tmp, keep.length ? keep.map((r) => JSON.stringify(r)).join('\n') + '\n' : '', { mode: 0o600 });
+    const tmp = `${lp}.${process.pid}.tmp`; // pid-scoped: two rewrites can't share a temp file
+    // Op lines FIRST so the tail stays all-records for nextId's bounded tail read.
+    const lines = [...retainedOpLines(sessionId), ...keep.map((r) => JSON.stringify(r))];
+    fs.writeFileSync(tmp, lines.length ? lines.join('\n') + '\n' : '', { mode: 0o600 });
     fs.renameSync(tmp, lp);
     gcSessionCore(sessionId); // reclaim blobs referenced only by the removed edits (already locked)
     return { cleared: dropped.length, ids: dropped };

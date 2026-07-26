@@ -40,6 +40,11 @@ class ObservatorySettings : PersistentStateComponent<ObservatorySettings.State> 
         // panel hide, a project reopen, and an IDE restart — a filter that silently resets is a filter the
         // reader has to re-check every time.
         var overviewActiveOnly: Boolean = true
+        /** Which of the bottom dock's side panes are shown. The Overview is always shown — it is the
+         *  reason the window exists — but Prompts and Stats are columns that squeeze it on a short dock,
+         *  so each can be folded away and comes back where you left it. */
+        var dashShowPrompts: Boolean = true
+        var dashShowStats: Boolean = true
         // Where the Overview's master/detail divider sits, as the master's share of the panel — one value
         // per layout, because a good nav WIDTH side by side is not a good nav HEIGHT stacked. Persisted for
         // the same reason the toggle above is: a divider that resets is one the reader re-drags every time.

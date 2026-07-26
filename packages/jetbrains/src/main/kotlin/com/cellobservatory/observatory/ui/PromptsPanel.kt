@@ -142,7 +142,8 @@ class PromptsPanel(private val project: Project) : JPanel(BorderLayout()) {
     private fun toolbar(): Component {
         val group = DefaultActionGroup().apply {
             add(object : AnAction("Clear Scope", "Clear the prompt scope — the Overview goes back to the whole session", AllIcons.Actions.Cancel) {
-                override fun getActionUpdateThread() = ActionUpdateThread.EDT
+                // Reads one service field; no UI state. EDT here cost a hop per toolbar expansion.
+                override fun getActionUpdateThread() = ActionUpdateThread.BGT
                 override fun update(e: AnActionEvent) {
                     e.presentation.isEnabled = service().selectedPromptId != null
                 }

@@ -173,7 +173,11 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
     // --- nav-bar state (mirrors the VS Code helpers) ---
 
     private fun session(): String? = service.currentSession()
-    private fun activeFilePath(): String? = FileEditorManager.getInstance(project).selectedFiles.firstOrNull()?.path
+    // Read from the tracker, never from FileEditorManager: this is called from action `update()`, which
+    // the platform runs on a background thread, and reaching for the manager there is what forced every
+    // one of these actions onto the EDT. See ActiveFileTracker.
+    private fun activeFilePath(): String? =
+        com.cellobservatory.observatory.services.ActiveFileTracker.getInstance(project).activePath()
     private fun sessionHasPending(): Boolean = service.counts().pending > 0
     private fun pendingFiles(): List<String> = service.log().filter { it.pending }.map { it.file }.distinct().sorted()
     private fun pendingInActiveFile(): List<EditRecord> {
@@ -252,7 +256,7 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
     /** An icon toolbar button, shown only when [visible] (drives the two tiers). */
     private fun iconAct(text: String, icon: Icon, visible: () -> Boolean, run: () -> Unit): AnAction =
         object : AnAction(text, text, icon), DumbAware {
-            override fun getActionUpdateThread() = ActionUpdateThread.EDT // reads the active editor
+            override fun getActionUpdateThread() = ActionUpdateThread.BGT // nothing here touches the EDT
             override fun update(e: AnActionEvent) { e.presentation.isVisible = visible() }
             override fun actionPerformed(e: AnActionEvent) = run()
         }
@@ -261,7 +265,7 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
      *  title bar — VS Code labels these buttons); the long [description] is the tooltip on both hosts. */
     private fun labelAct(showText: Boolean, text: String, description: String, icon: Icon, visible: () -> Boolean, run: () -> Unit): AnAction =
         object : AnAction(text, description, icon), DumbAware {
-            override fun getActionUpdateThread() = ActionUpdateThread.EDT // reads the active editor
+            override fun getActionUpdateThread() = ActionUpdateThread.BGT // nothing here touches the EDT
             @Suppress("OVERRIDE_DEPRECATION") // displayTextInToolbar: still honored; renders the short label
             override fun displayTextInToolbar() = showText
             override fun update(e: AnActionEvent) { e.presentation.isVisible = visible() }
@@ -273,7 +277,7 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
      *  title there rather than inline — VS Code parity). */
     private fun textAct(dynamicText: () -> String?, dynamicTip: (() -> String?)? = null, run: () -> Unit): AnAction =
         object : AnAction(), DumbAware {
-            override fun getActionUpdateThread() = ActionUpdateThread.EDT // reads the active editor
+            override fun getActionUpdateThread() = ActionUpdateThread.BGT // nothing here touches the EDT
             @Suppress("OVERRIDE_DEPRECATION") // displayTextInToolbar: still honored; renders the counter text
             override fun displayTextInToolbar() = true // force the counter text to render in the toolbar
             override fun update(e: AnActionEvent) {

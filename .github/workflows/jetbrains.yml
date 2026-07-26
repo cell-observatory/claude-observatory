@@ -2,6 +2,15 @@ name: JetBrains
 
 # Gradle test + buildPlugin so the plugin's build health carries its own README badge and the
 # installable zip is downloadable per-commit.
+#
+# `test` now boots a HEADLESS IDE (see src/test/.../platform/) and asserts the things only a running
+# IDE reveals — toolbar target components, action update() contracts, and the guided tour driven step by
+# step. Those tests need the `claude-observatory` CLI on PATH, so the CLI is built and linked first;
+# without it they skip, and a check that silently tests nothing is worse than no check.
+#
+# `verifyPlugin` is the JetBrains Plugin Verifier against the compile baseline AND a newer IDE. The
+# plugin declares no untilBuild, so it loads into IDEs it was never compiled against — an API that
+# changed signature is a runtime error the compiler and the tests both pass straight over.
 on:
   push:
     branches: [main]
@@ -22,8 +31,22 @@ jobs:
           distribution: temurin
           java-version: 21
       - uses: gradle/actions/setup-gradle@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # The headless-IDE tests drive the REAL CLI, so put it on PATH.
+      - run: npm ci && npm run build && npm link -w claude-observatory
+      - run: claude-observatory --version
       - run: ./gradlew test buildPlugin --console=plain
         working-directory: packages/jetbrains
+      - name: Plugin Verifier (binary compatibility across IDE versions)
+        run: ./gradlew verifyPlugin --console=plain
+        working-directory: packages/jetbrains
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-verifier-reports
+          path: packages/jetbrains/build/reports/pluginVerifier/**
       - uses: actions/upload-artifact@v4
         with:
           name: claude-observatory-jetbrains

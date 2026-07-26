@@ -72,6 +72,80 @@ object ObservatoryCli {
         return cmd
     }
 
+    /**
+     * How long a heavy read may take before we give up on it.
+     *
+     * The change map and the multitask view rebuild every SIBLING session in the repo — 36 of them here —
+     * and a first, uncached build was measured at 33 s. The old 30 s budget killed it just before it
+     * finished, so the on-disk cache it would have written never got written, and the next tick started
+     * the same 33 s of work again: two node processes at a full core each, forever, and a panel that
+     * never rendered. Letting the cold build finish once is what makes every later one ~0.1 s.
+     */
+    const val HEAVY_TIMEOUT_MS = 180_000
+
+    /**
+     * One spawn for the whole refresh tick.
+     *
+     * The panels ask for eight views — changemap, multitask, prompts, processes, sessions, observations,
+     * risk, egress — and each used to be its own CLI process. Two costs came with that, and only the
+     * first is obvious: ~70 ms of node start-up per spawn before any work at all, paid eight times; and
+     * every process re-deriving the SAME transcript and log parses from cold, because core's memo dies
+     * with the process that held it. Measured warm on a real store: 2.66 s across eight spawns against
+     * 1.38 s for one batched call.
+     *
+     * The batch is a cache, not a schedule: whichever view asks first pays for it and the other seven
+     * read the same result. The window is just under the panels' own 3 s throttle, so a tick shares one
+     * spawn and the next tick gets fresh data. An older CLI on PATH has no `views` command; that is
+     * detected once and every view falls back to spawning for itself, exactly as before.
+     */
+    private object ViewBatch {
+        private const val WINDOW_MS = 2_500L
+        private val lock = Any()
+        // One entry PER (session, workspace). This object is a singleton shared by every open project, so
+        // a single slot would let two projects evict each other on every call — each view then missing,
+        // spawning for itself AND re-spawning the batch: strictly worse than not batching at all.
+        private val entries = LinkedHashMap<String, Pair<Long, Map<String, String?>>>()
+        private const val MAX_ENTRIES = 8
+        /** Set once if this CLI predates `views`; from then on every caller spawns for itself. */
+        @Volatile private var unsupported = false
+
+        fun view(name: String, session: String?, workDir: String?): String? {
+            if (unsupported) return null
+            val k = "${session.orEmpty()}\u0000${workDir.orEmpty()}"
+            synchronized(lock) {
+                val now = System.currentTimeMillis()
+                val hit = entries[k]
+                if (hit != null && now - hit.first <= WINDOW_MS) return hit.second[name]
+                val fresh = fetch(session, workDir)
+                entries[k] = now to fresh
+                if (entries.size > MAX_ENTRIES) entries.remove(entries.keys.first())
+                return fresh[name]
+            }
+        }
+
+        private fun fetch(session: String?, workDir: String?): Map<String, String?> {
+            val args = buildList {
+                add("views"); add("--json")
+                session?.takeIf { it.isNotBlank() }?.let { add("--session"); add(it) }
+                workDir?.let { add("--root"); add(it) }
+            }
+            val r = run(args, workDir, timeoutMs = HEAVY_TIMEOUT_MS)
+            if (r.exitCode != 0 || r.stdout.isBlank()) {
+                // An older CLI answers "unknown command". Stop asking rather than paying for a failed
+                // spawn on every tick forever.
+                unsupported = true
+                return emptyMap()
+            }
+            return try {
+                val obj = com.google.gson.JsonParser.parseString(r.stdout).asJsonObject
+                obj.entrySet().associate { (k, v) -> k to if (v.isJsonNull) null else v.toString() }
+            } catch (_: Exception) {
+                unsupported = true
+                emptyMap()
+            }
+        }
+    }
+
     fun run(args: List<String>, workDir: String? = null, stdin: String? = null, timeoutMs: Int = 30_000): CliResult {
         val cmd = commandLine(args, workDir)
         return try {
@@ -242,6 +316,10 @@ object ObservatoryCli {
 
     /** `sessions --json` — every store session incl. its human-readable title (0.8.6), for the chooser. */
     fun sessionsJson(workDir: String?, reviewing: String? = null): String? {
+        // Only ride the batch on the POLLING path, which always names the session under review. The
+        // Switch-Session picker passes none, and building the other seven views — including the change
+        // map — to answer a one-off list would cost more than the list is worth.
+        if (reviewing != null) ViewBatch.view("sessions", reviewing, workDir)?.let { return it }
         // --session names the session being reviewed, so a pinned conversation that has made no edits
         // yet is still listed rather than looking like another workspace's.
         val args = buildList {
@@ -279,6 +357,7 @@ object ObservatoryCli {
     /** The Observations view-model (0.8.0, Timeline folded in): recap + coalesced same-file ×N runs with
      *  per-edit reasoning + next-steps. Always JSON; both editors render this payload thin. */
     fun observationsJson(session: String, workDir: String?): String? {
+        ViewBatch.view("observations", session, workDir)?.let { return it }
         val args = buildList {
             add("observations"); add("--session"); add(session)
             workDir?.let { add("--root"); add(it) }
@@ -346,12 +425,13 @@ object ObservatoryCli {
      *  touched. Every number (churn, status precedence, module labels) is computed by core — this
      *  plugin only renders the result, exactly like the VS Code webview. */
     fun changemapJson(session: String, workDir: String?): String? {
+        ViewBatch.view("changemap", session, workDir)?.let { return it }
         val args = buildList {
             add("changemap"); add("--session"); add(session)
             workDir?.let { add("--root"); add(it) }
             add("--json")
         }
-        val r = run(args, workDir)
+        val r = run(args, workDir, timeoutMs = HEAVY_TIMEOUT_MS)
         return if (r.ok) r.stdout else null
     }
 
@@ -363,12 +443,13 @@ object ObservatoryCli {
      *  session-scoped sections (actions, tasks). Without it the CLI re-resolves the newest session for
      *  the cwd, so after Switch Session every one of those still described the session you left. */
     fun multitaskJson(session: String?, workDir: String?): String? {
+        ViewBatch.view("multitask", session, workDir)?.let { return it }
         val args = buildList {
             add("multitask"); add("--json")
             session?.takeIf { it.isNotBlank() }?.let { add("--session"); add(it) }
             workDir?.let { add("--root"); add(it) }
         }
-        val r = run(args, workDir)
+        val r = run(args, workDir, timeoutMs = HEAVY_TIMEOUT_MS)
         return if (r.ok) r.stdout else null
     }
 
@@ -376,6 +457,7 @@ object ObservatoryCli {
      *  workspace. `--root` is the boundary "outside" is measured against; without it the CLI falls back
      *  to its own cwd, which is not the project root whenever the IDE was launched from elsewhere. */
     fun riskJson(session: String, workDir: String?): String? {
+        ViewBatch.view("risk", session, workDir)?.let { return it }
         val args = buildList {
             add("risk"); add("--session"); add(session)
             workDir?.let { add("--root"); add(it) }
@@ -389,6 +471,7 @@ object ObservatoryCli {
      *  and (0.8.7) the files it READ from outside the workspace. Only this verb carries those `file`
      *  channels; the `multitask --json` egress sub-report predates the fold and would omit them. */
     fun egressJson(session: String, workDir: String?): String? {
+        ViewBatch.view("egress", session, workDir)?.let { return it }
         val args = buildList {
             add("egress"); add("--session"); add(session)
             workDir?.let { add("--root"); add(it) }
@@ -403,6 +486,7 @@ object ObservatoryCli {
      *  never records one, and guessing it from local processes breaks the moment the agent runs over
      *  SSH or in a container. */
     fun processesJson(session: String, workDir: String?): String? {
+        ViewBatch.view("processes", session, workDir)?.let { return it }
         val r = run(listOf("processes", "--session", session, "--json"), workDir)
         return if (r.ok) r.stdout else null
     }
@@ -411,6 +495,7 @@ object ObservatoryCli {
      *  subagents, workflow runs and background shells it produced. Work is attributed to the prompt that
      *  STARTED it (core's rule), so nothing here re-attributes by completion. */
     fun promptsJson(session: String, workDir: String?): String? {
+        ViewBatch.view("prompts", session, workDir)?.let { return it }
         val r = run(listOf("prompts", "--session", session, "--json"), workDir)
         return if (r.ok) r.stdout else null
     }

@@ -673,14 +673,24 @@ async function openFileAtEdit(node: EditNode): Promise<void> {
   const editor = await vscode.window.showTextDocument(doc);
   const session = currentSession();
   if (!session) return;
-  const before = rec.beforeBlob ? core.readBlob(session, rec.beforeBlob).toString('utf8') : '';
-  const after = rec.afterBlob ? core.readBlob(session, rec.afterBlob).toString('utf8') : '';
-  // Prefer the added/changed lines; for a pure deletion (none) fall back to its deletion anchor so the
-  // cursor still lands on the ghost text (mirrors anchorLines used by the decorations/CodeLens/hover).
-  const lines = core.locateEditInCurrent(before, after, doc.getText());
-  const targets = lines.length
-    ? lines
-    : core.locateDeletionsInCurrent(before, after, doc.getText()).map((d) => d.anchor);
+  // Take the placement the OVERLAY is already using, so the cursor lands where the decoration is. The
+  // overlay composes the file's whole edit chain; placing this one edit on its own re-anchors it
+  // directly against the buffer, which can pick a different line — and did, leaving the cursor on a
+  // line that carries no lens (and JetBrains, which navigates through `locate`, on a third answer).
+  // Prefer the added/changed lines; a pure deletion falls back to its ghost-text anchor (anchorLines).
+  const placed = cachedPlacements(session, doc).find((p) => p.rec.id === rec.id);
+  let targets: number[];
+  if (placed) {
+    targets = anchorLines(placed);
+  } else {
+    // Resolved (kept/undone) edits aren't in the pending overlay — place this one on its own.
+    const before = rec.beforeBlob ? core.readBlob(session, rec.beforeBlob).toString('utf8') : '';
+    const after = rec.afterBlob ? core.readBlob(session, rec.afterBlob).toString('utf8') : '';
+    const lines = core.locateEditInCurrent(before, after, doc.getText());
+    targets = lines.length
+      ? lines
+      : core.locateDeletionsInCurrent(before, after, doc.getText()).map((d) => d.anchor);
+  }
   if (targets.length) {
     const pos = new vscode.Position(Math.min(targets[0], Math.max(0, doc.lineCount - 1)), 0);
     editor.selection = new vscode.Selection(pos, pos);
@@ -1244,17 +1254,17 @@ function pendingByFile(session: string): Map<string, core.EditRecord[]> {
 
 /** Every still-PENDING edit for `file`, with the current line indices it occupies. */
 function placementsFor(session: string, file: string, text: string): Placement[] {
-  const out: Placement[] = [];
-  for (const rec of pendingByFile(session).get(file) ?? []) {
-    const before = cachedBlob(session, rec.beforeBlob);
-    const after = cachedBlob(session, rec.afterBlob);
-    out.push({
-      rec,
-      lines: core.locateEditInCurrent(before, after, text),
-      removed: core.locateDeletionsInCurrent(before, after, text),
-    });
-  }
-  return out;
+  // One composed pass over the file's whole edit chain, not two whole-buffer alignments per edit —
+  // this runs on every keystroke burst. `pendingByFile` preserves log (chronological) order, which is
+  // what keeps each hop one edit wide. Same core call the CLI `locate` verb makes, so both editors
+  // place edits identically.
+  const recs = pendingByFile(session).get(file) ?? [];
+  const placed = core.locateEditsInCurrent(
+    recs.length,
+    (i) => ({ before: cachedBlob(session, recs[i].beforeBlob), after: cachedBlob(session, recs[i].afterBlob) }),
+    text
+  );
+  return recs.map((rec, i) => ({ rec, lines: placed[i].lines, removed: placed[i].removed }));
 }
 
 /** placementsFor memoized per (buffer content, log state) — decorations, CodeLens, and hovers all ask
@@ -2652,32 +2662,36 @@ function changeMapShell(): string {
     // TWO rows, rendered bottom-up via .ov-toolbar{flex-direction:column-reverse} (user swap 2026-07-17):
     // this DOM-first row (the diff · file · folder · prompt AXES) shows on the BOTTOM; the DOM-second row
     // (session · bulk · export | search · active · spotlight · refresh controls) shows on TOP.
+    // ICONS ONLY on this row. Each axis already names itself in its own n/m counter — "File 3/126",
+    // "Folder 1/23" — so "Accept File" beside it restated the axis the reader is already looking at, and
+    // between them the labels took most of the bar. Tooltips carry the verb. The row above KEEPS its
+    // labels: those act on the whole session and are destructive, with no axis counter to say so.
     `<div class="ov-tbrow" id="ov-axesrow">` + // id: the guided tour rings this row for its "four axes" step
     // Diff axis + the per-edit pair it steps: n/m counters post to the existing nav commands.
     `<span class="ov-navgrp">` +
     `<button class="ov-nb" id="ov-diffprev" title="Previous edit in this file"><i class="codicon codicon-chevron-up"></i></button>` +
     `<span class="ov-nc" id="ov-diffcount">Diff –/–</span>` +
     `<button class="ov-nb" id="ov-diffnext" title="Next edit in this file"><i class="codicon codicon-chevron-down"></i></button>` +
-    `<button class="ov-nb" id="ov-navkeep" title="Keep this edit"><i class="codicon codicon-check"></i> Keep</button>` +
-    `<button class="ov-nb" id="ov-navundo" title="Undo this edit"><i class="codicon codicon-discard"></i> Undo</button>` +
-    `<button class="ov-nb" id="ov-chatedit" title="Chat about this edit — copies its context, opens your Claude"><i class="codicon codicon-comment-discussion"></i> Chat</button>` +
-    `<button class="ov-nb" id="ov-viewdiff" title="View this edit's diff — before / after"><i class="codicon codicon-diff"></i> View diff</button>` +
+    `<button class="ov-nb" id="ov-navkeep" title="Keep this edit"><i class="codicon codicon-check"></i></button>` +
+    `<button class="ov-nb" id="ov-navundo" title="Undo this edit"><i class="codicon codicon-discard"></i></button>` +
+    `<button class="ov-nb" id="ov-chatedit" title="Chat about this edit — copies its context, opens your Claude"><i class="codicon codicon-comment-discussion"></i></button>` +
+    `<button class="ov-nb" id="ov-viewdiff" title="View this edit's diff — before / after"><i class="codicon codicon-diff"></i></button>` +
     `</span><span class="ov-nbsep"></span>` +
     // File axis + the per-file pair it steps.
     `<span class="ov-navgrp">` +
     `<button class="ov-nb" id="ov-fileprev" title="Previous changed file"><i class="codicon codicon-chevron-left"></i></button>` +
     `<span class="ov-nc" id="ov-filecount">File –/–</span>` +
     `<button class="ov-nb" id="ov-filenext" title="Next changed file"><i class="codicon codicon-chevron-right"></i></button>` +
-    `<button class="ov-nb" id="ov-acceptfile" title="Accept every pending edit in this file"><i class="codicon codicon-check-all"></i> Accept File</button>` +
-    `<button class="ov-nb" id="ov-rejectfile" title="Reject (revert) every pending edit in this file"><i class="codicon codicon-close-all"></i> Reject File</button>` +
+    `<button class="ov-nb" id="ov-acceptfile" title="Accept every pending edit in this file"><i class="codicon codicon-check-all"></i></button>` +
+    `<button class="ov-nb" id="ov-rejectfile" title="Reject (revert) every pending edit in this file"><i class="codicon codicon-close-all"></i></button>` +
     `</span><span class="ov-nbsep"></span>` +
     // Folder axis — step BETWEEN changed folders (the change-map's strip tiles); act on the whole bucket.
     `<span class="ov-navgrp">` +
     `<button class="ov-nb" id="ov-folderprev" title="Previous changed folder"><i class="codicon codicon-chevron-left"></i></button>` +
     `<span class="ov-nc" id="ov-foldercount">Folder –/–</span>` +
     `<button class="ov-nb" id="ov-foldernext" title="Next changed folder"><i class="codicon codicon-chevron-right"></i></button>` +
-    `<button class="ov-nb" id="ov-acceptfolder" title="Accept every pending edit in this folder"><i class="codicon codicon-check-all"></i> Accept Folder</button>` +
-    `<button class="ov-nb" id="ov-rejectfolder" title="Reject (revert) every pending edit in this folder"><i class="codicon codicon-close-all"></i> Reject Folder</button>` +
+    `<button class="ov-nb" id="ov-acceptfolder" title="Accept every pending edit in this folder"><i class="codicon codicon-check-all"></i></button>` +
+    `<button class="ov-nb" id="ov-rejectfolder" title="Reject (revert) every pending edit in this folder"><i class="codicon codicon-close-all"></i></button>` +
     `</span><span class="ov-nbsep"></span>` +
     // Prompt axis — the LAST axis, and the only one that slices the work the way the PERSON asked for it
     // rather than the way the agent organized it. Steps between your own asks; acts on everything one ask
@@ -2687,9 +2701,9 @@ function changeMapShell(): string {
     `<button class="ov-nb" id="ov-promptprev" title="Previous prompt — the ask before this one that still has edits to review"><i class="codicon codicon-chevron-left"></i></button>` +
     `<span class="ov-nc" id="ov-promptcount" title="the prompt (your own ask) that produced the current edit">Prompt –/–</span>` +
     `<button class="ov-nb" id="ov-promptnext" title="Next prompt — the next ask that still has edits to review"><i class="codicon codicon-chevron-right"></i></button>` +
-    `<button class="ov-nb" id="ov-reviewprompt" title="Review this prompt — step through the edits this ask produced, in order"><i class="codicon codicon-list-ordered"></i> Review</button>` +
-    `<button class="ov-nb" id="ov-acceptprompt" title="Accept every pending edit this prompt produced"><i class="codicon codicon-checklist"></i> Accept Prompt</button>` +
-    `<button class="ov-nb" id="ov-rejectprompt" title="Reject (revert) every pending edit this prompt produced"><i class="codicon codicon-history"></i> Reject Prompt</button>` +
+    `<button class="ov-nb" id="ov-reviewprompt" title="Review this prompt — step through the edits this ask produced, in order"><i class="codicon codicon-list-ordered"></i></button>` +
+    `<button class="ov-nb" id="ov-acceptprompt" title="Accept every pending edit this prompt produced"><i class="codicon codicon-checklist"></i></button>` +
+    `<button class="ov-nb" id="ov-rejectprompt" title="Reject (revert) every pending edit this prompt produced"><i class="codicon codicon-history"></i></button>` +
     `</span>` +
     `</div>` + // end ROW 1 (the diff · file · folder · prompt axes)
     // ROW 2 — split: the SESSION axis (selector + session-wide bulk) pinned LEFT; view controls (Search ·
@@ -3768,27 +3782,46 @@ class ChangeMapViewProvider implements vscode.WebviewViewProvider {
       // The bar names the session under review; the listing already carries every session's title, so
       // this costs a lookup rather than another transcript scan.
       const sessionTitle = sessions?.sessions.find((r) => r.id === session)?.title ?? undefined;
-      this.view?.webview.postMessage({ type: 'overview', cm, mt, pr, sessions, session, sessionTitle, pinned, prompt: this.promptId, navPos: this.navPos, filter: editFilter });
+      // Send everything EXCEPT the per-edit array. It is 0.72 MB of a 2.45 MB payload — 30% — and this
+      // webview never reads it: every `.edits` in the Overview script is a scalar rollup count, and
+      // `CM.edits` appears nowhere. It still leaves the CLI, because tools and the other front-ends do
+      // read it; it just stops crossing postMessage to a renderer that throws it away.
+      const cmLean = cm ? { ...cm, edits: [] } : cm;
+      this.view?.webview.postMessage({ type: 'overview', cm: cmLean, mt, pr, sessions, session, sessionTitle, pinned, prompt: this.promptId, navPos: this.navPos, filter: editFilter });
     };
-    // changemap --json: the right-detail change-map (+ per-agent / per-workflow slices).
-    this.spawnJson(['changemap', '--json', '--root', cwd, '--session', session], cwd, (data) => {
-      const d = data as (core.ChangeMap & { agents?: unknown[] }) | null;
-      cm = d && d.summary && Array.isArray(d.edits) && Array.isArray(d.files) && Array.isArray(d.modules) && Array.isArray(d.agents) ? d : null;
-      done();
-    });
-    // multitask --json: the left-nav Fleet/Workflows payload (live phase, sparkline, tokens/time, risk).
-    this.spawnJson(['multitask', '--json', '--root', cwd, '--session', session], cwd, (data) => {
-      const d = data as { agents?: unknown[]; collisions?: unknown[] } | null;
-      mt = d && Array.isArray(d.agents) && Array.isArray(d.collisions) ? d : null;
-      done();
-    });
-    // processes --json: the Processes tab (background shells left running). An older CLI on PATH has no
-    // such command, which lands here as null — that HIDES the tab; it must never break the panel.
-    this.spawnJson(['processes', '--json', '--session', session], cwd, (data) => {
-      const d = data as { processes?: unknown[]; summary?: unknown } | null;
-      pr = d && Array.isArray(d.processes) && d.summary ? d : null;
-      done();
-    });
+    // ONE spawn for the three heavy views, and it stays a SPAWN on purpose.
+    //
+    // These were three separate `changemap` / `multitask` / `processes` processes per tick — measured at
+    // 3.5 s of CPU and ~1.4 GB transient RSS, roughly six times a minute while Claude works. I briefly
+    // moved the change map in-process instead, since core is already bundled here. That was wrong, and
+    // ARCHITECTURE.md says why in the line that justifies the seam: the transcript-wide scans are
+    // spawned "so a multi-gigabyte parse never runs on the UI thread". Measured after the fact, an
+    // in-process build blocked the extension host for 2.8 s on the worst session in this workspace, and
+    // ~700 ms on EVERY tick for the active one — whose cache invalidates each time its transcript grows.
+    // A spawn costs more total CPU and blocks nothing; that is the trade this seam exists to make.
+    //
+    // `views` gets all three from ONE process, which is the part that was actually wasteful: three node
+    // start-ups, and three separate re-derivations of the same transcript parse that core memoizes
+    // per-process. Each view is produced by its own command inside that process, so the payloads are
+    // identical to asking for them separately (pinned by §E2E 20).
+    this.spawnJson(
+      ['views', '--views', 'changemap,multitask,processes', '--json', '--root', cwd, '--session', session],
+      cwd,
+      (data) => {
+        const all = data as { changemap?: unknown; multitask?: unknown; processes?: unknown } | null;
+        const d = (all?.changemap ?? null) as (core.ChangeMap & { agents?: unknown[] }) | null;
+        cm = d && d.summary && Array.isArray(d.edits) && Array.isArray(d.files) && Array.isArray(d.modules) && Array.isArray(d.agents) ? d : null;
+        const m = (all?.multitask ?? null) as { agents?: unknown[]; collisions?: unknown[] } | null;
+        mt = m && Array.isArray(m.agents) && Array.isArray(m.collisions) ? m : null;
+        // An older CLI has no `processes`; that lands here as null, which HIDES the tab rather than
+        // breaking the panel.
+        const q = (all?.processes ?? null) as { processes?: unknown[]; summary?: unknown } | null;
+        pr = q && Array.isArray(q.processes) && q.summary ? q : null;
+        done();
+        done();
+        done();
+      }
+    );
     // (No `prompts --json` spawn here since 0.8.7: the Prompts WINDOW fetches the list itself, and the
     // per-ask slices this panel filters by ride the changemap payload it already asks for.)
     // The feed rides THIS tick — no second timer. A finished ('audit') feed is fetched once and then
@@ -6155,7 +6188,11 @@ export function activate(context: vscode.ExtensionContext): void {
           async (progress, token) => {
             // Paint on a timer rather than from the `log` callback: a beat NARRATES before it writes, so
             // refreshing from the callback would always paint one beat behind what is being announced.
-            const paint = setInterval(() => refreshAll(true), 500);
+            // …but not faster than a refresh COMPLETES. At 500 ms with `force`, every tick landed while
+            // the previous spawn was still running, which sets `rerun` and re-fires on completion — a
+            // continuous back-to-back spawn chain for the whole replay, during the one feature whose
+            // whole job is to look effortless. A spawn was measured at 1.25–1.35 s.
+            const paint = setInterval(() => refreshAll(true), 1500);
             try {
               return await core.runDemo({
                 cwd: root,
@@ -6789,9 +6826,12 @@ function offerDemo(context: vscode.ExtensionContext, run: () => void, standDown:
 
   // Install vs update: a brand-new install has an empty globalState, which a version key alone cannot
   // tell from an upgrade — so look for any key a previous version would have written.
+  // NOT `promptsRevealed.0.8.8`: activation writes that key unconditionally, several lines before this
+  // runs, so it is true on a brand-new install too — with it in the list `hadPrior` was ALWAYS true and
+  // the first-install copy at the bottom of this function could never be reached. Every key below is
+  // written only by something a reader actually did. (JetBrains had the identical bug in `everRan`.)
   const hadPrior = !!(
     g.get('requestsRevealed.0.8.7') ||
-    g.get('promptsRevealed.0.8.8') ||
     g.get('setupNudged') ||
     g.get('updateCheck.lastMs') ||
     g.get('tourDocked')

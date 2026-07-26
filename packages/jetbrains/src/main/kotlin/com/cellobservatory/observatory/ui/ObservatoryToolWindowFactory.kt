@@ -50,16 +50,48 @@ class ObservatoryToolWindowFactory : ToolWindowFactory, DumbAware {
 class ObservatoryDashboardsFactory : ToolWindowFactory, DumbAware {
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
         val stats = com.cellobservatory.observatory.ui.stats.StatsPanel(project)
+        val promptsPane = titled("Prompts", PromptsPanel(project))
+        val statsPane = titled("Stats", stats)
         // Default split: Prompts 20% | Overview 65% | Stats 15% — the master-detail Overview stays the
         // centerpiece, and the Prompts pane is wide enough to read a prompt wrapped over a few lines.
         val right = com.intellij.ui.OnePixelSplitter(false, 0.81f).apply {
             firstComponent = titled("Overview", ChangeMapPanel(project))
-            secondComponent = titled("Stats", stats)
+            secondComponent = statsPane
         }
         val split = com.intellij.ui.OnePixelSplitter(false, 0.20f).apply {
-            firstComponent = titled("Prompts", PromptsPanel(project))
+            firstComponent = promptsPane
             secondComponent = right
         }
+
+        // Prompts and Stats FOLD AWAY. This dock is short — a bottom tool window is a few hundred pixels
+        // tall — and three columns plus the Overview's own nav bar left the change map with almost
+        // nothing. VS Code gets this for free: its three dock views are separate accordion sections the
+        // reader collapses individually. The platform equivalent is a title-bar toggle per pane, so the
+        // affordance sits in the window's own chrome instead of stealing more room from the panel.
+        val state = com.cellobservatory.observatory.settings.ObservatorySettings.instance.state
+        fun apply() {
+            split.firstComponent = if (state.dashShowPrompts) promptsPane else null
+            right.secondComponent = if (state.dashShowStats) statsPane else null
+            split.revalidate(); split.repaint()
+        }
+        fun paneToggle(label: String, icon: Icon, get: () -> Boolean, set: (Boolean) -> Unit) =
+            object : com.intellij.openapi.actionSystem.ToggleAction(label, "Show or hide the $label pane", icon),
+                DumbAware {
+                override fun getActionUpdateThread() = com.intellij.openapi.actionSystem.ActionUpdateThread.BGT
+                override fun isSelected(e: com.intellij.openapi.actionSystem.AnActionEvent) = get()
+                override fun setSelected(e: com.intellij.openapi.actionSystem.AnActionEvent, on: Boolean) {
+                    set(on)
+                    apply()
+                }
+            }
+        toolWindow.setTitleActions(
+            listOf(
+                paneToggle("Prompts", AllIcons.Actions.ListFiles, { state.dashShowPrompts }, { state.dashShowPrompts = it }),
+                paneToggle("Stats", AllIcons.Actions.Profile, { state.dashShowStats }, { state.dashShowStats = it }),
+            )
+        )
+        apply() // honour whatever the reader last chose
+
         val factory = ContentFactory.getInstance()
         val content = factory.createContent(split, "Dashboards", false).apply { isCloseable = false }
         // Tie the StatsPanel's Timer + service listener to the content's lifecycle (stopped on close).

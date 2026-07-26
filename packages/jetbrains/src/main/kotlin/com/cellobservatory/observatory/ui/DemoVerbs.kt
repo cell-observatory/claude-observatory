@@ -6,9 +6,10 @@ import com.intellij.openapi.project.Project
 import javax.swing.Icon
 
 /**
- * The demo-mode verbs, once. Both the Edits tree's toolbar and the Overview's nav bar offer them (VS Code
- * puts them on both title bars too), and a second hand-written copy of the list is how one toolbar ends
- * up offering a verb the other does not — or offering it in a state where it does nothing.
+ * The demo-mode verbs, and the state each one belongs to. The Overview's nav bar is the only panel that
+ * offers them, so this is not shared between callers today — it is here to be TESTABLE. Every panel in
+ * this plugin needs a Project to construct, which puts its toolbars out of reach of a unit test; a plain
+ * list does not, so the invariants below can actually be asserted rather than merely intended.
  *
  * [wantDemo] is the state the verb belongs to: Start applies only before a demo exists, and Restart,
  * Guided Tour and Exit only once one does. A toolbar shows each verb exactly when that matches.

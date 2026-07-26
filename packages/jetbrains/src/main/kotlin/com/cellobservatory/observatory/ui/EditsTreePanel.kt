@@ -263,11 +263,10 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
             action("Export Review Summary", AllIcons.ToolbarDecorator.Export) { exportSummary() },
             action("Setup Check (doctor)", AllIcons.General.Information) { ReviewOps.openDoctor(project) },
         )
-        // Demo mode LAST, from the SHARED verb list the Overview's nav bar also builds from — two copies
-        // is how one toolbar ends up offering a verb the other does not. It goes at the end because it is
-        // the one group here that is not about the session you are reviewing; mid-toolbar it pushed the
-        // review actions rightward and read as though the demo were part of the review flow.
-        DemoVerbs.ALL.forEach { v -> group.add(demoAction(v.text, v.icon, v.wantDemo) { v.run(project) }) }
+        // No demo buttons here. This toolbar is for reviewing the session in front of you; demo mode lives
+        // on the Overview's nav bar, which is one panel away and is where both editors now offer it. The
+        // empty state below still links straight into the demo — that is the first-run path, and it is a
+        // link in the place a reader is already looking, not a button competing with the review actions.
         // Collapse-all / expand-all for the folder → file → class tree — IntelliJ's own tree actions,
         // the platform equivalent of VS Code's file-Explorer Collapse-All button.
         val expander = DefaultTreeExpander(tree)
@@ -401,23 +400,17 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
         ) { ReviewOps.startDemo(project) }
     }
 
-    /** A demo-mode button, shown only in the state its verb belongs to: Start before a demo is running,
-     *  Restart and Exit while one is. Mirrors the VS Code title-bar `when` clauses. */
-    private fun demoAction(text: String, icon: javax.swing.Icon, wantDemo: Boolean, run: () -> Unit): AnAction =
-        object : AnAction(text, null, icon), DumbAware {
-            override fun getActionUpdateThread() = ActionUpdateThread.BGT
-            override fun update(e: AnActionEvent) {
-                e.presentation.isEnabledAndVisible = ReviewOps.demoPresent(project) == wantDemo
-            }
-            override fun actionPerformed(e: AnActionEvent) = run()
-        }
-
     private fun toggle(text: String, icon: javax.swing.Icon, isOn: () -> Boolean, set: (Boolean) -> Unit): ToggleAction =
         object : ToggleAction(text, null, icon), DumbAware {
-            override fun getActionUpdateThread() = ActionUpdateThread.EDT
+            // Reads a settings flag, nothing UI. Staying on the EDT made the platform hop for it.
+            override fun getActionUpdateThread() = ActionUpdateThread.BGT
             override fun isSelected(e: AnActionEvent) = isOn()
             override fun setSelected(e: AnActionEvent, state: Boolean) = set(state)
         }
+
+    /** The path of the tab in front, read from the background-safe tracker (see ActiveFileTracker). */
+    private fun activeFilePath(): String? =
+        com.cellobservatory.observatory.services.ActiveFileTracker.getInstance(project).activePath()
 
     private fun activeFile(): VirtualFile? = FileEditorManager.getInstance(project).selectedFiles.firstOrNull()
 
@@ -426,9 +419,9 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
      *  file from FileEditorManager (parity with VS Code's keepOpenFile/undoOpenFile). */
     private fun fileScopedAction(text: String, icon: javax.swing.Icon, run: (String, VirtualFile) -> Unit): AnAction =
         object : AnAction(text, null, icon), DumbAware {
-            override fun getActionUpdateThread() = ActionUpdateThread.EDT
+            override fun getActionUpdateThread() = ActionUpdateThread.BGT
             override fun update(e: AnActionEvent) {
-                val path = activeFile()?.path
+                val path = activeFilePath()
                 e.presentation.isEnabledAndVisible = path != null && service().log().any { it.pending && it.file == path }
             }
 

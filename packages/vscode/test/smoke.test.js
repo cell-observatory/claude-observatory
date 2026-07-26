@@ -318,8 +318,10 @@ test('extension: three views, click commands, inline annotations, chat, status s
       assert.ok(pkg.contributes.commands.some((x) => x.command === `claudeObservatory.${c}`), `${c} is contributed`);
     for (const c of ['startDemo', 'restartDemo', 'startTour', 'tourNext', 'tourBack', 'exitDemo'])
       assert.ok(pkg.contributes.commands.some((x) => x.command === `claudeObservatory.${c}`), `${c} is contributed`);
-    // Cancel / reset / redo have to be reachable FROM the panel, not only the palette: Start before a
-    // demo exists, Restart and Exit once one does.
+    // Cancel / reset / redo have to be reachable FROM a panel, not only the palette: Start before a
+    // demo exists, Restart and Exit once one does. They live on the OVERVIEW's nav bar and nowhere else —
+    // the sidebar's job is reviewing the session in front of you, and Exit/Restart sitting in it read as
+    // review actions. The sidebar keeps its empty-state link, which is the first-run path.
     const titles = pkg.contributes.menus['view/title'].filter((m) => /claudeObservatory\.(start|restart|exit)Demo$/.test(m.command));
     assert.equal(titles.length, 3, 'Start, Restart and Exit each have a title-bar button');
     assert.match(titles.find((m) => m.command === 'claudeObservatory.startDemo').when, /!claudeObservatory\.demoPresent/, 'Start shows only when no demo is running');
@@ -328,6 +330,10 @@ test('extension: three views, click commands, inline annotations, chat, status s
     // removed these four from the row rather than moving them along it.
     const allTitles = pkg.contributes.menus['view/title'];
     const isDemo = (cmd) => /claudeObservatory\.(startDemo|restartDemo|exitDemo|startTour)$/.test(cmd);
+    for (const m of allTitles.filter((x) => isDemo(x.command))) {
+      assert.match(m.when || '', /view == claudeObservatory\.changemap/, `${m.command} is offered from the Overview`);
+      assert.ok(!/claudeObservatory\.edits/.test(m.when || ''), `${m.command} is NOT in the sidebar's title bar`);
+    }
     const nonDemoOrders = allTitles
       .filter((m) => !isDemo(m.command) && /^navigation@\d+$/.test(m.group || ''))
       .map((m) => Number(m.group.split('@')[1]));

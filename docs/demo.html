@@ -713,6 +713,7 @@
 
       // ---- overview: toolbar + fleet nav + detail ----
       // The four review axes, as the editors' nav bar groups them: Diff · File · Folder · Prompt.
+      // Icons only, verb on hover — the axes row carries no labels (the row above it does).
       var pendingFiles=[],pendingFolders=[],curFile=fn;
       landed.forEach(function(e){
         if(statusOf(e.id,step,res)!=='pending')return;
@@ -727,10 +728,10 @@
       // The scenario is one prompt, so the Prompt axis holds a single entry while it still has work to review.
       var promptCounter=p0?'Prompt 1/1':'';
       var bar='<span class="g"><span class="ts">Search</span> · 🔬 demo-session</span><span class="sep"></span>';
-      if(diffCounter) bar+='<span class="g"><span class="nvb">▲</span> <span class="on">'+diffCounter+'</span> <span class="nvb">▼</span> <span class="tk">✓ Keep</span> <span class="tu">↩ Undo</span></span><span class="sep"></span>';
-      if(fileCounter) bar+='<span class="g"><span class="nvb">◀</span> <span class="on">'+fileCounter+'</span> <span class="nvb">▶</span> <span class="tk">✓✓ Accept File</span> <span class="tu">✗ Reject File</span></span><span class="sep"></span>';
-      if(folderCounter) bar+='<span class="g"><span class="nvb">◀</span> <span class="on">'+folderCounter+'</span> <span class="nvb">▶</span> <span class="tk">✓✓ Accept Folder</span> <span class="tu">✗ Reject Folder</span></span><span class="sep"></span>';
-      if(promptCounter) bar+='<span class="g"><span class="nvb">◀</span> <span class="on">'+promptCounter+'</span> <span class="nvb">▶</span> <span class="tk">✓✓ Accept Prompt</span> <span class="tu">✗ Reject Prompt</span></span><span class="sep"></span>';
+      if(diffCounter) bar+='<span class="g"><span class="nvb">▲</span> <span class="on">'+diffCounter+'</span> <span class="nvb">▼</span> <span class="tk" title="Keep this edit">✓</span> <span class="tu" title="Undo this edit">↩</span></span><span class="sep"></span>';
+      if(fileCounter) bar+='<span class="g"><span class="nvb">◀</span> <span class="on">'+fileCounter+'</span> <span class="nvb">▶</span> <span class="tk" title="Accept every edit in this file">✓✓</span> <span class="tu" title="Reject every edit in this file">✗</span></span><span class="sep"></span>';
+      if(folderCounter) bar+='<span class="g"><span class="nvb">◀</span> <span class="on">'+folderCounter+'</span> <span class="nvb">▶</span> <span class="tk" title="Accept every edit in this folder">✓✓</span> <span class="tu" title="Reject every edit in this folder">✗</span></span><span class="sep"></span>';
+      if(promptCounter) bar+='<span class="g"><span class="nvb">◀</span> <span class="on">'+promptCounter+'</span> <span class="nvb">▶</span> <span class="tk" title="Accept every edit from this prompt">✓✓</span> <span class="tu" title="Reject every edit from this prompt">✗</span></span><span class="sep"></span>';
       bar+='<span class="g ts">Spotlight</span>';
       if(st.gate==='acceptall'&&!res[step]) bar+='<span class="sep"></span><button id="ov-acceptall" class="hint">✓ Accept All</button>';
       el('ovbar').innerHTML=bar;

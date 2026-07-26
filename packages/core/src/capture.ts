@@ -156,6 +156,11 @@ function handlePost(session: string, payload: HookPayload): void {
     return;
   }
 
+  // Publish the after-blob on the staging record BEFORE appending. Until the record lands, nothing
+  // else references this blob, and a concurrent GC (clean / clearResolved) would collect it — leaving
+  // a committed edit pointing at a missing blob. gcSessionCore reads staging, so this closes the gap.
+  if (afterBlob) writeStaging(session, key, { ...staging, afterBlob });
+
   appendLog(session, {
     ts: Date.now(),
     tool: staging.tool,

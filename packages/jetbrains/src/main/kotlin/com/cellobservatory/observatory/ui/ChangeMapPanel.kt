@@ -361,6 +361,8 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
     //     repaints; Active only defaults ON and is remembered in settings (0.8.8) — this panel is about work
     //     still awaiting review. The dismissed sets HIDE completed items (never delete); reset on a session
     //     change. A dismissed item reappears if it goes active again. ---
+    // No @Volatile: this has no backing field — it reads and writes the persisted setting directly, so
+    // the storage is the settings component's, and both threads see the same object.
     private var activeOnly: Boolean
         get() = com.cellobservatory.observatory.settings.ObservatorySettings.instance.state.overviewActiveOnly
         set(value) { com.cellobservatory.observatory.settings.ObservatorySettings.instance.state.overviewActiveOnly = value }
@@ -457,26 +459,31 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         // its own ActionToolbar so a nav step or a change of prompt scope can refresh its labels + counters.
 
         // --- BOTTOM row: the four review axes ---
+        //     ICONS ONLY on these rows. Each axis already names itself in its own counter — "File 3/126",
+        //     "Folder 1/23" — so repeating "Accept File" and "Reject File" beside it spent most of the bar
+        //     restating the axis the reader is already looking at. The counter is the annotation; the
+        //     buttons are icons with tooltips. The top row keeps its labels: those are session-wide and
+        //     destructive, and there is no axis label above them to say what they act on.
         val diffGroup = DefaultActionGroup().apply {
             reviewNavBar.diffAxis().forEach(::add)
-            add(reviewNavBar.keepAction()); add(reviewNavBar.undoAction())
-            add(reviewNavBar.chatEditAction()); add(reviewNavBar.viewDiffAction())
+            add(reviewNavBar.keepAction(showText = false)); add(reviewNavBar.undoAction(showText = false))
+            add(reviewNavBar.chatEditAction(showText = false)); add(reviewNavBar.viewDiffAction(showText = false))
         }
         val fileGroup = DefaultActionGroup().apply {
             reviewNavBar.fileAxis().forEach(::add)
-            add(reviewNavBar.acceptFileAction()); add(reviewNavBar.rejectFileAction())
+            add(reviewNavBar.acceptFileAction(showText = false)); add(reviewNavBar.rejectFileAction(showText = false))
         }
         val folderGroup = DefaultActionGroup().apply {
             reviewNavBar.folderAxis().forEach(::add)
-            add(reviewNavBar.acceptFolderAction()); add(reviewNavBar.rejectFolderAction())
+            add(reviewNavBar.acceptFolderAction(showText = false)); add(reviewNavBar.rejectFolderAction(showText = false))
         }
         // Prompt is the LAST axis: the coarsest scope on the bar, and the one a person names out loud
         // ("accept everything from that ask"). No Chat button — `chat-context` has no prompt ref, and a
         // button that silently framed the prompt as something else would be worse than its absence.
         val promptGroup = DefaultActionGroup().apply {
             reviewNavBar.promptAxis().forEach(::add)
-            add(reviewNavBar.reviewPromptAction()); add(reviewNavBar.acceptPromptAction())
-            add(reviewNavBar.revertPromptAction())
+            add(reviewNavBar.reviewPromptAction(showText = false)); add(reviewNavBar.acceptPromptAction(showText = false))
+            add(reviewNavBar.revertPromptAction(showText = false))
         }
 
         // --- TOP row LEFT cluster: session selector + session-wide bulk + Export. Bulk actions RETARGET to
@@ -516,7 +523,14 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
 
         fun mkTb(name: String, g: DefaultActionGroup): ActionToolbar =
             ActionManager.getInstance().createActionToolbar("ClaudeObservatoryOverview$name", g, true).apply {
-                targetComponent = fleetTree
+                // The PANEL, never a tab's tree. The platform refuses to run an action whose toolbar's
+                // target component is not showing — and `fleetTree` lives inside the Fleet tab, so with
+                // any other tab selected (Sessions is the default) EVERY button on these six toolbars
+                // silently did nothing: Accept All, Reject All, Clear Resolved, Export, Search, Active
+                // only, Clear completed, Spotlight, Refresh and all four review axes. The IDE log said so
+                // 28 times — "Action is not performed because target component is not showing" — while
+                // the UI gave the reader no clue at all.
+                targetComponent = this@ChangeMapPanel
                 component.isOpaque = false
             }
         val diffTb = mkTb("Diff", diffGroup)
@@ -1334,8 +1348,8 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
      *  [ReviewOps.demoPresent] touches the filesystem (behind its own short cache). */
     private fun demoAction(text: String, icon: Icon, wantDemo: Boolean, run: () -> Unit): AnAction =
         object : AnAction(text, null, icon), DumbAware {
-            @Suppress("OVERRIDE_DEPRECATION") // displayTextInToolbar: still honored; renders the label
-            override fun displayTextInToolbar() = true
+            // ICON ONLY, matching VS Code's compact demo buttons. Labelled, these four were the widest
+            // thing on a bar that is already fighting for room; the tooltip carries the verb.
             override fun getActionUpdateThread() = ActionUpdateThread.BGT
             override fun update(e: AnActionEvent) {
                 e.presentation.isEnabledAndVisible = ReviewOps.demoPresent(project) == wantDemo
@@ -1360,7 +1374,7 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         sessionRun: () -> Unit,
         promptRun: (ChangeMapPrompt) -> Unit,
     ): AnAction = object : AnAction(baseText, null, icon), DumbAware {
-        override fun getActionUpdateThread() = ActionUpdateThread.EDT
+        override fun getActionUpdateThread() = ActionUpdateThread.BGT // reads the picked ask, not the UI
         @Suppress("OVERRIDE_DEPRECATION") // displayTextInToolbar: still honored; renders the scoped label
         override fun displayTextInToolbar() = true
         override fun update(e: AnActionEvent) {
@@ -1404,7 +1418,7 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         "Show only active agents (working / awaiting input / awaiting permission, or with an active subagent) and running workflows — and scope the change map on the right to work still awaiting review",
         AllIcons.General.Filter,
     ), DumbAware {
-        override fun getActionUpdateThread() = ActionUpdateThread.EDT
+        override fun getActionUpdateThread() = ActionUpdateThread.BGT // reads one flag
         @Suppress("OVERRIDE_DEPRECATION") // displayTextInToolbar: still honored; renders the label
         override fun displayTextInToolbar() = true
         override fun isSelected(e: AnActionEvent) = activeOnly

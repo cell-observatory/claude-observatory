@@ -5,10 +5,10 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * The demo verbs are offered by TWO toolbars — the Edits tree's and the Overview's nav bar — and by the
- * VS Code title bars, which contribute the same four commands with the same state gating. This pins the
- * list itself, so a verb added to one surface cannot quietly miss the other, and so the gating stays a
- * partition rather than drifting into "Start and Exit both visible at once".
+ * The Overview's nav bar offers these verbs, and VS Code contributes the same four commands with the same
+ * state gating on its own Overview title bar. This pins the list and the gating, so the two editors cannot
+ * drift apart and the gating stays a partition rather than becoming "Start and Exit both visible at once".
+ * It is the only level at which any of this is testable: the panel that renders it needs a Project.
  */
 class DemoVerbsTest {
 

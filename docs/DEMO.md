@@ -20,7 +20,7 @@ by the same hooks, a subagent, a workflow run, and a second agent in a sibling w
 `demo-…` sessions and an `observatory-demo/` folder it creates in the current directory.
 
 **In an editor**, run **Start Demo Mode** from the VS Code command palette or JetBrains Find Action, use
-the buttons at the end of the Edits panel's toolbar or the Overview's nav bar, or click **Try the demo** in an empty panel — which works
+the buttons at the end of the Overview's nav bar, or click **Try the demo** in an empty panel — which works
 before `claude-observatory init` has ever run, because the replay drives the capture pipeline directly. The
 panels fill beat by beat, and the **guided tour** opens when the replay finishes.
 

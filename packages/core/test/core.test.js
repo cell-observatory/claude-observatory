@@ -639,6 +639,63 @@ test('clean: clearResolved drops kept+undone, keeps pending', () => {
   assert.equal(core.clearResolved(S), 0, 'no-op when nothing resolved');
 });
 
+test('store: clearing resolved edits keeps the skip markers — the record that a change went UNcaptured', () => {
+  freshHome();
+  const S = 'clrskip';
+  const dir = tmpWork();
+  const F = path.join(dir, 'f.txt');
+  const OUT = path.join(dir, 'elsewhere', 'big.bin');
+  seedEdit(S, F, 'a\n', 'b\n'); // #1
+  core.appendSkip(S, OUT, 'file too large (>5MB) or binary at commit');
+  seedEdit(S, F, 'b\n', 'c\n'); // #2
+  core.appendSkip(S, '<bash-tree>', 'Bash working tree exceeds the file cap');
+  assert.equal(core.readSkips(S).length, 2, 'both markers recorded');
+
+  core.setStatus(S, 1, 'kept');
+  assert.equal(core.clearResolved(S), 1, 'the kept edit is dropped');
+  // The rewrite rebuilds the log from readLog, which returns EDIT RECORDS only. Without carrying the
+  // op lines across, Clear silently erased the one thing standing between an uncaptured edit and
+  // silence — and `status` then reported zero skips.
+  assert.equal(core.readSkips(S).length, 2, 'skip markers survive a clear');
+  assert.equal(core.readLog(S).length, 1, 'and the pending edit is still the only record');
+
+  // Repeating the clear must not duplicate or drop them either (the ops are re-read each time).
+  core.setStatus(S, 2, 'undone');
+  core.clearResolved(S);
+  assert.equal(core.readSkips(S).length, 2, 'still exactly two after a second clear');
+
+  // A SCOPED clear must not reach markers outside its scope.
+  const S2 = 'clrskip2';
+  seedEdit(S2, path.join(dir, 'in', 'a.txt'), 'a\n', 'b\n');
+  core.appendSkip(S2, path.join(dir, 'OUT', 'keep.bin'), 'oversized, out of scope');
+  core.setStatus(S2, 1, 'kept');
+  core.clearResolved(S2, path.join(dir, 'in'));
+  assert.equal(core.readSkips(S2).length, 1, 'a folder-scoped clear leaves another folder\'s marker alone');
+});
+
+test('undo: keep never resurrects a reverted edit — the ledger must not claim a change that is not on disk', () => {
+  freshHome();
+  const S = 'keepundone';
+  const F = path.join(tmpWork(), 'k.txt');
+  fs.writeFileSync(F, 'a\nb\n');
+  seedEdit(S, F, 'a\n', 'a\nb\n'); // #1, pending
+  core.setStatus(S, 1, 'undone');
+
+  const r = core.keepGroup(S, 1);
+  assert.equal(r.kept, 0, 'nothing is kept');
+  assert.deepEqual(r.ids, [], 'and no id is reported as kept');
+  assert.equal(core.readLog(S)[0].status, 'undone', 'the record stays undone');
+
+  // Marking it kept would also RESOLVE it, so clearResolved would drop it and the revert could never
+  // be redone — the failure this guards is data loss, not just a wrong label.
+  assert.equal(core.clearResolved(S), 1, 'it is still resolved-as-undone, so a clear drops it');
+
+  // The pending case is untouched.
+  const S2 = 'keeppending';
+  seedEdit(S2, F, 'a\n', 'a\nb\n');
+  assert.equal(core.keepGroup(S2, 1).kept, 1, 'a pending edit is still kept normally');
+});
+
 test('ranges: locateEditInCurrent maps an edit to its current lines (positional)', () => {
   const L = core.locateEditInCurrent;
   // simple: no later edits -> the changed line
@@ -671,6 +728,40 @@ test('ranges: locateDeletionsInCurrent surfaces removed text + its anchor (red g
   assert.deepEqual(D('a\nb\nc\n', 'a\nc\n', 'HEADER\na\nc\n'), [{ anchor: 2, lines: ['b'] }]);
   // the deletion's region was later rewritten -> the hunk drops out
   assert.deepEqual(D('a\nb\nc\n', 'a\nc\n', 'a\nZZ\n'), []);
+});
+
+test('ranges: a file\'s edits are placed by COMPOSING the chain — and one empty snapshot cannot un-place the rest', () => {
+  const chainLines = (chain, current) =>
+    core.locateEditsInCurrent(chain.length, (i) => chain[i], current).map((p) => p.lines);
+
+  // 1. A plain chain must agree, edit for edit, with placing each one on its own. This is the whole
+  //    contract of the batch form: composing hops is an optimization, never a different answer.
+  const v0 = 'a\nb\nc\n';
+  const v1 = 'a\nONE\nb\nc\n';
+  const v2 = 'a\nONE\nb\nTWO\nc\n';
+  const chain = [{ before: v0, after: v1 }, { before: v1, after: v2 }];
+  assert.deepEqual(chainLines(chain, v2), [
+    core.locateEditInCurrent(v0, v1, v2),
+    core.locateEditInCurrent(v1, v2, v2),
+  ]);
+  assert.deepEqual(chainLines(chain, v2), [[1], [3]]);
+
+  // 2. An edit that DELETED the file leaves an empty `after`. Nothing survives a hop through nothing,
+  //    so composing across it would wipe out every EARLIER edit's placement too — the deletion must
+  //    sever the chain and re-anchor, not erase history. (`afterBlob: null` is a normal capture
+  //    outcome, and an unreadable blob reads as '' by the same path.)
+  const deleted = [
+    { before: v0, after: v1 }, // inserts ONE
+    { before: v1, after: '' }, // deletes the file
+    { before: '', after: v1 }, // recreates it
+  ];
+  const placed = chainLines(deleted, v1);
+  assert.deepEqual(placed[0], [1], 'the first edit keeps its placement across a deletion later in the chain');
+  assert.deepEqual(placed[1], [], 'the deletion itself introduces nothing');
+  assert.deepEqual(placed[2], [0, 1, 2, 3], 'the re-create marks every restored line');
+
+  // 3. The single-edit wrappers are the batch form with one element — same code path, no drift.
+  assert.deepEqual(core.locateEditInCurrent(v0, v1, v1), chainLines([{ before: v0, after: v1 }], v1)[0]);
 });
 
 test('observe: recap "next steps" heading matching is linear-time on a pathological line (no ReDoS)', () => {
@@ -5710,6 +5801,29 @@ test('changemap: the map is memoized on disk across processes, and invalidated b
     2,
     'the transcript changing rebuilds it too'
   );
+
+  // …and so must the WORKSPACE FILE itself. The map reads each edited file off disk to detect its
+  // classes and place each edit in the CURRENT text, so a file the user edits in their editor is a
+  // third input — and one that moves neither the transcript nor the log. Without stamping it, the map
+  // kept reporting class names for a version of the file that no longer existed.
+  const cls = path.join(cwd, 'k.py');
+  const v1 = 'class Alpha:\n    def go(self):\n        return 1\n';
+  fs.writeFileSync(cls, v1);
+  // Real blobs: class attribution places the edit's introduced lines in the CURRENT text, so a
+  // record with no snapshots has nothing to place and would pass this test vacuously.
+  core.appendLog(S, {
+    tool: 'Edit',
+    file: cls,
+    beforeBlob: core.writeBlob(S, Buffer.from('class Alpha:\n    def go(self):\n        return 0\n')),
+    afterBlob: core.writeBlob(S, Buffer.from(v1)),
+    status: 'pending',
+    ts: 1400,
+  });
+  const named = core.cachedChangeMap(cwd, S, { root: cwd, prompts: true });
+  const clsOf = (m) => m.edits.find((e) => e.file === 'k.py')?.cls ?? null;
+  assert.equal(clsOf(named), 'Alpha', 'the class is detected from the file on disk');
+  fs.writeFileSync(cls, 'class Renamed:\n    def go(self):\n        return 1\n');
+  assert.equal(clsOf(core.cachedChangeMap(cwd, S, { root: cwd, prompts: true })), 'Renamed', 'editing the workspace file rebuilds it');
 });
 
 test('store: a bulk status change is one parse and one append, and skips no-ops (0.8.8)', () => {

@@ -215,18 +215,44 @@ class TourController(private val project: Project) : com.intellij.openapi.Dispos
                     .createPopupChooserBuilder(listOfNotNull(essentialsLabel.takeIf { short.isNotEmpty() }, everythingLabel))
                     .setTitle("Guided tour — how much would you like to see?")
                     .setItemChosenCallback { chosen ->
-                        essentialsTrack = chosen == essentialsLabel
-                        remainder = if (essentialsTrack) full.filterNot { f -> short.any { it.id == f.id } } else emptyList()
-                        steps = if (essentialsTrack) short else full
-                        ChangeMapPanel.of(project)?.setShowAll(true)
-                        openWindow()
-                        applyStep(0)
+                        val isShort = chosen == essentialsLabel
+                        begin(
+                            script = if (isShort) short else full,
+                            rest = if (isShort) full.filterNot { f -> short.any { it.id == f.id } } else emptyList(),
+                            isEssentials = isShort,
+                        )
                     }
                     .createPopup()
                     .showCenteredInCurrentWindow(project)
             }
         }
     }
+
+    /**
+     * Open a track and show its first step. The ONLY path into a running tour — the chooser callback and
+     * the test seam both come through here, so a test cannot accidentally skip setup the real path does.
+     * (It did: an earlier seam duplicated three of these lines and silently missed the fourth.)
+     */
+    private fun begin(script: List<DemoStep>, rest: List<DemoStep>, isEssentials: Boolean, play: Boolean = true) {
+        essentialsTrack = isEssentials
+        remainder = rest
+        steps = script
+        playing = play
+        // The tour narrates rows Active only hides; hand the reader's own filter back in stop().
+        ChangeMapPanel.of(project)?.setShowAll(true)
+        openWindow()
+        applyStep(0)
+    }
+
+    /**
+     * Test seam: walk a script without the track chooser, which is a popup and cannot open headlessly.
+     * Autoplay is left OFF so a test steps deterministically instead of racing timers. Everything else
+     * goes through [begin], the same function the chooser uses — this is the only feature here that no
+     * other kind of test can reach, so the seam has to be faithful or it is worse than nothing.
+     */
+    @org.jetbrains.annotations.TestOnly
+    internal fun driveForTest(script: List<DemoStep>) =
+        begin(script, rest = emptyList(), isEssentials = false, play = false)
 
     // Every manual control hands over the wheel: autoplay stops and only the transport restarts it.
     fun next() {
@@ -418,11 +444,7 @@ class TourController(private val project: Project) : com.intellij.openapi.Dispos
             .setTitle(blurb)
             .setItemChosenCallback { chosen ->
                 if (chosen != go) { stop(); return@setItemChosenCallback }
-                essentialsTrack = false
-                steps = remainder
-                remainder = emptyList()
-                playing = true
-                applyStep(0)
+                begin(remainder, rest = emptyList(), isEssentials = false)
             }
             .setCancelCallback { stop(); true }
             .createPopup()
@@ -434,7 +456,11 @@ class TourController(private val project: Project) : com.intellij.openapi.Dispos
     private fun openWindow() = ensureToolWindow()
 
     private fun closeWindow() {
-        ToolWindowManager.getInstance(project).getToolWindow(TOOL_WINDOW_ID)?.remove()
+        // Hide, never remove: the window is declared, so removing it takes the platform's own
+        // registration with it and it cannot be brought back without an IDE restart.
+        ToolWindowManager.getInstance(project).getToolWindow(TOOL_WINDOW_ID)?.let {
+            it.isAvailable = false
+        }
     }
 
     /** Subscribed once, for the project's lifetime. A tour whose window is not on screen must not keep
@@ -477,23 +503,34 @@ class TourController(private val project: Project) : com.intellij.openapi.Dispos
         )
     }
 
+    /** Called by [TourToolWindowFactory] when the platform builds the declared window's content. */
+    internal fun fillToolWindow(tw: com.intellij.openapi.wm.ToolWindow) {
+        val cm = tw.contentManager
+        cm.removeAllContents(true)
+        val content = cm.factory.createContent(buildPanel(), "", false)
+        content.isCloseable = false
+        cm.addContent(content)
+    }
+
     private fun ensureToolWindow() {
         watchForHide()
-        val mgr = ToolWindowManager.getInstance(project)
-        val existing = mgr.getToolWindow(TOOL_WINDOW_ID)
-        if (existing != null) {
-            existing.activate(null)
-            windowShown = true
+        // The window is DECLARED in plugin.xml; making it available and activating it is the supported
+        // way to bring one up on demand. Registering it here instead invoked an override-only platform
+        // API — unsupported, and the kind of thing that breaks silently on an IDE update.
+        val tw = ToolWindowManager.getInstance(project).getToolWindow(TOOL_WINDOW_ID)
+        if (tw == null) {
+            // The window is declared in plugin.xml, so this should not happen — but if it ever does, a
+            // tour that runs with nothing on screen is the worst possible outcome: it keeps advancing and
+            // keeps ACTING, on a timer, with no text explaining any of it. Stop and say so.
+            stop()
+            com.cellobservatory.observatory.ui.ReviewOps.notify(
+                project,
+                "Claude Observatory: could not open the guided tour window, so the tour was not started.",
+                com.intellij.notification.NotificationType.WARNING,
+            )
             return
         }
-        val tw = mgr.registerToolWindow(TOOL_WINDOW_ID) {
-            anchor = ToolWindowAnchor.RIGHT
-            canCloseContent = false
-            stripeTitle = { TOOL_WINDOW_ID }
-        }
-        val content = tw.contentManager.factory.createContent(buildPanel(), "", false)
-        content.isCloseable = false
-        tw.contentManager.addContent(content)
+        tw.isAvailable = true
         tw.activate(null)
         windowShown = true // the listener acts on transitions, so seed it with the truth
     }

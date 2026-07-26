@@ -206,6 +206,8 @@ class ObservatoryService(private val project: Project) : Disposable {
         @Volatile private var fetchedKey = ""
         @Volatile private var fetchedAt = 0L
         @Volatile private var inFlight = false
+        /** Consecutive failures, for the back-off below. Reset the moment one succeeds. */
+        @Volatile private var misses = 0
 
         /** A refresh that must NOT be dropped — armed by the Refresh button and by [refresh]`(force=true)`
          *  after a MUTATION. It outlives an in-flight spawn on purpose: see [spawn]. */
@@ -222,7 +224,12 @@ class ObservatoryService(private val project: Project) : Disposable {
         fun get(key: String, force: Boolean = false): T? {
             if (force) forced = true
             val now = System.currentTimeMillis()
-            val stale = key != fetchedKey || now - fetchedAt >= MIN_FETCH_MS
+            // Back off after failures instead of re-asking every three seconds forever. A view that
+            // cannot answer usually cannot answer for a reason that will still be true in three seconds
+            // (an unbuildable session, a CLI that is not there), and retrying at full cadence turns one
+            // broken view into a permanently busy core. Doubles to a minute, and any success clears it.
+            val wait = if (misses == 0) MIN_FETCH_MS else minOf(MIN_FETCH_MS shl minOf(misses, 5), 60_000L)
+            val stale = key != fetchedKey || now - fetchedAt >= wait
             if (!inFlight && (stale || forced)) spawn(key)
             return value
         }
@@ -235,9 +242,12 @@ class ObservatoryService(private val project: Project) : Disposable {
                     val v = fetch(key)
                     fetchedAt = System.currentTimeMillis() // set on failure too — back off, don't spin
                     if (v != null) {
+                        misses = 0
                         value = v
                         fetchedKey = key
                         notifyListeners()
+                    } else {
+                        misses++
                     }
                 } finally {
                     attempted = true

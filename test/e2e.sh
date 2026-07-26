@@ -213,6 +213,18 @@ hook PreToolUse Edit "$J"; node "$SETLINE" "$J" 2 "Z"; hook PostToolUse Edit "$J
 LOC=$(cc locate --file "$J" < "$J")
 ok "locate emits placements for the pending edit" "printf '%s' \"\$LOC\" | jq -e '.placements | length >= 1' >/dev/null"
 ok "locate maps the edit to its current line"     "printf '%s' \"\$LOC\" | jq -e '.placements[-1].lines | index(2) != null' >/dev/null"
+# A SECOND pending edit to the same file: placements are now composed down the chain, so the EARLIER
+# one is the interesting case — asserting only [-1] would pass even if every earlier placement were
+# empty, since the newest edit is the one anchored directly against the buffer.
+node "$SETLINE" "$J" 5 "Y2"; hook PreToolUse Edit "$J"; node "$SETLINE" "$J" 7 "Y3"; hook PostToolUse Edit "$J"
+LOC2=$(cc locate --file "$J" < "$J")
+ok "locate places EVERY pending edit, not just the newest" "printf '%s' \"\$LOC2\" | jq -e '[.placements[] | select(.lines | length > 0)] | length >= 2' >/dev/null"
+ok "locate's first placement is non-empty (chain composed, not severed)" "printf '%s' \"\$LOC2\" | jq -e '.placements[0].lines | length > 0' >/dev/null"
+ok "locate carries deletion hunks for the JetBrains overlay"  "printf '%s' \"\$LOC2\" | jq -e '.placements[0] | has(\"removed\")' >/dev/null"
+# A flag name is never a flag VALUE, and a scope flag never coexists with an explicit id.
+cc locate --file --json < "$J" >/dev/null 2>&1; ok "locate --file --json fails instead of placing edits in a file called --json" "[ \$? -ne 0 ]"
+cc keep --file main 1 --json >/dev/null 2>&1;   ok "keep --file <substr> <id> is refused (id would be discarded)"              "[ \$? -ne 0 ]"
+cc undo --ids 999 --json >/dev/null 2>&1;       ok "undo --ids <n> still works (a flag VALUE is not a positional id)"          "[ \$? -eq 0 ]"
 # observe: one payload for the Observations view
 OBS=$(cc observe)
 ok "observe emits per-edit summaries"        "printf '%s' \"\$OBS\" | jq -e '.edits[0].summary | length > 0' >/dev/null"
@@ -658,6 +670,29 @@ ok "demo --clean removes the workspace folder (marker-gated)"          "[ ! -d \
 ok "demo --clean removes the store dir"                                "[ ! -d \"\$HOME/.claude/claude-observatory/\$DSESS\" ]"
 ok "demo --clean removes the outside-the-workspace scratch dir"        "[ ! -d \"\$DSCRATCH\" ]"
 ok "demo --clean drops both demo usage cursors, keeping the others"    "[ \"\$DCUR_AFTER\" = \"\$((DCUR_BEFORE - 2))\" ]"
+
+# --- §E2E 23: `views` batches read-only views into ONE process -------------------------------------
+# The JetBrains plugin has no in-process core, so it spawned one CLI per view — eight per refresh tick,
+# each paying node start-up and each re-deriving the same transcript parses from cold. `views` runs them
+# together. The property that MATTERS is that batching cannot change an answer: every view must be
+# byte-identical to its own command. (An early version stripped `--session` when `--views` was absent —
+# `indexOf` returns -1 and the filter removed argument zero — so every view described a DIFFERENT session
+# while looking perfectly plausible. That is what these pin.)
+echo "════════ E2E 23: views batching must not change a single answer ════════"
+VJ=$( cc views --session "$SESSION" --root "$WS" --json )
+# Non-empty FIRST: without this the comparisons below pass when both sides fail, which is how the first
+# version of this section reported four green ticks against two empty strings.
+ok "views emits a non-empty object keyed by view"                      "printf '%s' \"\$VJ\" | jq -e 'type==\"object\" and (keys|length)>=6' >/dev/null"
+for v in changemap prompts processes sessions; do
+  ONE=$( cc $v --session "$SESSION" --root "$WS" --json | jq -cS . )
+  BAT=$( printf '%s' "$VJ" | jq -cS ".$v" )
+  ok "$v: the single command answers at all"                           "[ -n \"\$ONE\" ] && [ \"\$ONE\" != null ]"
+  ok "views.$v is byte-identical to \`$v --json\`"                     "[ \"\$ONE\" = \"\$BAT\" ]"
+done
+ok "views --views picks a subset, and only that subset"                "cc views --views prompts,sessions --session \"\$SESSION\" --root \"\$WS\" --json | jq -e 'keys==[\"prompts\",\"sessions\"]' >/dev/null"
+ok "an unknown view is null, never fatal to the batch"                 "cc views --views prompts,nope --session \"\$SESSION\" --root \"\$WS\" --json | jq -e '.nope==null and (.prompts|type)==\"object\"' >/dev/null"
+ok "views will not batch a MUTATING command"                           "cc views --views keep --session \"\$SESSION\" --root \"\$WS\" --json | jq -e '.keep==null' >/dev/null"
+
 
 echo "════════════════════════════════════════════════════════"
 echo "E2E RESULT: $pass passed, $fail failed"

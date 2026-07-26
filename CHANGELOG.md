@@ -18,10 +18,10 @@ capture hooks need not be installed — which makes it the first thing a new rea
 ### Added
 
 - **Demo mode in VS Code and JetBrains.** `Start Demo Mode`, `Restart demo`, `Guided tour`, `Exit demo
-  mode` — in the command palette, on the Edits and Overview title bars, and in every empty state, so a
+  mode` — in the command palette, on the Overview's nav bar, and in every empty state, so a
   workspace with no Claude session yet offers the demo instead of only explaining why it is empty. In
-  JetBrains the same verbs sit at the end of the Edits panel's toolbar and the Overview's nav bar, and in
-  Find Action, and the Edits and Observations empty states offer the demo too. The replay runs in-process in VS Code and as a streamed background task in
+  JetBrains the same verbs sit at the end of the Overview's nav bar and in Find Action, and the Edits and
+  Observations empty states offer the demo too. The replay runs in-process in VS Code and as a streamed background task in
   JetBrains, narrating each beat.
 - **The guided tour.** Forty-one steps covering every panel the product ships and every named
   feature — the five Overview tabs, the change map's Folders strip, Files ledger, summary bar and feed,
@@ -45,10 +45,11 @@ capture hooks need not be installed — which makes it the first thing a new rea
   choice; JetBrains cannot, because that window never appeared in PyCharm 2025.2 and shipping a control
   that does nothing is worse than not offering it. Hiding the JetBrains tool window **pauses** the
   tour, because its wait steps act on a timer and must never do so behind a window you cannot see.
-- **Demo mode sits at the END of the panel toolbars** in both editors, on the Edits panel and the
-  Overview alike. It was the first thing in the row, which pushed the review actions rightward and read
-  as though the demo were part of reviewing. The four verbs come from one shared list per editor, so a
-  toolbar cannot offer a verb the other does not.
+- **Demo mode lives at the END of the Overview's nav bar**, in both editors, and nowhere else in the
+  panels. It began as the first thing on the Edits toolbar, where it pushed the review actions rightward
+  and read as though the demo were part of reviewing the session in front of you. The empty states keep
+  their **Try the demo** link, which is the first-run path. In JetBrains the four verbs come from one
+  shared list, so the surfaces that offer them cannot drift apart.
 - **The demo is offered on a first install and once after an update** — one notification, four seconds
   after startup, with **Never ask** on it. Skipped while a Claude session is live in that project, in an
   untrusted workspace, and once a demo is already recorded there.
@@ -75,8 +76,20 @@ capture hooks need not be installed — which makes it the first thing a new rea
   that keeps a running demo inside the fleet's 60-second active window while a tour explains it (mtime
   only — nothing is written); and an opt-out from the sibling agent.
 
+- **`views` — several read-only views in one process.** `claude-observatory views [--views a,b,c]` runs
+  the read-only views together and emits `{name: payload}`, each byte-identical to that view's own
+  command (pinned by the e2e suite). A view that fails is `null` rather than fatal to the batch, and a
+  mutating verb is refused. The JetBrains plugin has no in-process core, so it spawned one CLI per view —
+  eight per refresh tick, each paying node start-up and re-deriving the same transcript parses from
+  cold; its whole tick is now one spawn.
+
 ### Changed
 
+- **The Overview's axes row is icons only, in both editors.** The four review axes — Diff · File ·
+  Folder · Prompt — carry color-coded icons with the verb on hover. Each axis already names itself in
+  its own counter ("File 3/126"), so "Accept File" beside it restated what the reader was looking at,
+  and between them the labels took most of the bar. The session-wide controls row above keeps its
+  labels: those act on everything and have no counter to say so.
 - **Starting the demo resets it.** A run clears any previous demo for that folder before replaying, so
   Start and Restart are one operation and a second run cannot stack a stale, half-reviewed session beside
   the fresh one. `runDemo({ reset: false })` opts out.
@@ -84,9 +97,69 @@ capture hooks need not be installed — which makes it the first thing a new rea
   codebases", "critical infrastructure", "code that matters", "code you cannot afford to get wrong").
   Every intro surface — the README, the site, both marketplace descriptions, every package description —
   now says **established and mission-critical codebases**, per `docs/STYLE.md` X2.
+- **A scope flag and an edit id are mutually exclusive.** `keep`/`undo`/`redo` took the bulk branch
+  before ever reading a positional id, so `undo --file src 2` silently discarded the `2` and reverted
+  every pending edit under `src` — writing them all to disk and exiting 0. They now refuse the pair and
+  say which is which.
+- **Flags require their values.** A bare `args[i + 1]` accepted the NEXT FLAG as a value, so
+  `locate --file --json` resolved `<cwd>/--json` as the path to place edits in, `list --file --json`
+  filtered for files containing "--json", and `clean --session --json` operated on a session literally
+  named `--json` (which passes the session-id character class). `--file`, `--under`, `--session` and the
+  rest now reject a `--`-prefixed token and fail loudly. `clean --session` and `list --file` require a
+  value at all — a missing `clean --session` value used to widen the scope from one session to **every
+  session in the store**, and that verb's sink is a recursive remove.
+- **A taskId this session never had is an error.** `task-keep`/`task-undo`/`task-clear` answered an
+  unknown id with a green "kept 0 edit(s)" and exit 0, indistinguishable from a real task with nothing
+  pending. They now exit 1 and list the session's actual task ids (`sessionTaskIds`).
+- **`keep` on a reverted edit keeps nothing, and says so.** It used to flip the ledger to *kept* while
+  the file still held the reverted content — and that also marked the edit resolved, so `clean
+  --resolved` would drop it and the revert could never be redone. `keepGroup` now flips only pending
+  edits, matching `keepTask`'s long-standing rule.
+
+### Performance
+
+- **Edit placement composes the edit chain instead of re-aligning per edit.** Placing an edit means
+  mapping its `after` snapshot onto the current buffer; done once per edit, that runs a whole-file Myers
+  alignment whose cost grows with the *cumulative* drift since that edit, so a file with n edits paid the
+  largest alignment n times over. Consecutive snapshots are only one edit apart, so `locateEditsInCurrent`
+  now aligns `after[i] → after[i+1]` and composes those hops backwards from the buffer. Measured on an
+  800-line file with 30 pending edits: **6.3× faster at 3 changed lines per edit, 39.4× at 15, 71.9× at
+  40**, with zero placement differences; on a class-bearing 40-file / 1,200-edit tree the locate pass
+  goes 4,787 ms → 325 ms at churn 15. Snapshots are pulled one at a time rather than materialised up
+  front, which keeps a 5,000-line / 500-edit file at **+171 MB instead of +665 MB** in the VS Code
+  extension host, where the inline overlay does run in-process. Every surface that places an edit goes
+  through it: both editors' inline overlays — VS Code in-process, JetBrains through `locate --json`,
+  which now also carries the deletion hunks it computes for free — and the change map, on whichever
+  side builds it.
 
 ### Fixed
 
+- **Clearing resolved edits erased the session's skip markers.** `clearResolved`/`clearResolvedIds`
+  rebuilt the log from `readLog`, which returns edit records only, so every `op` line went with it —
+  including the `skip` markers that record *"a real edit could not be captured"*, the one thing standing
+  between an uncaptured change and silence. Clearing a single folder erased skips for unrelated files
+  too. The rewrite now carries every non-status op across.
+- **Garbage collection could delete a just-captured snapshot.** `PostToolUse` wrote the after-blob and
+  then appended the record; in between, nothing referenced that blob, so a concurrent `clean` or
+  `clear` collected it and the append committed a record pointing at a file that no longer existed —
+  `lineDelta` then reported the edit as a pure deletion and `undo` threw. The staging record now
+  publishes the after-blob before the append, and the GC honours it.
+- **Edits attributed to the wrong task.** The strict span model sorted the task-system snapshots by
+  timestamp but not the TodoWrite ones — and a transcript is not timestamp-ordered. An out-of-order
+  checkpoint inverted a task's span so it matched nothing, and handed its edits to the neighbouring
+  task, which a task-scoped keep or undo would then act on. Both sources are now sorted.
+- **The change map served stale class attribution.** Its on-disk cache keyed on the transcript and the
+  store log, but the map is also derived from the **workspace files themselves** (it reads each one to
+  detect classes and place edits). Editing a file in your editor moved neither key, so the map kept
+  reporting the old class names and placements until something unrelated touched the transcript.
+- **`footprint --json` emitted two JSON documents.** It ran `risk` and `egress` straight through, so
+  every caller's `JSON.parse` threw. It now emits one `{ risk, egress }` object.
+- **`status` crashed on very large sessions.** Two `Math.max(...log.map(…))` spreads survived the
+  conversion to the call-stack-safe `maxOf`, and throw `RangeError` past ~124,000 edits.
+- **The end-to-end suite spoke out loud.** One section header used the `say "…"` logging idiom borrowed
+  from `scripts/bootstrap.sh` and `docs/devcontainer/setup.sh` — both of which define a `say()` helper.
+  `test/e2e.sh` does not, so on macOS it reached `/usr/bin/say` and read the test name aloud through the
+  speakers. It now uses the same `echo` header every other section uses.
 - **Demo task attribution under a fast replay.** The simulator's transcript clock advances a millisecond
   per line and so ran ahead of wall time, while the store stamps captures with the real clock — far
   enough ahead, in the longer scenario, that a task's in-progress span no longer contained its own edit

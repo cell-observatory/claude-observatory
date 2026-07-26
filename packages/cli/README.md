@@ -53,6 +53,7 @@ claude-observatory multitask --json    # real-time multi-agent view: every runni
 claude-observatory tasklog --json      # cross-agent task log: one row per stable taskId, unioned across worktrees + subagents
 claude-observatory chat-context --json # zero-token, ready-to-paste chat prompt about an action/edit/subagent/task (--tool-use-id | --edit | --agent | --task)
 claude-observatory changemap           # the Overview view-model: the per-prompt slices + per-file/per-folder churn rollups (per task/subagent/workflow/agent) as JSON
+claude-observatory views --json        # several read-only views in ONE process: {name: payload}, each byte-identical to its own command (--views a,b,c to pick). One spawn per refresh instead of eight — what the JetBrains plugin drives its whole tick through
 claude-observatory sessions --json     # {active, sessions:[{id, title, lastActiveMs, current}]} — built from directory stats + a cached title scan, never from a session's edit log
 claude-observatory blob <sha>          # raw blob bytes to stdout
 claude-observatory locate --file <f>   # per-pending-edit line indices in the LIVE buffer (text on stdin; JSON out)
