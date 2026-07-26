@@ -506,7 +506,7 @@ Built to add **zero overhead** to your Claude sessions:
   sessions, the listing the session picker opens with fell from 717 ms to 4 ms (1 ms once each session's
   title sidecar is warm), with the caveat that it now returns only this workspace's sessions.
 - **A refresh is one process, and edits are placed by composing the chain (0.8.9)** — the JetBrains
-  plugin's whole tick now goes through `views`, which runs the eight read-only views in a single spawn
+  plugin's Overview tick now goes through `views`, which runs those eight read-only views in a single spawn
   instead of one each, and VS Code gets the Overview's three heavy payloads from one `views` spawn
   rather than three. It stays a spawn on purpose: building the change map in-process was tried and
   reverted after it was measured blocking the extension host for 2.8 s on a large session, where a

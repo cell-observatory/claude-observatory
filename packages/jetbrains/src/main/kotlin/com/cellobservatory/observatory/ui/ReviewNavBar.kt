@@ -38,12 +38,20 @@ internal object NavTint {
     val PURPLE = JBColor(Color(0x9A6AC2), Color(0x9A6AC2))
     fun tint(icon: Icon, color: Color): Icon = IconUtil.colorize(icon, color)
 
-    // ONE glyph+tint per ACTION — and no glyph serves two different actions (user rule 2026-07-16).
-    // Used by every surface (nav bars, panel toolbars, context menus, the editor banner, the floating
-    // lens) so the same action always looks the same. Three scope tiers, mirroring the VS Code
-    // codicons: per-edit Keep ✓/Undo ↩ · scoped (file/folder) Accept ✓✓/Reject ✕ · session-wide
-    // Accept All (commit)/Reject All (history, VS Code $(timeline-view-icon)). Row STATE badges stay
-    // neutral except kept-green (a reverted STATE is not a destructive ACTION — it never wears red).
+    // ONE glyph+tint per OPERATION (user rule 2026-07-16), used by every surface — nav bars, panel
+    // toolbars, context menus, the editor banner, the floating lens — so an operation always looks the
+    // same wherever it appears. Mirrors the VS Code codicons one-for-one: per-edit Keep ✓/Undo ↩ ·
+    // scoped Accept ✓✓/Reject ✕ · session-wide Accept All (commit)/Reject All (history).
+    //
+    // The glyph names the OPERATION; the SCOPE comes from the axis group it sits in. Accept File,
+    // Accept Folder and Accept Prompt therefore share ✓✓ on purpose — each sits beside its own axis
+    // counter ("File 3/126", "Folder 1/23", "Prompt 2/9"), which is the annotation that says what the
+    // button acts on, and VS Code pairs the same three with codicon-check-all for the same reason.
+    // Since 0.8.9 those rows are icon-only, so the counter is doing that work alone; keep every scoped
+    // action inside an axis group that carries one, or its scope becomes unreadable. Demo verbs reuse
+    // two base glyphs (Preview, Cancel) UNTINTED — grey against these tints, and only ever on screen in
+    // demo mode. Row STATE badges stay neutral except kept-green (a reverted STATE is not a destructive
+    // ACTION — it never wears red).
     val KEEP: Icon = tint(AllIcons.Actions.Checked, GREEN)
     val ACCEPT_FILE: Icon = tint(Icons.CheckAll, GREEN)
     val ACCEPT_ALL: Icon = tint(AllIcons.Actions.Commit, GREEN)

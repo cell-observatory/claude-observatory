@@ -98,6 +98,9 @@ object ObservatoryCli {
      * spawn and the next tick gets fresh data. An older CLI on PATH has no `views` command; that is
      * detected once and every view falls back to spawning for itself, exactly as before.
      */
+    /** Drop the batched view cache — call after a mutation, before a forced refresh. */
+    fun invalidateViewBatch() = ViewBatch.invalidate()
+
     private object ViewBatch {
         private const val WINDOW_MS = 2_500L
         private val lock = Any()
@@ -106,19 +109,55 @@ object ObservatoryCli {
         // spawning for itself AND re-spawning the batch: strictly worse than not batching at all.
         private val entries = LinkedHashMap<String, Pair<Long, Map<String, String?>>>()
         private const val MAX_ENTRIES = 8
+        /** Per-(session, workspace) spawn locks, so one project's slow batch cannot block another's. */
+        private val keyLocks = java.util.concurrent.ConcurrentHashMap<String, Any>()
         /** Set once if this CLI predates `views`; from then on every caller spawns for itself. */
         @Volatile private var unsupported = false
 
+        /** Drop every cached batch. Called when a MUTATION lands: `ThrottledFetch.forced` exists so a
+         *  refresh after Accept All / Reject All / Clear Resolved is never served stale, and a batch up to
+         *  2.5 s old would have defeated exactly that — the Edits tree reads the store directly and would
+         *  have disagreed with the Overview on screen for the rest of the window. */
+        fun invalidate() {
+            synchronized(lock) { entries.clear() }
+        }
+
+        /** ONE definition of the cache key — [peek] and [view] must agree, or a peek silently never
+         *  hits and the picker pays a full spawn every time it opens. */
+        private fun cacheKey(session: String?, workDir: String?) = "${session.orEmpty()}\u0000${workDir.orEmpty()}"
+
+        /** The cached batch for [k] if it is still inside the window, else null. */
+        private fun fresh(k: String): Map<String, String?>? = synchronized(lock) {
+            entries[k]?.takeIf { System.currentTimeMillis() - it.first <= WINDOW_MS }?.second
+        }
+
+        /** Cache-only read: answers if the window is warm, never spawns. */
+        fun peek(name: String, session: String?, workDir: String?): String? {
+            if (unsupported) return null
+            return fresh(cacheKey(session, workDir))?.get(name)
+        }
+
         fun view(name: String, session: String?, workDir: String?): String? {
             if (unsupported) return null
-            val k = "${session.orEmpty()}\u0000${workDir.orEmpty()}"
-            synchronized(lock) {
-                val now = System.currentTimeMillis()
-                val hit = entries[k]
-                if (hit != null && now - hit.first <= WINDOW_MS) return hit.second[name]
+            val k = cacheKey(session, workDir)
+            fresh(k)?.let { return it[name] }
+
+            // The spawn runs OUTSIDE the shared lock, under one private to this (session, workDir).
+            // Holding the global lock across `fetch` serialized every open project behind whichever one
+            // was building: at HEAVY_TIMEOUT_MS that is a 180 s stall on a second project whose own batch
+            // was already cached. Per-key still coalesces the case that matters — several views of the
+            // SAME session asking at once collapse to one spawn, which is the point of batching.
+            val keyLock = keyLocks.computeIfAbsent(k) { Any() }
+            synchronized(keyLock) {
+                fresh(k)?.let { return it[name] } // another thread filled it while we waited
                 val fresh = fetch(session, workDir)
-                entries[k] = now to fresh
-                if (entries.size > MAX_ENTRIES) entries.remove(entries.keys.first())
+                synchronized(lock) {
+                    entries[k] = System.currentTimeMillis() to fresh
+                    if (entries.size > MAX_ENTRIES) entries.remove(entries.keys.first())
+                }
+                // Distinct sessions accumulate over a long-lived IDE. Dropping the map while a lock is
+                // held risks at worst a duplicate spawn for one key, never a wrong answer.
+                if (keyLocks.size > 64) keyLocks.clear()
                 return fresh[name]
             }
         }
@@ -131,16 +170,22 @@ object ObservatoryCli {
             }
             val r = run(args, workDir, timeoutMs = HEAVY_TIMEOUT_MS)
             if (r.exitCode != 0 || r.stdout.isBlank()) {
-                // An older CLI answers "unknown command". Stop asking rather than paying for a failed
-                // spawn on every tick forever.
-                unsupported = true
+                // Latch ONLY on the one failure that can never succeed later: a CLI too old to know the
+                // command, which says so verbatim on stderr ("unknown command \"views\""). Everything
+                // else here is transient — a timeout on a huge first build, a spawn that lost a race
+                // with an upgrade, an OOM — and latching on those cost far more than it saved: one slow
+                // tick permanently disabled batching for the rest of the IDE session, putting every
+                // later tick back on eight spawns, which is the regression this batch exists to prevent.
+                // Returning an empty map already makes THIS tick fall back per-view; the next tick retries.
+                if (r.stderr.contains("unknown command")) unsupported = true
                 return emptyMap()
             }
             return try {
                 val obj = com.google.gson.JsonParser.parseString(r.stdout).asJsonObject
                 obj.entrySet().associate { (k, v) -> k to if (v.isJsonNull) null else v.toString() }
             } catch (_: Exception) {
-                unsupported = true
+                // Unparseable stdout from a CLI that DID accept the command — a truncated pipe, or a
+                // stray line from a wrapper script. Transient by the same argument; do not latch.
                 emptyMap()
             }
         }
@@ -314,12 +359,20 @@ object ObservatoryCli {
         }
     }
 
-    /** `sessions --json` — every store session incl. its human-readable title (0.8.6), for the chooser. */
-    fun sessionsJson(workDir: String?, reviewing: String? = null): String? {
-        // Only ride the batch on the POLLING path, which always names the session under review. The
-        // Switch-Session picker passes none, and building the other seven views — including the change
-        // map — to answer a one-off list would cost more than the list is worth.
-        if (reviewing != null) ViewBatch.view("sessions", reviewing, workDir)?.let { return it }
+    /** `sessions --json` — every store session incl. its human-readable title (0.8.6), for the chooser.
+     *
+     *  [buildBatch] separates the two callers, which want opposite things from the batch. The POLLING
+     *  path (ObservatoryService) is the batch's owner: it may build one. The Switch-Session picker must
+     *  not — it names the current session too, so it would otherwise hit the same cache key and, on a
+     *  cold or expired window, block the popup behind a full eight-view build INCLUDING the change map.
+     *  That is precisely the multi-second stall the 0.8.8 stat-only listing removed. It peeks instead:
+     *  free when the poller has already filled the window, a plain `sessions` spawn when it has not. */
+    fun sessionsJson(workDir: String?, reviewing: String? = null, buildBatch: Boolean = false): String? {
+        if (reviewing != null) {
+            val batched = if (buildBatch) ViewBatch.view("sessions", reviewing, workDir)
+            else ViewBatch.peek("sessions", reviewing, workDir)
+            batched?.let { return it }
+        }
         // --session names the session being reviewed, so a pinned conversation that has made no edits
         // yet is still listed rather than looking like another workspace's.
         val args = buildList {

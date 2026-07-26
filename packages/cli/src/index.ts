@@ -2706,9 +2706,10 @@ function usage(): void {
       `  views [--views <a,b,c>] [--root <d>]\n` +
       `                       run several READ-ONLY views in ONE process and emit {name: payload} —\n` +
       `                       each is byte-identical to its own command. Default set: changemap,\n` +
-      `                       multitask, prompts, processes, sessions, observations, risk, egress.\n` +
+      `                       multitask, prompts, processes, sessions, observations, risk, egress;\n` +
+      `                       stats is accepted by name too, though nothing batches it by default.\n` +
       `                       A view that fails is null rather than fatal to the batch; a mutating\n` +
-      `                       verb is refused. The JetBrains plugin drives its whole refresh through it.\n` +
+      `                       verb is refused. The JetBrains Overview polls its eight views through it.\n` +
       `  chat-context [--tool-use-id <id> | --edit <n> | --agent <id> | --task <id>]\n` +
       `                       assemble a zero-token, ready-to-paste chat prompt about an action/edit/subagent/task\n` +
       `  locate --file <f>    per-pending-edit line indices in the live buffer (text on stdin; JSON out)\n` +

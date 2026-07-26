@@ -412,8 +412,10 @@ session-wide **Clear Resolved** (status bar), a **Spotlight** toggle, and **Sear
 The buttons are **color-coded by what they do** (0.8.3, both editors): keep/accept **green**,
 undo/reject **red**, the nav chevrons **blue**, clear **orange**, search/spotlight **purple** — the
 same chart palette the Overview uses, so the destructive half of the bar never reads like the safe half.
-No icon serves two actions: the session-wide bulk pair get their own glyphs (Accept All a checklist,
-Revert All a history-rewind), distinct from the file-scoped double-check / ✕ and the per-edit ✓ / ↩.
+A glyph names the **operation**, and the axis it sits in names the **scope**: the per-edit ✓ / ↩, the
+scoped double-check / ✕, and the session-wide checklist / history-rewind are three distinct pairs, while
+Accept File, Accept Folder and Accept Prompt deliberately share the scoped ✓✓ — each sits beside its own
+axis counter, which is what says who it acts on.
 On the **Overview title bar** the bar expands to **two rows**. The **top row** carries the controls: the
 **name of the session under review** (its title or first prompt; the raw id sits in the tooltip) — a
 label since 0.8.8, because the **Sessions** tab is where the session changes — the session-wide bulk
@@ -431,6 +433,12 @@ steps the pending edits on **four review axes**, each a coarser grain than the l
   **Accept Folder / Reject Folder**, which act on that folder's edits alone.
 - **Prompt** — your own asks, in order; shows what each one produced, with **Review · Accept Prompt ·
   Reject Prompt**.
+
+Since 0.8.9 the axes row is **icons only** in both editors, each button naming its verb on hover. Every
+axis already labels itself in its own `n/m` counter — `Diff 1/2`, `File 3/126`, `Folder 1/23`,
+`Prompt 2/9` — so a word beside each button only restated the axis the reader was already looking at, and
+on a bottom dock that space is the change map's. The **top row keeps its labels**: those actions are
+session-wide and destructive, and no counter above them says what they act on.
 
 The bar is **two-tier**. The File axis plus Clear / Spotlight / Search show whenever *any* edit is pending
 anywhere; the Diff axis and the per-edit / per-file actions appear only when the **open** file has

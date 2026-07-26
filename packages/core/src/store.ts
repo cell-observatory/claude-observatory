@@ -240,7 +240,17 @@ export function readBlob(sessionId: string, sha: string): Buffer {
 // --- staging (transient before-snapshot) ---
 
 export function writeStaging(sessionId: string, key: string, rec: StagingRecord): void {
-  fs.writeFileSync(path.join(stagingDir(sessionId), `${key}.json`), JSON.stringify(rec), { mode: 0o600 });
+  // ATOMIC — tmp + rename, like writeBlob. A staging record is what tells the GC that a blob written but
+  // not yet logged is still live, and a plain write truncates before it fills: a concurrent
+  // `gcSessionCore` that reads the file mid-write gets zero bytes, `JSON.parse` throws, and the catch
+  // treats the record as absent — collecting BOTH the before and after blobs of an edit that is about to
+  // be committed. Measured on this machine, ~4.7% of reads during a rewrite saw an empty file, and the
+  // resulting record points at blobs that no longer exist: `lineDelta` then reports a pure deletion and
+  // `undoEdit` throws. pid-scoped so two captures cannot collide on the temp name.
+  const dest = path.join(stagingDir(sessionId), `${key}.json`);
+  const tmp = `${dest}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(rec), { mode: 0o600 });
+  fs.renameSync(tmp, dest); // a reader sees old-or-new, never a torn file
 }
 
 export function readStaging(sessionId: string, key: string): StagingRecord | null {

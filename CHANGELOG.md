@@ -5,7 +5,7 @@ All notable changes to Claude Observatory are recorded here, following
 Per-tag release artifacts and auto-generated notes are on the
 [Releases page](https://github.com/cell-observatory/claude-observatory/releases).
 
-## [0.8.9] — 2026-07-25
+## [0.8.9] — 2026-07-26
 
 **Demo mode, in both editors.** The demo simulator has existed since 0.8.0, but only in the terminal —
 neither editor had a way to reach it. It is now one command away in both: **Start Demo Mode** replays a
@@ -81,10 +81,16 @@ capture hooks need not be installed — which makes it the first thing a new rea
   command (pinned by the e2e suite). A view that fails is `null` rather than fatal to the batch, and a
   mutating verb is refused. The JetBrains plugin has no in-process core, so it spawned one CLI per view —
   eight per refresh tick, each paying node start-up and re-deriving the same transcript parses from
-  cold; its whole tick is now one spawn.
+  cold; those eight are now one spawn. `feed`, `tree`, `stats` and `usage` still spawn for themselves —
+  they answer their own triggers, not the Overview's tick.
 
 ### Changed
 
+- **Prompts and Stats fold away in JetBrains.** The bottom dock holds three columns beside a nav bar, and
+  on a short tool window that left the change map almost nothing. Two toggles in the Dashboards title bar
+  now fold either side pane, remembered across restarts (`dashShowPrompts` / `dashShowStats`). VS Code
+  gets the same room for free — its three dock views are separate accordion sections — so this is the
+  platform's equivalent rather than a new idea.
 - **The Overview's axes row is icons only, in both editors.** The four review axes — Diff · File ·
   Folder · Prompt — carry color-coded icons with the verb on hover. Each axis already names itself in
   its own counter ("File 3/126"), so "Accept File" beside it restated what the reader was looking at,
@@ -123,9 +129,10 @@ capture hooks need not be installed — which makes it the first thing a new rea
   alignment whose cost grows with the *cumulative* drift since that edit, so a file with n edits paid the
   largest alignment n times over. Consecutive snapshots are only one edit apart, so `locateEditsInCurrent`
   now aligns `after[i] → after[i+1]` and composes those hops backwards from the buffer. Measured on an
-  800-line file with 30 pending edits: **6.3× faster at 3 changed lines per edit, 39.4× at 15, 71.9× at
-  40**, with zero placement differences; on a class-bearing 40-file / 1,200-edit tree the locate pass
-  goes 4,787 ms → 325 ms at churn 15. Snapshots are pulled one at a time rather than materialised up
+  800-line file with 30 pending edits (Node 22, warm process, the old per-edit path against the batch):
+  **~5× faster at 3 changed lines per edit and ~30–35× at 15 and at 40**, with zero placement
+  differences at every level. An earlier draft of this note quoted 71.9× at churn 40; that does not
+  reproduce — the gain flattens once per-edit alignment stops being the dominant cost. Snapshots are pulled one at a time rather than materialised up
   front, which keeps a 5,000-line / 500-edit file at **+171 MB instead of +665 MB** in the VS Code
   extension host, where the inline overlay does run in-process. Every surface that places an edit goes
   through it: both editors' inline overlays — VS Code in-process, JetBrains through `locate --json`,
@@ -134,6 +141,43 @@ capture hooks need not be installed — which makes it the first thing a new rea
 
 ### Fixed
 
+- **A staging record could be read as empty while it was being rewritten, and the garbage collector then
+  freed an edit's blobs out from under it.** `writeStaging` truncated in place; a `gcSessionCore` running
+  concurrently read zero bytes, `JSON.parse` threw, and the catch treated the record as absent — so both
+  the before AND after blob of an edit that was about to be committed were collected. Measured on this
+  machine at 2.8% of reads during a rewrite (1,318 of 47,608). It now writes to a temp file and renames,
+  so a reader sees the old record or the new one and never a torn one: 0 of 55,340 under the same probe.
+- **One slow or failed `views` batch permanently disabled batching for the rest of the IDE session.** Any
+  non-zero exit latched the "this CLI is too old" flag — including a timeout on a large first build — and
+  every later refresh fell back to eight separate spawns, which is the cost the batch exists to avoid. It
+  now latches only on the one failure that cannot recover, a CLI that answers `unknown command`; anything
+  else falls back for that tick alone and the next tick retries.
+- **A batch build blocked every other open project for as long as it ran.** `ViewBatch` held one global
+  lock across the spawn, so a second project whose own views were already cached still waited — up to the
+  180 s heavy timeout. The spawn now runs under a per-(session, workspace) lock, which still collapses
+  concurrent views of the same session into one process.
+- **The Switch-Session picker could block behind a full eight-view build.** It passes the current session,
+  so it hit the same batch key as the poller and, on a cold window, paid for the change map to answer a
+  session list — the multi-second stall 0.8.8's stat-only listing had removed. It now reads the batch only
+  when the poller has already filled it.
+- **The tree toolbar's per-file accept/reject could act on a file the gate never approved.** `update()`
+  read the background-safe active-file tracker while the click read `FileEditorManager`, two sources that
+  disagree across a tab switch — so a bulk, unrecoverable accept could land on the wrong file. The click
+  now resolves the same path the gate approved, and cancels rather than guessing when they differ.
+
+- **Every button on the JetBrains Overview did nothing unless the Fleet tab was open.** All six of that
+  panel's toolbars set `targetComponent` to a tree living inside ONE nav tab, and the platform refuses to
+  perform an action whose toolbar target is not showing — so with Sessions selected, which is the
+  default, Accept All, Reject All, Clear Resolved, Export, Search, Active only, Clear completed,
+  Spotlight, Refresh and all four review axes were dead, with no error and no feedback. The IDE's own log
+  said so 28 times. They now target the panel that owns them, and `ToolbarContractTest` fails if any
+  toolbar is ever again pointed at something that can stop showing while its buttons are on screen.
+- **The editor's text cursor was replaced by the arrow, in every file.** The inline overlay's lens-hover
+  handler is registered on the global editor multicaster and ended by assigning the cursor
+  unconditionally — including `Cursor.getDefaultCursor()`, the arrow — so it ran on every mouse move in
+  every editor of the project whether or not the file had a single Claude edit, and it ran after the
+  platform had set the pointer, so the editor could never win it back. It now uses `setCustomCursor`,
+  shows the hand only over a lens, and releases only an editor it took.
 - **Clearing resolved edits erased the session's skip markers.** `clearResolved`/`clearResolvedIds`
   rebuilt the log from `readLog`, which returns edit records only, so every `op` line went with it —
   including the `skip` markers that record *"a real edit could not be captured"*, the one thing standing

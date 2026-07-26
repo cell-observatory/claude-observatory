@@ -416,7 +416,14 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
 
     /** A bulk action scoped to the ACTIVE editor's file, gated (enabled+visible) on that file having
      *  pending edits. The tree toolbar has no VIRTUAL_FILE in its data context, so we read the active
-     *  file from FileEditorManager (parity with VS Code's keepOpenFile/undoOpenFile). */
+     *  file from FileEditorManager (parity with VS Code's keepOpenFile/undoOpenFile).
+     *
+     *  The gate runs on a BGT thread and must therefore read the tracker, while the click runs on the
+     *  EDT where FileEditorManager is available — two sources that can name different files across a tab
+     *  switch. These are bulk, destructive verbs (accept/reject EVERY pending edit in a file), so the
+     *  click resolves the SAME path the gate approved and only falls back to the editor's own answer
+     *  when that path is still what is in front. Disagreement cancels rather than guesses: silently
+     *  accepting a file the user was not looking at is unrecoverable. */
     private fun fileScopedAction(text: String, icon: javax.swing.Icon, run: (String, VirtualFile) -> Unit): AnAction =
         object : AnAction(text, null, icon), DumbAware {
             override fun getActionUpdateThread() = ActionUpdateThread.BGT
@@ -426,7 +433,10 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
             }
 
             override fun actionPerformed(e: AnActionEvent) {
-                val vf = activeFile() ?: return
+                val path = activeFilePath() ?: return
+                val vf = activeFile()?.takeIf { it.path == path }
+                    ?: com.intellij.openapi.vfs.LocalFileSystem.getInstance().findFileByPath(path)
+                    ?: return
                 withSession { s -> run(s, vf) }
             }
         }

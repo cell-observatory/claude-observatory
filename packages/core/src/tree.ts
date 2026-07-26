@@ -135,7 +135,10 @@ function buildFile(session: string, rel: string, file: string, recs: EditRecord[
   // One hash per FILE (not per edit) identifies the current text for the memo below.
   const textKey = `${text.length}:${crypto.createHash('sha1').update(text).digest('hex').slice(0, 16)}`;
   // `recs` arrive in log order (reviewEdits walks the log), i.e. chronological — which is what keeps
-  // each composed hop one edit wide. Out-of-order input would still be correct, only slower.
+  // each composed hop one edit wide. Order is a CORRECTNESS requirement, not a speed one: composition
+  // follows surviving lines, so a hop between unrelated states drops them and the earlier edits come
+  // back unplaced. Feeding the same three edits as (2,0,1) yields [[],[1],[3]] where chronological order
+  // yields [[1],[3],[5]] — a silently missing placement, not a slower one.
   const lines = locateCached(textKey, recs, readText, text);
   for (let i = 0; i < recs.length; i++) {
     const r = recs[i];

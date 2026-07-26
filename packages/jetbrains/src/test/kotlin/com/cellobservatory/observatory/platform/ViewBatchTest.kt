@@ -56,18 +56,47 @@ class ViewBatchTest : BasePlatformTestCase() {
         }
     }
 
-    /** A CLI without `views` must still serve every panel — the plugin loads against whatever is on PATH. */
-    fun testAViewIsStillServedWhenTheCliHasNoBatchCommand() {
-        if (!cliOnPath()) return
-        // `sessions` is the cheapest view; asking with a workDir that has no store exercises the path
-        // where the batch cannot help and the individual command has to answer.
-        val nowhere = File(System.getProperty("java.io.tmpdir"), "obs-empty-${System.nanoTime()}")
-        nowhere.mkdirs()
+    /**
+     * The UN-BATCHED path must still answer. `sessionsJson(dir, null)` deliberately skips the batch —
+     * the Switch-Session picker names no session, and building the other seven views to answer a list
+     * would cost more than the list is worth — so this is the path a caller takes when the batch is not
+     * available to it.
+     *
+     * The first version of this test asserted `out == null || out.contains("sessions")`. The `null` arm
+     * satisfies it, so it passed on precisely the failure it claimed to guard, against a store that was
+     * empty anyway. It now seeds a REAL store — via the `configDir` override, so the user's own
+     * ~/.claude is never touched — and demands a payload naming the session it just created.
+     */
+    fun testTheUnbatchedPathStillAnswers() {
+        if (!cliOnPath()) {
+            println("SKIPPED ViewBatchTest: `claude-observatory` is not on PATH")
+            return
+        }
+        val settings = com.cellobservatory.observatory.settings.ObservatorySettings.instance.state
+        val prevCfg = settings.configDir
+        val cfg = File(System.getProperty("java.io.tmpdir"), "obs-cfg-${System.nanoTime()}")
+        val work = File(System.getProperty("java.io.tmpdir"), "obs-unbatched-ws-${System.nanoTime()}")
+        cfg.mkdirs(); work.mkdirs()
         try {
-            val out = ObservatoryCli.sessionsJson(nowhere.absolutePath, null)
-            assertTrue("a sessions payload comes back (batched or not)", out == null || out.contains("sessions"))
+            settings.configDir = cfg.absolutePath
+            // A real replay through the real pipeline, into the throwaway config dir.
+            val pb = ProcessBuilder("claude-observatory", "demo", "--fast").directory(work)
+            pb.environment()["CLAUDE_CONFIG_DIR"] = cfg.absolutePath
+            pb.redirectErrorStream(true)
+            val p = pb.start(); p.inputStream.readBytes(); p.waitFor()
+
+            val out = ObservatoryCli.sessionsJson(work.absolutePath, null)
+            assertNotNull("the un-batched sessions path returned nothing at all", out)
+            assertTrue("…and it names no demo session: $out", out!!.contains("demo-"))
         } finally {
-            nowhere.deleteRecursively()
+            settings.configDir = prevCfg
+            runCatching {
+                val pb = ProcessBuilder("claude-observatory", "demo", "--clean").directory(work)
+                pb.environment()["CLAUDE_CONFIG_DIR"] = cfg.absolutePath
+                pb.start().waitFor()
+            }
+            work.deleteRecursively(); cfg.deleteRecursively()
         }
     }
+
 }

@@ -683,7 +683,10 @@ VJ=$( cc views --session "$SESSION" --root "$WS" --json )
 # Non-empty FIRST: without this the comparisons below pass when both sides fail, which is how the first
 # version of this section reported four green ticks against two empty strings.
 ok "views emits a non-empty object keyed by view"                      "printf '%s' \"\$VJ\" | jq -e 'type==\"object\" and (keys|length)>=6' >/dev/null"
-for v in changemap prompts processes sessions; do
+# EVERY default view, not a sample: the architecture doc's "byte-identical, pinned by e2e" claim is only
+# true if all eight are actually pinned, and the four that used to be left out (multitask, observations,
+# risk, egress) are exactly the ones no other section touches.
+for v in changemap multitask prompts processes sessions observations risk egress; do
   ONE=$( cc $v --session "$SESSION" --root "$WS" --json | jq -cS . )
   BAT=$( printf '%s' "$VJ" | jq -cS ".$v" )
   ok "$v: the single command answers at all"                           "[ -n \"\$ONE\" ] && [ \"\$ONE\" != null ]"

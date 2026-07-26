@@ -36,6 +36,16 @@ class ActiveFileTracker(private val project: Project) {
                 }
             },
         )
+        // Seed ONCE, on the EDT. The listener only fires on a CHANGE, and every reader is an action
+        // `update()` running on a background thread, where asking FileEditorManager is not allowed. Without
+        // this, a project opened onto an already-restored file leaves `path` null until the first tab
+        // switch — and every control gated on the active file stays hidden: the whole Diff axis, Keep,
+        // Undo, Chat, View diff, Accept/Reject File and Accept/Reject Folder.
+        com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater {
+            if (!project.isDisposed && path == null) {
+                path = FileEditorManager.getInstance(project).selectedFiles.firstOrNull()?.path
+            }
+        }
     }
 
     /** Safe from any thread. Seeds itself on first use from the EDT-owned manager when nothing is cached

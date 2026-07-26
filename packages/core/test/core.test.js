@@ -734,8 +734,8 @@ test('ranges: a file\'s edits are placed by COMPOSING the chain — and one empt
   const chainLines = (chain, current) =>
     core.locateEditsInCurrent(chain.length, (i) => chain[i], current).map((p) => p.lines);
 
-  // 1. A plain chain must agree, edit for edit, with placing each one on its own. This is the whole
-  //    contract of the batch form: composing hops is an optimization, never a different answer.
+  // 1. On a chain whose lines survive to the buffer, composing agrees edit for edit with placing each
+  //    edit on its own — there the hops are purely an optimization.
   const v0 = 'a\nb\nc\n';
   const v1 = 'a\nONE\nb\nc\n';
   const v2 = 'a\nONE\nb\nTWO\nc\n';
@@ -745,6 +745,26 @@ test('ranges: a file\'s edits are placed by COMPOSING the chain — and one empt
     core.locateEditInCurrent(v1, v2, v2),
   ]);
   assert.deepEqual(chainLines(chain, v2), [[1], [3]]);
+
+  // 1b. It is NOT true in general, and the difference is the point of composing rather than a defect to
+  //     paper over. When a line is deleted and later reintroduced with the same text, the copy standing
+  //     in the buffer belongs to the LATER edit. Composition follows surviving lines, so the earlier
+  //     edit comes back unplaced; a direct `after -> current` alignment matches it to the replacement and
+  //     hands two edits the same line — so "undo" on the earlier one would point at the later one's work.
+  //     Measured over randomized chains that reuse line text, the two disagree this way on 0.40% of
+  //     edits. Under-reporting is the intended answer; an unplaced edit still lists, it only loses its
+  //     class attribution (tree.ts passes `undefined` straight through to `classAt`).
+  const base = 'a\nb\nc\nd\n';
+  const withX = 'a\nb\nXXX\nc\nd\n';
+  const readd = [
+    { before: base, after: withX }, // #1 introduces XXX
+    { before: withX, after: base }, // #2 reverts it
+    { before: base, after: withX }, // #3 reintroduces the identical text
+  ];
+  const reintro = chainLines(readd, withX);
+  assert.deepEqual(reintro[2], [2], 'the edit that actually authored the surviving line owns it');
+  assert.deepEqual(reintro[0], [], 'the reverted edit stays unplaced rather than claiming its replacement');
+  assert.deepEqual(core.locateEditInCurrent(base, withX, withX), [2], 'placed alone, the same edit DOES claim line 2 — which is exactly the mis-attribution composing avoids');
 
   // 2. An edit that DELETED the file leaves an empty `after`. Nothing survives a hop through nothing,
   //    so composing across it would wipe out every EARLIER edit's placement too — the deletion must

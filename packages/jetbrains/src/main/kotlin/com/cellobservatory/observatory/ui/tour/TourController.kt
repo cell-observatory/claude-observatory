@@ -240,6 +240,13 @@ class TourController(private val project: Project) : com.intellij.openapi.Dispos
         playing = play
         // The tour narrates rows Active only hides; hand the reader's own filter back in stop().
         ChangeMapPanel.of(project)?.setShowAll(true)
+        // Unfold the dock's side panes for the duration. Seven of the forty-one steps ring a control
+        // inside Prompts or Stats — `prompts` and `finish` are on the Essentials track — and a folded
+        // pane is not showing, so `ring()` bails and the step narrates a panel the reader cannot see.
+        // Restored in stop(), exactly like the Active-only filter above.
+        foldedPrompts = !settings().dashShowPrompts
+        foldedStats = !settings().dashShowStats
+        if (foldedPrompts || foldedStats) setDockPanes(prompts = true, stats = true)
         openWindow()
         applyStep(0)
     }
@@ -291,6 +298,19 @@ class TourController(private val project: Project) : com.intellij.openapi.Dispos
     // --- action steps ---------------------------------------------------------------------------
 
     private fun service() = com.cellobservatory.observatory.services.ObservatoryService.getInstance(project)
+
+    private fun settings() = com.cellobservatory.observatory.settings.ObservatorySettings.instance.state
+
+    /** Which dock side panes the tour folded away, so stop() can put them back. */
+    private var foldedPrompts = false
+    private var foldedStats = false
+
+    /** Show or hide the Dashboards side panes, through the same path the title-bar toggles use. */
+    private fun setDockPanes(prompts: Boolean, stats: Boolean) {
+        settings().dashShowPrompts = prompts
+        settings().dashShowStats = stats
+        com.cellobservatory.observatory.ui.ObservatoryDashboardsFactory.applyPanes(project)
+    }
 
     /** Disarm, and put back anything an `auto` step changed about the reader's editor. */
     private fun disarm() {
@@ -424,6 +444,12 @@ class TourController(private val project: Project) : com.intellij.openapi.Dispos
         windowShown = false
         disarm()
         ChangeMapPanel.of(project)?.setShowAll(false)
+        // Give back exactly what the reader had before the tour opened them.
+        if (foldedPrompts || foldedStats) {
+            setDockPanes(prompts = !foldedPrompts, stats = !foldedStats)
+            foldedPrompts = false
+            foldedStats = false
+        }
         ring(null)
         closeWindow()
     }

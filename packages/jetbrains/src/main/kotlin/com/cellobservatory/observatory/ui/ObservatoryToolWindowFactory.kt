@@ -48,6 +48,21 @@ class ObservatoryToolWindowFactory : ToolWindowFactory, DumbAware {
  *    · Stats    — session metrics.
  *  Observations moved to the sidebar window (with Edits / Diffs / File History / Actions) to make room. */
 class ObservatoryDashboardsFactory : ToolWindowFactory, DumbAware {
+
+    companion object {
+        /** One re-apply hook per open project. The fold state lives in APPLICATION settings but each
+         *  window owns its own splitter, so a toggle in project A used to leave project B's pane on
+         *  screen with its title-bar checkbox reading the new value. Anything that changes the setting
+         *  calls [applyPanes], which re-applies it everywhere. */
+        private val appliers = java.util.WeakHashMap<Project, () -> Unit>()
+
+        fun applyPanes(project: Project) {
+            com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater {
+                if (!project.isDisposed) appliers.values.toList().forEach { it() }
+            }
+        }
+    }
+
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
         val stats = com.cellobservatory.observatory.ui.stats.StatsPanel(project)
         val promptsPane = titled("Prompts", PromptsPanel(project))
@@ -81,7 +96,7 @@ class ObservatoryDashboardsFactory : ToolWindowFactory, DumbAware {
                 override fun isSelected(e: com.intellij.openapi.actionSystem.AnActionEvent) = get()
                 override fun setSelected(e: com.intellij.openapi.actionSystem.AnActionEvent, on: Boolean) {
                     set(on)
-                    apply()
+                    applyPanes(project) // every open window, since the setting is application-wide
                 }
             }
         toolWindow.setTitleActions(
@@ -90,6 +105,7 @@ class ObservatoryDashboardsFactory : ToolWindowFactory, DumbAware {
                 paneToggle("Stats", AllIcons.Actions.Profile, { state.dashShowStats }, { state.dashShowStats = it }),
             )
         )
+        appliers[project] = ::apply
         apply() // honour whatever the reader last chose
 
         val factory = ContentFactory.getInstance()

@@ -41,8 +41,12 @@ import java.util.concurrent.atomic.AtomicBoolean
 @Service(Service.Level.PROJECT)
 class ObservatoryService(private val project: Project) : Disposable {
     private val listeners = CopyOnWriteArrayList<Runnable>()
-    private var cachedLog: List<EditRecord> = emptyList()
-    private var cachedKey: String = ""
+    // @Volatile because this pair is now read from BACKGROUND threads: ~20 toolbar actions moved to
+    // ActionUpdateThread.BGT in 0.8.9 and every one of them calls log()/counts(). Two threads could
+    // otherwise interleave the value/key writes and leave one session's log labelled with another
+    // session's key, which then sticks until the key moves again.
+    @Volatile private var cachedLog: List<EditRecord> = emptyList()
+    @Volatile private var cachedKey: String = ""
     @Volatile private var cachedAutoSession: String? = null
     @Volatile private var cachedAutoRoot: String? = null
     private val watchListener = Runnable { refresh() }
@@ -286,7 +290,7 @@ class ObservatoryService(private val project: Project) : Disposable {
     // and the Switch Session popup read the same rows. Cheap by construction in core (stats + a bounded,
     // sidecar-cached title scan; no store log is parsed), so it rides the shared tick like any other view.
     private val sessionsFetch = ThrottledFetch { _ ->
-        ObservatoryCli.sessionsJson(workspaceRoot, currentSession())?.let { SessionsParser.parse(it) }
+        ObservatoryCli.sessionsJson(workspaceRoot, currentSession(), buildBatch = true)?.let { SessionsParser.parse(it) }
     }
     // The folded footprint's two surviving facts (0.8.7): the writes that left the workspace (`risk`) and
     // the reads that did (`egress`'s `file` channels). Neither rides the shared multitask payload, so both
@@ -403,7 +407,13 @@ class ObservatoryService(private val project: Project) : Disposable {
     fun refresh(force: Boolean = false) {
         cachedKey = "" // force re-read
         cachedAutoSession = null // re-resolve the session (a new session may have appeared)
-        if (force) sharedViews.forEach { it.forceNext() }
+        if (force) {
+            // A forced refresh follows a MUTATION. The batched views are cached for ~2.5 s, so without
+            // this the Overview would repaint with pre-mutation counts while the Edits tree — which reads
+            // the store directly — already showed the new ones: the two panels disagreeing on screen.
+            ObservatoryCli.invalidateViewBatch()
+            sharedViews.forEach { it.forceNext() }
+        }
         refreshEditTree() // kick a background tree fetch; repaints when it lands
         notifyListeners()
     }

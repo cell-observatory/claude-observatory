@@ -72,6 +72,10 @@ class ToolbarContractTest : BasePlatformTestCase() {
             com.cellobservatory.observatory.ui.ChangeMapPanel(project),
             com.cellobservatory.observatory.ui.PromptsPanel(project),
         )
+        // Non-vacuity first: with no toolbars found, the loop below examines nothing and passes,
+        // which is how a contract test quietly stops testing its contract.
+        val found = panels.sumOf { toolbarsIn(it).size }
+        assertTrue("no toolbars were built, so this asserted nothing", found > 0)
         val offenders = mutableListOf<String>()
         for (p in panels) for (tb in toolbarsIn(p)) for (a in tb.actionGroup.getChildren(null)) {
             if (a.actionUpdateThread == com.intellij.openapi.actionSystem.ActionUpdateThread.EDT) {

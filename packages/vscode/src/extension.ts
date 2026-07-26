@@ -3803,7 +3803,7 @@ class ChangeMapViewProvider implements vscode.WebviewViewProvider {
     // `views` gets all three from ONE process, which is the part that was actually wasteful: three node
     // start-ups, and three separate re-derivations of the same transcript parse that core memoizes
     // per-process. Each view is produced by its own command inside that process, so the payloads are
-    // identical to asking for them separately (pinned by §E2E 20).
+    // identical to asking for them separately (pinned by §E2E 23).
     this.spawnJson(
       ['views', '--views', 'changemap,multitask,processes', '--json', '--root', cwd, '--session', session],
       cwd,
@@ -3817,8 +3817,10 @@ class ChangeMapViewProvider implements vscode.WebviewViewProvider {
         // breaking the panel.
         const q = (all?.processes ?? null) as { processes?: unknown[]; summary?: unknown } | null;
         pr = q && Array.isArray(q.processes) && q.summary ? q : null;
-        done();
-        done();
+        // ONE call. The old code had three callbacks each setting one variable, so only the last
+        // got past `done`'s guard; this one sets all three first, so three calls each ran the whole
+        // body — three `sessionMeta` reads and three ~1.7 MB postMessages per tick, inside the very
+        // change whose point was to cut per-tick cost.
         done();
       }
     );
