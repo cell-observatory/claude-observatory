@@ -262,18 +262,12 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
                 }),
             action("Export Review Summary", AllIcons.ToolbarDecorator.Export) { exportSummary() },
             action("Setup Check (doctor)", AllIcons.General.Information) { ReviewOps.openDoctor(project) },
-            // Demo mode LAST — reachable from the panel, not only from Find Action, and showing the verb
-            // that fits the state you are in. It sits at the end because it is the one group here that is
-            // not about the session you are actually reviewing; putting it mid-toolbar pushed the review
-            // actions rightward and read as though the demo were part of the review flow.
-            demoAction("Start Demo Mode", AllIcons.Actions.Execute, wantDemo = false) { ReviewOps.startDemo(project) },
-            demoAction("Restart Demo", AllIcons.Actions.Restart, wantDemo = true) { ReviewOps.startDemo(project) },
-            demoAction("Guided Tour", AllIcons.Actions.Preview, wantDemo = true) {
-                com.cellobservatory.observatory.ui.tour.TourController.getInstance(project)
-                    .start { msg -> ReviewOps.notify(project, msg, com.intellij.notification.NotificationType.WARNING) }
-            },
-            demoAction("Exit Demo Mode", AllIcons.Actions.Cancel, wantDemo = true) { ReviewOps.exitDemo(project) },
         )
+        // Demo mode LAST, from the SHARED verb list the Overview's nav bar also builds from — two copies
+        // is how one toolbar ends up offering a verb the other does not. It goes at the end because it is
+        // the one group here that is not about the session you are reviewing; mid-toolbar it pushed the
+        // review actions rightward and read as though the demo were part of the review flow.
+        DemoVerbs.ALL.forEach { v -> group.add(demoAction(v.text, v.icon, v.wantDemo) { v.run(project) }) }
         // Collapse-all / expand-all for the folder → file → class tree — IntelliJ's own tree actions,
         // the platform equivalent of VS Code's file-Explorer Collapse-All button.
         val expander = DefaultTreeExpander(tree)

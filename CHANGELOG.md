@@ -20,8 +20,8 @@ capture hooks need not be installed — which makes it the first thing a new rea
 - **Demo mode in VS Code and JetBrains.** `Start Demo Mode`, `Restart demo`, `Guided tour`, `Exit demo
   mode` — in the command palette, on the Edits and Overview title bars, and in every empty state, so a
   workspace with no Claude session yet offers the demo instead of only explaining why it is empty. In
-  JetBrains the same three verbs sit on the Edits panel's toolbar and in Find Action, and the Edits empty
-  state offers the demo too. The replay runs in-process in VS Code and as a streamed background task in
+  JetBrains the same verbs sit at the end of the Edits panel's toolbar and the Overview's nav bar, and in
+  Find Action, and the Edits and Observations empty states offer the demo too. The replay runs in-process in VS Code and as a streamed background task in
   JetBrains, narrating each beat.
 - **The guided tour.** Forty-one steps covering every panel the product ships and every named
   feature — the five Overview tabs, the change map's Folders strip, Files ledger, summary bar and feed,
@@ -45,8 +45,10 @@ capture hooks need not be installed — which makes it the first thing a new rea
   choice; JetBrains cannot, because that window never appeared in PyCharm 2025.2 and shipping a control
   that does nothing is worse than not offering it. Hiding the JetBrains tool window **pauses** the
   tour, because its wait steps act on a timer and must never do so behind a window you cannot see.
-- **Demo mode sits at the END of the panel toolbars** in both editors. It was the first thing in the row,
-  which pushed the review actions rightward and read as though the demo were part of reviewing.
+- **Demo mode sits at the END of the panel toolbars** in both editors, on the Edits panel and the
+  Overview alike. It was the first thing in the row, which pushed the review actions rightward and read
+  as though the demo were part of reviewing. The four verbs come from one shared list per editor, so a
+  toolbar cannot offer a verb the other does not.
 - **The demo is offered on a first install and once after an update** — one notification, four seconds
   after startup, with **Never ask** on it. Skipped while a Claude session is live in that project, in an
   untrusted workspace, and once a demo is already recorded there.

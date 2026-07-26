@@ -112,7 +112,7 @@ Observatory** view in your editor (or run `claude-observatory list`) to review.
 **Try it without Claude** — the same scenario is clickable in the browser on the
 **[interactive demo](https://cell-observatory.github.io/claude-observatory/demo.html)** page, nothing to
 install. In your editor, run **Start Demo Mode** from the VS Code command palette or JetBrains Find Action, use
-the button on the Edits panel's toolbar, or click **Try the demo** in the empty Edits panel. It replays a scripted
+the buttons at the end of the Edits panel's toolbar or the Overview's nav bar, or click **Try the demo** in an empty panel. It replays a scripted
 session through the real pipeline in an isolated `demo-*` session and an `observatory-demo/` folder it
 creates in the current directory, then walks you through every panel. In the terminal the same replay is
 `claude-observatory demo`, and `claude-observatory demo --tour` prints the tour as prose. Starting it

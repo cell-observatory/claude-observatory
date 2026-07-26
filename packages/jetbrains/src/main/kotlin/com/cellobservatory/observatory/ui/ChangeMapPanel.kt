@@ -499,7 +499,10 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
                 { r -> withSession { s -> ReviewOps.clearResolvedIds(project, s, r.editIds, "prompt #${r.index}") } }))
             add(exportAction())
         }
-        // --- TOP row RIGHT cluster: Search · Active only · Clear completed | Spotlight · Refresh ---
+        // --- TOP row RIGHT cluster: Search · Active only · Clear completed | Spotlight · Refresh | demo ---
+        //     Demo mode LAST, and on this panel as well as the Edits tree (VS Code puts it on both title
+        //     bars). It is the one cluster here that is not about the session under review, so it sits at
+        //     the end behind its own separator rather than among the review controls.
         val rightGroup = DefaultActionGroup().apply {
             add(reviewNavBar.searchAction())
             add(activeOnlyToggle())
@@ -507,6 +510,8 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             addSeparator()
             add(reviewNavBar.spotlightAction())
             add(action("Refresh", AllIcons.Actions.Refresh) { rebuild(force = true) })
+            addSeparator()
+            DemoVerbs.ALL.forEach { v -> add(demoAction(v.text, v.icon, v.wantDemo) { v.run(project) }) }
         }
 
         fun mkTb(name: String, g: DefaultActionGroup): ActionToolbar =
@@ -1323,6 +1328,21 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
 
     /** An Overview-toolbar button: [text] renders beside the icon (VS Code shows these labels), with an
      *  optional longer [description] as the tooltip. */
+    /** A demo-mode button, shown only in the state its verb belongs to: Start before a demo exists,
+     *  Restart / Guided Tour / Exit once one does. Same helper shape as the Edits tree's, so the two
+     *  toolbars cannot disagree about when a verb applies. `update` runs on a background thread because
+     *  [ReviewOps.demoPresent] touches the filesystem (behind its own short cache). */
+    private fun demoAction(text: String, icon: Icon, wantDemo: Boolean, run: () -> Unit): AnAction =
+        object : AnAction(text, null, icon), DumbAware {
+            @Suppress("OVERRIDE_DEPRECATION") // displayTextInToolbar: still honored; renders the label
+            override fun displayTextInToolbar() = true
+            override fun getActionUpdateThread() = ActionUpdateThread.BGT
+            override fun update(e: AnActionEvent) {
+                e.presentation.isEnabledAndVisible = ReviewOps.demoPresent(project) == wantDemo
+            }
+            override fun actionPerformed(e: AnActionEvent) = run()
+        }
+
     private fun action(text: String, icon: Icon, description: String? = null, run: () -> Unit): AnAction =
         object : AnAction(text, description, icon), DumbAware {
             @Suppress("OVERRIDE_DEPRECATION") // displayTextInToolbar: still honored; renders the label
