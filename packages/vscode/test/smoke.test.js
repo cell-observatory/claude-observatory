@@ -323,6 +323,22 @@ test('extension: three views, click commands, inline annotations, chat, status s
     const titles = pkg.contributes.menus['view/title'].filter((m) => /claudeObservatory\.(start|restart|exit)Demo$/.test(m.command));
     assert.equal(titles.length, 3, 'Start, Restart and Exit each have a title-bar button');
     assert.match(titles.find((m) => m.command === 'claudeObservatory.startDemo').when, /!claudeObservatory\.demoPresent/, 'Start shows only when no demo is running');
+    // Demo mode sits at the END of the title bar, and INLINE. Only the `navigation` group renders as
+    // icons; anything else is swept into the "..." overflow, so a plain "put it last" group would have
+    // removed these four from the row rather than moving them along it.
+    const allTitles = pkg.contributes.menus['view/title'];
+    const isDemo = (cmd) => /claudeObservatory\.(startDemo|restartDemo|exitDemo|startTour)$/.test(cmd);
+    const nonDemoOrders = allTitles
+      .filter((m) => !isDemo(m.command) && /^navigation@\d+$/.test(m.group || ''))
+      .map((m) => Number(m.group.split('@')[1]));
+    assert.ok(nonDemoOrders.length > 0, 'there are other inline title-bar actions to sort after');
+    for (const m of allTitles.filter((x) => isDemo(x.command))) {
+      assert.match(m.group || '', /^navigation@\d+$/, `${m.command} stays inline, not in the ... overflow`);
+      assert.ok(
+        Number(m.group.split('@')[1]) > Math.max(...nonDemoOrders),
+        `${m.command} sorts after every other inline title-bar action`
+      );
+    }
     for (const c of ['restartDemo', 'exitDemo'])
       assert.match(titles.find((m) => m.command === `claudeObservatory.${c}`).when, /&& claudeObservatory\.demoPresent/, `${c} shows only while a demo is running`);
     const welcome = pkg.contributes.viewsWelcome.filter((w) => w.view === 'claudeObservatory.edits');
