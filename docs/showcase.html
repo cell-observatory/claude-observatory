@@ -78,6 +78,13 @@
   .btn.line{background:transparent;color:var(--ink);border-color:var(--line)}
   .btn.line:hover{border-color:var(--ink-faint)}
   .menu-btn{display:none}
+  /* The nav row is one non-wrapping flex line — brand, links, then the right cluster — so anything that
+     does not fit pushes the cluster past the viewport and scrolls the WHOLE page sideways. Measured at
+     +29px on every page at 320px (brand + the three right-hand buttons) and +29/+30px at 768px on the
+     six-link pages, where the links are shown but no longer fit. The ghost GitHub button is the widest
+     item and the only redundant one: GitHub is already the last entry in .links, and below 720px the ☰
+     menu reveals those, so dropping it costs no route to anything. */
+  @media (max-width:900px){ .nav .right .ghost{display:none} }
   @media (max-width:720px){
     .menu-btn{display:inline-flex}
     .nav .links{display:none}

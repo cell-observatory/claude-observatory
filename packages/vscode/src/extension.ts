@@ -3579,6 +3579,16 @@ class ChangeMapViewProvider implements vscode.WebviewViewProvider {
   // spawn error) re-attempts on the next tick, so one bad spawn can't strand the pane on "loading…".
   private feedRef: { kind: string; id: string } | null = null;
   private feedSettled = false;
+  // A LIVE feed never settles, so it re-spawned `feed --json` (~75 ms) every 3 s tick for as long as its
+  // row stayed selected — and "live" only means nothing has recorded an end, not that anything is still
+  // happening. The demo's running shell is the standing example: it is live by construction until Exit
+  // Demo, so selecting it bought a permanent background spawn that returned identical bytes every time.
+  // Back off instead: each answer identical to the last one skips one more tick, capped at 9 (~30 s),
+  // and ANY change — or a Refresh — drops straight back to full rate. A source that is genuinely
+  // working changes every tick and so is never throttled.
+  private feedFingerprint = '';
+  private feedIdleTicks = 0;
+  private feedSkipTicks = 0;
   /** The ask picked in the Prompts window — this panel filters everything it draws to that prompt. */
   private promptId: string | null = null;
   setPrompt(id: string | null): void {
@@ -3697,6 +3707,9 @@ class ChangeMapViewProvider implements vscode.WebviewViewProvider {
   private followFeed(ref: { kind: string; id: string } | null): void {
     this.feedRef = ref;
     this.feedSettled = false;
+    this.feedFingerprint = '';
+    this.feedIdleTicks = 0;
+    this.feedSkipTicks = 0; // a new selection always answers at full rate
     if (ref) this.fetchFeed(ref);
   }
   /** One `feed --json` spawn for `ref`, posted back with the ref it answers so a stale reply can't land
@@ -3716,6 +3729,19 @@ class ChangeMapViewProvider implements vscode.WebviewViewProvider {
       const ok = !!(d && Array.isArray(d.entries) && (d.mode === 'live' || d.mode === 'audit'));
       // ONLY a good 'audit' answer stops the polling. A failure leaves it false so the next tick retries.
       this.feedSettled = ok && d!.mode === 'audit';
+      // Live-feed backoff: fingerprint what came back, and slow down only while it keeps not changing.
+      // A failed fetch fingerprints as '' and so resets to full rate — a transient error must not look
+      // like a quiet source and get throttled on top of already having failed.
+      const entries = ok ? (d!.entries as { ts?: number }[]) : [];
+      const fp = ok ? `${entries.length}:${entries.length ? (entries[entries.length - 1]?.ts ?? '') : ''}` : '';
+      if (fp && fp === this.feedFingerprint) {
+        this.feedIdleTicks++;
+        this.feedSkipTicks = Math.min(9, this.feedIdleTicks);
+      } else {
+        this.feedFingerprint = fp;
+        this.feedIdleTicks = 0;
+        this.feedSkipTicks = 0;
+      }
       this.view?.webview.postMessage({ type: 'feed', ref, feed: ok ? d : null });
     });
   }
@@ -3829,7 +3855,11 @@ class ChangeMapViewProvider implements vscode.WebviewViewProvider {
     // The feed rides THIS tick — no second timer. A finished ('audit') feed is fetched once and then
     // left alone; anything else (live, or a fetch that never landed) is re-attempted, and an explicit
     // Refresh (`force`) always refetches so a stuck pane is recoverable from the UI.
-    if (this.feedRef && (force || !this.feedSettled)) this.fetchFeed(this.feedRef);
+    if (this.feedRef && (force || !this.feedSettled)) {
+      if (force) this.fetchFeed(this.feedRef);
+      else if (this.feedSkipTicks > 0) this.feedSkipTicks--; // idle live feed — see feedFingerprint
+      else this.fetchFeed(this.feedRef);
+    }
   }
   private postError(): void {
     // The session listing is built in-process (core.sessionMeta) and needs no CLI at all, so it rides
@@ -6694,6 +6724,18 @@ export function activate(context: vscode.ExtensionContext): void {
   watcher.onDidCreate(onStoreEvent);
   watcher.onDidDelete(onStoreEvent);
   context.subscriptions.push(watcher);
+
+  // `workspaceRoot()` is `folders[0]`, and EVERY caller reads it live — so adding, removing or
+  // reordering folders silently changes which session the whole extension is about. Nothing announced
+  // that: the panels kept rendering the previous root's session until some unrelated event happened to
+  // refresh them, and in a multi-root window "unrelated event" can be minutes away. The store watcher
+  // above cannot cover this — it is scoped to ~/.claude, so no file event fires when the WORKSPACE
+  // changes. The caches need no clearing: each is keyed by session id and validated against its
+  // source's (mtime, size), so a new root simply misses instead of returning the old root's answer.
+  // JetBrains has no counterpart — a project's basePath is fixed for the life of the project.
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeWorkspaceFolders(() => refreshAll(true))
+  );
 
   // The store only changes on EDITS, but Actions / Observations / Timeline / Overview are mined from
   // the session TRANSCRIPT, which grows on every read / command / subagent / to-do. Watch it too so

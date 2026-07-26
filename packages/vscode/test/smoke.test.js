@@ -89,6 +89,7 @@ test('extension: three views, click commands, inline annotations, chat, status s
   const contentProviders = {};
   const webviewProviders = {};
   const configWrites = []; // [key, value] — demo mode must never write claudeObservatory.session
+  const folderChangeHandlers = []; // onDidChangeWorkspaceFolders subscribers, so a test can fire one
   let progressCancelled = false; // drives the demo replay's cancellation path without a 17s paced run
   const openTabs = []; // window.tabGroups contents — exitDemo must close the demo's editors
   const infoMessages = []; // every showInformationMessage — the first-run offer must not appear here
@@ -179,6 +180,9 @@ test('extension: three views, click commands, inline annotations, chat, status s
       createFileSystemWatcher: () => ({ onDidChange() {}, onDidCreate() {}, onDidDelete() {}, dispose() {} }),
       onDidChangeTextDocument: () => ({ dispose() {} }),
       onDidChangeConfiguration: () => ({ dispose() {} }),
+      // Captured so the test can FIRE a folder change: `workspaceRoot()` is folders[0], so this
+      // event is the only thing that tells the extension the session it is showing just changed.
+      onDidChangeWorkspaceFolders: (cb) => { folderChangeHandlers.push(cb); return { dispose() {} }; },
       getConfiguration: () => ({ get: (_k, def) => def, update: (k, v) => { configWrites.push([k, v]); return Promise.resolve(); } }),
       openTextDocument: (uri) => Promise.resolve({ uri, lineCount: 5, getText: () => 'AAA\nb\nc\nZZZ\n', lineAt: (n) => ({ range: new Range(n, 0, n, 3) }) }),
     },
@@ -281,6 +285,15 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.ok(!trees['claudeObservatory.timeline'], 'the standalone Timeline view is gone (folded into Observations)');
     assert.ok(!webviewProviders['claudeObservatory.multitask'] && !trees['claudeObservatory.multitask'], 'the standalone Multitasking view is gone (folded into the Overview)');
     assert.ok(trees['claudeObservatory.actions'], 'Actions is registered as a timeline-style tree (now in the sidebar window)');
+
+    // `workspaceRoot()` is folders[0] and every caller reads it live, so adding/removing/reordering
+    // folders changes which session the whole extension is about — and nothing else announces it (the
+    // store watcher is scoped to ~/.claude, so no file event fires when the WORKSPACE changes). Assert
+    // the subscription exists AND that firing it survives: a handler that throws would take out the
+    // event for every other listener in the host.
+    assert.ok(folderChangeHandlers.length >= 1, 'the extension subscribes to workspace-folder changes');
+    assert.doesNotThrow(() => folderChangeHandlers.forEach((cb) => cb({ added: [], removed: [] })),
+      'a folder change refreshes without throwing');
 
     // The Actions view lives in the "Claude Edits" SIDEBAR container (activity-bar) — NOT in the
     // bottom-panel dock. 0.8.7: Observations joined it there (LAST, with the edits/diffs trees), which

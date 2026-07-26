@@ -141,6 +141,23 @@ capture hooks need not be installed — which makes it the first thing a new rea
 
 ### Fixed
 
+- **Selecting a still-running row bought a permanent background spawn.** A feed is "live" whenever
+  nothing has recorded an end — which is not the same as anything still happening — so the Overview
+  re-ran `feed --json` (~75 ms) every 3 s tick for as long as that row stayed selected. The demo's
+  running shell is live by construction and so paid it until Exit Demo. The poll now backs off while the
+  answer keeps coming back identical (9 spawns per 120 s instead of 40, converging on one per 30 s) and
+  returns to full rate the instant anything changes or you press Refresh.
+- **Adding, removing or reordering workspace folders changed which session VS Code was showing, silently.**
+  `workspaceRoot()` is `folders[0]` and every caller reads it live, but nothing subscribed to
+  `onDidChangeWorkspaceFolders` — and the store watcher is scoped to `~/.claude`, so no file event fires
+  when the WORKSPACE changes. The panels kept rendering the previous root's session until some unrelated
+  event happened to refresh them. JetBrains has no counterpart; a project's basePath is fixed.
+- **The site scrolled sideways on a phone.** The nav is one non-wrapping flex row, and its ghost GitHub
+  button pushed the right-hand cluster past the viewport — measured +29 px at 320 px on every page, and
+  +29/+30 px at 768 px on the six-link pages. The button is dropped below 900 px, where GitHub is already
+  in the links (and in the ☰ menu). A long command in prose was the last 8 px on the features page; inline
+  `code` now wraps rather than overflowing. Verified at 320/390/768/1440 px on all five real pages.
+
 - **A staging record could be read as empty while it was being rewritten, and the garbage collector then
   freed an edit's blobs out from under it.** `writeStaging` truncated in place; a `gcSessionCore` running
   concurrently read zero bytes, `JSON.parse` threw, and the catch treated the record as absent — so both
