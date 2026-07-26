@@ -39,6 +39,18 @@ import javax.swing.ListSelectionModel
  * The selection lives on the service, so the two windows can never disagree about it.
  */
 class PromptsPanel(private val project: Project) : JPanel(BorderLayout()) {
+
+    /** Live panels by project, so the guided tour can ring this window's list. */
+    companion object Registry {
+        private val live = java.util.concurrent.ConcurrentHashMap<Project, PromptsPanel>()
+        fun of(project: Project): PromptsPanel? = live[project]
+        internal fun remember(project: Project, panel: PromptsPanel) {
+            live[project] = panel
+            com.intellij.openapi.util.Disposer.register(project) { live.remove(project, panel) }
+        }
+    }
+
+    fun tourAnchor(anchor: String?): javax.swing.JComponent? = if (anchor == "prompts-list") list else null
     private fun service() = ObservatoryService.getInstance(project)
 
     private val model = DefaultListModel<SessionPrompt>()
@@ -85,6 +97,7 @@ class PromptsPanel(private val project: Project) : JPanel(BorderLayout()) {
     private var responseWanted: String? = null
 
     init {
+        Registry.remember(project, this) // so the guided tour can ring a control this panel owns
         val north = JPanel(BorderLayout()).apply {
             add(toolbar(), BorderLayout.NORTH)
             add(head, BorderLayout.CENTER)
@@ -129,7 +142,8 @@ class PromptsPanel(private val project: Project) : JPanel(BorderLayout()) {
     private fun toolbar(): Component {
         val group = DefaultActionGroup().apply {
             add(object : AnAction("Clear Scope", "Clear the prompt scope — the Overview goes back to the whole session", AllIcons.Actions.Cancel) {
-                override fun getActionUpdateThread() = ActionUpdateThread.EDT
+                // Reads one service field; no UI state. EDT here cost a hop per toolbar expansion.
+                override fun getActionUpdateThread() = ActionUpdateThread.BGT
                 override fun update(e: AnActionEvent) {
                     e.presentation.isEnabled = service().selectedPromptId != null
                 }

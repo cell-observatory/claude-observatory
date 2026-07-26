@@ -171,6 +171,71 @@ private fun statusColor(status: String): JBColor = when (status) {
  */
 class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true, true) {
 
+    /** Live panels by project, so the guided tour can bring a named tab forward and point at it. A
+     *  registry rather than a service lookup because the panel is created by the tool-window factory
+     *  and has no other identity; entries are dropped in [dispose] so a closed project leaks nothing. */
+    companion object Registry {
+        /** The nav-tab names the guided tour may address, in shipped order — the exact set
+         *  [selectNavTab] maps. Held here so a tab core's tour learns to name and this panel cannot bring
+         *  forward is a test failure rather than a step that silently does nothing. */
+        val TOUR_TABS = listOf("sessions", "fleet", "workflows", "tasks", "processes")
+
+        private val live = java.util.concurrent.ConcurrentHashMap<Project, ChangeMapPanel>()
+        fun of(project: Project): ChangeMapPanel? = live[project]
+        internal fun remember(project: Project, panel: ChangeMapPanel) {
+            live[project] = panel
+            // Tied to the project, so a closed project drops its entry without the panel needing a
+            // dispose hook of its own. remove(k,v) so a re-created panel's entry is never clobbered.
+            com.intellij.openapi.util.Disposer.register(project) { live.remove(project, panel) }
+        }
+    }
+
+    /**
+     * Bring one of the left-nav tabs forward by its core name, and return the tab strip so a caller can
+     * anchor a tooltip on it. Null when that tab is not present (Processes is appended only once the CLI
+     * has answered for it) — the tour then does not switch, rather than guessing an index.
+     *
+     * Addressed by COMPONENT, not by title and not by the index constants. Three of the five titles are
+     * rewritten with live counts as soon as data arrives ("Sessions 2", "Tasks 3/5", "Processes 1/3"),
+     * which a demo guarantees, so a title match would silently miss exactly the tabs the tour talks
+     * about; and Processes is inserted at runtime, so a constant index is right only until it appears.
+     */
+    fun selectNavTab(tab: String): javax.swing.JComponent? {
+        if (!::navTabs.isInitialized) return null
+        val pane = when (tab) {
+            "sessions" -> sessionsPane
+            "fleet" -> fleetPane
+            "workflows" -> workflowsPane
+            "tasks" -> tasksPane
+            "processes" -> processesPane
+            else -> return null
+        }
+        val i = navTabs.indexOfComponent(pane)
+        if (i < 0) return null
+        // Remember where the reader was before the tour's first step moved them (setShowAll puts it back).
+        if (tourFilter != null && tourNavTab == null && navTabs.selectedIndex != i) tourNavTab = navTabs.selectedIndex
+        navTabs.selectedIndex = i
+        return navTabs
+    }
+
+    /**
+     * The component a tour step's `anchor` names, so its tip can point at the control it is about rather
+     * than at the panel in general. Unknown or currently-absent anchors return null and the caller falls
+     * back to the panel — a tip that lands somewhere plausible beats one that does not appear.
+     */
+    fun tourAnchor(anchor: String?): javax.swing.JComponent? = when (anchor) {
+        "nav-tabs" -> if (::navTabs.isInitialized) navTabs else null
+        // The Overview's own toolbar carries the four review axes and the session/bulk controls. These
+        // four anchors each name ONE button on it, and this rings the whole row — coarser than VS Code,
+        // which outlines the button itself. Stated in docs/DEMO.md rather than left to be discovered.
+        "nav-axes", "accept-prompt", "session-label", "spotlight" -> toolbar
+        "feed" -> feedSplit.secondComponent
+        // The detail pane is rebuilt per selection, so these resolve against whichever one is mounted now.
+        "folders-strip", "files-ledger", "summary-bar" ->
+            (detailHost.components.firstOrNull() as? AgentDetail)?.tourAnchor(anchor)
+        else -> null
+    }
+
     /** What the right detail is showing. Preserved across refreshes; falls back to [Main] if it vanishes. */
     private sealed class NavSel {
         object Main : NavSel()
@@ -236,6 +301,10 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
     private data class DoneTasksToggle(val count: Int, val open: Boolean)
     private var tasksOpen = false
     private var lastTasks: List<SessionTask> = emptyList()
+    /** The reader's own Active-only value, parked while the guided tour runs. null = no tour is holding it. */
+    private var tourFilter: Boolean? = null
+    /** The nav tab the reader was on before the tour moved them. null = no tour is holding it. */
+    private var tourNavTab: Int? = null
     private val tasksModel = javax.swing.DefaultListModel<Any>()
     private val tasksList = JBList(tasksModel).apply {
         emptyText.text = "No tasks — this session plans with a task list only when Claude creates one"
@@ -261,6 +330,16 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
     /** Held so [repaintSessions] can disclose that the pinned session is not one of this workspace's. */
     private val sessionsDesc = descLabel(SESSIONS_DESC)
     private val sessionsPane: JComponent by lazy { descPane(sessionsDesc, JBScrollPane(sessionsList)) }
+    // Each nav tab's pane is held as a field so the guided tour can address a tab by COMPONENT. The tab
+    // titles carry live counts, so they are not stable identifiers, and Processes is appended at runtime,
+    // so neither are the index constants.
+    private val fleetPane: JComponent by lazy {
+        descPane("Every Claude agent working in this repo’s worktrees — live phase, tokens, and risk. Select one to map just its edits.", JBScrollPane(fleetTree))
+    }
+    private val workflowsPane: JComponent by lazy {
+        descPane("Multi-agent runs (an orchestrator and its subagents) — each run’s phases and the edits attributed to it.", JBScrollPane(workflowsTree))
+    }
+    private val tasksPane: JComponent by lazy { descPane(tasksDesc, JBScrollPane(tasksList)) }
 
     /** The session-scoped panes' description labels — held so [refreshScopeNotes] can disclose that they
      *  do NOT follow a fleet row from another session. */
@@ -282,6 +361,8 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
     //     repaints; Active only defaults ON and is remembered in settings (0.8.8) — this panel is about work
     //     still awaiting review. The dismissed sets HIDE completed items (never delete); reset on a session
     //     change. A dismissed item reappears if it goes active again. ---
+    // No @Volatile: this has no backing field — it reads and writes the persisted setting directly, so
+    // the storage is the settings component's, and both threads see the same object.
     private var activeOnly: Boolean
         get() = com.cellobservatory.observatory.settings.ObservatorySettings.instance.state.overviewActiveOnly
         set(value) { com.cellobservatory.observatory.settings.ObservatorySettings.instance.state.overviewActiveOnly = value }
@@ -306,6 +387,7 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
     private lateinit var navTabs: JBTabbedPane
 
     init {
+        Registry.remember(project, this) // so the guided tour can bring a named tab forward
         // (Live conflicts moved to the Actions panel in 0.8.3 — the fleet tab is just the tree now.)
         navTabs = JBTabbedPane().apply {
             // Each pane leads with a one-line description (VS Code .ov-desc parity) above its tree/list.
@@ -313,11 +395,11 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             // tab, and answering it re-points the whole observatory rather than just this panel.
             addTab("Sessions", sessionsPane)
             setToolTipTextAt(SESSIONS_TAB, SESSIONS_TIP)
-            addTab("Fleet", descPane("Every Claude agent working in this repo’s worktrees — live phase, tokens, and risk. Select one to map just its edits.", JBScrollPane(fleetTree)))
+            addTab("Fleet", fleetPane)
             setToolTipTextAt(FLEET_TAB, "Running agents across every worktree — siblings + their subagents — with the live file-conflict strip below. Select one to map its changes.")
-            addTab("Workflows", descPane("Multi-agent runs (an orchestrator and its subagents) — each run’s phases and the edits attributed to it.", JBScrollPane(workflowsTree)))
+            addTab("Workflows", workflowsPane)
             setToolTipTextAt(WORKFLOWS_TAB, "Claude Code Workflow runs — agents grouped by phase, with tokens/time/edits per run. Select one to map its changes.")
-            addTab("Tasks", descPane(tasksDesc, JBScrollPane(tasksList)))
+            addTab("Tasks", tasksPane)
             setToolTipTextAt(TASKS_TAB, "The session's task list (Claude's numbered TaskCreate/TaskUpdate tasks) — live statuses; completed tasks leave the list when the runtime archives them. Always THIS project's active session, never a selected sibling agent's.")
             // No Processes tab here: it is APPENDED by repaintProcesses once `processes --json` answers,
             // so an older CLI on PATH shows no tab at all instead of an empty one that can never fill
@@ -377,26 +459,31 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         // its own ActionToolbar so a nav step or a change of prompt scope can refresh its labels + counters.
 
         // --- BOTTOM row: the four review axes ---
+        //     ICONS ONLY on these rows. Each axis already names itself in its own counter — "File 3/126",
+        //     "Folder 1/23" — so repeating "Accept File" and "Reject File" beside it spent most of the bar
+        //     restating the axis the reader is already looking at. The counter is the annotation; the
+        //     buttons are icons with tooltips. The top row keeps its labels: those are session-wide and
+        //     destructive, and there is no axis label above them to say what they act on.
         val diffGroup = DefaultActionGroup().apply {
             reviewNavBar.diffAxis().forEach(::add)
-            add(reviewNavBar.keepAction()); add(reviewNavBar.undoAction())
-            add(reviewNavBar.chatEditAction()); add(reviewNavBar.viewDiffAction())
+            add(reviewNavBar.keepAction(showText = false)); add(reviewNavBar.undoAction(showText = false))
+            add(reviewNavBar.chatEditAction(showText = false)); add(reviewNavBar.viewDiffAction(showText = false))
         }
         val fileGroup = DefaultActionGroup().apply {
             reviewNavBar.fileAxis().forEach(::add)
-            add(reviewNavBar.acceptFileAction()); add(reviewNavBar.rejectFileAction())
+            add(reviewNavBar.acceptFileAction(showText = false)); add(reviewNavBar.rejectFileAction(showText = false))
         }
         val folderGroup = DefaultActionGroup().apply {
             reviewNavBar.folderAxis().forEach(::add)
-            add(reviewNavBar.acceptFolderAction()); add(reviewNavBar.rejectFolderAction())
+            add(reviewNavBar.acceptFolderAction(showText = false)); add(reviewNavBar.rejectFolderAction(showText = false))
         }
         // Prompt is the LAST axis: the coarsest scope on the bar, and the one a person names out loud
         // ("accept everything from that ask"). No Chat button — `chat-context` has no prompt ref, and a
         // button that silently framed the prompt as something else would be worse than its absence.
         val promptGroup = DefaultActionGroup().apply {
             reviewNavBar.promptAxis().forEach(::add)
-            add(reviewNavBar.reviewPromptAction()); add(reviewNavBar.acceptPromptAction())
-            add(reviewNavBar.revertPromptAction())
+            add(reviewNavBar.reviewPromptAction(showText = false)); add(reviewNavBar.acceptPromptAction(showText = false))
+            add(reviewNavBar.revertPromptAction(showText = false))
         }
 
         // --- TOP row LEFT cluster: session selector + session-wide bulk + Export. Bulk actions RETARGET to
@@ -419,7 +506,10 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
                 { r -> withSession { s -> ReviewOps.clearResolvedIds(project, s, r.editIds, "prompt #${r.index}") } }))
             add(exportAction())
         }
-        // --- TOP row RIGHT cluster: Search · Active only · Clear completed | Spotlight · Refresh ---
+        // --- TOP row RIGHT cluster: Search · Active only · Clear completed | Spotlight · Refresh | demo ---
+        //     Demo mode LAST, and on this panel as well as the Edits tree (VS Code puts it on both title
+        //     bars). It is the one cluster here that is not about the session under review, so it sits at
+        //     the end behind its own separator rather than among the review controls.
         val rightGroup = DefaultActionGroup().apply {
             add(reviewNavBar.searchAction())
             add(activeOnlyToggle())
@@ -427,11 +517,20 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             addSeparator()
             add(reviewNavBar.spotlightAction())
             add(action("Refresh", AllIcons.Actions.Refresh) { rebuild(force = true) })
+            addSeparator()
+            DemoVerbs.ALL.forEach { v -> add(demoAction(v.text, v.icon, v.wantDemo) { v.run(project) }) }
         }
 
         fun mkTb(name: String, g: DefaultActionGroup): ActionToolbar =
             ActionManager.getInstance().createActionToolbar("ClaudeObservatoryOverview$name", g, true).apply {
-                targetComponent = fleetTree
+                // The PANEL, never a tab's tree. The platform refuses to run an action whose toolbar's
+                // target component is not showing — and `fleetTree` lives inside the Fleet tab, so with
+                // any other tab selected (Sessions is the default) EVERY button on these six toolbars
+                // silently did nothing: Accept All, Reject All, Clear Resolved, Export, Search, Active
+                // only, Clear completed, Spotlight, Refresh and all four review axes. The IDE log said so
+                // 28 times — "Action is not performed because target component is not showing" — while
+                // the UI gave the reader no clue at all.
+                targetComponent = this@ChangeMapPanel
                 component.isOpaque = false
             }
         val diffTb = mkTb("Diff", diffGroup)
@@ -617,6 +716,59 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
      *  listing. Blank on an older CLI that predates the field: there is then nothing to follow, and the
      *  feed pane detaches rather than asking about an id core cannot answer for. */
     private fun taskFeedId(row: TaskRow): String = row.task.taskId
+
+    /**
+     * The first task that still has pending edits, as (taskId, label) — what the guided tour's `auto`
+     * accept-a-task step acts on. Resolved from the rows this panel has already built, so the tour
+     * neither refetches nor hard-codes a task id that the scenario could invalidate. Null when nothing
+     * is pending, and the tour then says so instead of running a no-op.
+     */
+    fun firstPendingTaskInData(): Pair<String, String>? {
+        // From the FETCHED tasks, not the rendered rows: Active only is on by default and hides every
+        // completed task, and five of the demo's six are completed — so the rendered model can be empty
+        // of exactly the row the tour is about to accept, and the step would silently do nothing.
+        val rollBy = map?.rollupByTask?.filter { it.taskId != null }?.associateBy { it.taskId } ?: emptyMap()
+        for (t in lastTasks) {
+            val id = t.taskId.takeIf { it.isNotBlank() } ?: continue
+            if ((rollBy[id]?.pending ?: 0) <= 0) continue
+            return id to t.subject.ifBlank { "task #${t.id}" }
+        }
+        return null
+    }
+
+    /** Guided tour: suspend the Active-only display filter for its duration and restore the reader's own
+     *  value after. The tour narrates rows that filter hides, so leaving it on describes a screen that is
+     *  not on the reader's monitor. */
+    fun setShowAll(on: Boolean) {
+        if (on) {
+            if (tourFilter != null) return
+            tourFilter = activeOnly
+            if (activeOnly) { activeOnly = false; repaintFiltered() }
+        } else {
+            // Hand the panel back the way the tour found it: the reader's own tab and their own filter.
+            tourNavTab?.let { if (::navTabs.isInitialized && it < navTabs.tabCount) navTabs.selectedIndex = it }
+            tourNavTab = null
+            val prev = tourFilter ?: return
+            tourFilter = null
+            if (prev != activeOnly) { activeOnly = prev; repaintFiltered() }
+        }
+    }
+
+    /** Repaint everything the Active-only filter scopes — the same pair its own toggle drives. */
+    private fun repaintFiltered() {
+        repaintNav(lastResult)
+        renderDetail()
+    }
+
+    fun firstPendingTask(): Pair<String, String>? {
+        for (i in 0 until tasksModel.size()) {
+            val row = tasksModel.getElementAt(i) as? TaskRow ?: continue
+            val id = row.task.taskId.takeIf { it.isNotBlank() } ?: continue
+            if ((row.roll?.pending ?: 0) <= 0) continue
+            return id to row.task.subject.ifBlank { "task #${row.task.id}" }
+        }
+        return null
+    }
 
     /** The per-task review menu: Accept / Reject / Clear over the task's STRICT in-progress span, plus
      *  the session-wide clear of every settled task. Null for a row core has no strict id for (an older
@@ -972,12 +1124,10 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
      *  newest. Writing the setting is the whole action: every surface re-reads it on the refresh that
      *  follows, so the edits, the change map, the feed and the audits all move together. */
     private fun pinSession(row: SessionRow?) {
-        val settings = com.cellobservatory.observatory.settings.ObservatorySettings.instance
-        if (settings.state.session == row?.id) return
-        settings.state.session = row?.id
-        for (p in com.intellij.openapi.project.ProjectManager.getInstance().openProjects) {
-            ObservatoryService.getInstance(p).refresh(force = true)
-        }
+        // Routed through the shared handler so that during a demo this moves the in-memory override
+        // instead of writing a persisted pin that would outlive the demo it points at.
+        if (ObservatoryService.getInstance(project).currentSession() == row?.id) return
+        ReviewOps.applySessionChoice(project, row?.id)
         ReviewOps.notify(project, row?.let { "Reviewing “${it.displayName}”" } ?: "Following this workspace’s newest session")
     }
 
@@ -1192,6 +1342,21 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
 
     /** An Overview-toolbar button: [text] renders beside the icon (VS Code shows these labels), with an
      *  optional longer [description] as the tooltip. */
+    /** A demo-mode button, shown only in the state its verb belongs to: Start before a demo exists,
+     *  Restart / Guided Tour / Exit once one does. Same helper shape as the Edits tree's, so the two
+     *  toolbars cannot disagree about when a verb applies. `update` runs on a background thread because
+     *  [ReviewOps.demoPresent] touches the filesystem (behind its own short cache). */
+    private fun demoAction(text: String, icon: Icon, wantDemo: Boolean, run: () -> Unit): AnAction =
+        object : AnAction(text, null, icon), DumbAware {
+            // ICON ONLY, matching VS Code's compact demo buttons. Labelled, these four were the widest
+            // thing on a bar that is already fighting for room; the tooltip carries the verb.
+            override fun getActionUpdateThread() = ActionUpdateThread.BGT
+            override fun update(e: AnActionEvent) {
+                e.presentation.isEnabledAndVisible = ReviewOps.demoPresent(project) == wantDemo
+            }
+            override fun actionPerformed(e: AnActionEvent) = run()
+        }
+
     private fun action(text: String, icon: Icon, description: String? = null, run: () -> Unit): AnAction =
         object : AnAction(text, description, icon), DumbAware {
             @Suppress("OVERRIDE_DEPRECATION") // displayTextInToolbar: still honored; renders the label
@@ -1209,7 +1374,7 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         sessionRun: () -> Unit,
         promptRun: (ChangeMapPrompt) -> Unit,
     ): AnAction = object : AnAction(baseText, null, icon), DumbAware {
-        override fun getActionUpdateThread() = ActionUpdateThread.EDT
+        override fun getActionUpdateThread() = ActionUpdateThread.BGT // reads the picked ask, not the UI
         @Suppress("OVERRIDE_DEPRECATION") // displayTextInToolbar: still honored; renders the scoped label
         override fun displayTextInToolbar() = true
         override fun update(e: AnActionEvent) {
@@ -1253,7 +1418,7 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         "Show only active agents (working / awaiting input / awaiting permission, or with an active subagent) and running workflows — and scope the change map on the right to work still awaiting review",
         AllIcons.General.Filter,
     ), DumbAware {
-        override fun getActionUpdateThread() = ActionUpdateThread.EDT
+        override fun getActionUpdateThread() = ActionUpdateThread.BGT // reads one flag
         @Suppress("OVERRIDE_DEPRECATION") // displayTextInToolbar: still honored; renders the label
         override fun displayTextInToolbar() = true
         override fun isSelected(e: AnActionEvent) = activeOnly
@@ -1618,6 +1783,14 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         private val capFiles = caption("Files", "Files — every changed file, ranked by churn. Dot = review status, bar = relative churn, +N = lines, ⧗/✓ = pending/reviewed; click a row to open the edit.")
         private val summaryLabel = JBLabel().apply { font = JBUI.Fonts.miniFont(); border = JBUI.Borders.empty(2, 4, 2, 4) }
         private var lastShown: List<ChangeMapFile> = emptyList()
+
+        /** The section a tour step's anchor names, for its tip to point at. */
+        fun tourAnchor(anchor: String): JComponent? = when (anchor) {
+            "folders-strip" -> strip
+            "files-ledger" -> list
+            "summary-bar" -> summaryLabel
+            else -> null
+        }
 
         private fun caption(text: String, tip: String): JBLabel = JBLabel(text).apply {
             font = JBUI.Fonts.miniFont()

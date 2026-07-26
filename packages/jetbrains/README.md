@@ -1,7 +1,8 @@
 # Claude Observatory for JetBrains IDEs
 
-Per-edit **Keep / Undo** for [Claude Code](https://claude.com/claude-code) in PyCharm, IntelliJ,
-WebStorm, GoLand, and every other JetBrains IDE (platform-only APIs — no language plugin required).
+Per-edit **Keep / Undo** for [Claude Code](https://claude.com/claude-code) on established and
+mission-critical codebases, in PyCharm, IntelliJ, WebStorm, GoLand, and every other JetBrains IDE
+(platform-only APIs — no language plugin required).
 The same store, engine, and review model as the CLI and the VS Code extension: all three front-ends
 stay in sync because they read and write the same `~/.claude/claude-observatory` store.
 

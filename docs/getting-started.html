@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Getting started — Claude Observatory</title>
-<meta name="description" content="A recorded walkthrough of Claude Observatory: the bundled demo replays a full Claude session — three tasks of edits, a subagent, and a workflow — in VS Code and PyCharm, ending in a task-by-task review.">
+<meta name="description" content="A recorded walkthrough of Claude Observatory: the bundled demo replays a full Claude session — three prompts, six tasks of edits, a subagent, and a workflow — in VS Code and PyCharm, ending in a task-by-task review.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%AC%3C/text%3E%3C/svg%3E">
 <style>
   :root{
@@ -34,7 +34,10 @@
   .hl{color:var(--accent)}
   .eyebrow{font-family:var(--mono);font-size:.72rem;text-transform:uppercase;letter-spacing:.2em;color:var(--accent-ink);font-weight:600}
   .lede{color:var(--ink-soft);font-size:clamp(1.05rem,2vw,1.24rem);line-height:1.55;max-width:56ch;text-wrap:pretty}
-  code{font-family:var(--mono);font-size:.86em}
+  /* A long command inside prose (`claude-observatory changemap --json`) is one unbreakable token: at
+     320px it ran 3px past the viewport and scrolled the whole page sideways. Wrap it rather than clip
+     it — the same treatment .cmd code already gets on the demo page. */
+  code{font-family:var(--mono);font-size:.86em;overflow-wrap:anywhere}
 
   .nav{position:sticky;top:0;z-index:60;background:transparent;transition:background .25s,border-color .25s}
   .nav.condensed{background:color-mix(in srgb,var(--bg) 80%,transparent);backdrop-filter:saturate(1.5) blur(14px);-webkit-backdrop-filter:saturate(1.5) blur(14px);border-bottom:1px solid var(--line-soft)}
@@ -47,6 +50,13 @@
   .icon-btn,.ghost{border:1px solid var(--line);background:var(--surface);color:var(--ink-soft);border-radius:999px;padding:7px 13px;font-size:.85rem;font-family:var(--mono);cursor:pointer;transition:.15s}
   .icon-btn:hover,.ghost:hover{color:var(--ink);border-color:var(--ink-faint)}
   .menu-btn{display:none}
+  /* The nav row is one non-wrapping flex line — brand, links, then the right cluster — so anything that
+     does not fit pushes the cluster past the viewport and scrolls the WHOLE page sideways. Measured at
+     +29px on every page at 320px (brand + the three right-hand buttons) and +29/+30px at 768px on the
+     six-link pages, where the links are shown but no longer fit. The ghost GitHub button is the widest
+     item and the only redundant one: GitHub is already the last entry in .links, and below 720px the ☰
+     menu reveals those, so dropping it costs no route to anything. */
+  @media (max-width:900px){ .nav .right .ghost{display:none} }
   @media (max-width:720px){
     .menu-btn{display:inline-flex}
     .nav .links{display:none}
@@ -119,7 +129,7 @@
     <a class="back" href="showcase.html">← Home</a>
     <div style="margin-top:22px"><span class="eyebrow">Getting started</span></div>
     <h1>A recorded walkthrough</h1>
-    <p class="lede">The bundled demo replays a full Claude session — a plan, three tasks of edits, a subagent, and a workflow — and the observatory records all of it. This page shows that demo as recorded in VS Code and PyCharm; the same walkthrough is <a href="demo.html" style="color:var(--accent-ink);text-decoration:underline">clickable in the browser</a>.</p>
+    <p class="lede">Claude Observatory is built for established and mission-critical codebases. The bundled demo replays a full Claude session against one — three prompts, six tasks of edits, a subagent, a three-phase workflow, and a second agent in a sibling worktree — and the observatory records all of it. This page shows that demo as recorded in VS Code and PyCharm; the PyCharm recording covers its opening arc. A shortened version is <a href="demo.html" style="color:var(--accent-ink);text-decoration:underline">clickable in the browser</a>, and in either editor <b>Start Demo Mode</b> replays the whole thing and then walks you through every panel.</p>
     <p style="margin-top:16px;font-family:var(--mono);font-size:.8rem;color:var(--ink-faint)">If Claude Observatory is installed, run <code style="color:var(--ink-soft)">claude-observatory demo</code> to follow along; installation is <a href="https://github.com/cell-observatory/claude-observatory#install" style="color:var(--accent-ink);text-decoration:underline;text-underline-offset:3px">one line in the README</a>.</p>
   </div>
 </header>

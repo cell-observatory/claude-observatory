@@ -88,6 +88,30 @@ test('extension: three views, click commands, inline annotations, chat, status s
   const treeViewOpts = {};
   const contentProviders = {};
   const webviewProviders = {};
+  const configWrites = []; // [key, value] — demo mode must never write claudeObservatory.session
+  const folderChangeHandlers = []; // onDidChangeWorkspaceFolders subscribers, so a test can fire one
+  let progressCancelled = false; // drives the demo replay's cancellation path without a 17s paced run
+  const openTabs = []; // window.tabGroups contents — exitDemo must close the demo's editors
+  const infoMessages = []; // every showInformationMessage — the first-run offer must not appear here
+  const warnMessages = []; // every showWarningMessage — a refusal has to SAY why, not fail silently
+  let infoPick; // what the mock reader clicks on the next showInformationMessage (undefined = dismiss)
+  /**
+   * The actions offered by a show*Message call, for BOTH of the API's overloads:
+   * `(message, ...items)` and `(message, options, ...items)`. Assuming the second argument is always an
+   * options object silently shifted every positional-items call by one — the extension has eleven of
+   * them — so the mock returned the SECOND button while the code under test believed it had the first.
+   * That is a mock that can only fail where the branch is rarely taken, which is the worst place for it.
+   */
+  const actionsOf = (rest) => {
+    const [first] = rest;
+    // An options object is an object WITHOUT a `title` — a MessageItem action has one. That is how the
+    // real API tells the two overloads apart, so the mock must too; testing only `typeof === 'object'`
+    // would swallow a MessageItem action the first time anyone used one.
+    const isOptions = first !== null && typeof first === 'object' && !('title' in first);
+    return isOptions ? rest.slice(1) : rest;
+  };
+  const webviewPanels = []; // createWebviewPanel calls — the tour is a detachable panel
+  let quickPick = null; // what showQuickPick should return (the tour's track chooser)
   let lensProvider = null;
   let hoverProvider = null;
   let decoProvider = null;
@@ -143,6 +167,7 @@ test('extension: three views, click commands, inline annotations, chat, status s
     ColorThemeKind: { Light: 1, Dark: 2, HighContrast: 3, HighContrastLight: 4 },
     OverviewRulerLane: { Left: 1, Center: 2, Right: 4, Full: 7 },
     ProgressLocation: { Notification: 15, Window: 10, SourceControl: 1 },
+    ViewColumn: { Active: -1, Beside: -2, One: 1, Two: 2 },
     ConfigurationTarget: { Global: 1, Workspace: 2, WorkspaceFolder: 3 },
     TextEditorRevealType: { InCenter: 2 },
     CommentMode: { Editing: 0, Preview: 1 },
@@ -155,7 +180,10 @@ test('extension: three views, click commands, inline annotations, chat, status s
       createFileSystemWatcher: () => ({ onDidChange() {}, onDidCreate() {}, onDidDelete() {}, dispose() {} }),
       onDidChangeTextDocument: () => ({ dispose() {} }),
       onDidChangeConfiguration: () => ({ dispose() {} }),
-      getConfiguration: () => ({ get: (_k, def) => def, update: () => Promise.resolve() }),
+      // Captured so the test can FIRE a folder change: `workspaceRoot()` is folders[0], so this
+      // event is the only thing that tells the extension the session it is showing just changed.
+      onDidChangeWorkspaceFolders: (cb) => { folderChangeHandlers.push(cb); return { dispose() {} }; },
+      getConfiguration: () => ({ get: (_k, def) => def, update: (k, v) => { configWrites.push([k, v]); return Promise.resolve(); } }),
       openTextDocument: (uri) => Promise.resolve({ uri, lineCount: 5, getText: () => 'AAA\nb\nc\nZZZ\n', lineAt: (n) => ({ range: new Range(n, 0, n, 3) }) }),
     },
     window: {
@@ -169,7 +197,20 @@ test('extension: three views, click commands, inline annotations, chat, status s
       createTextEditorDecorationType: () => ({ id: ++decoCounter, dispose() {} }),
       registerFileDecorationProvider: (p) => { decoProvider = p; return { dispose() {} }; },
       registerWebviewViewProvider: (id, p) => { webviewProviders[id] = p; return { dispose() {} }; },
-      withProgress: (_o, task) => task({ report() {} }),
+      createWebviewPanel: (id, title) => {
+        const panel = {
+          id, title, disposed: false, revealed: 0,
+          webview: { options: {}, html: '', posts: [], postMessage(m) { this.posts.push(m); return Promise.resolve(true); }, onDidReceiveMessage(cb) { panel.recv = cb; } },
+          reveal() { panel.revealed++; },
+          onDidDispose(cb) { panel.onDispose = cb; },
+          dispose() { panel.disposed = true; panel.onDispose && panel.onDispose(); },
+        };
+        webviewPanels.push(panel);
+        return panel;
+      },
+      // Real VS Code always hands a cancellation token to a `cancellable` task; the mock does too, so
+      // the demo replay's stop path is exercised rather than mocked away.
+      withProgress: (_o, task) => task({ report() {} }, { isCancellationRequested: progressCancelled, onCancellationRequested: () => ({ dispose() {} }) }),
       onDidChangeWindowState: () => ({ dispose() {} }),
       onDidChangeActiveTextEditor: () => ({ dispose() {} }),
       activeColorTheme: { kind: 2 }, // Dark — exercises the dark clear-tint branch
@@ -178,9 +219,21 @@ test('extension: three views, click commands, inline annotations, chat, status s
       activeTextEditor: mockEditor,
       visibleTextEditors: [mockEditor],
       showTextDocument: (d) => { opened = d; lastShown = { document: d, selection: null, revealRange() {} }; return Promise.resolve(lastShown); },
-      showInformationMessage: () => Promise.resolve(undefined),
+      showInformationMessage: (m, ...rest) => {
+        infoMessages.push(String(m));
+        const items = actionsOf(rest);
+        return Promise.resolve(items.includes(infoPick) ? infoPick : undefined);
+      },
       showInputBox: () => Promise.resolve(inputBoxValue),
-      showWarningMessage: (_m, _o, ...items) => Promise.resolve(items[0]),
+      showQuickPick: (items) => Promise.resolve(quickPick === null ? undefined : items[quickPick]),
+      // The mock reader takes the FIRST action offered.
+      showWarningMessage: (m, ...rest) => { warnMessages.push(String(m)); return Promise.resolve(actionsOf(rest)[0]); },
+      // Real since VS Code 1.67 and the extension requires ^1.85, so the mock carries it: exitDemo
+      // closes the demo's editors before deleting their folder, and that has to be testable.
+      tabGroups: {
+        all: [{ tabs: openTabs }],
+        close: (tab) => { const i = openTabs.indexOf(tab); if (i >= 0) openTabs.splice(i, 1); return Promise.resolve(true); },
+      },
     },
     commands: {
       registerCommand: (id, cb) => { commands[id] = cb; return { dispose() {} }; },
@@ -215,7 +268,13 @@ test('extension: three views, click commands, inline annotations, chat, status s
   };
   try {
     const ext = require(BUNDLE);
-    ext.activate({ subscriptions: [], extensionUri: Uri.file(ws) });
+    // globalState backs the tour's remembered float/dock preference.
+    const globalState = new Map();
+    ext.activate({
+      subscriptions: [],
+      extensionUri: Uri.file(ws),
+      globalState: { get: (k, d) => (globalState.has(k) ? globalState.get(k) : d), update: (k, v) => { globalState.set(k, v); return Promise.resolve(); } },
+    });
 
     const editsTree = trees['claudeObservatory.edits'];
     const diffsTree = trees['claudeObservatory.diffs'];
@@ -226,6 +285,15 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.ok(!trees['claudeObservatory.timeline'], 'the standalone Timeline view is gone (folded into Observations)');
     assert.ok(!webviewProviders['claudeObservatory.multitask'] && !trees['claudeObservatory.multitask'], 'the standalone Multitasking view is gone (folded into the Overview)');
     assert.ok(trees['claudeObservatory.actions'], 'Actions is registered as a timeline-style tree (now in the sidebar window)');
+
+    // `workspaceRoot()` is folders[0] and every caller reads it live, so adding/removing/reordering
+    // folders changes which session the whole extension is about — and nothing else announces it (the
+    // store watcher is scoped to ~/.claude, so no file event fires when the WORKSPACE changes). Assert
+    // the subscription exists AND that firing it survives: a handler that throws would take out the
+    // event for every other listener in the host.
+    assert.ok(folderChangeHandlers.length >= 1, 'the extension subscribes to workspace-folder changes');
+    assert.doesNotThrow(() => folderChangeHandlers.forEach((cb) => cb({ added: [], removed: [] })),
+      'a folder change refreshes without throwing');
 
     // The Actions view lives in the "Claude Edits" SIDEBAR container (activity-bar) — NOT in the
     // bottom-panel dock. 0.8.7: Observations joined it there (LAST, with the edits/diffs trees), which
@@ -251,6 +319,56 @@ test('extension: three views, click commands, inline annotations, chat, status s
       pkg.contributes.commands.some((c) => c.command === 'claudeObservatory.showPrompts'),
       'Show Prompts is contributed to the command palette'
     );
+    // Demo mode (0.8.9): the tour view leads the sidebar and only exists while a tour runs, the five
+    // commands are contributed, and — the one that decides whether anybody ever finds it — the empty
+    // state offers the demo. That last one is the first-run path: the replay drives the capture pipeline
+    // in-process, so it genuinely works before `claude-observatory init`.
+    // The tour is NOT a sidebar view: a slot there sits in the very container whose other views the
+    // tour keeps asking you to look at. It is a detachable webview panel, floating by default.
+    assert.ok(!sidebarIds.includes('claudeObservatory.tour'), 'the tour takes no sidebar slot');
+    assert.equal(sidebarIds[0], 'claudeObservatory.edits', 'so Edits still leads the container');
+    for (const c of ['tourDock', 'tourFloat'])
+      assert.ok(pkg.contributes.commands.some((x) => x.command === `claudeObservatory.${c}`), `${c} is contributed`);
+    for (const c of ['startDemo', 'restartDemo', 'startTour', 'tourNext', 'tourBack', 'exitDemo'])
+      assert.ok(pkg.contributes.commands.some((x) => x.command === `claudeObservatory.${c}`), `${c} is contributed`);
+    // Cancel / reset / redo have to be reachable FROM a panel, not only the palette: Start before a
+    // demo exists, Restart and Exit once one does. They live on the OVERVIEW's nav bar and nowhere else —
+    // the sidebar's job is reviewing the session in front of you, and Exit/Restart sitting in it read as
+    // review actions. The sidebar keeps its empty-state link, which is the first-run path.
+    const titles = pkg.contributes.menus['view/title'].filter((m) => /claudeObservatory\.(start|restart|exit)Demo$/.test(m.command));
+    assert.equal(titles.length, 3, 'Start, Restart and Exit each have a title-bar button');
+    assert.match(titles.find((m) => m.command === 'claudeObservatory.startDemo').when, /!claudeObservatory\.demoPresent/, 'Start shows only when no demo is running');
+    // Demo mode sits at the END of the title bar, and INLINE. Only the `navigation` group renders as
+    // icons; anything else is swept into the "..." overflow, so a plain "put it last" group would have
+    // removed these four from the row rather than moving them along it.
+    const allTitles = pkg.contributes.menus['view/title'];
+    const isDemo = (cmd) => /claudeObservatory\.(startDemo|restartDemo|exitDemo|startTour)$/.test(cmd);
+    for (const m of allTitles.filter((x) => isDemo(x.command))) {
+      assert.match(m.when || '', /view == claudeObservatory\.changemap/, `${m.command} is offered from the Overview`);
+      assert.ok(!/claudeObservatory\.edits/.test(m.when || ''), `${m.command} is NOT in the sidebar's title bar`);
+    }
+    const nonDemoOrders = allTitles
+      .filter((m) => !isDemo(m.command) && /^navigation@\d+$/.test(m.group || ''))
+      .map((m) => Number(m.group.split('@')[1]));
+    assert.ok(nonDemoOrders.length > 0, 'there are other inline title-bar actions to sort after');
+    for (const m of allTitles.filter((x) => isDemo(x.command))) {
+      assert.match(m.group || '', /^navigation@\d+$/, `${m.command} stays inline, not in the ... overflow`);
+      assert.ok(
+        Number(m.group.split('@')[1]) > Math.max(...nonDemoOrders),
+        `${m.command} sorts after every other inline title-bar action`
+      );
+    }
+    for (const c of ['restartDemo', 'exitDemo'])
+      assert.match(titles.find((m) => m.command === `claudeObservatory.${c}`).when, /&& claudeObservatory\.demoPresent/, `${c} shows only while a demo is running`);
+    const welcome = pkg.contributes.viewsWelcome.filter((w) => w.view === 'claudeObservatory.edits');
+    assert.ok(welcome.length >= 3, 'the Edits view keeps its three empty-state variants');
+    for (const w of welcome)
+      assert.match(w.contents, /command:claudeObservatory\.startDemo/, 'every Edits empty state offers the demo, including the hooks-missing one');
+    const palette = pkg.contributes.menus.commandPalette || [];
+    assert.equal(palette.find((m) => m.command === 'claudeObservatory.tourGoto').when, 'false', 'tourGoto is panel-driven, not a palette command');
+    for (const c of ['tourNext', 'tourBack'])
+      assert.equal(palette.find((m) => m.command === `claudeObservatory.${c}`).when, 'claudeObservatory.demoTour', `${c} is offered only during a tour`);
+
     assert.ok(contentProviders['claude-edit'] && contentProviders['claude-observation'], 'blob + markdown content providers registered');
     assert.ok(decoProvider, 'status FileDecorationProvider registered');
 
@@ -1220,6 +1338,281 @@ test('extension: three views, click commands, inline annotations, chat, status s
     const flog = core.readLog(S);
     assert.equal(flog.find((r) => r.id === rF.id).status, 'kept', 'keepOpenFile accepted the active file (app.txt)');
     assert.equal(flog.find((r) => r.id === rG.id).status, 'pending', 'keepOpenFile left the other file (other.txt) untouched');
+
+    // The mock's own contract, pinned. Both overloads of show*Message must hand back the FIRST action;
+    // getting this wrong makes the code under test take a branch it never asked for, and only on the
+    // paths a local run happens not to exercise.
+    assert.equal(await vscode.window.showWarningMessage('probe', 'First', 'Second'), 'First', 'positional-items overload returns the first action');
+    assert.equal(await vscode.window.showWarningMessage('probe', { modal: true }, 'First', 'Second'), 'First', 'options-object overload returns the first action too');
+    assert.deepEqual(await vscode.window.showWarningMessage('probe', { title: 'First' }, { title: 'Second' }), { title: 'First' }, 'a MessageItem action is an action, not an options object');
+
+    // --- demo mode + the guided tour (0.8.9) ---
+    // Re-point the Overview's sink: the nav-position block above claimed it, and the tour's messages to
+    // this panel (tab, ring, show-all) are what the rest of this section asserts on.
+    const cmTourMsgs = [];
+    cmView.webview.postMessage = (m) => cmTourMsgs.push(m);
+    // The install/update offer must NEVER fire in an automated run. Its guard is that
+    // `context.extension` is absent under this mock — the same guard checkForUpdate already relies on —
+    // so if it ever fires here it would also fire in every CI job and every headless host.
+    assert.equal(infoMessages.filter((m) => /Claude Observatory is (installed|now )/.test(m)).length, 0, 'the first-run offer stays out of automated runs');
+
+    for (const c of ['startDemo', 'restartDemo', 'startTour', 'tourNext', 'tourBack', 'tourGoto', 'exitDemo']) {
+      assert.ok(typeof commands[`claudeObservatory.${c}`] === 'function', `${c} registered`);
+    }
+    // The tour is a detachable webview PANEL, not a sidebar view: a sidebar slot would sit in the very
+    // container whose other views the tour keeps asking you to look at.
+    assert.ok(!webviewProviders['claudeObservatory.tour'], 'the tour is not a sidebar view');
+    assert.ok(!pkg.contributes.views.claudeObservatory.some((v) => v.id === 'claudeObservatory.tour'), 'and is not contributed as one');
+    // The in-panel tip strip was removed: the step's text belongs in the tour, and repeating it inside
+    // every panel cost vertical space in each of them to say the same sentence twice.
+    assert.ok(!fs.readFileSync(BUNDLE, 'utf8').includes('ov-tourtip'), 'the in-panel tip strip is gone and stays gone');
+    for (const id of ['id="count"', 'id="title"', 'id="body"', 'id="tip"', 'id="next"', 'id="back"', 'id="dock"', 'id="exit"', 'id="dots"', 'id="action"', 'id="actionlabel"', 'id="actionstate"']) {
+      assert.ok(fs.readFileSync(BUNDLE, 'utf8').includes(id), `the tour panel renders ${id}`);
+    }
+    // Stats and Prompts ring their own controls now: an anchor is BROADCAST to every tour-aware panel
+    // and each rings it only if its own map knows the name. Routing by view instead would send a
+    // Stats-local anchor to the Overview, which rings nothing and reads as broken.
+    for (const id of ['id="tk-sec"', 'id="usage-sec"', 'id="rv-sec"', 'TOUR_ANCHORS', "'stats-model'", "'prompts-list'"]) {
+      assert.ok(fs.readFileSync(BUNDLE, 'utf8').includes(id), `the Stats/Prompts shells carry ${id}`);
+    }
+
+    // The Overview handles the tour message (tab + in-panel tip + the ring on the named control).
+    const cmHtml = webviewProviders['claudeObservatory.changemap'];
+    assert.ok(cmHtml, 'the Overview view is registered');
+
+    // Replay, cancelled at the first beat: exercises the command, the progress wiring, the shouldStop
+    // plumbing and the session override without paying for a ~17s paced run.
+    progressCancelled = true;
+    const cfgBefore = configWrites.length;
+    await commands['claudeObservatory.startDemo']();
+    // Stopping at the first beat is stopping BEFORE the first capture, so there are no store records —
+    // what must exist is the seeded workspace, which is the thing Exit has to be able to reclaim.
+    assert.ok(fs.existsSync(path.join(ws, 'observatory-demo', '.observatory-demo')), 'the demo workspace is seeded and marked');
+    assert.equal(core.listSessions().filter((s) => core.isDemoSession(s.id)).length, 0, 'a replay stopped at beat one captured nothing');
+    assert.deepEqual(
+      configWrites.slice(cfgBefore).filter(([k]) => k === 'session'),
+      [],
+      'demo mode never writes claudeObservatory.session — that would dirty .vscode/settings.json in the user repo'
+    );
+    // A stopped replay deliberately does NOT open the tour — there would be nothing to tour.
+    assert.equal(webviewPanels.length, 0, 'a cancelled replay does not open a tour');
+    // …and neither does the tour COMMAND, because there is no demo session for it to act on. The tour
+    // accepts and reverts edits, some of them on a nine-second timer, so it may only ever run against
+    // the demo — a guard that has to hold whichever route reached it, not only the button.
+    quickPick = 1; // "Everything"
+    await commands['claudeObservatory.startTour']();
+    assert.equal(webviewPanels.length, 0, 'the tour refuses to open with no demo session to act on');
+    assert.match(
+      warnMessages[warnMessages.length - 1] || '',
+      /guided tour runs against the demo session/i,
+      'and says why rather than opening onto a real session'
+    );
+
+    // Record a real one, unpaced, so the tour below walks a store with actual records in it.
+    await core.runDemo({ cwd: ws, fast: true, fleet: false });
+    quickPick = 1; // "Everything"
+    await commands['claudeObservatory.startTour']();
+    assert.equal(webviewPanels.length, 1, 'the tour opened as a webview panel, not a sidebar view');
+    const tourView = webviewPanels[0];
+    assert.match(tourView.title, /guided tour/i);
+    const live = () => webviewPanels[webviewPanels.length - 1];
+    // The tour panel got a step, and it is core's first step rather than one invented here.
+    const stepMsgs = tourView.webview.posts.filter((m) => m.type === 'step');
+    assert.ok(stepMsgs.length >= 1, 'the tour opened on a step');
+    assert.equal(stepMsgs[stepMsgs.length - 1].step.id, core.demoTour()[0].id, 'and it is core’s script, not a local copy');
+    assert.equal(stepMsgs[stepMsgs.length - 1].n, core.demoTour().length, 'with the full step count for its progress readout');
+    // It plays by DEFAULT, and says how long the step has rather than moving without warning. Asserted
+    // here, before any navigation: every manual control pauses, so this is the only moment it holds.
+    const firstAuto = tourView.webview.posts.filter((m) => m.type === 'auto');
+    assert.ok(firstAuto.length > 0, 'the tour reports its autoplay state');
+    assert.equal(firstAuto[0].playing, true, 'and it plays by default');
+    assert.ok(firstAuto[0].secs > 0, 'with seconds left on this step');
+    await commands['claudeObservatory.tourNext']();
+    assert.equal(tourView.webview.posts.filter((m) => m.type === 'step').pop().i, 1, 'Next advances a step');
+    await commands['claudeObservatory.tourBack']();
+    assert.equal(tourView.webview.posts.filter((m) => m.type === 'step').pop().i, 0, 'Back returns to the previous one');
+
+    // --- action steps: the wait/auto state machine, driven end to end ---
+    // Arm a wait step, mutate the store the way a reader would, and assert the tour notices. This is
+    // the whole interactive feature; nothing else in the suite covers it.
+    const waitStep = core.demoTour().findIndex((x) => x.action?.mode === 'wait');
+    assert.ok(waitStep >= 0, 'the script has a wait step to drive');
+    await commands['claudeObservatory.tourGoto'](waitStep);
+    const armed = live().webview.posts.filter((m) => m.type === 'step').pop();
+    assert.equal(armed.actionState, 'waiting', 'a wait step arms as waiting');
+    // Mutate the DEMO session — the one the tour pinned. The watch is keyed to that session precisely so
+    // a count taken against one log is never compared with a count taken against another.
+    const demoS = core.demoSessionsFor({ cwd: ws })[0];
+    assert.ok(demoS, 'the replay left a demo session for the tour to act on');
+    const pend = core.readLog(demoS).find((r) => r.status === 'pending');
+    core.setStatus(demoS, pend.id, core.demoTour()[waitStep].action.kind === 'undo-edit' ? 'undone' : 'kept');
+    await commands['claudeObservatory.refresh']();
+    assert.equal(live().webview.posts.filter((m) => m.type === 'action').pop().state, 'satisfied', 'and notices when the reader does it');
+
+    // --- autoplay ---
+    const autoPosts = () => live().webview.posts.filter((m) => m.type === 'auto');
+    // Any manual control hands over the wheel — the rule both of the site's demo engines use.
+    await commands['claudeObservatory.tourNext']();
+    assert.equal(autoPosts().pop().playing, false, 'Next pauses autoplay');
+    await commands['claudeObservatory.tourBack']();
+    assert.equal(autoPosts().pop().playing, false, 'and it stays paused');
+    await commands['claudeObservatory.tourPlayPause']();
+    assert.equal(autoPosts().pop().playing, true, 'the transport resumes it');
+    await commands['claudeObservatory.tourPlayPause']();
+    assert.equal(autoPosts().pop().playing, false, 'and pauses it again');
+
+    // A WAIT step under autoplay really performs its action rather than skipping it — a reader who
+    // only watches still sees Keep happen. Assert the STORE changed, not merely that a message flew.
+    // Earlier assertions resolved everything, so seed a pending edit — otherwise the step correctly
+    // reports there is nothing left to accept rather than accepting something.
+    const ab = core.writeBlob(demoS, Buffer.from('a\n'));
+    const aa = core.writeBlob(demoS, Buffer.from('a\nb\n'));
+    core.appendLog(demoS, { ts: 9950, tool: 'Edit', file: F, beforeBlob: ab, afterBlob: aa, status: 'pending' });
+    const keepStep = core.demoTour().findIndex((x) => x.action?.kind === 'keep-edit');
+    await commands['claudeObservatory.tourGoto'](keepStep);
+    const keptBefore = core.readLog(demoS).filter((r) => r.status === 'kept').length;
+    await commands['claudeObservatory.tourPlayPause'](); // resume: arms the countdown
+    await new Promise((r) => setTimeout(r, core.DEMO_ACTION_COUNTDOWN_MS + 600));
+    assert.ok(core.readLog(demoS).filter((r) => r.status === 'kept').length > keptBefore, 'an unanswered ask applies itself rather than being skipped');
+    // …and it advances exactly ONE step. Performing the action refreshes, which makes the watcher arm a
+    // beat of its own — so two timers are in flight for the same moment. They are guarded today, but the
+    // guards are what make that safe, and this pins the outcome rather than the guards.
+    await new Promise((r) => setTimeout(r, 2200));
+    const landed = live().webview.posts.filter((m) => m.type === 'step').pop().i;
+    assert.equal(landed, keepStep + 1, 'the tour moved on by one, not two');
+    await commands['claudeObservatory.tourPlayPause'](); // pause again so the rest of the test is stable
+
+    // …and the other shape: with nothing pending, the step reports it instead of hanging.
+    for (const r of core.readLog(demoS)) if (r.status === 'pending') core.setStatus(demoS, r.id, 'kept');
+    await commands['claudeObservatory.tourGoto'](keepStep);
+    assert.equal(
+      live().webview.posts.filter((m) => m.type === 'step').pop().actionState,
+      'vacated',
+      'nothing left to accept is reported, not waited on'
+    );
+
+    // Moving on DISARMS: a later mutation must post nothing, or every step leaks a watcher.
+    const plain = core.demoTour().findIndex((x) => !x.action);
+    await commands['claudeObservatory.tourGoto'](plain);
+    const actionsBefore = live().webview.posts.filter((m) => m.type === 'action').length;
+    const pend2 = core.readLog(demoS).find((r) => r.status === 'pending');
+    if (pend2) core.setStatus(demoS, pend2.id, 'kept');
+    await commands['claudeObservatory.refresh']();
+    assert.equal(live().webview.posts.filter((m) => m.type === 'action').length, actionsBefore, 'a step with no action watches nothing');
+
+    // Floating is the default, and the choice is remembered for next time rather than re-asked.
+    assert.equal(live().webview.posts.filter((m) => m.type === 'step').pop().docked, true, 'the tour is docked by default');
+    await commands['claudeObservatory.tourFloat']();
+    const floated = webviewPanels[webviewPanels.length - 1];
+    assert.equal(floated.webview.posts.filter((m) => m.type === 'step').pop().docked, false, 'and it reports itself floating');
+    // Stepping BETWEEN the toggles is the regression: setDocked disposes the panel to rebuild it, and
+    // without a guard that dispose fires tourClosed -> endTour, leaving Next/Back dead.
+    await commands['claudeObservatory.tourNext']();
+    assert.ok(live().webview.posts.filter((m) => m.type === 'step').length > 0, 'the tour still steps after a float');
+    await commands['claudeObservatory.tourDock']();
+    await commands['claudeObservatory.tourNext']();
+    const afterToggles = live().webview.posts.filter((m) => m.type === 'step').pop();
+    assert.ok(afterToggles, 'and still steps after docking again — the toggle did not end the tour');
+
+    // An AUTO step that could not run must not claim it did. Resolve everything the demo has, then land
+    // on the accept-a-task step: with nothing pending there is no task to accept, and "✓ done" over a
+    // screen where nothing moved is the exact failure this reports instead.
+    for (const r of core.readLog(demoS)) if (r.status === 'pending') core.setStatus(demoS, r.id, 'kept');
+    const autoStep = core.demoTour().findIndex((x) => x.action?.mode === 'auto' && x.action.kind === 'keep-task');
+    await commands['claudeObservatory.tourGoto'](autoStep);
+    assert.equal(
+      live().webview.posts.filter((m) => m.type === 'step').pop().actionState,
+      'vacated',
+      'an auto step that did nothing says so rather than reporting done'
+    );
+
+    // Docking carries the action state across. Dropping it re-rendered a satisfied step as "waiting" —
+    // invisible in a screenshot, and exactly the kind of thing only a state assertion catches.
+    await commands['claudeObservatory.tourFloat']();
+    await commands['claudeObservatory.tourDock']();
+    assert.equal(
+      live().webview.posts.filter((m) => m.type === 'step').pop().actionState,
+      'vacated',
+      'and the state survives a dock/float rebuild'
+    );
+
+    // The Overview's Active-only filter is held open for the tour, and handed back when it ends: the
+    // demo leaves five of six tasks completed, which that filter hides.
+    const showAlls = () => cmTourMsgs.filter((m) => m.type === 'showall');
+    assert.equal(showAlls().at(-1)?.on, true, 'a running tour asks the Overview to show every row');
+
+    // The short track is the same script, filtered — and choosing it really shortens the tour.
+    // End the TOUR, not the demo: the demo has to survive, because the tour refuses to open without one.
+    await commands['claudeObservatory.tourClosed']();
+    quickPick = 0; // "Essentials"
+    await commands['claudeObservatory.startTour']();
+    const shortPanel = webviewPanels[webviewPanels.length - 1];
+    const shortN = shortPanel.webview.posts.filter((m) => m.type === 'step').pop().n;
+    assert.equal(shortN, core.demoTrackSizes().essentials, 'the short track walks the essential steps');
+    assert.ok(shortN < core.demoTrackSizes().everything, 'and it is genuinely shorter');
+    // Dismissing the chooser opens nothing at all.
+    await commands['claudeObservatory.tourClosed']();
+    const before = webviewPanels.length;
+    quickPick = null;
+    await commands['claudeObservatory.startTour']();
+    assert.equal(webviewPanels.length, before, 'a dismissed chooser leaves no half-opened tour');
+    quickPick = 1;
+    await commands['claudeObservatory.startTour']();
+
+    // Walk EVERY step. Each one activates a different view and, for the Overview, a different tab; a
+    // branch that throws (an unknown view, an editor step with nothing pending, a provider that is not
+    // resolved) would otherwise only show up when a reader reached that step in a real session.
+    const tour = core.demoTour();
+    for (let i = 0; i < tour.length; i++) {
+      await commands['claudeObservatory.tourGoto'](i);
+      const posted = live().webview.posts.filter((m) => m.type === 'step').pop();
+      assert.equal(posted.i, i, `step ${i} (${tour[i].id}) posts its own index`);
+      assert.equal(posted.step.id, tour[i].id, `step ${i} posts core's step, unchanged`);
+    }
+    // Past the end finishes the tour rather than throwing or wrapping.
+    await commands['claudeObservatory.tourGoto'](tour.length - 1);
+    const lastPanel = live();
+    await commands['claudeObservatory.tourNext']();
+    assert.equal(lastPanel.webview.posts.filter((m) => m.type === 'step').pop().i, tour.length - 1, 'Next on the last step ends the tour, leaving it on the last step');
+    assert.ok(lastPanel.disposed, 'and the tour window closes with it');
+
+    // …and hands the filter back the moment it ends, rather than leaving the reader's Overview changed.
+    await commands['claudeObservatory.tourClosed']();
+    assert.equal(showAlls().at(-1)?.on, false, 'and gives the filter back when the tour ends');
+
+    // Finishing the SHORT track offers the other 28 rather than just closing — the only place a reader
+    // who picked Essentials is told the rest exists.
+    quickPick = 0; // "Essentials"
+    await commands['claudeObservatory.startTour']();
+    const shortTour = core.demoTour('essentials');
+    await commands['claudeObservatory.tourGoto'](shortTour.length - 1);
+    const infoBefore = infoMessages.length;
+    infoPick = `See the other ${core.demoTrackSizes().remainder}`;
+    await commands['claudeObservatory.tourNext']();
+    assert.ok(
+      infoMessages.slice(infoBefore).some((m) => /short track/i.test(m)),
+      'the end of the short track offers the remainder'
+    );
+    const contd = live().webview.posts.filter((m) => m.type === 'step').pop();
+    assert.equal(contd.n, core.demoTrackSizes().remainder, 'and accepting walks exactly the complement');
+    assert.equal(contd.step.id, core.demoTour('remainder')[0].id, 'starting at its first step');
+    infoPick = undefined;
+
+    // Exit removes every trace — and still writes nothing to settings.
+    // A demo file left open is the failure that makes the demo folder UNREMOVABLE: saving that buffer
+    // after the folder is deleted recreates a file inside it, and the `.observatory-demo` sentinel that
+    // authorizes deletion went with the tree. The tour deliberately opens one, so Exit closes them.
+    const demoTab = { input: { uri: Uri.file(path.join(ws, 'observatory-demo', 'src', 'features.py')) } };
+    const otherTab = { input: { uri: Uri.file(path.join(ws, 'app.txt')) } };
+    openTabs.push(demoTab, otherTab);
+    const cfgBeforeExit = configWrites.length;
+    await commands['claudeObservatory.exitDemo']();
+    assert.ok(!openTabs.includes(demoTab), 'exitDemo closes editors on demo files before deleting them');
+    assert.ok(openTabs.includes(otherTab), 'and leaves the user’s own files open');
+    assert.equal(core.listSessions().filter((s) => core.isDemoSession(s.id)).length, 0, 'exitDemo removed the demo session(s)');
+    assert.ok(!fs.existsSync(path.join(ws, 'observatory-demo')), 'and the demo workspace folder');
+    assert.deepEqual(configWrites.slice(cfgBeforeExit).filter(([k]) => k === 'session'), [], 'exitDemo writes no config either');
+    progressCancelled = false;
   } finally {
     Module._load = origLoad;
   }

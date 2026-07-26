@@ -33,7 +33,10 @@
   .hl{color:var(--accent)}
   .eyebrow{font-family:var(--mono);font-size:.72rem;text-transform:uppercase;letter-spacing:.2em;color:var(--accent-ink);font-weight:600}
   .lede{color:var(--ink-soft);font-size:clamp(1.05rem,2vw,1.24rem);line-height:1.55;max-width:56ch;text-wrap:pretty}
-  code{font-family:var(--mono);font-size:.86em}
+  /* A long command inside prose (`claude-observatory changemap --json`) is one unbreakable token: at
+     320px it ran 3px past the viewport and scrolled the whole page sideways. Wrap it rather than clip
+     it — the same treatment .cmd code already gets on the demo page. */
+  code{font-family:var(--mono);font-size:.86em;overflow-wrap:anywhere}
 
   .nav{position:sticky;top:0;z-index:60;background:transparent;transition:background .25s,border-color .25s}
   .nav.condensed{background:color-mix(in srgb,var(--bg) 80%,transparent);backdrop-filter:saturate(1.5) blur(14px);-webkit-backdrop-filter:saturate(1.5) blur(14px);border-bottom:1px solid var(--line-soft)}
@@ -46,6 +49,13 @@
   .icon-btn,.ghost{border:1px solid var(--line);background:var(--surface);color:var(--ink-soft);border-radius:999px;padding:7px 13px;font-size:.85rem;font-family:var(--mono);cursor:pointer;transition:.15s}
   .icon-btn:hover,.ghost:hover{color:var(--ink);border-color:var(--ink-faint)}
   .menu-btn{display:none}
+  /* The nav row is one non-wrapping flex line — brand, links, then the right cluster — so anything that
+     does not fit pushes the cluster past the viewport and scrolls the WHOLE page sideways. Measured at
+     +29px on every page at 320px (brand + the three right-hand buttons) and +29/+30px at 768px on the
+     six-link pages, where the links are shown but no longer fit. The ghost GitHub button is the widest
+     item and the only redundant one: GitHub is already the last entry in .links, and below 720px the ☰
+     menu reveals those, so dropping it costs no route to anything. */
+  @media (max-width:900px){ .nav .right .ghost{display:none} }
   @media (max-width:720px){
     .menu-btn{display:inline-flex}
     .nav .links{display:none}
@@ -119,7 +129,7 @@
   <div class="wrap">
     <a class="back" href="showcase.html">← Home</a>
     <h1>Concepts</h1>
-    <p class="lede">Claude Observatory records what a Claude Code session did and presents it for review. This page defines the terms that record is built from, in the order they depend on one another; every other page uses them unchanged.</p>
+    <p class="lede">Claude Observatory records what a Claude Code session did on an established and mission-critical codebase and presents it for review. This page defines the terms that record is built from, in the order they depend on one another; every other page uses them unchanged.</p>
   </div>
 </header>
 

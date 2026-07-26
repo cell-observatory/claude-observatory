@@ -4,6 +4,7 @@ import com.cellobservatory.observatory.core.ObservatoryCli
 import com.cellobservatory.observatory.services.ObservatoryService
 import com.cellobservatory.observatory.ui.ReviewOps
 import com.cellobservatory.observatory.ui.inline.InlineOverlay
+import com.cellobservatory.observatory.ui.tour.TourController
 import com.intellij.notification.NotificationType
 import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnAction
@@ -116,6 +117,81 @@ class ClearResolvedEditsAction : SessionAction() {
 class SpotlightAction : SessionAction() {
     override fun actionPerformed(e: AnActionEvent) {
         InlineOverlay.getInstance(e.project ?: return).toggleHeatmap()
+    }
+}
+
+// --- demo mode + the guided tour (0.8.9) -------------------------------------------------------------
+// Cancel is the progress bar's own Cancel while the replay runs; reset and redo are the same thing as
+// starting, because a run clears any previous demo for this folder before it replays. Two ids exist so
+// Find Action can offer the right verb for the state you are in.
+
+/** Replay the scripted demo session and open the guided tour. */
+class StartDemoAction : SessionAction() {
+    override fun update(e: AnActionEvent) {
+        e.presentation.isEnabledAndVisible = e.project != null && !ReviewOps.demoPresent(e.project!!)
+    }
+    override fun actionPerformed(e: AnActionEvent) {
+        ReviewOps.startDemo(e.project ?: return)
+    }
+}
+
+/** Replay it again from the beginning — the reset, for showing it a second time. */
+class RestartDemoAction : SessionAction() {
+    override fun update(e: AnActionEvent) {
+        e.presentation.isEnabledAndVisible = e.project != null && ReviewOps.demoPresent(e.project!!)
+    }
+    override fun actionPerformed(e: AnActionEvent) {
+        ReviewOps.startDemo(e.project ?: return)
+    }
+}
+
+/** Take the guided tour of the session on screen, from step one. */
+class StartTourAction : SessionAction() {
+    override fun update(e: AnActionEvent) {
+        e.presentation.isEnabledAndVisible = e.project != null && ReviewOps.demoPresent(e.project!!)
+    }
+    override fun actionPerformed(e: AnActionEvent) {
+        val project = e.project ?: return
+        TourController.getInstance(project).start { msg -> ReviewOps.notify(project, msg, NotificationType.WARNING) }
+    }
+}
+
+/** Step the tour without reaching for its panel (so it can be keybound). */
+class TourNextAction : SessionAction() {
+    override fun update(e: AnActionEvent) {
+        e.presentation.isEnabledAndVisible = e.project != null && TourController.getInstance(e.project!!).running
+    }
+    override fun actionPerformed(e: AnActionEvent) {
+        TourController.getInstance(e.project ?: return).next()
+    }
+}
+
+class TourBackAction : SessionAction() {
+    override fun update(e: AnActionEvent) {
+        e.presentation.isEnabledAndVisible = e.project != null && TourController.getInstance(e.project!!).running
+    }
+    override fun actionPerformed(e: AnActionEvent) {
+        TourController.getInstance(e.project ?: return).back()
+    }
+}
+
+/** Pause or resume the tour's autoplay. Any other control pauses it too. */
+class TourPlayPauseAction : SessionAction() {
+    override fun update(e: AnActionEvent) {
+        e.presentation.isEnabledAndVisible = e.project != null && TourController.getInstance(e.project!!).running
+    }
+    override fun actionPerformed(e: AnActionEvent) {
+        TourController.getInstance(e.project ?: return).playPause()
+    }
+}
+
+/** Leave demo mode and remove every trace of it. */
+class ExitDemoAction : SessionAction() {
+    override fun update(e: AnActionEvent) {
+        e.presentation.isEnabledAndVisible = e.project != null && ReviewOps.demoPresent(e.project!!)
+    }
+    override fun actionPerformed(e: AnActionEvent) {
+        ReviewOps.exitDemo(e.project ?: return)
     }
 }
 

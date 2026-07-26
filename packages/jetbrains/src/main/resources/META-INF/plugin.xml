@@ -5,7 +5,8 @@
   <description><![CDATA[
     Per-edit <b>Keep / Undo</b> for Claude Code — a running log of every file change Claude makes,
     each with its own surgical undo. Git-free, zero extra Claude tokens (capture runs in local
-    hooks, outside the model loop).<br/><br/>
+    hooks, outside the model loop). Built for <b>established and mission-critical codebases</b>
+    rather than throwaway prototypes.<br/><br/>
     Requires the <code>claude-observatory</code> CLI on this machine (the plugin drives it for all
     store mutations) and the capture hooks installed via <code>claude-observatory init</code>.
     Works in every JetBrains IDE; on Remote Development the plugin installs on the host.
@@ -21,6 +22,11 @@
                 factoryClass="com.cellobservatory.observatory.ui.ObservatoryToolWindowFactory"/>
     <toolWindow id="Claude Observatory Dashboards" anchor="bottom" icon="/icons/toolWindowObservatory.svg"
                 factoryClass="com.cellobservatory.observatory.ui.ObservatoryDashboardsFactory"/>
+    <!-- The guided tour's window. Declared (not registered at runtime, which invokes an override-only
+         platform API) and unavailable until a tour runs — see TourToolWindowFactory. -->
+    <toolWindow id="Claude Observatory Tour" anchor="right" canCloseContents="false"
+                icon="/icons/toolWindowObservatory.svg"
+                factoryClass="com.cellobservatory.observatory.ui.tour.TourToolWindowFactory"/>
     <statusBarWidgetFactory id="claudeObservatoryStatus" order="first"
                             implementation="com.cellobservatory.observatory.ui.ObservatoryStatusBarWidgetFactory"/>
     <statusBarWidgetFactory id="claudeObservatoryActions" order="after claudeObservatoryStatus"
@@ -139,6 +145,39 @@
               class="com.cellobservatory.observatory.actions.SearchEditsAction"
               text="Claude Observatory: Search Edits"
               description="Filter the Edits/Diffs trees by file path"/>
+      <!-- Demo mode (0.8.9). Cancel is the replay's own progress-bar Cancel; Restart is the reset, and
+           it is the same operation as Start because a run clears any previous demo before replaying. -->
+      <action id="ClaudeObservatory.StartDemo"
+              class="com.cellobservatory.observatory.actions.StartDemoAction"
+              icon="AllIcons.Actions.Execute"
+              text="Claude Observatory: Start Demo Mode"
+              description="Replay a scripted Claude session through the real pipeline, then take the guided tour"/>
+      <action id="ClaudeObservatory.RestartDemo"
+              class="com.cellobservatory.observatory.actions.RestartDemoAction"
+              icon="AllIcons.Actions.Restart"
+              text="Claude Observatory: Restart Demo"
+              description="Replay the demo from the beginning, replacing the current one"/>
+      <action id="ClaudeObservatory.StartTour"
+              class="com.cellobservatory.observatory.actions.StartTourAction"
+              text="Claude Observatory: Guided Tour"
+              description="Walk every panel of the observatory, step by step"/>
+      <action id="ClaudeObservatory.TourNext"
+              class="com.cellobservatory.observatory.actions.TourNextAction"
+              text="Claude Observatory: Guided Tour — Next Step"
+              description="Advance the guided tour"/>
+      <action id="ClaudeObservatory.TourBack"
+              class="com.cellobservatory.observatory.actions.TourBackAction"
+              text="Claude Observatory: Guided Tour — Previous Step"
+              description="Step the guided tour back"/>
+      <action id="ClaudeObservatory.TourPlayPause"
+              class="com.cellobservatory.observatory.actions.TourPlayPauseAction"
+              text="Claude Observatory: Guided Tour — Pause or Resume"
+              description="Pause or resume the guided tour's autoplay"/>
+      <action id="ClaudeObservatory.ExitDemo"
+              class="com.cellobservatory.observatory.actions.ExitDemoAction"
+              icon="AllIcons.Actions.Cancel"
+              text="Claude Observatory: Exit Demo Mode"
+              description="Leave demo mode and remove every trace: both sessions, the demo folder, and the report written outside the workspace"/>
     </group>
   </actions>
 </idea-plugin>

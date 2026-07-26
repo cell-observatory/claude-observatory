@@ -15,9 +15,9 @@ import { EditStatus, EditRecord, readLog, minOf, maxOf, logPath, rootDir, isSafe
 import { buildEditTree, EditTree, TreeEdit, TreeFolder, TreeFile } from './tree';
 import { reasoningByEdit, transcriptInsights, findTranscript, flagsFor } from './observe';
 import { parseActions, summarizeActions, compactLabel } from './actions';
-import { parseSubagents } from './subagents';
+import { parseSubagents, allSessionTaskRows } from './subagents';
 import { buildEgressReport } from './egress';
-import { projectSessionIds } from './fleet';
+import { projectSessionIds, listRepoSiblings, SiblingSession } from './fleet';
 import { parseWorkflows, workflowWindows, workflowForTs } from './workflows';
 import { taskSnaps, digest12 } from './tasks';
 import { sessionPrompts } from './prompts';
@@ -388,11 +388,14 @@ interface TodoSnap {
  * bundled demo plans both ways) so the two systems never mint twin tasks.
  */
 function planSnaps(transcriptPath: string): TodoSnap[] {
-  const todos = todoSnaps(transcriptPath);
-  // Sort by ts: the merge below walks both lists as if they were ascending, but taskSnaps emits in
-  // transcript LINE order and a transcript is not ts-ordered (one real session steps backwards 438
+  // Sort by ts: the merge below walks both lists as if they were ascending, and BOTH sources emit in
+  // transcript LINE order — a transcript is not ts-ordered (one real session steps backwards 438
   // times). An inverted snapshot yields a task whose firstTs > lastTs, which silently attributes zero
-  // edits and returns an empty feed for a task that did plenty.
+  // edits and returns an empty feed for a task that did plenty — and worse, hands the edits that
+  // belonged to it to the neighbouring task, so a task-scoped keep/undo acts on edits that were never
+  // part of it. todoSnaps needs this exactly as much as taskSnaps does, and is the commoner path:
+  // a session that never used the task system returns straight out of the `!tasks.length` branch below.
+  const todos = todoSnaps(transcriptPath).slice().sort((a, b) => a.ts - b.ts);
   const tasks = taskSnaps(transcriptPath).slice().sort((a, b) => a.ts - b.ts);
   if (!tasks.length) return todos;
   if (!todos.length) return tasks;
@@ -876,6 +879,29 @@ function promptSlices(
  * strict-span builder (inProgressSpansStrict), so it can't diverge from the change-map's own
  * attribution. Zero token.
  */
+/**
+ * Every taskId this session PUBLISHES — the set a task-scoped verb may legitimately be given. Lets a
+ * caller tell "that task has no pending edits" apart from "that task does not exist": both come back
+ * from keepTask/undoTask as a bare zero, so `task-keep <garbage>` printed a green success.
+ *
+ * The union of two sources, deliberately. The strict in_progress spans are what task-scoped edit sets
+ * are built from — but the Tasks tab also publishes a row per background Agent run
+ * (`allSessionTaskRows`), and those never enter an in_progress span, so validating against the spans
+ * alone would hard-fail on an id the product itself put on screen. Those ids resolve to an empty edit
+ * set, which is the honest answer for them: a quiet zero, not an error.
+ */
+export function sessionTaskIds(cwd: string, session: string): string[] {
+  const transcript = findTranscript(cwd, session);
+  const spans = inProgressSpansStrict(transcript ? planSnaps(transcript) : []);
+  const ids = new Set(spans.map((s) => s.taskId));
+  try {
+    for (const row of allSessionTaskRows(cwd, session)) ids.add(row.taskId);
+  } catch {
+    /* the task/agent rows are a display source — never let them block a review verb */
+  }
+  return [...ids];
+}
+
 export function taskEditIds(cwd: string, session: string, taskId: string): number[] {
   const transcript = findTranscript(cwd, session);
   const strictSpans = inProgressSpansStrict(transcript ? planSnaps(transcript) : []);
@@ -925,7 +951,7 @@ function dirStamp(dir: string | null): string {
  * only read, and siblings starting in other worktrees, changed no keyed file, so the Overview kept
  * reporting zero of them until something unrelated moved.
  */
-function derivedInputsStamp(cwd: string, session: string): string {
+function derivedInputsStamp(cwd: string, session: string, includeWorkspace: boolean): string {
   const transcript = findTranscript(cwd, session);
   const base = transcript ? transcript.replace(/\.jsonl$/, '') : null;
   const subs = base ? path.join(base, 'subagents') : null;
@@ -935,7 +961,43 @@ function derivedInputsStamp(cwd: string, session: string): string {
     dirStamp(base ? path.join(base, 'workflows') : null),
     // The project dir is one file per session: this covers every sibling transcript at once.
     dirStamp(transcript ? path.dirname(transcript) : null),
+    // Only for the session being RENDERED. A sibling's map is the "finished session whose inputs never
+    // change again" case this disk cache exists for, and siblings share files with the active session —
+    // 14 of 30 on a real repo — so stamping their workspace too made one save rebuild all of them
+    // (9.6 s cold, 542 ms warm), for a map whose class attribution nobody is looking at.
+    includeWorkspace ? workspaceStamp(session) : '',
   ].join('|');
+}
+
+/**
+ * (mtimeMs:size) of every WORKSPACE file the session edited — a third input, alongside the transcript
+ * and the store log, that the map is genuinely derived from.
+ *
+ * buildChangeMap reads each edited file off disk to detect its classes and to place each edit in the
+ * CURRENT text (buildEditTree → buildFile). Neither the transcript nor the log moves when the user
+ * edits that file in their editor, so without this the cache kept serving class names and placements
+ * for a version of the file that no longer exists — rename a class and the map still reported the old
+ * one until something unrelated happened to touch the transcript.
+ *
+ * Stat-only, over the distinct files in the log (readLog is memoized), so it costs microseconds.
+ */
+function workspaceStamp(session: string): string {
+  let files: string[];
+  try {
+    files = [...new Set(readLog(session).map((r) => r.file))].sort();
+  } catch {
+    return '';
+  }
+  const parts: string[] = [];
+  for (const f of files) {
+    try {
+      const st = fs.statSync(f);
+      parts.push(`${st.mtimeMs}:${st.size}`);
+    } catch {
+      parts.push('-'); // absent (deleted or never created) is itself a stable state
+    }
+  }
+  return parts.join(',');
 }
 
 function fileStamp(p: string | null): string {
@@ -1001,7 +1063,7 @@ export function cachedChangeMap(cwd: string, session: string, opts: { root: stri
   const lStamp = fileStamp(logPath(session));
   const build = (): ChangeMap => buildChangeMap(cwd, session, opts);
   if (!tStamp && !lStamp) return build(); // nothing stable to key on
-  const stamp = `${MAP_CACHE_VERSION}|${tStamp}|${lStamp}|${opts.prompts ? 'p' : '-'}|${derivedInputsStamp(cwd, session)}`;
+  const stamp = `${MAP_CACHE_VERSION}|${tStamp}|${lStamp}|${opts.prompts ? 'p' : '-'}|${derivedInputsStamp(cwd, session, true)}`;
   const key = crypto.createHash('sha256').update(`map ${cwd} ${session} ${opts.root}`).digest('hex').slice(0, 16);
   const p = mapCachePath(session, key);
   try {
@@ -1035,6 +1097,61 @@ export function cachedChangeMap(cwd: string, session: string, opts: { root: stri
  * Live facts (an agent's phase, its subagents' phases) are deliberately NOT cached here: they are
  * staleness-derived, so a frozen copy would report a working agent as done.
  */
+/**
+ * The Overview's whole payload: the active session's change map, one slice per worktree sibling, the
+ * per-agent rollup and the unassigned bucket.
+ *
+ * This lived inside the CLI's `changemap` command, which meant the VS Code extension — which BUNDLES
+ * this module and calls it in-process everywhere else — had to spawn a whole node process to get it.
+ * Measured, that spawn cost 1.25 s wall / 1.51 s CPU / 486 MB peak RSS, roughly six times a minute
+ * while Claude works, because the transcript watcher drives the refresh. A fresh process can also never
+ * keep core's in-process memo, so the 30 sibling maps were re-read every time: 2847 ms on a cold pass
+ * against 14 ms on a warm one in the same process.
+ *
+ * It is here, not there, so that both front-ends run the SAME composition. Duplicating fifty lines of
+ * sibling projection into the extension is how the two quietly stop agreeing about what the Overview is.
+ */
+export function overviewChangeMap(cwd: string, session: string, opts: { root: string }): ChangeMap & {
+  rollupByAgent: unknown;
+  agents: unknown[];
+  unassigned: unknown;
+} {
+  const { root } = opts;
+  // `prompts: true` — the per-ask slices the Prompts window scopes everything by. Only the ACTIVE
+  // session builds them; a sibling worktree's map is never scoped by an ask typed into this window.
+  const base = cachedChangeMap(cwd, session, { root, prompts: true });
+  // One slice per worktree sibling (the Overview's per-agent tabs). `listRepoSiblings` includes self;
+  // with no resolvable repo it returns [] and we degrade to self alone.
+  const sibs = listRepoSiblings(cwd, session);
+  const seed: SiblingSession[] = sibs.length
+    ? sibs
+    : [{ id: session, worktree: cwd, gitBranch: null, phase: null } as unknown as SiblingSession];
+  const agents = seed.map((sib) => ({
+    ...(sib.id === session && sib.worktree === cwd && root === cwd
+      ? base // reuse, never rebuild: half the work in the common single-agent case
+      : siblingChangeMap(sib.worktree, sib.id, { root: sib.worktree })),
+    session: sib.id,
+    worktree: sib.worktree,
+    gitBranch: sib.gitBranch ?? null,
+    phase: (sib as { phase?: string | null }).phase ?? null,
+    lastMs: (sib as { lastMs?: number }).lastMs ?? 0, // transcript mtime — drives tab order
+  })).sort((a: { lastMs: number }, b: { lastMs: number }) => b.lastMs - a.lastMs); // most recent first
+  // The current session's `taskId: null` roll — edits inside no strict task interval — surfaced directly
+  // so a renderer never has to dig it out of rollupByTask.
+  const unassigned =
+    base.rollupByTask.find((r) => r.taskId === null) ??
+    { taskId: null, edits: 0, added: 0, removed: 0, pending: 0, kept: 0, undone: 0 };
+  // Project each sibling down to what renderers read. The per-sibling `edits` arrays were 1.95 MB of a
+  // 3.30 MB payload with nothing consuming them, and a sibling's `prompts` would serialize the SELF
+  // entry's per-ask slices a second time in the same payload. The active session's own top-level
+  // `edits` is untouched — that is the one tools actually read.
+  const slimAgents = agents.map((a) => {
+    const { edits: _dropped, prompts: _asks, ...rest } = a as typeof a & { edits?: unknown; prompts?: unknown };
+    return rest;
+  });
+  return { ...base, rollupByAgent: rollupByAgent(agents), agents: slimAgents, unassigned };
+}
+
 export function siblingOverview(cwd: string, session: string, opts: { root: string; bins?: number }): SiblingOverview {
   const transcript = findTranscript(cwd, session);
   const tStamp = fileStamp(transcript);
@@ -1047,7 +1164,7 @@ export function siblingOverview(cwd: string, session: string, opts: { root: stri
   });
   // Nothing stable to key on (neither input exists) — just build it.
   if (!tStamp && !lStamp) return build();
-  const stamp = `${MAP_CACHE_VERSION}|${tStamp}|${lStamp}|${bins}|${derivedInputsStamp(cwd, session)}`;
+  const stamp = `${MAP_CACHE_VERSION}|${tStamp}|${lStamp}|${bins}|${derivedInputsStamp(cwd, session, false)}`;
   const key = crypto.createHash('sha256').update(`${cwd} ${session} ${opts.root}`).digest('hex').slice(0, 16);
   const p = mapCachePath(session, key);
   try {

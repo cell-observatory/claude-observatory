@@ -1,11 +1,18 @@
 package com.cellobservatory.observatory.core
 
+import com.cellobservatory.observatory.model.DemoStep
 import com.cellobservatory.observatory.model.Placement
+import com.cellobservatory.observatory.model.TourParser
 import com.cellobservatory.observatory.model.UndoResult
 import com.cellobservatory.observatory.settings.ObservatorySettings
 import com.google.gson.JsonParser
 import com.intellij.execution.configurations.GeneralCommandLine
+import com.intellij.execution.process.OSProcessHandler
+import com.intellij.execution.process.ProcessAdapter
+import com.intellij.execution.process.ProcessEvent
+import com.intellij.execution.process.ProcessOutputTypes
 import com.intellij.execution.util.ExecUtil
+import com.intellij.openapi.util.Key
 import com.intellij.openapi.util.SystemInfo
 import java.io.File
 import java.util.concurrent.TimeUnit
@@ -49,7 +56,7 @@ object ObservatoryCli {
             ?.firstOrNull { it.exists() }
             ?.path
 
-    fun run(args: List<String>, workDir: String? = null, stdin: String? = null, timeoutMs: Int = 30_000): CliResult {
+    private fun commandLine(args: List<String>, workDir: String?): GeneralCommandLine {
         // Windows: npm installs the CLI as a .cmd shim, which ProcessBuilder can't exec directly —
         // route through cmd.exe (which also does PATH+PATHEXT resolution for the bare fallback).
         val bin = resolveBin()
@@ -62,6 +69,130 @@ object ObservatoryCli {
         ObservatorySettings.instance.state.configDir?.takeIf { it.isNotBlank() }?.let {
             cmd.withEnvironment("CLAUDE_CONFIG_DIR", it)
         }
+        return cmd
+    }
+
+    /**
+     * How long a heavy read may take before we give up on it.
+     *
+     * The change map and the multitask view rebuild every SIBLING session in the repo — 36 of them here —
+     * and a first, uncached build was measured at 33 s. The old 30 s budget killed it just before it
+     * finished, so the on-disk cache it would have written never got written, and the next tick started
+     * the same 33 s of work again: two node processes at a full core each, forever, and a panel that
+     * never rendered. Letting the cold build finish once is what makes every later one ~0.1 s.
+     */
+    const val HEAVY_TIMEOUT_MS = 180_000
+
+    /**
+     * One spawn for the whole refresh tick.
+     *
+     * The panels ask for eight views — changemap, multitask, prompts, processes, sessions, observations,
+     * risk, egress — and each used to be its own CLI process. Two costs came with that, and only the
+     * first is obvious: ~70 ms of node start-up per spawn before any work at all, paid eight times; and
+     * every process re-deriving the SAME transcript and log parses from cold, because core's memo dies
+     * with the process that held it. Measured warm on a real store: 2.66 s across eight spawns against
+     * 1.38 s for one batched call.
+     *
+     * The batch is a cache, not a schedule: whichever view asks first pays for it and the other seven
+     * read the same result. The window is just under the panels' own 3 s throttle, so a tick shares one
+     * spawn and the next tick gets fresh data. An older CLI on PATH has no `views` command; that is
+     * detected once and every view falls back to spawning for itself, exactly as before.
+     */
+    /** Drop the batched view cache — call after a mutation, before a forced refresh. */
+    fun invalidateViewBatch() = ViewBatch.invalidate()
+
+    private object ViewBatch {
+        private const val WINDOW_MS = 2_500L
+        private val lock = Any()
+        // One entry PER (session, workspace). This object is a singleton shared by every open project, so
+        // a single slot would let two projects evict each other on every call — each view then missing,
+        // spawning for itself AND re-spawning the batch: strictly worse than not batching at all.
+        private val entries = LinkedHashMap<String, Pair<Long, Map<String, String?>>>()
+        private const val MAX_ENTRIES = 8
+        /** Per-(session, workspace) spawn locks, so one project's slow batch cannot block another's. */
+        private val keyLocks = java.util.concurrent.ConcurrentHashMap<String, Any>()
+        /** Set once if this CLI predates `views`; from then on every caller spawns for itself. */
+        @Volatile private var unsupported = false
+
+        /** Drop every cached batch. Called when a MUTATION lands: `ThrottledFetch.forced` exists so a
+         *  refresh after Accept All / Reject All / Clear Resolved is never served stale, and a batch up to
+         *  2.5 s old would have defeated exactly that — the Edits tree reads the store directly and would
+         *  have disagreed with the Overview on screen for the rest of the window. */
+        fun invalidate() {
+            synchronized(lock) { entries.clear() }
+        }
+
+        /** ONE definition of the cache key — [peek] and [view] must agree, or a peek silently never
+         *  hits and the picker pays a full spawn every time it opens. */
+        private fun cacheKey(session: String?, workDir: String?) = "${session.orEmpty()}\u0000${workDir.orEmpty()}"
+
+        /** The cached batch for [k] if it is still inside the window, else null. */
+        private fun fresh(k: String): Map<String, String?>? = synchronized(lock) {
+            entries[k]?.takeIf { System.currentTimeMillis() - it.first <= WINDOW_MS }?.second
+        }
+
+        /** Cache-only read: answers if the window is warm, never spawns. */
+        fun peek(name: String, session: String?, workDir: String?): String? {
+            if (unsupported) return null
+            return fresh(cacheKey(session, workDir))?.get(name)
+        }
+
+        fun view(name: String, session: String?, workDir: String?): String? {
+            if (unsupported) return null
+            val k = cacheKey(session, workDir)
+            fresh(k)?.let { return it[name] }
+
+            // The spawn runs OUTSIDE the shared lock, under one private to this (session, workDir).
+            // Holding the global lock across `fetch` serialized every open project behind whichever one
+            // was building: at HEAVY_TIMEOUT_MS that is a 180 s stall on a second project whose own batch
+            // was already cached. Per-key still coalesces the case that matters — several views of the
+            // SAME session asking at once collapse to one spawn, which is the point of batching.
+            val keyLock = keyLocks.computeIfAbsent(k) { Any() }
+            synchronized(keyLock) {
+                fresh(k)?.let { return it[name] } // another thread filled it while we waited
+                val fresh = fetch(session, workDir)
+                synchronized(lock) {
+                    entries[k] = System.currentTimeMillis() to fresh
+                    if (entries.size > MAX_ENTRIES) entries.remove(entries.keys.first())
+                }
+                // Distinct sessions accumulate over a long-lived IDE. Dropping the map while a lock is
+                // held risks at worst a duplicate spawn for one key, never a wrong answer.
+                if (keyLocks.size > 64) keyLocks.clear()
+                return fresh[name]
+            }
+        }
+
+        private fun fetch(session: String?, workDir: String?): Map<String, String?> {
+            val args = buildList {
+                add("views"); add("--json")
+                session?.takeIf { it.isNotBlank() }?.let { add("--session"); add(it) }
+                workDir?.let { add("--root"); add(it) }
+            }
+            val r = run(args, workDir, timeoutMs = HEAVY_TIMEOUT_MS)
+            if (r.exitCode != 0 || r.stdout.isBlank()) {
+                // Latch ONLY on the one failure that can never succeed later: a CLI too old to know the
+                // command, which says so verbatim on stderr ("unknown command \"views\""). Everything
+                // else here is transient — a timeout on a huge first build, a spawn that lost a race
+                // with an upgrade, an OOM — and latching on those cost far more than it saved: one slow
+                // tick permanently disabled batching for the rest of the IDE session, putting every
+                // later tick back on eight spawns, which is the regression this batch exists to prevent.
+                // Returning an empty map already makes THIS tick fall back per-view; the next tick retries.
+                if (r.stderr.contains("unknown command")) unsupported = true
+                return emptyMap()
+            }
+            return try {
+                val obj = com.google.gson.JsonParser.parseString(r.stdout).asJsonObject
+                obj.entrySet().associate { (k, v) -> k to if (v.isJsonNull) null else v.toString() }
+            } catch (_: Exception) {
+                // Unparseable stdout from a CLI that DID accept the command — a truncated pipe, or a
+                // stray line from a wrapper script. Transient by the same argument; do not latch.
+                emptyMap()
+            }
+        }
+    }
+
+    fun run(args: List<String>, workDir: String? = null, stdin: String? = null, timeoutMs: Int = 30_000): CliResult {
+        val cmd = commandLine(args, workDir)
         return try {
             val out = if (stdin != null) {
                 val proc = cmd.createProcess()
@@ -228,8 +359,20 @@ object ObservatoryCli {
         }
     }
 
-    /** `sessions --json` — every store session incl. its human-readable title (0.8.6), for the chooser. */
-    fun sessionsJson(workDir: String?, reviewing: String? = null): String? {
+    /** `sessions --json` — every store session incl. its human-readable title (0.8.6), for the chooser.
+     *
+     *  [buildBatch] separates the two callers, which want opposite things from the batch. The POLLING
+     *  path (ObservatoryService) is the batch's owner: it may build one. The Switch-Session picker must
+     *  not — it names the current session too, so it would otherwise hit the same cache key and, on a
+     *  cold or expired window, block the popup behind a full eight-view build INCLUDING the change map.
+     *  That is precisely the multi-second stall the 0.8.8 stat-only listing removed. It peeks instead:
+     *  free when the poller has already filled the window, a plain `sessions` spawn when it has not. */
+    fun sessionsJson(workDir: String?, reviewing: String? = null, buildBatch: Boolean = false): String? {
+        if (reviewing != null) {
+            val batched = if (buildBatch) ViewBatch.view("sessions", reviewing, workDir)
+            else ViewBatch.peek("sessions", reviewing, workDir)
+            batched?.let { return it }
+        }
         // --session names the session being reviewed, so a pinned conversation that has made no edits
         // yet is still listed rather than looking like another workspace's.
         val args = buildList {
@@ -267,6 +410,7 @@ object ObservatoryCli {
     /** The Observations view-model (0.8.0, Timeline folded in): recap + coalesced same-file ×N runs with
      *  per-edit reasoning + next-steps. Always JSON; both editors render this payload thin. */
     fun observationsJson(session: String, workDir: String?): String? {
+        ViewBatch.view("observations", session, workDir)?.let { return it }
         val args = buildList {
             add("observations"); add("--session"); add(session)
             workDir?.let { add("--root"); add(it) }
@@ -334,12 +478,13 @@ object ObservatoryCli {
      *  touched. Every number (churn, status precedence, module labels) is computed by core — this
      *  plugin only renders the result, exactly like the VS Code webview. */
     fun changemapJson(session: String, workDir: String?): String? {
+        ViewBatch.view("changemap", session, workDir)?.let { return it }
         val args = buildList {
             add("changemap"); add("--session"); add(session)
             workDir?.let { add("--root"); add(it) }
             add("--json")
         }
-        val r = run(args, workDir)
+        val r = run(args, workDir, timeoutMs = HEAVY_TIMEOUT_MS)
         return if (r.ok) r.stdout else null
     }
 
@@ -351,12 +496,13 @@ object ObservatoryCli {
      *  session-scoped sections (actions, tasks). Without it the CLI re-resolves the newest session for
      *  the cwd, so after Switch Session every one of those still described the session you left. */
     fun multitaskJson(session: String?, workDir: String?): String? {
+        ViewBatch.view("multitask", session, workDir)?.let { return it }
         val args = buildList {
             add("multitask"); add("--json")
             session?.takeIf { it.isNotBlank() }?.let { add("--session"); add(it) }
             workDir?.let { add("--root"); add(it) }
         }
-        val r = run(args, workDir)
+        val r = run(args, workDir, timeoutMs = HEAVY_TIMEOUT_MS)
         return if (r.ok) r.stdout else null
     }
 
@@ -364,6 +510,7 @@ object ObservatoryCli {
      *  workspace. `--root` is the boundary "outside" is measured against; without it the CLI falls back
      *  to its own cwd, which is not the project root whenever the IDE was launched from elsewhere. */
     fun riskJson(session: String, workDir: String?): String? {
+        ViewBatch.view("risk", session, workDir)?.let { return it }
         val args = buildList {
             add("risk"); add("--session"); add(session)
             workDir?.let { add("--root"); add(it) }
@@ -377,6 +524,7 @@ object ObservatoryCli {
      *  and (0.8.7) the files it READ from outside the workspace. Only this verb carries those `file`
      *  channels; the `multitask --json` egress sub-report predates the fold and would omit them. */
     fun egressJson(session: String, workDir: String?): String? {
+        ViewBatch.view("egress", session, workDir)?.let { return it }
         val args = buildList {
             add("egress"); add("--session"); add(session)
             workDir?.let { add("--root"); add(it) }
@@ -391,6 +539,7 @@ object ObservatoryCli {
      *  never records one, and guessing it from local processes breaks the moment the agent runs over
      *  SSH or in a container. */
     fun processesJson(session: String, workDir: String?): String? {
+        ViewBatch.view("processes", session, workDir)?.let { return it }
         val r = run(listOf("processes", "--session", session, "--json"), workDir)
         return if (r.ok) r.stdout else null
     }
@@ -399,6 +548,7 @@ object ObservatoryCli {
      *  subagents, workflow runs and background shells it produced. Work is attributed to the prompt that
      *  STARTED it (core's rule), so nothing here re-attributes by completion. */
     fun promptsJson(session: String, workDir: String?): String? {
+        ViewBatch.view("prompts", session, workDir)?.let { return it }
         val r = run(listOf("prompts", "--session", session, "--json"), workDir)
         return if (r.ok) r.stdout else null
     }
@@ -488,6 +638,101 @@ object ObservatoryCli {
     } catch (_: Exception) {
         null
     }
+
+    // --- demo mode + the guided tour (0.8.9) ---------------------------------------------------------
+
+    /**
+     * Replay the demo session, STREAMING its per-beat narration instead of waiting for the process.
+     *
+     * `run` is spawn-and-wait with a 30s cap, and a paced replay is ~20s — already inside the noise
+     * margin, and `--speed 0.5` would blow straight past it. Streaming buys three things a longer
+     * timeout does not: the progress bar narrates each beat as it lands, the panels can be refreshed
+     * per beat rather than once at the end, and Cancel can actually stop it.
+     *
+     * A cancelled run leaves a partial demo, which `demoClean` removes exactly like a complete one.
+     * Returns the exit code with the narration joined, for the caller's error path.
+     */
+    fun demoStreaming(args: List<String>, workDir: String?, isCancelled: () -> Boolean, onLine: (String) -> Unit): CliResult {
+        return try {
+            val handler = OSProcessHandler(commandLine(listOf("demo") + args, workDir))
+            // StringBuffer, not StringBuilder: these are appended from the process reader thread and
+            // read from this one after an ASYNCHRONOUS destroyProcess(), so there is no happens-before
+            // edge to rely on — a torn read used to surface a plain cancel as "could not start".
+            val out = StringBuffer()
+            val err = StringBuffer()
+            handler.addProcessListener(object : ProcessAdapter() {
+                override fun onTextAvailable(event: ProcessEvent, outputType: Key<*>) {
+                    // stderr is the only place a failing run says WHY; dropping it left every failure
+                    // reported as "is the CLI installed?", the one cause already ruled out.
+                    if (outputType == ProcessOutputTypes.STDERR) { err.append(event.text); return }
+                    if (outputType != ProcessOutputTypes.STDOUT) return
+                    out.append(event.text)
+                    event.text.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.forEach(onLine)
+                }
+            })
+            handler.startNotify()
+            var cancelled = false
+            while (!handler.waitFor(200)) {
+                if (isCancelled()) { handler.destroyProcess(); cancelled = true; break }
+            }
+            CliResult(
+                if (cancelled) -1 else (handler.exitCode ?: -1),
+                out.toString(),
+                if (cancelled) "cancelled" else err.toString(),
+            )
+        } catch (e: Exception) {
+            CliResult(-1, "", e.message ?: "failed to launch the demo")
+        }
+    }
+
+    /**
+     * The guided tour's script. Core owns it, so this and the VS Code panel render the same tour.
+     *
+     * Capability-probed first, and that is not defensive habit: a pre-0.8.9 CLI does not reject
+     * `demo --tour --json` — it ignores the unknown flag, honours `--json`, and REPLAYS AN ENTIRE DEMO
+     * as the side effect of being asked for a script. Asking `help` what it supports costs one cheap
+     * process and cannot mutate anything.
+     */
+    fun demoTour(workDir: String?, essentials: Boolean = false): List<DemoStep> {
+        if (!run(listOf("help"), workDir).stdout.contains("demo --tour")) return emptyList()
+        val args = buildList { add("demo"); add("--tour"); if (essentials) add("--essentials"); add("--json") }
+        val r = run(args, workDir)
+        return if (r.ok) TourParser.parse(r.stdout) else emptyList()
+    }
+
+    /** Keep a running demo inside the fleet's 60s active window — mtime only, nothing is written.
+     *  Called on tour step advance ONLY: this touches watched files, so calling it from a refresh
+     *  would wake the watcher that triggered it, forever. */
+    fun demoTouch(workDir: String?): CliResult = run(listOf("demo", "--touch", "--json"), workDir)
+
+    /** Remove every trace: both sessions, their stores, the demo folder, and the scratch dir. */
+    fun demoClean(workDir: String?): CliResult = run(listOf("demo", "--clean", "--json"), workDir)
+
+    /** The primary session id a streamed replay reported. Its final narration line names it, and the
+     *  sibling agent's id is never printed — so this is exact, where picking one out of the store would
+     *  have to assume an ordering. Null when the run printed nothing (a failed spawn, or a cancel
+     *  before the first beat), and the caller falls back to [demoSession]. */
+    fun demoSessionFrom(stdout: String): String? =
+        DEMO_ID_IN_TEXT.findAll(stdout).lastOrNull()?.value
+
+    private val DEMO_ID_IN_TEXT = Regex("demo-[0-9a-f]{8}")
+
+    /** The demo session id for this project, or null — how the plugin finds a demo it did not itself
+     *  just start (one a crashed IDE left behind, since demo mode persists no state of its own). */
+    fun demoSession(workDir: String?): String? = try {
+        val r = run(listOf("sessions", "--json"), workDir)
+        if (!r.ok) null
+        else JsonParser.parseString(r.stdout).asJsonObject.getAsJsonArray("sessions")
+            .mapNotNull { it.takeIf { e -> e.isJsonObject }?.asJsonObject?.get("id")?.asString }
+            .firstOrNull { DEMO_ID.matches(it) }
+    } catch (_: Exception) {
+        null
+    }
+
+    /** The same gate core applies — `demo-<8hex>` and nothing else may drive demo-only behaviour. */
+    private val DEMO_ID = Regex("^demo-[0-9a-f]{8}$")
+
+    fun isDemoSession(id: String?): Boolean = id != null && DEMO_ID.matches(id)
 
     private fun parseUndo(r: CliResult): UndoResult = try {
         val o = JsonParser.parseString(r.stdout).asJsonObject

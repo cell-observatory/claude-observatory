@@ -1,6 +1,6 @@
 # Claude Observatory
 
-A running list of every file change **Claude Code** makes — each with its own **Keep** / **Undo** — right in the VS Code sidebar. Git-free, surgical, and it costs **zero extra Claude tokens** (edits are captured by local hooks, outside the model loop).
+A running list of every file change **Claude Code** makes — each with its own **Keep** / **Undo** — right in the VS Code sidebar. Git-free, surgical, and it costs **zero extra Claude tokens** (edits are captured by local hooks, outside the model loop). It is built for **established and mission-critical codebases** rather than throwaway prototypes.
 
 Think of it as the Cursor "keep/undo each change" experience, but for Claude Code, and shareable with your team.
 

@@ -37,8 +37,16 @@ const CSS = `
   body{background:var(--bg);color:var(--ink);font-family:var(--ui);font-size:12.5px;-webkit-font-smoothing:antialiased;display:flex;flex-direction:column}
   .tw-head{height:36px;display:flex;align-items:center;padding:0 12px;gap:14px;border-bottom:1px solid var(--border);background:var(--panel);flex:none}
   .tw-head .title{font-weight:600}
-  .tw-tabs{display:flex;gap:10px;margin-left:8px;color:var(--dim);font-size:12px}
-  .tw-tabs .on{color:var(--ink);border-bottom:1.5px solid var(--blue);padding-bottom:8px;margin-bottom:-9.5px}
+  /* The bottom dock is ONE "Dashboards" content holding three titled panes side by side; the window's
+     title bar carries a show/hide toggle per foldable pane. There is no tab strip here. */
+  .tw-toggles{display:flex;gap:8px;margin-left:8px;color:var(--dim);font-size:11px}
+  .tw-toggles span{border:1px solid var(--border2);border-radius:5px;padding:1px 7px;background:var(--panel2)}
+  .tw-toggles .on{color:var(--ink);border-color:var(--blue)}
+  /* The axes row: icons only, each axis named by its own n/m counter (0.8.9). */
+  .axrow{height:30px;display:flex;align-items:center;gap:8px;padding:0 12px;border-bottom:1px solid var(--border);background:var(--panel);flex:none;font-size:11.5px;color:var(--dim);white-space:nowrap}
+  .axrow .b{border:1px solid var(--border2);border-radius:6px;padding:1px 7px;background:var(--panel2)}
+  .axrow .ct{color:var(--ink);font-family:var(--mono);font-size:11px}
+  .axrow .sep{width:1px;align-self:stretch;background:var(--border2);margin:5px 4px}
   .toolbar{margin-left:auto;display:flex;gap:10px;align-items:center;color:var(--dim);font-size:11.5px;white-space:nowrap}
   .toolbar .b{border:1px solid var(--border2);border-radius:6px;padding:2px 9px;background:var(--panel2)}
   .toolbar .b.tog{color:var(--ink);border-color:var(--blue)}
@@ -138,8 +146,9 @@ const wfRun = ({ running, sel }) => `
 /** One frame of the PyCharm Overview: nav tab + rows, folder strip, file ledger, caption. */
 const frame = ({ tab = 'fleet', agent, wf, tasks, sessions, mods, files, empty, cap }) => `<!doctype html><html><head><meta charset="utf-8"><style>${CSS}</style></head><body>
   <div class="tw-head"><span class="title">Claude Observatory Dashboards</span>
-    <span class="tw-tabs"><span>Observations</span><span class="on">Overview</span><span>Stats</span></span>
-    <span class="toolbar"><span class="b" style="color:${P}">${icoFind} Search</span><span class="b tog">Active only</span><span class="sep"></span><span class="b" style="color:${G}">✓ Keep</span><span class="b" style="color:${R}">↩ Undo</span><span class="sep"></span><span class="b" style="color:${G}">✓✓ Accept File</span><span class="b" style="color:${R}">✕ Reject File</span><span class="sep"></span><span class="b" style="color:${G}">${icoCommit} Accept All</span><span class="b" style="color:${R}">${icoHistory} Reject All</span><span class="b" style="color:${O}">${icoTrash} Clear Resolved</span><span class="sep"></span><span class="b" style="color:${P}">${icoBulb} Spotlight</span><span class="b">⟳</span></span></div>
+    <span class="tw-toggles"><span>Prompts</span><span>Stats</span></span>
+    <span class="toolbar"><span class="b" style="color:${G}">${icoCommit} Accept All</span><span class="b" style="color:${R}">${icoHistory} Reject All</span><span class="b" style="color:${O}">${icoTrash} Clear Resolved</span><span class="sep"></span><span class="b" style="color:${P}">${icoFind} Search</span><span class="b tog">Active only</span><span class="b" style="color:${P}">${icoBulb} Spotlight</span><span class="b">⟳</span></span></div>
+  <div class="axrow"><span class="b" style="color:${B}">▲</span><span class="ct">Diff 1/2</span><span class="b" style="color:${B}">▼</span><span class="b" style="color:${G}">✓</span><span class="b" style="color:${R}">↩</span><span class="sep"></span><span class="b" style="color:${B}">◀</span><span class="ct">File 1/3</span><span class="b" style="color:${B}">▶</span><span class="b" style="color:${G}">✓✓</span><span class="b" style="color:${R}">✕</span><span class="sep"></span><span class="b" style="color:${B}">◀</span><span class="ct">Folder 1/2</span><span class="b" style="color:${B}">▶</span><span class="b" style="color:${G}">✓✓</span><span class="b" style="color:${R}">✕</span><span class="sep"></span><span class="b" style="color:${B}">◀</span><span class="ct">Prompt 1/2</span><span class="b" style="color:${B}">▶</span><span class="b" style="color:${B}">▷</span><span class="b" style="color:${G}">✓✓</span><span class="b" style="color:${R}">✕</span></div>
   <div class="main">
     <div class="nav">
       <div class="nav-tabs"><span class="${tab === 'sessions' ? 'on' : ''}">Sessions ${sessions ? sessions.length : 4}</span><span class="${tab === 'fleet' ? 'on' : ''}">Fleet</span><span class="${tab === 'workflows' ? 'on' : ''}">Workflows</span><span class="${tab === 'tasks' ? 'on' : ''}">Tasks ${tasks ? `${tasks.filter((t) => t.g === '●').length}/${tasks.length}` : '2/3'}</span></div>
@@ -165,6 +174,9 @@ const frame = ({ tab = 'fleet', agent, wf, tasks, sessions, mods, files, empty, 
 const T1 = 'Add feature scaling to the pipeline';
 const T2 = 'Validate the training dataset';
 const T3 = 'Tests and docs';
+const T4 = 'Retire the legacy scaler';
+const T5 = 'Profile the pipeline';
+const T6 = 'Tune the scaler for sparse columns'; // the sixth, still in progress when the demo ends
 const beats = [
   {
     tab: 'tasks',
@@ -173,6 +185,9 @@ const beats = [
       { g: '\u25D0', gc: Y, num: 1, title: T1, m: '' },
       { g: '\u25CB', gc: F, num: 2, title: T2, m: '' },
       { g: '\u25CB', gc: F, num: 3, title: T3, m: '' },
+      { g: '\u25CB', gc: F, num: 4, title: T4, m: '' },
+      { g: '\u25CB', gc: F, num: 5, title: T5, m: '' },
+      { g: '\u25CB', gc: F, num: 6, title: T6, m: '' },
     ],
     empty: 'No edits yet. This fills in as Claude edits files.',
   },
@@ -183,6 +198,9 @@ const beats = [
       { g: '\u25D0', gc: Y, num: 1, title: T1, m: '+9 \u22123', pending: '2\u29D7' },
       { g: '\u25CB', gc: F, num: 2, title: T2, m: '' },
       { g: '\u25CB', gc: F, num: 3, title: T3, m: '' },
+      { g: '\u25CB', gc: F, num: 4, title: T4, m: '' },
+      { g: '\u25CB', gc: F, num: 5, title: T5, m: '' },
+      { g: '\u25CB', gc: F, num: 6, title: T6, m: '' },
     ],
     mods: [['observatory-demo', Y]],
     files: [
@@ -197,6 +215,9 @@ const beats = [
       { g: '\u25CF', gc: G, num: 1, title: T1, m: '+9 \u22123', pending: '2\u29D7' },
       { g: '\u25D0', gc: Y, num: 2, title: T2, m: '+7 \u22120', pending: '1\u29D7' },
       { g: '\u25CB', gc: F, num: 3, title: T3, m: '' },
+      { g: '\u25CB', gc: F, num: 4, title: T4, m: '' },
+      { g: '\u25CB', gc: F, num: 5, title: T5, m: '' },
+      { g: '\u25CB', gc: F, num: 6, title: T6, m: '' },
     ],
     mods: [['observatory-demo', Y], ['src/models', Y]],
     files: [
@@ -236,6 +257,9 @@ const beats = [
       { g: '\u25CF', gc: G, num: 1, title: T1, m: '+9 \u22123' },
       { g: '\u25CF', gc: G, num: 2, title: T2, m: '+7 \u22120' },
       { g: '\u25D0', gc: Y, num: 3, title: T3, m: '+24 \u22120', pending: '2\u29D7' },
+      { g: '\u25CB', gc: F, num: 4, title: T4, m: '' },
+      { g: '\u25CB', gc: F, num: 5, title: T5, m: '' },
+      { g: '\u25CB', gc: F, num: 6, title: T6, m: '' },
     ],
     mods: [['docs', Y], ['tests', Y], ['observatory-demo', G], ['src/models', G]],
     files: [

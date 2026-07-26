@@ -6,5 +6,8 @@ packages/*/dist/
 release/
 .idea/
 *.code-workspace
+# per-user Claude Code overrides (permissions, local env). The team-shared .claude/settings.json
+# is deliberately NOT ignored — only this one is per-contributor.
+.claude/settings.local.json
 # the demo simulator's scratch workspace, created in the CWD by `claude-observatory demo`
 observatory-demo/

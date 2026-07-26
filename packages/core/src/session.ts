@@ -14,6 +14,13 @@ import * as path from 'path';
 import { StringDecoder } from 'string_decoder';
 import { claudeConfigDir } from './paths';
 
+/**
+ * How recently a session's transcript must have moved for it to count as MID-FLIGHT. Shared by both
+ * editors so neither can decide on its own what "the user is busy" means: interrupting a live Claude
+ * session with an unsolicited offer is the one thing a first-run prompt must never do.
+ */
+export const SESSION_BUSY_MS = 5 * 60_000;
+
 /** Mangle an absolute path the same way Claude Code names its project dirs. */
 export function mangleCwd(cwd: string): string {
   return cwd.replace(/[^a-zA-Z0-9]/g, '-');

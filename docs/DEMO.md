@@ -16,43 +16,115 @@ which run it came from.
 The **[interactive demo](https://cell-observatory.github.io/claude-observatory/demo.html)** replays the
 scenario in the browser, with no editor and no Claude session required. Locally, the built-in simulator
 replays the same scripted session through the **real pipeline** — a genuine transcript, edits captured
-by the same hooks, a subagent, and a workflow run — inside an isolated `demo-…` session and an
-`observatory-demo/` folder it creates in the current directory:
+by the same hooks, a subagent, a workflow run, and a second agent in a sibling worktree — inside isolated
+`demo-…` sessions and an `observatory-demo/` folder it creates in the current directory.
+
+**In an editor**, run **Start Demo Mode** from the VS Code command palette or JetBrains Find Action, use
+the buttons at the end of the Overview's nav bar, or click **Try the demo** in an empty panel — which works
+before `claude-observatory init` has ever run, because the replay drives the capture pipeline directly. The
+panels fill beat by beat, and the **guided tour** opens when the replay finishes.
+
+**In the terminal:**
 
 ```bash
 claude-observatory demo          # run it in an open workspace and watch every panel update live
+claude-observatory demo --tour   # the guided tour's steps, as prose
 ```
 
-Open the Overview while it runs: the **Tasks** tab counts down three numbered tasks (live statuses and
-per-task edit counts), the Folders strip and the Files ledger fill in as each edit lands, the Fleet nav
-gains a subagent and a workflow, and the **Processes** tab picks up two background shells — one that
-exits 0 and one left running. Partway through, the scenario runs the context window out; the compaction
-that follows is reported in the Actions timeline and in Stats. Click any row and the **feed** below the
-change map fills with what that thing is doing. Observations streams the reasoning throughout. The
-scenario also runs a command `risk` flags, reads a file outside the workspace, fetches a URL and calls an
-MCP server, so both audits have something real to report. The edits are real store records on real files,
-so Accept / Reject / task-scoped review all genuinely work. To remove it:
+Open the Overview while it runs: the **Tasks** tab works through six numbered tasks, the last still in progress when the replay ends (live statuses and
+per-task edit counts), the Folders strip and the Files ledger fill in as each edit lands, the **Fleet**
+tab gains a second agent on `demo/hotfix` and flags the file both agents are holding, the **Workflows**
+tab shows a three-phase run, and the **Processes** tab picks up three background shells — one that exits
+0, one that fails, and one left running. Partway through, the scenario runs the context window out; the
+compaction that follows is reported in the Actions timeline and in Stats. Click any row and the **feed**
+below the change map fills with what that thing is doing. Observations streams the reasoning throughout.
+The scenario also fails a tool call, runs a command `risk` flags, deletes a file, writes a report outside
+the workspace, reads a file outside it, fetches a URL and calls an MCP server, so every audit has
+something real to report. The edits are real store records on real files, so Accept / Reject /
+task-scoped review all genuinely work.
+
+Starting the demo again **resets** it: a run clears any previous demo for that folder before replaying,
+so a second run never stacks a stale, half-reviewed session beside the fresh one. The replay is
+cancellable, and what a stopped run left behind is still real, reviewable and removable. To remove it:
 
 ```bash
-claude-observatory demo --clean  # removes the demo session, its store, and the demo folder
+claude-observatory demo --clean  # both sessions, their stores, the demo folder, and the scratch dir
 ```
 
-Reviewing the demo leaves no residue either way — a fully reviewed demo session clears its own store.
-(`--speed 2` paces it faster; `--fast` lands everything at once, which is what the test suite uses.)
+or **Exit Demo Mode** in either editor. Reviewing the demo leaves no residue either way — a fully
+reviewed demo session clears its own store. (`--speed 2` paces it faster; `--fast` lands everything at
+once, which is what the test suite uses; `--no-fleet` leaves out the second agent.)
+
+## The guided tour
+
+The tour walks **forty-one steps** covering every panel the product ships and every named feature —
+including the Diffs view, revision navigation, Spotlight, search, the chat handoff, export, the status
+bar, the Explorer badges, context sources and file memory. It lives in core, so the terminal and both
+editors show the same steps: a step added to a panel reaches every editor at once, and none of them can
+drift into its own wording.
+
+It opens with a choice of **two tracks**: **Essentials** (13 steps — the review model, the agents, the
+audits) or **Everything** (all 41). Finishing the short one offers the other 28 as its own track, in both
+editors and in the terminal (`demo --tour --remainder`). The short track is a filter over the same list, in the same order, so
+the two can never tell different stories. In the terminal, `demo --tour --essentials` prints the short one.
+
+The tour **plays itself**: each step holds long enough to read it, and any control — Next, Back, a step
+jump — hands you the wheel, with a transport button to resume. A **YOUR TURN** step shows a countdown and
+performs the action itself if you do nothing, so watching it hands-off still shows Keep and Undo really
+happening rather than only describing them.
+
+It **docks beside your code**: an editor-area panel in VS Code, a tool window on the right in JetBrains.
+VS Code can also **detach** it into a window of its own for a second screen, and remembers the choice.
+JetBrains cannot — its floating window never appeared in PyCharm 2025.2, so it was removed rather than
+shipped as a control that does nothing.
+
+Each step brings its surface forward — the Overview tab, the sidebar tree, or the file itself — and
+**rings** the control it names: a CSS outline in VS Code, a glass-pane painter in JetBrains. The step's
+text stays in the tour window rather than being copied into the panel, so the panel keeps showing the
+product and not a second narration of it. Neither editor lets an extension draw over IDE chrome it does
+not own (the activity bar, the tab strip, the status bar), so for those the step's text names the control
+instead. JetBrains rings some controls more coarsely than VS Code: four of the Overview's toolbar anchors
+resolve to the toolbar row rather than the button, and the two token anchors in Stats both resolve to the
+token strip. A step whose control this build cannot resolve rings nothing and still reads.
+
+While the tour runs, the Overview's **Active only** filter is held open so the rows a step describes are
+actually on screen — five of the demo's six tasks are completed, and the filter hides completed tasks by
+default. Your own setting and your own tab come back when the tour ends.
+
+Back, Next and a step chooser drive it (plus Dock/Float in VS Code); **Exit demo** ends it and removes
+the session. In JetBrains, hiding the tour's tool window **pauses** it — a tour must never keep acting behind a
+window you cannot see, and its wait steps accept and revert edits on a timer. Bringing the window back
+restores the step's outline; resuming is yours to ask for, like every other control.
+
+On a first install, and once after an update, both editors **offer the demo**: one notification, four
+seconds after startup, carrying **Never ask**. It is skipped while a Claude session is live in that
+project, in a workspace you have not trusted, and once a demo is already recorded there — so it never
+interrupts work, and never asks twice for the same version.
+Closing the tour window ends the tour. Read the whole script at any time with
+`claude-observatory demo --tour`.
 
 ## The demo session
 
-With the capture hooks installed, a short Claude Code session made three edits:
+The scenario is three of your asks, six numbered tasks — the last still under way when it ends — and **nine captured edits** across two agents:
 
-| # | File | Tool | Change |
-| --- | --- | --- | --- |
-| 1 | `src/models/dataset.py` | Write | create the file with `class Dataset` (`__init__` + `describe()`) (+11) |
-| 2 | `src/models/dataset.py` | Edit | add a `validate()` method to the class (+4) |
-| 3 | `src/train.py` | Write | import `Dataset` and print a validation report (+4) |
+| # | File | Tool | Prompt · task | Change |
+| --- | --- | --- | --- | --- |
+| 1 | `src/features.py` | Edit | 1 · scaling | add `scale()` — z-score standardization |
+| 2 | `src/train.py` | Edit | 1 · scaling | scale the features before the model sees them |
+| 3 | `src/features.py` | Edit | 1 · scaling | guard `scale()` after the sanity run **fails** |
+| 4 | `src/models/dataset.py` | Edit | 1 · validation | add `Dataset.validate()` |
+| 5 | `tests/test_pipeline.py` | Write | 2 · tests and docs | written by a **subagent** |
+| 6 | `docs/USAGE.md` | Write | 2 · tests and docs | written by a **workflow** agent |
+| 7 | `src/legacy_scaler.py` | Bash | 2 · retire the scaler | **deleted** — captured by the tree-diff path |
+| 8 | `src/features.py` | Edit | 3 · profiling | add `profile()`, in a region of its own |
+| 9 | `~/.claude/claude-observatory/.demo-scratch/…/profile-report.md` | Write | 3 · profiling | **outside the workspace** |
+
+Edits 1 and 3 change the same code, so they collapse into one review unit; edit 8 does not, which is why
+`src/features.py` ends up with two units you can accept independently. A tenth edit belongs to the second
+agent: a hotfix to `src/features.py` that collides with this session's, held pending on both sides.
 
 No extra tokens were spent capturing any of it — the hooks run outside the model loop. The transcript
-even gives the Observations panel its recap ("Create Dataset class and test validation") and each edit's
-reasoning, for free.
+gives the Observations panel its recap and each edit's reasoning, for free.
 
 ---
 
@@ -340,8 +412,10 @@ session-wide **Clear Resolved** (status bar), a **Spotlight** toggle, and **Sear
 The buttons are **color-coded by what they do** (0.8.3, both editors): keep/accept **green**,
 undo/reject **red**, the nav chevrons **blue**, clear **orange**, search/spotlight **purple** — the
 same chart palette the Overview uses, so the destructive half of the bar never reads like the safe half.
-No icon serves two actions: the session-wide bulk pair get their own glyphs (Accept All a checklist,
-Revert All a history-rewind), distinct from the file-scoped double-check / ✕ and the per-edit ✓ / ↩.
+A glyph names the **operation**, and the axis it sits in names the **scope**: the per-edit ✓ / ↩, the
+scoped double-check / ✕, and the session-wide checklist / history-rewind are three distinct pairs, while
+Accept File, Accept Folder and Accept Prompt deliberately share the scoped ✓✓ — each sits beside its own
+axis counter, which is what says who it acts on.
 On the **Overview title bar** the bar expands to **two rows**. The **top row** carries the controls: the
 **name of the session under review** (its title or first prompt; the raw id sits in the tooltip) — a
 label since 0.8.8, because the **Sessions** tab is where the session changes — the session-wide bulk
@@ -359,6 +433,12 @@ steps the pending edits on **four review axes**, each a coarser grain than the l
   **Accept Folder / Reject Folder**, which act on that folder's edits alone.
 - **Prompt** — your own asks, in order; shows what each one produced, with **Review · Accept Prompt ·
   Reject Prompt**.
+
+Since 0.8.9 the axes row is **icons only** in both editors, each button naming its verb on hover. Every
+axis already labels itself in its own `n/m` counter — `Diff 1/2`, `File 3/126`, `Folder 1/23`,
+`Prompt 2/9` — so a word beside each button only restated the axis the reader was already looking at, and
+on a bottom dock that space is the change map's. The **top row keeps its labels**: those actions are
+session-wide and destructive, and no counter above them says what they act on.
 
 The bar is **two-tier**. The File axis plus Clear / Spotlight / Search show whenever *any* edit is pending
 anywhere; the Diff axis and the per-edit / per-file actions appear only when the **open** file has

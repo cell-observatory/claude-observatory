@@ -213,6 +213,18 @@ hook PreToolUse Edit "$J"; node "$SETLINE" "$J" 2 "Z"; hook PostToolUse Edit "$J
 LOC=$(cc locate --file "$J" < "$J")
 ok "locate emits placements for the pending edit" "printf '%s' \"\$LOC\" | jq -e '.placements | length >= 1' >/dev/null"
 ok "locate maps the edit to its current line"     "printf '%s' \"\$LOC\" | jq -e '.placements[-1].lines | index(2) != null' >/dev/null"
+# A SECOND pending edit to the same file: placements are now composed down the chain, so the EARLIER
+# one is the interesting case — asserting only [-1] would pass even if every earlier placement were
+# empty, since the newest edit is the one anchored directly against the buffer.
+node "$SETLINE" "$J" 5 "Y2"; hook PreToolUse Edit "$J"; node "$SETLINE" "$J" 7 "Y3"; hook PostToolUse Edit "$J"
+LOC2=$(cc locate --file "$J" < "$J")
+ok "locate places EVERY pending edit, not just the newest" "printf '%s' \"\$LOC2\" | jq -e '[.placements[] | select(.lines | length > 0)] | length >= 2' >/dev/null"
+ok "locate's first placement is non-empty (chain composed, not severed)" "printf '%s' \"\$LOC2\" | jq -e '.placements[0].lines | length > 0' >/dev/null"
+ok "locate carries deletion hunks for the JetBrains overlay"  "printf '%s' \"\$LOC2\" | jq -e '.placements[0] | has(\"removed\")' >/dev/null"
+# A flag name is never a flag VALUE, and a scope flag never coexists with an explicit id.
+cc locate --file --json < "$J" >/dev/null 2>&1; ok "locate --file --json fails instead of placing edits in a file called --json" "[ \$? -ne 0 ]"
+cc keep --file main 1 --json >/dev/null 2>&1;   ok "keep --file <substr> <id> is refused (id would be discarded)"              "[ \$? -ne 0 ]"
+cc undo --ids 999 --json >/dev/null 2>&1;       ok "undo --ids <n> still works (a flag VALUE is not a positional id)"          "[ \$? -eq 0 ]"
 # observe: one payload for the Observations view
 OBS=$(cc observe)
 ok "observe emits per-edit summaries"        "printf '%s' \"\$OBS\" | jq -e '.edits[0].summary | length > 0' >/dev/null"
@@ -562,38 +574,128 @@ ok "feed: the session feed lists its tool calls"      "printf '%s' \"\$FEEDS\" |
 ok "feed: a capped feed reports what it dropped"      "printf '%s' \"\$(cc feed --session \"$P7\" --limit 1 --json 2>/dev/null)\" | jq -e '(.entries|length)==1 and (.truncated>=0)' >/dev/null"
 ok "feed: an unknown target is empty with a reason"   "printf '%s' \"\$(cc feed --kind agent --id nope --session \"$P7\" --json 2>/dev/null)\" | jq -e '(.entries|length)==0 and (.note|length)>0' >/dev/null"
 
-echo "════════ E2E 19: 0.8.0 demo simulator (real pipeline end-to-end, strict task attribution, no-residue lifecycle) ════════"
+echo "════════ E2E 19: demo simulator + guided tour (real pipeline end-to-end, strict attribution, no-residue lifecycle) ════════"
 # The demo replays a scripted session through the REAL pipeline (transcript + captured edits + a
-# subagent + a workflow) in an isolated demo-* session + folder — then every 0.8.0 surface is asserted
-# against it, and the lifecycle (accept-all auto-clear, --clean) must leave zero residue.
+# subagent + a three-phase workflow + a second agent in a sibling worktree) in isolated demo-* sessions
+# + folder — then every surface is asserted against it, including the ones that can ONLY show an empty
+# state unless the scenario produces their data (deletions, failed calls, outside writes, processes).
+# Finally the lifecycle (accept-all auto-clear, --clean) must leave zero residue, across both sessions.
 DEMOWS="$WS/demo-e2e"; mkdir -p "$DEMOWS/.git"
 DEMOJ=$( ( cd "$DEMOWS" && node "$CLI" demo --fast --json ) )
 DSESS=$(printf '%s' "$DEMOJ" | jq -r '.session')
-ok "demo --fast --json reports its isolated session + workspace" "printf '%s' \"\$DEMOJ\" | jq -e '(.session|test(\"^demo-[0-9a-f]{8}$\")) and .edits==5 and (.workspace|endswith(\"observatory-demo\"))' >/dev/null"
+DSIB=$(printf '%s' "$DEMOJ" | jq -r '.sibling')
+DSCRATCH=$(printf '%s' "$DEMOJ" | jq -r '.scratch')
+ok "demo --fast --json reports its isolated session + workspace" "printf '%s' \"\$DEMOJ\" | jq -e '(.session|test(\"^demo-[0-9a-f]{8}$\")) and .edits==9 and .cancelled==false and (.workspace|endswith(\"observatory-demo\"))' >/dev/null"
+ok "demo --fast --json reports the sibling agent + the scratch dir"    "printf '%s' \"\$DEMOJ\" | jq -e '(.sibling|test(\"^demo-[0-9a-f]{8}$\")) and (.scratch|length)>0' >/dev/null"
 DCM=$( ( cd "$DEMOWS" && node "$CLI" changemap --session "$DSESS" --json ) )
 ok "demo changemap: every edit is strictly attributed (no null taskId)" "printf '%s' \"\$DCM\" | jq -e '[.edits[] | select(.taskId==null)]|length==0' >/dev/null"
-ok "demo changemap: three strict task identities"                       "printf '%s' \"\$DCM\" | jq -e '(.tasks|length)==3 and (has(\"subtasks\")|not)' >/dev/null"
+ok "demo changemap: six strict task identities"                         "printf '%s' \"\$DCM\" | jq -e '(.tasks|length)==6 and (has(\"subtasks\")|not)' >/dev/null"
 ok "demo changemap: subagent edit attributed (rollupBySubagent)"       "printf '%s' \"\$DCM\" | jq -e '[.rollupBySubagent[] | select(.subagentId==\"demosub1\" and .edits==1)]|length==1' >/dev/null"
 ok "demo changemap: workflow slice rolls up its run"                    "printf '%s' \"\$DCM\" | jq -e '.workflows[0] | .id==\"wf_demo\" and (.rollup.edits>=1)' >/dev/null"
+ok "demo changemap: the outside-workspace write gets an (external) tile" "printf '%s' \"\$DCM\" | jq -e '[.modules[]|select(.label==\"(external)\")]|length==1' >/dev/null"
+ok "demo changemap: features.py holds TWO independent review units"    "printf '%s' \"\$DCM\" | jq -e '[.edits[]|select(.file|endswith(\"features.py\"))]|length==2' >/dev/null"
 DPR=$( ( cd "$DEMOWS" && node "$CLI" prompts --session "$DSESS" --json ) )
-ok "prompts --json lists the demo's ask with its edit ids"             "printf '%s' \"\$DPR\" | jq -e '(.prompts|length)>=1 and (.prompts[0].editIds|length)>=1' >/dev/null"
+ok "prompts --json lists all THREE asks with their edit ids"           "printf '%s' \"\$DPR\" | jq -e '(.prompts|length)==3 and ([.prompts[]|select((.editIds|length)==0)]|length)==0' >/dev/null"
+ok "prompts --json counts the failed tool call against its ask"        "printf '%s' \"\$DPR\" | jq -e '[.prompts[]|select(.errors>0)]|length==1' >/dev/null"
 ok "the pre-0.8.8 'requests' verb is gone, with the usage text"        "! ( cd \"\$DEMOWS\" && node \"\$CLI\" requests --session \"\$DSESS\" --json ) >/dev/null 2>&1"
 DMT=$( ( cd "$DEMOWS" && node "$CLI" multitask --session "$DSESS" --json ) )
-ok "demo multitask: the demo agent + its subagent + the workflow"      "printf '%s' \"\$DMT\" | jq -e '(.agents|length)>=1 and (.agents[0].subagents|length)==1 and (.workflows[0].id==\"wf_demo\")' >/dev/null"
-ok "demo multitask: subagent rows carry phaseConfidence (0.8.0)"       "printf '%s' \"\$DMT\" | jq -e '.agents[0].subagents[0] | has(\"phaseConfidence\")' >/dev/null"
+# Never index agents[] positionally: listRepoSiblings sorts by transcript mtime, so the sibling can hold
+# slot 0. Every assertion below selects on .self, the way both editors' renderers do.
+ok "demo multitask: TWO agents — this session and the sibling worktree" "printf '%s' \"\$DMT\" | jq -e '(.agents|length)==2 and ([.agents[]|select(.self)]|length)==1' >/dev/null"
+ok "demo multitask: the sibling reports its own branch"                "printf '%s' \"\$DMT\" | jq -e '[.agents[]|select(.self|not)][0].gitBranch==\"demo/hotfix\"' >/dev/null"
+ok "demo multitask: one live file collision between them"              "printf '%s' \"\$DMT\" | jq -e '(.collisions|length)==1 and ((.collisions[0].agents|length)==2) and (.collisions[0].file|endswith(\"src/features.py\"))' >/dev/null"
+ok "demo multitask: the self agent owns the subagent + the workflow"   "printf '%s' \"\$DMT\" | jq -e '([.agents[]|select(.self)][0].subagents|length)==1 and (.workflows[0].id==\"wf_demo\")' >/dev/null"
+ok "demo multitask: the workflow run is multi-phase, multi-agent"      "printf '%s' \"\$DMT\" | jq -e '.workflows[0] | (.agents|length)==3 and ([.phaseGroups[].title]==[\"Outline\",\"Docs\",\"Review\"])' >/dev/null"
+ok "demo multitask: subagent rows carry phaseConfidence (0.8.0)"       "printf '%s' \"\$DMT\" | jq -e '[.agents[]|select(.self)][0].subagents[0] | has(\"phaseConfidence\")' >/dev/null"
+DPROC=$( ( cd "$DEMOWS" && node "$CLI" processes --session "$DSESS" --json ) )
+ok "demo processes: three shells — running, exited 0, and failed"      "printf '%s' \"\$DPROC\" | jq -e '(.processes|length)==3 and .summary.running==1 and .summary.failed==1' >/dev/null"
+# The finished demo leaves WORK IN FLIGHT, not only aftermath: a workflow still running with its last
+# phase open, and a task still in progress. Both are what these panels exist to show.
+ok "demo multitask: the workflow is still running, last phase open"    "printf '%s' \"\$DMT\" | jq -e '.workflows[0].running==true and ([.workflows[0].phaseGroups[]|select(.title==\"Review\")][0]|.done==0 and .total==1)' >/dev/null"
+ok "demo multitask: exactly one task is still in progress"             "printf '%s' \"\$DMT\" | jq -e '[.tasks[]|select(.status==\"in_progress\")]|length==1' >/dev/null"
+DRISK=$( ( cd "$DEMOWS" && node "$CLI" risk --session "$DSESS" --json ) )
+ok "demo risk: a flagged command AND an outside-the-workspace write"   "printf '%s' \"\$DRISK\" | jq -e '.high>=1 and (.outsideWrites|length)==1 and (.outsideWrites[0].file|startswith(\"~/\"))' >/dev/null"
+DACT=$( ( cd "$DEMOWS" && node "$CLI" actions --session "$DSESS" --json ) )
+ok "demo actions: exactly one FAILED call, and it is not the last"     "printf '%s' \"\$DACT\" | jq -e '([.actions[]|select(.ok==false)]|length)==1 and (.actions[-1].ok!=false)' >/dev/null"
 DTL=$( ( cd "$DEMOWS" && node "$CLI" tasklog --session "$DSESS" ) )
-ok "demo tasklog: one row per named task"                              "printf '%s' \"\$DTL\" | jq -e 'length==3 and ([.[]|select(.content==\"Validate the training dataset\")]|length)==1' >/dev/null"
+# FIVE, not six: the task log is edits-derived, and the sixth task is the one still in progress, which
+# owns no edits. The change map reports six task IDENTITIES; this reports the tasks that produced work.
+# The two numbers differing is the model being honest, not a drift.
+ok "demo tasklog: one row per EDIT-PRODUCING task"                     "printf '%s' \"\$DTL\" | jq -e 'length==5 and ([.[]|select(.content==\"Validate the training dataset\")]|length)==1' >/dev/null"
 DOBS=$( ( cd "$DEMOWS" && node "$CLI" observations --session "$DSESS" ) )
 ok "demo observations: runs + reasoning + next steps"                  "printf '%s' \"\$DOBS\" | jq -e '(.runs|length)>=4 and ([.runs[].edits[]|select(.reasoning!=null)]|length)>=3 and (.nextSteps|length)>=1' >/dev/null"
+# The guided tour's script — the SAME list both editors render, so the CLI is the contract for it.
+DTOUR=$( ( cd "$DEMOWS" && node "$CLI" demo --tour --json ) )
+ok "demo --tour --json emits the shared step list"                     "printf '%s' \"\$DTOUR\" | jq -e '(.steps|length)>=15 and ([.steps[].id]|unique|length)==(.steps|length)' >/dev/null"
+ok "demo --tour covers every Overview tab"                             "printf '%s' \"\$DTOUR\" | jq -e '[.steps[]|select(.tab)|.tab]|unique|sort == [\"fleet\",\"processes\",\"sessions\",\"tasks\",\"workflows\"]' >/dev/null"
+ok "demo --tour (text) is readable without a session"                  "( cd \"\$DEMOWS\" && node \"\$CLI\" demo --tour ) | grep -q 'Fleet'"
+# The prose renderer must print every field the editors render, or the printed tour is quietly a
+# different, shorter tour than the driven one — the drift core owning the script exists to prevent.
+DTIP=$( printf '%s' "$DTOUR" | jq -r '[.steps[]|select(.tip)][0].tip' )
+ok "demo --tour (text) prints each step's tip, as both editors do"     "( cd \"\$DEMOWS\" && node \"\$CLI\" demo --tour ) | grep -qF \"\$DTIP\""
+# Two tracks over ONE script: the short one must be a strict, order-preserving subset — a second list
+# would let the two tours tell different stories about the same product.
+DTOURE=$( ( cd "$DEMOWS" && node "$CLI" demo --tour --essentials --json ) )
+ok "demo --tour --essentials is a SHORTER track"                       "printf '%s' \"\$DTOURE\" | jq -e '.track==\"essentials\" and (.steps|length)==.sizes.essentials and .sizes.essentials < .sizes.everything' >/dev/null"
+DTOURR=$( ( cd "$DEMOWS" && node "$CLI" demo --tour --remainder --json ) )
+ok "demo --tour --remainder is the exact complement of --essentials"   "[ \"\$(printf '%s' \"\$DTOURE\" \"\$DTOURR\" | jq -s -r '[.[0].steps[].id]+[.[1].steps[].id]|sort|join(\",\")')\" = \"\$(printf '%s' \"\$DTOUR\" | jq -r '[.steps[].id]|sort|join(\",\")')\" ]"
+ok "the three track sizes add up"                                      "printf '%s' \"\$DTOURR\" | jq -e '.sizes.essentials + .sizes.remainder == .sizes.everything and (.steps|length)==.sizes.remainder' >/dev/null"
+ok "--essentials and --remainder together is an error, not a guess"    "! ( cd \"\$DEMOWS\" && node \"\$CLI\" demo --tour --essentials --remainder ) >/dev/null 2>&1"
+# Action steps: both labels present, well formed, and never doubled up with a tryIt line.
+ok "demo --tour: action steps are well formed, both modes present"     "printf '%s' \"\$DTOUR\" | jq -e '([.steps[]|select(.action)]|length)>=4 and ([.steps[]|select(.action.mode==\"wait\")]|length)>=1 and ([.steps[]|select(.action.mode==\"auto\")]|length)>=1 and ([.steps[]|select(.action and .tryIt)]|length)==0 and ([.steps[]|select(.action and (.action.mode==\"auto\") and (.action.done|not))]|length)==0' >/dev/null"
+ok "…and every step in it is in the full tour, in the same order"      "[ \"\$(printf '%s' \"\$DTOURE\" | jq -r '[.steps[].id]|join(\",\")')\" = \"\$(printf '%s' \"\$DTOUR\" | jq -r --argjson e \"\$(printf '%s' \"\$DTOURE\" | jq -c '[.steps[].id]')\" '[.steps[].id|select(. as \$i|\$e|index(\$i))]|join(\",\")')\" ]"
+ok "demo --tour covers every shipped panel, Diffs included"            "printf '%s' \"\$DTOUR\" | jq -e '[.steps[].view]|unique|sort == [\"actions\",\"diffs\",\"editor\",\"edits\",\"fileHistory\",\"observations\",\"overview\",\"prompts\",\"stats\"]' >/dev/null"
+# The heartbeat keeps a paced tour inside the fleet's 60s active window — mtime only, never a write.
+DBYTES=$(wc -c < "$HOME/.claude/projects/$(printf '%s' "$DEMOWS" | sed 's/[^a-zA-Z0-9]/-/g')/$DSESS.jsonl")
+ok "demo --touch bumps both transcripts and the workflow state"        "( cd \"\$DEMOWS\" && node \"\$CLI\" demo --touch --json ) | jq -e '([.touched[]|select(endswith(\".jsonl\"))]|length)==2 and ([.touched[]|select(endswith(\"wf_demo.json\"))]|length)==1' >/dev/null"
+# The heartbeat must never touch anything under subagents/ — those files ARE watched by both editors, so
+# bumping them would give a heartbeat driven by a refresh the very loop it exists to avoid.
+ok "demo --touch leaves the watched subagent transcripts alone"        "( cd \"\$DEMOWS\" && node \"\$CLI\" demo --touch --json ) | jq -e '[.touched[]|select(contains(\"/subagents/\"))]|length==0' >/dev/null"
+ok "demo --touch appends nothing (it is a touch, not a write)"         "[ \"\$(wc -c < \"\$HOME/.claude/projects/\$(printf '%s' \"\$DEMOWS\" | sed 's/[^a-zA-Z0-9]/-/g')/\$DSESS.jsonl\")\" = \"\$DBYTES\" ]"
 # No-residue lifecycle: accepting everything auto-clears a demo session's store…
 ( cd "$DEMOWS" && node "$CLI" keep --all --session "$DSESS" ) >/dev/null
 ok "demo accept-all leaves an EMPTY store (auto-clear, demo-only)"     "( cd \"\$DEMOWS\" && node \"\$CLI\" list --session \"\$DSESS\" --json ) | jq -e '.edits|length==0' >/dev/null"
 ok "demo files stay on disk after accept (only the STORE clears)"      "[ -f \"\$DEMOWS/observatory-demo/docs/USAGE.md\" ]"
-# …and --clean removes the session, its store, and the marked workspace folder.
-( cd "$DEMOWS" && node "$CLI" demo --clean ) >/dev/null
+# …and --clean removes BOTH sessions, their stores, the marked workspace, and the scratch dir.
+# A usage cursor is keyed by TRANSCRIPT PATH, so removeSession (which knows only the id) cannot reach
+# it — deleting a transcript has to drop its cursor explicitly, or every demo run orphans two forever.
+# Count the delta: other e2e sessions hold cursors of their own that must survive.
+DCUR_BEFORE=$(ls -A "$HOME/.claude/claude-observatory/usage-cursors" 2>/dev/null | wc -l | tr -d ' ')
+DCLEAN=$( ( cd "$DEMOWS" && node "$CLI" demo --clean --json ) )
+DCUR_AFTER=$(ls -A "$HOME/.claude/claude-observatory/usage-cursors" 2>/dev/null | wc -l | tr -d ' ')
+ok "demo --clean reports both sessions, the workspace and the scratch" "printf '%s' \"\$DCLEAN\" | jq -e '(.sessions|length)==2 and (.workspaces|length)==1 and (.scratch|length)==1' >/dev/null"
 ok "demo --clean removes the demo session from sessions"               "( cd \"\$DEMOWS\" && node \"\$CLI\" sessions --json ) | jq -e '[.sessions[] | select(.id==\"'\$DSESS'\")]|length==0' >/dev/null"
+ok "demo --clean removes the SIBLING session too"                      "[ ! -d \"\$HOME/.claude/claude-observatory/\$DSIB\" ]"
 ok "demo --clean removes the workspace folder (marker-gated)"          "[ ! -d \"\$DEMOWS/observatory-demo\" ]"
 ok "demo --clean removes the store dir"                                "[ ! -d \"\$HOME/.claude/claude-observatory/\$DSESS\" ]"
+ok "demo --clean removes the outside-the-workspace scratch dir"        "[ ! -d \"\$DSCRATCH\" ]"
+ok "demo --clean drops both demo usage cursors, keeping the others"    "[ \"\$DCUR_AFTER\" = \"\$((DCUR_BEFORE - 2))\" ]"
+
+# --- §E2E 23: `views` batches read-only views into ONE process -------------------------------------
+# The JetBrains plugin has no in-process core, so it spawned one CLI per view — eight per refresh tick,
+# each paying node start-up and each re-deriving the same transcript parses from cold. `views` runs them
+# together. The property that MATTERS is that batching cannot change an answer: every view must be
+# byte-identical to its own command. (An early version stripped `--session` when `--views` was absent —
+# `indexOf` returns -1 and the filter removed argument zero — so every view described a DIFFERENT session
+# while looking perfectly plausible. That is what these pin.)
+echo "════════ E2E 23: views batching must not change a single answer ════════"
+VJ=$( cc views --session "$SESSION" --root "$WS" --json )
+# Non-empty FIRST: without this the comparisons below pass when both sides fail, which is how the first
+# version of this section reported four green ticks against two empty strings.
+ok "views emits a non-empty object keyed by view"                      "printf '%s' \"\$VJ\" | jq -e 'type==\"object\" and (keys|length)>=6' >/dev/null"
+# EVERY default view, not a sample: the architecture doc's "byte-identical, pinned by e2e" claim is only
+# true if all eight are actually pinned, and the four that used to be left out (multitask, observations,
+# risk, egress) are exactly the ones no other section touches.
+for v in changemap multitask prompts processes sessions observations risk egress; do
+  ONE=$( cc $v --session "$SESSION" --root "$WS" --json | jq -cS . )
+  BAT=$( printf '%s' "$VJ" | jq -cS ".$v" )
+  ok "$v: the single command answers at all"                           "[ -n \"\$ONE\" ] && [ \"\$ONE\" != null ]"
+  ok "views.$v is byte-identical to \`$v --json\`"                     "[ \"\$ONE\" = \"\$BAT\" ]"
+done
+ok "views --views picks a subset, and only that subset"                "cc views --views prompts,sessions --session \"\$SESSION\" --root \"\$WS\" --json | jq -e 'keys==[\"prompts\",\"sessions\"]' >/dev/null"
+ok "an unknown view is null, never fatal to the batch"                 "cc views --views prompts,nope --session \"\$SESSION\" --root \"\$WS\" --json | jq -e '.nope==null and (.prompts|type)==\"object\"' >/dev/null"
+ok "views will not batch a MUTATING command"                           "cc views --views keep --session \"\$SESSION\" --root \"\$WS\" --json | jq -e '.keep==null' >/dev/null"
+
 
 echo "════════════════════════════════════════════════════════"
 echo "E2E RESULT: $pass passed, $fail failed"

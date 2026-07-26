@@ -109,6 +109,7 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
             !com.cellobservatory.observatory.core.ClaudePaths.hooksInstalled() -> {
                 tree.emptyText.appendLine("No tracked Claude edits yet")
                 tree.emptyText.appendLine("Run `claude-observatory init`, then let Claude Code edit.")
+                tryTheDemoLine()
             }
             else -> {
                 // Hooks are fine — never imply otherwise. A fresh session with prior work gets a
@@ -135,10 +136,7 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
                         "Switch to previous session (${prior.id.take(8)} · ${prior.edits} edits)",
                         com.intellij.ui.SimpleTextAttributes.LINK_ATTRIBUTES
                     ) {
-                        com.cellobservatory.observatory.settings.ObservatorySettings.instance.state.session = prior.id
-                        for (p in com.intellij.openapi.project.ProjectManager.getInstance().openProjects) {
-                            com.cellobservatory.observatory.services.ObservatoryService.getInstance(p).refresh()
-                        }
+                        ReviewOps.applySessionChoice(project, prior.id)
                     }
                     tree.emptyText.appendLine(
                         "Pick a session…",
@@ -146,6 +144,7 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
                     ) { ReviewOps.chooseSession(project, tree) }
                 } else {
                     tree.emptyText.appendLine("No edits in this session yet.")
+                    tryTheDemoLine()
                     tree.emptyText.appendLine("Let Claude edit a file and it will appear here.")
                 }
             }
@@ -264,6 +263,10 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
             action("Export Review Summary", AllIcons.ToolbarDecorator.Export) { exportSummary() },
             action("Setup Check (doctor)", AllIcons.General.Information) { ReviewOps.openDoctor(project) },
         )
+        // No demo buttons here. This toolbar is for reviewing the session in front of you; demo mode lives
+        // on the Overview's nav bar, which is one panel away and is where both editors now offer it. The
+        // empty state below still links straight into the demo — that is the first-run path, and it is a
+        // link in the place a reader is already looking, not a button competing with the review actions.
         // Collapse-all / expand-all for the folder → file → class tree — IntelliJ's own tree actions,
         // the platform equivalent of VS Code's file-Explorer Collapse-All button.
         val expander = DefaultTreeExpander(tree)
@@ -382,28 +385,58 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
             override fun actionPerformed(e: AnActionEvent) = run()
         }
 
+    /**
+     * The empty state's way into demo mode — the entry point that decides whether a first-time reader
+     * ever finds it. Offered even when the capture hooks are missing, because the replay drives the
+     * pipeline through the CLI directly and does not need them. Says "sidebar" rather than "every
+     * panel": the dock panels shell out to the CLI, so a machine without it on PATH fills the trees and
+     * the inline review and reports the missing CLI in the dock, which is what actually happens.
+     */
+    private fun tryTheDemoLine() {
+        if (ReviewOps.demoPresent(project)) return
+        tree.emptyText.appendLine(
+            "Try the demo — no Claude session needed",
+            com.intellij.ui.SimpleTextAttributes.LINK_ATTRIBUTES
+        ) { ReviewOps.startDemo(project) }
+    }
+
     private fun toggle(text: String, icon: javax.swing.Icon, isOn: () -> Boolean, set: (Boolean) -> Unit): ToggleAction =
         object : ToggleAction(text, null, icon), DumbAware {
-            override fun getActionUpdateThread() = ActionUpdateThread.EDT
+            // Reads a settings flag, nothing UI. Staying on the EDT made the platform hop for it.
+            override fun getActionUpdateThread() = ActionUpdateThread.BGT
             override fun isSelected(e: AnActionEvent) = isOn()
             override fun setSelected(e: AnActionEvent, state: Boolean) = set(state)
         }
+
+    /** The path of the tab in front, read from the background-safe tracker (see ActiveFileTracker). */
+    private fun activeFilePath(): String? =
+        com.cellobservatory.observatory.services.ActiveFileTracker.getInstance(project).activePath()
 
     private fun activeFile(): VirtualFile? = FileEditorManager.getInstance(project).selectedFiles.firstOrNull()
 
     /** A bulk action scoped to the ACTIVE editor's file, gated (enabled+visible) on that file having
      *  pending edits. The tree toolbar has no VIRTUAL_FILE in its data context, so we read the active
-     *  file from FileEditorManager (parity with VS Code's keepOpenFile/undoOpenFile). */
+     *  file from FileEditorManager (parity with VS Code's keepOpenFile/undoOpenFile).
+     *
+     *  The gate runs on a BGT thread and must therefore read the tracker, while the click runs on the
+     *  EDT where FileEditorManager is available — two sources that can name different files across a tab
+     *  switch. These are bulk, destructive verbs (accept/reject EVERY pending edit in a file), so the
+     *  click resolves the SAME path the gate approved and only falls back to the editor's own answer
+     *  when that path is still what is in front. Disagreement cancels rather than guesses: silently
+     *  accepting a file the user was not looking at is unrecoverable. */
     private fun fileScopedAction(text: String, icon: javax.swing.Icon, run: (String, VirtualFile) -> Unit): AnAction =
         object : AnAction(text, null, icon), DumbAware {
-            override fun getActionUpdateThread() = ActionUpdateThread.EDT
+            override fun getActionUpdateThread() = ActionUpdateThread.BGT
             override fun update(e: AnActionEvent) {
-                val path = activeFile()?.path
+                val path = activeFilePath()
                 e.presentation.isEnabledAndVisible = path != null && service().log().any { it.pending && it.file == path }
             }
 
             override fun actionPerformed(e: AnActionEvent) {
-                val vf = activeFile() ?: return
+                val path = activeFilePath() ?: return
+                val vf = activeFile()?.takeIf { it.path == path }
+                    ?: com.intellij.openapi.vfs.LocalFileSystem.getInstance().findFileByPath(path)
+                    ?: return
                 withSession { s -> run(s, vf) }
             }
         }

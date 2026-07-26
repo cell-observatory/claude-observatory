@@ -5,6 +5,249 @@ All notable changes to Claude Observatory are recorded here, following
 Per-tag release artifacts and auto-generated notes are on the
 [Releases page](https://github.com/cell-observatory/claude-observatory/releases).
 
+## [0.8.9] — 2026-07-26
+
+**Demo mode, in both editors.** The demo simulator has existed since 0.8.0, but only in the terminal —
+neither editor had a way to reach it. It is now one command away in both: **Start Demo Mode** replays a
+scripted Claude Code session through the real capture pipeline while you watch the panels fill, then
+opens a **guided tour** that walks every surface, one step at a time, activating the panel it is
+describing and ringing the control it names. Starting the demo again **resets** it, the
+replay is **cancellable**, and **Exit Demo** removes every trace it wrote. Nothing calls a model, and the
+capture hooks need not be installed — which makes it the first thing a new reader can try.
+
+### Added
+
+- **Demo mode in VS Code and JetBrains.** `Start Demo Mode`, `Restart demo`, `Guided tour`, `Exit demo
+  mode` — in the command palette, on the Overview's nav bar, and in every empty state, so a
+  workspace with no Claude session yet offers the demo instead of only explaining why it is empty. In
+  JetBrains the same verbs sit at the end of the Overview's nav bar and in Find Action, and the Edits and
+  Observations empty states offer the demo too. The replay runs in-process in VS Code and as a streamed background task in
+  JetBrains, narrating each beat.
+- **The guided tour.** Forty-one steps covering every panel the product ships and every named
+  feature — the five Overview tabs, the change map's Folders strip, Files ledger, summary bar and feed,
+  the four review axes, the Edits **and Diffs** trees, inline review, Spotlight, File History and
+  revision navigation, search and Active only, the chat handoff, export, the status bar, the Explorer
+  badges, the Risk and Egress audits, context sources, file memory, and Stats. It opens with a choice of
+  **Essentials** (13 steps) or **Everything** (41); finishing the short one offers the other 28 as its
+  own track, in both editors. All
+  three are filters over the same list, so they can never tell different stories. The script lives in core (`demoTour()`), so the terminal, VS Code and
+  JetBrains all show the same tour in the same order; `claude-observatory demo --tour [--essentials]`
+  prints it as prose.
+- **The tour plays itself.** Each step holds long enough to read it — derived from its own text, three
+  and a half to nine seconds — and any control that moves the tour (Next, Back, a step jump) hands you
+  the wheel, with a transport button to resume. Docking or floating the window does not.
+  A **YOUR TURN** step shows a countdown and, if you do nothing, performs the action itself and says so,
+  so a reader who only watches still sees Keep and Undo actually happen. VS Code honours
+  `prefers-reduced-motion` and starts paused; the JetBrains platform exposes no such signal, so it starts
+  playing and the button is the control.
+- **The tour docks beside your code** — an editor-area panel in VS Code, a tool window on the right in
+  JetBrains. VS Code can also detach it into a window of its own for a second screen and remembers the
+  choice; JetBrains cannot, because that window never appeared in PyCharm 2025.2 and shipping a control
+  that does nothing is worse than not offering it. Hiding the JetBrains tool window **pauses** the
+  tour, because its wait steps act on a timer and must never do so behind a window you cannot see.
+- **Demo mode lives at the END of the Overview's nav bar**, in both editors, and nowhere else in the
+  panels. It began as the first thing on the Edits toolbar, where it pushed the review actions rightward
+  and read as though the demo were part of reviewing the session in front of you. The empty states keep
+  their **Try the demo** link, which is the first-run path. In JetBrains the four verbs come from one
+  shared list, so the surfaces that offer them cannot drift apart.
+- **The demo is offered on a first install and once after an update** — one notification, four seconds
+  after startup, with **Never ask** on it. Skipped while a Claude session is live in that project, in an
+  untrusted workspace, and once a demo is already recorded there.
+- **The tour holds the Overview's Active only filter open** while it runs, because five of the demo's six
+  tasks are completed and the filter hides completed tasks by default — so a step that says "accept task
+  1" now names a row that is on screen. Your own filter and your own tab come back when the tour ends.
+- **The control a step names is ringed.** The step's text lives in the tour window; the control it points
+  at is outlined in place — a CSS outline in VS Code, a glass-pane painter in JetBrains, neither of which
+  reflows the panel being pointed at. Neither editor can draw over IDE chrome it does not own — the
+  activity bar, the tab strip, the status bar — so for those the step's text names the control instead.
+- **A scenario that leaves no panel empty.** The simulated session now runs to **three prompts, six
+  tasks and nine edits**, and adds the cases whose surfaces could previously only render an empty state:
+  a **second agent in a sibling worktree** with a live **file collision**, a **deletion** captured through
+  the Bash tree-diff path, a **failed tool call**, a **write outside the workspace** for the Risk audit, a
+  third **background shell** that exits non-zero, a **three-phase workflow**, and a second edit to one
+  file in its own region, so "undo one edit and keep the later edits to the same file" is demonstrable.
+- **The demo hides itself from git.** It writes into your own repository, so its folder now carries a
+  self-ignoring `.gitignore` — it never appears in `git status` and `git add -A` cannot sweep it in.
+- **`demo --status`, and an exit that stays reachable.** Session resolution follows the newest
+  transcript, so one real Claude turn after a demo used to take Exit Demo away while the folder and both
+  sessions were still on disk. Both editors now offer Exit whenever a demo *exists* for the folder, not
+  only while one is the session under review.
+- **`demo --tour`, `demo --touch`, `demo --no-fleet`.** The tour's script as text or JSON; a heartbeat
+  that keeps a running demo inside the fleet's 60-second active window while a tour explains it (mtime
+  only — nothing is written); and an opt-out from the sibling agent.
+
+- **`views` — several read-only views in one process.** `claude-observatory views [--views a,b,c]` runs
+  the read-only views together and emits `{name: payload}`, each byte-identical to that view's own
+  command (pinned by the e2e suite). A view that fails is `null` rather than fatal to the batch, and a
+  mutating verb is refused. The JetBrains plugin has no in-process core, so it spawned one CLI per view —
+  eight per refresh tick, each paying node start-up and re-deriving the same transcript parses from
+  cold; those eight are now one spawn. `feed`, `tree`, `stats` and `usage` still spawn for themselves —
+  they answer their own triggers, not the Overview's tick.
+
+### Changed
+
+- **Prompts and Stats fold away in JetBrains.** The bottom dock holds three columns beside a nav bar, and
+  on a short tool window that left the change map almost nothing. Two toggles in the Dashboards title bar
+  now fold either side pane, remembered across restarts (`dashShowPrompts` / `dashShowStats`). VS Code
+  gets the same room for free — its three dock views are separate accordion sections — so this is the
+  platform's equivalent rather than a new idea.
+- **The Overview's axes row is icons only, in both editors.** The four review axes — Diff · File ·
+  Folder · Prompt — carry color-coded icons with the verb on hover. Each axis already names itself in
+  its own counter ("File 3/126"), so "Accept File" beside it restated what the reader was looking at,
+  and between them the labels took most of the bar. The session-wide controls row above keeps its
+  labels: those act on everything and have no counter to say so.
+- **Starting the demo resets it.** A run clears any previous demo for that folder before replaying, so
+  Start and Restart are one operation and a second run cannot stack a stale, half-reviewed session beside
+  the fresh one. `runDemo({ reset: false })` opts out.
+- **One name for the audience.** The project described who it is for four different ways ("established
+  codebases", "critical infrastructure", "code that matters", "code you cannot afford to get wrong").
+  Every intro surface — the README, the site, both marketplace descriptions, every package description —
+  now says **established and mission-critical codebases**, per `docs/STYLE.md` X2.
+- **A scope flag and an edit id are mutually exclusive.** `keep`/`undo`/`redo` took the bulk branch
+  before ever reading a positional id, so `undo --file src 2` silently discarded the `2` and reverted
+  every pending edit under `src` — writing them all to disk and exiting 0. They now refuse the pair and
+  say which is which.
+- **Flags require their values.** A bare `args[i + 1]` accepted the NEXT FLAG as a value, so
+  `locate --file --json` resolved `<cwd>/--json` as the path to place edits in, `list --file --json`
+  filtered for files containing "--json", and `clean --session --json` operated on a session literally
+  named `--json` (which passes the session-id character class). `--file`, `--under`, `--session` and the
+  rest now reject a `--`-prefixed token and fail loudly. `clean --session` and `list --file` require a
+  value at all — a missing `clean --session` value used to widen the scope from one session to **every
+  session in the store**, and that verb's sink is a recursive remove.
+- **A taskId this session never had is an error.** `task-keep`/`task-undo`/`task-clear` answered an
+  unknown id with a green "kept 0 edit(s)" and exit 0, indistinguishable from a real task with nothing
+  pending. They now exit 1 and list the session's actual task ids (`sessionTaskIds`).
+- **`keep` on a reverted edit keeps nothing, and says so.** It used to flip the ledger to *kept* while
+  the file still held the reverted content — and that also marked the edit resolved, so `clean
+  --resolved` would drop it and the revert could never be redone. `keepGroup` now flips only pending
+  edits, matching `keepTask`'s long-standing rule.
+
+### Performance
+
+- **Edit placement composes the edit chain instead of re-aligning per edit.** Placing an edit means
+  mapping its `after` snapshot onto the current buffer; done once per edit, that runs a whole-file Myers
+  alignment whose cost grows with the *cumulative* drift since that edit, so a file with n edits paid the
+  largest alignment n times over. Consecutive snapshots are only one edit apart, so `locateEditsInCurrent`
+  now aligns `after[i] → after[i+1]` and composes those hops backwards from the buffer. Measured on an
+  800-line file with 30 pending edits (Node 22, warm process, the old per-edit path against the batch):
+  **~5× faster at 3 changed lines per edit and ~30–35× at 15 and at 40**, with zero placement
+  differences at every level. An earlier draft of this note quoted 71.9× at churn 40; that does not
+  reproduce — the gain flattens once per-edit alignment stops being the dominant cost. Snapshots are pulled one at a time rather than materialised up
+  front, which keeps a 5,000-line / 500-edit file at **+171 MB instead of +665 MB** in the VS Code
+  extension host, where the inline overlay does run in-process. Every surface that places an edit goes
+  through it: both editors' inline overlays — VS Code in-process, JetBrains through `locate --json`,
+  which now also carries the deletion hunks it computes for free — and the change map, on whichever
+  side builds it.
+
+### Fixed
+
+- **Selecting a still-running row bought a permanent background spawn.** A feed is "live" whenever
+  nothing has recorded an end — which is not the same as anything still happening — so the Overview
+  re-ran `feed --json` (~75 ms) every 3 s tick for as long as that row stayed selected. The demo's
+  running shell is live by construction and so paid it until Exit Demo. The poll now backs off while the
+  answer keeps coming back identical (9 spawns per 120 s instead of 40, converging on one per 30 s) and
+  returns to full rate the instant anything changes or you press Refresh.
+- **Adding, removing or reordering workspace folders changed which session VS Code was showing, silently.**
+  `workspaceRoot()` is `folders[0]` and every caller reads it live, but nothing subscribed to
+  `onDidChangeWorkspaceFolders` — and the store watcher is scoped to `~/.claude`, so no file event fires
+  when the WORKSPACE changes. The panels kept rendering the previous root's session until some unrelated
+  event happened to refresh them. JetBrains has no counterpart; a project's basePath is fixed.
+- **The site scrolled sideways on a phone.** The nav is one non-wrapping flex row, and its ghost GitHub
+  button pushed the right-hand cluster past the viewport — measured +29 px at 320 px on every page, and
+  +29/+30 px at 768 px on the six-link pages. The button is dropped below 900 px, where GitHub is already
+  in the links (and in the ☰ menu). A long command in prose was the last 8 px on the features page; inline
+  `code` now wraps rather than overflowing. Verified at 320/390/768/1440 px on all five real pages.
+
+- **A staging record could be read as empty while it was being rewritten, and the garbage collector then
+  freed an edit's blobs out from under it.** `writeStaging` truncated in place; a `gcSessionCore` running
+  concurrently read zero bytes, `JSON.parse` threw, and the catch treated the record as absent — so both
+  the before AND after blob of an edit that was about to be committed were collected. Measured on this
+  machine at 2.8% of reads during a rewrite (1,318 of 47,608). It now writes to a temp file and renames,
+  so a reader sees the old record or the new one and never a torn one: 0 of 55,340 under the same probe.
+- **One slow or failed `views` batch permanently disabled batching for the rest of the IDE session.** Any
+  non-zero exit latched the "this CLI is too old" flag — including a timeout on a large first build — and
+  every later refresh fell back to eight separate spawns, which is the cost the batch exists to avoid. It
+  now latches only on the one failure that cannot recover, a CLI that answers `unknown command`; anything
+  else falls back for that tick alone and the next tick retries.
+- **A batch build blocked every other open project for as long as it ran.** `ViewBatch` held one global
+  lock across the spawn, so a second project whose own views were already cached still waited — up to the
+  180 s heavy timeout. The spawn now runs under a per-(session, workspace) lock, which still collapses
+  concurrent views of the same session into one process.
+- **The Switch-Session picker could block behind a full eight-view build.** It passes the current session,
+  so it hit the same batch key as the poller and, on a cold window, paid for the change map to answer a
+  session list — the multi-second stall 0.8.8's stat-only listing had removed. It now reads the batch only
+  when the poller has already filled it.
+- **The tree toolbar's per-file accept/reject could act on a file the gate never approved.** `update()`
+  read the background-safe active-file tracker while the click read `FileEditorManager`, two sources that
+  disagree across a tab switch — so a bulk, unrecoverable accept could land on the wrong file. The click
+  now resolves the same path the gate approved, and cancels rather than guessing when they differ.
+
+- **Every button on the JetBrains Overview did nothing unless the Fleet tab was open.** All six of that
+  panel's toolbars set `targetComponent` to a tree living inside ONE nav tab, and the platform refuses to
+  perform an action whose toolbar target is not showing — so with Sessions selected, which is the
+  default, Accept All, Reject All, Clear Resolved, Export, Search, Active only, Clear completed,
+  Spotlight, Refresh and all four review axes were dead, with no error and no feedback. The IDE's own log
+  said so 28 times. They now target the panel that owns them, and `ToolbarContractTest` fails if any
+  toolbar is ever again pointed at something that can stop showing while its buttons are on screen.
+- **The editor's text cursor was replaced by the arrow, in every file.** The inline overlay's lens-hover
+  handler is registered on the global editor multicaster and ended by assigning the cursor
+  unconditionally — including `Cursor.getDefaultCursor()`, the arrow — so it ran on every mouse move in
+  every editor of the project whether or not the file had a single Claude edit, and it ran after the
+  platform had set the pointer, so the editor could never win it back. It now uses `setCustomCursor`,
+  shows the hand only over a lens, and releases only an editor it took.
+- **Clearing resolved edits erased the session's skip markers.** `clearResolved`/`clearResolvedIds`
+  rebuilt the log from `readLog`, which returns edit records only, so every `op` line went with it —
+  including the `skip` markers that record *"a real edit could not be captured"*, the one thing standing
+  between an uncaptured change and silence. Clearing a single folder erased skips for unrelated files
+  too. The rewrite now carries every non-status op across.
+- **Garbage collection could delete a just-captured snapshot.** `PostToolUse` wrote the after-blob and
+  then appended the record; in between, nothing referenced that blob, so a concurrent `clean` or
+  `clear` collected it and the append committed a record pointing at a file that no longer existed —
+  `lineDelta` then reported the edit as a pure deletion and `undo` threw. The staging record now
+  publishes the after-blob before the append, and the GC honours it.
+- **Edits attributed to the wrong task.** The strict span model sorted the task-system snapshots by
+  timestamp but not the TodoWrite ones — and a transcript is not timestamp-ordered. An out-of-order
+  checkpoint inverted a task's span so it matched nothing, and handed its edits to the neighbouring
+  task, which a task-scoped keep or undo would then act on. Both sources are now sorted.
+- **The change map served stale class attribution.** Its on-disk cache keyed on the transcript and the
+  store log, but the map is also derived from the **workspace files themselves** (it reads each one to
+  detect classes and place edits). Editing a file in your editor moved neither key, so the map kept
+  reporting the old class names and placements until something unrelated touched the transcript.
+- **`footprint --json` emitted two JSON documents.** It ran `risk` and `egress` straight through, so
+  every caller's `JSON.parse` threw. It now emits one `{ risk, egress }` object.
+- **`status` crashed on very large sessions.** Two `Math.max(...log.map(…))` spreads survived the
+  conversion to the call-stack-safe `maxOf`, and throw `RangeError` past ~124,000 edits.
+- **The end-to-end suite spoke out loud.** One section header used the `say "…"` logging idiom borrowed
+  from `scripts/bootstrap.sh` and `docs/devcontainer/setup.sh` — both of which define a `say()` helper.
+  `test/e2e.sh` does not, so on macOS it reached `/usr/bin/say` and read the test name aloud through the
+  speakers. It now uses the same `echo` header every other section uses.
+- **Demo task attribution under a fast replay.** The simulator's transcript clock advances a millisecond
+  per line and so ran ahead of wall time, while the store stamps captures with the real clock — far
+  enough ahead, in the longer scenario, that a task's in-progress span no longer contained its own edit
+  and the Tasks tab lost a row. Each beat now waits for wall time to catch up.
+- **Orphaned usage cursors.** A transcript's incremental usage cursor is keyed by path, so
+  `removeSession` could not reach it and every demo run left one behind for good. `demo --clean` now
+  drops them (`removeUsageCursor`).
+- **`demo --dir` could destroy the directory it was pointed at.** The demo planted its ownership
+  sentinel into whatever folder `--dir` named, so the sentinel proved nothing: the first run overwrote
+  any file whose path the scenario reuses, and — since a run now resets — the second run deleted the
+  whole directory. `--dir` is refused unless the folder is empty or already a demo workspace.
+- **A symlinked `--dir` stranded the sibling session.** The workspace path was resolved through the
+  symlink in one place and not in another, minting two project dirs; the sibling landed in one and every
+  later `--clean`, `--touch` and status scan looked in the other, while cleanup reported success. One
+  normalization now serves all four.
+- **Exit Demo could strand its own folder.** The tour opens a demo file; a buffer saved after Exit
+  deleted the tree recreated a file inside it — along with the sentinel that authorizes deletion, so no
+  command could ever remove that folder again. Both editors now close the demo's editors first.
+- **Cleanup no longer claims more than it did.** Removal is best-effort per item, but both editors
+  reported a fixed "removed the folder and the report" regardless; they now name what actually came
+  back, and say "nothing to remove" when that is the truth.
+- **A demo with no CLI on PATH says so first.** The replay runs in-process in VS Code and works without
+  the CLI, but the Overview, Prompts and Stats panels read their data through it — and 26 of the tour's
+  41 steps are about those three. Starting the demo without it now warns before, not after — and the
+  check **spawns** the CLI rather than statting a path, because the PATH fallback is a bare name and
+  statting it declared every install outside a fixed candidate list broken.
+
 ## [0.8.8] — 2026-07-25
 
 A subtraction and a speed-up. The **chapters** display layer is gone: it partitioned a session's edits

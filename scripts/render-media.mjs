@@ -598,7 +598,8 @@ const overviewTabsBody = `
   </div>`;
 
 // The Overview's title-bar toolbar — TWO rows (the 0.8.4 layout): a controls row on top (session name +
-// session-wide bulk + view controls), the four review AXES below. Labeled + color-coded, one icon/action.
+// session-wide bulk + view controls), the four review AXES below. The controls row is labeled; the axes
+// row is color-coded ICONS only, each naming its verb on hover.
 const ovtGrp = (inner) => `<span style="display:flex;gap:9px;align-items:center;white-space:nowrap">${inner}</span>`;
 const ovtSep = `<span style="width:1px;align-self:stretch;background:var(--border2);margin:1px 2px"></span>`;
 const ovToolbar = `
@@ -608,10 +609,10 @@ const ovToolbar = `
       ${ovtGrp(`<span style="color:#9a6ac2">${icoSearch} Search</span><span>✓ Active only</span>${ovtSep}<span style="color:#9a6ac2">${icoBulb} Spotlight</span><span>⟳ Refresh</span>`)}
     </div>
     <div style="display:flex;align-items:center;justify-content:center;gap:9px;flex-wrap:wrap">
-      ${ovtGrp(`<span style="color:#4c8bf5">⌃</span><span class="mono">Diff 1/2 · 5m</span><span style="color:#4c8bf5">⌄</span><span style="color:#3fb950">✓ Keep</span><span style="color:#e5534b">↩ Undo</span><span style="color:var(--accent)">${icoChat} Chat</span><span style="color:var(--accent)">⧉ View diff</span>`)}${ovtSep}
-      ${ovtGrp(`<span style="color:#4c8bf5">‹</span><span class="mono">File 2/5 · dataset.py · 1 edit</span><span style="color:#4c8bf5">›</span><span style="color:#3fb950">✓✓ Accept File</span><span style="color:#e5534b">✕ Reject File</span>`)}${ovtSep}
-      ${ovtGrp(`<span style="color:#4c8bf5">‹</span><span class="mono">Folder 1/3 · src/models · 2 files · 7 edits</span><span style="color:#4c8bf5">›</span><span style="color:#3fb950">✓✓ Accept Folder</span><span style="color:#e5534b">✕ Reject Folder</span>`)}${ovtSep}
-      ${ovtGrp(`<span style="color:#4c8bf5">‹</span><span class="mono">Prompt 2/6 · 3 files · 9 edits</span><span style="color:#4c8bf5">›</span><span style="color:var(--accent)">≡ Review</span><span style="color:#3fb950">${icoChecklist} Accept Prompt</span><span style="color:#e5534b">${icoHistory} Reject Prompt</span>`)}
+      ${ovtGrp(`<span style="color:#4c8bf5">⌃</span><span class="mono">Diff 1/2 · 5m</span><span style="color:#4c8bf5">⌄</span><span style="color:#3fb950">✓</span><span style="color:#e5534b">↩</span><span style="color:var(--accent)">${icoChat}</span><span style="color:var(--accent)">⧉</span>`)}${ovtSep}
+      ${ovtGrp(`<span style="color:#4c8bf5">‹</span><span class="mono">File 2/5 · dataset.py · 1 edit</span><span style="color:#4c8bf5">›</span><span style="color:#3fb950">✓✓</span><span style="color:#e5534b">✕</span>`)}${ovtSep}
+      ${ovtGrp(`<span style="color:#4c8bf5">‹</span><span class="mono">Folder 1/3 · src/models · 2 files · 7 edits</span><span style="color:#4c8bf5">›</span><span style="color:#3fb950">✓✓</span><span style="color:#e5534b">✕</span>`)}${ovtSep}
+      ${ovtGrp(`<span style="color:#4c8bf5">‹</span><span class="mono">Prompt 2/6 · 3 files · 9 edits</span><span style="color:#4c8bf5">›</span><span style="color:var(--accent)">≡</span><span style="color:#3fb950">${icoChecklist}</span><span style="color:#e5534b">${icoHistory}</span>`)}
     </div>
   </div>`;
 
@@ -714,7 +715,7 @@ const scenes = {
   // Anatomy — a labelled outline of every surface, so each section can be referred to by name.
   // Per-window diagrams — the real panel mockup + a numbered legend of its parts.
   'win-overview': scene(1200, winDiag('OVERVIEW', ovToolbar + changeMapCol, [
-    note('1', 'Toolbar — two rows', 'Controls on top (session name · Accept&nbsp;All · Reject&nbsp;All · Clear&nbsp;Resolved · Export&nbsp;|&nbsp;Search · Active&nbsp;only · Spotlight · Refresh); the four review AXES below — <b style="color:var(--ink)">Diff · File · Folder · Prompt</b>. Labeled, color-coded, one icon per action.'),
+    note('1', 'Toolbar — two rows', 'Controls on top (session name · Accept&nbsp;All · Reject&nbsp;All · Clear&nbsp;Resolved · Export&nbsp;|&nbsp;Search · Active&nbsp;only · Spotlight · Refresh); the four review AXES below — <b style="color:var(--ink)">Diff · File · Folder · Prompt</b>. Color-coded icons, one per action, each naming its verb on hover.'),
     note('2', 'Sessions · Fleet · Workflows · Tasks · Processes nav', 'The left rail — every session in this workspace, running agents across git worktrees, workflow runs, the session&rsquo;s numbered tasks, and the background shells it left running. Pick one to drive the detail; a Sessions row switches which session you are reviewing.'),
     note('3', 'Folders · Files', 'Two labeled sections: the <b style="color:var(--ink)">Folders</b> strip (one tile per changed directory, colored by review status) and the churn-ranked <b style="color:var(--ink)">Files</b> ledger. Click a folder tile to filter the ledger and drive the Folder axis.'),
     note('4', 'Summary bar', 'Pending / accepted / reverted edit counts plus file and folder totals for whatever is in scope — named for the picked prompt (or folder filter).'),
@@ -1036,15 +1037,21 @@ const scenes = {
       <div class="titlebar"><span class="tl" style="background:#ff5f57"></span><span class="tl" style="background:#febc2e"></span><span class="tl" style="background:#28c840"></span><span class="t">demo — claude-observatory</span></div>
       <div class="term">
         <div class="cmd"><span class="pr">$</span>claude-observatory <span class="fl">demo</span></div>
-        <div class="out">▸ prompt — asking Claude to extend the training pipeline</div>
-        <div class="out">▸ plan — three to-dos + the numbered task list</div>
+        <div class="out">▸ prompt 1 — asking Claude to extend the training pipeline</div>
+        <div class="out">▸ plan — the to-dos and the numbered task list</div>
         <div class="out">▸ task 1 — feature scaling (2 edits)</div>
+        <div class="out">▸   … the sanity run FAILS — the failed call the audit counts</div>
         <div class="out">▸ task 2 — dataset validation</div>
+        <div class="out">▸ a second agent picks up a hotfix in a sibling worktree</div>
+        <div class="out">▸ prompt 2 — asking for the tests, the docs, and the old scaler gone</div>
         <div class="out">▸ task 3 — tests, written by a <span class="file2">subagent</span></div>
-        <div class="out">▸ a <span class="file2">workflow</span> run starts — documentation, one level above the subagents</div>
+        <div class="out">▸ a <span class="file2">workflow</span> run starts — three phases, one level above the subagents</div>
+        <div class="out">▸ task 4 — the legacy scaler is deleted (captured by the Bash path)</div>
+        <div class="out">▸ prompt 3 — asking for a profiling report</div>
         <div class="out">▸ recap — plan complete, next steps surfaced</div>
-        <div class="out"><span class="ok">✓</span> demo session <span class="id2">demo-3cc31d01</span> is live — <span class="warn">5 pending edits</span> in observatory-demo/</div>
-        <div class="out">  open the Overview / Observations panels, review the edits, then: <span class="fl">demo --clean</span></div>
+        <div class="out"><span class="ok">✓</span> demo session <span class="id2">demo-3cc31d01</span> is live — <span class="warn">9 pending edits</span> in observatory-demo/,</div>
+        <div class="out">  plus a second agent on demo/hotfix</div>
+        <div class="out">  guided tour: <span class="fl">demo --tour</span>   ·   remove every trace: <span class="fl">demo --clean</span></div>
         <div class="cmd"><span class="pr">$</span><span class="cursor">&nbsp;</span></div>
       </div>
     </div>`),
@@ -1060,7 +1067,7 @@ const SIZE = {
   'file-history': '768,130',
   multitasking: '868,218', 'overview-tabs': '908,266', prompts: '748,560',
   'overview-workflows': '868,196', 'overview-tasks': '868,168', 'win-overview': '1248,392',
-  sessions: '768,232', feed: '868,212', processes: '868,205', chat: '908,440', demo: '928,392',
+  sessions: '768,232', feed: '868,212', processes: '868,205', chat: '908,440', demo: '928,556',
 };
 const tmp = join(tmpdir(), 'obs-media');
 mkdirSync(tmp, { recursive: true });

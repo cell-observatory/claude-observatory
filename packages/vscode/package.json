@@ -1,8 +1,8 @@
 {
   "name": "claude-observatory-vscode",
   "displayName": "Claude Observatory",
-  "description": "A running list of every file change Claude Code makes, each with its own Keep / Undo (surgical, git-free).",
-  "version": "0.8.8",
+  "description": "A running list of every file change Claude Code makes, each with its own Keep / Undo (surgical, git-free) — built for established and mission-critical codebases.",
+  "version": "0.8.9",
   "publisher": "cell-observatory",
   "private": true,
   "engines": {
@@ -87,27 +87,27 @@
       {
         "view": "claudeObservatory.edits",
         "when": "!claudeObservatory.hooksInstalled",
-        "contents": "No tracked Claude edits in this workspace yet.\nInstall the capture hooks, then let Claude edit a file.\n[Show setup instructions](command:claudeObservatory.setup)"
+        "contents": "No tracked Claude edits in this workspace yet.\nInstall the capture hooks, then let Claude edit a file.\n[Show setup instructions](command:claudeObservatory.setup)\n[Try the demo — no Claude session needed](command:claudeObservatory.startDemo)"
       },
       {
         "view": "claudeObservatory.edits",
         "when": "claudeObservatory.hooksInstalled && claudeObservatory.priorSessionWithEdits",
-        "contents": "No edits in this session yet \u2014 the hooks are working.\n[Switch to previous session](command:claudeObservatory.switchToPreviousSession)\n[Pick a session\u2026](command:claudeObservatory.switchSession)"
+        "contents": "No edits in this session yet — the hooks are working.\n[Switch to previous session](command:claudeObservatory.switchToPreviousSession)\n[Pick a session…](command:claudeObservatory.switchSession)\n[Try the demo — no Claude session needed](command:claudeObservatory.startDemo)"
       },
       {
         "view": "claudeObservatory.edits",
         "when": "claudeObservatory.hooksInstalled && !claudeObservatory.priorSessionWithEdits",
-        "contents": "No edits in this session yet.\nLet Claude edit a file and it will appear here."
+        "contents": "No edits in this session yet.\nLet Claude edit a file and it will appear here.\n[Try the demo — no Claude session needed](command:claudeObservatory.startDemo)"
       },
       {
         "view": "claudeObservatory.diffs",
         "when": "!claudeObservatory.hooksInstalled",
-        "contents": "No tracked Claude edits in this workspace yet."
+        "contents": "No tracked Claude edits in this workspace yet.\n[Try the demo — no Claude session needed](command:claudeObservatory.startDemo)"
       },
       {
         "view": "claudeObservatory.diffs",
         "when": "claudeObservatory.hooksInstalled",
-        "contents": "No edits in this session yet."
+        "contents": "No edits in this session yet.\n[Try the demo — no Claude session needed](command:claudeObservatory.startDemo)"
       },
       {
         "view": "claudeObservatory.fileHistory",
@@ -116,12 +116,12 @@
       {
         "view": "claudeObservatory.observations",
         "when": "!claudeObservatory.hooksInstalled",
-        "contents": "No tracked Claude edits in this workspace yet."
+        "contents": "No tracked Claude edits in this workspace yet.\n[Try the demo — no Claude session needed](command:claudeObservatory.startDemo)"
       },
       {
         "view": "claudeObservatory.observations",
         "when": "claudeObservatory.hooksInstalled",
-        "contents": "No edits in this session yet."
+        "contents": "No edits in this session yet.\n[Try the demo — no Claude session needed](command:claudeObservatory.startDemo)"
       },
       {
         "view": "claudeObservatory.actions",
@@ -524,6 +524,73 @@
         "title": "Clear resolved edits in folder",
         "category": "Claude Observatory",
         "icon": "$(clear-all)"
+      },
+      {
+        "command": "claudeObservatory.startDemo",
+        "title": "Start demo mode (replay + guided tour)",
+        "category": "Claude Observatory",
+        "icon": "$(play-circle)"
+      },
+      {
+        "command": "claudeObservatory.startTour",
+        "title": "Guided tour",
+        "category": "Claude Observatory",
+        "icon": "$(book)"
+      },
+      {
+        "command": "claudeObservatory.tourNext",
+        "title": "Guided tour: next step",
+        "category": "Claude Observatory"
+      },
+      {
+        "command": "claudeObservatory.tourBack",
+        "title": "Guided tour: previous step",
+        "category": "Claude Observatory"
+      },
+      {
+        "command": "claudeObservatory.exitDemo",
+        "title": "Exit demo mode (remove every trace)",
+        "category": "Claude Observatory",
+        "icon": "$(close)"
+      },
+      {
+        "command": "claudeObservatory.tourGoto",
+        "title": "Guided tour: go to step",
+        "category": "Claude Observatory"
+      },
+      {
+        "command": "claudeObservatory.restartDemo",
+        "title": "Restart demo (replay from the beginning)",
+        "category": "Claude Observatory",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "claudeObservatory.tourDock",
+        "title": "Guided tour: dock into the editor",
+        "category": "Claude Observatory",
+        "icon": "$(editor-layout)"
+      },
+      {
+        "command": "claudeObservatory.tourFloat",
+        "title": "Guided tour: move to its own window",
+        "category": "Claude Observatory",
+        "icon": "$(multiple-windows)"
+      },
+      {
+        "command": "claudeObservatory.tourClosed",
+        "title": "Guided tour: closed",
+        "category": "Claude Observatory"
+      },
+      {
+        "command": "claudeObservatory.tourPlayPause",
+        "title": "Guided tour: pause or resume",
+        "category": "Claude Observatory",
+        "icon": "$(debug-pause)"
+      },
+      {
+        "command": "claudeObservatory.tourReducedMotion",
+        "title": "Guided tour: reduced motion",
+        "category": "Claude Observatory"
       }
     ],
     "keybindings": [
@@ -737,6 +804,50 @@
         {
           "command": "claudeObservatory.clearFolder",
           "when": "false"
+        },
+        {
+          "command": "claudeObservatory.tourNext",
+          "when": "claudeObservatory.demoTour"
+        },
+        {
+          "command": "claudeObservatory.tourBack",
+          "when": "claudeObservatory.demoTour"
+        },
+        {
+          "command": "claudeObservatory.tourGoto",
+          "when": "false"
+        },
+        {
+          "command": "claudeObservatory.startTour",
+          "when": "claudeObservatory.demoPresent"
+        },
+        {
+          "command": "claudeObservatory.exitDemo",
+          "when": "claudeObservatory.demoPresent"
+        },
+        {
+          "command": "claudeObservatory.restartDemo",
+          "when": "claudeObservatory.demoPresent"
+        },
+        {
+          "command": "claudeObservatory.tourDock",
+          "when": "claudeObservatory.demoTour"
+        },
+        {
+          "command": "claudeObservatory.tourFloat",
+          "when": "claudeObservatory.demoTour"
+        },
+        {
+          "command": "claudeObservatory.tourClosed",
+          "when": "false"
+        },
+        {
+          "command": "claudeObservatory.tourPlayPause",
+          "when": "claudeObservatory.demoTour"
+        },
+        {
+          "command": "claudeObservatory.tourReducedMotion",
+          "when": "false"
         }
       ],
       "comments/commentThread/title": [
@@ -916,6 +1027,26 @@
           "command": "claudeObservatory.refresh",
           "when": "view == claudeObservatory.fileHistory",
           "group": "navigation@6"
+        },
+        {
+          "command": "claudeObservatory.startDemo",
+          "when": "view == claudeObservatory.changemap && !claudeObservatory.demoPresent",
+          "group": "navigation@99"
+        },
+        {
+          "command": "claudeObservatory.exitDemo",
+          "when": "view == claudeObservatory.changemap && claudeObservatory.demoPresent",
+          "group": "navigation@99"
+        },
+        {
+          "command": "claudeObservatory.startTour",
+          "when": "view == claudeObservatory.changemap && claudeObservatory.demoPresent && !claudeObservatory.demoTour",
+          "group": "navigation@99"
+        },
+        {
+          "command": "claudeObservatory.restartDemo",
+          "when": "view == claudeObservatory.changemap && claudeObservatory.demoPresent",
+          "group": "navigation@99"
         }
       ],
       "editor/title": [
@@ -1089,7 +1220,7 @@
         "claudeObservatory.inlineDiffView": {
           "type": "boolean",
           "default": true,
-          "description": "Open a Claude edit's before \u27f7 after diff in the unified (inline) view \u2014 the red/green single-column look \u2014 instead of side-by-side. Best-effort: flips a freshly opened diff via VS Code's built-in inline toggle when your editor defaults to side-by-side."
+          "description": "Open a Claude edit's before ⟷ after diff in the unified (inline) view — the red/green single-column look — instead of side-by-side. Best-effort: flips a freshly opened diff via VS Code's built-in inline toggle when your editor defaults to side-by-side."
         },
         "claudeObservatory.claudeBin": {
           "type": "string",
@@ -1111,7 +1242,7 @@
     "package": "vsce package --no-dependencies -o claude-observatory.vsix"
   },
   "devDependencies": {
-    "@claude-observatory/core": "0.8.8",
+    "@claude-observatory/core": "0.8.9",
     "@types/node": "^26.1.1",
     "@types/vscode": "^1.85.0",
     "@vscode/codicons": "^0.0.45",

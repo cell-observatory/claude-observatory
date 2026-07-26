@@ -190,6 +190,20 @@ function cursorPath(transcript: string): string {
   return path.join(rootDir(), 'usage-cursors', `${key}.json`);
 }
 
+/**
+ * Drop a transcript's persisted usage cursor. The cursor is keyed by the transcript PATH, not the
+ * session id, so `removeSession` (which only knows the id) cannot reach it — a caller that deletes a
+ * transcript has to say so here, or the cursor outlives it as an orphan that nothing will ever read
+ * again. `demo --clean` does exactly that, and repeats every time the demo is replayed.
+ */
+export function removeUsageCursor(transcript: string): void {
+  try {
+    fs.rmSync(cursorPath(transcript), { force: true });
+  } catch {
+    /* best effort — an orphaned cursor is inert, just untidy */
+  }
+}
+
 /** Cursor state as written to disk. `seen` must be persisted in FULL: duplicate message ids recur
  *  hundreds of lines apart in real transcripts (a resumed session re-emits earlier turns), so a
  *  last-id or fixed-window dedup would silently double-count those turns' tokens. */

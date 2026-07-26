@@ -257,9 +257,34 @@ class InlineOverlay(private val project: Project) : Disposable {
             hoverInlay = inlay
             if (lens.setHover(idx)) bounds?.let { editor.contentComponent.repaint(it) }
         }
-        editor.contentComponent.cursor =
-            if (idx >= 0) java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR)
-            else java.awt.Cursor.getDefaultCursor()
+        setLensCursor(editor, idx >= 0)
+    }
+
+    /** Editors this overlay currently holds a custom cursor on, so it only ever releases its own. */
+    private val cursorOwned = java.util.Collections.newSetFromMap(java.util.WeakHashMap<Editor, Boolean>())
+
+    /**
+     * Show the hand while the pointer is over a lens action, and give the cursor BACK otherwise.
+     *
+     * This used to assign `contentComponent.cursor` directly on every mouse move — including
+     * `Cursor.getDefaultCursor()`, which is the ARROW. `handleLensHover` is registered on the global
+     * event multicaster, so that ran for every motion event in every editor of the project and replaced
+     * the I-BEAM everywhere, in every file, whether or not the file had a single Claude edit in it. The
+     * platform sets the pointer first and this handler ran last, so the editor could never win it back;
+     * Cmd-click link cursors and fold-region cursors went the same way. It is the loudest thing a person
+     * would feel and nothing in a build or a test can see it.
+     *
+     * `setCustomCursor` is the API that exists for this: the editor tracks who asked, and `null` hands
+     * the pointer back to whatever the editor itself wants. We only ever release an editor we took.
+     */
+    private fun setLensCursor(editor: Editor, onLens: Boolean) {
+        val impl = editor as? com.intellij.openapi.editor.impl.EditorImpl ?: return
+        if (onLens) {
+            impl.setCustomCursor(this, java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR))
+            cursorOwned.add(editor)
+        } else if (cursorOwned.remove(editor)) {
+            impl.setCustomCursor(this, null)
+        }
     }
 
     override fun dispose() {
