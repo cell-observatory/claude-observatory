@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Releases &amp; channels — Claude Observatory</title>
+<meta name="description" content="How Claude Observatory ships: the stable channel (tagged releases from main) and the pre-release channel (a rolling build of the dev branch), how to switch between them from the editors' version chip or the CLI, and how a change travels from a feature branch to a tagged release.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%AC%3C/text%3E%3C/svg%3E">
+<style>
+  :root{
+    --bg:#fbfaf9; --surface:#ffffff; --surface-2:#f5f3f0;
+    --ink:#17171a; --ink-soft:#54545b; --ink-faint:#8b8a92;
+    --line:rgba(20,18,16,.10); --line-soft:rgba(20,18,16,.06);
+    --accent:#cf6440; --accent-ink:#a94e2c; --accent-soft:rgba(207,100,64,.10);
+    --shadow:0 30px 70px -40px rgba(40,25,15,.40), 0 8px 22px -18px rgba(40,25,15,.25);
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,Roboto,Helvetica,sans-serif;
+    --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+    --col:max(1140px, 90vw);
+  }
+  @media (prefers-color-scheme:dark){:root{
+    --bg:#0e0e11;--surface:#161619;--surface-2:#1a1a1e;--ink:#ececef;--ink-soft:#a5a4ac;--ink-faint:#76757d;
+    --line:rgba(255,255,255,.11);--line-soft:rgba(255,255,255,.06);--accent:#e08a63;--accent-ink:#ef9f7c;--accent-soft:rgba(224,138,99,.14);
+    --shadow:0 30px 70px -40px rgba(0,0,0,.8),0 8px 22px -18px rgba(0,0,0,.6);
+  }}
+  :root[data-theme="light"]{--bg:#fbfaf9;--surface:#fff;--surface-2:#f5f3f0;--ink:#17171a;--ink-soft:#54545b;--ink-faint:#8b8a92;--line:rgba(20,18,16,.10);--line-soft:rgba(20,18,16,.06);--accent:#cf6440;--accent-ink:#a94e2c;--accent-soft:rgba(207,100,64,.10);--shadow:0 30px 70px -40px rgba(40,25,15,.40),0 8px 22px -18px rgba(40,25,15,.25)}
+  :root[data-theme="dark"]{--bg:#0e0e11;--surface:#161619;--surface-2:#1a1a1e;--ink:#ececef;--ink-soft:#a5a4ac;--ink-faint:#76757d;--line:rgba(255,255,255,.11);--line-soft:rgba(255,255,255,.06);--accent:#e08a63;--accent-ink:#ef9f7c;--accent-soft:rgba(224,138,99,.14);--shadow:0 30px 70px -40px rgba(0,0,0,.8),0 8px 22px -18px rgba(0,0,0,.6)}
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth;scroll-padding-top:80px;-webkit-text-size-adjust:100%}
+  body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:1.0625rem;line-height:1.62;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+  .wrap{width:min(var(--col),90%);margin-inline:auto}
+  a{color:inherit;text-decoration:none}
+  h1,h2,h3{font-weight:640;letter-spacing:-.021em;line-height:1.1;text-wrap:balance;overflow-wrap:break-word}
+  .hl{color:var(--accent)}
+  .eyebrow{font-family:var(--mono);font-size:.72rem;text-transform:uppercase;letter-spacing:.2em;color:var(--accent-ink);font-weight:600}
+  .lede{color:var(--ink-soft);font-size:clamp(1.05rem,2vw,1.24rem);line-height:1.55;text-wrap:pretty}
+  /* A long command inside prose (`claude-observatory changemap --json`) is one unbreakable token: at
+     320px it ran 3px past the viewport and scrolled the whole page sideways. Wrap it rather than clip
+     it — the same treatment .cmd code already gets on the demo page. */
+  code{font-family:var(--mono);font-size:.86em;overflow-wrap:anywhere}
+
+  .nav{position:sticky;top:0;z-index:60;background:transparent;transition:background .25s,border-color .25s}
+  .nav.condensed{background:color-mix(in srgb,var(--bg) 80%,transparent);backdrop-filter:saturate(1.5) blur(14px);-webkit-backdrop-filter:saturate(1.5) blur(14px);border-bottom:1px solid var(--line-soft)}
+  .nav .row{display:flex;align-items:center;gap:20px;height:60px}
+  .brand{display:flex;align-items:center;gap:9px;font-weight:640;letter-spacing:-.02em;font-size:1.02rem}
+  .brand .m{font-size:1.2rem}
+  .nav .links{display:flex;gap:26px;margin-inline:auto;font-size:.95rem;color:var(--ink-soft)}
+  .nav .links a:hover{color:var(--ink)} .nav .links a.more{color:var(--accent-ink)}
+  .nav .right{display:flex;align-items:center;gap:10px}
+  .icon-btn,.ghost{border:1px solid var(--line);background:var(--surface);color:var(--ink-soft);border-radius:999px;padding:7px 13px;font-size:.85rem;font-family:var(--mono);cursor:pointer;transition:.15s}
+  .icon-btn:hover,.ghost:hover{color:var(--ink);border-color:var(--ink-faint)}
+  .menu-btn{display:none}
+  /* The nav row is one non-wrapping flex line — brand, links, then the right cluster — so anything that
+     does not fit pushes the cluster past the viewport and scrolls the WHOLE page sideways. Measured at
+     +29px on every page at 320px (brand + the three right-hand buttons) and +29/+30px at 768px on the
+     six-link pages, where the links are shown but no longer fit. The ghost GitHub button is the widest
+     item and the only redundant one: GitHub is already the last entry in .links, and below 720px the ☰
+     menu reveals those, so dropping it costs no route to anything. */
+  @media (max-width:900px){ .nav .right .ghost{display:none} }
+  @media (max-width:720px){
+    .menu-btn{display:inline-flex}
+    .nav .links{display:none}
+    .nav.open .links{display:flex;flex-direction:column;align-items:flex-start;position:absolute;top:60px;left:0;right:0;margin:0;padding:14px 5% 18px;gap:14px;background:var(--bg);border-bottom:1px solid var(--line);box-shadow:var(--shadow)}
+    .nav.open,.nav.open.condensed{background:var(--bg)}
+  }
+
+  header.head{padding:clamp(56px,9vw,110px) 0 clamp(30px,5vw,56px)}
+  header.head h1{font-size:clamp(2.4rem,6vw,4rem);margin:16px 0}
+  .back{display:inline-flex;align-items:center;gap:7px;font-family:var(--mono);font-size:.8rem;color:var(--ink-soft)}
+  .back:hover{color:var(--accent-ink)}
+
+  .group{padding-block:clamp(44px,6vh,80px);border-top:1px solid var(--line-soft)}
+  .group h2{font-size:clamp(1.5rem,2.8vw,2.1rem);margin:12px 0 10px}
+  .group>.wrap>p.glede{color:var(--ink-soft);margin-bottom:8px}
+  .term{margin-top:clamp(26px,4vh,40px);}
+  .term h3{font-size:1.12rem;margin-bottom:8px}
+  .term h3 a{color:inherit}
+  .term h3 a:hover{color:var(--accent-ink)}
+  .term p{color:var(--ink-soft);margin-bottom:8px}
+  .term p b,.group p b{color:var(--ink);font-weight:600}
+  .cfig{margin:14px 0 4px;max-width:min(100%,860px)}
+  .cfig img{width:100%;height:auto;display:block;border:1px solid var(--line);border-radius:10px;background:var(--bg-soft)}
+  .cfig figcaption{color:var(--ink-faint);font-size:.86rem;margin-top:9px;font-family:var(--mono);line-height:1.6}
+  .surface{margin-top:clamp(30px,4.5vh,46px);max-width:min(100%,860px)}
+  .surface h3{font-size:1.12rem;margin-bottom:6px}
+  .surface .id{font-family:var(--mono);font-size:.78rem;color:var(--ink-faint);margin-left:8px}
+  .surface p{color:var(--ink-soft);margin-bottom:8px;}
+  pre.ex{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:16px 18px;font-family:var(--mono);font-size:.82rem;line-height:1.7;color:var(--ink-soft);overflow-x:auto;margin-top:14px;}
+  pre.ex .p{color:var(--accent-ink)}
+  pre.ex .ok{color:#4a9d63}
+
+  .deeper{padding-block:clamp(56px,8vh,110px);border-top:1px solid var(--line-soft);text-align:center}
+  .deeper h2{font-size:clamp(1.7rem,3.5vw,2.6rem)}
+  .doclinks{display:flex;flex-wrap:wrap;gap:12px;justify-content:center;margin-top:28px}
+  .doclinks a{border:1px solid var(--line);border-radius:999px;padding:10px 18px;font-size:.92rem;color:var(--ink-soft);transition:.15s}
+  .doclinks a:hover{color:var(--ink);border-color:var(--ink-faint)}
+  .doclinks a.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+  .doclinks a.primary:hover{background:var(--accent-ink)}
+
+  .foot{padding:56px 0 68px;border-top:1px solid var(--line-soft);color:var(--ink-faint)}
+  .foot .row{display:flex;flex-wrap:wrap;gap:20px 30px;align-items:center;justify-content:space-between}
+  .foot .brand{display:flex;align-items:center;gap:9px;font-weight:640}
+  .foot .flinks{display:flex;flex-wrap:wrap;gap:20px;font-size:.92rem}
+  .foot .flinks a{color:var(--ink-soft)}
+  .foot .flinks a:hover{color:var(--ink)}
+  .foot .fine{font-family:var(--mono);font-size:.74rem;margin-top:16px}
+
+  /* Big screens: the column already grows via --col (66vw capped at 1560px); type follows in two
+     gentle steps so a 27–32" display gets a page, not a ribbon. px-sized chrome stays fixed — only
+     the reading measure and rem-based text scale. */
+  /* FLUID scaling, no steps: the root font tracks viewport width continuously (floor = today's 16px,
+     so anything ≤ ~1490px is pixel-identical to before; cap 24px ≈ a 32" display), and every rem-sized
+     rule — which is nearly all of this site's type, clamp() caps included — follows it. Root, not
+     body: rem resolves against html, which is why the first body-only attempt visibly moved nothing.
+     The column spans most of the width (86vw, floored at the old 1140px), and because type and column
+     scale together, characters-per-line stays roughly constant at every size. */
+  html{font-size:clamp(16px, 9px + 0.47vw, 24px)}
+</style>
+</head>
+<body>
+
+<nav class="nav" id="nav">
+  <div class="wrap row">
+    <a class="brand" href="showcase.html"><span class="m">🔬</span> Claude Observatory</a>
+    <div class="links">
+      <a href="showcase.html">Home</a>
+      <a href="demo.html">Demo</a>
+      <a href="getting-started.html">Getting started</a>
+      <a href="https://github.com/cell-observatory/claude-observatory">GitHub</a>
+    </div>
+    <div class="right">
+      <button class="icon-btn menu-btn" id="menu" aria-label="Toggle navigation menu" aria-expanded="false">☰</button>
+      <button class="icon-btn" id="theme" aria-label="Toggle theme">◐</button>
+      <a class="ghost" href="https://github.com/cell-observatory/claude-observatory">GitHub&nbsp;↗</a>
+    </div>
+  </div>
+</nav>
+
+<header class="head">
+  <div class="wrap">
+    <a class="back" href="showcase.html">← Home</a>
+    <h1>Releases &amp; channels</h1>
+    <p class="lede">Claude Observatory ships on two release channels. Stable is the default: tagged releases, cut when the work has soaked. Pre-release is a rolling build of the development branch, republished on every push, for anyone who wants what is being built as it is built. Every install follows exactly one channel, and switching is one action from either editor or one command from the terminal.</p>
+  </div>
+</header>
+
+<main>
+
+<section class="group" id="channels">
+  <div class="wrap">
+    <span class="eyebrow">The two channels</span>
+    <h2>Stable and Pre-release</h2>
+    <div class="term" id="stable">
+      <h3><a href="#stable">Stable</a></h3>
+      <p><b>Tagged releases, cut from <code>main</code>.</b> Each one is a version like <code>v0.9.0</code>: the full three-OS test matrix and the end-to-end suite ran on the exact commit, the artifacts (CLI tarball, VS&nbsp;Code <code>.vsix</code>, JetBrains plugin zip) are attached to the GitHub Release, and the changelog names what changed. This is the default channel — <code>releases/latest</code> serves it, and nothing on it ever moves after it is published.</p>
+    </div>
+    <div class="term" id="prerelease">
+      <h3><a href="#prerelease">Pre-release</a></h3>
+      <p><b>A rolling build of the <code>dev</code> branch.</b> Every push to <code>dev</code> rebuilds all the artifacts, stamps them <code>&lt;next&gt;-dev.&lt;n&gt;</code> (for example <code>0.10.0-dev.37</code>), and refreshes one GitHub release — tag <code>dev-latest</code>, marked <em>prerelease</em>, so the stable channel never sees it. You get merged features and fixes days or weeks before they reach a tagged release, with correspondingly less soak time. The version ordering is real semver: every dev build is newer than the stable it forked from, and the eventual tagged release is newer than every dev build that led to it — so promotion lands as an ordinary update.</p>
+    </div>
+  </div>
+</section>
+
+<section class="group" id="switching">
+  <div class="wrap">
+    <span class="eyebrow">Switching &amp; updating</span>
+    <h2>One chip in the editors, one flag in the terminal</h2>
+    <p class="glede">Both editors pin a <b>version chip</b> at the right edge of the Overview's toolbar. It shows the version you are running; when the channel you follow has something newer, a dot appears. Its menu holds everything this page describes:</p>
+    <div class="term">
+      <h3>Update now</h3>
+      <p>Installs the newest release of the channel you follow — the CLI, both editor plugins, and the bundled status line, all in one pass. Reload the VS&nbsp;Code window (or restart the IDE) afterwards to load the new build.</p>
+    </div>
+    <div class="term">
+      <h3>Stable ⇄ Pre-release</h3>
+      <p>Switching persists the choice and installs the target channel's newest immediately — including the deliberate downgrade when you leave the pre-release channel for stable. Updates follow the chosen channel from then on: the CLI's once-a-day nudge, VS&nbsp;Code's background check, and the chip itself all compare against it.</p>
+    </div>
+    <div class="term">
+      <h3>The terminal equivalents</h3>
+      <pre class="ex"><span class="p">$</span> claude-observatory update --check
+channel: stable
+CLI: up to date (0.9.0)
+<span class="p">…one row per installed editor plugin…</span>
+pre-release channel: 0.10.0-dev.37 — switch with `claude-observatory update --channel dev`
+run `claude-observatory update` to apply.
+
+<span class="p">$</span> claude-observatory update --channel dev
+<span class="ok">✓</span> switched to the pre-release (dev) channel
+downloading claude-observatory-cli-dev.tgz …
+<span class="ok">✓</span> updated the CLI 0.9.0 → 0.10.0-dev.37
+<span class="p">…the editor plugins and the status line refresh the same way…</span>
+
+<span class="p">$</span> claude-observatory update --channel stable   <span class="p"># back, any time</span></pre>
+      <p><code>claude-observatory version --check</code> reports the installed version, the followed channel, and both channels' newest at any time. The channel itself is one word in <code>~/.claude/claude-observatory/channel</code> — no other state.</p>
+    </div>
+    <div class="term">
+      <h3>JetBrains IDE-native updates, per channel</h3>
+      <p>The self-hosted plugin repository exists for both channels. Subscribe the IDE to exactly one (<b>Settings → Plugins → ⚙ → Manage Plugin Repositories</b>):</p>
+      <p><code>…/releases/latest/download/updatePlugins.xml</code> — stable<br>
+      <code>…/releases/download/dev-latest/updatePlugins.xml</code> — pre-release</p>
+      <p>(The chip's switch already covers the plugin; the repository URL is for IDE-native auto-updates.)</p>
+    </div>
+  </div>
+</section>
+
+<section class="group" id="pipeline">
+  <div class="wrap">
+    <span class="eyebrow">How a change ships</span>
+    <h2>From a branch to your editor</h2>
+    <p class="glede">One path, three stations — each PR runs the full three-OS test matrix before it can land anywhere:</p>
+    <pre class="ex">feature / fix branch ──PR──▶ <b>dev</b> (pre-release channel) ──PR──▶ <b>main</b> (stable channel, tagged releases)</pre>
+    <div class="term">
+      <h3>Landing on dev</h3>
+      <p>Feature and fix PRs target the persistent <code>dev</code> branch. The moment one merges, the rolling pre-release rebuilds — anyone on the pre-release channel is one <b>Update now</b> away from it.</p>
+    </div>
+    <div class="term">
+      <h3>Promoting to main</h3>
+      <p>When dev has soaked, a single <code>dev → main</code> PR promotes everything, and a version tag on the merge cuts the official release. Stable users see one coherent update with a changelog; pre-release users see the same content arrive as an ordinary (slightly newer) version.</p>
+    </div>
+    <p style="margin-top:18px">The contributor-side details — workflows, version stamping, what to bump after a promote — live in <a href="https://github.com/cell-observatory/claude-observatory/blob/main/CONTRIBUTING.md" style="color:var(--accent-ink);text-decoration:underline;text-underline-offset:3px">CONTRIBUTING</a>.</p>
+  </div>
+</section>
+
+</main>
+
+<section class="deeper">
+  <div class="wrap">
+    <span class="eyebrow">Documentation</span>
+    <h2>Further reading</h2>
+    <div class="doclinks">
+      <a class="primary" href="showcase.html">← Back to home</a>
+      <a href="getting-started.html">Getting started</a>
+      <a href="concepts.html">Concepts</a>
+      <a href="https://github.com/cell-observatory/claude-observatory/blob/main/CONTRIBUTING.md">Contribute</a>
+      <a href="https://github.com/cell-observatory/claude-observatory#quickstart">Install</a>
+    </div>
+  </div>
+</section>
+
+<footer class="foot" id="footer">
+  <div class="wrap">
+    <div class="row">
+      <span class="brand"><span class="m">🔬</span> Claude Observatory</span>
+      <div class="flinks">
+        <a href="concepts.html">Concepts</a>
+        <a href="releases.html">Releases</a>
+        <a href="https://github.com/cell-observatory/claude-observatory/blob/main/docs/DEMO.md">Demo</a>
+        <a href="https://github.com/cell-observatory/claude-observatory/blob/main/docs/ARCHITECTURE.md">How it works</a>
+        <a href="https://github.com/cell-observatory/claude-observatory/blob/main/CONTRIBUTING.md">Contribute</a>
+        <a href="https://github.com/cell-observatory/claude-observatory">GitHub ↗</a>
+      </div>
+    </div>
+    <div class="fine">Apache-2.0 · git-free · zero extra Claude tokens · terminal + VS Code + JetBrains</div>
+  </div>
+</footer>
+
+<script>
+  (function(){
+    var root=document.documentElement,btn=document.getElementById('theme'),KEY='co-theme';
+    try{var s=localStorage.getItem(KEY);if(s)root.setAttribute('data-theme',s);}catch(e){}
+    btn.addEventListener('click',function(){
+      var cur=root.getAttribute('data-theme')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light');
+      var next=cur==='dark'?'light':'dark';root.setAttribute('data-theme',next);
+      try{localStorage.setItem(KEY,next);}catch(e){}
+    });
+  })();
+  (function(){
+    var nav=document.getElementById('nav');var f=function(){nav.classList.toggle('condensed',window.scrollY>40);};
+    window.addEventListener('scroll',f,{passive:true});f();
+  })();
+  (function(){
+    var nav=document.getElementById('nav'),btn=document.getElementById('menu');
+    if(!nav||!btn) return;
+    btn.addEventListener('click',function(){ var open=nav.classList.toggle('open'); btn.setAttribute('aria-expanded',open?'true':'false'); });
+    var ls=nav.querySelectorAll('.links a');
+    for(var i=0;i<ls.length;i++) ls[i].addEventListener('click',function(){ nav.classList.remove('open'); btn.setAttribute('aria-expanded','false'); });
+  })();
+</script>
+</body>
+</html>

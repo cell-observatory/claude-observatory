@@ -382,10 +382,21 @@ The one-liner in [Quickstart](#quickstart) covers most people. The details:
 ### Keeping up to date
 
 `claude-observatory update` refreshes **everything installed** — the CLI, the VS Code extension, and
-the JetBrains plugin — from the [latest release](https://github.com/cell-observatory/claude-observatory/releases/latest)
-(add `--check` to preview without installing); re-running the [one-liner](#quickstart) does the same.
-The CLI also nudges you once a day when a newer release exists (opt out with
-`CLAUDE_OBSERVATORY_NO_UPDATE_CHECK=1`). Beyond that, each surface can keep **itself** current:
+the JetBrains plugin — from the release channel you follow (add `--check` to preview without
+installing); re-running the [one-liner](#quickstart) does the same. The CLI also nudges you once a
+day when a newer release exists (opt out with `CLAUDE_OBSERVATORY_NO_UPDATE_CHECK=1`).
+
+There are **two release channels** (full story: [the Releases page](https://cell-observatory.github.io/claude-observatory/releases.html)):
+
+- **Stable** (the default) — tagged releases, cut from `main`.
+- **Pre-release** — a rolling build of the `dev` branch, republished on every push, versioned
+  `<next>-dev.<n>`. Newest features, less soak time.
+
+Switch from the **version chip** at the right edge of the Overview's toolbar in either editor
+(it shows the running version; its menu offers **Update now** and the channel switch), or from the
+terminal: `claude-observatory update --channel dev` (back with `--channel stable` — switching
+installs that channel's newest immediately, downgrades included, and updates follow it from then
+on). Beyond that, each surface can keep **itself** current:
 
 - **CLI** — `claude-observatory update`, or the daily nudge above; `claude-observatory version --check`
   shows your installed version next to the latest release at any time.
@@ -394,7 +405,9 @@ The CLI also nudges you once a day when a newer release exists (opt out with
 - **JetBrains** — add the self-hosted plugin repository **once** and the IDE auto-updates the plugin
   like any Marketplace plugin (see [the JetBrains guide](packages/jetbrains/README.md#auto-updates)):
   **Settings → Plugins → ⚙ → Manage Plugin Repositories → +**, then paste
-  `https://github.com/cell-observatory/claude-observatory/releases/latest/download/updatePlugins.xml`.
+  `https://github.com/cell-observatory/claude-observatory/releases/latest/download/updatePlugins.xml`
+  (pre-release channel: the same path under `releases/download/dev-latest/` instead of
+  `releases/latest/download/`).
 
 **Platforms:** macOS and Linux work as-is. On **Windows**, the CLI, capture hooks, and both editor plugins
 run natively (npm's `.cmd` shims are handled) — but the installer and the bundled status line are bash, so

@@ -521,6 +521,18 @@
         "icon": "$(cloud-download)"
       },
       {
+        "command": "claudeObservatory.switchChannel",
+        "title": "Switch release channel (Stable / Pre-release)",
+        "category": "Claude Observatory",
+        "icon": "$(versions)"
+      },
+      {
+        "command": "claudeObservatory.updateNow",
+        "title": "Update now (CLI + both editor plugins)",
+        "category": "Claude Observatory",
+        "icon": "$(cloud-download)"
+      },
+      {
         "command": "claudeObservatory.showPrompts",
         "title": "Show the Prompts window",
         "category": "Claude Observatory",

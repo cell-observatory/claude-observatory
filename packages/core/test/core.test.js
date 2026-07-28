@@ -7472,3 +7472,173 @@ test('install: statuslineInstalled detects OURS and only ours (0.9.0)', () => {
   fs.writeFileSync(path.join(dir, 'settings.json'), '{corrupt');
   assert.equal(core.statuslineInstalled(), false, 'corrupt settings — false, never a throw');
 });
+
+test('semver: prerelease ordering carries the release channels (0.9.0)', () => {
+  assert.ok(core.isNewer('0.10.0-dev.2', '0.9.0'), 'a dev build is newer than the stable it forked from');
+  assert.ok(core.isNewer('0.10.0', '0.10.0-dev.9'), 'the promoted stable is newer than every dev build before it');
+  assert.ok(core.isNewer('0.10.0-dev.10', '0.10.0-dev.9'), 'dev builds order numerically, not lexically');
+  assert.ok(!core.isNewer('0.10.0-dev.9', '0.10.0-dev.10'), 'and never the other way');
+  assert.ok(!core.isNewer('0.10.0-dev.4', '0.10.0-dev.4'), 'equal prereleases are equal');
+  assert.ok(core.isNewer('0.10.0-dev.2', '0.10.0-dev'), 'more identifiers beat a shared prefix');
+  assert.equal(core.compareVersions('1.2.3', 'v1.2.3'), 0, 'the v prefix is cosmetic');
+  assert.ok(core.isNewer('0.10.0', '0.9.9'), 'plain release ordering is unchanged');
+});
+
+test('channel: persisted at the store root; resolveReleaseFromList picks per channel (0.9.0)', () => {
+  const home = freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  assert.equal(core.getUpdateChannel(), 'stable', 'no file → stable');
+  core.setUpdateChannel('dev');
+  assert.equal(core.getUpdateChannel(), 'dev', 'the switch persists');
+  core.setUpdateChannel('stable');
+  assert.equal(core.getUpdateChannel(), 'stable', 'and back');
+  assert.equal(core.normalizeChannel('Pre-Release'), 'dev');
+  assert.equal(core.normalizeChannel('prerelease'), 'dev');
+  assert.equal(core.normalizeChannel('stable'), 'stable');
+  assert.equal(core.normalizeChannel('nightly'), null, 'unknown spellings are refused, never guessed');
+
+  const releases = [
+    { tag_name: 'dev-latest', prerelease: true },
+    { tag_name: 'v0.9.0', prerelease: false },
+    { tag_name: 'v0.8.9', prerelease: false },
+  ];
+  assert.equal(core.resolveReleaseFromList(releases, 'stable').tag_name, 'v0.9.0', 'stable skips prereleases');
+  assert.equal(core.resolveReleaseFromList(releases, 'dev').tag_name, 'dev-latest', 'dev takes the newest prerelease');
+  assert.equal(core.resolveReleaseFromList([{ tag_name: 'v0.9.0' }], 'dev').tag_name, 'v0.9.0', 'dev falls back to stable when no prerelease exists');
+  assert.equal(core.resolveReleaseFromList([{ tag_name: 'x', prerelease: false, draft: true }], 'stable'), null, 'drafts never resolve');
+
+  // After a promote, the STABLE release outranks the last rolling build — the dev channel must
+  // serve the newest thing, not blindly the newest prerelease.
+  assert.equal(
+    core.resolveReleaseFromList(
+      [
+        { tag_name: 'v0.10.0', prerelease: false },
+        { tag_name: 'dev-latest', name: 'Pre-release 0.10.0-dev.9 (rolling, from dev)', prerelease: true },
+      ],
+      'dev'
+    ).tag_name,
+    'v0.10.0',
+    'dev serves the stable when it semver-outranks the rolling build'
+  );
+
+  // versionOfRelease: the tag when version-shaped, else the semver in the title (the rolling tag).
+  assert.equal(core.versionOfRelease({ tag_name: 'v0.9.0' }), '0.9.0', 'stable versions come from the tag');
+  assert.equal(core.versionOfRelease({ tag_name: 'dev-latest', name: 'Pre-release 0.9.0-dev.12 (rolling, from dev)' }), '0.9.0-dev.12', 'the rolling tag versions from the title');
+  assert.equal(core.versionOfRelease({ tag_name: 'dev-latest', name: 'no version here' }), null, 'no semver anywhere → null, never a fake 0.0.0');
+  assert.equal(core.versionOfRelease(null), null, 'null-safe');
+
+  // LOCKSTEP with the workflow: the rolling release's --title template in dev-release.yml must stay
+  // extractable by versionOfRelease — if the title loses its version, the dev channel resolves to
+  // nothing and no other test notices.
+  const wf = fs.readFileSync(path.resolve(__dirname, '../../../.github/workflows/dev-release.yml'), 'utf8');
+  const titles = [...wf.matchAll(/--title "([^"]+)"/g)].map((m) => m[1].replace(/\$\{VER\}/g, '9.9.9-dev.3'));
+  assert.ok(titles.length >= 1, 'the workflow declares the rolling release title');
+  for (const t of titles)
+    assert.equal(core.versionOfRelease({ tag_name: 'dev-latest', name: t }), '9.9.9-dev.3',
+      `versionOfRelease must extract the version from the workflow title: "${t}"`);
+
+  // The CLI's network-free version surface — what the editors' chip renders instantly.
+  const env = { ...process.env, HOME: home, USERPROFILE: home };
+  const vj = JSON.parse(cp.execFileSync('node', [CLI, 'version', '--json'], { env, encoding: 'utf8' }));
+  assert.deepEqual(vj, { current: require('../../cli/package.json').version, channel: 'stable' }, 'version --json = installed + channel, no network');
+});
+
+test('cli: the update/switch mechanism WORKS end-to-end — mock releases API, real downloads, real installs, both directions (0.9.0)', async () => {
+  // The whole flow, minus github.com itself: a LOCAL mock of the releases API (the
+  // CLAUDE_OBSERVATORY_RELEASES_API seam) serving one stable and one prerelease whose assets are
+  // REAL npm-installable tarballs — and a sandboxed npm global prefix (npm_config_prefix), so the
+  // genuine `npm i -g` lands in scratch and the machine's real install is never touched.
+  const home = freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const http = require('http');
+
+  const work = fs.realpathSync(tmpWork());
+  const pkgDir = path.join(work, 'fakecli');
+  fs.mkdirSync(pkgDir, { recursive: true });
+  const mkTgz = (version) => {
+    fs.writeFileSync(
+      path.join(pkgDir, 'package.json'),
+      JSON.stringify({ name: 'claude-observatory', version, bin: { 'claude-observatory': 'co.js' } })
+    );
+    fs.writeFileSync(path.join(pkgDir, 'co.js'), '#!/usr/bin/env node\nconsole.log("fake " + require("./package.json").version);\n');
+    cp.execSync('npm pack --silent', { cwd: pkgDir, stdio: ['ignore', 'ignore', 'ignore'] });
+    return path.join(pkgDir, `claude-observatory-${version}.tgz`);
+  };
+  const stableTgz = mkTgz('9.9.9');
+  const devTgz = mkTgz('9.10.0-dev.7');
+
+  const srv = http.createServer((req, res) => {
+    if (req.url.startsWith('/releases')) {
+      const base = `http://127.0.0.1:${srv.address().port}`;
+      res.setHeader('content-type', 'application/json');
+      // The REAL shapes: the rolling pre-release keeps a FIXED tag and carries its version in the
+      // title (exactly what .github/workflows/dev-release.yml publishes); stable versions by tag.
+      res.end(JSON.stringify([
+        { tag_name: 'dev-latest', name: 'Pre-release 9.10.0-dev.7 (rolling, from dev)', prerelease: true, assets: [{ name: 'claude-observatory-cli-dev.tgz', browser_download_url: `${base}/a/dev.tgz` }] },
+        { tag_name: 'v9.9.9', name: 'Claude Observatory v9.9.9', prerelease: false, assets: [{ name: 'claude-observatory-9.9.9.tgz', browser_download_url: `${base}/a/stable.tgz` }] },
+      ]));
+    } else if (req.url === '/a/dev.tgz') res.end(fs.readFileSync(devTgz));
+    else if (req.url === '/a/stable.tgz') res.end(fs.readFileSync(stableTgz));
+    else { res.statusCode = 404; res.end(); }
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+
+  const prefix = path.join(work, 'npm-prefix');
+  fs.mkdirSync(prefix, { recursive: true });
+  const env = {
+    ...process.env,
+    HOME: home,
+    USERPROFILE: home,
+    CLAUDE_OBSERVATORY_RELEASES_API: `http://127.0.0.1:${srv.address().port}`,
+    npm_config_prefix: prefix,
+    CLAUDE_OBSERVATORY_NO_UPDATE_CHECK: '1',
+  };
+  delete env.CLAUDE_CONFIG_DIR;
+  // ASYNC exec, deliberately: the mock server lives in THIS process, and a sync exec would block the
+  // event loop that has to accept the child's requests — a deadlock that reads as a network timeout.
+  const run = (args) =>
+    new Promise((resolve, reject) => {
+      cp.execFile('node', [CLI, ...args], { env, encoding: 'utf8' }, (err, stdout, stderr) => {
+        if (err) reject(new Error(`${args.join(' ')} failed: ${stderr || stdout || err.message}`));
+        else resolve(stdout);
+      });
+    });
+  // npm's global module dir differs per OS (lib/node_modules vs node_modules).
+  const installedPkgJson = () => {
+    for (const p of [
+      path.join(prefix, 'lib', 'node_modules', 'claude-observatory', 'package.json'),
+      path.join(prefix, 'node_modules', 'claude-observatory', 'package.json'),
+    ]) if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, 'utf8'));
+    return null;
+  };
+
+  try {
+    // 1. `update --check`: the followed channel is named, and the dev tip is disclosed.
+    const chk = await run(['update', '--check']);
+    assert.match(chk, /channel: stable/, '--check names the followed channel');
+    assert.match(chk, /9\.9\.9/, 'stable resolves against the mock');
+    assert.match(chk, /pre-release channel: 9\.10\.0-dev\.7/, 'the dev tip is disclosed to stable users');
+
+    // 2. SWITCH to dev: the channel persists AND the dev tarball really downloads + installs.
+    const sw = await run(['update', '--channel', 'dev', '--cli-only']);
+    assert.match(sw, /switched to the pre-release \(dev\) channel/, 'the switch is announced');
+    assert.equal(core.getUpdateChannel(), 'dev', 'the channel file persisted at the store root');
+    assert.equal(installedPkgJson()?.version, '9.10.0-dev.7', 'the dev build LANDED in the sandboxed global prefix');
+
+    // 3. And BACK: stable is a semver DOWNGRADE from the dev build — the one case a plain
+    //    isNewer gate would refuse; a switch must install it anyway.
+    const back = await run(['update', '--channel', 'stable', '--cli-only']);
+    assert.match(back, /switched to the stable channel/, 'the reverse switch is announced');
+    assert.equal(installedPkgJson()?.version, '9.9.9', 'the stable build replaced the dev build');
+    assert.equal(core.getUpdateChannel(), 'stable', 'the channel followed back');
+
+    // 4. `version --check --json` — the exact payload both editors' dropdowns render.
+    const vj = JSON.parse(await run(['version', '--check', '--json']));
+    assert.equal(vj.channel, 'stable');
+    assert.equal(vj.stableLatest, '9.9.9');
+    assert.equal(vj.devLatest, '9.10.0-dev.7');
+    assert.equal(vj.updateAvailable, core.isNewer('9.9.9', vj.current), 'updateAvailable is the active-channel compare');
+  } finally {
+    srv.close();
+  }
+});

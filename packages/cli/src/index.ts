@@ -274,7 +274,10 @@ function cmdDoctor(args: string[]): void {
     return;
   }
   const icon = (l: string) => (l === 'ok' ? c.green('✓') : l === 'warn' ? c.yellow('⚠') : c.red('✗'));
-  process.stdout.write(c.bold(`claude-observatory doctor`) + c.dim(`  v${version()}\n\n`));
+  process.stdout.write(
+    c.bold(`claude-observatory doctor`) +
+      c.dim(`  v${version()} · ${(require('@claude-observatory/core') as typeof import('@claude-observatory/core')).getUpdateChannel() === 'dev' ? 'pre-release (dev)' : 'stable'} channel\n\n`)
+  );
   for (const ch of checks) {
     process.stdout.write(`${icon(ch.level)} ${ch.label}\n    ${c.dim(ch.detail)}\n`);
     if (ch.fix) process.stdout.write(`    ${c.cyan('→ ' + ch.fix)}\n`);
@@ -1184,7 +1187,7 @@ function flagValue(args: string[], name: string): string | undefined {
 }
 
 /** Flags that consume the token after them — so a numeric VALUE is never read as a positional id. */
-const VALUE_FLAGS = new Set(['--session', '--file', '--under', '--ids', '--root', '--filter', '--dir']);
+const VALUE_FLAGS = new Set(['--session', '--file', '--under', '--ids', '--root', '--filter', '--dir', '--channel']);
 
 /**
  * The positional edit id if one was typed, else undefined — requireId's scan without the failure.
@@ -2404,6 +2407,10 @@ async function cmdSuggest(args: string[]): Promise<void> {
 // --- self-update: fetch the latest GitHub Release and reinstall the CLI (no registry, no deps) ---
 
 const RELEASE_REPO = 'cell-observatory/claude-observatory';
+/** The releases API base — overridable so the update/channel integration test (and an enterprise
+ *  release mirror) can stand in for github.com. Everything else about the flow stays identical:
+ *  asset downloads follow the `browser_download_url`s the API payload itself carries. */
+const RELEASES_API = process.env.CLAUDE_OBSERVATORY_RELEASES_API || `https://api.github.com/repos/${RELEASE_REPO}`;
 // The VS Code-family extension id (publisher.name). We detect the extension by its install DIR (like
 // the JetBrains plugin dirs) so detection never depends on the editor CLI being on PATH; the CLI is
 // only needed to APPLY the update, and is resolved from app-bundle locations when it's off PATH.
@@ -2433,7 +2440,10 @@ type ReleaseAsset = { name: string; browser_download_url: string; digest?: strin
 
 /** GET a URL following redirects, resolving to the response body. Rejects on non-200. */
 function httpGet(url: string, redirects = 5): Promise<Buffer> {
-  const https = require('https');
+  // Protocol-aware: production traffic is https (github.com + its CDN), while the update/channel
+  // integration test serves a LOCAL http mock of the releases API — the one way the real download →
+  // verify → install path gets exercised end-to-end without touching the network.
+  const https = url.startsWith('http://') ? require('http') : require('https');
   return new Promise((resolve, reject) => {
     const req = https.get(
       url,
@@ -2500,7 +2510,12 @@ async function updateCliBinary(assets: ReleaseAsset[], latest: string, current: 
   const dest = await downloadAsset(tgz!);
   const cp = require('child_process');
   process.stdout.write(c.dim('installing globally (npm i -g) …\n'));
-  const r = cp.spawnSync('npm', ['i', '-g', dest], { stdio: 'inherit' });
+  // npm is npm.cmd on Windows — a bare spawn can't exec it without a shell (same rule as the
+  // status-line respawn below).
+  const winShell = process.platform === 'win32';
+  // shell mode concatenates args UNQUOTED — a temp path with a space (spaced Windows usernames)
+  // would split; quote the one arg that carries a user-controlled path.
+  const r = cp.spawnSync(winShell ? 'npm.cmd' : 'npm', ['i', '-g', winShell ? `"${dest}"` : dest], { stdio: 'inherit', shell: winShell });
   if (r.status !== 0) fail(`npm install failed (exit ${r.status ?? '?'}). Try: npm i -g ${dest}`);
   process.stdout.write(c.green('✓ ') + `updated the CLI ${current} → ${latest}\n`);
   refreshInstalledStatusline();
@@ -2824,30 +2839,65 @@ async function refreshJetbrainsPlugin(
  * `--check` reports only; `--cli-only` is the old CLI-only behavior; `--force` reinstalls even if
  * already current.
  */
+/** The releases LIST (newest first, drafts invisible anonymously) — ONE fetch answers both
+ *  channels: the first regular release is what `releases/latest` serves, the first prerelease is
+ *  the rolling dev build. Channel choice happens in core (`resolveReleaseFromList`), pure. */
+async function fetchReleases(): Promise<any[]> {
+  try {
+    const list = JSON.parse((await httpGet(`${RELEASES_API}/releases?per_page=100`)).toString('utf8'));
+    return Array.isArray(list) ? list : [];
+  } catch (e: any) {
+    fail(`could not check for updates (need network access to github.com): ${e?.message || e}`);
+  }
+}
+
+const CHANNEL_LABEL = { stable: 'stable', dev: 'pre-release (dev)' } as const;
+
 async function cmdUpdate(args: string[]): Promise<void> {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const current = version();
   const cliOnly = args.includes('--cli-only');
   const checkOnly = args.includes('--check');
   const force = args.includes('--force');
-  let release: any;
-  try {
-    release = JSON.parse((await httpGet(`https://api.github.com/repos/${RELEASE_REPO}/releases/latest`)).toString('utf8'));
-  } catch (e: any) {
-    fail(`could not check for updates (need network access to github.com): ${e?.message || e}`);
-  }
-  const latest = String(release.tag_name || '').replace(/^v/i, '');
+  // --channel <stable|dev>: SWITCH channels — persist the choice and install that channel's newest
+  // in the same breath (a switch installs even when the target version isn't "newer": moving from a
+  // dev build back to stable is a downgrade by semver and must still happen).
+  const chI = args.indexOf('--channel');
+  const chRaw = flagValue(args, '--channel');
+  if (chI >= 0 && !chRaw) fail('`update --channel <stable|dev>` requires a value');
+  const requested = chRaw ? core.normalizeChannel(chRaw) : null;
+  if (chRaw && !requested) fail(`unknown channel "${chRaw}" — use stable or dev (pre-release)`);
+  const switching = requested !== null && requested !== core.getUpdateChannel();
+  const channel = requested ?? core.getUpdateChannel();
+
+  const releases = await fetchReleases();
+  const release: any = core.resolveReleaseFromList(releases, channel);
+  if (!release) fail('no published release found for the repository.');
+  if (channel === 'dev' && release.prerelease !== true)
+    process.stdout.write(c.dim('no pre-release published yet — the stable release is the newest there is.\n'));
+  const latest = core.versionOfRelease(release) ?? '';
   if (!latest) fail('no published release found for the repository.');
   const assets: ReleaseAsset[] = release.assets || [];
-  const cliStale = core.isNewer(latest, current);
+  const cliStale = switching ? latest !== current : core.isNewer(latest, current);
 
   if (checkOnly) {
+    // A PREVIEW is honest about being one: `--check --channel dev` shows what the switch WOULD do —
+    // it never persists, its rows use switch semantics (a switch installs on any version DIFFERENCE,
+    // downgrades included), and the closing hint names the command that actually applies it.
+    process.stdout.write(
+      c.dim(
+        switching
+          ? `channel: ${CHANNEL_LABEL[channel]} (previewing — you follow ${CHANNEL_LABEL[core.getUpdateChannel()]}; nothing switched)\n`
+          : `channel: ${CHANNEL_LABEL[channel]}\n`
+      )
+    );
+    const stale = (v: string) => (switching ? latest !== v : core.isNewer(latest, v));
     process.stdout.write(cliStale ? c.yellow(`CLI: update available ${current} → ${latest}\n`) : c.green(`CLI: up to date (${current})\n`));
     if (!cliOnly) {
       const vs = vscodeInstalls();
       if (vs.length === 0) process.stdout.write(c.dim('VS Code: extension not detected\n'));
       else for (const h of vs) {
-        if (!core.isNewer(latest, h.version)) process.stdout.write(c.green(`${h.label}: up to date (${h.version})\n`));
+        if (!stale(h.version)) process.stdout.write(c.green(`${h.label}: up to date (${h.version})\n`));
         else process.stdout.write(c.yellow(`${h.label}: ${h.version} → ${latest}`) + (h.cli ? '\n' : c.yellow('  (installed but no CLI found to update — install the shell `code` command)\n')));
       }
       const fs = require('fs');
@@ -2856,11 +2906,28 @@ async function cmdUpdate(args: string[]): Promise<void> {
       if (jb.length === 0) process.stdout.write(c.dim('JetBrains: plugin not detected\n'));
       else for (const d of jb) {
         const v = jbInstalledVersion(path.join(d, JB_PLUGIN_DIRNAME));
-        process.stdout.write(v && !core.isNewer(latest, v) ? c.green(`JetBrains: up to date (${v})\n`) : c.yellow(`JetBrains: ${v || 'installed'} → ${latest} (${d})\n`));
+        process.stdout.write(v && !stale(v) ? c.green(`JetBrains: up to date (${v})\n`) : c.yellow(`JetBrains: ${v || 'installed'} → ${latest} (${d})\n`));
       }
     }
-    process.stdout.write(c.dim('run `claude-observatory update` to apply.\n'));
+    if (channel === 'stable') {
+      // The pre-release channel's tip, one dim line — the list is already in hand, and this is the
+      // only place a stable user learns the channel exists from the terminal.
+      const pre: any = releases.find((r: any) => r?.prerelease === true && !r?.draft);
+      const preVer = core.versionOfRelease(pre);
+      if (preVer)
+        process.stdout.write(c.dim(`pre-release channel: ${preVer} — switch with \`claude-observatory update --channel dev\`\n`));
+    }
+    process.stdout.write(
+      c.dim(switching ? `run \`claude-observatory update --channel ${requested}\` to apply.\n` : 'run `claude-observatory update` to apply.\n')
+    );
     return;
+  }
+
+  // Persist the switch only once the target channel RESOLVED — a typo or an offline check must not
+  // strand the config on a channel whose release was never even looked up.
+  if (requested !== null && requested !== core.getUpdateChannel()) {
+    core.setUpdateChannel(requested);
+    process.stdout.write(c.green('✓ ') + `switched to the ${CHANNEL_LABEL[requested]} channel\n`);
   }
 
   if (cliOnly) {
@@ -2871,8 +2938,8 @@ async function cmdUpdate(args: string[]): Promise<void> {
 
   if (cliStale) await updateCliBinary(assets, latest, current); // refreshes the status line itself
   else refreshInstalledStatusline(); // CLI already current — still heal a statusline.sh an older CLI wrote
-  const vscode = await refreshVscodeExtension(assets, latest, force);
-  const jetbrains = await refreshJetbrainsPlugin(assets, latest, force);
+  const vscode = await refreshVscodeExtension(assets, latest, force || switching);
+  const jetbrains = await refreshJetbrainsPlugin(assets, latest, force || switching);
   if (vscode === 'blocked' || jetbrains === 'blocked') {
     // Something is installed but couldn't be updated — never let this pass as success/silence.
     process.stdout.write(c.yellow('⚠ ') + 'an installed extension could not be updated (see the note above).\n');
@@ -2887,7 +2954,9 @@ async function cmdUpdate(args: string[]): Promise<void> {
           c.dim('  install the VS Code / JetBrains extensions via scripts/bootstrap.sh or the release assets.\n')
       );
     } else {
-      process.stdout.write(c.green('✓ ') + `everything is up to date (${latest})\n`);
+      process.stdout.write(
+        c.green('✓ ') + `everything is up to date (${latest}${channel === 'dev' ? ', pre-release channel' : ''})\n`
+      );
     }
   }
 }
@@ -2897,26 +2966,45 @@ async function cmdUpdate(args: string[]): Promise<void> {
  *  `-v` / `--version` stay a pure one-line print so scripts can rely on them. */
 async function cmdVersion(args: string[]): Promise<void> {
   const cur = version();
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  const json = args.includes('--json');
   if (!(args.includes('--check') || args.includes('--latest'))) {
+    // Network-free forms. `--json` is what the editors' version chip renders BEFORE any fetch:
+    // the installed version + the followed channel, instantly.
+    if (json) {
+      emitJson({ current: cur, channel: core.getUpdateChannel() });
+      return;
+    }
     process.stdout.write(`claude-observatory ${cur}\n`);
     return;
   }
-  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
-  let latest = '';
-  try {
-    const release = JSON.parse(
-      (await httpGet(`https://api.github.com/repos/${RELEASE_REPO}/releases/latest`)).toString('utf8')
-    );
-    latest = String(release.tag_name || '').replace(/^v/i, '');
-  } catch (e: any) {
-    fail(`could not fetch the latest release (installed ${cur}; need network access to github.com): ${e?.message || e}`);
-  }
+  const channel = core.getUpdateChannel();
+  const releases = await fetchReleases();
+  const pick = (ch: 'stable' | 'dev') => {
+    const r: any = core.resolveReleaseFromList(releases, ch);
+    // dev falls back to stable when no prerelease exists — report null instead, so a consumer can
+    // tell "no pre-release published" apart from "the pre-release equals stable".
+    return ch === 'dev' && r && r.prerelease !== true ? null : core.versionOfRelease(r);
+  };
+  const stableLatest = pick('stable');
+  const devLatest = pick('dev');
+  const latest = (channel === 'dev' ? devLatest ?? stableLatest : stableLatest) ?? '';
   if (!latest) fail('no published release found for the repository.');
-  writeUpdateCache({ checkedMs: Date.now(), latestTag: latest }); // an explicit check also freshens the daily nudge
+  writeUpdateCache({
+    checkedMs: Date.now(),
+    latestTag: stableLatest,
+    latestDevTag: devLatest,
+  }); // an explicit check also freshens the daily nudge
   const newer = core.isNewer(latest, cur);
+  if (json) {
+    // The editors' version dropdown: one call answers the chip, the Update row, and both channel rows.
+    emitJson({ current: cur, channel, latest, updateAvailable: newer, stableLatest, devLatest });
+    return;
+  }
   process.stdout.write(
-    `installed   ${c.bold(cur)}\n` +
-      `latest      ${c.bold(latest)}   ${newer ? c.yellow('← update available') : c.green('✓ up to date')}\n`
+    `installed   ${c.bold(cur)}   ${c.dim(`(${CHANNEL_LABEL[channel]} channel)`)}\n` +
+      `latest      ${c.bold(latest)}   ${newer ? c.yellow('← update available') : c.green('✓ up to date')}\n` +
+      (channel === 'stable' && devLatest ? c.dim(`pre-release ${devLatest}   (switch: \`update --channel dev\`)\n`) : '')
   );
   if (newer) {
     process.stdout.write(c.dim('run `claude-observatory update` to apply, or `update --check` to see every surface.\n'));
@@ -2936,12 +3024,14 @@ function usage(): void {
       `  status               show hooks + hook-path health + session + edit counts\n` +
       `  doctor [--json]      diagnose setup (hooks, PATH, config dir, session, status line) with fixes;\n` +
       `                       --markdown (--md) emits the report as Markdown\n` +
-      `  update [--check] [--cli-only] [--force]\n` +
+      `  update [--check] [--cli-only] [--force] [--channel stable|dev]\n` +
       `                       update the CLI AND refresh the locally-installed editor extensions from\n` +
-      `                       the latest GitHub Release (VS Code via \`code --install-extension\`;\n` +
+      `                       the followed release channel (VS Code via \`code --install-extension\`;\n` +
       `                       JetBrains by unzip into plugin dirs), and refresh the bundled status\n` +
       `                       line when ours is installed. --check reports only; --cli-only\n` +
-      `                       skips the extensions; --force reinstalls even if already current\n` +
+      `                       skips the extensions; --force reinstalls even if already current;\n` +
+      `                       --channel switches between stable and the rolling pre-release (dev)\n` +
+      `                       and installs that channel's newest in the same run\n` +
       `  sessions             this workspace's sessions, newest conversation first (● = this directory's)\n` +
       `  list [filters]       list edits (grouped by file); filters: --pending|--kept|--undone, --file <substr>\n` +
       `  timeline [--json]    edits newest-first as a chronological feed (time · id · Δ · file)\n` +
@@ -3030,7 +3120,9 @@ function usage(): void {
       `  recap                one-line session recap   [--json --fresh --claude-bin <path>]\n` +
       `  suggest              next-steps + suggestions [--json --fresh --claude-bin <path>]\n\n` +
       `  --session <id>       target a specific session instead of the newest\n` +
-      `  version [--check]    print the installed version; --check (or --latest) also shows the latest release\n` +
+      `  version [--check] [--json]\n` +
+      `                       print the installed version (--json adds the channel); --check (or --latest)\n` +
+      `                       also shows the newest release of BOTH channels (--json feeds the editors' chip)\n` +
       `  --version            print the installed CLI version\n`
   );
 }
@@ -3041,7 +3133,7 @@ function usage(): void {
 // fills the cache for the NEXT run. Only for interactive (TTY) human invocations — never the capture
 // hot path, `--json` output, or the JetBrains plugin. Opt out: CLAUDE_OBSERVATORY_NO_UPDATE_CHECK=1.
 
-type UpdateCache = { checkedMs: number; latestTag: string | null };
+type UpdateCache = { checkedMs: number; latestTag: string | null; latestDevTag?: string | null };
 
 function updateCachePath(): string {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
@@ -3052,7 +3144,11 @@ function readUpdateCache(): UpdateCache | null {
   try {
     const j = JSON.parse(require('fs').readFileSync(updateCachePath(), 'utf8'));
     if (typeof j?.checkedMs === 'number') {
-      return { checkedMs: j.checkedMs, latestTag: typeof j.latestTag === 'string' ? j.latestTag : null };
+      return {
+        checkedMs: j.checkedMs,
+        latestTag: typeof j.latestTag === 'string' ? j.latestTag : null,
+        latestDevTag: typeof j.latestDevTag === 'string' ? j.latestDevTag : null,
+      };
     }
   } catch {
     /* no cache yet / unreadable — treated as "never checked" */
@@ -3075,11 +3171,14 @@ function writeUpdateCache(v: UpdateCache): void {
  *  Prints nothing; failures are swallowed so an offline machine just keeps the previous cached tag. */
 async function refreshUpdateCache(): Promise<void> {
   try {
-    const release = JSON.parse(
-      (await httpGet(`https://api.github.com/repos/${RELEASE_REPO}/releases/latest`)).toString('utf8')
+    const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+    const list = JSON.parse(
+      (await httpGet(`${RELEASES_API}/releases?per_page=100`)).toString('utf8')
     );
-    const tag = String(release.tag_name || '').replace(/^v/i, '') || null;
-    writeUpdateCache({ checkedMs: Date.now(), latestTag: tag });
+    const releases: any[] = Array.isArray(list) ? list : [];
+    const stable: any = core.resolveReleaseFromList(releases, 'stable');
+    const dev: any = releases.find((r: any) => r?.prerelease === true && !r?.draft) ?? null;
+    writeUpdateCache({ checkedMs: Date.now(), latestTag: core.versionOfRelease(stable), latestDevTag: core.versionOfRelease(dev) });
   } catch {
     /* offline / rate-limited: the parent already wrote a throttle timestamp; keep the old tag */
   }
@@ -3101,12 +3200,14 @@ function maybeCheckForUpdate(cmd: string | undefined, rest: string[]): void {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const cache = readUpdateCache();
   const cur = version();
-  if (cache?.latestTag && core.isNewer(cache.latestTag, cur)) {
-    const latest = cache.latestTag;
+  // The nudge follows the ACTIVE channel: a dev-channel install compares against the rolling
+  // pre-release tag, never against stable (which is older than every dev build by construction).
+  const channelTag = core.getUpdateChannel() === 'dev' ? cache?.latestDevTag ?? cache?.latestTag : cache?.latestTag;
+  if (channelTag && core.isNewer(channelTag, cur)) {
     // Print AFTER the command's output, once, to stderr — never pollutes stdout / --json consumers.
     process.on('exit', () => {
       try {
-        process.stderr.write(c.dim(`\nupdate available (${cur} → ${latest}) — run \`claude-observatory update\`\n`));
+        process.stderr.write(c.dim(`\nupdate available (${cur} → ${channelTag}) — run \`claude-observatory update\`\n`));
       } catch {
         /* stream already closed */
       }
@@ -3114,7 +3215,9 @@ function maybeCheckForUpdate(cmd: string | undefined, rest: string[]): void {
   }
   const DAY = 24 * 60 * 60 * 1000;
   if (!cache || Date.now() - cache.checkedMs > DAY) {
-    writeUpdateCache({ checkedMs: Date.now(), latestTag: cache?.latestTag ?? null }); // optimistic throttle
+    // The optimistic throttle must carry BOTH tags forward — dropping latestDevTag here silently
+    // ate a dev-channel machine's known-update nudge until the next successful network refresh.
+    writeUpdateCache({ checkedMs: Date.now(), latestTag: cache?.latestTag ?? null, latestDevTag: cache?.latestDevTag ?? null });
     try {
       require('child_process')
         .spawn(process.execPath, [__filename, '__update-check'], { detached: true, stdio: 'ignore' })

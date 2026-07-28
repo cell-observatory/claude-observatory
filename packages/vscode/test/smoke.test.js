@@ -1115,6 +1115,7 @@ test('extension: three views, click commands, inline annotations, chat, status s
       ['searchEdits', 'claudeObservatory.searchEdits'],
       ['exportSummary', 'claudeObservatory.exportSummary'],
       ['exportMenu', 'claudeObservatory.exportMenu'],
+      ['versionUpdate', 'claudeObservatory.updateNow'],
     ]) {
       assert.ok(typeof commands[cmd] === 'function', `${cmd} registered`);
       let seen = 0;
@@ -1141,6 +1142,70 @@ test('extension: three views, click commands, inline annotations, chat, status s
       opened.uri.language === 'json' && opened.uri.content.includes('"edits"') && opened.uri.content.includes('"exportedAt"'),
       'the document is the session-trace JSON'
     );
+
+    // The version chip (0.9.0): pinned at the controls row's right edge; its menu routes channel
+    // switches to the switchChannel command (with the channel argument intact).
+    assert.ok(/id="ov-version"/.test(bundleSrc), 'the version chip is in the Overview navbar markup');
+    assert.ok(typeof commands['claudeObservatory.switchChannel'] === 'function', 'switchChannel registered');
+    let switched = 0;
+    const realSwitch = commands['claudeObservatory.switchChannel'];
+    commands['claudeObservatory.switchChannel'] = (ch) => { switched++; assert.equal(ch, 'dev', 'the picked channel rides along'); };
+    cmMsgHandler({ type: 'switchChannel', channel: 'dev' });
+    assert.equal(switched, 1, 'the version menu routes channel switches to switchChannel');
+    // The refusal check runs WHILE the spy is installed — restored first, a forwarded bad value
+    // would hit the real command (which no-ops under the mock) and this assert could never fail.
+    cmMsgHandler({ type: 'switchChannel', channel: 'evil' });
+    assert.equal(switched, 1, 'an unknown channel value is refused, never forwarded');
+    commands['claudeObservatory.switchChannel'] = realSwitch;
+
+    // The webview's own display path, EXECUTED: markup + routing asserts cannot see a renderer whose
+    // state lives in the wrong scope (the chip once rendered v— forever while every other assert was
+    // green) — only running the real script against a DOM stub catches that class.
+    {
+      const vm = require('node:vm');
+      const scripts = [...cmView.webview.html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)];
+      assert.ok(scripts.length >= 1, 'the overview shell embeds its script');
+      const mkEl = () => ({
+        innerHTML: '', textContent: '', title: '', hidden: true, style: {}, dataset: {}, value: '', checked: false,
+        classList: { toggle() {}, add() {}, remove() {}, contains: () => false },
+        setAttribute() {}, getAttribute: () => null, hasAttribute: () => false, removeAttribute() {},
+        addEventListener() {}, appendChild() {}, removeChild() {}, contains: () => false,
+        querySelectorAll: () => [], querySelector: () => null, parentNode: null, firstChild: null,
+        getContext: () => null, getBoundingClientRect: () => ({ width: 0, height: 0, left: 0, top: 0 }),
+      });
+      const els = new Map();
+      const elFor = (id) => { if (!els.has(id)) els.set(id, mkEl()); return els.get(id); };
+      let msgListener = null;
+      const winStub = {
+        addEventListener: (t, cb) => { if (t === 'message') msgListener = cb; },
+        matchMedia: () => ({ matches: false, addEventListener() {} }),
+        setInterval: () => 0, clearInterval() {}, setTimeout: () => 0, clearTimeout() {},
+        requestAnimationFrame: () => 0, devicePixelRatio: 1, scrollY: 0,
+      };
+      const docStub = {
+        getElementById: elFor, addEventListener() {}, createElement: mkEl,
+        querySelectorAll: () => [], querySelector: () => null, body: mkEl(), documentElement: mkEl(),
+      };
+      const sandbox = {
+        window: winStub, document: docStub, console,
+        acquireVsCodeApi: () => ({ postMessage() {}, getState: () => null, setState() {} }),
+        URLSearchParams, JSON, Math, Date, String, Number, Array, Object, RegExp, parseInt, parseFloat, isFinite, NaN, Infinity, undefined,
+        getComputedStyle: () => ({ getPropertyValue: () => '' }),
+        ResizeObserver: class { observe() {} unobserve() {} disconnect() {} },
+        IntersectionObserver: class { observe() {} unobserve() {} disconnect() {} },
+        requestAnimationFrame: () => 0, setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0, clearInterval() {},
+        localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+      };
+      winStub.document = docStub;
+      sandbox.globalThis = sandbox;
+      vm.createContext(sandbox);
+      assert.doesNotThrow(() => vm.runInContext(scripts[scripts.length - 1][1], sandbox), 'the overview script initializes under the DOM stub');
+      assert.ok(typeof msgListener === 'function', 'the script listens for host messages');
+      msgListener({ data: { type: 'version', v: { current: '9.9.9', channel: 'stable', stableLatest: '9.9.9', devLatest: '9.10.0-dev.3', updateAvailable: true } } });
+      assert.match(elFor('ov-version').innerHTML, /9\.9\.9/, 'the chip RENDERS the version the host delivered');
+      assert.match(elFor('ov-vermenu').innerHTML, /Pre-release/, 'the menu carries the channel rows');
+      assert.match(elFor('ov-vermenu').innerHTML, /Update now/, 'and the Update row when an update is available');
+    }
 
     // (3) THE PROMPT AXIS — the LAST axis on the review nav bar. Step/Review/Accept/Reject
     // affordances scoped to one of the user's own asks (the Subtask axis is gone in 0.8.8).

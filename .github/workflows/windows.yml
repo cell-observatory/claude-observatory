@@ -6,7 +6,7 @@ name: Windows
 # harness drives the real bundled CLI + capture hook in an isolated store.
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
   workflow_dispatch:
 

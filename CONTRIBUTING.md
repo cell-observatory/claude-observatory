@@ -184,3 +184,26 @@ Every feature PR must satisfy:
 
 By convention, features ship on **all** platforms; a platform-specific exception needs a reason in
 the issue/PR.
+
+### Branches & releases: how a change reaches users
+
+```text
+feature/fix branch ──PR──▶ dev (pre-release channel) ──PR──▶ main (stable channel, tagged releases)
+```
+
+- **Feature and fix PRs target the persistent `dev` branch**, not `main`. Every PR runs the full
+  three-OS test matrix.
+- **Every push to `dev`** makes the [Dev pre-release workflow](.github/workflows/dev-release.yml)
+  re-stamp the version as `<next>-dev.<run#>`, rebuild every artifact, and refresh the ONE rolling
+  GitHub release (tag `dev-latest`, marked *prerelease* so `releases/latest` — the stable channel —
+  never serves it). Anyone on the **pre-release channel** (`claude-observatory update --channel dev`,
+  or the version chip in either editor's Overview) gets it on their next update.
+- **When dev has soaked**, a `dev → main` PR promotes everything at once; merging it is followed by a
+  version bump if needed and a `vX.Y.Z` tag, which the [Release workflow](.github/workflows/release.yml)
+  turns into the official GitHub Release — the stable channel. After a promote, bump `dev`'s
+  committed version to the next target (the rolling builds derive `<next>-dev.<n>` from it).
+- `main` stays the default branch (installer URLs and docs point at `raw/main`), and history that
+  shipped keeps the names it shipped with — the changelog's past entries are immutable.
+
+The user-facing story of the two channels lives on
+[the Releases page](https://cell-observatory.github.io/claude-observatory/releases.html).

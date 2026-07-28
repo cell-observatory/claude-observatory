@@ -194,6 +194,25 @@ capped at a 64 MB budget — a pathological store otherwise built ~850 MB of dif
 string cap — with the omission named in `errors` (deltas and blob shas stay); JetBrains opens the
 result as a tab, or names the written file when it exceeds the IDE's 20 MB editor load limit.
 
+**Release channels: stable, and a rolling pre-release.** The observatory now ships on two channels.
+**Stable** is what it always was — tagged releases from `main`, served by `releases/latest`.
+**Pre-release** is a rolling build of the persistent `dev` branch: every push re-stamps the version as
+`<next>-dev.<n>`, re-runs the suite, and refreshes one GitHub release (tag `dev-latest`, marked
+*prerelease* so stable installs never see it). A **version chip** now closes the Overview toolbar's
+controls row in BOTH editors — pinned right, showing the running version with a dot when an update
+is available, and a menu holding **Update now** (the full pass: CLI + both editor plugins + status
+line) and the **Stable ⇄ Pre-release** switch; the terminal equivalent is
+`claude-observatory update --channel <stable|dev>`, which persists the choice and installs that
+channel's newest in the same run (downgrades included — leaving pre-release for stable must work).
+Every updater follows the channel: `update`, `version --check` (now with `--json` for the chip), the
+CLI's daily nudge, and VS Code's background notifier. The semver compare understands prerelease
+ordering (a dev build is newer than the stable it forked from, older than the release it becomes),
+release versions are derived from the tag OR the release title (the rolling tag never moves), and the
+whole mechanism is exercised end-to-end in CI against a local mock of the releases API — real
+downloads, real installs into a sandboxed npm prefix, both switch directions. Where a change ships
+from now on: feature PRs target `dev`; a soaked `dev → main` PR plus a tag cuts the stable release
+(see CONTRIBUTING, and the site's new [Releases & channels](https://cell-observatory.github.io/claude-observatory/releases.html) page).
+
 **The session's name leads the Overview in both editors.** JetBrains' Overview top row now opens with
 the session-name label VS Code already had — the human-readable title (the Sessions rows' title:
 Claude's ai-title, else the first prompt — never the raw id) with the session id on the tooltip. In

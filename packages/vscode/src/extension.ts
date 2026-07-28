@@ -2535,6 +2535,17 @@ function changeMapShell(): string {
      (user call 2026-07-28): the whole human-readable name shows; when the row runs short the BUTTONS
      wrap to the next line (the group is flex-wrap), never the title. Tooltip carries the raw id. */
   .ov-sesslabel { font-family: var(--cm-mono); font-size:11px; color: var(--vscode-foreground); white-space:nowrap; }
+  /* version chip + its dropdown (update / channel switch) — pinned at the controls row's right edge */
+  .ov-verwrap { position:relative; display:inline-flex; }
+  .ov-verchip { font-family: var(--cm-mono); white-space:nowrap; }
+  .ov-verchip.upd::before { content:''; width:6px; height:6px; border-radius:50%; background:var(--vscode-charts-yellow, #d9a441); display:inline-block; margin-right:4px; }
+  .ov-vermenu { position:absolute; right:0; top:calc(100% + 4px); z-index:60; min-width:240px; background:var(--vscode-editorWidget-background, var(--cm-panel)); border:1px solid var(--cm-border); border-radius:4px; padding:4px; box-shadow:0 4px 14px rgba(0,0,0,.35); }
+  .ov-vermenu .vm-row { display:flex; align-items:center; gap:7px; width:100%; padding:5px 8px; border-radius:3px; cursor:pointer; color:var(--vscode-foreground); font-size:11.5px; background:none; border:none; text-align:left; }
+  .ov-vermenu .vm-row:hover:not([disabled]) { background: var(--vscode-list-hoverBackground, rgba(128,128,128,.12)); }
+  .ov-vermenu .vm-row[disabled] { opacity:.6; cursor:default; }
+  .ov-vermenu .vm-sec { border-top:1px solid var(--cm-border); margin:4px 2px; }
+  .ov-vermenu .vm-ver { margin-left:auto; font-family:var(--cm-mono); font-size:10.5px; color:var(--vscode-descriptionForeground); }
+  .ov-vermenu .vm-note { padding:3px 8px 5px; font-size:10px; color:var(--vscode-descriptionForeground); }
   .ov-tb { display:inline-flex; align-items:center; gap:5px; background:transparent; border:1px solid var(--cm-border); border-radius:5px; color: var(--vscode-descriptionForeground); font:inherit; font-size:11px; padding:3px 9px; cursor:pointer; white-space:nowrap; }
   .ov-tb:hover { background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.12)); color: var(--vscode-foreground); }
   /* session chip: show the FULL name — let a long one wrap/break inside the chip instead of overflowing */
@@ -2920,6 +2931,10 @@ function changeMapShell(): string {
     `<span class="ov-nbsep"></span>` +
     `<button class="ov-nb" id="ov-spotlight" title="Toggle spotlight — dim unedited lines to highlight Claude’s changes"><i class="codicon codicon-lightbulb"></i> Spotlight</button>` +
     `<button class="ov-tb" id="ov-refresh" title="Refresh the Overview"><i class="codicon codicon-refresh"></i> Refresh</button>` +
+    // The version chip — LAST, i.e. pinned to the row's right edge: the installed Observatory
+    // version, opening the update / release-channel menu (Stable ⇄ Pre-release).
+    `<span class="ov-verwrap"><button class="ov-tb ov-verchip" id="ov-version" title="Claude Observatory version — update, or switch between the stable and pre-release channels">v— <i class="codicon codicon-chevron-down"></i></button>` +
+    `<div class="ov-vermenu" id="ov-vermenu" hidden></div></span>` +
     `</span>` +
     `</div>` + // end ROW 2 (controls)
     `</div>` +
@@ -3859,9 +3874,18 @@ class ChangeMapViewProvider implements vscode.WebviewViewProvider {
     // forever with no explanation. Say where the Overview went instead of looking broken.
     if (this.editorPanel && host !== this.editorPanel)
       setTimeout(() => host.webview.postMessage({ type: 'elsewhere', where: 'editor' }), 0);
-    host.webview.onDidReceiveMessage((m: { type?: string; id?: number | string; kind?: string; taskId?: string; promptId?: string; folder?: string; ref?: core.ChatContextRef; session?: string; name?: string; pending?: string | number }) => {
+    host.webview.onDidReceiveMessage((m: { type?: string; id?: number | string; kind?: string; taskId?: string; promptId?: string; folder?: string; ref?: core.ChatContextRef; session?: string; name?: string; pending?: string | number; channel?: string }) => {
       if (!m) return;
-      if (m.type === 'ready') this.refresh(true);
+      if (m.type === 'ready') {
+        this.refresh(true);
+        void versionChipInfo().then((v) => host.webview.postMessage({ type: 'version', v }));
+      }
+      // The version chip's menu opened — (re)send release info; the 1h cache absorbs repeat opens.
+      else if (m.type === 'versionMenuOpen')
+        void versionChipInfo().then((v) => host.webview.postMessage({ type: 'version', v }));
+      else if (m.type === 'versionUpdate') void vscode.commands.executeCommand('claudeObservatory.updateNow');
+      else if (m.type === 'switchChannel' && (m.channel === 'stable' || m.channel === 'dev'))
+        void vscode.commands.executeCommand('claudeObservatory.switchChannel', m.channel);
       // The feed pane names the row it wants followed (or nothing, to stop). Fetched now, and again on
       // this panel's existing refresh tick for as long as core reports the feed is still live.
       else if (m.type === 'feed')
@@ -4956,6 +4980,25 @@ const OVERVIEW_SCRIPT = `
   }
 
   // The session under review, named on the bar. Read-only: the Sessions tab is where it changes.
+  // Version chip state + renderer — TOP-LEVEL, beside the other renderers: the message listener that
+  // feeds VERINFO is a sibling of the wiring IIFE, so anything scoped inside it is unreachable here.
+  var VERINFO=null;
+  function renderVersion(){ var chip=document.getElementById('ov-version'); var menu=document.getElementById('ov-vermenu'); if(!chip||!menu) return; var v=VERINFO||{};
+    chip.innerHTML='v'+esc(v.current||'—')+' <i class="codicon codicon-chevron-down"></i>';
+    chip.classList.toggle('upd', !!v.updateAvailable);
+    chip.title=(v.updateAvailable?'Update available — ':'')+'Claude Observatory version — update, or switch between the stable and pre-release channels';
+    var chLatest=v.channel==='dev'?(v.devLatest||v.stableLatest):v.stableLatest;
+    var h='';
+    if(v.updateAvailable&&chLatest) h+='<button class="vm-row" data-va="update"><i class="codicon codicon-cloud-download"></i> Update now<span class="vm-ver">v'+esc(chLatest)+'</span></button><div class="vm-sec"></div>';
+    h+='<button class="vm-row" data-va="stable"'+(v.channel!=='dev'?' disabled':'')+'><i class="codicon codicon-check" style="visibility:'+(v.channel!=='dev'?'visible':'hidden')+'"></i> Stable<span class="vm-ver">'+(v.stableLatest?'v'+esc(v.stableLatest):'—')+'</span></button>';
+    h+='<button class="vm-row" data-va="dev"'+(v.channel==='dev'?' disabled':'')+'><i class="codicon codicon-check" style="visibility:'+(v.channel==='dev'?'visible':'hidden')+'"></i> Pre-release<span class="vm-ver">'+(v.devLatest?'v'+esc(v.devLatest):'none yet')+'</span></button>';
+    if(v.offline) h+='<div class="vm-note">release info unavailable — offline?</div>';
+    menu.innerHTML=h;
+    var rows=menu.querySelectorAll('.vm-row');
+    for(var i=0;i<rows.length;i++){ rows[i].addEventListener('click', function(){ if(this.hasAttribute('disabled')) return; var a=this.getAttribute('data-va'); menu.hidden=true;
+      if(a==='update') vscode.postMessage({type:'versionUpdate'});
+      else vscode.postMessage({type:'switchChannel', channel:a}); }); }
+  }
   function setSessLabel(s, title){ var el=document.getElementById('ov-sess-label'); if(!el) return;
     var nm=(title||'').trim();
     el.textContent='🔬 '+(nm || ('session '+(s? String(s).slice(0,8) : '—')));
@@ -5318,6 +5361,7 @@ const OVERVIEW_SCRIPT = `
         '<br><br>Close that tab to bring the Overview back here, or set <b>claudeObservatory.overviewLocation</b> to <b>panel</b>.</div>';
       return;
     }
+    if(m.type==='version'){ VERINFO=m.v||null; renderVersion(); return; }
     if(m.type==='overview'){ var oe=document.getElementById('ov-elsewhere'); if(oe&&oe.parentNode) oe.parentNode.removeChild(oe); CLI_ERR=false; PINNED=m.pinned||''; setSessLabel(m.session, m.sessionTitle); CM=m.cm||null; MT=m.mt||null; PR=m.pr||null; SESS=m.sessions||SESS; OV_SEEN=true; NAVPOS=m.navPos||null; FILTER=m.filter||'';
       // Reset dismissals only when the actual session changes — key on the stable host-provided session id,
       // NOT selfSession() (which falls back to agents[0].session and flips whenever the fleet re-sorts,
@@ -5408,6 +5452,14 @@ const OVERVIEW_SCRIPT = `
     tbtn('ov-acceptfolder','acceptCurrentFolder'); tbtn('ov-rejectfolder','rejectCurrentFolder');
     tbtn('ov-export','exportMenu');
     tbtn('ov-spotlight','toggleHeatmap'); tbtn('ov-search','searchEdits');
+    // Version chip (pinned right) — wiring only; VERINFO/renderVersion live at the SCRIPT top level,
+    // because the message listener that feeds them is a SIBLING of this IIFE, not a child (learned
+    // the hard way: declared in here, every 'version' message threw ReferenceError under strict mode
+    // and the chip stayed at v— forever).
+    (function(){ var chip=document.getElementById('ov-version'); var menu=document.getElementById('ov-vermenu'); if(!chip||!menu) return;
+      chip.addEventListener('click', function(e){ e.stopPropagation(); menu.hidden=!menu.hidden; if(!menu.hidden){ renderVersion(); vscode.postMessage({type:'versionMenuOpen'}); } });
+      document.addEventListener('click', function(ev){ if(!menu.hidden && !menu.contains(ev.target)) menu.hidden=true; });
+    })();
     relabelBulk(); renderNavPos();
   })();
   readPal();
@@ -5432,10 +5484,14 @@ const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000; // at most once a day in t
 
 /** GET the latest-release JSON from GitHub. Rejects on any network/HTTP/parse error (no deps — the
  *  extension host is Node). GitHub requires a User-Agent. */
-function fetchLatestRelease(): Promise<any> {
+/** The releases LIST (newest first) — one fetch answers both channels; `fetchLatestRelease` picks
+ *  the FOLLOWED channel's newest from it (stable = what `releases/latest` serves; dev = the rolling
+ *  pre-release), so the daily notifier and the Update flow track whatever channel the user switched
+ *  to — the same resolution the CLI performs (core.resolveReleaseFromList, the shared backend). */
+function fetchReleaseList(): Promise<any[]> {
   return new Promise((resolve, reject) => {
     const req = https.get(
-      `https://api.github.com/repos/${RELEASE_REPO}/releases/latest`,
+      `https://api.github.com/repos/${RELEASE_REPO}/releases?per_page=100`,
       { headers: { 'User-Agent': 'claude-observatory-vscode', Accept: 'application/vnd.github+json' } },
       (res) => {
         if (res.statusCode && res.statusCode >= 400) {
@@ -5447,7 +5503,8 @@ function fetchLatestRelease(): Promise<any> {
         res.on('data', (d) => (body += d));
         res.on('end', () => {
           try {
-            resolve(JSON.parse(body));
+            const list = JSON.parse(body);
+            resolve(Array.isArray(list) ? list : []);
           } catch (e) {
             reject(e);
           }
@@ -5457,6 +5514,91 @@ function fetchLatestRelease(): Promise<any> {
     req.on('error', reject);
     req.setTimeout(8000, () => req.destroy(new Error('timeout')));
   });
+}
+
+async function fetchLatestRelease(): Promise<any> {
+  const release = core.resolveReleaseFromList(await fetchReleaseList(), core.getUpdateChannel());
+  if (!release) throw new Error('no published release found');
+  return release;
+}
+
+/** Run the CLI's `update` (the one updater for every surface) with a progress notification, then
+ *  offer a window reload. Windows: the CLI is an npm `.cmd` shim, which spawn() can't exec without a
+ *  shell — quoted binary + `shell`, the same treatment every other CLI spawn in this file gets. */
+function runObservatoryUpdate(args: string[], title: string, doneMsg: string, upToDateMsg: string): Thenable<void> {
+  const winShell = process.platform === 'win32';
+  const bin = resolveObservatoryBin();
+  return vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title },
+    () =>
+      new Promise<void>((resolve) => {
+        cp.execFile(winShell ? `"${bin}"` : bin, args, { timeout: 300000, shell: winShell }, (err, stdout, stderr) => {
+          versionInfoCache = null; // the chip must re-learn the world after an install
+          if (err) {
+            vscode.window.showErrorMessage(
+              `Claude Observatory: update failed — ${String(stderr || stdout || err.message).trim().slice(0, 300)}`
+            );
+            resolve();
+            return;
+          }
+          // The reload pop-up appears only when something was actually INSTALLED. The CLI prints one
+          // of these exact lines precisely when nothing changed (its final-summary guard) — a reload
+          // offer on a no-op would teach people the button cries wolf.
+          const out = String(stdout || '');
+          const nothingInstalled = out.includes('everything is up to date') || out.includes('CLI is up to date');
+          if (nothingInstalled) {
+            vscode.window.showInformationMessage(upToDateMsg);
+          } else {
+            void vscode.window.showInformationMessage(doneMsg, 'Reload Window').then((pick) => {
+              if (pick === 'Reload Window') void vscode.commands.executeCommand('workbench.action.reloadWindow');
+            });
+          }
+          resolve();
+        });
+      })
+  );
+}
+
+/** The version chip's payload: the running extension's own version, the followed channel, and both
+ *  channels' newest tags (1h in-memory cache — the chip renders instantly, the menu stays honest). */
+let versionInfoCache: { at: number; stableLatest: string | null; devLatest: string | null } | null = null;
+let extensionVersion = ''; // set once in activate() from the extension's own manifest
+
+async function versionChipInfo(): Promise<{
+  current: string;
+  channel: core.UpdateChannel;
+  stableLatest: string | null;
+  devLatest: string | null;
+  updateAvailable: boolean;
+  offline?: boolean;
+}> {
+  const current = extensionVersion;
+  const channel = core.getUpdateChannel();
+  // No own version (the smoke-test mock, or a mangled install) → nothing to compare against, so no
+  // fetch either: the chip renders v— and stays inert, and tests never touch the network.
+  if (!current) return { current, channel, stableLatest: null, devLatest: null, updateAvailable: false, offline: true };
+  let cached = versionInfoCache;
+  if (!cached || Date.now() - cached.at > 60 * 60 * 1000) {
+    try {
+      const list = await fetchReleaseList();
+      cached = {
+        at: Date.now(),
+        stableLatest: core.versionOfRelease(core.resolveReleaseFromList(list, 'stable')),
+        devLatest: core.versionOfRelease(list.find((r: any) => r?.prerelease === true && !r?.draft) ?? null),
+      };
+      versionInfoCache = cached;
+    } catch {
+      if (!cached) return { current, channel, stableLatest: null, devLatest: null, updateAvailable: false, offline: true };
+    }
+  }
+  const latest = channel === 'dev' ? cached.devLatest ?? cached.stableLatest : cached.stableLatest;
+  return {
+    current,
+    channel,
+    stableLatest: cached.stableLatest,
+    devLatest: cached.devLatest,
+    updateAvailable: Boolean(latest && current && core.isNewer(latest, current)),
+  };
 }
 
 /** Download `url` (following redirects) to `dest`. Rejects on any non-200 / network error. */
@@ -5554,7 +5696,7 @@ async function checkForUpdate(context: vscode.ExtensionContext, manual: boolean)
     return;
   }
   context.globalState.update('updateCheck.lastMs', Date.now());
-  const latest = String(release?.tag_name || '').replace(/^v/i, '');
+  const latest = core.versionOfRelease(release) ?? '';
   if (!latest || !core.isNewer(latest, current)) {
     if (manual) vscode.window.showInformationMessage(`Claude Observatory is up to date (${current}).`);
     return;
@@ -5587,6 +5729,9 @@ async function checkForUpdate(context: vscode.ExtensionContext, manual: boolean)
 }
 
 export function activate(context: vscode.ExtensionContext): void {
+  // The running build's own version — what the Overview's version chip shows ('' under the smoke
+  // mock, which has no `context.extension`; the chip then renders v— and stays inert).
+  extensionVersion = String(context.extension?.packageJSON?.version ?? '');
   // 0.8.6 changed the publisher (claude-observatory → cell-observatory), which changed the extension
   // id — editors treat the pre-rename install as a SEPARATE extension, so both can be installed at
   // once, racing to register the same commands and views (the loser's activate() throws). Don't
@@ -7424,7 +7569,45 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // Marketplace-free update nudge: a manual command + a throttled background check on activation.
   context.subscriptions.push(
-    vscode.commands.registerCommand('claudeObservatory.checkForUpdates', () => checkForUpdate(context, true))
+    vscode.commands.registerCommand('claudeObservatory.checkForUpdates', () => checkForUpdate(context, true)),
+    // Switch release channels (stable ⇄ the rolling pre-release). ONE CLI run does everything —
+    // `update --channel X` persists the choice and refreshes the CLI, both editor plugins, and the
+    // status line — so afterwards only a window reload is needed to load the new build.
+    vscode.commands.registerCommand('claudeObservatory.switchChannel', async (ch?: string) => {
+      let target: 'stable' | 'dev' | undefined = ch === 'stable' || ch === 'dev' ? ch : undefined;
+      if (!target) {
+        const pick = await vscode.window.showQuickPick(
+          [
+            { label: 'Stable', description: 'tagged releases', ch: 'stable' as const },
+            { label: 'Pre-release', description: 'rolling build of the dev branch — newest features, less soak', ch: 'dev' as const },
+          ],
+          { title: 'Switch release channel', placeHolder: `Currently: ${core.getUpdateChannel() === 'dev' ? 'Pre-release' : 'Stable'}` }
+        );
+        if (!pick) return;
+        target = pick.ch;
+      }
+      const label = target === 'dev' ? 'Pre-release' : 'Stable';
+      if (target === core.getUpdateChannel()) {
+        vscode.window.showInformationMessage(`Claude Observatory is already on the ${label} channel.`);
+        return;
+      }
+      await runObservatoryUpdate(
+        ['update', '--channel', target],
+        `Claude Observatory: switching to the ${label} channel…`,
+        `Switched to the ${label} channel — the CLI and both editor plugins were refreshed. Reload to load the new build.`,
+        `Switched to the ${label} channel — already on its newest build, nothing to reload.`
+      );
+    }),
+    // The chip's Update now: the FULL update — CLI + both editor plugins + status line — exactly what
+    // the docs promise and what JetBrains' chip runs; the vsix-only notifier flow stays its own thing.
+    vscode.commands.registerCommand('claudeObservatory.updateNow', () =>
+      runObservatoryUpdate(
+        ['update'],
+        'Claude Observatory: updating (CLI + editor plugins)…',
+        'Updated — the CLI and both editor plugins were refreshed. Reload to load the new build.',
+        'Claude Observatory is already up to date.'
+      )
+    )
   );
   // The demo offer takes precedence for this activation. Two unsolicited notifications on the first
   // launch after an update is precisely the noise "Never ask" exists to stop, and the update check is

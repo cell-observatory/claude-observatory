@@ -44,14 +44,20 @@ const read = (rel) => readFileSync(join(root, rel), 'utf8');
 // The README's static version badge — stamped here rather than shields' GitHub-API-backed
 // "latest release" badge, which reads "inaccessible" whenever GitHub's REST API hiccups.
 const README = 'README.md';
-const badgeRe = /(badge\/version-v)([0-9][^-]*)(-blue)/;
+// Shields encodes a literal dash as '--', and prerelease versions carry dashes (0.9.0-dev.42) — the
+// badge segment is therefore runs of non-dash or double-dash, ended by the single-dash color part.
+// The old `[0-9][^-]*` form could neither write nor re-find a prerelease badge, which crashed
+// version:check inside the dev pre-release workflow right after it stamped one.
+const badgeRe = /(badge\/version-v)((?:[^-\s]|--)+)(-blue)/;
+const badgeEncode = (v) => v.replace(/-/g, '--');
+const badgeDecode = (v) => v.replace(/--/g, '-');
 function badgeVersionOf() {
   const m = read(README).match(badgeRe);
   if (!m) throw new Error(`no version badge found in ${README}`);
-  return m[2];
+  return badgeDecode(m[2]);
 }
 function setBadgeVersion(next) {
-  writeFileSync(join(root, README), read(README).replace(badgeRe, (_all, a, _v, c) => `${a}${next}${c}`));
+  writeFileSync(join(root, README), read(README).replace(badgeRe, (_all, a, _v, c) => `${a}${badgeEncode(next)}${c}`));
 }
 
 function versionOf(rel) {

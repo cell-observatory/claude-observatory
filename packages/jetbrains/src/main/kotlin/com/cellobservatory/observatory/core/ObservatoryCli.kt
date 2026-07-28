@@ -675,6 +675,53 @@ object ObservatoryCli {
         return if (r.ok) r.stdout else null
     }
 
+    data class VersionCheck(
+        val current: String,
+        val channel: String, // "stable" | "dev"
+        val latest: String?,
+        val updateAvailable: Boolean,
+        val stableLatest: String?,
+        val devLatest: String?,
+    )
+
+    /** `version --check --json` — the version dropdown's payload: the installed CLI version, the
+     *  followed channel, and both channels' newest releases (one GitHub fetch, CLI-side). Null when
+     *  the CLI is missing, offline, or predates the channels. */
+    fun versionCheck(workDir: String?): VersionCheck? {
+        val r = run(listOf("version", "--check", "--json"), workDir)
+        if (!r.ok) return null
+        return try {
+            val o = JsonParser.parseString(r.stdout).asJsonObject
+            fun s(k: String) = o.get(k)?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString
+            VersionCheck(
+                current = s("current") ?: "",
+                channel = s("channel") ?: "stable",
+                latest = s("latest"),
+                updateAvailable = o.get("updateAvailable")?.takeIf { it.isJsonPrimitive }?.asBoolean ?: false,
+                stableLatest = s("stableLatest"),
+                devLatest = s("devLatest"),
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** `update [--channel X]` — the ONE updater for every surface: refreshes the CLI, both editor
+     *  plugins, and the status line; `--channel` also switches release channels. LONG (downloads) —
+     *  callers run it on a pooled thread and tell the user to restart the IDE afterwards. */
+    fun update(channel: String?, workDir: String?): Pair<Boolean, String> {
+        val args = buildList {
+            add("update")
+            if (channel != null) {
+                add("--channel"); add(channel)
+            }
+        }
+        val r = run(args, workDir, timeoutMs = 300_000)
+        // On failure the ERROR is on stderr (the CLI's fail() writes there) — stdout carries progress
+        // lines that would bury it in the toast.
+        return r.ok to (if (r.ok) r.stdout else r.stderr.ifBlank { r.stdout })
+    }
+
     /** Setup diagnostics as markdown. `doctor` exits 1 when there are failures but still prints, so
      *  we take stdout regardless of the exit code. */
     fun doctorMarkdown(workDir: String?): String? =

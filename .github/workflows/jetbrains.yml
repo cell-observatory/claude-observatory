@@ -13,7 +13,7 @@ name: JetBrains
 # changed signature is a runtime error the compiler and the tests both pass straight over.
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
   workflow_dispatch:
 

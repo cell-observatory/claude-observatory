@@ -46,9 +46,18 @@ https://github.com/cell-observatory/claude-observatory/releases/latest/download/
 ```
 
 New releases then appear under **Settings → Plugins → Updates**, exactly like a Marketplace plugin —
-this repository descriptor is regenerated and attached to every GitHub Release. (Prefer the terminal?
-`claude-observatory update` refreshes the plugin in place from the newest release; restart the IDE
-afterward.)
+this repository descriptor is regenerated and attached to every GitHub Release. To follow the
+**pre-release channel** (the rolling build of the `dev` branch) instead, subscribe to its descriptor
+rather than the one above:
+
+```text
+https://github.com/cell-observatory/claude-observatory/releases/download/dev-latest/updatePlugins.xml
+```
+
+(Prefer the terminal or the Overview's version chip? `claude-observatory update` refreshes the plugin
+in place from your channel's newest release — `--channel dev` / `--channel stable` switches channels —
+and the chip at the right edge of the Overview toolbar does the same from inside the IDE; restart the
+IDE afterward. The full channel story: [Releases & channels](https://cell-observatory.github.io/claude-observatory/releases.html).)
 
 ## Remote development (Gateway / Toolbox over SSH)
 

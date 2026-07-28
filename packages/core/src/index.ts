@@ -13,6 +13,7 @@ export * from './memory';
 export * from './diagnose';
 export * from './filter';
 export * from './semver';
+export * from './channel';
 export * from './review';
 export * from './tree';
 export * from './groups';

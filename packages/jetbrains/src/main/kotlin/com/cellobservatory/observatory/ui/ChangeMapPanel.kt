@@ -537,9 +537,10 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             add(exportGroup())
         }
         // --- TOP row RIGHT cluster: Search · Active only · Clear completed | Spotlight · Refresh | demo ---
-        //     Demo mode LAST, and on this panel as well as the Edits tree (VS Code puts it on both title
-        //     bars). It is the one cluster here that is not about the session under review, so it sits at
-        //     the end behind its own separator rather than among the review controls.
+        //     Demo mode LAST among the controls, and on this panel as well as the Edits tree (VS Code
+        //     puts it on both title bars). It is the one cluster here that is not about the session
+        //     under review, so it sits at the end behind its own separator rather than among the review
+        //     controls. The VERSION chip closes the row — pinned to the right edge (VS Code parity).
         val rightGroup = DefaultActionGroup().apply {
             add(reviewNavBar.searchAction())
             add(activeOnlyToggle())
@@ -549,6 +550,8 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             add(action("Refresh", AllIcons.Actions.Refresh) { rebuild(force = true) })
             addSeparator()
             DemoVerbs.ALL.forEach { v -> add(demoAction(v.text, v.icon, v.wantDemo) { v.run(project) }) }
+            addSeparator()
+            add(versionGroup())
         }
 
         fun mkTb(name: String, g: DefaultActionGroup): ActionToolbar =
@@ -1585,6 +1588,111 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
                 component.toolTipText = presentation.description
             }
         }
+
+    /** Release-channel info for the version chip — fetched off the EDT via the CLI (`version --check
+     *  --json`, the shared backend), cached an hour. @Volatile: the popup builds its rows on whatever
+     *  thread expands it. */
+    @Volatile private var versionInfo: ObservatoryCli.VersionCheck? = null
+    @Volatile private var versionFetchedAtMs = 0L
+
+    private fun refreshVersionInfo(force: Boolean = false) {
+        val now = System.currentTimeMillis()
+        // The throttle holds on FAILURE too (a shorter negative TTL): the platform expands a popup
+        // group's children on every toolbar update pass, so a missing/old/offline CLI must not spawn
+        // a `version --check` process per tick — 30s-capped spawns with no in-flight guard pile up.
+        val ttlMs = if (versionInfo == null) 5 * 60 * 1000L else 60 * 60 * 1000L
+        if (!force && versionFetchedAtMs != 0L && now - versionFetchedAtMs < ttlMs) return
+        versionFetchedAtMs = now
+        ApplicationManager.getApplication().executeOnPooledThread {
+            ObservatoryCli.versionCheck(project.basePath)?.let { versionInfo = it }
+        }
+    }
+
+    /** This plugin's OWN installed version — what the chip label shows (each surface shows what is
+     *  actually running there; the CLI reports its own in the dropdown's rows). */
+    private fun pluginVersion(): String =
+        com.intellij.ide.plugins.PluginManagerCore.getPlugin(
+            com.intellij.openapi.extensions.PluginId.getId("com.cell-observatory.claude-observatory")
+        )?.version ?: ""
+
+    /** The version chip closing the top row (VS Code's `ov-version`, pinned right): the running
+     *  version, opening Update Now + the Stable ⇄ Pre-release channel switch. Every action runs the
+     *  CLI's `update` — the one updater for all surfaces — then asks for an IDE restart. */
+    private fun versionGroup(): AnAction =
+        object : DefaultActionGroup("v" + pluginVersion().ifEmpty { "—" }, true), DumbAware {
+            @Suppress("OVERRIDE_DEPRECATION") // displayTextInToolbar: still honored; renders the label
+            override fun displayTextInToolbar() = true
+            override fun getActionUpdateThread() = ActionUpdateThread.BGT
+            override fun update(e: AnActionEvent) {
+                // The chip itself signals an available update — a dot beside the version, the same
+                // signal VS Code's chip shows — and each tick (throttled) keeps the info current.
+                refreshVersionInfo()
+                val v = versionInfo
+                val chLatest = if (v?.channel == "dev") v.devLatest ?: v.stableLatest else v?.stableLatest
+                e.presentation.setText(
+                    "v" + pluginVersion().ifEmpty { "—" } + (if (v?.updateAvailable == true) " ●" else ""),
+                    false,
+                )
+                e.presentation.description =
+                    (if (v?.updateAvailable == true && chLatest != null) "Update available — v$chLatest. " else "") +
+                        "Claude Observatory version — update, or switch between the stable and pre-release channels"
+            }
+            override fun getChildren(e: AnActionEvent?): Array<AnAction> {
+                val v = versionInfo
+                    ?: return arrayOf(action("Checking for releases…", AllIcons.Actions.Refresh, "Fetch release info again (needs the claude-observatory CLI + network)") { refreshVersionInfo(force = true) })
+                val rows = mutableListOf<AnAction>()
+                val chLatest = if (v.channel == "dev") v.devLatest ?: v.stableLatest else v.stableLatest
+                if (v.updateAvailable && chLatest != null) {
+                    rows += action("Update Now — v$chLatest", AllIcons.Actions.Download, "Update the CLI + both editor plugins, then restart the IDE") { runUpdateCli(null) }
+                    rows += com.intellij.openapi.actionSystem.Separator.getInstance()
+                }
+                val stableText = (if (v.channel != "dev") "✓ " else "") + "Stable" + (v.stableLatest?.let { " — v$it" } ?: "")
+                val devText = (if (v.channel == "dev") "✓ " else "") + "Pre-release" + (v.devLatest?.let { " — v$it" } ?: " — none yet")
+                rows += action(stableText, AllIcons.Actions.Commit, "Tagged releases") {
+                    if (v.channel != "stable") runUpdateCli("stable")
+                }
+                rows += action(devText, AllIcons.Actions.Lightning, "Rolling build of the dev branch — newest features, less soak") {
+                    if (v.channel != "dev") runUpdateCli("dev")
+                }
+                return rows.toTypedArray()
+            }
+        }.apply {
+            templatePresentation.description =
+                "Claude Observatory version — update, or switch between the stable and pre-release channels"
+        }
+
+    /** Run the CLI's `update` (optionally switching `--channel`) in the background and report. The
+     *  CLI pass rewrites the installed plugin on disk; the restart POP-UP appears only when something
+     *  was actually installed (the CLI prints its exact up-to-date summary line otherwise), and
+     *  "Restart IDE" performs the restart — parity with VS Code's Reload-Window offer. */
+    private fun runUpdateCli(channel: String?) {
+        val what = when (channel) { null -> "Updating Claude Observatory"; "dev" -> "Switching to the Pre-release channel"; else -> "Switching to the Stable channel" }
+        ReviewOps.notify(project, "$what — this refreshes the CLI and both editor plugins…")
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val (ok, out) = ObservatoryCli.update(channel, project.basePath)
+            versionFetchedAtMs = 0L
+            refreshVersionInfo(force = true)
+            ApplicationManager.getApplication().invokeLater {
+                when {
+                    !ok -> ReviewOps.notify(project, "$what failed: ${out.take(300).ifBlank { "is the claude-observatory CLI installed?" }}", NotificationType.ERROR)
+                    out.contains("everything is up to date") || out.contains("CLI is up to date") ->
+                        ReviewOps.notify(project, "$what done — already on the newest build, no restart needed.")
+                    else -> {
+                        val restart = Messages.showYesNoDialog(
+                            project,
+                            "$what done — the plugin on disk was replaced.\n\nRestart the IDE now to load the new build?",
+                            "Claude Observatory",
+                            "Restart IDE",
+                            "Later",
+                            Messages.getQuestionIcon(),
+                        )
+                        if (restart == Messages.YES) ApplicationManager.getApplication().restart()
+                        else ReviewOps.notify(project, "New build loads on the next IDE restart.")
+                    }
+                }
+            }
+        }
+    }
 
     /** Export — ONE dropdown, both exports (parity with VS Code's Export button + picker): the
      *  shareable review summary (kept / reverted per file, markdown), or the FULL session trace of
