@@ -63,8 +63,14 @@ export function versionOfRelease(r: { tag_name?: string; name?: string } | null 
   const tag = String(r.tag_name ?? '')
     .trim()
     .replace(/^v/i, '');
-  if (/^\d+\.\d+\.\d+/.test(tag)) return tag;
-  const m = String(r.name ?? '').match(/\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?/);
+  if (/^\d{1,9}\.\d{1,9}\.\d{1,9}/.test(tag)) return tag;
+  // Bounded quantifiers + a hard input cap: the title arrives from a release API (overridable to a
+  // mirror), and an unanchored scan with unbounded `\d+` runs is polynomial on adversarial digit
+  // strings. Nine digits per component and a 128-char suffix cover every version this project can
+  // ever mint, at provably linear cost.
+  const m = String(r.name ?? '')
+    .slice(0, 256)
+    .match(/\d{1,9}\.\d{1,9}\.\d{1,9}(?:-[0-9A-Za-z][0-9A-Za-z.-]{0,127})?/);
   return m ? m[0] : null;
 }
 
