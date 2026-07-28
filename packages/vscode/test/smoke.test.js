@@ -1163,7 +1163,7 @@ test('extension: three views, click commands, inline annotations, chat, status s
     // green) — only running the real script against a DOM stub catches that class.
     {
       const vm = require('node:vm');
-      const scripts = [...cmView.webview.html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/gi)];
+      const scripts = [...cmView.webview.html.matchAll(/<script[^>]*>([\s\S]*?)<\/script\s*>/gi)];
       assert.ok(scripts.length >= 1, 'the overview shell embeds its script');
       const mkEl = () => ({
         innerHTML: '', textContent: '', title: '', hidden: true, style: {}, dataset: {}, value: '', checked: false,
