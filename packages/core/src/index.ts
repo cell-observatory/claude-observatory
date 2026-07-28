@@ -33,3 +33,4 @@ export * from './tasks';
 export { runCapture, handleHookPayload } from './capture';
 export * from './demo';
 export * from './tour';
+export * from './trace';

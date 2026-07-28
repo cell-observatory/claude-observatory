@@ -57,8 +57,22 @@ function toFileNode(f: core.TreeFile): FileNode {
   return { kind: 'file', file: f.file, edits: [...f.classes.flatMap((c) => c.edits), ...f.loose], classes: f.classes, loose: f.loose };
 }
 
+/** #43: `Uri.fsPath` LOWER-CASES the Windows drive letter, while store records are canonical
+ *  (`C:\…`) — so a raw fsPath never matches a record path on Windows. Every record↔editor path
+ *  join routes an editor-side path through here first; opening/displaying paths stays raw. */
+function canonFsPath(uri: vscode.Uri): string {
+  return core.canonPath(uri.fsPath);
+}
+
 function workspaceRoot(): string | undefined {
-  return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  const u = vscode.workspace.workspaceFolders?.[0]?.uri;
+  return u ? canonFsPath(u) : undefined;
+}
+
+/** The active editor's file as a canonical store key (#43) — undefined when no editor is active. */
+function activeEditorFile(): string | undefined {
+  const u = vscode.window.activeTextEditor?.document.uri;
+  return u ? canonFsPath(u) : undefined;
 }
 
 // Demo mode's session, held in MEMORY and never written to settings. Pinning through
@@ -649,7 +663,7 @@ const diffRevisionStep = async (dir: 1 | -1): Promise<void> => {
   const s = currentSession();
   if (!s) return;
   const active = vscode.window.activeTextEditor?.document.uri;
-  const file = active?.scheme === 'file' ? active.fsPath : revisionFile; // keep target while the diff pane is focused
+  const file = active?.scheme === 'file' ? canonFsPath(active) : revisionFile; // keep target while the diff pane is focused
   if (!file) {
     vscode.window.setStatusBarMessage('Claude Observatory: open a file Claude edited to step its revisions', 3000);
     return;
@@ -709,7 +723,7 @@ async function openFileAtEdit(node: EditNode): Promise<void> {
 /** True (and warns) if the file is open with unsaved edits — undoing writes to disk and would
  * either compute against stale content or be clobbered when the user next saves the buffer. */
 async function blockedByDirtyBuffer(file: string): Promise<boolean> {
-  const dirty = vscode.workspace.textDocuments.some((d) => d.uri.fsPath === file && d.isDirty);
+  const dirty = vscode.workspace.textDocuments.some((d) => canonFsPath(d.uri) === file && d.isDirty);
   if (dirty) {
     await vscode.window.showWarningMessage(
       `${path.basename(file)} has unsaved changes — save or revert it first. Claude Observatory undoes by writing to disk.`,
@@ -727,11 +741,16 @@ async function undoOne(session: string, id: number): Promise<void> {
     const pick = await vscode.window.showWarningMessage(res.message, { modal: true }, 'Force-restore file');
     if (pick === 'Force-restore file') {
       const r2 = core.restoreFile(session, id);
-      vscode.window.showInformationMessage(r2.message);
+      // The force path can itself refuse (#43 phantom guard) — a refusal reads as a warning.
+      if (!r2.ok) vscode.window.showWarningMessage(r2.message);
+      else vscode.window.showInformationMessage(r2.message);
     }
     return;
   }
-  vscode.window.showInformationMessage(res.message);
+  // A refusal (status 'error' — e.g. the #43 phantom guard) is a warning, not an info toast: its
+  // message carries the remediation pointer and must read as "this did not happen".
+  if (!res.ok) vscode.window.showWarningMessage(res.message);
+  else vscode.window.showInformationMessage(res.message);
 }
 
 async function redoOne(session: string, id: number): Promise<void> {
@@ -861,6 +880,7 @@ async function undoEditsInFile(session: string, file: string, _edits: core.EditR
   vscode.window.showInformationMessage(
     `Undid ${res.undone} edit(s) in ${base}` +
       (res.conflicts ? ` · ${res.conflicts} conflict(s) left — undo individually to force-restore` : '') +
+      (res.errors ? ` · ${res.errors} refused — ${res.firstError ?? ''}` : '') +
       '.'
   );
 }
@@ -891,7 +911,7 @@ async function undoEditsInFolder(session: string, folder: string): Promise<void>
     return;
   }
   const dirty = [...new Set(targets.map((t) => t.file))].filter((f) =>
-    vscode.workspace.textDocuments.some((d) => d.uri.fsPath === f && d.isDirty)
+    vscode.workspace.textDocuments.some((d) => canonFsPath(d.uri) === f && d.isDirty)
   );
   if (dirty.length) {
     await vscode.window.showWarningMessage(
@@ -910,6 +930,7 @@ async function undoEditsInFolder(session: string, folder: string): Promise<void>
   vscode.window.showInformationMessage(
     `Undid ${res.undone} edit(s) in ${label}` +
       (res.conflicts ? ` · ${res.conflicts} conflict(s) left — undo individually to force-restore` : '') +
+      (res.errors ? ` · ${res.errors} refused — ${res.firstError ?? ''}` : '') +
       '.'
   );
 }
@@ -936,7 +957,7 @@ async function undoEditsUnder(session: string, scope: string, label: string): Pr
     return;
   }
   const dirty = [...new Set(targets.map((t) => t.file))].filter((f) =>
-    vscode.workspace.textDocuments.some((d) => d.uri.fsPath === f && d.isDirty)
+    vscode.workspace.textDocuments.some((d) => canonFsPath(d.uri) === f && d.isDirty)
   );
   if (dirty.length) {
     await vscode.window.showWarningMessage(
@@ -955,6 +976,7 @@ async function undoEditsUnder(session: string, scope: string, label: string): Pr
   vscode.window.showInformationMessage(
     `Reverted ${res.undone} edit(s) in ${label}` +
       (res.conflicts ? ` · ${res.conflicts} conflict(s) left (revert individually to force)` : '') +
+      (res.errors ? ` · ${res.errors} refused — ${res.firstError ?? ''}` : '') +
       '.'
   );
 }
@@ -1071,7 +1093,7 @@ async function undoAllSession(session: string): Promise<void> {
     return;
   }
   const dirty = [...new Set(targets.map((t) => t.file))].filter((f) =>
-    vscode.workspace.textDocuments.some((d) => d.uri.fsPath === f && d.isDirty)
+    vscode.workspace.textDocuments.some((d) => canonFsPath(d.uri) === f && d.isDirty)
   );
   if (dirty.length) {
     await vscode.window.showWarningMessage(
@@ -1091,6 +1113,7 @@ async function undoAllSession(session: string): Promise<void> {
   vscode.window.showInformationMessage(
     `Reverted ${res.undone} edit(s)` +
       (res.conflicts ? ` · ${res.conflicts} conflict(s) left (revert individually to force)` : '') +
+      (res.errors ? ` · ${res.errors} refused — ${res.firstError ?? ''}` : '') +
       '.'
   );
 }
@@ -1103,7 +1126,7 @@ async function redoAllSession(session: string): Promise<void> {
     return;
   }
   const dirty = [...new Set(targets.map((t) => t.file))].filter((f) =>
-    vscode.workspace.textDocuments.some((d) => d.uri.fsPath === f && d.isDirty)
+    vscode.workspace.textDocuments.some((d) => canonFsPath(d.uri) === f && d.isDirty)
   );
   if (dirty.length) {
     await vscode.window.showWarningMessage(
@@ -1154,7 +1177,7 @@ async function undoTaskScope(session: string, taskId: string): Promise<void> {
     return;
   }
   const dirty = [...new Set(targets.map((t) => t.file))].filter((f) =>
-    vscode.workspace.textDocuments.some((d) => d.uri.fsPath === f && d.isDirty)
+    vscode.workspace.textDocuments.some((d) => canonFsPath(d.uri) === f && d.isDirty)
   );
   if (dirty.length) {
     await vscode.window.showWarningMessage(
@@ -1173,6 +1196,7 @@ async function undoTaskScope(session: string, taskId: string): Promise<void> {
   vscode.window.showInformationMessage(
     `Reverted ${res.undone} edit(s) in this task` +
       (res.conflicts ? ` · ${res.conflicts} conflict(s) left (revert individually to force)` : '') +
+      (res.errors ? ` · ${res.errors} refused — ${res.firstError ?? ''}` : '') +
       '.'
   );
 }
@@ -1218,7 +1242,7 @@ async function undoPrompt(session: string, promptId: string): Promise<void> {
     return;
   }
   const dirty = [...new Set(targets.map((t) => t.file))].filter((f) =>
-    vscode.workspace.textDocuments.some((d) => d.uri.fsPath === f && d.isDirty)
+    vscode.workspace.textDocuments.some((d) => canonFsPath(d.uri) === f && d.isDirty)
   );
   if (dirty.length) {
     await vscode.window.showWarningMessage(
@@ -1237,6 +1261,7 @@ async function undoPrompt(session: string, promptId: string): Promise<void> {
   vscode.window.showInformationMessage(
     `Reverted ${res.undone} edit(s) from this prompt` +
       (res.conflicts ? ` · ${res.conflicts} conflict(s) left (revert individually to force)` : '') +
+      (res.errors ? ` · ${res.errors} refused — ${res.firstError ?? ''}` : '') +
       '.'
   );
 }
@@ -1404,7 +1429,7 @@ function docContentKey(doc: vscode.TextDocument): string {
 /** Wall-clock of the last real locate per file — feeds the adaptive keystroke debounce below. */
 const placementCostMs = new Map<string, number>();
 function cachedPlacements(session: string, doc: vscode.TextDocument): Placement[] {
-  const file = doc.uri.fsPath;
+  const file = canonFsPath(doc.uri); // #43: pendingByFile is keyed by canonical record paths
   // Keyed on the buffer content + THIS FILE's pending chain (ids + blob shas + count), NOT the whole
   // session log: with the log stamp in the key, a keep click in any file re-diffed every open file —
   // measured at ~353ms per hot file per click, for placements that could not have moved. The chain is
@@ -1605,9 +1630,9 @@ class InlineLensProvider implements vscode.CodeLensProvider {
     // Position counters — the same Diff-axis / File-axis numbers the status-bar nav bar shows, but
     // folded into the lens next to the edit (the editor title bar can't render live text). "edit n/m
     // in file" mirrors the Diff axis; "file i/k" mirrors the File axis (shown only when >1 file pending).
-    const filePending = pendingEditsInFile(session, doc.uri.fsPath);
+    const filePending = pendingEditsInFile(session, canonFsPath(doc.uri));
     const files = pendingFilesOf(session);
-    const fileIdx = files.indexOf(doc.uri.fsPath);
+    const fileIdx = files.indexOf(canonFsPath(doc.uri));
     const filePos = fileIdx >= 0 && files.length > 1 ? `  ·  file ${fileIdx + 1}/${files.length}` : '';
     const lenses: vscode.CodeLens[] = [];
     for (const [line, g] of byLine) {
@@ -2506,9 +2531,9 @@ function changeMapShell(): string {
   .ov-tbrow { display:flex; align-items:center; justify-content:center; gap:10px; flex-wrap:wrap; }
   /* a split row pins its first child to the left edge and its last to the right (space-between) */
   .ov-tbrow.split { justify-content:space-between; }
-  /* Not a control — the session under review, stated. It wraps rather than clipping: the session's name
-     is the one thing on this bar a reader cannot reconstruct from anywhere else. */
-  .ov-sesslabel { font-family: var(--cm-mono); font-size:11px; color: var(--vscode-foreground); overflow-wrap:anywhere; max-width:32ch; }
+  /* Not a control — the session under review, stated. ONE line, never wrapped (user call 2026-07-28):
+     a long title clips to an ellipsis and the tooltip carries the full name + raw id. */
+  .ov-sesslabel { font-family: var(--cm-mono); font-size:11px; color: var(--vscode-foreground); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:32ch; }
   .ov-tb { display:inline-flex; align-items:center; gap:5px; background:transparent; border:1px solid var(--cm-border); border-radius:5px; color: var(--vscode-descriptionForeground); font:inherit; font-size:11px; padding:3px 9px; cursor:pointer; white-space:nowrap; }
   .ov-tb:hover { background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.12)); color: var(--vscode-foreground); }
   /* session chip: show the FULL name — let a long one wrap/break inside the chip instead of overflowing */
@@ -2884,7 +2909,7 @@ function changeMapShell(): string {
     `<button class="ov-tb" id="ov-keepall" title="Accept all edits in this session"><i class="codicon codicon-checklist"></i> Accept All</button>` +
     `<button class="ov-tb" id="ov-undoall" title="Reject (revert) every pending edit in this session"><i class="codicon codicon-history"></i> Reject All</button>` +
     `<button class="ov-tb" id="ov-clearres" title="Clear resolved (kept / reverted) edits"><i class="codicon codicon-clear-all"></i> Clear Resolved</button>` +
-    `<button class="ov-tb" id="ov-export" title="Export a shareable review summary (kept / reverted per file) as markdown"><i class="codicon codicon-export"></i> Export</button>` +
+    `<button class="ov-tb" id="ov-export" title="Export — a shareable review summary (markdown), or the full session trace of everything recorded (JSON)"><i class="codicon codicon-export"></i> Export</button>` +
     `</span>` +
     // Right cluster: search · active only | spotlight · refresh (view/utility controls).
     `<span class="ov-navgrp">` +
@@ -2960,7 +2985,7 @@ class FileHistoryProvider implements vscode.TreeDataProvider<EditNode> {
   refresh(): void {
     this._changed.fire();
     if (this.view) {
-      const f = vscode.window.activeTextEditor?.document.uri.fsPath;
+      const f = activeEditorFile();
       this.view.description = f ? path.basename(f) : undefined; // name the file being followed
     }
   }
@@ -2968,7 +2993,7 @@ class FileHistoryProvider implements vscode.TreeDataProvider<EditNode> {
   getChildren(node?: EditNode): EditNode[] {
     if (node) return []; // flat list
     const session = currentSession();
-    const file = vscode.window.activeTextEditor?.document.uri.fsPath;
+    const file = activeEditorFile();
     if (!session || !file) return [];
     // The store read-primitive: a file's edits = readLog filtered by absolute-path equality.
     return cachedLog(session)
@@ -3955,6 +3980,7 @@ class ChangeMapViewProvider implements vscode.WebviewViewProvider {
       else if (m.type === 'keepOpenFile') void vscode.commands.executeCommand('claudeObservatory.keepOpenFile');
       else if (m.type === 'undoOpenFile') void vscode.commands.executeCommand('claudeObservatory.undoOpenFile');
       else if (m.type === 'exportSummary') void vscode.commands.executeCommand('claudeObservatory.exportSummary');
+      else if (m.type === 'exportMenu') void vscode.commands.executeCommand('claudeObservatory.exportMenu');
       else if (m.type === 'toggleHeatmap') void vscode.commands.executeCommand('claudeObservatory.toggleHeatmap');
       else if (m.type === 'searchEdits') void vscode.commands.executeCommand('claudeObservatory.searchEdits');
     });
@@ -5380,7 +5406,7 @@ const OVERVIEW_SCRIPT = `
     tbtn('ov-acceptfile','keepOpenFile'); tbtn('ov-rejectfile','undoOpenFile');
     tbtn('ov-folderprev','navFolderPrev'); tbtn('ov-foldernext','navFolderNext');
     tbtn('ov-acceptfolder','acceptCurrentFolder'); tbtn('ov-rejectfolder','rejectCurrentFolder');
-    tbtn('ov-export','exportSummary');
+    tbtn('ov-export','exportMenu');
     tbtn('ov-spotlight','toggleHeatmap'); tbtn('ov-search','searchEdits');
     relabelBulk(); renderNavPos();
   })();
@@ -6125,7 +6151,7 @@ export function activate(context: vscode.ExtensionContext): void {
     statusItem.show();
 
     // Nav-bar counters: the File axis spans every pending file; the Diff axis spans the OPEN file's edits.
-    const activeFile = vscode.window.activeTextEditor?.document.uri.fsPath;
+    const activeFile = activeEditorFile();
     const files = session ? pendingFilesOf(session) : [];
     const inFile = session && activeFile ? pendingEditsInFile(session, activeFile) : [];
     const activeHasPending = inFile.length > 0;
@@ -6202,7 +6228,7 @@ export function activate(context: vscode.ExtensionContext): void {
   // pending edit — its own context key, refreshed on store changes and on tab switches.
   const syncActiveFileContext = () => {
     const s = currentSession();
-    const file = vscode.window.activeTextEditor?.document.uri.fsPath;
+    const file = activeEditorFile();
     const has = Boolean(s && file && cachedLog(s).some((r) => r.status === 'pending' && r.file === file));
     void vscode.commands.executeCommand('setContext', 'claudeObservatory.activeFileHasPending', has);
   };
@@ -6411,7 +6437,7 @@ export function activate(context: vscode.ExtensionContext): void {
   // Diff axis: step the OPEN file's pending edits (wrapping) and reveal the target in the editor.
   const navDiff = async (dir: 1 | -1) => {
     const s = currentSession();
-    const file = vscode.window.activeTextEditor?.document.uri.fsPath;
+    const file = activeEditorFile();
     if (!s || !file) return;
     const list = pendingEditsInFile(s, file);
     if (!list.length) return;
@@ -6427,7 +6453,7 @@ export function activate(context: vscode.ExtensionContext): void {
     if (!s) return;
     const files = pendingFilesOf(s);
     if (!files.length) return;
-    const active = vscode.window.activeTextEditor?.document.uri.fsPath;
+    const active = activeEditorFile();
     const idx = active ? files.indexOf(active) : -1;
     const target = files[((idx < 0 ? 0 : idx) + dir + files.length) % files.length];
     const first = pendingEditsInFile(s, target)[0];
@@ -6442,7 +6468,7 @@ export function activate(context: vscode.ExtensionContext): void {
     if (!s) return;
     const folders = pendingFoldersOf(s);
     if (!folders.length) return;
-    const active = vscode.window.activeTextEditor?.document.uri.fsPath;
+    const active = activeEditorFile();
     const idx = active ? folders.indexOf(folderLabelOf(active)) : -1;
     const target = folders[((idx < 0 ? 0 : idx) + dir + folders.length) % folders.length];
     const first = pendingEditsInFolder(s, target)[0];
@@ -6509,7 +6535,7 @@ export function activate(context: vscode.ExtensionContext): void {
       // Adaptive: a file whose last locate was expensive (long edit chain × big buffer — measured
       // ~353ms on a 46-edit chain in 152KB) coalesces at 1.2s instead of stalling every 250ms burst.
       // Cheap files keep the tight cadence; the cost map is fed by cachedPlacements itself.
-      const cost = placementCostMs.get(e.document.uri.fsPath) ?? 0;
+      const cost = placementCostMs.get(canonFsPath(e.document.uri)) ?? 0;
       debounce = setTimeout(refreshInline, cost > 150 ? 1200 : 250);
     })
   );
@@ -6584,7 +6610,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('claudeObservatory.revealFolder', (folder: string) => revealFolder(folder)),
     vscode.commands.registerCommand('claudeObservatory.acceptCurrentFolder', () => {
       const s = currentSession();
-      const file = vscode.window.activeTextEditor?.document.uri.fsPath;
+      const file = activeEditorFile();
       if (!s || !file) {
         vscode.window.setStatusBarMessage('Claude Observatory: open a file with edits to accept its folder', 2500);
         return;
@@ -6593,7 +6619,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand('claudeObservatory.rejectCurrentFolder', async () => {
       const s = currentSession();
-      const file = vscode.window.activeTextEditor?.document.uri.fsPath;
+      const file = activeEditorFile();
       if (!s || !file) {
         vscode.window.setStatusBarMessage('Claude Observatory: open a file with edits to reject its folder', 2500);
         return;
@@ -6645,6 +6671,38 @@ export function activate(context: vscode.ExtensionContext): void {
       const md = core.reviewSummaryMarkdown(core.reviewSummary(s));
       const doc = await vscode.workspace.openTextDocument({ content: md, language: 'markdown' });
       await vscode.window.showTextDocument(doc);
+    }),
+    // The FULL session trace — everything the observatory recorded, as one JSON document
+    // (core.buildSessionTrace; the CLI `export` verb and JetBrains produce the identical shape).
+    vscode.commands.registerCommand('claudeObservatory.exportTrace', async () => {
+      const s = currentSession();
+      if (!s) {
+        vscode.window.showWarningMessage('Claude Observatory: no active Claude Code session to export.');
+        return;
+      }
+      const cwd = workspaceRoot() ?? process.cwd();
+      const trace = core.buildSessionTrace(cwd, s, {
+        root: cwd,
+        toolVersion: String(context.extension?.packageJSON?.version ?? ''),
+      });
+      const doc = await vscode.workspace.openTextDocument({
+        content: JSON.stringify(trace, null, 2) + '\n',
+        language: 'json',
+      });
+      await vscode.window.showTextDocument(doc);
+      if (trace.errors.length)
+        vscode.window.showWarningMessage(`Claude Observatory: trace sections that failed to build: ${trace.errors.join(', ')}`);
+    }),
+    // The Overview's Export button: one button, both exports (the expansion issue asked for).
+    vscode.commands.registerCommand('claudeObservatory.exportMenu', async () => {
+      const pick = await vscode.window.showQuickPick(
+        [
+          { label: 'Review summary', description: 'kept / reverted per file — markdown', cmd: 'claudeObservatory.exportSummary' },
+          { label: 'Full session trace', description: 'everything recorded — every edit with its diff, prompts, actions, tasks, subagents, egress, observations, usage — JSON', cmd: 'claudeObservatory.exportTrace' },
+        ],
+        { title: 'Export', placeHolder: 'What to export' }
+      );
+      if (pick) void vscode.commands.executeCommand(pick.cmd);
     }),
     // Setup check: run `doctor` and open the diagnostics (hooks, PATH, config, session, status line) in a tab.
     vscode.commands.registerCommand('claudeObservatory.doctor', async () => {
@@ -6825,7 +6883,7 @@ export function activate(context: vscode.ExtensionContext): void {
         for (const group of vscode.window.tabGroups.all) {
           for (const tab of group.tabs) {
             const uri = (tab.input as { uri?: vscode.Uri } | undefined)?.uri;
-            if (uri?.fsPath.startsWith(ws + path.sep)) {
+            if (uri && canonFsPath(uri).startsWith(ws + path.sep)) {
               try {
                 await vscode.window.tabGroups.close(tab, false);
               } catch {
@@ -7210,14 +7268,14 @@ export function activate(context: vscode.ExtensionContext): void {
     // Accept / revert every pending edit in the ACTIVE editor's file — what the per-file surfaces use.
     vscode.commands.registerCommand('claudeObservatory.keepOpenFile', () =>
       withSession((s) => {
-        const file = vscode.window.activeTextEditor?.document.uri.fsPath;
+        const file = activeEditorFile();
         if (!file) return void vscode.window.showInformationMessage('Claude Observatory: no active file.');
         keepEditsInFile(s, file, cachedLog(s).filter((r) => r.file === file));
       })()
     ),
     vscode.commands.registerCommand('claudeObservatory.undoOpenFile', () =>
       withSession(async (s) => {
-        const file = vscode.window.activeTextEditor?.document.uri.fsPath;
+        const file = activeEditorFile();
         if (!file) return void vscode.window.showInformationMessage('Claude Observatory: no active file.');
         await undoEditsInFile(s, file, cachedLog(s).filter((r) => r.file === file));
       })()
@@ -7293,8 +7351,8 @@ export function activate(context: vscode.ExtensionContext): void {
     const cwd = workspaceRoot();
     if (!cwd) return null;
     try {
-      const dirs = new Set<string>([path.resolve(core.projectDir(cwd))]);
-      for (const sib of core.listRepoSiblings(cwd, currentSession() ?? '')) dirs.add(path.resolve(core.projectDir(sib.worktree)));
+      const dirs = new Set<string>([core.canonPath(path.resolve(core.projectDir(cwd)))]);
+      for (const sib of core.listRepoSiblings(cwd, currentSession() ?? '')) dirs.add(core.canonPath(path.resolve(core.projectDir(sib.worktree))));
       relevantDirs = dirs;
       relevantAt = now;
       return dirs;
@@ -7309,7 +7367,7 @@ export function activate(context: vscode.ExtensionContext): void {
       // Containment, not equality: a session's subagent and workflow transcripts live NESTED under the
       // project dir (<project>/<session>/subagents/**.jsonl), and those are exactly the writes that keep
       // a live agent fleet's phase current.
-      const p = path.resolve(uri.fsPath);
+      const p = core.canonPath(path.resolve(uri.fsPath)); // #43: watcher URIs carry the lower-cased drive
       if (dirs && ![...dirs].some((d) => p === d || p.startsWith(d + path.sep))) return; // another project's session
     }
     if (txDebounce) clearTimeout(txDebounce);

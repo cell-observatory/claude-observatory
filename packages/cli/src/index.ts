@@ -392,6 +392,16 @@ function relFile(file: string): string {
   return r && !r.startsWith('..') ? r : file;
 }
 
+/** #43: an `--under` operand can arrive with a lower-cased Windows drive letter (shells) or forward
+ *  slashes (JetBrains passes VirtualFile paths) — resolve to the OS-native absolute form and
+ *  canonicalize the drive case so it matches canonical record paths. Callers validate emptiness
+ *  FIRST: `path.resolve('')` is the cwd, which would silently widen an invalid scope to everything. */
+function canonUnder(under: string): string {
+  const path = require('path');
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  return core.canonPath(path.resolve(under));
+}
+
 function statusLabel(s: string): string {
   if (s === 'pending') return c.yellow('pending');
   if (s === 'kept') return c.green('kept');
@@ -413,8 +423,9 @@ function cmdList(args: string[]): void {
         : null;
   if (only) log = log.filter((r) => r.status === only);
   const fi = args.indexOf('--file');
-  const sub = flagValue(args, '--file');
-  if (fi >= 0 && !sub) fail('`list --file <substr>` requires a value');
+  const subRaw = flagValue(args, '--file');
+  if (fi >= 0 && !subRaw) fail('`list --file <substr>` requires a value');
+  const sub = subRaw && core.canonPath(subRaw); // #43: match canonical record paths
   if (sub) log = log.filter((r) => r.file.includes(sub));
 
   if (args.includes('--json')) {
@@ -1264,10 +1275,12 @@ function cmdKeep(args: string[]): void {
   const ui = args.indexOf('--under');
   if (args.includes('--all') || fi >= 0 || ui >= 0) {
     refuseScopeWithId(args, "keep");
-    const fileSub = flagValue(args, "--file");
-    if (fi >= 0 && !fileSub) fail('`keep --file <substr>` requires a value');
-    const under = flagValue(args, "--under");
-    if (ui >= 0 && !under) fail('`keep --under <path>` requires a value');
+    const fileSubRaw = flagValue(args, "--file");
+    if (fi >= 0 && !fileSubRaw) fail('`keep --file <substr>` requires a value');
+    const fileSub = fileSubRaw && core.canonPath(fileSubRaw); // #43: match canonical record paths
+    const underRaw = flagValue(args, "--under");
+    if (ui >= 0 && !underRaw) fail('`keep --under <path>` requires a value');
+    const under = underRaw && canonUnder(underRaw);
     const targets = core
       .readLog(session)
       .filter(
@@ -1332,8 +1345,9 @@ function cmdUndo(args: string[]): void {
     refuseScopeWithId(args, "undo");
     const fileSub = flagValue(args, "--file");
     if (fi >= 0 && !fileSub) fail('`undo --file <substr>` requires a value');
-    const under = flagValue(args, "--under");
-    if (ui >= 0 && !under) fail('`undo --under <path>` requires a value');
+    const underRaw = flagValue(args, "--under");
+    if (ui >= 0 && !underRaw) fail('`undo --under <path>` requires a value');
+    const under = underRaw && canonUnder(underRaw); // #43: undoScope canonicalizes fileSub itself
     let ids: number[] | undefined;
     if (idi >= 0) {
       const raw = args[idi + 1];
@@ -1344,7 +1358,7 @@ function cmdUndo(args: string[]): void {
     const res = core.undoScope(session, { under, fileSubstr: fileSub, ids });
     core.autoClearDemo(session); // a fully reviewed demo session leaves no residue
     if (args.includes('--json')) {
-      emitJson({ undone: res.undone, conflicts: res.conflicts, total: res.total });
+      emitJson({ undone: res.undone, conflicts: res.conflicts, errors: res.errors, firstError: res.firstError ?? null, total: res.total });
       return;
     }
     const scope = fileSub ? ` in files matching "${fileSub}"` : under ? ` under ${relFile(under)}` : ids ? ` in ${ids.length} selected edit(s)` : '';
@@ -1354,11 +1368,15 @@ function cmdUndo(args: string[]): void {
       return;
     }
     process.stdout.write(
-      (res.conflicts ? c.yellow('⚠ ') : c.green('✓ ')) +
+      (res.conflicts || res.errors ? c.yellow('⚠ ') : c.green('✓ ')) +
         `reverted ${res.undone} edit(s)${scope}` +
         (res.conflicts ? ` · ${res.conflicts} conflict(s) left (undo individually with --force)` : '') +
+        (res.errors ? ` · ${res.errors} refused` : '') +
         '\n'
     );
+    // The refusal's remediation pointer (e.g. `clean --phantoms`) must reach the user — a bulk revert
+    // that silently swallows it leaves a session that never empties and no way to learn why.
+    if (res.errors && res.firstError) process.stdout.write(c.yellow('  ↳ ') + res.firstError + '\n');
     return;
   }
   const id = requireId(args);
@@ -1392,8 +1410,9 @@ function cmdRedo(args: string[]): void {
     refuseScopeWithId(args, "redo");
     const fileSub = flagValue(args, "--file");
     if (fi >= 0 && !fileSub) fail('`redo --file <substr>` requires a value');
-    const under = flagValue(args, "--under");
-    if (ui >= 0 && !under) fail('`redo --under <path>` requires a value');
+    const underRaw = flagValue(args, "--under");
+    if (ui >= 0 && !underRaw) fail('`redo --under <path>` requires a value');
+    const under = underRaw && canonUnder(underRaw); // #43: redoScope canonicalizes fileSub itself
     let bulkIds: number[] | undefined;
     if (idi >= 0) {
       const raw = args[idi + 1];
@@ -1685,8 +1704,9 @@ function cmdClean(args: string[]): void {
   // a file/folder (the editors' folder/file Clear action).
   if (args.includes('--resolved')) {
     const ui = args.indexOf('--under');
-    const under = flagValue(args, "--under");
-    if (ui >= 0 && !under) fail('`clean --resolved --under <path>` requires a value');
+    const underRaw = flagValue(args, "--under");
+    if (ui >= 0 && !underRaw) fail('`clean --resolved --under <path>` requires a value');
+    const under = underRaw && canonUnder(underRaw); // #43
     // --ids <a,b,c> clears an EXPLICIT edit set — the scope a prompt names, which no path can express
     // (one ask edits many folders). Same resolver both editors use, so neither invents its own scope.
     const idi = args.indexOf('--ids');
@@ -1726,6 +1746,23 @@ function cmdClean(args: string[]): void {
       return;
     }
     process.stdout.write(c.green('✓ ') + `dropped session ${id}\n`);
+    return;
+  }
+  // Repair (issue #43): drop Windows drive-letter-case phantom pairs — a pending create + delete twin
+  // for one file under two cases, both capture artifacts. Provable pairs only; real work is never touched.
+  if (args.includes('--phantoms')) {
+    const sess = flagValue(args, '--session') ?? core.resolveSessionId(process.cwd());
+    if (!sess) fail('no session resolved — pass --session <id>');
+    const r = core.repairCasePhantoms(sess);
+    if (json) {
+      emitJson({ session: sess, pairs: r.pairs, ids: r.ids });
+      return;
+    }
+    process.stdout.write(
+      r.pairs
+        ? c.green('✓ ') + `removed ${r.pairs} phantom pair(s) (${r.ids.length} records) from ${sess}\n`
+        : `no phantom pairs found in ${sess} — nothing changed\n`
+    );
     return;
   }
   // Destructive: drop every session whose review is finished — nothing pending, conversation over.
@@ -1937,6 +1974,38 @@ function cmdStats(args: string[]): void {
 }
 
 /** `summary` — a per-session review recap (kept/reverted per file + acceptance rate); --markdown to export. */
+/** `export` — the FULL session trace: everything the observatory recorded for one session (the edit
+ *  log with per-edit deltas and unified diffs, capture skips, prompts, every action, tasks,
+ *  subagents, egress, outside-workspace writes, observations, token usage, and the change-map
+ *  summary) as ONE JSON document. Core composes it (`buildSessionTrace`), so the CLI and both
+ *  editors export the identical thing. `--out <file>` writes it; otherwise it prints to stdout. */
+function cmdExport(args: string[]): void {
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  const fs = require('fs');
+  const path = require('path');
+  const session = getSessionId(args);
+  const ri = args.indexOf('--root');
+  const root = flagValue(args, '--root');
+  if (ri >= 0 && !root) fail('`export --root <path>` requires a value');
+  const oi = args.indexOf('--out');
+  const out = flagValue(args, '--out');
+  if (oi >= 0 && !out) fail('`export --out <file>` requires a value');
+  const trace = core.buildSessionTrace(process.cwd(), session, { root: root ?? process.cwd(), toolVersion: version() });
+  const body = JSON.stringify(trace, null, 2) + '\n';
+  if (out) {
+    fs.writeFileSync(out, body);
+    process.stdout.write(
+      c.green('✓ ') +
+        `wrote the full session trace to ${relFile(path.resolve(out))} ` +
+        `(${trace.edits.length} edit(s), ${trace.actions?.length ?? 0} action(s))\n`
+    );
+  } else {
+    process.stdout.write(body);
+  }
+  if (trace.errors.length)
+    process.stderr.write(c.yellow('⚠ ') + `sections that failed to build: ${trace.errors.join(', ')}\n`);
+}
+
 function cmdSummary(args: string[]): void {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const session = getSessionId(args);
@@ -1966,6 +2035,7 @@ function cmdSummary(args: string[]): void {
     process.stdout.write('\n' + c.dim('reverted: ') + s.reverted.map((r) => '#' + r.id).join(' ') + '\n');
   }
   process.stdout.write(c.dim('\nexport:  claude-observatory summary --markdown > review.md\n'));
+  process.stdout.write(c.dim('         claude-observatory export --out trace.json   (the full session trace)\n'));
 }
 
 // --- machine-readable commands for non-Node front-ends (JetBrains plugin, scripts) ---
@@ -1993,7 +2063,7 @@ function cmdLocate(args: string[]): void {
   const fi = args.indexOf('--file');
   const file = flagValue(args, '--file');
   if (!file) fail('`locate --file <path>` is required (current buffer text on stdin)');
-  const abs = path.resolve(file);
+  const abs = core.canonPath(path.resolve(file)); // #43: both editors pass editor-cased paths
   let current: string;
   try {
     current = fs.readFileSync(0, 'utf8'); // stdin
@@ -2433,6 +2503,27 @@ async function updateCliBinary(assets: ReleaseAsset[], latest: string, current: 
   const r = cp.spawnSync('npm', ['i', '-g', dest], { stdio: 'inherit' });
   if (r.status !== 0) fail(`npm install failed (exit ${r.status ?? '?'}). Try: npm i -g ${dest}`);
   process.stdout.write(c.green('✓ ') + `updated the CLI ${current} → ${latest}\n`);
+  refreshInstalledStatusline();
+}
+
+/** The bundled status line updates WITH the CLI. Updating the observatory used to leave the installed
+ *  ~/.claude/statusline.sh stale until the user re-ran `claude-observatory statusline` by hand — one
+ *  update command now covers both. Runs the freshly-installed GLOBAL binary (not this process, whose
+ *  bundled copy is the old version), and only when ours is actually installed. */
+function refreshInstalledStatusline(): void {
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  if (!core.statuslineInstalled()) return; // some other status line (or none) — never touch it
+  const cp = require('child_process');
+  process.stdout.write(c.dim('refreshing the bundled status line…\n'));
+  const winShell = process.platform === 'win32';
+  const r = cp.spawnSync(winShell ? 'claude-observatory.cmd' : 'claude-observatory', ['statusline'], {
+    stdio: 'inherit',
+    shell: winShell,
+  });
+  if (r.status !== 0)
+    process.stdout.write(
+      c.dim(`status line refresh did not complete — run \`claude-observatory statusline\` yourself.\n`)
+    );
 }
 
 /** Editors in the VS Code family (code/cursor/…) on PATH that already have our extension, with the
@@ -2778,7 +2869,8 @@ async function cmdUpdate(args: string[]): Promise<void> {
     return;
   }
 
-  if (cliStale) await updateCliBinary(assets, latest, current);
+  if (cliStale) await updateCliBinary(assets, latest, current); // refreshes the status line itself
+  else refreshInstalledStatusline(); // CLI already current — still heal a statusline.sh an older CLI wrote
   const vscode = await refreshVscodeExtension(assets, latest, force);
   const jetbrains = await refreshJetbrainsPlugin(assets, latest, force);
   if (vscode === 'blocked' || jetbrains === 'blocked') {
@@ -2847,7 +2939,8 @@ function usage(): void {
       `  update [--check] [--cli-only] [--force]\n` +
       `                       update the CLI AND refresh the locally-installed editor extensions from\n` +
       `                       the latest GitHub Release (VS Code via \`code --install-extension\`;\n` +
-      `                       JetBrains by unzip into plugin dirs). --check reports only; --cli-only\n` +
+      `                       JetBrains by unzip into plugin dirs), and refresh the bundled status\n` +
+      `                       line when ours is installed. --check reports only; --cli-only\n` +
       `                       skips the extensions; --force reinstalls even if already current\n` +
       `  sessions             this workspace's sessions, newest conversation first (● = this directory's)\n` +
       `  list [filters]       list edits (grouped by file); filters: --pending|--kept|--undone, --file <substr>\n` +
@@ -2907,8 +3000,11 @@ function usage(): void {
       `                       --completed [--stale <Nd>] [--dry-run]  drop FINISHED sessions (nothing\n` +
       `                       left to review) and ABANDONED ones (unreviewed but dead >14d; their edits\n` +
       `                       are discarded) — --dry-run lists what would go without dropping anything\n` +
+      `                       --phantoms [--session <id>]  remove Windows path-case phantom pairs (#43)\n` +
       `  stats [--json]       usage stats (edits/tokens/messages/thinking/output) by session & window\n` +
       `  summary [--markdown] per-session review recap (kept/reverted per file); --markdown to export\n` +
+      `  export [--out <f>]   the FULL session trace as JSON — every edit with its diff, skips, prompts,\n` +
+      `                       actions, tasks, subagents, egress, outside writes, observations, usage\n` +
       `  insights [--json]    Observations view: recap + per-edit reasoning/flags/file-memory + next steps\n\n` +
       `machine-readable (for front-ends/scripts; list/status/sessions/keep/undo/redo also take --json):\n` +
       `  blob <sha>           raw blob bytes to stdout\n` +
@@ -3168,6 +3264,9 @@ function main(): void {
       break;
     case 'summary':
       cmdSummary(rest);
+      break;
+    case 'export':
+      cmdExport(rest);
       break;
     case 'blob':
       cmdBlob(rest);

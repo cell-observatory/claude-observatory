@@ -45,6 +45,11 @@ object ReviewOps {
         "Could not $action — the claude-observatory CLI failed or isn't installed. " +
             "Install it and set its path in Settings → Tools → Claude Observatory."
 
+    /** Bulk-revert refusals (e.g. the #43 phantom guard) appended to the toast — the refusal message
+     *  names the remediation (`clean --phantoms`), and swallowing it leaves totals that don't add up. */
+    private fun refusedSuffix(res: ObservatoryCli.UndoScopeResult): String =
+        if (res.errors > 0) " · ${res.errors} refused — ${res.firstError ?: ""}" else ""
+
     fun keep(project: Project, session: String, id: Int) {
         runBg(project, "Keeping edit #$id") {
             // Routine single-edit keep → transient status bar (no Event Log pile-up); failures stay balloons.
@@ -145,7 +150,11 @@ object ReviewOps {
                 else {
                     ObservatoryService.getInstance(project).refresh(force = true)
                     VfsUtil.markDirtyAndRefresh(true, true, true, *arrayOf(LocalFileSystem.getInstance().findFileByPath(project.basePath ?: "")).filterNotNull().toTypedArray())
-                    notify(project, "Reverted the session's pending edits.")
+                    notify(
+                        project,
+                        "Reverted ${r.undone} of ${r.total} pending edit(s)." + refusedSuffix(r),
+                        if (r.errors > 0) NotificationType.WARNING else NotificationType.INFORMATION,
+                    )
                 }
             }
         }
@@ -187,7 +196,10 @@ object ReviewOps {
             } else {
                 done(
                     project,
-                    "Reverted ${res.undone} edit(s)" + if (res.conflicts > 0) " · ${res.conflicts} conflict(s) — undo those individually to force" else "",
+                    "Reverted ${res.undone} edit(s)" +
+                        (if (res.conflicts > 0) " · ${res.conflicts} conflict(s) — undo those individually to force" else "") +
+                        refusedSuffix(res),
+                    if (res.errors > 0) NotificationType.WARNING else NotificationType.INFORMATION,
                 )
             }
         }
@@ -271,7 +283,9 @@ object ReviewOps {
                 done(
                     project,
                     "Reverted ${res.undone} edit(s) in $longScope" +
-                        if (res.conflicts > 0) " · ${res.conflicts} conflict(s) — revert those individually to force" else "",
+                        (if (res.conflicts > 0) " · ${res.conflicts} conflict(s) — revert those individually to force" else "") +
+                        refusedSuffix(res),
+                    if (res.errors > 0) NotificationType.WARNING else NotificationType.INFORMATION,
                 )
             }
         }
@@ -434,15 +448,33 @@ object ReviewOps {
         app.executeOnPooledThread {
             val md = produce()
             app.invokeLater {
-                if (md.isNullOrBlank()) notify(project, errorMsg) else openMarkdownTab(project, name, md)
+                if (md.isNullOrBlank()) notify(project, errorMsg) else openTextTab(project, name, ".md", md)
             }
         }
     }
 
-    /** Write [text] to a temp `.md` and open it in an editor tab (shared by Export / Doctor / Analyze). */
-    private fun openMarkdownTab(project: Project, name: String, text: String) {
-        val tmp = java.io.File.createTempFile(name, ".md")
+    /** The full-session-trace twin of [openMarkdown]: same off-EDT fetch, opens a `.json` tab. */
+    fun openJson(project: Project, name: String, errorMsg: String, produce: () -> String?) {
+        val app = ApplicationManager.getApplication()
+        app.executeOnPooledThread {
+            val text = produce()
+            app.invokeLater {
+                if (text.isNullOrBlank()) notify(project, errorMsg) else openTextTab(project, name, ".json", text)
+            }
+        }
+    }
+
+    /** Write [text] to a temp [ext] file and open it in an editor tab (Export / Doctor / Analyze / Trace). */
+    private fun openTextTab(project: Project, name: String, ext: String, text: String) {
+        val tmp = java.io.File.createTempFile(name, ext)
         tmp.writeText(text)
+        // The platform refuses to load files past idea.max.content.load.filesize (20 MB by default) —
+        // for a very large trace, "opening" would show a refusal with no pointer to the data. Naming
+        // the file it was written to keeps the export usable.
+        if (tmp.length() > 19L * 1024 * 1024) {
+            notify(project, "Export written to ${tmp.path} — too large to open in the editor.")
+            return
+        }
         LocalFileSystem.getInstance().refreshAndFindFileByPath(tmp.path)?.let { vf ->
             FileEditorManager.getInstance(project).openFile(vf, true)
         }
@@ -465,7 +497,7 @@ object ReviewOps {
                 if (text.isNullOrBlank()) {
                     notify(project, "Could not analyze edit #$id — is the claude CLI installed? Set its path in Settings → Tools → Claude Observatory.", NotificationType.ERROR)
                 } else {
-                    openMarkdownTab(project, "claude-observatory-analysis-$id", text)
+                    openTextTab(project, "claude-observatory-analysis-$id", ".md", text)
                 }
             }
         }

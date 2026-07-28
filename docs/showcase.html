@@ -19,7 +19,7 @@
     --shadow:0 30px 70px -40px rgba(40,25,15,.40), 0 8px 22px -18px rgba(40,25,15,.25);
     --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,Roboto,Helvetica,sans-serif;
     --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
-    --col:1140px;
+    --col:max(1140px, 90vw);
   }
   @media (prefers-color-scheme:dark){:root{
     --bg:#0e0e11; --surface:#161619; --surface-2:#1a1a1e; --surface-3:#202024;
@@ -50,13 +50,13 @@
   }
   *{box-sizing:border-box;margin:0;padding:0}
   html{scroll-behavior:smooth;scroll-padding-top:80px;-webkit-text-size-adjust:100%}
-  body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:17px;line-height:1.62;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+  body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:1.0625rem;line-height:1.62;-webkit-font-smoothing:antialiased;overflow-x:hidden}
   .wrap{width:min(var(--col),90%);margin-inline:auto}
   a{color:inherit;text-decoration:none}
   h1,h2,h3{font-weight:640;letter-spacing:-.021em;line-height:1.08;text-wrap:balance;overflow-wrap:break-word}
   .hl{color:var(--accent)}
   .eyebrow{font-family:var(--mono);font-size:.72rem;text-transform:uppercase;letter-spacing:.2em;color:var(--accent-ink);font-weight:600}
-  .lede{color:var(--ink-soft);font-size:clamp(1.05rem,2vw,1.28rem);line-height:1.55;max-width:34ch;text-wrap:pretty}
+  .lede{color:var(--ink-soft);font-size:clamp(1.05rem,2vw,1.28rem);line-height:1.55;text-wrap:pretty}
   code,kbd{font-family:var(--mono);font-size:.86em}
 
   /* nav */
@@ -95,8 +95,8 @@
   }
 
   section{padding-block:clamp(96px,14vh,190px)}
-  .center{text-align:center;margin-inline:auto;max-width:660px}
-  .center .lede{margin-inline:auto;max-width:52ch}
+  .center{text-align:center;margin-inline:auto}
+  .center .lede{margin-inline:auto;}
   h2{font-size:clamp(2rem,5vw,3.4rem)}
 
   /* hero */
@@ -104,7 +104,7 @@
   .hero h1{font-size:clamp(2.6rem,7vw,5.2rem);margin:18px 0}
   .hero .cta{display:flex;gap:12px;flex-wrap:wrap;margin-top:28px}
   .hero .meta{margin-top:22px;font-family:var(--mono);font-size:.78rem;color:var(--ink-faint)}
-  @media (max-width:900px){.hero .lede{max-width:46ch}}
+  @media (max-width:900px){.hero .lede{}}
 
   /* editor mock (shared) */
   .editor{background:var(--ed-bg);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);overflow:hidden;font-family:var(--mono);color:var(--ed-ink)}
@@ -133,21 +133,21 @@
   @media (max-width:520px){.bubble .bh .tools{width:100%;margin-left:0}}
   /* moments */
   .moment{text-align:center}
-  .moment .lede{margin:16px auto 0;max-width:56ch}
+  .moment .lede{margin:16px auto 0;}
   .panel{background:var(--surface);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);overflow:hidden;margin-top:clamp(36px,5vw,60px)}
   .panel .scroll{overflow-x:auto}
   .panel img{display:block;width:100%;height:auto}
   .panel figcaption.cap{font-family:var(--mono);font-size:.68rem;color:var(--ink-faint);padding:8px 12px;text-align:center;border-top:1px solid var(--line-soft)}
   /* install */
-  .cmd{display:flex;align-items:center;gap:12px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:13px 12px 13px 16px;font-family:var(--mono);font-size:.9rem;overflow-x:auto;max-width:640px;margin:26px auto 0}
+  .cmd{display:flex;align-items:center;gap:12px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:13px 12px 13px 16px;font-family:var(--mono);font-size:.9rem;overflow-x:auto;margin:26px auto 0}
   .cmd .pr{color:var(--accent);flex:none}
   .cmd code{white-space:nowrap;color:var(--ink)}
   .cmd .copy{margin-left:auto;flex:none;border:1px solid var(--line);background:var(--surface-2);color:var(--ink-soft);border-radius:7px;padding:5px 11px;font-family:var(--mono);font-size:.74rem;cursor:pointer;transition:.15s}
   .cmd .copy:hover{color:var(--ink);border-color:var(--ink-faint)}
   .install-cta{display:flex;gap:12px;flex-wrap:wrap;justify-content:center;margin-top:26px}
-  .stay-current{margin:34px auto 0;max-width:560px;font-size:.86rem;color:var(--ink-faint)}
+  .stay-current{margin:34px auto 0;font-size:.86rem;color:var(--ink-faint)}
   .stay-current code{font-family:var(--mono);font-size:.82em;color:var(--ink-soft);background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:1px 6px}
-  .or-claude{margin:40px auto 0;max-width:600px}
+  .or-claude{margin:40px auto 0}
   .or-claude .or{font-family:var(--mono);font-size:.7rem;text-transform:uppercase;letter-spacing:.18em;color:var(--ink-faint);margin-bottom:14px}
   .promptbox{position:relative;background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:20px 20px 18px;text-align:left}
   .promptbox p{font-size:.84rem;color:var(--ink-faint);margin:0 0 12px}
@@ -180,7 +180,7 @@
   /* image on top, caption below (centred) */
   .slide-in{display:flex;flex-direction:column;align-items:center;text-align:center;gap:clamp(14px,2vw,22px)}
   .slide-in>.panel{order:-1;width:100%;margin-top:0}
-  .slide-in>div:not(.panel){max-width:64ch}
+  .slide-in>div:not(.panel){}
   .slide h3{font-size:clamp(1.15rem,2.1vw,1.55rem);margin:.1em 0 .35em}
   .slide p{color:var(--ink-soft);font-size:.98rem;line-height:1.55;text-wrap:pretty}
   .tour-ui{display:flex;align-items:center;justify-content:center;gap:14px;margin-top:20px;flex-wrap:wrap}
@@ -213,8 +213,8 @@
   }
   /* ---- lead interactive demo (hero) ---- */
   [hidden]{display:none!important}
-  .hero-lead{text-align:center;max-width:760px;margin-inline:auto}
-  .hero-lead .lede{margin-inline:auto;max-width:52ch}
+  .hero-lead{text-align:center;margin-inline:auto}
+  .hero-lead .lede{margin-inline:auto;}
   .hero-lead .cta{justify-content:center}
   .sd-stage{display:grid;grid-template-columns:1.15fr .85fr;gap:20px;align-items:start;margin-top:26px;text-align:left}
   @media (max-width:900px){.sd-stage{grid-template-columns:1fr}}
@@ -277,7 +277,7 @@
   .mini .mh button{transition:background .25s,color .25s}
   #sd-acceptall{pointer-events:none;cursor:default}
   .sd-ui{margin-top:34px;text-align:left}
-  .sd-ui .narr{min-height:3em;font-size:.98rem;color:var(--ink-soft);max-width:70ch}
+  .sd-ui .narr{min-height:3em;font-size:.98rem;color:var(--ink-soft);}
   .sd-ui .narr .hl{color:var(--accent-ink);font-weight:560}
   .sd-ui .hintline{font-size:.84rem;color:var(--accent-ink);min-height:1.5em;margin-top:2px}
   .sd-ui .ctrl{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:8px}
@@ -291,12 +291,23 @@
   .essay h2{letter-spacing:-.02em;line-height:1.12;margin-bottom:16px}
   #credits h2{font-size:clamp(1.3rem,2.5vw,1.7rem)}
   #credits{padding-block:clamp(40px,6vh,72px)}
-  .essay p{color:var(--ink-soft);max-width:66ch;line-height:1.6;margin:0 auto 14px}
+  .essay p{color:var(--ink-soft);line-height:1.6;margin:0 auto 14px}
   .essay p:last-child{margin-bottom:0}
-  .essay ul{list-style:none;margin:8px auto 0;padding:0;max-width:62ch;text-align:left}
+  .essay ul{list-style:none;margin:8px auto 0;padding:0;text-align:left}
   .essay li{color:var(--ink-soft);line-height:1.55;margin-bottom:12px;padding-left:24px;position:relative}
   .essay li::before{content:"—" / "";position:absolute;left:0;color:var(--accent-ink)}
   .essay li b{color:var(--ink);font-weight:640}
+
+  /* Big screens: the column already grows via --col (66vw capped at 1560px); type follows in two
+     gentle steps so a 27–32" display gets a page, not a ribbon. px-sized chrome stays fixed — only
+     the reading measure and rem-based text scale. */
+  /* FLUID scaling, no steps: the root font tracks viewport width continuously (floor = today's 16px,
+     so anything ≤ ~1490px is pixel-identical to before; cap 24px ≈ a 32" display), and every rem-sized
+     rule — which is nearly all of this site's type, clamp() caps included — follows it. Root, not
+     body: rem resolves against html, which is why the first body-only attempt visibly moved nothing.
+     The column spans most of the width (86vw, floored at the old 1140px), and because type and column
+     scale together, characters-per-line stays roughly constant at every size. */
+  html{font-size:clamp(16px, 9px + 0.47vw, 24px)}
 </style>
 </head>
 <body>
@@ -309,7 +320,6 @@
       <a href="#install">Install</a>
       <a href="getting-started.html">Getting started</a>
       <a href="concepts.html">Concepts</a>
-      <a class="more" href="features.html">Features&nbsp;→</a>
       <a href="https://github.com/cell-observatory/claude-observatory">GitHub</a>
     </div>
     <div class="right">
@@ -323,9 +333,8 @@
 <aside class="gutter" aria-hidden="true">
   <a href="#hero" data-spy="hero">01</a>
   <a href="#manifesto" data-spy="manifesto">02</a>
-  <a href="#everywhere" data-spy="everywhere">03</a>
-  <a href="#tour" data-spy="tour">04</a>
-  <a href="#install" data-spy="install">05</a>
+  <a href="#tour" data-spy="tour">03</a>
+  <a href="#install" data-spy="install">04</a>
 </aside>
 
 <header class="hero" id="hero">
@@ -399,22 +408,12 @@
   </div>
 </section>
 
-<!-- moments -->
-<section class="moment" id="everywhere">
-  <div class="wrap rv">
-    <span class="eyebrow">Terminal, VS Code, JetBrains</span>
-    <h2>The same review in every editor</h2>
-    <p class="lede">One backend serves the CLI, VS Code, and JetBrains, so a review can start in the terminal and finish in either editor with nothing to reconcile. The Claude Edits sidebar holds Edits, Diffs, File History, Actions, and Observations; the Claude Observatory bottom panel holds the multi-agent Overview and Stats, with Prompts as its own view. A navigation bar steps through pending edits from the status bar, the editor’s title bar, a bubble over the change, or the Overview panel, where it opens as two rows: session-wide controls above, and four axes below that step the edits by diff, file, folder, and prompt. Actions records every tool call Claude made, not just the edits: it leads with any file two agents are touching at once, flags risky commands, and closes with the two audits — the edits that landed outside the workspace, and everywhere the session reached. Per-subagent timelines and the fleet of agents across the repository's worktrees live in the Overview. All of it is read from the transcript, at zero extra tokens.</p>
-  </div>
-  <div class="wrap"><a href="concepts.html#surfaces" title="Concepts — every surface beside the term it presents"><div class="panel rv scale"><img src="media/layout.png" loading="lazy" alt="The observatory in VS Code: the Claude Edits sidebar, inline review in the editor, and the bottom Claude Observatory panel"></div></a></div>
-</section>
-
 <!-- RECORDED DEMO: the Overview as a session runs -->
 <!-- FEATURE TOUR: every surface, one slide at a time -->
 <section class="moment" id="tour">
   <div class="wrap rv">
     <span class="eyebrow">Feature tour</span>
-    <h2><a href="features.html">Everything it does, on every surface</a></h2>
+    <h2>Everything it does, on every surface</h2>
     <p class="lede">The tour covers every surface, one slide at a time: inline in the editor, in the panels, in the terminal, and in both editors.</p>
   </div>
   <div class="wrap">
@@ -481,9 +480,9 @@
           <article class="slide" role="group" aria-roledescription="slide" aria-label="Actions">
             <div class="slide-in">
               <div><span class="eyebrow">Actions</span><h3>A timeline of every tool call</h3>
-                <p>Every read, grep, shell command, web fetch, and subagent spawn is grouped by kind in the Claude Edits sidebar, with each category collapsed by default and errors always surfaced. Edit rows link directly to their review.</p></div>
+                <p>Every read, grep, shell command, web fetch, and subagent spawn is grouped by kind in the Observatory Timeline panel, with each category collapsed by default and errors always surfaced. Edit rows link directly to their review.</p></div>
               <div class="panel"><div class="mock">
-                <div class="mh">Actions · sidebar</div>
+                <div class="mh">Actions · Observatory Timeline</div>
                 <div>▸ Commands <span class="d">(229) ·</span> <span class="r">2 errors</span></div>
                 <div>▾ Edits <span class="d">(185)</span></div>
                 <div>&nbsp;&nbsp;src/features.py <span class="a">→ review</span></div>
@@ -638,7 +637,7 @@
             <div class="slide-in">
               <div><span class="eyebrow">Cross-editor parity</span><h3>The same tool in both editors</h3>
                 <p>VS Code and JetBrains render the same model from the same backend, so a review can start in one editor and finish in the other.</p></div>
-              <div class="panel"><img src="media/layout.png" loading="lazy" alt="The observatory in VS Code: the Claude Edits sidebar, inline review in the editor, and the bottom Claude Observatory panel"></div>
+              <div class="panel"><img src="media/layout.png" loading="lazy" alt="The observatory in VS Code: the Observatory Traces sidebar, inline review in the editor, and the bottom Observatory Dashboards panel"></div>
             </div>
           </article>
 
@@ -664,7 +663,6 @@
     <div class="install-cta">
       <a class="btn primary" href="https://github.com/cell-observatory/claude-observatory#quickstart">Read the README</a>
       <a class="btn line" href="getting-started.html">Getting started →</a>
-      <a class="btn line" href="features.html">See the full tour →</a>
     </div>
     <div class="or-claude rv">
       <div class="or">— or install via Claude Code —</div>
@@ -691,7 +689,6 @@
     <div class="row">
       <span class="brand"><span class="m">🔬</span> Claude Observatory</span>
       <div class="flinks">
-        <a href="features.html">Features</a>
         <a href="concepts.html">Concepts</a>
         <a href="https://github.com/cell-observatory/claude-observatory/blob/main/docs/DEMO.md">Demo</a>
         <a href="https://github.com/cell-observatory/claude-observatory/blob/main/docs/ARCHITECTURE.md">How it works</a>
@@ -797,7 +794,7 @@
       links.forEach(function(a){a.classList.remove('is-active');});
       var a=map[e.target.id];if(a)a.classList.add('is-active');
     }});},{rootMargin:'-45% 0px -50% 0px'});
-    ['hero','manifesto','everywhere','tour','install'].forEach(function(id){var el=document.getElementById(id);if(el)io.observe(el);});
+    ['hero','manifesto','tour','install'].forEach(function(id){var el=document.getElementById(id);if(el)io.observe(el);});
   })();
   (function(){
     var nav=document.getElementById('nav'),btn=document.getElementById('menu');

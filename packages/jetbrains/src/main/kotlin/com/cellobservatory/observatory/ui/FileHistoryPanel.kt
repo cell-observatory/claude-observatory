@@ -1,5 +1,6 @@
 package com.cellobservatory.observatory.ui
 
+import com.cellobservatory.observatory.core.ClaudePaths
 import com.cellobservatory.observatory.model.EditRecord
 import com.cellobservatory.observatory.services.ObserveCache
 import com.cellobservatory.observatory.services.ObservatoryService
@@ -36,7 +37,8 @@ import javax.swing.tree.TreeSelectionModel
  * File History: the ACTIVE editor's Claude edits, oldest→newest (id · time · status · reasoning).
  * Follows the selected file via FileEditorManagerListener.selectionChanged; repaints on every store
  * change (service listener) and reasoning refresh (ObserveCache). Flat — no folder/class grouping.
- * The store read-primitive: service.log().filter { it.file == <activeFile>.path } (absolute-path equality).
+ * The store read-primitive: service.log().filter { it.file == storeKey(<activeFile>.path) } — absolute-path
+ * equality after the editor→store path bridge (#43).
  * Parity with the VS Code File History tree view.
  */
 class FileHistoryPanel(private val project: Project) : SimpleToolWindowPanel(true, true) {
@@ -89,7 +91,7 @@ class FileHistoryPanel(private val project: Project) : SimpleToolWindowPanel(tru
     fun rebuild() {
         val file = currentFile
         val edits = if (file == null) emptyList()
-        else service().log().filter { it.file == file.path }.sortedWith(compareBy({ it.ts }, { it.id }))
+        else service().log().filter { it.file == ClaudePaths.storeKey(file.path) }.sortedWith(compareBy({ it.ts }, { it.id }))
         tree.emptyText.text =
             if (file == null) "Open a file Claude has edited to see its history"
             else "No Claude edits in ${file.name}"
@@ -144,12 +146,12 @@ class FileHistoryPanel(private val project: Project) : SimpleToolWindowPanel(tru
 
     private fun acceptFile() = withSession { s ->
         val file = currentFile ?: return@withSession
-        ReviewOps.keepAll(project, s, service().log().filter { it.file == file.path }, file.name)
+        ReviewOps.keepAll(project, s, service().log().filter { it.file == ClaudePaths.storeKey(file.path) }, file.name)
     }
 
     private fun revertFile() = withSession { s ->
         val file = currentFile ?: return@withSession
-        ReviewOps.undoAll(project, s, service().log().filter { it.file == file.path }, file.name, file.path)
+        ReviewOps.undoAll(project, s, service().log().filter { it.file == ClaudePaths.storeKey(file.path) }, file.name, file.path)
     }
 
     private fun withSession(block: (String) -> Unit) {

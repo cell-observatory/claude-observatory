@@ -309,7 +309,26 @@ object ObservatoryCli {
             add("--session"); add(session); add("--json")
         }, workDir))
 
-    data class UndoScopeResult(val undone: Int, val conflicts: Int, val total: Int)
+    data class UndoScopeResult(
+        val undone: Int,
+        val conflicts: Int,
+        val total: Int,
+        /** Edits the CLI REFUSED outright (e.g. the #43 phantom guard) — 0 from older CLIs. */
+        val errors: Int = 0,
+        /** The first refusal's message — it names the remediation (`clean --phantoms`). */
+        val firstError: String? = null,
+    )
+
+    private fun parseUndoScope(stdout: String): UndoScopeResult? = try {
+        val o = JsonParser.parseString(stdout).asJsonObject
+        UndoScopeResult(
+            o.get("undone").asInt, o.get("conflicts").asInt, o.get("total").asInt,
+            o.get("errors")?.takeIf { it.isJsonPrimitive }?.asInt ?: 0,
+            o.get("firstError")?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString,
+        )
+    } catch (_: Exception) {
+        null
+    }
 
     /** Revert every PENDING edit in a scope in ONE call (the CLI's `undo --all` / `undo --under`, backed
      *  by core.undoScope — the single scoped-revert implementation both editors share). `under` = null
@@ -323,12 +342,7 @@ object ObservatoryCli {
         }
         val r = run(args, workDir)
         if (!r.ok) return null
-        return try {
-            val o = JsonParser.parseString(r.stdout).asJsonObject
-            UndoScopeResult(o.get("undone").asInt, o.get("conflicts").asInt, o.get("total").asInt)
-        } catch (_: Exception) {
-            null
-        }
+        return parseUndoScope(r.stdout)
     }
 
     data class RedoScopeResult(val redone: Int, val conflicts: Int, val total: Int)
@@ -360,12 +374,7 @@ object ObservatoryCli {
         if (ids.isEmpty()) return UndoScopeResult(0, 0, 0)
         val r = run(listOf("undo", "--ids", ids.joinToString(","), "--session", session, "--json"), workDir)
         if (!r.ok) return null
-        return try {
-            val o = JsonParser.parseString(r.stdout).asJsonObject
-            UndoScopeResult(o.get("undone").asInt, o.get("conflicts").asInt, o.get("total").asInt)
-        } catch (_: Exception) {
-            null
-        }
+        return parseUndoScope(r.stdout)
     }
 
     /** `clean --resolved --json` — returns the CLI's own `cleared` count, or null on failure. The count
@@ -656,6 +665,13 @@ object ObservatoryCli {
     /** Portable markdown review summary (kept/reverted per file) for export. */
     fun summaryMarkdown(session: String, workDir: String?): String? {
         val r = run(listOf("summary", "--markdown", "--session", session), workDir)
+        return if (r.ok) r.stdout else null
+    }
+
+    /** The FULL session trace — everything the observatory recorded — as JSON (`export`). Core
+     *  composes it, so this plugin, VS Code, and the CLI export the identical document. */
+    fun traceJson(session: String, workDir: String?): String? {
+        val r = run(listOf("export", "--session", session), workDir)
         return if (r.ok) r.stdout else null
     }
 

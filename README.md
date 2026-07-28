@@ -22,12 +22,12 @@ IDEs** — at **zero extra Claude tokens**. The review model resembles Cursor's 
 is standalone, shareable, and git-free. It is built for **established and mission-critical codebases**
 rather than throwaway prototypes.
 
-![The observatory in VS Code: the Claude Edits sidebar (Edits · Diffs · File History · Actions), inline review in the editor, the Claude Observatory bottom panel (Prompts · Overview · Stats), and the microscope scoreboard in the status bar](docs/media/layout.png)
+![The observatory in VS Code: the Observatory Traces sidebar (Edits · Diffs · File History), inline review in the editor, the Observatory Dashboards bottom panel (Overview · Stats), and the Observatory Timeline panel (Prompts · Actions · Observations), and the microscope scoreboard in the status bar](docs/media/layout.png)
 
 <details>
 <summary><b>Anatomy</b> — every surface, named</summary>
 
-![Anatomy of the workspace: the Claude Edits activity bar and sidebar (Edits · Diffs · File History · Actions), the editor with inline review and its tab-bar toolbar, the Claude Observatory bottom panel (Prompts · Overview · Stats, with the Overview's Folders strip / Files ledger called out), and the status-bar microscope + navigation bar](docs/media/anatomy.png)
+![Anatomy of the workspace: the Observatory Traces activity bar and sidebar (Edits · Diffs · File History), the editor with inline review and its tab-bar toolbar, the Observatory Dashboards bottom panel (Overview · Stats, with the Overview's Folders strip / Files ledger called out), and the status-bar microscope + navigation bar](docs/media/anatomy.png)
 
 </details>
 
@@ -44,46 +44,26 @@ rather than showing zeros. Session rows now carry the same badges a fleet row do
 tokens, wall-clock and a model · effort chip — and **Clear completed sessions…** drops the stored
 edits of sessions whose review is finished, never touching the session you are in, anything with pending
 edits, anything mid-capture, anything from another workspace, or anything whose conversation moved in the
-last 24 hours.
+last 24 hours. **Windows stores no longer forge phantom edits**: drive-letter case is canonicalized at
+capture and on every lookup in all three front-ends, undo refuses the destructive half of an existing
+phantom pair, and `clean --phantoms` removes the pairs for good (#43). **Export** grew a second form —
+the **full session trace**, everything the observatory recorded as one JSON document, from the same
+Export button in both editors or `claude-observatory export`. (Earlier releases: see the
+[changelog](CHANGELOG.md).)
 
-<details>
-<summary><b>New in 0.8.9</b> — demo mode, in both editors</summary>
-
-The demo simulator has existed since 0.8.0, but only in the
-terminal. It is now one command away in **VS Code** and **JetBrains**: **Start Demo Mode** replays a
-scripted Claude Code session through the real capture pipeline while you watch the panels fill, then opens
-a **guided tour** — forty-one steps over every panel and named feature, or thirteen if you pick the
-short track — that activates the panel it is describing and rings the exact control it names. The
-step's text stays in the tour window; only the outline is drawn in the panel. It plays itself at a
-readable pace, and any control that moves the tour — Next, Back, a step jump — hands you the wheel; a
-step that asks you to do something performs it after a countdown if you would rather just watch. The replay is cancellable, starting it again **resets** it,
-and **Exit Demo** removes every trace it wrote. Nothing calls a model, and the capture hooks need not be
-installed, so it is the first thing you can try. The simulated session now runs to three prompts, six
-tasks and nine edits, and covers the cases whose panels could previously only render an empty state: a
-second agent in a sibling worktree with a live file collision, a deletion, a failed tool call, a write
-outside the workspace, a failing background shell, and a three-phase workflow run.
-
-</details>
-
-<details>
-<summary><b>New in 0.8.8</b> — prompts, tasks, sessions, and a defined vocabulary</summary>
-
-The observatory groups a session's
-work two ways, and names both. A **prompt** is one of your own turns together with the work it caused,
-attributed by what it **started**; picking one in the **Prompts** window scopes the whole Overview to it.
-A **task** is one of Claude's own numbered to-dos, and it owns only the edits captured while that task was
-in progress — an edit outside every in-progress window stays unassigned rather than being attributed to a
-neighboring task. Both groupings run through the whole product: the Prompts window, the `prompts` command,
-and the `prompts[]` key of the JSON view API on one side; the Tasks tab, the `task-keep` / `task-undo` /
-`task-clear` verbs, and the per-task rollup on the other. A **Sessions** tab ends the Overview's left nav:
-it lists this workspace's sessions by conversation recency, and selecting one switches what the whole
-observatory reviews. A new
+The observatory groups a session's work two ways, and names both. A **prompt** is one of your own turns
+together with the work it caused, attributed by what it **started**; picking one in the **Prompts**
+window scopes the whole Overview to it. A **task** is one of Claude's own numbered to-dos, and it owns
+only the edits captured while that task was in progress — an edit outside every in-progress window stays
+unassigned rather than being attributed to a neighboring task. Both groupings run through the whole
+product: the Prompts window, the `prompts` command, and the `prompts[]` key of the JSON view API on one
+side; the Tasks tab, the `task-keep` / `task-undo` / `task-clear` verbs, and the per-task rollup on the
+other. A **Sessions** tab ends the Overview's left nav: it lists this workspace's sessions by
+conversation recency, and selecting one switches what the whole observatory reviews. The
 **[Concepts](https://cell-observatory.github.io/claude-observatory/concepts.html)** page defines the
-vocabulary the observatory is built from — the record, the two groupings of a session (prompts and tasks),
-the agents, the audits, and the review verbs — and every prose surface uses it consistently, in the
-register described in [docs/STYLE.md](docs/STYLE.md).
-
-</details>
+vocabulary the observatory is built from — the record, the two groupings of a session (prompts and
+tasks), the agents, the audits, and the review verbs — and every prose surface uses it consistently, in
+the register described in [docs/STYLE.md](docs/STYLE.md).
 
 The rest of the Overview is as it has been since 0.8.0. Claude running in several git **worktrees** of one
 repo unifies into a single **fleet** under the **Fleet** tab, each agent with a live **phase** and its
@@ -163,7 +143,8 @@ every change as it lands and accept, edit, or revert each one while Claude accel
 edit, action — are defined on the
 **[Concepts](https://cell-observatory.github.io/claude-observatory/concepts.html)** page.
 
-The bottom panel holds three views — Prompts, Overview, and Stats — side by side like Terminal / Problems.
+The **Observatory Dashboards** bottom panel holds the Overview and Stats side by side like Terminal /
+Problems; Prompts sits with Actions and Observations in the **Observatory Timeline** panel.
 
 ### Prompts
 
@@ -214,8 +195,10 @@ is in scope; beneath it, the selected row's **feed** shows what that thing is do
 source is still writing, an audit log once it has finished.
 
 The **review nav bar** on top is two rows. The controls row names the session under review — its title
-or first prompt, with the raw id in the tooltip — then the session-wide Accept All · Reject All · Clear
-Resolved · Export, and, at the right, Search · Active only · Spotlight · Refresh. The name is a label,
+or first prompt on a single line, with the full title and raw id in the tooltip — then the session-wide
+Accept All · Reject All · Clear Resolved · Export, and, at the right, Search · Active only · Spotlight ·
+Refresh. Export offers two documents: the shareable review summary (markdown), or the full session
+trace of everything the observatory recorded (JSON). The name is a label,
 not a control: since 0.8.8 the **Sessions tab** is where the session changes. The Switch Session command
 still opens a picker, which leads each row with Claude's own title, lists the live session first and the
 rest by conversation recency, preselects the session in effect, and matches on the raw id as you type.
@@ -228,7 +211,7 @@ with live n/m counters on each axis.
 
 ### Observations
 
-Observations is in the sidebar, alongside Edits · Diffs · File History · Actions. A session recap sits on
+Observations lives in the Observatory Timeline panel, alongside Prompts and Actions. A session recap sits on
 top (Claude Code's own title, zero token; ✨ to refine via `claude -p --resume`), then a **Context** section
 naming what shaped the session — the skills it invoked, the plans it wrote, the memory it read, whether it
 was resumed from a compaction, plus the instruction files present where Claude Code auto-loads them — each
@@ -379,10 +362,11 @@ claude-observatory changemap       # the Overview view-model: per-file/per-folde
 claude-observatory views           # several read-only views in ONE process: {name: payload}, each byte-identical to its own command; --views a,b,c to pick. A failed view is null, never fatal to the batch; mutating verbs are refused
 claude-observatory metrics         # session rollup: per-edit diff stats · action/error counts · per-subagent duration/tokens · tool latency (median/p95/max); --json
 claude-observatory summary         # per-session review recap (kept/reverted per file); --markdown to export
-claude-observatory clean           # GC orphaned blobs + superseded cache files; --resolved [--under <path> | --ids <a,b,c>] | --completed [--stale <Nd>] [--dry-run] | --drop <id> | --older-than 30d | --all
+claude-observatory export          # the FULL session trace as one JSON document — every edit with its diff, capture skips, prompts, actions, tasks, subagents, egress, outside writes, observations, usage; --out <file>
+claude-observatory clean           # GC orphaned blobs + superseded cache files; --resolved [--under <path> | --ids <a,b,c>] | --completed [--stale <Nd>] [--dry-run] | --drop <id> | --older-than 30d | --all | --phantoms (Windows path-case pairs, #43)
 claude-observatory resolve         # finish a session in one step: accept every pending edit, then drop its records; --json
 claude-observatory warm            # pre-build the change-map caches for sessions active recently, so switching to one is instant (--since 24h); skips the session under review; --json
-claude-observatory update          # update the CLI + installed editor extensions to the latest release (--check to only report)
+claude-observatory update          # update the CLI + installed editor extensions + the bundled status line (when installed) to the latest release (--check to only report)
 claude-observatory uninstall       # remove the capture hooks (--all also reverts the bundled status line)
 claude-observatory version [--check]  # print the installed version; --check also shows the latest release
 ```
@@ -414,7 +398,10 @@ The CLI also nudges you once a day when a newer release exists (opt out with
 
 **Platforms:** macOS and Linux work as-is. On **Windows**, the CLI, capture hooks, and both editor plugins
 run natively (npm's `.cmd` shims are handled) — but the installer and the bundled status line are bash, so
-run them from **Git Bash** (`jq` needed for the status line) or use WSL.
+run them from **Git Bash** (`jq` needed for the status line) or use WSL. Windows paths are canonicalized
+for drive-letter case everywhere (capture, lookups, both editors); a store written by v0.8.9 or earlier
+may hold phantom `+N −0` / `+0 −N` edit pairs from that bug — they heal on read, and
+`claude-observatory clean --phantoms` removes them for good (#43).
 
 **Build from source (contributors):**
 

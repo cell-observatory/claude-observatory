@@ -16,7 +16,7 @@ import * as fs from 'fs';
 import { cachedByFiles } from './fscache';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import { claudeConfigDir } from './paths';
+import { claudeConfigDir, canonPath } from './paths';
 
 /**
  * Loop-based min/max over a numeric array — the call-stack-safe replacement for `Math.min(...xs)` /
@@ -408,6 +408,19 @@ export interface SkipOp {
  * concurrent caller.
  */
 export function readLog(sessionId: string): EditRecord[] {
+  const p = logPath(sessionId);
+  if (!fs.existsSync(p)) return [];
+  // canonPath on the COPY: existing stores written before #43's fix hold drive-letter case twins for
+  // one file — normalizing here makes every reader (grouping, counts, trees) see one file without
+  // rewriting history on disk. The parse cache stays raw; only the caller's copy is healed.
+  return cachedByFiles('readLog', [p], () => parseLogFile(p)).map((r) => ({ ...r, file: canonPath(r.file) }));
+}
+
+/** The log WITHOUT the #43 drive-case heal — raw path strings exactly as captured. The phantom repair
+ *  and the undo phantom guard need the RAW case to PROVE a pair is a capture artifact: the healed
+ *  copies agree by construction, so they cannot discriminate a phantom from a genuine
+ *  create→delete→re-create chain on one consistent path. Same memoized parse; fresh shallow copies. */
+export function readLogRaw(sessionId: string): EditRecord[] {
   const p = logPath(sessionId);
   if (!fs.existsSync(p)) return [];
   return cachedByFiles('readLog', [p], () => parseLogFile(p)).map((r) => ({ ...r }));
@@ -843,6 +856,58 @@ export function resolveSession(sessionId: string): { accepted: number; cleared: 
   return { accepted, cleared };
 }
 
+/**
+ * Repair issue #43's phantom pairs: a pending CREATE record (null → A) and a pending DELETE record
+ * (A → null) for the same file under two drive-letter cases. Both are capture artifacts of one Bash
+ * walk keyed against another walk's case — the file was never touched. Provable strictly: the pair
+ * must differ in RAW path case (a legitimate create-then-delete carries one consistent path, and is
+ * kept), share the exact blob, and both still be pending. Drops both records of each pair.
+ */
+export function repairCasePhantoms(sessionId: string): { pairs: number; ids: number[] } {
+  // readLogRaw, not parseLogFile directly: it carries the missing-log guard, so `clean --phantoms`
+  // on a session that never captured (or a wrong cwd) reports zero pairs instead of dying on ENOENT.
+  const raw = readLogRaw(sessionId);
+  const creates = raw.filter((r) => r.status === 'pending' && r.beforeBlob === null && r.afterBlob !== null);
+  const deletes = raw.filter((r) => r.status === 'pending' && r.afterBlob === null && r.beforeBlob !== null);
+  const doomed: number[] = [];
+  const usedDel = new Set<number>();
+  for (const c of creates) {
+    const d = deletes.find(
+      (x) => !usedDel.has(x.id) && x.beforeBlob === c.afterBlob && x.file !== c.file && canonPath(x.file) === canonPath(c.file)
+    );
+    if (!d) continue;
+    usedDel.add(d.id);
+    doomed.push(c.id, d.id);
+  }
+  if (doomed.length) dropRecords(sessionId, doomed);
+  return { pairs: doomed.length / 2, ids: doomed.sort((a, b) => a - b) };
+}
+
+/** Drop an explicit record set from the log REGARDLESS of status — the repair path's primitive. The
+ *  rewrite discipline matches clearResolved: locked, tmp-then-rename, control ops preserved. */
+function dropRecords(sessionId: string, ids: number[]): void {
+  const dead = new Set(ids);
+  withLock(sessionId, APPEND_LOCK_BUDGET_MS, () => {
+    const p = logPath(sessionId);
+    const kept: string[] = [];
+    for (const line of fs.readFileSync(p, 'utf8').split('\n')) {
+      const t = line.trim();
+      if (!t) continue;
+      try {
+        const o = JSON.parse(t);
+        if (typeof o.id === 'number' && !('op' in o) && dead.has(o.id)) continue; // the record itself
+        if (o.op === 'status' && dead.has(o.id)) continue; // and its status ops
+      } catch {
+        /* keep unparseable lines — never widen a repair into data loss */
+      }
+      kept.push(t);
+    }
+    const tmp = `${p}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, kept.join('\n') + (kept.length ? '\n' : ''), { mode: 0o600 });
+    fs.renameSync(tmp, p);
+  });
+}
+
 /** Remove an entire session directory from the store. */
 export function removeSession(sessionId: string): void {
   const dir = storeDir(sessionId); // throws on an invalid/traversing id
@@ -862,9 +927,13 @@ export function removeSession(sessionId: string): void {
 }
 
 /** True when `file` is the scope path itself (exact file) or lives beneath it (folder prefix). The one
- *  rule shared by every `--under` operation, so file-scope and folder-scope match identically. */
+ *  rule shared by every `--under` operation, so file-scope and folder-scope match identically. Both
+ *  operands are drive-case-canonicalized (#43): records are served canonical, but the scope may arrive
+ *  from an editor or shell that lower-cases the Windows drive letter. */
 export function isUnderPath(file: string, scope: string): boolean {
-  return file === scope || file.startsWith(scope.endsWith(path.sep) ? scope : scope + path.sep);
+  const f = canonPath(file);
+  const s = canonPath(scope);
+  return f === s || f.startsWith(s.endsWith(path.sep) ? s : s + path.sep);
 }
 
 /**

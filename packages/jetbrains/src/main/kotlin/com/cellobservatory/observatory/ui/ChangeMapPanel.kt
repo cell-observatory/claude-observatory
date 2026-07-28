@@ -39,7 +39,9 @@ import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.DefaultActionGroup
+import com.intellij.openapi.actionSystem.Presentation
 import com.intellij.openapi.actionSystem.ToggleAction
+import com.intellij.openapi.actionSystem.ex.CustomComponentAction
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.DumbAware
@@ -506,6 +508,7 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         //     the picked ASK when the Prompts window has one selected — that is the explicit scope the
         //     reader named, and every pane on this panel is already filtered to it. ---
         val leftGroup = DefaultActionGroup().apply {
+            add(sessionLabelAction())
             add(bulkAction("Accept All", NavTint.ACCEPT_ALL, { "Accept All in $it" },
                 { withSession { s -> ReviewOps.keepAll(project, s) } },
                 // The REVIEWED session, never withSession: the prompt's edit ids come from the
@@ -531,7 +534,7 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
                     }
                 },
                 { r -> withSession { s -> ReviewOps.clearResolvedIds(project, s, r.editIds, "prompt #${r.index}") } }))
-            add(exportAction())
+            add(exportGroup())
         }
         // --- TOP row RIGHT cluster: Search · Active only · Clear completed | Spotlight · Refresh | demo ---
         //     Demo mode LAST, and on this panel as well as the Edits tree (VS Code puts it on both title
@@ -1540,18 +1543,75 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         border = JBUI.Borders.empty(4, 6, 5, 6)
     }
 
-    /** The session selector — shows the human-readable session NAME in FULL (title / first prompt), the
-     *  raw id in the tooltip (VS Code parity, 2026-07-17); clicking it opens the Switch-session chooser. */
-    /** Export — a shareable review summary (kept / reverted per file) as markdown, opened in an editor tab
-     *  (mirrors the VS Code exportSummary; core.reviewSummaryMarkdown via `summary --markdown`). */
-    private fun exportAction(): AnAction =
-        action("Export", NavTint.tint(AllIcons.ToolbarDecorator.Export, NavTint.BLUE), "Export a shareable review summary (kept / reverted per file) as markdown") {
-            withSession { s ->
-                ReviewOps.openMarkdown(
-                    project, "claude-observatory-review-summary",
-                    "Could not export the review summary (is the claude-observatory CLI installed?)",
-                ) { ObservatoryCli.summaryMarkdown(s, project.basePath) }
+    /** The session-name label leading the top row — VS Code's `ov-sess-label`: the human-readable
+     *  session title (Claude's ai-title, else the first prompt) on ONE line, never wrapped. Swing clips
+     *  a too-long title with `…`; the tooltip carries the full title and the raw session id. A label,
+     *  not a control: switching sessions is a Sessions-tab click. */
+    private fun sessionLabelAction(): AnAction =
+        object : AnAction(), CustomComponentAction, DumbAware {
+            override fun getActionUpdateThread() = ActionUpdateThread.BGT
+            override fun actionPerformed(e: AnActionEvent) {} // a label, not a control
+            override fun update(e: AnActionEvent) {
+                val s = map?.summary
+                val title = s?.title?.trim().orEmpty()
+                val sess = s?.session.orEmpty()
+                // setText(text, FALSE): titles are prose — with mnemonic parsing on, "save_load"
+                // renders as "saveload" and "&" vanishes (underscore/ampersand become mnemonics).
+                e.presentation.setText(
+                    "🔬 " + title.ifEmpty { if (sess.isEmpty()) "session —" else "session ${sess.take(8)}" },
+                    false,
+                )
+                e.presentation.description =
+                    (if (title.isEmpty()) "" else "$title — ") +
+                        (if (sess.isEmpty()) "no active Claude Code session" else "session $sess") +
+                        " · switch in the Sessions tab"
             }
+            override fun createCustomComponent(presentation: Presentation, place: String): JComponent =
+                object : JBLabel() {
+                    // Cap the width so a long title CLIPS on its single line instead of growing the
+                    // toolbar; JLabel never wraps, and paints the clip as "…" natively.
+                    override fun getPreferredSize(): java.awt.Dimension {
+                        val d = super.getPreferredSize()
+                        return java.awt.Dimension(minOf(d.width, JBUI.scale(260)), d.height)
+                    }
+                }.apply {
+                    font = JBUI.Fonts.smallFont()
+                    border = JBUI.Borders.empty(0, 4, 0, 6)
+                }
+            override fun updateCustomComponent(component: JComponent, presentation: Presentation) {
+                (component as JBLabel).text = presentation.text
+                component.toolTipText = presentation.description
+            }
+        }
+
+    /** Export — ONE dropdown, both exports (parity with VS Code's Export button + picker): the
+     *  shareable review summary (kept / reverted per file, markdown), or the FULL session trace of
+     *  everything the observatory recorded (JSON; core.buildSessionTrace via the `export` verb). */
+    private fun exportGroup(): AnAction =
+        object : DefaultActionGroup("Export", true), DumbAware {
+            @Suppress("OVERRIDE_DEPRECATION") // displayTextInToolbar: still honored; renders the label
+            override fun displayTextInToolbar() = true
+        }.apply {
+            templatePresentation.icon = NavTint.tint(AllIcons.ToolbarDecorator.Export, NavTint.BLUE)
+            templatePresentation.description =
+                "Export — a shareable review summary (markdown), or the full session trace of everything recorded (JSON)"
+            add(action("Review Summary (markdown)", AllIcons.FileTypes.Text) {
+                withSession { s ->
+                    ReviewOps.openMarkdown(
+                        project, "claude-observatory-review-summary",
+                        "Could not export the review summary (is the claude-observatory CLI installed?)",
+                    ) { ObservatoryCli.summaryMarkdown(s, project.basePath) }
+                }
+            })
+            add(action("Full Session Trace (JSON)", AllIcons.FileTypes.Json) {
+                withSession { s ->
+                    ReviewOps.openJson(
+                        project, "claude-observatory-trace",
+                        "Could not export the session trace — is the claude-observatory CLI installed? " +
+                            "For very large sessions, run `claude-observatory export --out trace.json` in a terminal.",
+                    ) { ObservatoryCli.traceJson(s, project.basePath) }
+                }
+            })
         }
 
     /** An Overview-toolbar button: [text] renders beside the icon (VS Code shows these labels), with an

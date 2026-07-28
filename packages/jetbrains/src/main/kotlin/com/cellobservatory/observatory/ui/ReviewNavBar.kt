@@ -1,6 +1,7 @@
 package com.cellobservatory.observatory.ui
 
 import com.cellobservatory.observatory.core.ChatRef
+import com.cellobservatory.observatory.core.ClaudePaths
 import com.cellobservatory.observatory.model.EditRecord
 import com.cellobservatory.observatory.model.SessionPrompt
 import com.cellobservatory.observatory.model.folderLabelOf
@@ -122,7 +123,7 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
     /** File axis — steps across every file with pending edits; the counter opens the Edits tool window. */
     fun fileAxis(): List<AnAction> = listOf(
         iconAct("Previous changed file", NavTint.tint(AllIcons.Actions.Back, NavTint.BLUE), ::sessionHasPending) { navFile(-1) },
-        textAct(::fileCounterText) { ToolWindowManager.getInstance(project).getToolWindow("Claude Observatory")?.activate(null) },
+        textAct(::fileCounterText) { ToolWindowManager.getInstance(project).getToolWindow("Observatory Traces")?.activate(null) },
         iconAct("Next changed file", NavTint.tint(AllIcons.Actions.Forward, NavTint.BLUE), ::sessionHasPending) { navFile(1) },
     )
 
@@ -157,12 +158,12 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
 
     fun acceptFileAction(showText: Boolean = true): AnAction =
         labelAct(showText, "Accept File", "Accept every pending edit in this file", NavTint.ACCEPT_FILE, ::activeHasPending) {
-            activeFilePath()?.let { f -> withSession { s -> ReviewOps.keepAll(project, s, service.log().filter { it.file == f }, File(f).name) } }
+            activeFilePath()?.let { f -> withSession { s -> ReviewOps.keepAll(project, s, service.log().filter { it.file == ClaudePaths.storeKey(f) }, File(f).name) } }
         }
 
     fun rejectFileAction(showText: Boolean = true): AnAction =
         labelAct(showText, "Reject File", "Reject (revert) every pending edit in this file", NavTint.REJECT, ::activeHasPending) {
-            activeFilePath()?.let { f -> withSession { s -> ReviewOps.undoAll(project, s, service.log().filter { it.file == f }, File(f).name, f) } }
+            activeFilePath()?.let { f -> withSession { s -> ReviewOps.undoAll(project, s, service.log().filter { it.file == ClaudePaths.storeKey(f) }, File(f).name, f) } }
         }
 
     fun clearResolvedAction(showText: Boolean = true): AnAction =
@@ -190,7 +191,8 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
     private fun pendingFiles(): List<String> = service.log().filter { it.pending }.map { it.file }.distinct().sorted()
     private fun pendingInActiveFile(): List<EditRecord> {
         val f = activeFilePath() ?: return emptyList()
-        return service.log().filter { it.pending && it.file == f }.sortedBy { it.id }
+        val key = ClaudePaths.storeKey(f) // hoisted: this runs per toolbar tick over every record
+        return service.log().filter { it.pending && it.file == key }.sortedBy { it.id }
     }
     private fun activeHasPending(): Boolean = pendingInActiveFile().isNotEmpty()
 
@@ -219,7 +221,7 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
         val files = pendingFiles()
         if (files.isEmpty()) return null
         val active = activeFilePath()
-        val idx = active?.let { files.indexOf(it) } ?: -1
+        val idx = active?.let { files.indexOf(ClaudePaths.storeKey(it)) } ?: -1
         val base = "File ${if (idx >= 0) idx + 1 else "–"}/${files.size}"
         if (!richCounters || idx < 0 || active == null) return base
         val edits = pendingInActiveFile().size
@@ -239,7 +241,7 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
     private fun navFile(dir: Int) {
         val files = pendingFiles()
         if (files.isEmpty()) return
-        val idx = activeFilePath()?.let { files.indexOf(it) } ?: -1
+        val idx = activeFilePath()?.let { files.indexOf(ClaudePaths.storeKey(it)) } ?: -1
         val target = files[((if (idx < 0) 0 else idx) + dir + files.size) % files.size]
         val first = service.log().filter { it.pending && it.file == target }.minByOrNull { it.id } ?: return
         navEditId = first.id

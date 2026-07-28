@@ -5,7 +5,7 @@ All notable changes to Claude Observatory are recorded here, following
 Per-tag release artifacts and auto-generated notes are on the
 [Releases page](https://github.com/cell-observatory/claude-observatory/releases).
 
-## [0.9.0] — 2026-07-27
+## [0.9.0] — 2026-07-28
 
 **The Overview's cache almost never hit.** Opening an older session and watching it take twelve seconds
 to draw, every few seconds, was not the cache being cold — it was the cache being thrown away on nearly
@@ -171,11 +171,74 @@ explicit statement of scope, so the axis counter moves with it immediately (the 
 the fallback), and stepping the axis becomes the pick — the counter and the pick-scoped panes can never
 disagree about which ask is under review. Both editors.
 
-**Prompts is its own view.** It moved out of the shared bottom dock into a dedicated Prompts container.
-VS Code remembers view placement per profile, so an existing profile keeps wherever you last dragged it —
-new installs start it in the panel, and *Show the Prompts window* focuses it wherever it lives.
+**The containers are regrouped and renamed.** The sidebar is **Observatory Traces** (Edits · Diffs ·
+File History — the per-edit review side), the bottom panel is **Observatory Dashboards** (Overview ·
+Stats), and the timeline-shaped surfaces — **Prompts · Actions · Observations** — live together in a new
+**Observatory Timeline** panel. VS Code remembers view placement per profile, so an existing profile
+keeps wherever you last dragged things — new installs get this layout, and *Show the Prompts window*
+focuses the Prompts view wherever it lives. JetBrains mirrors the three surfaces literally: the Traces and
+Dashboards tool windows carry the new names, and a new **Observatory Timeline** tool window (right
+stripe) holds Prompts · Actions · Observations as tabs — the Dashboards dock slims to the Overview +
+Stats split, and the guided tour raises whichever window a step's surface lives in. (Tool-window positions reset once on upgrade: the platform keys
+them by window id, and the ids are the names.)
+
+**Export grew a second form: the full session trace.** The Overview's Export now offers two documents —
+the shareable review summary (markdown, as before), and the **full session trace**: everything the
+observatory recorded for the session as one JSON document — every edit with its status, per-edit delta,
+and reconstructed unified diff, the captures the hook declined, the prompts, every tool call, tasks and
+subagents, egress and outside-workspace writes, the observations, and token usage. Core composes it
+(`buildSessionTrace`), so the CLI (`claude-observatory export [--out <file>]`), VS Code (Export → Full
+session trace, also in the command palette), and JetBrains (Export dropdown) emit the identical
+document; a section that fails to build is named in `errors` rather than silently missing. Diff text is
+capped at a 64 MB budget — a pathological store otherwise built ~850 MB of diffs and died on V8's
+string cap — with the omission named in `errors` (deltas and blob shas stay); JetBrains opens the
+result as a tab, or names the written file when it exceeds the IDE's 20 MB editor load limit.
+
+**The session's name leads the Overview in both editors.** JetBrains' Overview top row now opens with
+the session-name label VS Code already had — the human-readable title (Claude's ai-title, else the
+first prompt) with the raw session id on the tooltip. In both editors the label keeps to ONE line: VS
+Code no longer wraps it (`ellipsis` + the full text on the tooltip), and the JetBrains label clips the
+same way instead of growing the toolbar.
 
 ### Fixed
+- **The site scales fluidly and text spans the page.** The reading column was fixed at 1140px at every
+  size — a ribbon on a 27"+ display. The column is now 90% of the viewport (floored at the old 1140px),
+  the ROOT font size tracks width continuously (16px floor, 24px cap, no breakpoint steps — root, not
+  body, because the type is rem-sized down to its clamp() caps, and a body-only bump visibly moved
+  almost nothing), and every per-element `ch` cap on paragraphs and ledes is gone, so text genuinely
+  fills the column at any width.
+- **`update` refreshes the bundled status line too.** Updating the observatory left the installed
+  `~/.claude/statusline.sh` at whatever version last ran `claude-observatory statusline` — one update
+  command now covers both (including when the CLI itself is already current, healing a script an older
+  CLI wrote), and only when ours is the installed one: the check matches the FULL config-dir script
+  path, so a user's own script that merely ends in `statusline.sh` is never touched.
+- **Windows: drive-letter case no longer forges phantom edits (#43).** Hook events could report one
+  file as `C:\...` and `c:\...`; the Bash walk keyed each case separately, so every file gained a
+  phantom created-record and a deleted-record twin — and undoing the phantom create DELETED the
+  untouched file (unrecoverable when gitignored). Paths are now canonicalized at capture and on read
+  (a pure drive-letter transform, so old stores heal in place), undo refuses a create whose delete-twin
+  is present while the file still exists, and `clean --phantoms` removes the provable pairs — strictly
+  those whose two records disagree on raw path case, so a genuine create-then-delete is never touched.
+  The guard holds the whole way down: it proves a pair by the RAW-case disagreement (a same-path
+  create→delete→re-create chain keeps its ordinary undo instead of a misdiagnosis pointing at a repair
+  that finds nothing), it covers `undo --force` too (the bulk flow's conflict hint names --force, which
+  previously still deleted the file), bulk reverts now COUNT refusals and surface the first refusal's
+  message in all three front-ends (`undo --json` gains `errors` + `firstError`) instead of silently
+  swallowing the one message that names the repair, and `clean --phantoms` on a session with no log
+  reports zero pairs instead of dying on ENOENT.
+  The same canonicalization now guards every path the product *takes in*, not just what capture writes:
+  CLI operands (`locate --file`, `list --file`, and `--file`/`--under` on `keep`/`undo`/`redo`/
+  `clean --resolved` — `--under` also resolves, so JetBrains' forward-slash paths and relative scopes
+  work), the workspace `--root` prefix that scopes the Overview, and the shared `isUnderPath` primitive
+  canonicalize both sides. In VS Code, `Uri.fsPath` lower-cases the Windows drive letter, so every
+  record↔editor join — inline placements, dirty-buffer guards before bulk undo (which failed OPEN),
+  nav-bar counters, per-file accept/revert, the live transcript watcher — now routes through one
+  `canonPath` boundary; the extension-host smoke test's `Uri` mock reproduces the real lower-casing so
+  windows-latest CI exercises exactly this skew. In JetBrains, the store reader applies the same
+  read-side heal (phantom pairs render as one file there too), and a new editor→store path bridge
+  (`storeKey`) fixes every `record.file == VirtualFile.path` join, which compared `C:\repo\x` against
+  `C:/repo/x` and could never match on Windows — file history, editor banner, inline overlays, nav
+  axes, the Project-view badge, and per-file accept/revert all join through it now.
 - **`install-jetbrains.sh` no longer dies before its own error message.** With no JetBrains IDE
   installed, expanding the empty plugin-dir array under `set -u` aborted the script with a bash error
   instead of printing where it had looked.

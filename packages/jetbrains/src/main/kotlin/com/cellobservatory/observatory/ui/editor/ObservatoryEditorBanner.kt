@@ -1,5 +1,6 @@
 package com.cellobservatory.observatory.ui.editor
 
+import com.cellobservatory.observatory.core.ClaudePaths
 import com.cellobservatory.observatory.services.ObservatoryService
 import com.cellobservatory.observatory.ui.Icons
 import com.cellobservatory.observatory.ui.NavTint
@@ -31,7 +32,8 @@ class ObservatoryEditorBanner : EditorNotificationProvider, DumbAware {
         val service = ObservatoryService.getInstance(project)
         service.currentSession() ?: return null
         // Cheap: cached folded log + path filter, no `locate` subprocess — safe on the provider's BGT.
-        val pendingInFile = service.log().count { it.pending && it.file == file.path }
+        val key = ClaudePaths.storeKey(file.path) // hoisted: the provider runs per open file per refresh
+        val pendingInFile = service.log().count { it.pending && it.file == key }
         if (pendingInFile == 0) return null // null ⇒ no banner on files Claude hasn't touched
         return Function { fileEditor -> banner(project, service, file, pendingInFile, fileEditor) }
     }
@@ -98,8 +100,8 @@ class ObservatoryEditorBanner : EditorNotificationProvider, DumbAware {
         // Per-edit pair — acts on the edit the review cursor is parked on when it sits in THIS file
         // (the one Prev/Next Edit just landed on), else the file's first pending edit.
         val bannerEdit = {
-            service.currentPendingEdit()?.takeIf { it.file == file.path }
-                ?: service.log().filter { it.pending && it.file == file.path }.minByOrNull { it.id }
+            service.currentPendingEdit()?.takeIf { it.file == ClaudePaths.storeKey(file.path) }
+                ?: service.log().filter { it.pending && it.file == ClaudePaths.storeKey(file.path) }.minByOrNull { it.id }
         }
         panel.createActionLabel("Keep") {
             service.currentSession()?.let { s -> bannerEdit()?.let { ReviewOps.keep(project, s, it.id) } }
@@ -118,7 +120,7 @@ class ObservatoryEditorBanner : EditorNotificationProvider, DumbAware {
         // These act on THIS file only — the banner is per-file, so session-wide would be misleading.
         panel.createActionLabel("Accept File") {
             service.currentSession()?.let { s ->
-                ReviewOps.keepAll(project, s, service.log().filter { it.file == file.path }, file.name)
+                ReviewOps.keepAll(project, s, service.log().filter { it.file == ClaudePaths.storeKey(file.path) }, file.name)
             }
         }.apply {
             setUseIconAsLink(true)
@@ -127,7 +129,7 @@ class ObservatoryEditorBanner : EditorNotificationProvider, DumbAware {
         }
         panel.createActionLabel("Reject File") {
             service.currentSession()?.let { s ->
-                ReviewOps.undoAll(project, s, service.log().filter { it.file == file.path }, file.name, file.path)
+                ReviewOps.undoAll(project, s, service.log().filter { it.file == ClaudePaths.storeKey(file.path) }, file.name, file.path)
             }
         }.apply {
             setUseIconAsLink(true)
@@ -163,7 +165,7 @@ class ObservatoryEditorBanner : EditorNotificationProvider, DumbAware {
         val s = service.currentSession() ?: return
         val files = service.log().filter { it.pending }.map { it.file }.distinct().sorted()
         if (files.isEmpty()) return
-        val idx = files.indexOf(current)
+        val idx = files.indexOf(ClaudePaths.storeKey(current))
         val target = files[((if (idx < 0) 0 else idx) + dir + files.size) % files.size]
         val first = service.log().filter { it.pending && it.file == target }.minByOrNull { it.id } ?: return
         Navigate.openFileAtEdit(project, s, first)

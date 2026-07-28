@@ -44,4 +44,31 @@ object ClaudePaths {
     fun hooksInstalled(): Boolean = runCatching {
         java.nio.file.Files.readString(configDir().resolve("settings.json")).contains("claude-observatory-hook")
     }.getOrDefault(false)
+
+    /**
+     * Canonicalize a path's DRIVE-LETTER case — the Kotlin mirror of core's canonPath (issue #43).
+     * Same total, platform-independent string transform; see paths.ts for the full rationale.
+     */
+    fun canonPath(p: String): String {
+        if (p.length >= 2 && p[1] == ':' && (p.length == 2 || p[2] == '\\' || p[2] == '/')) {
+            val d = p[0]
+            if (d in 'a'..'z') return d.uppercaseChar() + p.substring(1)
+        }
+        return p
+    }
+
+    /**
+     * Editor→store path bridge (#43): IntelliJ VirtualFile paths are system-independent
+     * (`C:/repo/x.ts`) while store records are OS-native (`C:\repo\x.ts` on Windows) — so a raw
+     * `record.file == vf.path` join can never match on Windows. Flips separators only for
+     * drive-letter-shaped paths (a backslash is a legal filename character on POSIX, and the drive
+     * shape is what makes it unambiguously a Windows path), then canonicalizes the drive case.
+     * UNC paths (`//server/share`) are left as-is — out of #43's scope.
+     */
+    fun storeKey(editorPath: String): String {
+        val driveShaped = editorPath.length >= 2 && editorPath[1] == ':' &&
+            (editorPath.length == 2 || editorPath[2] == '/' || editorPath[2] == '\\')
+        val native = if (driveShaped) editorPath.replace('/', '\\') else editorPath
+        return canonPath(native)
+    }
 }

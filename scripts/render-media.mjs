@@ -712,7 +712,7 @@ const scenes = {
     note('4', 'Summary bar', 'Pending / accepted / reverted edit counts plus file and folder totals for whatever is in scope — named for the picked prompt (or folder filter).'),
   ].join(''))),
   'win-actions': scene(1200, winDiag('ACTIONS', actionsCol, [
-    note('1', 'Category groups', 'Now a sidebar tab (moved from the panel), collapsed by default — Edits · Commands · Reads · Searches · To-dos. Curated; errors always surface.'),
+    note('1', 'Category groups', 'A tab of the Observatory Timeline panel (beside Prompts and Observations), collapsed by default — Edits · Commands · Reads · Searches · To-dos. Curated; errors always surface.'),
     note('2', 'Egress', 'Everywhere the session reached off-machine — web · MCP · network shell.'),
     note('3', 'Audits', 'Risk &amp; egress audits ride the Observations change-feed alongside the edits they flag.'),
     note('4', 'Review links', 'A row with an edit links straight to its inline review.'),
@@ -735,11 +735,11 @@ const scenes = {
         <div style="width:126px;background:var(--side);border-right:1px solid var(--border);padding:12px 11px;display:flex;flex-direction:column;gap:9px;">
           <div style="font-size:9.5px;font-weight:700;color:var(--coral);letter-spacing:.05em;">① ACTIVITY BAR</div>
           <div style="font-size:20px;position:relative;width:26px;">${microscope}<span style="position:absolute;right:-6px;bottom:-4px;background:var(--accent);color:#fff;border-radius:8px;font-size:9px;padding:0 4px;">3</span></div>
-          <div style="font-size:11px;color:var(--dim);line-height:1.45;">The <b style="color:var(--ink)">Claude&nbsp;Edits</b> container, badged with the pending count.</div>
+          <div style="font-size:11px;color:var(--dim);line-height:1.45;">The <b style="color:var(--ink)">Observatory&nbsp;Traces</b> container, badged with the pending count.</div>
         </div>
         <div style="width:320px;background:var(--side);border-right:1px solid var(--border);padding:12px 14px;">
-          <div style="font-size:9.5px;font-weight:700;color:var(--coral);letter-spacing:.05em;margin-bottom:7px;">② SIDEBAR · Claude Edits</div>
-          <div style="font-size:12px;color:var(--dim);line-height:1.55;"><b style="color:var(--ink)">Edits</b> (folder → file → class) · <b style="color:var(--ink)">Diffs</b> · <b style="color:var(--ink)">File&nbsp;History</b> · <b style="color:var(--ink)">Actions</b>.<br>Per-row Keep&nbsp;/&nbsp;Undo. Title bar: Search · Review&nbsp;◄► · Accept/Reject&nbsp;All · Clear&nbsp;Resolved · Switch&nbsp;session.</div>
+          <div style="font-size:9.5px;font-weight:700;color:var(--coral);letter-spacing:.05em;margin-bottom:7px;">② SIDEBAR · Observatory Traces</div>
+          <div style="font-size:12px;color:var(--dim);line-height:1.55;"><b style="color:var(--ink)">Edits</b> (folder → file → class) · <b style="color:var(--ink)">Diffs</b> · <b style="color:var(--ink)">File&nbsp;History</b>.<br>Per-row Keep&nbsp;/&nbsp;Undo. Title bar: Search · Review&nbsp;◄► · Accept/Reject&nbsp;All · Clear&nbsp;Resolved · Switch&nbsp;session.</div>
         </div>
         <div style="flex:1;padding:12px 16px;">
           <div style="font-size:9.5px;font-weight:700;color:var(--coral);letter-spacing:.05em;margin-bottom:7px;">③ EDITOR</div>
@@ -747,7 +747,7 @@ const scenes = {
         </div>
       </div>
       <div style="border-top:1px solid var(--border);background:var(--panel);">
-        <div class="paneltabs"><span>PROBLEMS</span><span>OUTPUT</span><span>TERMINAL</span><span class="on">④ CLAUDE OBSERVATORY</span></div>
+        <div class="paneltabs"><span>PROBLEMS</span><span>OUTPUT</span><span>TERMINAL</span><span class="on">④ OBSERVATORY DASHBOARDS</span></div>
         <div class="row" style="align-items:stretch;height:168px;">
           <div class="col" style="flex:1.5;border-right:1px solid var(--border);">
             <div class="colhead" style="color:var(--coral)">OVERVIEW</div>
@@ -780,13 +780,11 @@ const scenes = {
           <span style="opacity:.4">⚙</span>
         </div>
         <div style="position:relative;width:300px;background:var(--side);border-right:1px solid var(--border);box-shadow:inset 0 0 0 2px var(--coral);">
-          <span style="position:absolute;top:-8px;left:9px;background:var(--coral);color:#fff;font-size:9px;font-weight:700;letter-spacing:.04em;padding:1.5px 7px;border-radius:4px;z-index:5;white-space:nowrap;">① Activity bar · ② Sidebar (Claude Edits: Edits·Diffs·File History·Actions)</span>
-          <div style="padding:10px 14px 2px;font-size:11px;color:var(--dim);letter-spacing:.06em;">CLAUDE EDITS</div>
+          <span style="position:absolute;top:-8px;left:9px;background:var(--coral);color:#fff;font-size:9px;font-weight:700;letter-spacing:.04em;padding:1.5px 7px;border-radius:4px;z-index:5;white-space:nowrap;">① Activity bar · ② Sidebar (Observatory Traces: Edits·Diffs·File History)</span>
+          <div style="padding:10px 14px 2px;font-size:11px;color:var(--dim);letter-spacing:.06em;">OBSERVATORY TRACES</div>
           ${editsTree}
           <div class="viewhead" style="border-top:1px solid var(--border);margin-top:8px;">DIFFS</div>
           <div class="viewhead" style="border-top:1px solid var(--border);">FILE HISTORY <span style="float:right;color:var(--faint)">features.py</span></div>
-          <div class="viewhead" style="border-top:1px solid var(--border);">ACTIONS</div>
-          <div class="viewhead" style="border-top:1px solid var(--border);">OBSERVATIONS</div>
         </div>
         <div style="flex:1;display:flex;flex-direction:column;">
           <div style="position:relative;display:flex;align-items:center;background:var(--side);border-bottom:1px solid var(--border);box-shadow:inset 0 0 0 2px var(--coral);">
@@ -798,7 +796,7 @@ const scenes = {
         </div>
       </div>
       <div style="border-top:1px solid var(--border);background:var(--panel);">
-        <div class="paneltabs"><span>PROBLEMS</span><span>OUTPUT</span><span>TERMINAL</span><span class="on">④ CLAUDE OBSERVATORY</span></div>
+        <div class="paneltabs"><span>PROBLEMS</span><span>OUTPUT</span><span>TERMINAL</span><span class="on">④ OBSERVATORY DASHBOARDS</span></div>
         <div class="row" style="align-items:stretch;height:184px;">
           ${mapPane('1.55', 'OVERVIEW', changeMapCol)}
           ${mapPane('1', 'STATS', statsCol(30, 30).replace(/<div class="uhead">USAGE<\/div>[\s\S]*$/, '<div class="urow"><span class="lbl">ctx</span><span class="track"><span class="fill" style="width:39%;background:var(--kept)"></span></span><span class="pct" style="color:var(--kept)">39%</span><span class="sub">390k/1M</span></div>'), true)}
@@ -821,12 +819,10 @@ const scenes = {
           <span style="opacity:.4">⚙</span>
         </div>
         <div style="width:300px;background:var(--side);border-right:1px solid var(--border);">
-          <div style="padding:10px 14px 2px;font-size:11px;color:var(--dim);letter-spacing:.06em;">CLAUDE EDITS</div>
+          <div style="padding:10px 14px 2px;font-size:11px;color:var(--dim);letter-spacing:.06em;">OBSERVATORY TRACES</div>
           ${editsTree}
           <div class="viewhead" style="border-top:1px solid var(--border);margin-top:8px;">DIFFS</div>
           <div class="viewhead" style="border-top:1px solid var(--border);">FILE HISTORY <span style="float:right;color:var(--faint)">features.py</span></div>
-          <div class="viewhead" style="border-top:1px solid var(--border);">ACTIONS</div>
-          <div class="viewhead" style="border-top:1px solid var(--border);">OBSERVATIONS</div>
         </div>
         <div style="flex:1;display:flex;flex-direction:column;">
           <div style="display:flex;background:var(--side);border-bottom:1px solid var(--border);">
@@ -836,7 +832,7 @@ const scenes = {
         </div>
       </div>
       <div style="border-top:1px solid var(--border);background:var(--panel);">
-        <div class="paneltabs"><span>PROBLEMS</span><span>OUTPUT</span><span>TERMINAL</span><span class="on">CLAUDE OBSERVATORY</span></div>
+        <div class="paneltabs"><span>PROBLEMS</span><span>OUTPUT</span><span>TERMINAL</span><span class="on">OBSERVATORY DASHBOARDS</span></div>
         <div class="row" style="align-items:stretch;height:212px;">
           <div class="col" style="flex:1.55;border-right:1px solid var(--border);"><div class="colhead">OVERVIEW</div>${changeMapCol}</div>
           <div class="col" style="flex:1;"><div class="colhead">STATS</div>${statsCol(34, 34).replace(/<div class="uhead">USAGE<\/div>[\s\S]*$/, '<div class="urow"><span class="lbl">ctx</span><span class="track"><span class="fill" style="width:39%;background:var(--kept)"></span></span><span class="pct" style="color:var(--kept)">39%</span><span class="sub">390k/1M</span></div>')}</div>
@@ -862,7 +858,7 @@ const scenes = {
   // C. observations panel closeup
   'observations': scene(980, `
     <div class="window" style="padding-bottom:8px;">
-      <div class="paneltabs"><span>TERMINAL</span><span class="on">CLAUDE OBSERVATORY</span></div>
+      <div class="paneltabs"><span>TERMINAL</span><span class="on">OBSERVATORY TIMELINE</span></div>
       <div class="colhead" style="padding-top:10px;">OBSERVATIONS</div>
       ${observationsCol}
       <div class="hovercard" style="margin:10px 16px 8px 40px;width:430px;">
@@ -876,7 +872,7 @@ const scenes = {
   // D. stats panel closeup
   'stats': scene(760, `
     <div class="window" style="padding-bottom:10px;">
-      <div class="paneltabs"><span>TERMINAL</span><span class="on">CLAUDE OBSERVATORY</span></div>
+      <div class="paneltabs"><span>TERMINAL</span><span class="on">OBSERVATORY DASHBOARDS</span></div>
       <div class="colhead" style="padding-top:10px;">STATS</div>
       ${statsCol(56, 56)}
     </div>`),
@@ -930,7 +926,7 @@ const scenes = {
   //     scopes the Overview beside it (the scoped row is outlined, and its scope bar appears there).
   'prompts': scene(700, `
     <div class="window" style="padding-bottom:8px;">
-      <div class="viewhead" style="padding-top:12px;">CLAUDE OBSERVATORY PROMPTS <span style="float:right;color:var(--faint)">6 asks · 4 with edits · 71 edits</span></div>
+      <div class="viewhead" style="padding-top:12px;">OBSERVATORY TIMELINE: PROMPTS <span style="float:right;color:var(--faint)">6 asks · 4 with edits · 71 edits</span></div>
       <div style="font-size:10.5px;color:var(--faint);padding:0 16px 8px;line-height:1.45;border-bottom:1px solid var(--border)">What you asked for, in order. Select one to scope the Overview beside it — its fleet, runs, tasks, shells and change map narrow to the work that ask caused.</div>
       ${promptRow(6, 'now', '', '', 'add a Processes tab so I can see the shells that are still running, and let me click one to follow its output', '2 tool calls · 41k tok', '~4m', false)}
       ${promptRow(5, '', '+412 −96', '31 edits · 8f · 3fo · 12 pending', 'the loader is still reading the whole file into memory — stream it instead, and add a test that fails on the old behaviour', '190k tok · 2 tasks · 1 subagent · 1 shell', '22m', true,

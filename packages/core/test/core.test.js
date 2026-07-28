@@ -1350,6 +1350,14 @@ test('contract: each --json command emits the documented key set (rename-guard f
   // Read-only shapes (JetBrains + scripts key on these names — add fields, never rename).
   const list = runJson(['list', '--json']);
   hasKeys(list, ['session', 'edits'], 'list');
+  // The FULL session trace (`export`) — the one document that carries everything recorded.
+  const trace = runJson(['export']);
+  hasKeys(trace, ['exportedAt', 'tool', 'session', 'title', 'root', 'summary', 'edits', 'skips', 'prompts',
+    'actions', 'tasks', 'subagents', 'egress', 'outsideWrites', 'observations', 'usage', 'errors'], 'export');
+  assert.equal(trace.edits.length, 3, 'export carries every edit');
+  hasKeys(trace.edits[0], ['id', 'ts', 'tool', 'file', 'status', 'added', 'removed', 'diff'], 'export.edits[]');
+  assert.match(trace.edits[0].diff, /^Index: /, 'each edit carries its reconstructed unified diff');
+  assert.deepEqual(trace.errors, [], 'no section fails to build on a healthy store');
   hasKeys(list.edits[0], ['id', 'ts', 'tool', 'file', 'status', 'added', 'removed'], 'list.edits[]');
   hasKeys(runJson(['status', '--json']), ['hooksInstalled', 'hookScript', 'session', 'store', 'lastCaptureTs', 'counts', 'skipped'], 'status');
   const sessions = runJson(['sessions', '--json']);
@@ -7278,4 +7286,187 @@ test('prompts: promptWindows owns edits by ask window, boundary to the NEWER ask
   const w2 = core.promptWindows(cwd, S);
   assert.deepEqual(w2[0].editIds, [mid], 'a kept edit is still owned by its ask');
   assert.equal(w2[0].pending, 0, 'and no longer pending');
+});
+
+test('store: Windows drive-letter case — phantoms are healed, repaired, and undo-proofed (#43)', () => {
+  freshHome();
+  const S = 'caseSess';
+  core.ensureStore(S);
+  // canonPath is a pure transform, so the same assertions run on every CI OS.
+  assert.equal(core.canonPath('c:\\repo\\x.ts'), 'C:\\repo\\x.ts', 'lowercase drive is uppercased');
+  assert.equal(core.canonPath('C:/repo/x.ts'), 'C:/repo/x.ts', 'already-canonical stays');
+  assert.equal(core.canonPath('/unix/path'), '/unix/path', 'POSIX paths untouched');
+  assert.equal(core.canonPath('cargo.toml'), 'cargo.toml', 'a bare name with no drive is untouched');
+
+  const blob = (txt) => core.writeBlob(S, Buffer.from(txt));
+  const add = (file, before, after) => {
+    const id = core.nextId(S);
+    core.appendLog(S, { id, ts: id * 1000, tool: 'Bash', file, beforeBlob: before, afterBlob: after, status: 'pending' });
+    return id;
+  };
+  // The issue's exact shape: one file, two cases — a phantom create and its delete twin.
+  const A = blob('the untouched file\ncontents\n');
+  const phantomCreate = add('C:\\repo\\ci.yml', null, A);
+  const phantomDelete = add('c:\\repo\\ci.yml', A, null);
+  // A LEGITIMATE create-then-delete of a temp file — one consistent path. The repair must keep it.
+  const B = blob('temp\n');
+  const legitCreate = add('C:\\repo\\tmp.txt', null, B);
+  const legitDelete = add('C:\\repo\\tmp.txt', B, null);
+  // And one real pending edit that must survive everything.
+  const realEdit = add('C:\\repo\\real.ts', blob('a\n'), blob('b\n'));
+
+  // 1. READ-SIDE HEAL: both phantom records surface under ONE canonical file.
+  const files = new Set(core.readLog(S).map((r) => r.file));
+  assert.ok(files.has('C:\\repo\\ci.yml') && !files.has('c:\\repo\\ci.yml'),
+    'readLog serves one canonical path for the case twins');
+
+  // 2. REPAIR: exactly the case-differing pair goes; the legit pair and the real edit stay.
+  const r = core.repairCasePhantoms(S);
+  assert.deepEqual(r, { pairs: 1, ids: [phantomCreate, phantomDelete].sort((a, b) => a - b) },
+    'one provable pair found — raw-case difference is the discriminator');
+  const left = core.readLog(S).map((x) => x.id).sort((a, b) => a - b);
+  assert.deepEqual(left, [legitCreate, legitDelete, realEdit].sort((a, b) => a - b),
+    'the same-case create+delete pair and the real edit are untouched');
+  assert.equal(core.repairCasePhantoms(S).pairs, 0, 'a second repair finds nothing (idempotent)');
+});
+
+test('undo: the phantom guard is STRICT — a same-raw-path create+delete chain keeps ordinary undo semantics (#43)', () => {
+  // The guard refuses only PROVABLE phantoms: the create and its delete-twin must disagree in RAW
+  // path case (repairCasePhantoms' own discriminator). A genuine create→delete→re-create chain on
+  // ONE consistent path (stash/checkout flows produce it) must not be misdiagnosed as a phantom and
+  // pointed at a repair that would then find nothing. The refusal itself needs a real case-twin pair
+  // with the file on disk, which only a Windows path can be — exercised end-to-end by the win32 test.
+  freshHome();
+  const S = 'caseUndo';
+  const work = fs.realpathSync(tmpWork());
+  core.ensureStore(S);
+  const target = path.join(work, 'made-and-remade.txt');
+  fs.writeFileSync(target, 'same bytes\n');
+  const A = core.writeBlob(S, fs.readFileSync(target));
+  const mk = (file, before, after) => { const id = core.nextId(S); core.appendLog(S, { id, ts: id * 1000, tool: 'Bash', file, beforeBlob: before, afterBlob: after, status: 'pending' }); return id; };
+  const create = mk(target, null, A);
+  mk(target, A, null); // same RAW path — NOT a provable phantom
+  const res = core.undoEdit(S, create);
+  assert.equal(res.ok, true, 'no phantom misdiagnosis on one consistent raw path');
+  assert.ok(!fs.existsSync(target), 'the ordinary create-undo semantics hold (content matches → delete)');
+  // Positive control for the guard's other gate: with no file on disk, a create-undo is a no-op success.
+  const ghost = mk(path.join(work, 'never-on-disk.txt'), null, core.writeBlob(S, Buffer.from('tmp\n')));
+  assert.equal(core.undoEdit(S, ghost).ok, true, 'a create whose file is gone undoes harmlessly');
+});
+
+test('cli: clean --phantoms wiring — removes a provable pair; a log-less session reports zero, not ENOENT (#43)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const home = process.env.HOME;
+  const env = { ...process.env, HOME: home, USERPROFILE: home };
+  delete env.CLAUDE_OBSERVATORY_SESSION;
+  const S = 'phWire';
+  core.ensureStore(S);
+  const blob = core.writeBlob(S, Buffer.from('x\n'));
+  const mk = (file, before, after) => { const id = core.nextId(S); core.appendLog(S, { id, ts: id * 1000, tool: 'Bash', file, beforeBlob: before, afterBlob: after, status: 'pending' }); return id; };
+  mk('C:\\repo\\ci.yml', null, blob);
+  mk('c:\\repo\\ci.yml', blob, null);
+  const runJson = (args) => JSON.parse(cp.execFileSync('node', [CLI, ...args], { env, encoding: 'utf8' }));
+  assert.equal(runJson(['clean', '--phantoms', '--session', S, '--json']).pairs, 1, 'the flag reaches repairCasePhantoms');
+  // A session that never captured (no log.jsonl at all): zero pairs and a clean exit — the undo
+  // guard's error message names this command, so it must never die on ENOENT where it sends people.
+  assert.equal(runJson(['clean', '--phantoms', '--session', 'never-captured', '--json']).pairs, 0, 'no log → zero pairs, not a crash');
+});
+
+test('scope: isUnderPath canonicalizes BOTH operands (#43)', () => {
+  // EXACT-FILE scope is separator-free, so the canon is assertable on every CI OS. (FOLDER scope
+  // splices the RUNTIME path.sep, so Windows folder prefixes only match on win32 — covered by the
+  // win32-gated CLI test below.)
+  assert.ok(core.isUnderPath('C:\\repo\\x.ts', 'c:\\repo\\x.ts'), 'exact-file scope with a lower-cased drive matches');
+  assert.ok(core.isUnderPath('c:\\repo\\x.ts', 'C:\\repo\\x.ts'), 'a lower-cased record side is canonicalized too');
+  assert.ok(!core.isUnderPath('C:\\repo\\x.ts', 'c:\\other\\x.ts'), 'a non-matching scope still refuses (positive control)');
+  // POSIX behavior unchanged.
+  assert.ok(core.isUnderPath('/w/src/a.ts', '/w/src'), 'POSIX folder scope');
+  assert.ok(!core.isUnderPath('/w/srcx/a.ts', '/w/src'), 'POSIX sibling prefix still refuses');
+});
+
+test('cli: list --file and keep --under canonicalize their operands (#43)', () => {
+  // Platform-independent half: records with FAKE canonical Windows paths, read-only `list --file`
+  // (keep/undo would try to touch C:\ paths on a POSIX runner, so the write half is win32-gated below).
+  const home = freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR; // the in-process store writes must land in the fake HOME too
+  const env = { ...process.env, HOME: home, USERPROFILE: home };
+  delete env.CLAUDE_OBSERVATORY_SESSION;
+  const S = 'cliCase';
+  core.ensureStore(S);
+  const id = core.nextId(S);
+  core.appendLog(S, {
+    id, ts: 1000, tool: 'Edit', file: 'C:\\repo\\src\\mod.ts',
+    beforeBlob: core.writeBlob(S, Buffer.from('a\n')), afterBlob: core.writeBlob(S, Buffer.from('b\n')), status: 'pending',
+  });
+  const runJson = (args) => JSON.parse(cp.execFileSync('node', [CLI, ...args], { env, encoding: 'utf8' }));
+  const hit = runJson(['list', '--session', S, '--file', 'c:\\repo\\src', '--json']);
+  assert.equal(hit.edits.length, 1, 'a lower-cased --file substring matches the canonical record');
+  const miss = runJson(['list', '--session', S, '--file', 'c:\\other', '--json']);
+  assert.equal(miss.edits.length, 0, 'a non-matching substring still matches nothing (positive control)');
+  const kept = runJson(['keep', '--session', S, '--file', 'c:\\repo\\src', '--json']);
+  assert.equal(kept.kept, 1, 'keep --file canonicalizes its substring the same way');
+});
+
+test('cli(win32): lower-cased drive operands work end-to-end — list, keep --under, locate', { skip: process.platform !== 'win32' }, () => {
+  // REAL paths on the Windows runner: C:\Users\... — lower-case the drive letter in every operand,
+  // exactly what a Git Bash shell or an editor hands over. Runs only on windows-latest CI.
+  const home = freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const env = { ...process.env, HOME: home, USERPROFILE: home };
+  delete env.CLAUDE_OBSERVATORY_SESSION;
+  const S = 'cliWin';
+  core.ensureStore(S);
+  const work = fs.realpathSync(tmpWork());
+  const target = path.join(work, 'mod.ts');
+  fs.writeFileSync(target, 'b\n');
+  const canonical = core.canonPath(target);
+  assert.notEqual(canonical, canonical[0].toLowerCase() + canonical.slice(1), 'the runner path is drive-shaped');
+  const id = core.nextId(S);
+  core.appendLog(S, {
+    id, ts: 1000, tool: 'Edit', file: canonical,
+    beforeBlob: core.writeBlob(S, Buffer.from('a\n')), afterBlob: core.writeBlob(S, Buffer.from('b\n')), status: 'pending',
+  });
+  const lower = (p) => p[0].toLowerCase() + p.slice(1);
+  assert.ok(core.isUnderPath(canonical, lower(work)), 'isUnderPath folder scope through a lower-cased drive (win32 sep)');
+  const run = (args, input) => cp.execFileSync('node', [CLI, ...args], { env, encoding: 'utf8', ...(input === undefined ? {} : { input }) });
+  const runJson = (args, input) => JSON.parse(run(args, input));
+  assert.equal(runJson(['list', '--session', S, '--file', lower(target), '--json']).edits.length, 1, 'list --file');
+  const loc = runJson(['locate', '--session', S, '--file', lower(target), '--json'], 'b\n');
+  assert.equal(loc.placements.length, 1, 'locate --file finds the pending edit through a lower-cased drive');
+  const kept = runJson(['keep', '--session', S, '--under', lower(work), '--json']);
+  assert.equal(kept.kept, 1, 'keep --under scopes through a lower-cased drive');
+
+  // The REAL #43 shape end-to-end: one file, two RAW drive cases, the file on disk. Both undo paths
+  // must refuse, the bulk revert must SAY so, and the named repair must remove the pair.
+  const phTarget = path.join(work, 'phantom.txt');
+  fs.writeFileSync(phTarget, 'untouched\n');
+  const P = core.writeBlob(S, fs.readFileSync(phTarget));
+  const mk = (file, before, after) => { const pid = core.nextId(S); core.appendLog(S, { id: pid, ts: pid * 1000, tool: 'Bash', file, beforeBlob: before, afterBlob: after, status: 'pending' }); return pid; };
+  const create = mk(core.canonPath(phTarget), null, P);
+  mk(lower(core.canonPath(phTarget)), P, null); // the delete-twin under the OTHER raw case
+  assert.equal(core.undoEdit(S, create).ok, false, 'undoEdit refuses the provable phantom');
+  assert.equal(core.restoreFile(S, create).ok, false, 'the --force path refuses it too');
+  assert.ok(fs.existsSync(phTarget), 'the untouched file survives both undo paths');
+  const scope = core.undoScope(S, { under: lower(work) });
+  assert.ok(scope.errors >= 1 && /phantom/.test(scope.firstError ?? ''), 'bulk revert counts and names the refusal');
+  assert.equal(runJson(['clean', '--phantoms', '--session', S, '--json']).pairs, 1, 'clean --phantoms removes the pair');
+});
+
+test('install: statuslineInstalled detects OURS and only ours (0.9.0)', () => {
+  const home = freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const dir = path.join(home, '.claude');
+  fs.mkdirSync(dir, { recursive: true });
+  assert.equal(core.statuslineInstalled(), false, 'nothing installed — false');
+  fs.writeFileSync(path.join(dir, 'settings.json'), JSON.stringify({ statusLine: { type: 'command', command: `bash ${path.join(dir, 'statusline.sh')}` } }));
+  assert.equal(core.statuslineInstalled(), false, 'settings point at a script that does not exist — false (never "refresh" onto nothing)');
+  fs.writeFileSync(path.join(dir, 'statusline.sh'), '#!/bin/bash\n');
+  assert.equal(core.statuslineInstalled(), true, 'settings + script — true');
+  fs.writeFileSync(path.join(dir, 'settings.json'), JSON.stringify({ statusLine: { type: 'command', command: '/usr/local/bin/some-other-statusline' } }));
+  assert.equal(core.statuslineInstalled(), false, 'a FOREIGN status line is never treated as ours');
+  fs.writeFileSync(path.join(dir, 'settings.json'), JSON.stringify({ statusLine: { type: 'command', command: 'bash /home/u/tools/statusline.sh' } }));
+  assert.equal(core.statuslineInstalled(), false, "someone else's statusline.sh at a foreign path is not ours — the match is the FULL config-dir path, and `update` must never overwrite it");
+  fs.writeFileSync(path.join(dir, 'settings.json'), '{corrupt');
+  assert.equal(core.statuslineInstalled(), false, 'corrupt settings — false, never a throw');
 });

@@ -12,6 +12,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { EditStatus, EditRecord, readLog, minOf, maxOf, logPath, rootDir, isSafeSessionId } from './store';
+import { canonPath } from './paths';
 import { buildEditTree, EditTree, TreeEdit, TreeFolder, TreeFile } from './tree';
 import { reasoningByEdit, transcriptInsights, findTranscript, flagsFor } from './observe';
 import { parseActions, summarizeActions, compactLabel } from './actions';
@@ -1037,7 +1038,9 @@ function workspaceStamp(session: string, root: string): string {
     // seconds, so every warm pass rebuilt that session forever. Out-of-root churn is exactly the noise
     // this cache exists to ignore; out-of-root EDITS still invalidate through the log/transcript stamps
     // whenever the session itself acts.
-    const rootAbs = path.resolve(root) + path.sep;
+    // canonPath on the root (#43): editors hand over workspace roots with a lower-cased Windows drive
+    // letter, while readLog serves canonical record paths — a raw prefix compare would stamp nothing.
+    const rootAbs = canonPath(path.resolve(root)) + path.sep;
     files = [...new Set(readLog(session).map((r) => r.file))].filter((f) => path.resolve(f).startsWith(rootAbs)).sort();
   } catch {
     return '';

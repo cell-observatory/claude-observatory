@@ -22,19 +22,19 @@
       "activitybar": [
         {
           "id": "claudeObservatory",
-          "title": "Claude Edits",
+          "title": "Observatory Traces",
           "icon": "media/icon.svg"
         }
       ],
       "panel": [
         {
           "id": "claudeObservatoryDock",
-          "title": "Claude Observatory",
+          "title": "Observatory Dashboards",
           "icon": "media/icon.svg"
         },
         {
           "id": "claudeObservatoryPrompts",
-          "title": "Claude Observatory Prompts",
+          "title": "Observatory Timeline",
           "icon": "media/icon.svg"
         }
       ]
@@ -55,16 +55,6 @@
           "id": "claudeObservatory.fileHistory",
           "name": "File History",
           "icon": "media/history.svg"
-        },
-        {
-          "id": "claudeObservatory.actions",
-          "name": "Actions",
-          "icon": "media/icon.svg"
-        },
-        {
-          "id": "claudeObservatory.observations",
-          "name": "Observations",
-          "icon": "media/icon.svg"
         }
       ],
       "claudeObservatoryDock": [
@@ -84,9 +74,19 @@
       "claudeObservatoryPrompts": [
         {
           "id": "claudeObservatory.prompts",
-          "name": "Claude Observatory Prompts",
+          "name": "Prompts",
           "type": "webview",
           "initialSize": 2
+        },
+        {
+          "id": "claudeObservatory.actions",
+          "name": "Actions",
+          "icon": "media/icon.svg"
+        },
+        {
+          "id": "claudeObservatory.observations",
+          "name": "Observations",
+          "icon": "media/icon.svg"
         }
       ]
     },
@@ -489,6 +489,12 @@
       {
         "command": "claudeObservatory.exportSummary",
         "title": "Export review summary",
+        "category": "Claude Observatory",
+        "icon": "$(export)"
+      },
+      {
+        "command": "claudeObservatory.exportTrace",
+        "title": "Export full session trace",
         "category": "Claude Observatory",
         "icon": "$(export)"
       },
@@ -998,6 +1004,11 @@
         },
         {
           "command": "claudeObservatory.exportSummary",
+          "when": "view == claudeObservatory.edits || view == claudeObservatory.diffs",
+          "group": "1_export"
+        },
+        {
+          "command": "claudeObservatory.exportTrace",
           "when": "view == claudeObservatory.edits || view == claudeObservatory.diffs",
           "group": "1_export"
         },

@@ -1,5 +1,6 @@
 package com.cellobservatory.observatory.actions
 
+import com.cellobservatory.observatory.core.ClaudePaths
 import com.cellobservatory.observatory.services.ObservatoryService
 import com.cellobservatory.observatory.ui.Navigate
 import com.cellobservatory.observatory.ui.ReviewOps
@@ -129,7 +130,7 @@ class KeepOpenFileAction : AnAction(), DumbAware {
         val vf = e.getData(CommonDataKeys.VIRTUAL_FILE) ?: return
         val service = ObservatoryService.getInstance(project)
         val session = service.currentSession() ?: return
-        val targets = service.log().filter { it.file == vf.path }
+        val targets = service.log().filter { it.file == ClaudePaths.storeKey(vf.path) }
         ReviewOps.keepAll(project, session, targets, vf.name)
     }
 }
@@ -146,7 +147,7 @@ class UndoOpenFileAction : AnAction(), DumbAware {
         val vf = e.getData(CommonDataKeys.VIRTUAL_FILE) ?: return
         val service = ObservatoryService.getInstance(project)
         val session = service.currentSession() ?: return
-        val targets = service.log().filter { it.file == vf.path }
+        val targets = service.log().filter { it.file == ClaudePaths.storeKey(vf.path) }
         // `under = vf.path` scopes the revert to this file; omitting it makes undoScope run
         // `undo --all` across the whole session (matches EditsTreePanel/FileHistory/ReviewNavBar).
         ReviewOps.undoAll(project, session, targets, vf.name, vf.path)
