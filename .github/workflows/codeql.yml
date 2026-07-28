@@ -6,9 +6,9 @@ name: CodeQL
 # CodeQL Kotlin extractor doesn't support the Kotlin 2.2 toolchain this project uses.
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
   schedule:
     - cron: '30 5 * * 1' # weekly sweep so new queries run even without pushes
 

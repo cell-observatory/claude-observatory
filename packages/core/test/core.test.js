@@ -1350,11 +1350,24 @@ test('contract: each --json command emits the documented key set (rename-guard f
   // Read-only shapes (JetBrains + scripts key on these names — add fields, never rename).
   const list = runJson(['list', '--json']);
   hasKeys(list, ['session', 'edits'], 'list');
+  // The FULL session trace (`export`) — the one document that carries everything recorded.
+  const trace = runJson(['export']);
+  hasKeys(trace, ['exportedAt', 'tool', 'session', 'title', 'root', 'summary', 'edits', 'skips', 'prompts',
+    'actions', 'tasks', 'subagents', 'egress', 'outsideWrites', 'observations', 'usage', 'errors'], 'export');
+  assert.equal(trace.edits.length, 3, 'export carries every edit');
+  hasKeys(trace.edits[0], ['id', 'ts', 'tool', 'file', 'status', 'added', 'removed', 'diff'], 'export.edits[]');
+  assert.match(trace.edits[0].diff, /^Index: /, 'each edit carries its reconstructed unified diff');
+  assert.deepEqual(trace.errors, [], 'no section fails to build on a healthy store');
   hasKeys(list.edits[0], ['id', 'ts', 'tool', 'file', 'status', 'added', 'removed'], 'list.edits[]');
   hasKeys(runJson(['status', '--json']), ['hooksInstalled', 'hookScript', 'session', 'store', 'lastCaptureTs', 'counts', 'skipped'], 'status');
   const sessions = runJson(['sessions', '--json']);
   hasKeys(sessions, ['active', 'sessions'], 'sessions');
-  hasKeys(sessions.sessions[0], ['id', 'title', 'lastActiveMs', 'current'], 'sessions.sessions[]'); // recency + name — no per-row log parse (0.8.8)
+  // Every field the Sessions rows RENDER, in both editors. The list stopped at `current` while 0.9.0 added
+  // nine more, so dropping any of them (verified: emitting only the first four) left a green build and a
+  // Sessions tab of "+0 -0 . 0 tok" blanks — JetBrains parses exactly these names off each row.
+  hasKeys(sessions.sessions[0],
+    ['id', 'title', 'lastActiveMs', 'current', 'edits', 'pending', 'files', 'added', 'removed', 'tokens', 'durationMs', 'model', 'effort'],
+    'sessions.sessions[]');
   const tree = runJson(['tree', '--json']);
   hasKeys(tree, ['folders', 'files'], 'tree');
   hasKeys(tree.folders[0], ['label', 'path', 'folders', 'files'], 'tree.folders[]'); // `path` drives scoped folder ops
@@ -1390,7 +1403,7 @@ test('contract 0.8.0: every machine surface the editors consume emits its docume
   // sibling agent can hold that slot. A positional assumption here fails as a confusing TypeError.
   const self = mt.agents.find((a) => a.self);
   assert.ok(self, 'the active session appears in its own fleet');
-  hasKeys(self, ['session', 'worktree', 'gitBranch', 'self', 'phase', 'phaseConfidence', 'sparkline', 'todos', 'subagents', 'files', 'diff', 'tokens', 'durationMs', 'risk', 'outside', 'compactions'], 'multitask.agents[]');
+  hasKeys(self, ['session', 'worktree', 'gitBranch', 'self', 'phase', 'phaseConfidence', 'sparkline', 'todos', 'subagents', 'files', 'diff', 'tokens', 'durationMs', 'risk', 'outside', 'compactions', 'folded', 'loaded'], 'multitask.agents[]');
   hasKeys(self.subagents[0], ['agentId', 'agentType', 'description', 'phase', 'phaseConfidence', 'todos', 'currentTask', 'edits', 'added', 'removed'], 'multitask.agents[].subagents[]');
   hasKeys(mt.workflows[0], ['id', 'name', 'phases', 'agents', 'phaseGroups', 'running', 'lastActivityMs', 'agentCount', 'tokens', 'durationMs', 'edits', 'added', 'removed', 'sparkline'], 'multitask.workflows[]');
   hasKeys(mt.actions, ['groups', 'egress'], 'multitask.actions');
@@ -3073,10 +3086,14 @@ test('metrics: sessionMetrics rolls up ±lines, actions, subagents, and tool lat
   fs.writeFileSync(path.join(proj, S + '.jsonl'), main);
 
   const m = core.sessionMetrics(cwd, S);
-  assert.equal(m.edits.count, 2);
-  assert.equal(m.edits.added, 3, 'added lines summed across edits');
-  assert.equal(m.edits.removed, 2, 'removed lines summed');
-  assert.equal(m.edits.pending, 2);
+  // DISPLAY units since 0.9.0, like every other count in the product. These two records form a perfect
+  // chain (#2 rewrites what #1 produced), so they are ONE thing to review, and its delta is the chain's
+  // NET effect — a file created with one line — not the sum of the intermediate steps. Counting the raw
+  // records here is what made Stats disagree with the Overview about the same session.
+  assert.equal(m.edits.count, 1, 'the chained pair is one review unit');
+  assert.equal(m.edits.added, 1, 'and its ±lines are the net effect of the chain');
+  assert.equal(m.edits.removed, 0);
+  assert.equal(m.edits.pending, 1, 'pending counts review units too — one thing is awaiting a verdict');
   assert.equal(m.actions.total, 2, 'two tool calls in the main transcript');
   assert.equal(m.subagents.count, 0, 'no subagents in this session');
   assert.equal(m.toolLatency.count, 2, 'two measurable tool latencies');
@@ -5846,6 +5863,627 @@ test('changemap: the map is memoized on disk across processes, and invalidated b
   assert.equal(clsOf(core.cachedChangeMap(cwd, S, { root: cwd, prompts: true })), 'Renamed', 'editing the workspace file rebuilds it');
 });
 
+/* The cache entry is rewritten via tmp+rename on every MISS and not touched at all on a hit, so the
+   entry's inode is the instrument for "did this rebuild?" — an output assertion cannot tell the two
+   apart when the correct answer is that nothing changed. `placements.json` is excluded: it is the edit
+   tree's own memo (see below) and moves on its own schedule. */
+function mapCacheInos(session) {
+  const dir = path.join(core.rootDir(), 'changemap-cache', session);
+  return fs
+    .readdirSync(dir)
+    .filter((n) => n.endsWith('.json') && n !== 'placements.json')
+    .sort()
+    .map((n) => `${n}:${fs.statSync(path.join(dir, n)).ino}`)
+    .join(',');
+}
+
+test('changemap: a sibling session GROWING does not invalidate this session\'s map (0.9.0)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'mapSelf';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const rec = (ms, text) =>
+    JSON.stringify({ timestamp: new Date(ms).toISOString(), type: 'user', message: { role: 'user', content: text } });
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), rec(1000, 'do the thing') + '\n');
+  core.ensureStore(S);
+  const f = path.join(cwd, 'a.ts');
+  fs.writeFileSync(f, 'one\n');
+  core.appendLog(S, { tool: 'Edit', file: f, before: null, after: null, added: 1, removed: 0, status: 'pending', ts: 1200 });
+
+  const build = () => core.cachedChangeMap(cwd, S, { root: cwd, prompts: true });
+  build();
+  const before = mapCacheInos(S);
+
+  // POSITIVE CONTROL, and it must come first: a NEW sibling appearing DOES have to rebuild, because
+  // summary.fleet counts the sessions in the project dir. Without this, a stamp that returned a
+  // constant would sail through the assertion below while measuring nothing at all.
+  const sib = path.join(proj, 'sibling.jsonl');
+  fs.writeFileSync(sib, rec(2000, 'a second session') + '\n');
+  assert.equal(build().summary.fleet, 1, 'the new sibling is counted');
+  const afterAdd = mapCacheInos(S);
+  assert.notEqual(afterAdd, before, 'a sibling APPEARING rebuilds the map (positive control)');
+
+  // The fix: that sibling growing must NOT. Its bytes are not an input to this session's map — only
+  // the set of session ids is — and stamping them meant every session in a project invalidated every
+  // other one's cache on each tick, which is what made an old session's Overview cost ~14 s a refresh.
+  fs.appendFileSync(sib, rec(3000, 'and it keeps working') + '\n');
+  assert.equal(build().summary.fleet, 1, 'the fleet count is unchanged');
+  assert.equal(mapCacheInos(S), afterAdd, 'a sibling APPENDING is served from cache');
+
+  // Removal is the other half of the id set, and it is what a reap does.
+  fs.rmSync(sib);
+  assert.equal(build().summary.fleet, 0, 'a sibling disappearing rebuilds the map too');
+});
+
+test('tree: edit placement is memoized on disk and survives the process (0.9.0)', () => {
+  const home = freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'placeCache';
+  const cwd = tmpWork();
+  const py = path.join(cwd, 'm.py');
+  const v1 = 'class Alpha:\n    def go(self):\n        return 1\n';
+  fs.writeFileSync(py, v1);
+  core.ensureStore(S);
+  core.appendLog(S, {
+    tool: 'Edit',
+    file: py,
+    beforeBlob: core.writeBlob(S, Buffer.from('class Alpha:\n    def go(self):\n        return 0\n')),
+    afterBlob: core.writeBlob(S, Buffer.from(v1)),
+    status: 'pending',
+    ts: 1400,
+  });
+
+  // A FRESH process is the whole point — the in-process memo is what already worked, and the Overview
+  // spawns a new CLI process on every refresh tick, so only a disk tier can help it.
+  const CORE = path.resolve(__dirname, '../dist/index.js');
+  const inChild = () =>
+    JSON.parse(
+      cp.execFileSync(
+        process.execPath,
+        ['-e', `process.stdout.write(JSON.stringify(require(${JSON.stringify(CORE)}).buildEditTree(${JSON.stringify(S)}, { root: ${JSON.stringify(cwd)} })))`],
+        { env: { ...process.env, HOME: home, USERPROFILE: home }, encoding: 'utf8' }
+      )
+    );
+
+  // Only the PLACEMENT is under test. The blob deletion below also strips lineDelta's added/removed
+  // counts, which are a different derivation — comparing whole trees would fail for reasons that have
+  // nothing to do with the memo.
+  const placement = (t) => ({ cls: t.files[0].classes[0]?.name ?? null, loose: t.files[0].loose.length });
+
+  const cold = inChild();
+  const pFile = path.join(core.rootDir(), 'changemap-cache', S, 'placements.json');
+  assert.ok(fs.existsSync(pFile), 'placements were persisted');
+  assert.equal(Object.keys(JSON.parse(fs.readFileSync(pFile, 'utf8')).entries).length, 1, 'one entry per class-bearing file');
+  assert.deepEqual(placement(cold), { cls: 'Alpha', loose: 0 }, 'the edit is placed inside the class');
+
+  // Building TWICE IN ONE PROCESS is its own case, and the one a long-lived host actually hits: the
+  // in-process memo outlives the per-call store, so the second build takes only the memo path. When that
+  // path did not re-retain its keys, the store's pruning flush rewrote this file as {} — the disk tier
+  // deleting itself on every refresh after the first. A child process per build never sees it, which is
+  // why every assertion here passed while the cache was being wiped in the VS Code extension host.
+  const entries = () => Object.keys(JSON.parse(fs.readFileSync(pFile, 'utf8')).entries).length;
+  cp.execFileSync(
+    process.execPath,
+    ['-e', `const c=require(${JSON.stringify(CORE)});for(let i=0;i<3;i++)c.buildEditTree(${JSON.stringify(S)},{root:${JSON.stringify(cwd)}});`],
+    { env: { ...process.env, HOME: home, USERPROFILE: home }, encoding: 'utf8' }
+  );
+  assert.equal(entries(), 1, 'three builds in one process keep the entry (the memo path still retains it)');
+
+  // Deleting the BLOBS is the instrument: placement is computed from them, so a run that still answers
+  // "Alpha" can only have read the disk tier. Nothing here is keyed by mtime, so this is exact.
+  fs.rmSync(path.join(core.rootDir(), S, 'blobs'), { recursive: true, force: true });
+  assert.deepEqual(placement(inChild()), { cls: 'Alpha', loose: 0 }, 'a fresh process places it identically, without the blobs');
+
+  // POSITIVE CONTROL: without the memo AND without the blobs there is nothing to place from, so the
+  // edit falls out of the class. If this still said "Alpha", the assertion above would prove nothing.
+  fs.rmSync(pFile);
+  assert.deepEqual(placement(inChild()), { cls: null, loose: 1 }, 'with neither blobs nor memo the placement is lost');
+
+  // …and that unplaceable result must never be written back, or it would outlive the process as a
+  // wrong answer keyed identically to the right one.
+  assert.ok(!fs.existsSync(pFile), 'a placement computed from unreadable blobs is not persisted');
+});
+
+test('changemap: a RUNNING workflow\'s growing transcript invalidates the map (0.9.0)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'wfStamp';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  fs.writeFileSync(
+    path.join(proj, S + '.jsonl'),
+    JSON.stringify({ timestamp: new Date(1000).toISOString(), type: 'user', message: { role: 'user', content: 'run a workflow' } }) + '\n'
+  );
+  const wf = path.join(proj, S, 'subagents', 'workflows', 'wf_abc');
+  fs.mkdirSync(wf, { recursive: true });
+  const agent = path.join(wf, 'agent-1.jsonl');
+  fs.writeFileSync(agent, JSON.stringify({ timestamp: new Date(1100).toISOString(), type: 'user', message: { role: 'user', content: 'go' } }) + '\n');
+  core.ensureStore(S);
+  const f = path.join(cwd, 'a.ts');
+  fs.writeFileSync(f, 'one\n');
+  core.appendLog(S, { tool: 'Edit', file: f, before: null, after: null, added: 1, removed: 0, status: 'pending', ts: 1200 });
+
+  const build = () => core.cachedChangeMap(cwd, S, { root: cwd, prompts: true });
+  build();
+  const before = mapCacheInos(S);
+
+  // The entries of subagents/workflows/ are wf_<id> DIRECTORIES, and a directory's mtime and size do
+  // not move when a file inside it grows — so stamping that directory alone left a workflow that was
+  // still running frozen at whatever its window was when its first agent appeared. Assert the premise
+  // rather than trusting it: if this ever failed, the shallow stamp would have been sufficient.
+  const dirBefore = fs.statSync(wf);
+  fs.appendFileSync(agent, JSON.stringify({ timestamp: new Date(1300).toISOString(), type: 'assistant', message: { role: 'assistant', id: 'a1', content: [{ type: 'text', text: 'working' }] } }) + '\n');
+  const dirAfter = fs.statSync(wf);
+  assert.equal(`${dirBefore.mtimeMs}:${dirBefore.size}`, `${dirAfter.mtimeMs}:${dirAfter.size}`, 'the wf_ directory itself did not move (premise)');
+
+  build();
+  assert.notEqual(mapCacheInos(S), before, 'the growing agent transcript rebuilds the map');
+});
+
+test('fleet: a conversation older than a week is folded, and never the one under review (0.9.0)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const ws = tmpWork();
+  fs.mkdirSync(path.join(ws, '.git'), { recursive: true }); // plain .git → commonDir resolves → the fleet engages
+  const proj = core.projectDir(ws);
+  fs.mkdirSync(proj, { recursive: true });
+  const NOW = 'liveSess';
+  const OLD = 'oldSess';
+  const seed = (id) => {
+    const p = path.join(proj, id + '.jsonl');
+    fs.writeFileSync(
+      p,
+      [
+        JSON.stringify({ timestamp: new Date(1000).toISOString(), type: 'user', cwd: ws, message: { role: 'user', content: 'work on ' + id } }),
+        JSON.stringify({ timestamp: new Date(1100).toISOString(), type: 'assistant', message: { role: 'assistant', id: 'a-' + id, content: [{ type: 'text', text: 'ok' }] } }),
+      ].join('\n') + '\n'
+    );
+    core.ensureStore(id);
+    const f = path.join(ws, id + '.ts');
+    fs.writeFileSync(f, 'one\n');
+    core.appendLog(id, { tool: 'Edit', file: f, before: null, after: null, added: 1, removed: 0, status: 'pending', ts: 1200 });
+    return p;
+  };
+  seed(NOW);
+  const pOld = seed(OLD);
+  const rowFor = (viewing, id) => core.overviewChangeMap(ws, viewing, { root: ws }).agents.find((a) => a.session === id);
+  const state = (r) => ({ folded: r.folded, loaded: r.loaded });
+
+  // POSITIVE CONTROL: while it is recent the sibling is built like any other. Without this, a fold
+  // that simply always fired would satisfy every assertion below.
+  assert.deepEqual(state(rowFor(NOW, OLD)), { folded: false, loaded: true }, 'a recent sibling is built');
+
+  // Age its conversation past the fold window.
+  const ago = (Date.now() - 30 * 86400000) / 1000;
+  fs.utimesSync(pOld, ago, ago);
+  assert.deepEqual(state(rowFor(NOW, OLD)), { folded: true, loaded: false }, 'a week-old sibling is folded and not rebuilt');
+
+  // Folding declines to BUILD; it never hides an answer that is already on disk.
+  core.siblingOverview(ws, OLD, { root: ws });
+  assert.deepEqual(state(rowFor(NOW, OLD)), { folded: true, loaded: true }, 'a folded sibling still renders from a warm cache');
+
+  // The one that matters for a pinned old session: whatever its age, the session being VIEWED is
+  // never folded — the user selected it precisely to look at what it did.
+  const own = rowFor(OLD, OLD);
+  assert.equal(own.folded, false, 'the session under review is never folded, however old');
+  assert.equal(own.summary.units, 1, '...and its own map is fully built');
+});
+
+test('clean: --completed reaps finished sessions and refuses every live one (0.9.0)', () => {
+  const home = freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  // realpath: a child process started with cwd=<symlinked tmp> reports the RESOLVED path from
+  // process.cwd(), and projectDir() mangles the path it is given — so the CLI would look under a
+  // different project dir than the fixture wrote to and find nothing.
+  const ws = fs.realpathSync(tmpWork());
+  fs.mkdirSync(path.join(ws, '.git'), { recursive: true });
+  const proj = core.projectDir(ws);
+  fs.mkdirSync(proj, { recursive: true });
+  const HOUR = 3_600_000; // REAP_QUIET_MS is a DAY — this deletes edit history, so the clock is coarse
+  // Each session is one refusal clause in reapableSessions, so a rail that stopped working shows up
+  // here as a specific session going missing rather than as a vague count.
+  const mk = (id, agoMs, status) => {
+    const p = path.join(proj, id + '.jsonl');
+    fs.writeFileSync(
+      p,
+      [
+        JSON.stringify({ timestamp: new Date(1000).toISOString(), type: 'user', cwd: ws, message: { role: 'user', content: id } }),
+        JSON.stringify({ timestamp: new Date(1100).toISOString(), type: 'assistant', message: { role: 'assistant', id: 'a-' + id, content: [{ type: 'text', text: 'ok' }] } }),
+      ].join('\n') + '\n'
+    );
+    core.ensureStore(id);
+    const f = path.join(ws, id + '.ts');
+    fs.writeFileSync(f, 'one\n');
+    core.appendLog(id, { tool: 'Edit', file: f, before: null, after: null, added: 1, removed: 0, status, ts: 1200 });
+    const t = (Date.now() - agoMs) / 1000;
+    fs.utimesSync(p, t, t); // CONVERSATION recency is transcript mtime
+    return p;
+  };
+  const age = (id, agoMs) => {
+    const t = (Date.now() - agoMs) / 1000;
+    fs.utimesSync(path.join(proj, id + '.jsonl'), t, t);
+  };
+  // sCurrent is the NEWEST transcript (so resolveSessionId answers with it) but is itself well past the
+  // quiet window — otherwise the quiet rail would cover for the not-current rail and neither would be
+  // under test. Each survivor below is spared by exactly one clause.
+  mk('sCurrent', 30 * HOUR, 'kept');
+  mk('sDone', 48 * HOUR, 'kept'); // the one that should go
+  mk('sPending', 48 * HOUR, 'pending'); // old and quiet, but still has review left
+  mk('sStaged', 48 * HOUR, 'kept');
+  fs.mkdirSync(path.join(core.rootDir(), 'sStaged', 'staging'), { recursive: true });
+  fs.writeFileSync(path.join(core.rootDir(), 'sStaged', 'staging', 'x.json'), '{}'); // capture in flight
+
+  assert.equal(core.resolveSessionId(ws), 'sCurrent', 'the fixture puts the live session where we think');
+  assert.deepEqual(
+    core.reapableSessions(ws).map((s) => s.id),
+    ['sDone'],
+    'only the finished, quiet, unstaged, non-current session is reapable'
+  );
+
+  // The quiet rail on its own: a finished, non-current session whose conversation stopped only moments
+  // ago is NOT finished enough. sCurrent stays newest so it keeps answering as current.
+  age('sCurrent', 1 * HOUR);
+  age('sDone', 2 * HOUR);
+  assert.deepEqual(core.reapableSessions(ws).map((s) => s.id), [], 'a session that just went quiet is not reaped');
+  age('sDone', 48 * HOUR);
+  assert.equal(core.reapableSessions(ws)[0].reason, 'finished', 'a fully reviewed session is reported as finished');
+
+  // ABANDONED: unreviewed edits do NOT protect a session forever. Two days in, sPending is still under
+  // review; a month in, nobody is coming back and its edits are discarded with it. Without this second
+  // clause almost nothing qualifies on a real store — most old sessions were never reviewed to the end.
+  assert.ok(!core.reapableSessions(ws).some((s) => s.id === 'sPending'), 'a 2-day-old session with pending edits is spared');
+  age('sPending', 30 * 24 * HOUR);
+  const ab = core.reapableSessions(ws).find((s) => s.id === 'sPending');
+  assert.ok(ab, 'a month-dead session with pending edits IS reaped');
+  assert.equal(ab.reason, 'abandoned', 'and is reported as abandoned, so the UI can warn what it discards');
+  assert.equal(ab.pending, 1, 'carrying the count of unreviewed edits that go with it');
+  // …and the threshold is caller-controllable, because "too old" is a judgement, not a constant.
+  assert.ok(
+    !core.reapableSessions(ws, Date.now(), 60 * 24 * HOUR).some((s) => s.id === 'sPending'),
+    'a longer stale window spares it again'
+  );
+  age('sPending', 48 * HOUR); // back under the window, so the CLI assertions below still see one target
+
+  const store = (id) => fs.existsSync(path.join(core.rootDir(), id));
+  const out = JSON.parse(
+    cp.execFileSync('node', [CLI, 'clean', '--completed', '--json'], {
+      env: { ...process.env, HOME: home, USERPROFILE: home },
+      cwd: ws,
+      encoding: 'utf8',
+    })
+  );
+  assert.deepEqual(out.dropped, ['sDone'], 'the CLI drops exactly that one');
+  assert.equal(store('sDone'), false, 'its store is gone');
+  for (const kept of ['sCurrent', 'sPending', 'sStaged']) {
+    assert.equal(store(kept), true, `${kept} survives`);
+  }
+});
+
+test('clean: --completed never reaps a session recorded for an ANCESTOR workspace (0.9.0)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  // A session launched in a PARENT directory — ~, ~/Github, a monorepo root are all ordinary launch
+  // dirs. `findTranscript` walks up to the filesystem root, so such a session resolves from a
+  // subdirectory and used to be deleted by a clear run there. Listing it is fine; deleting it is not.
+  const parent = fs.realpathSync(tmpWork());
+  const sub = path.join(parent, 'packages', 'thing');
+  fs.mkdirSync(sub, { recursive: true });
+  const old = (Date.now() - 48 * 3_600_000) / 1000;
+  const seed = (cwd, id) => {
+    const proj = core.projectDir(cwd);
+    fs.mkdirSync(proj, { recursive: true });
+    const p = path.join(proj, id + '.jsonl');
+    fs.writeFileSync(
+      p,
+      [
+        JSON.stringify({ timestamp: new Date(1000).toISOString(), type: 'user', cwd, message: { role: 'user', content: id } }),
+        JSON.stringify({ timestamp: new Date(1100).toISOString(), type: 'assistant', message: { role: 'assistant', id: 'a-' + id, content: [{ type: 'text', text: 'ok' }] } }),
+      ].join('\n') + '\n'
+    );
+    core.ensureStore(id);
+    const f = path.join(cwd, id + '.ts');
+    fs.writeFileSync(f, 'one\n');
+    core.appendLog(id, { tool: 'Edit', file: f, before: null, after: null, added: 1, removed: 0, status: 'kept', ts: 1200 });
+    fs.utimesSync(p, old, old);
+  };
+  seed(parent, 'ancestorSess');
+  seed(sub, 'subDone');
+  seed(sub, 'subCurrent');
+  // Make subCurrent the newest so it is `current` and cannot be the one under test.
+  const now = Date.now() / 1000;
+  fs.utimesSync(path.join(core.projectDir(sub), 'subCurrent.jsonl'), now, now);
+
+  const reapable = core.reapableSessions(sub).map((s) => s.id);
+  assert.deepEqual(reapable, ['subDone'], 'only this workspace’s finished session is reapable');
+  // POSITIVE CONTROL: the ancestor session IS resolvable from here — that is exactly why the naive
+  // provenance rail let it through. If this fails, the fixture is not reproducing the hazard.
+  assert.ok(core.findTranscript(sub, 'ancestorSess'), 'the ancestor session does resolve from the subdirectory');
+  assert.ok(
+    core.sessionMeta(sub).sessions.some((r) => r.id === 'ancestorSess'),
+    'and it is even LISTED here — listing is fine, deleting is not'
+  );
+});
+
+test('clean: --older-than never deletes the session the user is in (0.9.0)', () => {
+  const home = freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const ws = fs.realpathSync(tmpWork()); // the CLI child reports the resolved cwd — see the note above
+  const proj = core.projectDir(ws);
+  fs.mkdirSync(proj, { recursive: true });
+  const S = 'liveLong';
+  fs.writeFileSync(
+    path.join(proj, S + '.jsonl'),
+    [
+      JSON.stringify({ timestamp: new Date(1000).toISOString(), type: 'user', cwd: ws, message: { role: 'user', content: 'hi' } }),
+      JSON.stringify({ timestamp: new Date(1100).toISOString(), type: 'assistant', message: { role: 'assistant', id: 'a1', content: [{ type: 'text', text: 'ok' }] } }),
+    ].join('\n') + '\n'
+  );
+  core.ensureStore(S);
+  const f = path.join(ws, 'a.ts');
+  fs.writeFileSync(f, 'one\n');
+  core.appendLog(S, { tool: 'Edit', file: f, before: null, after: null, added: 1, removed: 0, status: 'pending', ts: 1200 });
+  // A long conversation that made all its edits early: the STORE LOG is ancient while the session is
+  // very much alive. That is the shape --older-than used to delete out from under the user.
+  const old = (Date.now() - 30 * 86400000) / 1000;
+  fs.utimesSync(core.logPath(S), old, old);
+
+  const run = (args) =>
+    JSON.parse(cp.execFileSync('node', [CLI, ...args], { env: { ...process.env, HOME: home, USERPROFILE: home }, cwd: ws, encoding: 'utf8' }));
+  assert.equal(core.resolveSessionId(ws), S, 'it is the current session');
+  assert.deepEqual(run(['clean', '--older-than', '7d', '--json']).dropped, [], 'the live session is not swept up');
+  assert.equal(fs.existsSync(core.logPath(S)), true, 'its store survives');
+
+  // POSITIVE CONTROL: the verb still works. An identical but NON-current session is still dropped,
+  // so this is a targeted exclusion and not a broken --older-than.
+  const O = 'deadOne';
+  fs.writeFileSync(path.join(proj, O + '.jsonl'), JSON.stringify({ timestamp: new Date(900).toISOString(), type: 'user', cwd: ws, message: { role: 'user', content: 'old' } }) + '\n');
+  core.ensureStore(O);
+  core.appendLog(O, { tool: 'Edit', file: f, before: null, after: null, added: 1, removed: 0, status: 'kept', ts: 1000 });
+  fs.utimesSync(core.logPath(O), old, old);
+  assert.deepEqual(run(['clean', '--older-than', '7d', '--json']).dropped, [O], 'a dead session with the same age still goes');
+});
+
+test('taskLog: the cross-agent log reads the sibling CACHE, never the raw builder (0.9.0)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const ws = fs.realpathSync(tmpWork());
+  fs.mkdirSync(path.join(ws, '.git'), { recursive: true });
+  const proj = core.projectDir(ws);
+  fs.mkdirSync(proj, { recursive: true });
+  const S = 'tlSess';
+  fs.writeFileSync(
+    path.join(proj, S + '.jsonl'),
+    [
+      JSON.stringify({ timestamp: new Date(1000).toISOString(), type: 'user', cwd: ws, message: { role: 'user', content: 'do the work' } }),
+      JSON.stringify({ timestamp: new Date(1100).toISOString(), type: 'assistant', message: { role: 'assistant', id: 'a1', content: [{ type: 'text', text: 'ok' }] } }),
+    ].join('\n') + '\n'
+  );
+  core.ensureStore(S);
+  const f = path.join(ws, 'a.ts');
+  fs.writeFileSync(f, 'one\n');
+  core.appendLog(S, { tool: 'Edit', file: f, before: null, after: null, added: 1, removed: 0, status: 'pending', ts: 1200 });
+
+  // The instrument: `siblingChangeMap` PERSISTS its result, and the raw `buildChangeMap` writes nothing.
+  // So a cache entry appearing after this call is proof of which door was used — and the log rebuilt
+  // every sibling from scratch on every run before this, 12.4 s on a repo with 31 of them.
+  const cacheDir = path.join(core.rootDir(), 'changemap-cache', S);
+  assert.equal(fs.existsSync(cacheDir), false, 'nothing cached yet (baseline)');
+  core.crossAgentTaskLog(ws);
+  assert.ok(
+    // The 16-hex payload name is the SIBLING SLOT's signature — 'any .json but placements' was a
+    // never-fail door: the raw builder writes deltas.json into the same dir, so both implementations
+    // satisfied it (proven by reinstating the raw-builder mutation, which passed).
+    fs.existsSync(cacheDir) && fs.readdirSync(cacheDir).some((n) => /^[0-9a-f]{16}\.json$/.test(n)),
+    'the task log went through the caching path'
+  );
+});
+
+test('memory: fileMemory indexes the store once, and a new edit still invalidates it (0.9.0)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const ws = tmpWork();
+  const f = path.join(ws, 'shared.ts');
+  fs.writeFileSync(f, 'one\n');
+  // Two sessions touching ONE file: fileMemory's whole job is aggregating across them, and the index
+  // rewrite must not lose that.
+  core.ensureStore('memA');
+  core.appendLog('memA', { tool: 'Edit', file: f, before: null, after: null, added: 1, removed: 0, status: 'kept', ts: 1000 });
+  core.ensureStore('memB');
+  core.appendLog('memB', { tool: 'Edit', file: f, before: null, after: null, added: 1, removed: 0, status: 'undone', ts: 2000 });
+
+  const m1 = core.fileMemory(f);
+  assert.deepEqual(
+    { edits: m1.edits, kept: m1.kept, undone: m1.undone, pending: m1.pending },
+    { edits: 2, kept: 1, undone: 1, pending: 0 },
+    'both sessions are folded into one history'
+  );
+  assert.deepEqual(m1.lastVerdict, { status: 'undone', ts: 2000 }, 'the newest verdict wins');
+
+  // The index is memoized on the log files. A memo that did not notice a new edit would report the old
+  // counts forever — the failure mode this rewrite could plausibly introduce, so assert it directly.
+  core.appendLog('memA', { tool: 'Edit', file: f, before: null, after: null, added: 5, removed: 0, status: 'pending', ts: 3000 });
+  const m2 = core.fileMemory(f);
+  assert.equal(m2.edits, 3, 'a new edit invalidates the index');
+  assert.equal(m2.pending, 1, '...and lands in the right bucket');
+
+  // A file nobody has touched has an empty history, not a crash or a neighbour's numbers.
+  assert.equal(core.fileMemory(path.join(ws, 'never-edited.ts')).edits, 0, 'an unknown file is empty');
+});
+
+test('observe: session line deltas are cached per blob PAIR, so a wrong total can never be inherited (0.9.0)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const ws = tmpWork();
+  const S = 'deltaSess';
+  const f = path.join(ws, 'a.ts');
+  fs.writeFileSync(f, 'one\n');
+  const add = (before, after) => seedEdit(S, f, before, after);
+  add('a\n', 'a\nb\n'); // +1
+  add('a\nb\n', 'a\nb\nc\n'); // +1
+  const sidecar = () => JSON.parse(fs.readFileSync(path.join(core.rootDir(), 'session-meta', S + '.json'), 'utf8'));
+  const full = () => {
+    let a = 0, r = 0;
+    for (const rec of core.readLog(S)) { const d = core.lineDelta(S, rec); a += d.added; r += d.removed; }
+    return { added: a, removed: r };
+  };
+
+  let c = core.sessionCounts(S);
+  assert.deepEqual({ added: c.added, removed: c.removed }, full(), 'the first pass matches a full sum');
+  const cacheFile = path.join(core.rootDir(), 'changemap-cache', S, 'deltas.json');
+  assert.ok(fs.existsSync(cacheFile), 'the per-blob-pair delta cache was written');
+
+  add('a\nb\nc\n', 'a\nb\nc\nd\n');
+  c = core.sessionCounts(S);
+  assert.deepEqual({ added: c.added, removed: c.removed }, full(), 'a grown log still matches a full sum');
+
+  // The cache is keyed by CONTENT — the record's before AND after blob shas, as a PAIR. Two records with
+  // the same pair share one entry…
+  add('a\n', 'a\nb\n'); // identical blob pair to the very first edit
+  // …and, the case that actually pins the key: the same AFTER reached from a different BEFORE is a
+  // different edit with a different delta. Keyed on the after alone (four distinct afters mapping 1:1
+  // onto the pairs) every count above still agreed, so that mis-key shipped green.
+  add('a\nb\nc\nd\ne\nf\n', 'a\nb\nc\n'); // same after as edit #2, but removes three lines instead of adding one
+  core.sessionCounts(S);
+  const pairs = JSON.parse(fs.readFileSync(cacheFile, 'utf8')).pairs;
+  assert.equal(Object.keys(pairs).length, 4, 'five records, four distinct blob PAIRS — identical edits collapse, a shared after does not');
+  const c2 = core.sessionCounts(S);
+  assert.deepEqual({ added: c2.added, removed: c2.removed }, full(), 'and a shared after keeps its own delta');
+  assert.ok(c2.removed > 0, 'the fixture really does exercise a removal, not only additions');
+
+  // A wrong cached TOTAL must not be permanent. This is why a running total was rejected: resuming from
+  // one is inheriting it, so a single bad write is never recomputed and the number is frozen for good
+  // (observed for real: 0 over 2,800 edits). Here the sum is rebuilt in full on the next log change, so
+  // a bad value is bounded by one edit rather than forever.
+  // A delta computed from a blob that could not be READ must never be cached. blobText returns '' for a
+  // missing snapshot so rendering degrades instead of crashing — which makes lineDelta report a plausible
+  // wrong number, filed under the INTACT sha. Content-keying makes a hit exact only when the content was
+  // actually there, and nothing would ever heal it, because the key never changes.
+  const gone = add('p\nq\nr\n', 'p\n'); // a removal, so a lost `before` changes the answer visibly
+  const rec = core.readLog(S).find((x) => x.id === gone);
+  const pairKey = `${rec.beforeBlob}:${rec.afterBlob}`;
+  const blob = path.join(core.rootDir(), S, 'blobs', rec.beforeBlob);
+  const stampBefore = sidecar().countsStamp;
+  const blobBytes = fs.readFileSync(blob);
+  fs.rmSync(blob);
+  core.sessionCounts(S); // computes from an unreadable blob — allowed to be wrong, must not be STORED
+  // Assert the FILE, not the returned number: `full()` recomputes through lineDelta, whose in-process
+  // memo is poisoned by the very same failed read, so oracle and cache agree on the wrong value and any
+  // comparison between them passes either way. The stored entry is the only uncontaminated witness.
+  const stored = JSON.parse(fs.readFileSync(cacheFile, 'utf8')).pairs;
+  assert.ok(!(pairKey in stored), 'a delta computed from an unreadable blob is never written to the cache');
+  // …and neither is the AGGREGATE it feeds. The sidecar's stamp covers the LOG only, but added/removed
+  // come from BLOBS — so a sum derived from a snapshot this session could not read would be filed under
+  // a stamp that, for a finished session, never moves again. Leaving the sidecar untouched is what makes
+  // "wrong is bounded by one edit" true of the total and not just of the per-pair entries.
+  assert.equal(sidecar().countsStamp, stampBefore,
+    'an incomplete pass leaves the sidecar alone rather than freezing a guess under a log-only stamp');
+  fs.writeFileSync(blob, blobBytes); // the snapshot comes back — and with it a persistable pass
+  core.sessionCounts(S);
+  assert.notEqual(sidecar().countsStamp, stampBefore, 'positive control: a COMPLETE pass does write the sidecar');
+
+  const poisoned = { ...sidecar(), counts: { ...sidecar().counts, added: 0, removed: 0 } };
+  fs.writeFileSync(path.join(core.rootDir(), 'session-meta', S + '.json'), JSON.stringify(poisoned));
+  assert.equal(core.sessionCounts(S).added, 0, 'a current stamp is still served from cache (it is a cache)');
+  add('a\nb\nc\nd\n', 'a\nb\nc\nd\ne\n'); // the log moves on
+  c = core.sessionCounts(S);
+  assert.deepEqual({ added: c.added, removed: c.removed }, full(), 'and the next change heals it completely');
+  assert.notEqual(c.added, 0, 'the poisoned zero did not survive');
+});
+
+test('changemap: the GC reclaims cache payloads from a superseded version, and spares the live ones (0.9.0)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'staleMaps';
+  const cwd = fs.realpathSync(tmpWork());
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  fs.writeFileSync(path.join(proj, S + '.jsonl'),
+    JSON.stringify({ timestamp: new Date(1000).toISOString(), type: 'user', cwd, message: { role: 'user', content: 'go' } }) + '\n');
+  seedEdit(S, path.join(cwd, 'a.ts'), 'x\n', 'y\n');
+  // Write the live entry with the REAL writer, and read the current version back out of it. Hand-writing
+  // a fixture and hard-coding "2" is what this test did, which tied it to nothing: the GC's version rule
+  // and the writer's version could drift apart and only the fixture would notice, and a version bump
+  // failed the test rather than the code. The version is an implementation detail of the writer — the
+  // GC's contract is "spare what the writer just made, reclaim what it superseded".
+  core.cachedChangeMap(cwd, S, { root: cwd, prompts: true });
+  const dir = path.join(core.rootDir(), 'changemap-cache', S);
+  const live = fs.readdirSync(dir).filter((f) => /^[0-9a-f]{16}\.json$/.test(f));
+  assert.equal(live.length, 1, 'positive control: the real writer produced exactly one map payload');
+  const version = Number(JSON.parse(fs.readFileSync(path.join(dir, live[0]), 'utf8')).stamp.split('|')[0]);
+  assert.ok(Number.isInteger(version) && version >= 1, `the live entry carries a version (got ${version})`);
+  const write = (name, stamp) => fs.writeFileSync(path.join(dir, name), JSON.stringify({ stamp, map: { summary: {} } }));
+  write('0123456789abcdef.json', `${version - 1}|t|l|p|d`); // superseded
+  write('fedcba9876543210.json', `${version - 1}|t|l|-|d`); // superseded
+  fs.writeFileSync(path.join(dir, 'placements.json'), JSON.stringify({ version: 1, entries: {} }));
+  fs.writeFileSync(path.join(dir, 'deltas.json'), JSON.stringify({ version: 1, pairs: {} }));
+
+  const r = core.pruneStaleMaps(S);
+  assert.equal(r.removed, 2, 'both superseded payloads are reclaimed');
+  assert.ok(r.bytes > 0, 'and their bytes are reported');
+  const left = fs.readdirSync(dir).sort();
+  // The sibling caches are content-keyed with their own version fields — a name-based sweep must not
+  // touch them, or the GC would silently delete the two caches this release exists to add.
+  assert.deepEqual(left, [live[0], 'deltas.json', 'placements.json'].sort(), 'the live map and both sibling caches survive');
+  assert.equal(core.pruneStaleMaps(S).removed, 0, 'a second sweep finds nothing (it is not re-reaping)');
+  assert.deepEqual(core.pruneStaleMaps('noSuchSession'), { removed: 0, bytes: 0 }, 'a session with no cache is not an error');
+});
+
+test('observe: a session row and the change map agree about pending and ±lines (0.9.0)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const S = 'agreeSess';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  fs.writeFileSync(
+    path.join(proj, S + '.jsonl'),
+    JSON.stringify({ timestamp: new Date(1000).toISOString(), type: 'user', cwd, message: { role: 'user', content: 'go' } }) + '\n'
+  );
+  const f = path.join(cwd, 'a.ts');
+  const v1 = 'one\n';
+  const v2 = 'one\ntwo\n';
+  const v3 = 'one\ntwoX\n';
+  const v4 = 'one\ntwoXY\n';
+  fs.writeFileSync(f, v4);
+  // SAME-CODE edits: a perfect CHAIN where each edit rewrites the line the previous one produced, which
+  // is what `reviewEdits` collapses into a single review unit. A raw record count and a display-unit
+  // count therefore diverge here — exactly how the Sessions row came to say 5,198 pending while the
+  // Overview's summary bar said 3,609 for the same session.
+  seedEdit(S, f, v1, v2);
+  seedEdit(S, f, v2, v3);
+  seedEdit(S, f, v3, v4);
+
+  const raw = core.readLog(S).filter((r) => r.status === 'pending').length;
+  const counts = core.sessionCounts(S);
+  const map = core.cachedChangeMap(cwd, S, { root: cwd });
+  assert.ok(raw > counts.pending, 'the fixture really does collapse (otherwise this proves nothing)');
+  assert.equal(counts.pending, map.summary.pending, 'the row and the map agree about pending');
+  assert.equal(counts.added, map.summary.added, '…and about added lines');
+  assert.equal(counts.removed, map.summary.removed, '…and about removed lines');
+
+  // EVERY surface that reports "how many edits / how many pending" must answer with the same number.
+  // These are five independent implementations over the same log, and before 0.9.0 three of them
+  // counted raw records while the change map counted collapsed units — so Stats, the Prompts rollup,
+  // the summary and the session row could each print a different total for one session.
+  const metrics = core.sessionMetrics(cwd, S);
+  const summary = core.reviewSummary(S);
+  const asks = core.sessionPrompts(cwd, S);
+  const askPending = asks.reduce((n, a) => n + (a.pending || 0), 0);
+  assert.equal(metrics.edits.pending, counts.pending, 'metrics agrees');
+  assert.equal(metrics.edits.count, map.summary.units, 'metrics counts display units, not raw records');
+  // No `?? counts.pending` fallback: it made the assertion satisfy itself the moment reviewSummary stopped
+  // emitting `pending`, which is precisely the regression it is here to catch.
+  assert.equal(summary.pending, counts.pending, 'the review summary agrees');
+  assert.equal(askPending, counts.pending, 'the per-ask rollup agrees');
+  assert.ok(
+    core.heuristicSuggestions(S).some((s) => s.startsWith(`${counts.pending} edit(s) still pending`)),
+    'and the suggestion text quotes the same number'
+  );
+});
+
 test('store: a bulk status change is one parse and one append, and skips no-ops (0.8.8)', () => {
   freshHome();
   delete process.env.CLAUDE_CONFIG_DIR;
@@ -6352,4 +6990,655 @@ test('prompts: the session splits by what the USER asked, and work belongs to th
   assert.deepEqual(afterKeep.filter((r) => r.status === 'kept').map((r) => r.id).sort((a, b) => a - b), [1, 2],
     'accepting a request flips exactly its own edits');
   assert.equal(afterKeep.find((r) => r.id === 3).status, 'pending', '…and leaves a neighbouring ask’s edit untouched');
+});
+
+// ---------------------------------------------------------------------------------------------
+// 0.9.0 coverage for the verbs and caches this release added. Each of these was written because a
+// mutation to the code it covers passed the whole suite: a green build was proving nothing about
+// resolve, warm, --stale, the delta cache's READ path, or the placement store's prune rule.
+// ---------------------------------------------------------------------------------------------
+
+test('store: resolve accepts every pending edit and clears the log — in that order (0.9.0)', () => {
+  freshHome();
+  const S = 'resolveOrder';
+  seedEdit(S, '/w/a.ts', 'x\n', 'y\n');
+  seedEdit(S, '/w/b.ts', 'p\n', 'q\n');
+  const c = seedEdit(S, '/w/c.ts', 'm\n', 'n\n');
+  core.setStatus(S, c, 'kept'); // already carries a verdict before resolve runs
+  const r = core.resolveSession(S);
+  assert.deepEqual(r, { accepted: 2, cleared: 3 }, 'both pending edits accepted, all three records dropped');
+  // THE ORDERING CONTROL. clearResolved only drops records that already carry a verdict, so running it
+  // first would drop `c` alone (cleared: 1) and leave the two it never saw sitting in the log as kept.
+  // `accepted` reads the same either way — the empty log is what pins the order.
+  assert.deepEqual(core.readLog(S), [], 'nothing survives a resolve');
+});
+
+test('core: every built module loads standalone, so the require cycle stays benign (0.9.0)', () => {
+  // observe.ts documents this test by name. It did not exist: every test requires the barrel, which
+  // hides load-order faults because tsc hoists `exports.fn = fn` above the requires — true for function
+  // declarations and silently false the first time a module exports a const computed at load.
+  const dist = path.resolve(__dirname, '../dist');
+  const mods = fs.readdirSync(dist).filter((f) => f.endsWith('.js') && f !== 'index.js');
+  assert.ok(mods.length > 5, `positive control: found ${mods.length} modules to load`);
+  const broken = [];
+  for (const m of mods) {
+    const r = cp.spawnSync(process.execPath, ['-e', `require(${JSON.stringify(path.join(dist, m))})`], { encoding: 'utf8' });
+    if (r.status !== 0) broken.push(`${m}: ${(r.stderr || '').split('\n').find((l) => l.trim()) || 'exit ' + r.status}`);
+  }
+  assert.deepEqual(broken, [], 'each module must be requirable on its own, not only through the barrel');
+});
+
+test('cli: warm skips the reviewed session and anything past --since (0.9.0)', () => {
+  const home = freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const cwd = fs.realpathSync(tmpWork()); // execFileSync hands the child the realpath; projectDir must agree
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const now = Date.now();
+  const mk = (id, ageMs) => {
+    const p = path.join(proj, id + '.jsonl');
+    fs.writeFileSync(p, [
+      JSON.stringify({ timestamp: new Date(now - ageMs).toISOString(), type: 'user', message: { role: 'user', content: 'do a thing' } }),
+      JSON.stringify({ timestamp: new Date(now - ageMs + 10).toISOString(), type: 'assistant', message: { role: 'assistant', id: 'a1', content: [{ type: 'text', text: 'ok' }] } }),
+    ].join('\n') + '\n');
+    const s = (now - ageMs) / 1000;
+    fs.utimesSync(p, s, s);
+    core.ensureStore(id); // a store is what makes it a listed session
+    return p;
+  };
+  mk('warmOld', 5 * 24 * 3600_000); // outside a 24h window
+  mk('warmRecent', 2 * 3600_000);
+  mk('warmCurrent', 1000); // newest transcript with an assistant record === the session under review
+  const env = { ...process.env, HOME: home, USERPROFILE: home };
+  const out = JSON.parse(cp.execFileSync('node', [CLI, 'warm', '--json', '--root', cwd, '--since', '24h'], { cwd, env, encoding: 'utf8' }));
+  assert.deepEqual(out.warmed, ['warmRecent'], 'only the recent SIBLING is warmed');
+  // Positive control for the window itself: widen it and the old session joins. Without this a `warm`
+  // that simply warmed nothing would satisfy the assertion above.
+  const wide = JSON.parse(cp.execFileSync('node', [CLI, 'warm', '--json', '--root', cwd, '--since', '7d'], { cwd, env, encoding: 'utf8' }));
+  assert.deepEqual(wide.warmed.sort(), ['warmOld', 'warmRecent'], '--since widens the window but never pulls in the reviewed session');
+  const bad = cp.spawnSync('node', [CLI, 'warm', '--root', cwd, '--since', 'soon'], { cwd, env, encoding: 'utf8' });
+  assert.notEqual(bad.status, 0, 'a bad --since fails loudly rather than silently defaulting');
+});
+
+test('cli: clean --completed --stale widens the abandoned window only (0.9.0)', () => {
+  const home = freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const cwd = fs.realpathSync(tmpWork());
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const now = Date.now();
+  const mk = (id, ageMs) => {
+    const p = path.join(proj, id + '.jsonl');
+    fs.writeFileSync(p, [
+      JSON.stringify({ timestamp: new Date(now - ageMs).toISOString(), type: 'user', message: { role: 'user', content: 'q' } }),
+      JSON.stringify({ timestamp: new Date(now - ageMs + 10).toISOString(), type: 'assistant', message: { role: 'assistant', id: 'a1', content: [{ type: 'text', text: 'a' }] } }),
+    ].join('\n') + '\n');
+    const s = (now - ageMs) / 1000;
+    fs.utimesSync(p, s, s);
+    return p;
+  };
+  mk('staleLive', 1000); // newest + an assistant record: this is the session under review, never reaped
+  core.ensureStore('staleLive');
+  mk('staleAband', 30 * 24 * 3600_000); // a month dead, but still holding unreviewed work
+  seedEdit('staleAband', path.join(cwd, 'x.ts'), 'a\n', 'b\n');
+  const env = { ...process.env, HOME: home, USERPROFILE: home };
+  const run = (extra) => JSON.parse(cp.execFileSync('node', [CLI, 'clean', '--completed', '--json', ...extra], { cwd, env, encoding: 'utf8' }));
+  const spared = run(['--stale', '60d']);
+  assert.ok(!spared.sessions.some((s) => s.id === 'staleAband'), '--stale 60d spares a session dead only 30 days');
+  // Positive control: the DEFAULT 14-day window reaps exactly that session, so the assertion above is
+  // measuring the flag and not an unreapable fixture.
+  const reaped = run([]);
+  const row = reaped.sessions.find((s) => s.id === 'staleAband');
+  assert.ok(row, 'the default window reaps it');
+  assert.equal(row.pending, 1, 'and the CLI reports the unreviewed work it discarded');
+  assert.ok(!reaped.sessions.some((s) => s.id === 'staleLive'), 'the session under review is never reaped, at any window');
+  for (const bad of [['--stale'], ['--stale', 'never']]) {
+    assert.notEqual(cp.spawnSync('node', [CLI, 'clean', '--completed', ...bad], { cwd, env, encoding: 'utf8' }).status, 0, `\`clean --completed ${bad.join(' ')}\` fails loudly`);
+  }
+});
+
+test('observe: the delta cache is READ, not just written — counts survive losing the blobs (0.9.0)', () => {
+  const home = freshHome();
+  const S = 'deltaRead';
+  seedEdit(S, '/w/a.ts', 'a\nb\n', 'a\nb\nc\nd\ne\n'); // +3
+  seedEdit(S, '/w/b.ts', 'p\nq\nr\n', 'p\n'); // -2
+  const warm = core.sessionCounts(S);
+  assert.deepEqual({ added: warm.added, removed: warm.removed }, { added: 3, removed: 2 }, 'the cold count is right');
+  // Delete the evidence the count is derived FROM, and the sidecar that would answer from memory. A
+  // cache that is written but never read now recomputes from nothing and reports zeroes.
+  fs.rmSync(path.join(core.rootDir(), S, 'blobs'), { recursive: true, force: true });
+  fs.rmSync(path.join(core.rootDir(), 'session-meta', `${S}.json`), { force: true });
+  const child = cp.execFileSync('node', ['-e',
+    `const c=require(${JSON.stringify(path.resolve(__dirname, '../dist/index.js'))});const r=c.sessionCounts(${JSON.stringify(S)});console.log(JSON.stringify({added:r.added,removed:r.removed}))`,
+  ], { env: { ...process.env, HOME: home, USERPROFILE: home }, encoding: 'utf8' });
+  assert.deepEqual(JSON.parse(child), { added: 3, removed: 2 }, 'a cold process answers from the persisted per-blob-pair cache');
+});
+
+test('observe: the delta cache drops entries for records that are gone (0.9.0)', () => {
+  freshHome();
+  const S = 'deltaPrune';
+  const a = seedEdit(S, '/w/a.ts', 'a\n', 'a\nb\n');
+  seedEdit(S, '/w/b.ts', 'p\n', 'p\nq\n');
+  core.sessionCounts(S);
+  const pairs = () => Object.keys(JSON.parse(fs.readFileSync(path.join(core.rootDir(), 'changemap-cache', S, 'deltas.json'), 'utf8')).pairs).length;
+  assert.equal(pairs(), 2, 'both blob pairs cached');
+  core.setStatus(S, a, 'kept');
+  core.clearResolved(S);
+  fs.rmSync(path.join(core.rootDir(), 'session-meta', `${S}.json`), { force: true }); // force a real recount
+  core.sessionCounts(S);
+  assert.equal(pairs(), 1, 'the dropped record takes its cache entry with it instead of leaking forever');
+});
+
+test('tree: a filtered build must not prune the placements of files it never looked at (0.9.0)', () => {
+  freshHome();
+  const cwd = fs.realpathSync(tmpWork());
+  const S = 'placePrune';
+  // Placement only runs for files with structure to place edits INTO — a class-free file is grouped as
+  // `loose` and never touches the store, so a fixture without one exercises nothing.
+  const before = (n) => `export class ${n} {\n  run() {\n    return 1;\n  }\n}\n`;
+  const after = (n) => `export class ${n} {\n  run() {\n    return 1;\n  }\n  extra() {\n    return 2;\n  }\n}\n`;
+  for (const f of ['alpha.ts', 'beta.ts']) {
+    const n = f[0].toUpperCase() + f.slice(1, -3);
+    fs.writeFileSync(path.join(cwd, f), after(n));
+    seedEdit(S, path.join(cwd, f), before(n), after(n));
+  }
+  const pfile = path.join(core.rootDir(), 'changemap-cache', S, 'placements.json');
+  core.buildEditTree(S, { root: cwd });
+  const full = Object.keys(JSON.parse(fs.readFileSync(pfile, 'utf8')).entries).length;
+  assert.equal(full, 2, 'an unfiltered build places both files');
+  core.buildEditTree(S, { root: cwd, filter: 'alpha' });
+  assert.equal(Object.keys(JSON.parse(fs.readFileSync(pfile, 'utf8')).entries).length, 2,
+    'a filtered build sees one file and must not treat the other as unreferenced');
+});
+
+test('observe: a plan with no rolling windows says so, instead of drawing empty quota bars (0.9.0)', () => {
+  const home = freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+  const cwd = fs.realpathSync(tmpWork());
+  const cache = path.join(home, '.claude', 'statusline-last.json');
+  const write = (o) => { fs.writeFileSync(cache, JSON.stringify(o)); core.clearFsCache(); };
+
+  // Claude Code sends rate_limits.* ONLY for Claude.ai subscription plans. An Enterprise or API account
+  // gets a turn like this one — context, no limits — and the 5h/weekly bars then sat at empty forever,
+  // which reads as "none of your quota used" rather than "this plan has no quota to use".
+  write({ ctx_pct: 19, ctx_size: 1000000, ctx_used: 186131 });
+  const ent = core.usageLine(cwd, 'none');
+  assert.equal(ent.rollingLimits, false, 'a reading that carried no rate_limits means the plan has none');
+  assert.deepEqual([ent.fiveHourPct, ent.weekPct], [null, null], 'and there is nothing to draw in the bars');
+  assert.ok(Array.isArray(ent.localWindows) && ent.localWindows.length >= 1,
+    'so it is replaced by something measurable — locally counted token windows');
+  assert.ok(ent.localWindows.every((w) => typeof w.label === 'string' && typeof w.tokens === 'number'),
+    'each window carries the label it was measured over, so a row cannot be drawn under the wrong one');
+
+  // The status line measures the same transcripts against the clocks it draws. When it has written its
+  // totals, they win — two surfaces reporting different numbers for one account is the bug this release
+  // is mostly about.
+  write({ ctx_pct: 19, five_meas: 3500, week_meas: 5250 });
+  assert.deepEqual(core.usageLine(cwd, 'none').localWindows,
+    [{ label: '5h', tokens: 3500 }, { label: 'wk', tokens: 5250 }],
+    'the status line\u2019s own measured windows are preferred over a second local scan — and the week label reads "wk", as the status line itself prints it');
+
+  // A subscription account must be untouched by all of this.
+  write({ ctx_pct: 19, five_pct: 42, week_pct: 8 });
+  const sub = core.usageLine(cwd, 'none');
+  assert.equal(sub.rollingLimits, true, 'percentages present ⇒ this plan does have rolling windows');
+  assert.equal(sub.fiveHourPct, 42, 'and they are still read exactly as before');
+  assert.equal(sub.localWindows, null, 'the replacement is not computed for an account that will never see it');
+
+  // And "nothing has reported yet" is a THIRD state, not the enterprise one — treating a missing cache
+  // as "no limits" would tell every user who has not installed the status line that they have no plan.
+  fs.rmSync(cache);
+  core.clearFsCache();
+  assert.equal(core.usageLine(cwd, 'none').rollingLimits, null, 'no reading at all is unknown, never false');
+});
+
+test('cli: clean reaches the GC blind spots — ghost cache dirs, orphaned cursors, dead blob-memo (0.9.0)', () => {
+  const home = freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const root = core.rootDir();
+  // 1. a changemap-cache dir whose session has NO store dir: the store-id loop never visits it, so its
+  //    superseded-version payloads survived every GC (27 found on a real store). The LIVE-version file
+  //    must survive — a transcript-only session's warm cache is a working cache, not garbage.
+  const cd = path.join(root, 'changemap-cache', 'ghostSess');
+  fs.mkdirSync(cd, { recursive: true });
+  fs.writeFileSync(path.join(cd, '0123456789abcdef.json'), JSON.stringify({ stamp: '1|old', map: {} }));
+  fs.writeFileSync(path.join(cd, 'aaaabbbbccccdddd.json'), JSON.stringify({ stamp: '3|live', map: {} }));
+  // 2. usage cursors: filename is a one-way hash of the transcript path, unreachable from any session id.
+  const uc = path.join(root, 'usage-cursors');
+  fs.mkdirSync(uc, { recursive: true });
+  fs.writeFileSync(path.join(uc, 'dead00.json'), JSON.stringify({ v: 1, transcript: '/no/such/file.jsonl', seen: [] }));
+  const liveT = path.join(home, 'live.jsonl');
+  fs.writeFileSync(liveT, '');
+  fs.writeFileSync(path.join(uc, 'live00.json'), JSON.stringify({ v: 1, transcript: liveT, seen: [] }));
+  fs.writeFileSync(path.join(uc, 'legacy.json'), JSON.stringify({ v: 1, seen: [] })); // path-less old format
+  const old = (Date.now() - 40 * 24 * 3600e3) / 1000;
+  fs.utimesSync(path.join(uc, 'legacy.json'), old, old);
+  // 3. the artifact no released build ever read.
+  fs.writeFileSync(path.join(root, 'blob-memo.json'), 'x'.repeat(1000));
+
+  const out = JSON.parse(cp.execFileSync('node', [CLI, 'clean', '--json'], { env: { ...process.env, HOME: home, USERPROFILE: home }, encoding: 'utf8' }));
+  assert.equal(out.staleMaps, 1, 'the ghost dir’s superseded payload is reaped');
+  assert.equal(out.cursors, 2, 'the dead-path cursor and the aged path-less one are reaped');
+  assert.ok(!fs.existsSync(path.join(cd, '0123456789abcdef.json')), 'superseded version gone');
+  assert.ok(fs.existsSync(path.join(cd, 'aaaabbbbccccdddd.json')), 'live version kept');
+  assert.ok(fs.existsSync(path.join(uc, 'live00.json')), 'a cursor whose transcript exists is never touched');
+  assert.ok(!fs.existsSync(path.join(root, 'blob-memo.json')), 'blob-memo dropped');
+  // Scoped clean must NOT sweep the blind spots: `--session x` names one session's store, and machine-
+  // wide reaping on a scoped call would surprise exactly the caller who asked for the narrow thing.
+  fs.writeFileSync(path.join(root, 'blob-memo.json'), 'y');
+  core.ensureStore('scopedS');
+  cp.execFileSync('node', [CLI, 'clean', '--session', 'scopedS', '--json'], { env: { ...process.env, HOME: home, USERPROFILE: home }, encoding: 'utf8' });
+  assert.ok(fs.existsSync(path.join(root, 'blob-memo.json')), 'a scoped clean leaves the machine-wide sweeps alone');
+});
+
+test('actions: outsideCounts — memoized boundary-crossing counts stay exact (0.9.0)', () => {
+  const home = freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const ws = fs.realpathSync(tmpWork());
+  const S = 'outCounts';
+  const proj = core.projectDir(ws);
+  fs.mkdirSync(proj, { recursive: true });
+  const tp = path.join(proj, S + '.jsonl');
+  const use = (name, input) => JSON.stringify({ timestamp: new Date(1000).toISOString(), type: 'assistant', message: { role: 'assistant', id: 'a' + Math.random(), content: [{ type: 'tool_use', id: 't' + Math.random(), name, input }] } });
+  // ASYMMETRIC on purpose: 2 outside reads + 1 outside write — the asymmetry is the built-in positive
+  // control, so a reads/writes swap cannot pass.
+  fs.writeFileSync(tp, [
+    use('Read', { file_path: path.join(home, 'outside-a.txt') }),
+    use('Read', { file_path: path.join(home, 'outside-b.txt') }),
+    use('Edit', { file_path: path.join(home, 'outside-c.txt'), old_string: 'x', new_string: 'y' }),
+    use('Read', { file_path: path.join(ws, 'inside.txt') }), // inside the worktree — counted by neither
+  ].join('\n') + '\n');
+  core.ensureStore(S);
+  assert.deepEqual(core.outsideCounts(ws, S), { reads: 2, writes: 1 }, 'counts match the transcript, not each other');
+  // The stamp must cover the TRANSCRIPT: append one more outside write and the memo must not serve the
+  // stale pair (a finished session's numbers are permanent precisely because its transcript is).
+  fs.appendFileSync(tp, use('Write', { file_path: path.join(home, 'outside-d.txt'), content: 'z' }) + '\n');
+  assert.deepEqual(core.outsideCounts(ws, S), { reads: 2, writes: 2 }, 'a grown transcript recounts');
+});
+
+test('prompts: promptWindows owns edits by ask window, boundary to the NEWER ask (0.9.0)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const cwd = fs.realpathSync(tmpWork());
+  const S = 'pwOwner';
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const line = (ts, o) => JSON.stringify({ timestamp: new Date(ts).toISOString(), ...o });
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), [
+    line(1000, { type: 'user', message: { role: 'user', content: 'first ask' } }),
+    line(5000, { type: 'user', message: { role: 'user', content: 'second ask' } }),
+    line(5100, { type: 'assistant', message: { role: 'assistant', id: 'a1', content: [{ type: 'text', text: 'ok' }] } }),
+  ].join('\n') + '\n');
+  // Three pending edits in DISTINCT files (so reviewEdits collapses nothing): before any ask, inside
+  // ask 1, and exactly AT ask 2's timestamp — the boundary that pins the binary search.
+  const mk = (ts, f) => { core.ensureStore(S); const b = core.writeBlob(S, Buffer.from('a\n')); const a = core.writeBlob(S, Buffer.from('b\n')); const id = core.nextId(S); core.appendLog(S, { id, ts, tool: 'Edit', file: path.join(cwd, f), beforeBlob: b, afterBlob: a, status: 'pending' }); return id; };
+  mk(500, 'pre.ts');
+  const mid = mk(2000, 'mid.ts');
+  const edge = mk(5000, 'edge.ts');
+  const w = core.promptWindows(cwd, S);
+  assert.equal(w.length, 2, 'two asks, two windows');
+  assert.deepEqual(w[0].editIds, [mid], 'ask 1 owns only the edit inside its window — the pre-ask edit belongs to nobody');
+  assert.deepEqual(w[1].editIds, [edge], 'an edit stamped at an ask’s own ts belongs to the NEW ask, not the old one');
+  assert.deepEqual([w[0].pending, w[1].pending], [1, 1], 'pending rides each window');
+  // Positive control for the status overlay: keep the mid edit; its id stays owned, pending drops.
+  core.setStatus(S, mid, 'kept');
+  const w2 = core.promptWindows(cwd, S);
+  assert.deepEqual(w2[0].editIds, [mid], 'a kept edit is still owned by its ask');
+  assert.equal(w2[0].pending, 0, 'and no longer pending');
+});
+
+test('store: Windows drive-letter case — phantoms are healed, repaired, and undo-proofed (#43)', () => {
+  freshHome();
+  const S = 'caseSess';
+  core.ensureStore(S);
+  // canonPath is a pure transform, so the same assertions run on every CI OS.
+  assert.equal(core.canonPath('c:\\repo\\x.ts'), 'C:\\repo\\x.ts', 'lowercase drive is uppercased');
+  assert.equal(core.canonPath('C:/repo/x.ts'), 'C:/repo/x.ts', 'already-canonical stays');
+  assert.equal(core.canonPath('/unix/path'), '/unix/path', 'POSIX paths untouched');
+  assert.equal(core.canonPath('cargo.toml'), 'cargo.toml', 'a bare name with no drive is untouched');
+
+  const blob = (txt) => core.writeBlob(S, Buffer.from(txt));
+  const add = (file, before, after) => {
+    const id = core.nextId(S);
+    core.appendLog(S, { id, ts: id * 1000, tool: 'Bash', file, beforeBlob: before, afterBlob: after, status: 'pending' });
+    return id;
+  };
+  // The issue's exact shape: one file, two cases — a phantom create and its delete twin.
+  const A = blob('the untouched file\ncontents\n');
+  const phantomCreate = add('C:\\repo\\ci.yml', null, A);
+  const phantomDelete = add('c:\\repo\\ci.yml', A, null);
+  // A LEGITIMATE create-then-delete of a temp file — one consistent path. The repair must keep it.
+  const B = blob('temp\n');
+  const legitCreate = add('C:\\repo\\tmp.txt', null, B);
+  const legitDelete = add('C:\\repo\\tmp.txt', B, null);
+  // And one real pending edit that must survive everything.
+  const realEdit = add('C:\\repo\\real.ts', blob('a\n'), blob('b\n'));
+
+  // 1. READ-SIDE HEAL: both phantom records surface under ONE canonical file.
+  const files = new Set(core.readLog(S).map((r) => r.file));
+  assert.ok(files.has('C:\\repo\\ci.yml') && !files.has('c:\\repo\\ci.yml'),
+    'readLog serves one canonical path for the case twins');
+
+  // 2. REPAIR: exactly the case-differing pair goes; the legit pair and the real edit stay.
+  const r = core.repairCasePhantoms(S);
+  assert.deepEqual(r, { pairs: 1, ids: [phantomCreate, phantomDelete].sort((a, b) => a - b) },
+    'one provable pair found — raw-case difference is the discriminator');
+  const left = core.readLog(S).map((x) => x.id).sort((a, b) => a - b);
+  assert.deepEqual(left, [legitCreate, legitDelete, realEdit].sort((a, b) => a - b),
+    'the same-case create+delete pair and the real edit are untouched');
+  assert.equal(core.repairCasePhantoms(S).pairs, 0, 'a second repair finds nothing (idempotent)');
+});
+
+test('undo: the phantom guard is STRICT — a same-raw-path create+delete chain keeps ordinary undo semantics (#43)', () => {
+  // The guard refuses only PROVABLE phantoms: the create and its delete-twin must disagree in RAW
+  // path case (repairCasePhantoms' own discriminator). A genuine create→delete→re-create chain on
+  // ONE consistent path (stash/checkout flows produce it) must not be misdiagnosed as a phantom and
+  // pointed at a repair that would then find nothing. The refusal itself needs a real case-twin pair
+  // with the file on disk, which only a Windows path can be — exercised end-to-end by the win32 test.
+  freshHome();
+  const S = 'caseUndo';
+  const work = fs.realpathSync(tmpWork());
+  core.ensureStore(S);
+  const target = path.join(work, 'made-and-remade.txt');
+  fs.writeFileSync(target, 'same bytes\n');
+  const A = core.writeBlob(S, fs.readFileSync(target));
+  const mk = (file, before, after) => { const id = core.nextId(S); core.appendLog(S, { id, ts: id * 1000, tool: 'Bash', file, beforeBlob: before, afterBlob: after, status: 'pending' }); return id; };
+  const create = mk(target, null, A);
+  mk(target, A, null); // same RAW path — NOT a provable phantom
+  const res = core.undoEdit(S, create);
+  assert.equal(res.ok, true, 'no phantom misdiagnosis on one consistent raw path');
+  assert.ok(!fs.existsSync(target), 'the ordinary create-undo semantics hold (content matches → delete)');
+  // Positive control for the guard's other gate: with no file on disk, a create-undo is a no-op success.
+  const ghost = mk(path.join(work, 'never-on-disk.txt'), null, core.writeBlob(S, Buffer.from('tmp\n')));
+  assert.equal(core.undoEdit(S, ghost).ok, true, 'a create whose file is gone undoes harmlessly');
+});
+
+test('cli: clean --phantoms wiring — removes a provable pair; a log-less session reports zero, not ENOENT (#43)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const home = process.env.HOME;
+  const env = { ...process.env, HOME: home, USERPROFILE: home };
+  delete env.CLAUDE_OBSERVATORY_SESSION;
+  const S = 'phWire';
+  core.ensureStore(S);
+  const blob = core.writeBlob(S, Buffer.from('x\n'));
+  const mk = (file, before, after) => { const id = core.nextId(S); core.appendLog(S, { id, ts: id * 1000, tool: 'Bash', file, beforeBlob: before, afterBlob: after, status: 'pending' }); return id; };
+  mk('C:\\repo\\ci.yml', null, blob);
+  mk('c:\\repo\\ci.yml', blob, null);
+  const runJson = (args) => JSON.parse(cp.execFileSync('node', [CLI, ...args], { env, encoding: 'utf8' }));
+  assert.equal(runJson(['clean', '--phantoms', '--session', S, '--json']).pairs, 1, 'the flag reaches repairCasePhantoms');
+  // A session that never captured (no log.jsonl at all): zero pairs and a clean exit — the undo
+  // guard's error message names this command, so it must never die on ENOENT where it sends people.
+  assert.equal(runJson(['clean', '--phantoms', '--session', 'never-captured', '--json']).pairs, 0, 'no log → zero pairs, not a crash');
+});
+
+test('scope: isUnderPath canonicalizes BOTH operands (#43)', () => {
+  // EXACT-FILE scope is separator-free, so the canon is assertable on every CI OS. (FOLDER scope
+  // splices the RUNTIME path.sep, so Windows folder prefixes only match on win32 — covered by the
+  // win32-gated CLI test below.)
+  assert.ok(core.isUnderPath('C:\\repo\\x.ts', 'c:\\repo\\x.ts'), 'exact-file scope with a lower-cased drive matches');
+  assert.ok(core.isUnderPath('c:\\repo\\x.ts', 'C:\\repo\\x.ts'), 'a lower-cased record side is canonicalized too');
+  assert.ok(!core.isUnderPath('C:\\repo\\x.ts', 'c:\\other\\x.ts'), 'a non-matching scope still refuses (positive control)');
+  // FOLDER scope splices the RUNTIME path.sep, so assert it with native paths — POSIX literals here
+  // failed on windows-latest ('/w/src' + '\\' matches nothing), the mirror of the trap above.
+  const root = path.join('w', 'src');
+  assert.ok(core.isUnderPath(path.join(root, 'a.ts'), root), 'native folder scope');
+  assert.ok(!core.isUnderPath(path.join('w', 'srcx', 'a.ts'), root), 'native sibling prefix still refuses');
+});
+
+test('cli: list --file and keep --under canonicalize their operands (#43)', () => {
+  // Platform-independent half: records with FAKE canonical Windows paths, read-only `list --file`
+  // (keep/undo would try to touch C:\ paths on a POSIX runner, so the write half is win32-gated below).
+  const home = freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR; // the in-process store writes must land in the fake HOME too
+  const env = { ...process.env, HOME: home, USERPROFILE: home };
+  delete env.CLAUDE_OBSERVATORY_SESSION;
+  const S = 'cliCase';
+  core.ensureStore(S);
+  const id = core.nextId(S);
+  core.appendLog(S, {
+    id, ts: 1000, tool: 'Edit', file: 'C:\\repo\\src\\mod.ts',
+    beforeBlob: core.writeBlob(S, Buffer.from('a\n')), afterBlob: core.writeBlob(S, Buffer.from('b\n')), status: 'pending',
+  });
+  const runJson = (args) => JSON.parse(cp.execFileSync('node', [CLI, ...args], { env, encoding: 'utf8' }));
+  const hit = runJson(['list', '--session', S, '--file', 'c:\\repo\\src', '--json']);
+  assert.equal(hit.edits.length, 1, 'a lower-cased --file substring matches the canonical record');
+  const miss = runJson(['list', '--session', S, '--file', 'c:\\other', '--json']);
+  assert.equal(miss.edits.length, 0, 'a non-matching substring still matches nothing (positive control)');
+  const kept = runJson(['keep', '--session', S, '--file', 'c:\\repo\\src', '--json']);
+  assert.equal(kept.kept, 1, 'keep --file canonicalizes its substring the same way');
+});
+
+test('cli(win32): lower-cased drive operands work end-to-end — list, keep --under, locate', { skip: process.platform !== 'win32' }, () => {
+  // REAL paths on the Windows runner: C:\Users\... — lower-case the drive letter in every operand,
+  // exactly what a Git Bash shell or an editor hands over. Runs only on windows-latest CI.
+  const home = freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const env = { ...process.env, HOME: home, USERPROFILE: home };
+  delete env.CLAUDE_OBSERVATORY_SESSION;
+  const S = 'cliWin';
+  core.ensureStore(S);
+  const work = fs.realpathSync(tmpWork());
+  const target = path.join(work, 'mod.ts');
+  fs.writeFileSync(target, 'b\n');
+  const canonical = core.canonPath(target);
+  assert.notEqual(canonical, canonical[0].toLowerCase() + canonical.slice(1), 'the runner path is drive-shaped');
+  const id = core.nextId(S);
+  core.appendLog(S, {
+    id, ts: 1000, tool: 'Edit', file: canonical,
+    beforeBlob: core.writeBlob(S, Buffer.from('a\n')), afterBlob: core.writeBlob(S, Buffer.from('b\n')), status: 'pending',
+  });
+  const lower = (p) => p[0].toLowerCase() + p.slice(1);
+  assert.ok(core.isUnderPath(canonical, lower(work)), 'isUnderPath folder scope through a lower-cased drive (win32 sep)');
+  const run = (args, input) => cp.execFileSync('node', [CLI, ...args], { env, encoding: 'utf8', ...(input === undefined ? {} : { input }) });
+  const runJson = (args, input) => JSON.parse(run(args, input));
+  assert.equal(runJson(['list', '--session', S, '--file', lower(target), '--json']).edits.length, 1, 'list --file');
+  const loc = runJson(['locate', '--session', S, '--file', lower(target), '--json'], 'b\n');
+  assert.equal(loc.placements.length, 1, 'locate --file finds the pending edit through a lower-cased drive');
+  const kept = runJson(['keep', '--session', S, '--under', lower(work), '--json']);
+  assert.equal(kept.kept, 1, 'keep --under scopes through a lower-cased drive');
+
+  // The REAL #43 shape end-to-end: one file, two RAW drive cases, the file on disk. Both undo paths
+  // must refuse, the bulk revert must SAY so, and the named repair must remove the pair.
+  const phTarget = path.join(work, 'phantom.txt');
+  fs.writeFileSync(phTarget, 'untouched\n');
+  const P = core.writeBlob(S, fs.readFileSync(phTarget));
+  const mk = (file, before, after) => { const pid = core.nextId(S); core.appendLog(S, { id: pid, ts: pid * 1000, tool: 'Bash', file, beforeBlob: before, afterBlob: after, status: 'pending' }); return pid; };
+  const create = mk(core.canonPath(phTarget), null, P);
+  mk(lower(core.canonPath(phTarget)), P, null); // the delete-twin under the OTHER raw case
+  assert.equal(core.undoEdit(S, create).ok, false, 'undoEdit refuses the provable phantom');
+  assert.equal(core.restoreFile(S, create).ok, false, 'the --force path refuses it too');
+  assert.ok(fs.existsSync(phTarget), 'the untouched file survives both undo paths');
+  const scope = core.undoScope(S, { under: lower(work) });
+  assert.ok(scope.errors >= 1 && /phantom/.test(scope.firstError ?? ''), 'bulk revert counts and names the refusal');
+  assert.equal(runJson(['clean', '--phantoms', '--session', S, '--json']).pairs, 1, 'clean --phantoms removes the pair');
+});
+
+test('install: statuslineInstalled detects OURS and only ours (0.9.0)', () => {
+  const home = freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const dir = path.join(home, '.claude');
+  fs.mkdirSync(dir, { recursive: true });
+  assert.equal(core.statuslineInstalled(), false, 'nothing installed — false');
+  fs.writeFileSync(path.join(dir, 'settings.json'), JSON.stringify({ statusLine: { type: 'command', command: `bash ${path.join(dir, 'statusline.sh')}` } }));
+  assert.equal(core.statuslineInstalled(), false, 'settings point at a script that does not exist — false (never "refresh" onto nothing)');
+  fs.writeFileSync(path.join(dir, 'statusline.sh'), '#!/bin/bash\n');
+  assert.equal(core.statuslineInstalled(), true, 'settings + script — true');
+  fs.writeFileSync(path.join(dir, 'settings.json'), JSON.stringify({ statusLine: { type: 'command', command: '/usr/local/bin/some-other-statusline' } }));
+  assert.equal(core.statuslineInstalled(), false, 'a FOREIGN status line is never treated as ours');
+  fs.writeFileSync(path.join(dir, 'settings.json'), JSON.stringify({ statusLine: { type: 'command', command: 'bash /home/u/tools/statusline.sh' } }));
+  assert.equal(core.statuslineInstalled(), false, "someone else's statusline.sh at a foreign path is not ours — the match is the FULL config-dir path, and `update` must never overwrite it");
+  fs.writeFileSync(path.join(dir, 'settings.json'), '{corrupt');
+  assert.equal(core.statuslineInstalled(), false, 'corrupt settings — false, never a throw');
+});
+
+test('semver: prerelease ordering carries the release channels (0.9.0)', () => {
+  assert.ok(core.isNewer('0.10.0-dev.2', '0.9.0'), 'a dev build is newer than the stable it forked from');
+  assert.ok(core.isNewer('0.10.0', '0.10.0-dev.9'), 'the promoted stable is newer than every dev build before it');
+  assert.ok(core.isNewer('0.10.0-dev.10', '0.10.0-dev.9'), 'dev builds order numerically, not lexically');
+  assert.ok(!core.isNewer('0.10.0-dev.9', '0.10.0-dev.10'), 'and never the other way');
+  assert.ok(!core.isNewer('0.10.0-dev.4', '0.10.0-dev.4'), 'equal prereleases are equal');
+  assert.ok(core.isNewer('0.10.0-dev.2', '0.10.0-dev'), 'more identifiers beat a shared prefix');
+  assert.equal(core.compareVersions('1.2.3', 'v1.2.3'), 0, 'the v prefix is cosmetic');
+  assert.ok(core.isNewer('0.10.0', '0.9.9'), 'plain release ordering is unchanged');
+});
+
+test('channel: persisted at the store root; resolveReleaseFromList picks per channel (0.9.0)', () => {
+  const home = freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  assert.equal(core.getUpdateChannel(), 'stable', 'no file → stable');
+  core.setUpdateChannel('dev');
+  assert.equal(core.getUpdateChannel(), 'dev', 'the switch persists');
+  core.setUpdateChannel('stable');
+  assert.equal(core.getUpdateChannel(), 'stable', 'and back');
+  assert.equal(core.normalizeChannel('Pre-Release'), 'dev');
+  assert.equal(core.normalizeChannel('prerelease'), 'dev');
+  assert.equal(core.normalizeChannel('stable'), 'stable');
+  assert.equal(core.normalizeChannel('nightly'), null, 'unknown spellings are refused, never guessed');
+
+  const releases = [
+    { tag_name: 'dev-latest', prerelease: true },
+    { tag_name: 'v0.9.0', prerelease: false },
+    { tag_name: 'v0.8.9', prerelease: false },
+  ];
+  assert.equal(core.resolveReleaseFromList(releases, 'stable').tag_name, 'v0.9.0', 'stable skips prereleases');
+  assert.equal(core.resolveReleaseFromList(releases, 'dev').tag_name, 'dev-latest', 'dev takes the newest prerelease');
+  assert.equal(core.resolveReleaseFromList([{ tag_name: 'v0.9.0' }], 'dev').tag_name, 'v0.9.0', 'dev falls back to stable when no prerelease exists');
+  assert.equal(core.resolveReleaseFromList([{ tag_name: 'x', prerelease: false, draft: true }], 'stable'), null, 'drafts never resolve');
+
+  // After a promote, the STABLE release outranks the last rolling build — the dev channel must
+  // serve the newest thing, not blindly the newest prerelease.
+  assert.equal(
+    core.resolveReleaseFromList(
+      [
+        { tag_name: 'v0.10.0', prerelease: false },
+        { tag_name: 'dev-latest', name: 'Pre-release 0.10.0-dev.9 (rolling, from dev)', prerelease: true },
+      ],
+      'dev'
+    ).tag_name,
+    'v0.10.0',
+    'dev serves the stable when it semver-outranks the rolling build'
+  );
+
+  // versionOfRelease: the tag when version-shaped, else the semver in the title (the rolling tag).
+  assert.equal(core.versionOfRelease({ tag_name: 'v0.9.0' }), '0.9.0', 'stable versions come from the tag');
+  assert.equal(core.versionOfRelease({ tag_name: 'dev-latest', name: 'Pre-release 0.9.0-dev.12 (rolling, from dev)' }), '0.9.0-dev.12', 'the rolling tag versions from the title');
+  assert.equal(core.versionOfRelease({ tag_name: 'dev-latest', name: 'no version here' }), null, 'no semver anywhere → null, never a fake 0.0.0');
+  assert.equal(core.versionOfRelease(null), null, 'null-safe');
+
+  // LOCKSTEP with the workflow: the rolling release's --title template in dev-release.yml must stay
+  // extractable by versionOfRelease — if the title loses its version, the dev channel resolves to
+  // nothing and no other test notices.
+  const wf = fs.readFileSync(path.resolve(__dirname, '../../../.github/workflows/dev-release.yml'), 'utf8');
+  const titles = [...wf.matchAll(/--title "([^"]+)"/g)].map((m) => m[1].replace(/\$\{VER\}/g, '9.9.9-dev.3'));
+  assert.ok(titles.length >= 1, 'the workflow declares the rolling release title');
+  for (const t of titles)
+    assert.equal(core.versionOfRelease({ tag_name: 'dev-latest', name: t }), '9.9.9-dev.3',
+      `versionOfRelease must extract the version from the workflow title: "${t}"`);
+
+  // The CLI's network-free version surface — what the editors' chip renders instantly.
+  const env = { ...process.env, HOME: home, USERPROFILE: home };
+  const vj = JSON.parse(cp.execFileSync('node', [CLI, 'version', '--json'], { env, encoding: 'utf8' }));
+  assert.deepEqual(vj, { current: require('../../cli/package.json').version, channel: 'stable' }, 'version --json = installed + channel, no network');
+});
+
+test('cli: the update/switch mechanism WORKS end-to-end — mock releases API, real downloads, real installs, both directions (0.9.0)', async () => {
+  // The whole flow, minus github.com itself: a LOCAL mock of the releases API (the
+  // CLAUDE_OBSERVATORY_RELEASES_API seam) serving one stable and one prerelease whose assets are
+  // REAL npm-installable tarballs — and a sandboxed npm global prefix (npm_config_prefix), so the
+  // genuine `npm i -g` lands in scratch and the machine's real install is never touched.
+  const home = freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const http = require('http');
+
+  const work = fs.realpathSync(tmpWork());
+  const pkgDir = path.join(work, 'fakecli');
+  fs.mkdirSync(pkgDir, { recursive: true });
+  const mkTgz = (version) => {
+    fs.writeFileSync(
+      path.join(pkgDir, 'package.json'),
+      JSON.stringify({ name: 'claude-observatory', version, bin: { 'claude-observatory': 'co.js' } })
+    );
+    fs.writeFileSync(path.join(pkgDir, 'co.js'), '#!/usr/bin/env node\nconsole.log("fake " + require("./package.json").version);\n');
+    cp.execSync('npm pack --silent', { cwd: pkgDir, stdio: ['ignore', 'ignore', 'ignore'] });
+    return path.join(pkgDir, `claude-observatory-${version}.tgz`);
+  };
+  const stableTgz = mkTgz('9.9.9');
+  const devTgz = mkTgz('9.10.0-dev.7');
+
+  const srv = http.createServer((req, res) => {
+    if (req.url.startsWith('/releases')) {
+      const base = `http://127.0.0.1:${srv.address().port}`;
+      res.setHeader('content-type', 'application/json');
+      // The REAL shapes: the rolling pre-release keeps a FIXED tag and carries its version in the
+      // title (exactly what .github/workflows/dev-release.yml publishes); stable versions by tag.
+      res.end(JSON.stringify([
+        { tag_name: 'dev-latest', name: 'Pre-release 9.10.0-dev.7 (rolling, from dev)', prerelease: true, assets: [{ name: 'claude-observatory-cli-dev.tgz', browser_download_url: `${base}/a/dev.tgz` }] },
+        { tag_name: 'v9.9.9', name: 'Claude Observatory v9.9.9', prerelease: false, assets: [{ name: 'claude-observatory-9.9.9.tgz', browser_download_url: `${base}/a/stable.tgz` }] },
+      ]));
+    } else if (req.url === '/a/dev.tgz') res.end(fs.readFileSync(devTgz));
+    else if (req.url === '/a/stable.tgz') res.end(fs.readFileSync(stableTgz));
+    else { res.statusCode = 404; res.end(); }
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+
+  const prefix = path.join(work, 'npm-prefix');
+  fs.mkdirSync(prefix, { recursive: true });
+  const env = {
+    ...process.env,
+    HOME: home,
+    USERPROFILE: home,
+    CLAUDE_OBSERVATORY_RELEASES_API: `http://127.0.0.1:${srv.address().port}`,
+    npm_config_prefix: prefix,
+    CLAUDE_OBSERVATORY_NO_UPDATE_CHECK: '1',
+  };
+  delete env.CLAUDE_CONFIG_DIR;
+  // ASYNC exec, deliberately: the mock server lives in THIS process, and a sync exec would block the
+  // event loop that has to accept the child's requests — a deadlock that reads as a network timeout.
+  const run = (args) =>
+    new Promise((resolve, reject) => {
+      cp.execFile('node', [CLI, ...args], { env, encoding: 'utf8' }, (err, stdout, stderr) => {
+        if (err) reject(new Error(`${args.join(' ')} failed: ${stderr || stdout || err.message}`));
+        else resolve(stdout);
+      });
+    });
+  // npm's global module dir differs per OS (lib/node_modules vs node_modules).
+  const installedPkgJson = () => {
+    for (const p of [
+      path.join(prefix, 'lib', 'node_modules', 'claude-observatory', 'package.json'),
+      path.join(prefix, 'node_modules', 'claude-observatory', 'package.json'),
+    ]) if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, 'utf8'));
+    return null;
+  };
+
+  try {
+    // 1. `update --check`: the followed channel is named, and the dev tip is disclosed.
+    const chk = await run(['update', '--check']);
+    assert.match(chk, /channel: stable/, '--check names the followed channel');
+    assert.match(chk, /9\.9\.9/, 'stable resolves against the mock');
+    assert.match(chk, /pre-release channel: 9\.10\.0-dev\.7/, 'the dev tip is disclosed to stable users');
+
+    // 2. SWITCH to dev: the channel persists AND the dev tarball really downloads + installs.
+    const sw = await run(['update', '--channel', 'dev', '--cli-only']);
+    assert.match(sw, /switched to the pre-release \(dev\) channel/, 'the switch is announced');
+    assert.equal(core.getUpdateChannel(), 'dev', 'the channel file persisted at the store root');
+    assert.equal(installedPkgJson()?.version, '9.10.0-dev.7', 'the dev build LANDED in the sandboxed global prefix');
+
+    // 3. And BACK: stable is a semver DOWNGRADE from the dev build — the one case a plain
+    //    isNewer gate would refuse; a switch must install it anyway.
+    const back = await run(['update', '--channel', 'stable', '--cli-only']);
+    assert.match(back, /switched to the stable channel/, 'the reverse switch is announced');
+    assert.equal(installedPkgJson()?.version, '9.9.9', 'the stable build replaced the dev build');
+    assert.equal(core.getUpdateChannel(), 'stable', 'the channel followed back');
+
+    // 4. `version --check --json` — the exact payload both editors' dropdowns render.
+    const vj = JSON.parse(await run(['version', '--check', '--json']));
+    assert.equal(vj.channel, 'stable');
+    assert.equal(vj.stableLatest, '9.9.9');
+    assert.equal(vj.devLatest, '9.10.0-dev.7');
+    assert.equal(vj.updateAvailable, core.isNewer('9.9.9', vj.current), 'updateAvailable is the active-channel compare');
+  } finally {
+    srv.close();
+  }
 });

@@ -43,6 +43,8 @@ class ObservatorySettings : PersistentStateComponent<ObservatorySettings.State> 
         /** Which of the bottom dock's side panes are shown. The Overview is always shown — it is the
          *  reason the window exists — but Prompts and Stats are columns that squeeze it on a short dock,
          *  so each can be folded away and comes back where you left it. */
+        // Unused since 0.9.0 (Prompts moved to the Observatory Timeline tool window) — kept so old
+        // settings XML carrying it still round-trips; remove after a deprecation release.
         var dashShowPrompts: Boolean = true
         var dashShowStats: Boolean = true
         // Where the Overview's master/detail divider sits, as the master's share of the panel — one value

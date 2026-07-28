@@ -16,9 +16,27 @@ import { claudeConfigDir } from './paths';
 import { projectDir, commonDir, repoKeyForSession, firstCwdLine } from './session';
 import { readLog, isSafeSessionId, sidecarMemo } from './store';
 import { parseTranscriptActions, agentPhaseDetail } from './actions';
+import { sessionCounts } from './observe';
 
 /** A session whose transcript mtime is within this of now is "active" (an agent is live in it). */
 export const FLEET_ACTIVE_MS = 60_000;
+
+/**
+ * A session whose conversation last moved longer ago than this is FOLDED: still listed, but collapsed
+ * in the fleet surfaces and never rebuilt on the Overview's critical path.
+ *
+ * The Overview builds one full change map per repo sibling, and a mature repo accumulates them without
+ * bound — 33 in this one, of which 24 were more than a week old. Those are finished conversations
+ * nobody is watching, and rebuilding them is most of what a cold refresh costs. Folded siblings are
+ * served from the on-disk cache when it happens to be warm and reported as UNBUILT when it is not;
+ * they are never built eagerly. Expanding one is what asks for it.
+ */
+export const FLEET_FOLD_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Whether a sibling's last conversation activity is old enough to fold. `lastMs` is transcript mtime. */
+export function isFoldedAge(lastMs: number, now: number): boolean {
+  return lastMs > 0 && now - lastMs > FLEET_FOLD_MS;
+}
 
 export interface SiblingSession {
   id: string;
@@ -95,10 +113,8 @@ function buildSibling(
   const distinct: string[] = [];
   const seen = new Set<string>();
   const pendingSeen = new Set<string>(); // distinct files with a PENDING edit — the live-overlap set
-  let pending = 0;
   for (const r of log) {
     if (r.status === 'pending') {
-      pending++;
       pendingSeen.add(r.file);
     }
     if (!seen.has(r.file)) {
@@ -128,14 +144,20 @@ function buildSibling(
     }
     return { total, high };
   });
+  const counts = sessionCounts(id);
   const phaseDetail = agentPhaseDetail(transcriptPath);
   return {
     id,
     self: id === activeSessionId,
     active: now - lastMs <= FLEET_ACTIVE_MS,
     lastMs,
-    edits: log.length,
-    pending,
+    // DISPLAY units — the same collapse the Overview and the Sessions rows apply, so "N pending across
+    // siblings" cannot disagree with the row the reader clicks into. sessionCounts is sidecar-cached on
+    // disk, so this stays one stat() per sibling on a warm store rather than 31 collapses per tick.
+    // The FILE sets above stay raw on purpose: collapsing merges chained edits within one file, so the
+    // distinct-file and pending-file sets are identical either way, and recomputing them would cost.
+    edits: counts.edits,
+    pending: counts.pending,
     files: distinct.slice(0, FILE_CAP),
     moreFiles: Math.max(0, distinct.length - FILE_CAP),
     pendingFiles: [...pendingSeen],

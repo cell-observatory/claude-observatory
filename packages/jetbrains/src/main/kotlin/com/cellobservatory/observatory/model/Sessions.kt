@@ -24,6 +24,18 @@ data class SessionRow(
     val edits: Int,
     val pending: Int,
     val files: Int,
+    /** Lines added / removed across the session's captured edits (0.9.0). Sidecar-cached in core against
+     *  the log's stamp, so a row still costs a stat once a finished session has been counted once. */
+    val added: Int = 0,
+    val removed: Int = 0,
+    /** Tokens the conversation consumed and its wall-clock span — the same pair a fleet row shows. */
+    val tokens: Long = 0,
+    val durationMs: Long = 0,
+    /** What it ran on, as recorded by the harness: display label ("Opus 5") and declared reasoning effort.
+     *  Blank when the transcript never said — an unset effort is reported as unknown, never guessed, since
+     *  the default differs by build and model. Older CLIs emit neither field and simply show nothing. */
+    val model: String = "",
+    val effort: String = "",
 ) {
     /** What a row leads with: Claude's title, else a short id (never an empty label). */
     val displayName: String get() = title?.takeIf { it.isNotBlank() } ?: "session ${id.take(8)}"
@@ -62,5 +74,14 @@ object SessionsParser {
         edits = o.get("edits")?.takeIf { it.isJsonPrimitive }?.asInt ?: 0,
         pending = o.get("pending")?.takeIf { it.isJsonPrimitive }?.asInt ?: 0,
         files = o.get("files")?.takeIf { it.isJsonPrimitive }?.asInt ?: 0,
+        // 0.9.0 badge fields. Absent on an older CLI, and 0/"" is the honest reading of absent here —
+        // unlike `lastActiveMs` above, a missing count says "this build does not report it", which the
+        // renderer shows by omitting the badge rather than by drawing a zero.
+        added = o.get("added")?.takeIf { it.isJsonPrimitive }?.asInt ?: 0,
+        removed = o.get("removed")?.takeIf { it.isJsonPrimitive }?.asInt ?: 0,
+        tokens = o.get("tokens")?.takeIf { it.isJsonPrimitive }?.asLong ?: 0L,
+        durationMs = o.get("durationMs")?.takeIf { it.isJsonPrimitive }?.asLong ?: 0L,
+        model = o.get("model")?.takeIf { it.isJsonPrimitive }?.asString ?: "",
+        effort = o.get("effort")?.takeIf { it.isJsonPrimitive }?.asString ?: "",
     )
 }

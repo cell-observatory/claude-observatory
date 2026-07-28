@@ -18,6 +18,7 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
+import { canonPath } from './paths';
 import {
   ensureStore,
   pathKey,
@@ -108,7 +109,8 @@ function resolveFile(payload: HookPayload): string | null {
   const f = ti.file_path || ti.notebook_path;
   if (typeof f !== 'string' || !f) return null;
   const cwd = payload.cwd || process.cwd();
-  return path.isAbsolute(f) ? f : path.resolve(cwd, f);
+  // canonPath: hook events can disagree about drive-letter case on Windows (#43) — one key per file.
+  return canonPath(path.isAbsolute(f) ? f : path.resolve(cwd, f));
 }
 
 function handlePre(session: string, payload: HookPayload): void {
@@ -254,7 +256,9 @@ function cachedSnapshotHash(session: string, abs: string, cache: BashStatCache, 
  *  Runs under the session lock so concurrent GC can't collect fresh blobs before the manifest
  *  lands; appendSkip happens AFTER release (appendLog takes the same lock — never append inside). */
 function handlePreBash(session: string, payload: HookPayload): void {
-  const cwd = payload.cwd;
+  // Canonical drive-letter case for the tree every walk key derives from (#43): a Pre manifest keyed
+  // C:\ against a Post walk keyed c:\ made every file a phantom create + delete pair.
+  const cwd = payload.cwd ? canonPath(payload.cwd) : payload.cwd;
   if (!cwd) return;
   ensureStore(session);
   const truncated = withBashPreLock(session, () => {
@@ -283,7 +287,9 @@ function handlePreBash(session: string, payload: HookPayload): void {
  *  Unlocked like always: each changed file's blob is log-referenced by appendLog immediately after
  *  it is written, so the unreferenced window stays microseconds. */
 function handlePostBash(session: string, payload: HookPayload): void {
-  const cwd = payload.cwd;
+  // Canonical drive-letter case for the tree every walk key derives from (#43): a Pre manifest keyed
+  // C:\ against a Post walk keyed c:\ made every file a phantom create + delete pair.
+  const cwd = payload.cwd ? canonPath(payload.cwd) : payload.cwd;
   if (!cwd) return;
   const manifest = readBashManifest(session);
   if (!manifest) return; // Pre skipped/truncated — nothing reliable to diff

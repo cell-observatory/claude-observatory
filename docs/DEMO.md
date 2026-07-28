@@ -6,7 +6,7 @@ needs facts that run did not produce — from the bundled `claude-observatory de
 capture pipeline against a real transcript. Nothing is staged; the session id in each block's header says
 which run it came from.
 
-![The observatory layout — the sidebar "Claude Edits" (Edits · Diffs · File History · Actions · Observations) plus the bottom panel "Claude Observatory" (Prompts · Overview · Stats)](media/layout.png)
+![The observatory layout — the sidebar "Observatory Traces" (Edits · Diffs · File History) plus the bottom panel "Observatory Dashboards" (Overview · Stats) and the "Observatory Timeline" panel (Prompts · Actions · Observations)](media/layout.png)
 
 > The **[visual showcase](https://cell-observatory.github.io/claude-observatory/showcase.html)** presents
 > the same material in the browser (rendered from [showcase.html](showcase.html) via GitHub Pages).
@@ -326,17 +326,16 @@ in the others instantly. The layout is deliberately identical; only the host chr
 | --- | --- | --- |
 | Install | `code --install-extension claude-observatory.vsix` | `./scripts/install-jetbrains.sh` (or Install Plugin from Disk) |
 | Auto-update | daily background check → one-click **Update now** | add the [plugin repository](../packages/jetbrains/README.md#auto-updates) once → IDE-native updates |
-| **Edits · Diffs · File History · Actions** (the sidebar) | **Claude Edits** — microscope in the Activity Bar, badged with the pending count | **Claude Observatory** tool window, left stripe |
-| **Prompts · Overview · Stats** (the bottom panel) | **Claude Observatory** bottom panel, side by side (like Terminal/Problems) | **Claude Observatory Dashboards** tool window, bottom stripe — the same three panes side by side |
+| **Edits · Diffs · File History** (the sidebar) | **Observatory Traces** — microscope in the Activity Bar, badged with the pending count | **Observatory Traces** tool window, left stripe |
+| **Overview · Stats** (the bottom panel) | **Observatory Dashboards** bottom panel, side by side (like Terminal/Problems). The Overview can also be docked as a full-height **editor tab** — palette: *Open Overview in Editor*, or set `claudeObservatory.overviewLocation`; whichever host holds it drives the refresh, never both | **Observatory Dashboards** tool window, bottom stripe |
+| **Prompts** | its own **Prompts** view (new installs start it in the bottom panel; drag it to the secondary sidebar if you like) — an existing profile keeps wherever you last dragged it, since VS Code remembers view placement per profile | the **Observatory Timeline** tool window, right stripe — Prompts · Actions · Observations as tabs |
 | Inline menu (**✨ #N · +A −R · view changes · Keep · Undo · Chat · View diff**) | CodeLens above each edit + ✨ gutter star + bold green/red highlight + coral ruler mark | lens above each edit + clickable ✨ gutter star + bold green/red highlight + coral stripe |
 | Click **view changes** | opens the **inline review bubble** at the edit — the diff in git's colors + reasoning + `+A −R`, Keep/Undo/Chat/Prev/Next on its toolbar (no tab) | opens the edit's unified **diff** (reasoning in title, Keep/Undo/Chat on toolbar) |
 | File spotlight | 📄 spotlight (tab-bar) | 📄 spotlight (editor banner) |
 | Scoreboard | status-bar `🔬 N` (amber while pending) + live bar in Stats | status-bar `🔬 N` + live bar in Stats |
 | Keyboard loop | `⌥⌘N` next · `⌥⌘Y` keep · `⌥⌘U` undo · `⌥⌘-`/`⌥⌘=` revisions (`Ctrl+Alt` on Win/Linux) | `⌥⌘N` next · `⌥⌘Y` keep · `⌥⌘U` undo · `⌥⌘[`/`⌥⌘]` revisions |
 
-The **sidebar** ("Claude Edits") carries the five review-and-audit panes — **Edits · Diffs · File
-History · Actions · Observations** — and the **bottom panel** ("Claude Observatory") carries the three
-dashboards — **Prompts · Overview · Stats**. (Timeline is gone as a standalone pane — its coalesced
+The **sidebar** ("Observatory Traces") carries the three per-edit review panes — **Edits · Diffs · File History**; the timeline-shaped surfaces — **Prompts · Actions · Observations** — live together in the **Observatory Timeline** panel. (Timeline is gone as a standalone pane — its coalesced
 change-feed now leads **Observations**, which moved into the sidebar in 0.8.7 to make room for the
 **Prompts** window beside the Overview it scopes; **Actions** moved up there in 0.8.0; and the former
 multi-agent window folded into **Overview** as its **Fleet** tab.) Both front-ends drive the review
@@ -419,7 +418,11 @@ axis counter, which is what says who it acts on.
 On the **Overview title bar** the bar expands to **two rows**. The **top row** carries the controls: the
 **name of the session under review** (its title or first prompt; the raw id sits in the tooltip) — a
 label since 0.8.8, because the **Sessions** tab is where the session changes — the session-wide bulk
-actions **Accept All · Reject All · Clear Resolved · Export**, and on the right **Search · Active only · Spotlight · Refresh**. **Active only** —
+actions **Accept All · Reject All · Clear Resolved · Export**, and on the right **Search · Active only · Spotlight · Refresh**. **Export** offers two
+documents: the shareable **review summary** (kept / reverted per file, markdown), or the **full session
+trace** — everything the observatory recorded for the session, as one JSON document (every edit with its
+diff, capture skips, prompts, every action, tasks, subagents, egress, outside writes, observations, and
+token usage; also `claude-observatory export [--out <file>]`). **Active only** —
 which hides finished agents, finished runs, exited shells and fully reviewed work — is **on by default**
 and is remembered across panel hides and restarts, in both editors. The **bottom row**
 steps the pending edits on **four review axes**, each a coarser grain than the last:
@@ -462,7 +465,7 @@ everything else here it costs **zero tokens** — mined straight from the Claude
 and each action is correlated with its **result** (`ok` / `error`). File-edit actions **link back to
 their store record**, so you can jump from the trace into the review in one click.
 
-In 0.8.0 **Actions** lives in the **sidebar** ("Claude Edits") alongside Edits · Diffs · File History
+Since 0.9.0 **Actions** lives in the **Observatory Timeline** panel alongside Prompts and Observations
 (it used to sit in the bottom panel). It's **grouped by category** and — new — every group is
 **collapsed by default**, so you expand only the ones you care about:
 
@@ -794,7 +797,7 @@ add nothing to the store and change no on-disk format.
 
 The Actions timeline already knows every command Claude ran, every file it opened, and every host it
 reached, so these safety audits fall straight out of it — **zero tokens, no new store or format**. Both
-ride the **Actions** view in the **sidebar** ("Claude Edits"), and each gets its own CLI verb.
+ride the **Actions** view in the **Observatory Timeline** panel, and each gets its own CLI verb.
 
 0.8.6 shipped a third surface, a capability *footprint* badge row. 0.8.7 removed it: most of what it
 showed restated Risk, Egress and Subagents as a second set of numbers, and the two facts only it reported
@@ -1000,11 +1003,7 @@ re-point the change map and the feed.
 The **Switch Session** picker reads the same rows. Each entry leads with the session's title, the live
 session comes first, the rest follow by conversation recency, the row currently in effect is
 preselected, and typing filters by title or id. The listing is built from directory stats plus a bounded
-title scan cached in a small on-disk sidecar per session. Each row also reports what that session did —
-its captured edits, the files they touched, how many still await review — read from its edit log and
-cached in the same sidecar under the log's own `(mtime, size)`: a finished session is never re-read, and
-a live one is re-read only for those three numbers. What made the old picker slow was doing that work
-for every session on every open, uncached, alongside a full transcript parse for each title.
+title scan cached in a small on-disk sidecar per session. Each row shows the session's title and when its conversation was last active; the full stats live on the Sessions tab's rows.
 
 `claude-observatory sessions` prints the same listing as text; `--json` emits it whole:
 

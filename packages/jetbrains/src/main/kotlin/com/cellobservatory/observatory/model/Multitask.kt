@@ -59,6 +59,14 @@ data class RunningAgent(
     val outside: OutsideTouch?,
     /** How many times this agent's context was compacted; 0 for an older CLI without the field. */
     val compactions: Int,
+    /** Conversation quiet for over a week: collapsed in the fleet, and not rebuilt on refresh (0.9.0). */
+    val folded: Boolean = false,
+    /**
+     * False ⇒ this row's numbers are placeholders, not findings — a folded session whose change map was
+     * not built. Only ever false for a folded row. Defaults TRUE so an older CLI, which emits neither
+     * field, keeps reporting its rows as real instead of silently rendering every one as "not loaded".
+     */
+    val loaded: Boolean = true,
 )
 
 /** A file touched by 2+ agents — computed from the UNCAPPED distinct file sets, path-only (no contents
@@ -262,6 +270,10 @@ object MultitaskParser {
             outside = o.get("outside")?.takeIf { it.isJsonObject }?.asJsonObject
                 ?.let { OutsideTouch(int(it, "reads"), int(it, "writes")) },
             compactions = int(o, "compactions"),
+            folded = bool(o, "folded"),
+            // NOT bool(): that yields false for an absent key, and an older CLI emits neither field —
+            // which would render every row in the fleet as "not loaded". Absent must mean "real".
+            loaded = o.get("loaded")?.takeIf { !it.isJsonNull }?.asBoolean ?: true,
         )
     }
 

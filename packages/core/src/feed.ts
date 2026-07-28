@@ -22,7 +22,7 @@ import { parseTranscriptActions, ActionRecord, agentPhaseDetail } from './action
 import { findSubagentsDir } from './subagents';
 import { parseWorkflows } from './workflows';
 import { listRepoSiblings } from './fleet';
-import { buildChangeMap } from './changemap';
+import { cachedChangeMap } from './changemap';
 import { sessionProcesses, processOutputTail } from './processes';
 
 export type FeedKind = 'session' | 'agent' | 'workflow' | 'task' | 'process';
@@ -219,8 +219,10 @@ export function liveFeed(cwd: string, sessionId: string, ref: FeedRef, opts: { l
   }
 
   if (ref.kind === 'task') {
-    // The strict-span task model lives on the change map, which the Overview has already built.
-    const task = buildChangeMap(cwd, sessionId).tasks.find((t) => t.taskId === ref.id);
+    // The strict-span task model lives on the change map, which the Overview has already built — so read
+    // the CACHED one. This said the same thing while calling the raw builder, which re-derived the whole
+    // map (seconds on a large session) on every feed poll to look up one task's interval.
+    const task = cachedChangeMap(cwd, sessionId, { root: cwd, prompts: true }).tasks.find((t) => t.taskId === ref.id);
     if (!task) return empty(ref, ref.id, 'no such task in this session');
     // A task owns a real interval, so its feed is the main chain's calls inside that window.
     const end = task.lastTs || Number.MAX_SAFE_INTEGER;

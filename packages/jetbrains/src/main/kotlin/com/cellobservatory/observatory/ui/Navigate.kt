@@ -1,5 +1,6 @@
 package com.cellobservatory.observatory.ui
 
+import com.cellobservatory.observatory.core.ClaudePaths
 import com.cellobservatory.observatory.core.ObservatoryCli
 import com.cellobservatory.observatory.model.EditRecord
 import com.cellobservatory.observatory.services.ObservatoryService
@@ -24,7 +25,9 @@ import com.intellij.openapi.vfs.LocalFileSystem
 object Navigate {
 
     fun openFileAtEdit(project: Project, session: String, rec: EditRecord) {
-        val vf = LocalFileSystem.getInstance().refreshAndFindFileByPath(rec.file)
+        // Record paths are OS-native (backslashes on Windows); the VFS wants system-independent.
+        val vf = LocalFileSystem.getInstance()
+            .refreshAndFindFileByPath(com.intellij.openapi.util.io.FileUtil.toSystemIndependentName(rec.file))
         if (vf == null) {
             ReviewOps.notify(project, "File not found: ${rec.file}", NotificationType.WARNING)
             return
@@ -53,7 +56,7 @@ object Navigate {
             ?: return onFound(null)
         val caretLine = editor.caretModel.logicalPosition.line
         val text = editor.document.text
-        val pending = service.log().filter { it.pending && it.file == file }
+        val pending = service.log().filter { it.pending && it.file == ClaudePaths.storeKey(file) }
         if (pending.isEmpty()) return onFound(null)
         ProgressManager.getInstance().run(object : Task.Backgroundable(project, "Resolving edit at cursor", false) {
             override fun run(indicator: ProgressIndicator) {

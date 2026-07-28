@@ -42,7 +42,9 @@ object StoreReader {
                 continue
             }
             val id = o.get("id")?.asIntOrNull() ?: continue
-            val file = o.get("file")?.asStringOrNull() ?: continue
+            // canonPath mirrors core's readLog heal (#43): pre-fix stores hold drive-letter case twins
+            // for one file; normalizing here makes every panel see one file without rewriting disk.
+            val file = o.get("file")?.asStringOrNull()?.let { ClaudePaths.canonPath(it) } ?: continue
             records[id] = EditRecord(
                 id = id,
                 ts = o.get("ts")?.asLongOrNull() ?: 0L,

@@ -16,7 +16,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { diffArrays } from 'diff';
-import { findRecord, isUnderPath, readBlob, readLog, setStatus, setStatusMany } from './store';
+import { EditRecord, findRecord, isUnderPath, readBlob, readLog, readLogRaw, setStatus, setStatusMany } from './store';
+import { canonPath } from './paths';
 import { groupMembers } from './groups';
 import { taskEditIds } from './changemap';
 
@@ -203,6 +204,13 @@ export function undoEdit(sessionId: string, id: number): UndoResult {
   // New-file create -> undo deletes the file, but ONLY if no later edit changed it since (compare by
   // sha of the raw bytes, never a UTF-8 round-trip).
   if (rec.beforeBlob === null) {
+    // #43 phantom guard: this "creation" is one half of a capture artifact, not Claude's work, and the
+    // content check below cannot save the file (the phantom's snapshot IS the untouched file, so it
+    // always matches). Refuse and name the repair. Gated on the file still EXISTING: that is what
+    // makes this undo destructive — a legitimate create-then-delete pair (Claude made a temp file and
+    // removed it) has the same record shape but no file on disk, and its undo stays a harmless no-op.
+    const twin = currentBuf === null ? undefined : phantomTwinOf(sessionId, rec);
+    if (twin) return phantomRefusal(id, twin.id);
     if (currentSha !== null && rec.afterBlob !== null && currentSha !== rec.afterBlob) return conflict();
     try {
       if (currentBuf !== null) fs.unlinkSync(rec.file);
@@ -273,6 +281,41 @@ function markLaterSameFileDropped(sessionId: string, file: string, afterId: numb
 }
 
 /**
+ * The PROVABLE #43 phantom delete-twin of a pending create record, or undefined. Provable STRICTLY,
+ * matching repairCasePhantoms: same canonical file, the twin's before-blob equals the create's
+ * after-blob, both still pending — and the two RAW paths disagree (drive-letter case). A genuine
+ * create→delete→re-create chain carries one consistent raw path and must keep its ordinary undo
+ * semantics; without the raw-case discriminator the guard misdiagnosed exactly that chain and pointed
+ * at a repair (`clean --phantoms`) that then correctly found nothing.
+ */
+function phantomTwinOf(sessionId: string, rec: EditRecord): EditRecord | undefined {
+  const rawById = new Map(readLogRaw(sessionId).map((r) => [r.id, r.file]));
+  const rawRec = rawById.get(rec.id);
+  if (rawRec === undefined) return undefined;
+  return readLog(sessionId).find(
+    (t) =>
+      t.id !== rec.id &&
+      t.status === 'pending' &&
+      t.afterBlob === null &&
+      t.beforeBlob === rec.afterBlob &&
+      t.file === rec.file &&
+      rawById.get(t.id) !== undefined &&
+      rawById.get(t.id) !== rawRec
+  );
+}
+
+/** The one refusal both undo paths present — the remediation pointer must read identically. */
+function phantomRefusal(id: number, twinId: number): UndoResult {
+  return {
+    ok: false,
+    status: 'error',
+    message:
+      `edit #${id} looks like a Windows path-case phantom (its delete-twin is edit #${twinId}) — ` +
+      `undoing it would delete a file Claude never touched. Run \`claude-observatory clean --phantoms\` to remove both records.`,
+  };
+}
+
+/**
  * Per-file restore fallback (the `--force` path). Reverts the file to its state BEFORE edit `id`,
  * dropping any later edits to that same file. Used when undoEdit() reports a conflict.
  */
@@ -282,6 +325,13 @@ export function restoreFile(sessionId: string, id: number): UndoResult {
 
   const beforeBuf = blobBuf(sessionId, rec.beforeBlob);
   if (beforeBuf === null) {
+    // #43: the phantom guard holds on the FORCE path too — `undo <id> --force` on a phantom create
+    // must not delete the untouched file either (the bulk flow's conflict hint names --force, so this
+    // is exactly where a #43 victim lands next).
+    if (rec.beforeBlob === null && fs.existsSync(rec.file)) {
+      const twin = phantomTwinOf(sessionId, rec);
+      if (twin) return phantomRefusal(id, twin.id);
+    }
     try {
       if (fs.existsSync(rec.file)) fs.unlinkSync(rec.file);
     } catch (e) {
@@ -469,6 +519,8 @@ export function reapplyFile(sessionId: string, id: number): UndoResult {
 export interface UndoScopeResult {
   undone: number; // edits actually reverted
   conflicts: number; // edits left in place because a later change overlapped (offer per-edit --force)
+  errors: number; // edits refused outright (e.g. the #43 phantom guard) — without this the bulk totals lie
+  firstError?: string; // the first refusal's message — its remediation pointer must reach the user
   total: number; // pending edits that matched the scope
   ids: number[]; // the reverted edit ids
 }
@@ -489,17 +541,20 @@ export function undoScope(
   opts: { under?: string; fileSubstr?: string; ids?: number[] } = {}
 ): UndoScopeResult {
   const idSet = opts.ids ? new Set(opts.ids) : null; // the task-scoped path passes a resolved edit-id set
+  const sub = opts.fileSubstr === undefined ? undefined : canonPath(opts.fileSubstr); // #43: match canonical records
   const targets = readLog(sessionId)
     .filter(
       (r) =>
         r.status === 'pending' &&
         (opts.under === undefined || isUnderPath(r.file, opts.under)) &&
-        (opts.fileSubstr === undefined || r.file.includes(opts.fileSubstr)) &&
+        (sub === undefined || r.file.includes(sub)) &&
         (idSet === null || idSet.has(r.id))
     )
     .sort((a, b) => b.id - a.id);
   let undone = 0;
   let conflicts = 0;
+  let errors = 0;
+  let firstError: string | undefined;
   const ids: number[] = [];
   for (const t of targets) {
     const r = undoEdit(sessionId, t.id);
@@ -507,9 +562,15 @@ export function undoScope(
     else if (r.ok) {
       undone++;
       ids.push(t.id);
+    } else {
+      // A refusal (status 'error') is not a conflict and must not vanish from the arithmetic: on a
+      // #43-corrupted store, "Reject All" hits the phantom guard for every phantom create, and the
+      // refusal message is the only place the repair (`clean --phantoms`) is named.
+      errors++;
+      if (firstError === undefined) firstError = r.message;
     }
   }
-  return { undone, conflicts, total: targets.length, ids };
+  return { undone, conflicts, errors, firstError, total: targets.length, ids };
 }
 
 export interface RedoScopeResult {
@@ -532,12 +593,13 @@ export function redoScope(
   opts: { under?: string; fileSubstr?: string; ids?: number[] } = {}
 ): RedoScopeResult {
   const idSet = opts.ids ? new Set(opts.ids) : null;
+  const sub = opts.fileSubstr === undefined ? undefined : canonPath(opts.fileSubstr); // #43: match canonical records
   const targets = readLog(sessionId)
     .filter(
       (r) =>
         r.status === 'undone' &&
         (opts.under === undefined || isUnderPath(r.file, opts.under)) &&
-        (opts.fileSubstr === undefined || r.file.includes(opts.fileSubstr)) &&
+        (sub === undefined || r.file.includes(sub)) &&
         (idSet === null || idSet.has(r.id))
     )
     .sort((a, b) => a.id - b.id); // oldest-first: re-apply in original order

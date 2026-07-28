@@ -46,11 +46,22 @@ private data class Bucket(
     val tokensInput: Double, val tokensOutput: Double,
 ) { val tokensTotal get() = tokensInput + tokensOutput }
 
+/** One USAGE row. `valueOverride` replaces the percentage column when the row reports a measurement
+ *  rather than a share of a quota (a plan with no rolling windows). */
+private data class UsageRow(
+    val label: String,
+    val pct: Double?,
+    val sub: String,
+    val valueOverride: String? = null,
+)
+
 private data class Usage(
     val ctxPct: Double?, val ctxTokens: Double?, val ctxSize: Double?,
     val fivePct: Double?, val fiveReset: Long?, val fiveTok: Double?,
     val weekPct: Double?, val weekReset: Long?, val weekTok: Double?,
     val statuslineCache: Boolean, val cachedAtMs: Long?, val staleMs: Long,
+    /** null = nothing has reported yet; false = this plan has no rolling windows (Enterprise / API). */
+    val rollingLimits: Boolean?, val localWindows: List<Pair<String, Double>>,
     val sessionTokens: SessionTokens?,
     val vitals: SessionVitals?,
 )
@@ -300,6 +311,9 @@ class StatsPanel(private val project: Project) : JPanel(BorderLayout()), com.int
         fetchStats()
     }
 
+    private var usageRunning = false
+    private var lastUsageRun = 0L
+
     private fun fetchStats() {
         val now = System.currentTimeMillis()
         if (statsRunning || now - lastStatsRun < 20_000) return
@@ -328,10 +342,18 @@ class StatsPanel(private val project: Project) : JPanel(BorderLayout()), com.int
     }
 
     private fun fetchUsage() {
+        // Throttled like fetchStats: the service listener fires this on every coalesced tick (~2-3s
+        // during active work), which spawned a ~60ms CLI process each time, visible or not. The 30s
+        // Timer already re-fires while the panel is showing, so a 20s floor loses nothing but churn.
+        val now = System.currentTimeMillis()
+        if (usageRunning || now - lastUsageRun < 20_000) return
+        usageRunning = true
+        lastUsageRun = now
         val session = ObservatoryService.getInstance(project).currentSession()
         AppExecutorUtil.getAppExecutorService().submit {
             val u = ObservatoryCli.usageJson(session, project.basePath)?.let { parseUsage(it) }
             ApplicationManager.getApplication().invokeLater {
+                usageRunning = false
                 if (project.isDisposed) return@invokeLater
                 usage = u ?: usage
                 usageBars.update(usage)
@@ -447,6 +469,11 @@ class StatsPanel(private val project: Project) : JPanel(BorderLayout()), com.int
             ctxPct = num(ctx?.get("pct")), ctxTokens = num(ctx?.get("tokens")), ctxSize = num(ctx?.get("size")),
             fivePct = num(o.get("fiveHourPct")), fiveReset = lng(o.get("fiveReset")), fiveTok = num(o.get("fiveTokens")),
             weekPct = num(o.get("weekPct")), weekReset = lng(o.get("weekReset")), weekTok = num(o.get("weekTokens")),
+            rollingLimits = o.get("rollingLimits")?.takeIf { !it.isJsonNull }?.asBoolean,
+            localWindows = o.get("localWindows")?.takeIf { !it.isJsonNull }?.asJsonArray
+                ?.map { it.asJsonObject }
+                ?.mapNotNull { w -> (num(w.get("tokens")))?.let { t -> w.get("label").asString to t } }
+                ?: emptyList(),
             statuslineCache = o.get("statuslineCache")?.asBoolean ?: false,
             cachedAtMs = lng(o.get("cachedAtMs")),
             staleMs = lng(o.get("staleMs")) ?: 300_000L,
@@ -780,15 +807,29 @@ private class UsageBars : JComponent() {
         g2.color = grey
         g2.drawString("USAGE", JBUI.scale(2), JBUI.scale(10))
         val usage = u
-        val rows: List<Triple<String, Double?, String>> = if (usage == null) {
-            listOf(Triple("ctx", null, ""), Triple("5h", null, ""), Triple("wk", null, ""))
+        // (label, pct, detail, valueOverride). valueOverride replaces the "N%" column for a row that
+        // reports a MEASUREMENT rather than a share of a quota.
+        val rows: List<UsageRow> = if (usage == null) {
+            listOf(UsageRow("ctx", null, ""), UsageRow("5h", null, ""), UsageRow("wk", null, ""))
+        } else if (usage.rollingLimits == false) {
+            // Claude Code sends rate_limits.* only for Claude.ai subscription plans, so on Enterprise or
+            // an API key these two bars can never fill — and an empty bar reads as "none of your quota
+            // used" rather than "this plan has no rolling quota". Show what CAN be measured. No
+            // percentage: there is no denominator, and inventing one would be a confident guess.
+            // The label travels with the number: the status line measures 5h/7d, the local fallback
+            // 24h/7d, and drawing one under the other would misreport the window it covers.
+            val notes = listOf("tokens, measured from this machine", "no rolling limit on this plan")
+            listOf(UsageRow("ctx", usage.ctxPct, usage.ctxTokens?.let { t -> "${human(t)}/${human(usage.ctxSize ?: 0.0)}" } ?: "")) +
+                usage.localWindows.take(2).mapIndexed { i, (label, tok) ->
+                    UsageRow(label, null, notes.getOrElse(i) { "" }, human(tok))
+                }
         } else {
             val age = if (usage.statuslineCache && usage.cachedAtMs != null) System.currentTimeMillis() - usage.cachedAtMs else null
             val stale = if (age != null && age > usage.staleMs) " · ${ago(age)} ago" else ""
             listOf(
-                Triple("ctx", usage.ctxPct, usage.ctxTokens?.let { t -> "${human(t)}/${human(usage.ctxSize ?: 0.0)}" } ?: ""),
-                Triple("5h", usage.fivePct, listOfNotNull(until(usage.fiveReset).ifBlank { null }, usedOfTotal(usage.fiveTok, usage.fivePct)).joinToString(" · ") + stale),
-                Triple("wk", usage.weekPct, listOfNotNull(until(usage.weekReset).ifBlank { null }, usedOfTotal(usage.weekTok, usage.weekPct)).joinToString(" · ") + stale),
+                UsageRow("ctx", usage.ctxPct, usage.ctxTokens?.let { t -> "${human(t)}/${human(usage.ctxSize ?: 0.0)}" } ?: ""),
+                UsageRow("5h", usage.fivePct, listOfNotNull(until(usage.fiveReset).ifBlank { null }, usedOfTotal(usage.fiveTok, usage.fivePct)).joinToString(" · ") + stale),
+                UsageRow("wk", usage.weekPct, listOfNotNull(until(usage.weekReset).ifBlank { null }, usedOfTotal(usage.weekTok, usage.weekPct)).joinToString(" · ") + stale),
             )
         }
         // Full-width responsive rows (same idea as the charts tracking the viewport): per row the
@@ -798,7 +839,7 @@ private class UsageBars : JComponent() {
         val fm = g2.fontMetrics
         val trackX = JBUI.scale(28)
         val pctW = JBUI.scale(34)
-        for ((label, pct, sub) in rows) {
+        for ((label, pct, sub, valueOverride) in rows) {
             val subW = if (sub.isBlank()) 0 else fm.stringWidth(sub) + JBUI.scale(10)
             var track = width - trackX - pctW - subW - JBUI.scale(10)
             val showSub = track >= JBUI.scale(60) && subW > 0
@@ -817,12 +858,18 @@ private class UsageBars : JComponent() {
                     g2.color = grey
                     g2.drawString(sub, trackX + track + pctW, y + JBUI.scale(4))
                 }
+            } else if (valueOverride != null) {
+                g2.color = grey
+                g2.drawString(valueOverride, trackX + track + JBUI.scale(6), y + JBUI.scale(4))
+                if (showSub) g2.drawString(sub, trackX + track + pctW, y + JBUI.scale(4))
             } else {
                 g2.color = grey
                 g2.drawString("—", trackX + track + JBUI.scale(6), y + JBUI.scale(4))
             }
             y += JBUI.scale(16)
         }
-        toolTipText = rows.joinToString("  ·  ") { (l, p, s) -> "$l ${p?.toInt()?.toString()?.plus("%") ?: "—"} $s".trim() }
+        toolTipText = rows.joinToString("  ·  ") { (l, p, s, v) ->
+            "$l ${p?.toInt()?.toString()?.plus("%") ?: v ?: "—"} $s".trim()
+        }
     }
 }

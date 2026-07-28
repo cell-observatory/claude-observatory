@@ -46,9 +46,18 @@ https://github.com/cell-observatory/claude-observatory/releases/latest/download/
 ```
 
 New releases then appear under **Settings → Plugins → Updates**, exactly like a Marketplace plugin —
-this repository descriptor is regenerated and attached to every GitHub Release. (Prefer the terminal?
-`claude-observatory update` refreshes the plugin in place from the newest release; restart the IDE
-afterward.)
+this repository descriptor is regenerated and attached to every GitHub Release. To follow the
+**pre-release channel** (the rolling build of the `dev` branch) instead, subscribe to its descriptor
+rather than the one above:
+
+```text
+https://github.com/cell-observatory/claude-observatory/releases/download/dev-latest/updatePlugins.xml
+```
+
+(Prefer the terminal or the Overview's version chip? `claude-observatory update` refreshes the plugin
+in place from your channel's newest release — `--channel dev` / `--channel stable` switches channels —
+and the chip at the right edge of the Overview toolbar does the same from inside the IDE; restart the
+IDE afterward. The full channel story: [Releases & channels](https://cell-observatory.github.io/claude-observatory/releases.html).)
 
 ## Remote development (Gateway / Toolbox over SSH)
 
@@ -64,8 +73,9 @@ found, set both explicitly in **Settings → Tools → Claude Observatory**. Ful
 
 | Surface | Where |
 | --- | --- |
-| **Edits / Diffs / File History / Actions / Observations** trees and panes (Edits/Diffs group folder → file → class → edit; **File History** is a flat, chronological list of just the active file's edits that follows the editor; **Actions** is the zero-token action timeline with the risk + egress audits and the live cross-agent file conflicts; **Observations** carries the recap + chronological change feed) — Keep/Undo/Redo/Diff via context menu | "Claude Observatory" tool window, left stripe |
-| **Prompts · Overview · Stats** side-by-side panes. **Prompts** lists your own turns in order, each carrying the edits, files, folders, tokens, agents, workflows, tasks, and shells it produced; selecting one **scopes the whole Overview** to it, and **Accept Prompt** / **Reject Prompt** / **Clear** then act on exactly the work that ask caused. The **Overview** is the flagship **master–detail** view: a **Sessions · Fleet · Workflows · Tasks · Processes** nav on the left (running agents across the repo's git **worktrees** — live phase with `~` marking inferred ones, sparkline, ±lines, risk, nested subagents; orchestration runs; Claude's own numbered to-dos with their ±lines / edits / pending rollups; the background shells this session left running; and this workspace's sessions, newest conversation first, with the live one marked), and the selected item's change map on the right (a Folders strip, a churn-ranked Files ledger, and a summary bar, over that selection's feed — a live tail while the agent, run, task, or shell is still working, an audit log once it has finished). Selecting a **Sessions** row pins what the whole observatory reviews; the other nav tabs only re-point this panel. Stats leads with a live **review scoreboard** — pending / accepted / reverted counts + a progress bar — over the tokens plot | "Claude Observatory Dashboards" tool window, bottom stripe |
+| **Edits / Diffs / File History** trees and panes (Edits/Diffs group folder → file → class → edit; **File History** is a flat, chronological list of just the active file's edits that follows the editor) — Keep/Undo/Redo/Diff via context menu | "Observatory Traces" tool window, left stripe |
+| **Prompts · Actions · Observations** tabs. **Prompts** lists your own turns in order, each carrying the edits, files, folders, tokens, agents, workflows, tasks, and shells it produced; selecting one **scopes the whole Overview** to it, and **Accept Prompt** / **Reject Prompt** / **Clear** then act on exactly the work that ask caused. **Actions** is the zero-token action timeline with the risk + egress audits and the live cross-agent file conflicts; **Observations** carries the recap + chronological change feed | "Observatory Timeline" tool window, right stripe |
+| **Overview · Stats** side-by-side panes. The **Overview** is the flagship **master–detail** view: a **Sessions · Fleet · Workflows · Tasks · Processes** nav on the left (running agents across the repo's git **worktrees** — live phase with `~` marking inferred ones, sparkline, ±lines, risk, nested subagents; orchestration runs; Claude's own numbered to-dos with their ±lines / edits / pending rollups; the background shells this session left running; and this workspace's sessions, newest conversation first, with the live one marked), and the selected item's change map on the right (a Folders strip, a churn-ranked Files ledger, and a summary bar, over that selection's feed — a live tail while the agent, run, task, or shell is still working, an audit log once it has finished). Selecting a **Sessions** row pins what the whole observatory reviews; the other nav tabs only re-point this panel. Stats leads with a live **review scoreboard** — pending / accepted / reverted counts + a progress bar — over the tokens plot | "Observatory Dashboards" tool window, bottom stripe |
 | **Review nav bar** — a top row of session controls (the name of the session under review, as a label — the **Sessions** tab is where it changes · Accept All · Reject All · Clear Resolved · Export · Search · **Active only**, on by default and remembered · Spotlight · Refresh) over a bottom row of four review axes — **Diff · File · Folder · Prompt** — that step the pending edits at four granularities | Overview pane, above the change map |
 | **Inline menu** — `✦ #N view changes` (opens the edit's inline diff) then `✓ Keep · ↩ Undo · ❝ Chat · ⧉ View diff` on the lens above each pending edit; a **✨ gutter star** (click to open the diff), a subtle green/red line tint, a **Claude-coral error-stripe** marker | every editor |
 | **Click → inline diff** — the edit's before ⟷ after opens **unified**, with Claude's reasoning in the title and `Keep · Undo · Chat` on the diff toolbar; **Spotlight** dims the unedited lines (editor banner) | every editor |

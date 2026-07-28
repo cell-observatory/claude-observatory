@@ -33,7 +33,8 @@ private class ObservatoryActionsWidget(private val project: Project) : CustomSta
     private val listener = Runnable { refreshUi() }
     private var busConn: MessageBusConnection? = null
 
-    private val navBar = ReviewNavBar(project) { refreshUi() }
+    // The status bar has no selection concept, so it always means the session under review.
+    private val navBar = ReviewNavBar(project, { refreshUi() })
 
     private val toolbar = ActionManager.getInstance()
         // sessionClear: the status bar carries the session-wide Clear Resolved (VS Code status-bar parity).
