@@ -7380,9 +7380,11 @@ test('scope: isUnderPath canonicalizes BOTH operands (#43)', () => {
   assert.ok(core.isUnderPath('C:\\repo\\x.ts', 'c:\\repo\\x.ts'), 'exact-file scope with a lower-cased drive matches');
   assert.ok(core.isUnderPath('c:\\repo\\x.ts', 'C:\\repo\\x.ts'), 'a lower-cased record side is canonicalized too');
   assert.ok(!core.isUnderPath('C:\\repo\\x.ts', 'c:\\other\\x.ts'), 'a non-matching scope still refuses (positive control)');
-  // POSIX behavior unchanged.
-  assert.ok(core.isUnderPath('/w/src/a.ts', '/w/src'), 'POSIX folder scope');
-  assert.ok(!core.isUnderPath('/w/srcx/a.ts', '/w/src'), 'POSIX sibling prefix still refuses');
+  // FOLDER scope splices the RUNTIME path.sep, so assert it with native paths — POSIX literals here
+  // failed on windows-latest ('/w/src' + '\\' matches nothing), the mirror of the trap above.
+  const root = path.join('w', 'src');
+  assert.ok(core.isUnderPath(path.join(root, 'a.ts'), root), 'native folder scope');
+  assert.ok(!core.isUnderPath(path.join('w', 'srcx', 'a.ts'), root), 'native sibling prefix still refuses');
 });
 
 test('cli: list --file and keep --under canonicalize their operands (#43)', () => {

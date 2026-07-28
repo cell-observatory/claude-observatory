@@ -195,7 +195,7 @@ is in scope; beneath it, the selected row's **feed** shows what that thing is do
 source is still writing, an audit log once it has finished.
 
 The **review nav bar** on top is two rows. The controls row names the session under review — its title
-or first prompt on a single line, with the full title and raw id in the tooltip — then the session-wide
+or first prompt, whole, on a single line (the raw id sits in the tooltip) — then the session-wide
 Accept All · Reject All · Clear Resolved · Export, and, at the right, Search · Active only · Spotlight ·
 Refresh. Export offers two documents: the shareable review summary (markdown), or the full session
 trace of everything the observatory recorded (JSON). The name is a label,

@@ -195,10 +195,11 @@ string cap — with the omission named in `errors` (deltas and blob shas stay); 
 result as a tab, or names the written file when it exceeds the IDE's 20 MB editor load limit.
 
 **The session's name leads the Overview in both editors.** JetBrains' Overview top row now opens with
-the session-name label VS Code already had — the human-readable title (Claude's ai-title, else the
-first prompt) with the raw session id on the tooltip. In both editors the label keeps to ONE line: VS
-Code no longer wraps it (`ellipsis` + the full text on the tooltip), and the JetBrains label clips the
-same way instead of growing the toolbar.
+the session-name label VS Code already had — the human-readable title (the Sessions rows' title:
+Claude's ai-title, else the first prompt — never the raw id) with the session id on the tooltip. In
+both editors the label is ONE line and shows the WHOLE name: it never wraps and never clips — when the
+row runs short, the bulk buttons flow to the next line (VS Code) or the toolbar's own overflow
+(JetBrains), not the title.
 
 ### Fixed
 - **The site scales fluidly and text spans the page.** The reading column was fixed at 1140px at every

@@ -2531,9 +2531,10 @@ function changeMapShell(): string {
   .ov-tbrow { display:flex; align-items:center; justify-content:center; gap:10px; flex-wrap:wrap; }
   /* a split row pins its first child to the left edge and its last to the right (space-between) */
   .ov-tbrow.split { justify-content:space-between; }
-  /* Not a control — the session under review, stated. ONE line, never wrapped (user call 2026-07-28):
-     a long title clips to an ellipsis and the tooltip carries the full name + raw id. */
-  .ov-sesslabel { font-family: var(--cm-mono); font-size:11px; color: var(--vscode-foreground); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:32ch; }
+  /* Not a control — the session under review, stated. ONE line, never wrapped, and NEVER clipped
+     (user call 2026-07-28): the whole human-readable name shows; when the row runs short the BUTTONS
+     wrap to the next line (the group is flex-wrap), never the title. Tooltip carries the raw id. */
+  .ov-sesslabel { font-family: var(--cm-mono); font-size:11px; color: var(--vscode-foreground); white-space:nowrap; }
   .ov-tb { display:inline-flex; align-items:center; gap:5px; background:transparent; border:1px solid var(--cm-border); border-radius:5px; color: var(--vscode-descriptionForeground); font:inherit; font-size:11px; padding:3px 9px; cursor:pointer; white-space:nowrap; }
   .ov-tb:hover { background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.12)); color: var(--vscode-foreground); }
   /* session chip: show the FULL name — let a long one wrap/break inside the chip instead of overflowing */
@@ -2585,7 +2586,6 @@ function changeMapShell(): string {
     .ov-tab { padding:3px 8px; }
     .ov-toolbar { gap:3px; padding:4px 6px; }
     .ov-tb, .ov-nb { padding:2px 7px; }
-    .ov-sesslabel { max-width:100%; }
     /* An inline-flex group is sized to its content and will overflow the panel rather than wrap inside
        itself — a percentage max-width does not clamp it (verified in a browser). Giving it the whole row
        does: below the breakpoint each axis takes a line and breaks between its own buttons. */

@@ -316,7 +316,7 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
     /** The "N older with pending edits · show all" collapse row in the Sessions tab (0.9.0). */
     private data class OlderSessionsToggle(val count: Int, val open: Boolean)
     private var oldSessionsOpen = false
-    private var lastSessions: SessionsResult? = null
+    @Volatile private var lastSessions: SessionsResult? = null // BGT-read by sessionLabelAction.update()
     private var tasksOpen = false
     private var lastTasks: List<SessionTask> = emptyList()
     /** The reader's own Active-only value, parked while the guided tour runs. null = no tour is holding it. */
@@ -1544,17 +1544,23 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
     }
 
     /** The session-name label leading the top row — VS Code's `ov-sess-label`: the human-readable
-     *  session title (Claude's ai-title, else the first prompt) on ONE line, never wrapped. Swing clips
-     *  a too-long title with `…`; the tooltip carries the full title and the raw session id. A label,
-     *  not a control: switching sessions is a Sessions-tab click. */
+     *  session title (the Sessions rows' title — Claude's ai-title, else the first prompt) on ONE
+     *  line, never wrapped and NEVER clipped (user call 2026-07-28): the whole name shows, and a tight
+     *  row is the toolbar's problem (its overflow), not the title's. The tooltip carries the raw
+     *  session id. A label, not a control: switching sessions is a Sessions-tab click. */
     private fun sessionLabelAction(): AnAction =
         object : AnAction(), CustomComponentAction, DumbAware {
             override fun getActionUpdateThread() = ActionUpdateThread.BGT
             override fun actionPerformed(e: AnActionEvent) {} // a label, not a control
             override fun update(e: AnActionEvent) {
                 val s = map?.summary
-                val title = s?.title?.trim().orEmpty()
                 val sess = s?.session.orEmpty()
+                // The SAME source VS Code's label reads: the Sessions rows carry Claude's title for
+                // every session (ai-title, else first prompt — sidecar-cached in core). The change-map
+                // summary's title alone is blank for sessions whose transcript insights carry neither,
+                // which is how the demo session rendered as its raw id.
+                val rowTitle = lastSessions?.sessions?.firstOrNull { it.id == sess }?.title?.trim().orEmpty()
+                val title = rowTitle.ifEmpty { s?.title?.trim().orEmpty() }
                 // setText(text, FALSE): titles are prose — with mnemonic parsing on, "save_load"
                 // renders as "saveload" and "&" vanishes (underscore/ampersand become mnemonics).
                 e.presentation.setText(
@@ -1567,14 +1573,10 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
                         " · switch in the Sessions tab"
             }
             override fun createCustomComponent(presentation: Presentation, place: String): JComponent =
-                object : JBLabel() {
-                    // Cap the width so a long title CLIPS on its single line instead of growing the
-                    // toolbar; JLabel never wraps, and paints the clip as "…" natively.
-                    override fun getPreferredSize(): java.awt.Dimension {
-                        val d = super.getPreferredSize()
-                        return java.awt.Dimension(minOf(d.width, JBUI.scale(260)), d.height)
-                    }
-                }.apply {
+                JBLabel().apply {
+                    // Uncapped: the FULL title renders (JLabel is single-line by nature, so it can
+                    // never wrap); a row too tight for label + buttons overflows into the toolbar's
+                    // own "…" chevron rather than costing the title characters.
                     font = JBUI.Fonts.smallFont()
                     border = JBUI.Borders.empty(0, 4, 0, 6)
                 }
