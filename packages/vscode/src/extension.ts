@@ -212,7 +212,15 @@ class EditsProvider implements vscode.TreeDataProvider<Node> {
   // 'edits' → click opens the file at that edit; 'diffs' → before↔after diff; 'timeline' → flat, newest-first.
   constructor(private readonly mode: 'edits' | 'diffs' | 'timeline') {}
 
+  /** The root tree, computed at most once per REFRESH CYCLE — the ActionsProvider.cycle pattern.
+   *  buildEditTree re-reads and re-hashes every edited file (~48ms warm on a real session), VS Code
+   *  calls getChildren(root) more than once per render, and two of these providers exist — so without
+   *  this, one refresh paid the build 2–4×. Dropped by refresh(); never stamp-keyed, because refresh IS
+   *  the invalidation signal here. */
+  private cycleTree?: core.EditTree;
+
   refresh(): void {
+    this.cycleTree = undefined; // a new cycle rebuilds from the store
     this._changed.fire();
     this.updateBadge();
   }
@@ -256,7 +264,7 @@ class EditsProvider implements vscode.TreeDataProvider<Node> {
     }
     // edits/diffs: folder → file → (class → edits) + loose edits, from the shared core view-model.
     if (!node) {
-      const tree = core.buildEditTree(session, { root: workspaceRoot(), filter: editFilter });
+      const tree = (this.cycleTree ??= core.buildEditTree(session, { root: workspaceRoot(), filter: editFilter }));
       return [...tree.folders.map(toFolderNode), ...tree.files.map(toFileNode)];
     }
     if (node.kind === 'folder') return [...node.folders.map(toFolderNode), ...node.files.map(toFileNode)];
@@ -959,6 +967,54 @@ function clearResolvedUnder(session: string, scope: string, label: string): void
   );
 }
 
+/**
+ * Which session a toolbar bulk action acts on: the one the webview says it is scoped to, else the
+ * reviewed one.
+ *
+ * Validated, not trusted. These verbs accept or revert every pending edit in a session, so an id
+ * arriving from the webview is checked for shape before it becomes a store path, and then against the
+ * set of sessions this window may actually act on. A named id that is not in that set is REFUSED, never
+ * quietly redirected: falling back to the reviewed session would mean a bad id accepts or reverts a
+ * DIFFERENT session's edits, which is worse than doing nothing. An empty string is the webview's own
+ * "nothing selected" and resolves to the reviewed session, as the palette always did.
+ */
+function bulkSession(fromView: unknown): string | null {
+  if (typeof fromView !== 'string' || !fromView) return currentSession() ?? null;
+  if (!core.isSafeSessionId(fromView)) return null;
+  const cwd = workspaceRoot();
+  if (!cwd) return null;
+  if (core.sessionMeta(cwd).sessions.some((r) => r.id === fromView)) return fromView;
+  // The FLEET rows are sibling worktrees, and sessionMeta cannot see them: its provenance rail walks UP
+  // from cwd, and a sibling worktree is never an ancestor. Validating against sessionMeta alone refused
+  // every Fleet row's own Accept/Revert button while leaving it enabled — a control that can only fail.
+  // The fleet listing is the same allowlist the user is looking at, so it is the right second rail.
+  return core.listRepoSiblings(cwd).some((r) => r.id === fromView) ? fromView : null;
+}
+
+/** Set once in activate. Module-scope because the bulk verbs live here, outside activate's closure. */
+let forceRefreshAll: (() => void) | null = null;
+
+/** Run a bulk verb against a resolved scope, or say why it did not run. */
+async function withBulkScope(sess: unknown, run: (session: string) => void | Promise<void>): Promise<void> {
+  const s = bulkSession(sess);
+  if (!s) {
+    // Distinguish the two refusals: "you named a session I cannot act on" is a different problem from
+    // "there is no session here at all", and the palette path only ever produces the second.
+    vscode.window.showWarningMessage(
+      typeof sess === 'string' && sess
+        ? 'That session is not one of this workspace’s — nothing was changed.'
+        : 'Claude Observatory: no active Claude Code session for this workspace.'
+    );
+    return;
+  }
+  await run(s);
+  // force: this just changed the counts every panel is showing. An unforced refresh is dropped by the
+  // Overview's 3s coalescing window, and the spawn already in flight was started BEFORE the mutation, so
+  // it repaints pre-change numbers with nothing afterwards to correct them. The store watcher's own
+  // unforced tick ~150ms later is exactly the case that is not enough — this is why withSession forced.
+  forceRefreshAll?.();
+}
+
 function keepAllSession(session: string): void {
   // The one that mattered: 26,000 pending edits took eight minutes as a per-edit loop.
   const n = core.setStatusMany(
@@ -967,6 +1023,45 @@ function keepAllSession(session: string): void {
     'kept'
   ).length;
   vscode.window.showInformationMessage(n ? `Accepted ${n} edit(s).` : 'No pending edits to accept.');
+}
+
+/** Clear one session's resolved (kept/reverted) records, confirmed. Pending edits are kept.
+ *
+ *  A function rather than command-body code because the Overview toolbar now calls it with the session
+ *  it is LABELLED with, which is not always the session `withSession` would resolve. */
+async function clearResolvedSession(session: string): Promise<void> {
+  const resolved = core.readLog(session).filter((r) => r.status !== 'pending').length;
+  if (resolved === 0) {
+    vscode.window.showInformationMessage('No resolved (kept/reverted) edits to clear.');
+    return;
+  }
+  const choice = await vscode.window.showWarningMessage(
+    `Clear ${resolved} resolved (kept/reverted) edit(s)? Pending edits are kept.`,
+    { modal: true },
+    'Clear'
+  );
+  if (choice !== 'Clear') return;
+  // Spawned, not in-process: clearResolved rewrites the whole log — measured ~0.8s at 8,000 records —
+  // and it used to run on the host thread right after the modal closed, which is exactly when the user
+  // is watching. Same seam clearCompletedTasks uses; the store watcher repaints when the file lands.
+  await new Promise<void>((done) => {
+    void vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: 'Clearing resolved edits…' },
+      () =>
+        new Promise<void>((fin) => {
+          spawnCliJson(['clean', '--resolved', '--session', session, '--json'], workspaceRoot() ?? process.cwd(), (data) => {
+            // The verb's own JSON field is `cleared` (verified against the CLI, not assumed) — and a
+            // null payload is a FAILED spawn (missing CLI, crash, timeout), which must never be dressed
+            // as success with the precomputed count: nothing was cleared and the list will not change.
+            if (data && typeof data === 'object' && 'cleared' in data)
+              vscode.window.showInformationMessage(`Cleared ${(data as { cleared: number }).cleared} resolved edit(s).`);
+            else vscode.window.showErrorMessage('Could not clear resolved edits — is the claude-observatory CLI installed?');
+            fin();
+            done();
+          });
+        })
+    );
+  });
 }
 
 async function undoAllSession(session: string): Promise<void> {
@@ -1161,18 +1256,41 @@ function clearPrompt(session: string, promptId: string): void {
 function clearCompletedTasks(session: string): void {
   const cwd = workspaceRoot();
   if (!cwd) return;
-  const map = core.buildChangeMap(cwd, session, { root: cwd });
-  const settled = map.rollupByTask.filter((t) => t.taskId !== null && t.edits > 0 && t.pending === 0 && t.undone === 0);
-  if (settled.length === 0) {
-    vscode.window.showInformationMessage('No completed tasks to clear.');
-    return;
-  }
-  let cleared = 0;
-  for (const t of settled) cleared += core.clearResolvedIds(session, core.taskEditIds(cwd, session, t.taskId!)).cleared;
-  vscode.window.showInformationMessage(
-    cleared
-      ? `Cleared ${cleared} resolved edit(s) across ${settled.length} completed task(s).`
-      : 'No resolved edits to clear.'
+  // SPAWNED, not read in-process. A cached read is only cheap when the cache HITS, and this map's stamp
+  // includes every edited file's mtime — so one save invalidates it and the "read" becomes a full
+  // rebuild on the extension host: measured at 4.7 s and 1.1 GB on a 7,912-edit session, with the UI
+  // frozen throughout. The Overview learned this already and spawns for exactly the same reason; a
+  // subprocess blocks nothing, and this verb is rare enough that a few seconds of progress is fine.
+  void vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: 'Claude Observatory: finding completed tasks…' },
+    () =>
+      new Promise<void>((resolve) => {
+        spawnCliJson(['changemap', '--json', '--root', cwd, '--session', session], cwd, (data) => {
+          const map = data as { rollupByTask?: { taskId: string | null; edits: number; pending: number; undone: number }[] } | null;
+          const rolls = map?.rollupByTask;
+          if (!Array.isArray(rolls)) {
+            vscode.window.showWarningMessage('Could not read this session’s tasks — the claude-observatory CLI did not answer.');
+            resolve();
+            return;
+          }
+          const settled = rolls.filter((t) => t.taskId !== null && t.edits > 0 && t.pending === 0 && t.undone === 0);
+          if (settled.length === 0) {
+            vscode.window.showInformationMessage('No completed tasks to clear.');
+            resolve();
+            return;
+          }
+          // The clear itself is a store write over an explicit id set — cheap, and safe in-process.
+          let cleared = 0;
+          for (const t of settled) cleared += core.clearResolvedIds(session, core.taskEditIds(cwd, session, t.taskId!)).cleared;
+          vscode.window.showInformationMessage(
+            cleared
+              ? `Cleared ${cleared} resolved edit(s) across ${settled.length} completed task(s).`
+              : 'No resolved edits to clear.'
+          );
+          void vscode.commands.executeCommand('claudeObservatory.refresh');
+          resolve();
+        });
+      })
   );
 }
 
@@ -1267,7 +1385,7 @@ function placementsFor(session: string, file: string, text: string): Placement[]
   return recs.map((rec, i) => ({ rec, lines: placed[i].lines, removed: placed[i].removed }));
 }
 
-/** placementsFor memoized per (buffer content, log state) — decorations, CodeLens, and hovers all ask
+/** placementsFor memoized per (buffer content, the file's own pending chain) — decorations, CodeLens, and hovers all ask
  *  for the same placements in the same tick, and a keystroke burst that ends where it started (undo,
  *  format-on-save round-trip) hits instead of re-diffing.
  *
@@ -1283,12 +1401,23 @@ function docContentKey(doc: vscode.TextDocument): string {
   for (let i = 0; i < t.length; i++) h = ((h * 33) ^ t.charCodeAt(i)) >>> 0; // djb2-xor, unsigned
   return `${t.length}:${h.toString(36)}`;
 }
+/** Wall-clock of the last real locate per file — feeds the adaptive keystroke debounce below. */
+const placementCostMs = new Map<string, number>();
 function cachedPlacements(session: string, doc: vscode.TextDocument): Placement[] {
   const file = doc.uri.fsPath;
-  const key = `${docContentKey(doc)}:${fileKey(logPath(session))}`;
+  // Keyed on the buffer content + THIS FILE's pending chain (ids + blob shas + count), NOT the whole
+  // session log: with the log stamp in the key, a keep click in any file re-diffed every open file —
+  // measured at ~353ms per hot file per click, for placements that could not have moved. The chain is
+  // exactly what the placement is a function of (same identity core's locateCached uses), so a record
+  // leaving pending re-diffs only the file it left.
+  const recs = pendingByFile(session).get(file) ?? [];
+  const chain = recs.map((r) => `${r.id}:${r.beforeBlob ?? '-'}:${r.afterBlob ?? '-'}`).join(',');
+  const key = `${docContentKey(doc)}:${recs.length}:${chain}`;
   const hit = placementsCache.get(file);
   if (hit && hit.key === key) return hit.p;
+  const t0 = Date.now();
   const p = placementsFor(session, file, doc.getText());
+  placementCostMs.set(file, Date.now() - t0);
   if (placementsCache.size >= 50) placementsCache.delete(placementsCache.keys().next().value!);
   placementsCache.set(file, { key, p });
   return p;
@@ -2099,7 +2228,7 @@ function combinedShell(): string {
     `<div class="usagesec" id="usage-sec">` +
     `<div class="uhead" title="Plan usage: the context window (live from the transcript) plus your 5-hour and weekly limits (from Claude’s status line)">Usage</div>` +
     ['ctx', '5h', 'wk']
-      .map((l) => `<div class="row" title="${usageTips[l]}"><span class="lbl">${l}</span><span class="track"><span class="fill" id="uf-${l}"></span></span><span class="pct" id="up-${l}">—</span><span class="sub" id="us-${l}"></span></div>`)
+      .map((l) => `<div class="row" title="${usageTips[l]}"><span class="lbl" id="ul-${l}">${l}</span><span class="track"><span class="fill" id="uf-${l}"></span></span><span class="pct" id="up-${l}">—</span><span class="sub" id="us-${l}"></span></div>`)
       .join('') +
     `<div id="uhint" class="empty" style="display:none">5h / week plan usage needs <b>claude-statusline</b> writing on this host.<br><span class="dim">run <b>claude-observatory statusline</b> (bundled — no download), then start a Claude session.</span></div>` +
     `</div>` +
@@ -2130,6 +2259,10 @@ function combinedShell(): string {
     function ucolor(p){ if(p>=80)return 'var(--vscode-charts-red,#e5534b)'; if(p>=50)return 'var(--vscode-charts-yellow,#d9a441)'; return 'var(--vscode-charts-green,#3fb950)'; }
     function until(ms){ if(ms==null)return ''; var d=ms-Date.now(); if(!isFinite(d)||d<=0)return ''; var mins=Math.round(d/60000),h=Math.floor(mins/60); if(h>=24)return Math.floor(h/24)+'d'+(h%24)+'h'; return h>0? h+'h'+(mins%60)+'m' : (mins%60)+'m'; }
     function setRow(l,pct,sub){ var f=document.getElementById('uf-'+l),p=document.getElementById('up-'+l),s=document.getElementById('us-'+l); if(pct==null){ f.style.width='0'; p.textContent='—'; p.style.color=''; s.textContent=''; return; } var c=ucolor(pct); f.style.width=Math.max(2,Math.min(100,pct))+'%'; f.style.background=c; p.textContent=Math.round(pct)+'%'; p.style.color=c; s.textContent=sub||''; }
+    // A row that reports a MEASUREMENT, not a quota: no bar, no percentage, just the number and where it
+    // came from. Used when the plan has no rolling windows to draw.
+    function setMeasuredRow(l,label,tok,note){ var f=document.getElementById('uf-'+l),p=document.getElementById('up-'+l),s=document.getElementById('us-'+l),lb=document.getElementById('ul-'+l);
+      if(lb) lb.textContent=label; f.style.width='0'; p.textContent=human(tok); p.style.color=''; s.textContent=note||''; }
     var STALE_MS = ${core.USAGE_STALE_MS};
     var LASTU = null;
     function ago(ms){ var m=Math.round(ms/60000); if(m<60)return m+'m'; var h=Math.floor(m/60); if(h<24)return h+'h'+(m%60? (m%60)+'m':''); return Math.floor(h/24)+'d'; }
@@ -2145,6 +2278,27 @@ function combinedShell(): string {
       // below that we can only show the tokens used so far.
       function usedOfTotal(tok,pct){ if(!tok) return ''; return (pct>0.5)? '~'+human(tok)+'/'+human(Math.round(tok/pct*100)) : '~'+human(tok); }
       setRow('ctx', u.ctx? u.ctx.pct : null, u.ctx? (human(u.ctx.tokens)+'/'+human(u.ctx.size)) : '');
+      // Claude Code sends rate_limits.* only for Claude.ai subscription plans. On Enterprise or an API
+      // key these two bars can never fill, and an empty bar reads as "none of your quota used" rather
+      // than "this plan has no rolling quota". Show what this machine CAN measure instead. No percentage
+      // is drawn, deliberately: there is no denominator, and inventing one would be a confident guess.
+      if(u.rollingLimits===false){
+        // The label travels with the number: the status line measures 5h/7d, the local fallback 24h/7d,
+        // and drawing one under the other would misreport the window it was measured over.
+        var lw=u.localWindows||[];
+        var slots=['5h','wk'];
+        for(var wi=0;wi<slots.length;wi++){
+          var w=lw[wi];
+          setMeasuredRow(slots[wi], w?w.label:'—', w?w.tokens:0,
+            wi===0 ? 'tokens, measured from this machine' : 'no rolling limit on this plan');
+        }
+        if(hint) hint.style.display='none';   // nothing to install: the status line is not the gap here
+        if(stale) stale.style.display='none'; // and there is no cached percentage to go stale
+        return;
+      }
+      // Restore the quota labels: an account can start reporting limits between refreshes.
+      var l5=document.getElementById('ul-5h'), lw2=document.getElementById('ul-wk');
+      if(l5) l5.textContent='5h'; if(lw2) lw2.textContent='wk';
       setRow('5h', u.fiveHourPct, [until(u.fiveReset), usedOfTotal(u.fiveTokens,u.fiveHourPct), mark].filter(Boolean).join(' · '));
       setRow('wk', u.weekPct, [until(u.weekReset), usedOfTotal(u.weekTokens,u.weekPct), mark].filter(Boolean).join(' · '));
       // Only nudge when the statusline cache is truly absent — not on a fresh session whose rate_limits
@@ -2412,12 +2566,16 @@ function changeMapShell(): string {
        does: below the breakpoint each axis takes a line and breaks between its own buttons. */
     .ov-navgrp { display:flex; flex:1 1 100%; }
     .ov-nbsep { display:none; }
-    /* The row's stats are a summary of what the name already identifies — the first thing to go. */
+    /* The row's stats are a summary of what the name already identifies — the first thing to go.
+       Session rows shed their badges in cost order (what it ran on, then what it cost, then the diff)
+       and keep "how long ago / reviewing" longest: that is the one fact the name cannot carry. */
     .mt-trow .mt-tct + .mt-tct { display:none; }
+    .mt-trow .mt-schip { display:none; }
   }
   @media (max-width: 460px) {
     .ov-navtabs { gap:2px; }
     .ov-tab { padding:3px 6px; font-size:10.5px; }
+    .mt-trow .mt-meta, .mt-trow .mt-diff { display:none; }
     .mt-trow .mt-tct { display:none; }                   /* name and status only */
     .ov-desc { display:none; }                           /* the pane's one-line description */
     .cm-caption { font-size:9px; margin-bottom:1px; }
@@ -2493,6 +2651,10 @@ function changeMapShell(): string {
      outside-the-workspace and high-risk on this panel, and a third meaning would dilute both. */
   .mt-scope { font-size:9.5px; line-height:1.35; color: var(--vscode-descriptionForeground); border-left:2px solid var(--cm-border); padding:2px 0 2px 6px; margin-bottom:5px; }
   /* Tasks tab — the session's numbered task list */
+  /* model · effort on a session row (0.9.0) — a quiet chip, not a status: it never means anything is wrong */
+  .mt-resolve { flex:none; font-size:9px; background:transparent; border:1px solid var(--cm-border); border-radius:3px; color: var(--vscode-descriptionForeground); padding:0 5px; margin-left:4px; cursor:pointer; }
+  .mt-resolve:hover { color: var(--vscode-foreground); border-color: var(--vscode-focusBorder); }
+  .mt-schip { flex:none; font-family: var(--cm-mono); font-size:9px; color: var(--vscode-descriptionForeground); border:1px solid var(--cm-border); border-radius:3px; padding:0 4px; white-space:nowrap; }
   .mt-trow { display:flex; align-items:baseline; gap:7px; font-size:11px; padding:2px 2px; border-radius:3px; }
   .mt-trow .mt-tg { flex:none; }
   .mt-trow[data-feed] { cursor:pointer; }
@@ -2522,6 +2684,11 @@ function changeMapShell(): string {
   .mt-ttog:hover { color: var(--vscode-foreground); }
   .mt-trow .mt-tdep { flex:none; color: var(--mt-attn); font-size:10px; }
   .mt-none { padding:10px 2px; color: var(--vscode-descriptionForeground); font-size:11px; }
+  /* folded group (0.9.0): week-old conversations, collapsed and not rebuilt */
+  .mt-foldhdr { cursor:pointer; user-select:none; margin:6px 0 3px; padding:3px 4px; border-top:1px solid var(--vscode-panel-border); font-family: var(--cm-mono); font-size:9.5px; color: var(--vscode-descriptionForeground); }
+  .mt-foldhdr:hover { color: var(--vscode-foreground); }
+  .mt-agent.folded { opacity:.72; }
+  .mt-unloaded { font-family: var(--cm-mono); font-size:9px; color: var(--vscode-descriptionForeground); font-style:italic; margin-left:6px; }
   /* Processes tab — one row per background shell (run_in_background). No pid column: the transcript
      records no OS pid, so the harness's shell id is the identity. */
   .mt-folded { color: var(--vscode-descriptionForeground); }
@@ -2836,12 +3003,20 @@ class FileHistoryProvider implements vscode.TreeDataProvider<EditNode> {
 
 /** Spawn one CLI subcommand, parse its stdout as JSON, and hand the result (or null on any failure) to
  *  `cb` exactly once. Windows: the .cmd shim needs a shell. Shared by every panel that shells out. */
+/** Hard ceiling on any CLI child. The Overview's refresh gate (`running`) is cleared in its done()
+ *  callback — with no timeout, one child that hangs without exiting (a wedged filesystem, a debugger
+ *  stop, an NFS stall) left `running` set forever and every later refresh silently dropped, until the
+ *  window was reloaded. Generous on purpose: the slowest legitimate spawn measured is a cold-cold
+ *  rebuild at ~16s; 120s only ever fires on a child that was never coming back. */
+const CLI_SPAWN_TIMEOUT_MS = 120_000;
 function spawnCliJson(args: string[], cwd: string, cb: (data: unknown | null) => void): void {
   let child: cp.ChildProcess;
   let fired = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   const once = (data: unknown | null) => {
     if (fired) return;
     fired = true;
+    if (timer) clearTimeout(timer);
     cb(data);
   };
   try {
@@ -2852,6 +3027,14 @@ function spawnCliJson(args: string[], cwd: string, cb: (data: unknown | null) =>
     once(null);
     return;
   }
+  timer = setTimeout(() => {
+    try {
+      child.kill();
+    } catch {
+      /* already gone */
+    }
+    once(null); // callers treat null as "this refresh failed" and clear their gates
+  }, CLI_SPAWN_TIMEOUT_MS);
   let out = '';
   child.stdout?.on('data', (d) => (out += d));
   child.on('error', () => once(null));
@@ -3454,7 +3637,11 @@ class StatsUsageViewProvider implements vscode.WebviewViewProvider {
   private postCounts(): void {
     if (!this.view) return;
     const session = currentSession();
-    const log = session ? cachedLog(session) : [];
+    // DISPLAY units, like every other surface. This read raw records while the Sessions rows, the
+    // Overview summary and sessionMetrics all collapsed same-code chains, so one window showed 2,800
+    // pending in the Stats panel and 1,855 for the same session two panels away. reviewEdits is ~120ms
+    // cold on that session and ~1ms after, so the scoreboard can still ride every store change.
+    const log = session ? core.reviewEdits(session) : [];
     const c = {
       pending: log.filter((r) => r.status === 'pending').length,
       kept: log.filter((r) => r.status === 'kept').length,
@@ -3562,8 +3749,19 @@ interface NavPos {
   // AGENT saw it (a file, a folder); this one slices it the way the person asked for it.
   prompt: { i: number; n: number; id: string; index: number; title: string; files: number; edits: number } | null;
 }
+/**
+ * What the Overview needs from whatever is hosting it. A `WebviewView` (the bottom panel) and a
+ * `WebviewPanel` (an editor tab) both satisfy this, and the provider touches nothing else — which is
+ * what lets the same renderer live in either place without a second copy of it.
+ */
+type OverviewHost = { readonly webview: vscode.Webview; readonly visible: boolean };
+
 class ChangeMapViewProvider implements vscode.WebviewViewProvider {
-  private view?: vscode.WebviewView;
+  /** The host currently DRIVING refreshes. Exactly one, ever: an editor tab wins while it is open, and
+   *  the panel view takes over again when it closes. Two hosts both ticking would double every spawn. */
+  private view?: OverviewHost;
+  private panelView?: vscode.WebviewView;
+  private editorPanel?: vscode.WebviewPanel;
   private run = 0;
   private running = false;
   private everLoaded = false;
@@ -3591,6 +3789,10 @@ class ChangeMapViewProvider implements vscode.WebviewViewProvider {
   private feedSkipTicks = 0;
   /** The ask picked in the Prompts window — this panel filters everything it draws to that prompt. */
   private promptId: string | null = null;
+  /** The picked ask, for the nav bar's Prompt axis — the pick outranks the edit anchor there. */
+  getPrompt(): string | null {
+    return this.promptId;
+  }
   setPrompt(id: string | null): void {
     this.promptId = id;
     // Push it now (a click must feel like a click); the next refresh carries it again for a panel that
@@ -3615,10 +3817,24 @@ class ChangeMapViewProvider implements vscode.WebviewViewProvider {
     this.view?.webview.postMessage({ type: 'showall', on });
   }
   resolveWebviewView(view: vscode.WebviewView): void {
-    this.view = view;
-    view.webview.options = { enableScripts: true };
-    view.webview.html = changeMapShell(); // set once; data arrives via postMessage (no reload flash)
-    view.webview.onDidReceiveMessage((m: { type?: string; id?: number | string; kind?: string; taskId?: string; promptId?: string; folder?: string; ref?: core.ChatContextRef }) => {
+    this.panelView = view;
+    if (!this.editorPanel) this.view = view; // an open editor tab keeps the wheel
+    this.wire(view);
+    view.onDidChangeVisibility(() => {
+      if (view.visible && this.view === view) this.refresh(true);
+    });
+  }
+
+  /** Give a host the shell and the message wiring. Shared so an editor tab is the SAME Overview, not a
+   *  second implementation that drifts. */
+  private wire(host: OverviewHost): void {
+    host.webview.options = { enableScripts: true };
+    host.webview.html = changeMapShell(); // set once; data arrives via postMessage (no reload flash)
+    // A host that is NOT driving never receives a payload, so it would sit on "Reading sessions…"
+    // forever with no explanation. Say where the Overview went instead of looking broken.
+    if (this.editorPanel && host !== this.editorPanel)
+      setTimeout(() => host.webview.postMessage({ type: 'elsewhere', where: 'editor' }), 0);
+    host.webview.onDidReceiveMessage((m: { type?: string; id?: number | string; kind?: string; taskId?: string; promptId?: string; folder?: string; ref?: core.ChatContextRef; session?: string; name?: string; pending?: string | number }) => {
       if (!m) return;
       if (m.type === 'ready') this.refresh(true);
       // The feed pane names the row it wants followed (or nothing, to stop). Fetched now, and again on
@@ -3633,6 +3849,52 @@ class ChangeMapViewProvider implements vscode.WebviewViewProvider {
         void vscode.commands.executeCommand('claudeObservatory.showObservation', m.id);
       else if (m.type === 'chatAction' && m.ref)
         void vscode.commands.executeCommand('claudeObservatory.chatAction', m.ref);
+      // Resolve one session from its own row: accept what is pending, then drop its records. Confirmed,
+      // because clearing the records is not undoable — the accept itself changes no file on disk.
+      else if (m.type === 'resolveSession' && typeof m.session === 'string') {
+        const sess = m.session;
+        const nm = typeof m.name === 'string' && m.name ? m.name : sess.slice(0, 8);
+        const pend = Number(m.pending) || 0;
+        void (async () => {
+          const ok = await vscode.window.showWarningMessage(
+            `Resolve “${nm}”?`,
+            {
+              modal: true,
+              detail:
+                `Accepts its ${pend} pending edit(s), then clears this session's review records.\n\n` +
+                `Accepting changes NO file on disk — it records a verdict. Clearing the records cannot be undone, ` +
+                `and the session itself is kept.`,
+            },
+            'Resolve session'
+          );
+          if (ok !== 'Resolve session') return;
+          // Validated like every other bulk verb. resolveSession is the MOST destructive of them — it
+          // accepts everything then drops the records — so it gets the same rails, not fewer, even
+          // though the only sender today is this workspace's own Sessions list.
+          const target = bulkSession(sess);
+          if (!target || target !== sess) {
+            vscode.window.showWarningMessage('That session is not one of this workspace’s — nothing was changed.');
+            return;
+          }
+          // Spawned: resolveSession = accept-everything + rewrite-the-log, measured ~0.8s at 8k
+          // records — in-process it froze the host right after the user confirmed. `resolve` is the
+          // same core call behind the CLI seam.
+          void vscode.window.withProgress(
+            { location: vscode.ProgressLocation.Notification, title: `Resolving ${nm}…` },
+            () =>
+              new Promise<void>((fin) => {
+                spawnCliJson(['resolve', '--session', target, '--json'], workspaceRoot() ?? process.cwd(), (data) => {
+                  const r = data as { accepted?: number; cleared?: number } | null;
+                  if (r && typeof r.accepted === 'number')
+                    vscode.window.showInformationMessage(`Resolved ${nm} — accepted ${r.accepted} edit(s), cleared ${r.cleared ?? 0} record(s).`);
+                  else vscode.window.showErrorMessage(`Could not resolve ${nm} — is the claude-observatory CLI installed?`);
+                  void vscode.commands.executeCommand('claudeObservatory.refresh');
+                  fin();
+                });
+              })
+          );
+        })();
+      }
       // Task review actions from the Tasks tab's per-row chips (strict edit sets).
       else if (m.type === 'taskKeep' && typeof m.taskId === 'string')
         void vscode.commands.executeCommand('claudeObservatory.taskKeep', m.taskId);
@@ -3661,12 +3923,15 @@ class ChangeMapViewProvider implements vscode.WebviewViewProvider {
       // other tab, which only re-slices the detail).
       else if (m.type === 'switchToSession' && typeof m.id === 'string')
         void vscode.commands.executeCommand('claudeObservatory.pinSession', m.id);
+      // The webview names the session these act on (a selected Fleet row, else the reviewed one). Passing
+      // it explicitly is what stops "Accept All" from accepting a different session than the toolbar is
+      // labelled with — the same defect class as a badge that counts a list its pane is not showing.
       else if (m.type === 'keepAll')
-        void vscode.commands.executeCommand('claudeObservatory.keepAll');
+        void vscode.commands.executeCommand('claudeObservatory.keepAll', m.session);
       else if (m.type === 'undoAll')
-        void vscode.commands.executeCommand('claudeObservatory.undoAll');
+        void vscode.commands.executeCommand('claudeObservatory.undoAll', m.session);
       else if (m.type === 'clearResolved')
-        void vscode.commands.executeCommand('claudeObservatory.clearResolved');
+        void vscode.commands.executeCommand('claudeObservatory.clearResolved', m.session);
       else if (m.type === 'refresh')
         void vscode.commands.executeCommand('claudeObservatory.refresh');
       // Step-through review nav bar (mirrors the status-bar nav bar) — passthrough to the existing commands.
@@ -3693,12 +3958,82 @@ class ChangeMapViewProvider implements vscode.WebviewViewProvider {
       else if (m.type === 'toggleHeatmap') void vscode.commands.executeCommand('claudeObservatory.toggleHeatmap');
       else if (m.type === 'searchEdits') void vscode.commands.executeCommand('claudeObservatory.searchEdits');
     });
-    view.onDidChangeVisibility(() => {
-      if (view.visible) this.refresh(true);
+  }
+
+  /**
+   * Open (or reveal) the Overview as an EDITOR TAB, and hand it the wheel.
+   *
+   * The bottom panel stays the default; this is for readers who want the Overview beside their code at
+   * full height. While the tab is open it drives the refresh and the panel view goes quiet — one host
+   * ticking, never two — and closing it hands control back.
+   */
+  openInEditor(): void {
+    if (this.editorPanel) {
+      this.editorPanel.reveal();
+      return;
+    }
+    const panel = vscode.window.createWebviewPanel(
+      'claudeObservatory.overviewEditor',
+      'Claude Observatory — Overview',
+      vscode.ViewColumn.Beside,
+      { enableScripts: true, retainContextWhenHidden: true }
+    );
+    this.editorPanel = panel;
+    this.view = panel;
+    this.wire(panel);
+    // The panel view is usually resolved FIRST (the reader opens the tab from it), so wire() already ran
+    // on it back when there was no editorPanel to notice — it would never be told, and would sit on its
+    // last-painted counts forever. Tell it now; the notice lifts when its next payload arrives.
+    this.panelView?.webview.postMessage({ type: 'elsewhere', where: 'editor' });
+    panel.onDidChangeViewState(() => {
+      if (panel.visible && this.view === panel) this.refresh(true);
     });
+    panel.onDidDispose(() => {
+      this.editorPanel = undefined;
+      this.view = this.panelView; // the panel view takes the wheel back
+      if (this.panelView) this.refresh(true);
+      // …and if there is no panel view to take it — `overviewLocation: "editor"` on a fresh window, where
+      // the dock was never opened — closing the tab would otherwise leave the Overview with no host at
+      // all, silently, until the reader found the palette. Reveal the dock instead.
+      else void vscode.commands.executeCommand('claudeObservatory.changemap.focus');
+    });
+    this.refresh(true);
   }
   /** Spawn one CLI subcommand, parse its stdout as JSON, and hand the result (or null on any failure)
    *  to `cb` exactly once. See `spawnCliJson` — this panel's spawns all go through it. */
+  /** When this workspace's recent sessions were last pre-built, so an idle panel does not loop on it. */
+  private warmedAt = 0;
+
+  /**
+   * Pre-build the change maps of sessions active in the last day, detached, after a refresh has landed.
+   *
+   * Switching to a session nothing had built was measured at 6.2 s against 1.5 s once its caches existed,
+   * and nothing built a session until you switched to it — so that cost fell on the reader every time.
+   * This spends idle time instead. Detached and unwatched: it must never delay the panel that triggered
+   * it, and a failure here costs a slow switch, not a broken view.
+   */
+  private warmRecent(cwd: string): void {
+    const now = Date.now();
+    if (now - this.warmedAt < 10 * 60_000) return; // at most once every ten minutes
+    this.warmedAt = now;
+    try {
+      const bin = resolveObservatoryBin();
+      const winShell = process.platform === 'win32';
+      const child = cp.spawn(winShell ? `"${bin}"` : bin, ['warm', '--root', cwd, '--since', '24h'], {
+        cwd,
+        stdio: 'ignore',
+        detached: true,
+        shell: winShell,
+      });
+      child.on('error', () => {
+        /* no CLI on PATH — switching stays slow, which is the pre-0.9.0 behaviour, not a failure */
+      });
+      child.unref();
+    } catch {
+      /* best-effort by construction */
+    }
+  }
+
   private spawnJson(args: string[], cwd: string, cb: (data: unknown | null) => void): void {
     spawnCliJson(args, cwd, cb);
   }
@@ -3848,6 +4183,7 @@ class ChangeMapViewProvider implements vscode.WebviewViewProvider {
         // body — three `sessionMeta` reads and three ~1.7 MB postMessages per tick, inside the very
         // change whose point was to cut per-tick cost.
         done();
+        this.warmRecent(cwd);
       }
     );
     // (No `prompts --json` spawn here since 0.8.7: the Prompts WINDOW fetches the list itself, and the
@@ -4004,6 +4340,11 @@ const OVERVIEW_SCRIPT = `
   // Active-only defaults ON (0.8.8) and persists across hide/show via the webview state API.
   var WVSTATE=(vscode.getState&&vscode.getState())||{};
   var ACTIVE_ONLY=(WVSTATE.activeOnly!==undefined)?!!WVSTATE.activeOnly:true, DISMISS_AG={}, DISMISS_WF={}, DISMISS_PR={};
+  // Week-old conversations start collapsed (0.9.0). Not persisted: "expanded" is a look-at-this-now
+  // intent, and restoring it across reloads would quietly re-enter the state the fold exists to avoid.
+  var SHOW_FOLDED=false;
+  // Older sessions in the Sessions tab, same rule as the fleet fold: collapsed by default, not persisted.
+  var SHOW_OLDSESS=false;
   // The reader's own Active-only value, parked while the guided tour runs. null = no tour is holding it.
   var TOUR_FILTER=null;
   /** The nav tab the reader was on before the tour moved them. null = no tour is holding it. */
@@ -4339,17 +4680,36 @@ const OVERVIEW_SCRIPT = `
         h+='<div class="mt-scope" title="Filtered to prompt #'+rqf.index+' — ‘'+esc(rqf.text||rqf.title)+'’. A sibling worktree’s session is its own conversation; only subagents this prompt spawned belong to it.">'+
           esc(bits.join(' · '))+' hidden — not started by prompt #'+rqf.index+'</div>'; }
     }
-    for(var i=0;i<vis.length;i++){ var a=vis[i]; var col=agentCollisions(a); var sel=(a.session===selAgentSess());
-      h+='<div class="mt-agent'+(sel?' sel':'')+'" data-sess="'+esc(a.session)+'" data-wt="'+esc(a.worktree||'')+'">';
+    // FOLDED (0.9.0): conversations older than a week sink into a collapsed group. The Overview stopped
+    // rebuilding their change maps on every refresh — 24 of 33 sibling sessions in a mature repo — so a
+    // folded row often has no numbers to show. That is loaded:false, and it is NOT the same as zero.
+    // (No backticks in this region: it is inside the webview template literal, which they would close.)
+    var live=[], old=[];
+    for(var pi=0;pi<vis.length;pi++) (vis[pi].folded?old:live).push(vis[pi]);
+    var rows0=live.concat(old);
+    for(var i=0;i<rows0.length;i++){ var a=rows0[i];
+      if(old.length && i===live.length){
+        h+='<div class="mt-foldhdr" title="Conversations that have been quiet for over a week. They are not rebuilt on refresh — expanding one is what asks for it.">'+
+          (SHOW_FOLDED?'▾ ':'▸ ')+old.length+' older session'+(old.length===1?'':'s')+'</div>';
+        if(!SHOW_FOLDED) break;
+      }
+      var col=agentCollisions(a); var sel=(a.session===selAgentSess());
+      h+='<div class="mt-agent'+(sel?' sel':'')+(a.folded?' folded':'')+'" data-sess="'+esc(a.session)+'" data-wt="'+esc(a.worktree||'')+'">';
       h+='<div class="mt-arow">';
       h+='<span class="mt-badge" style="background:'+phaseColor(a.phase)+'"'+(a.phaseConfidence==='heuristic'?' title="inferred from inactivity — no structural marker for this state">~':'>')+esc(phaseLabel(a.phase))+'</span>';
       h+='<span class="mt-wt">'+esc(base(a.worktree))+(a.self?'<span class="mt-self">self</span>':'')+(a.gitBranch?'<span class="mt-br">⑂'+esc(a.gitBranch)+'</span>':'')+'</span>';
+      if(a.loaded===false){
+        // Never draw +0/−0/0 tok for a map nobody built — that reads as "this session did nothing".
+        // No apostrophe in this title: the TS template literal would unescape it and break the JS string.
+        h+='<span class="mt-unloaded" title="Folded — the change map for this session was not rebuilt, so there are no numbers to show. Open it from the Sessions tab to build one.">not loaded</span>';
+      } else {
       h+=spark(a.sparkline);
       h+='<span class="mt-diff"><span class="mt-add">+'+((a.diff&&a.diff.added)||0)+'</span> <span class="mt-rem">−'+((a.diff&&a.diff.removed)||0)+'</span></span>';
       h+='<span class="mt-meta">'+fmtTok(a.tokens)+' tok · '+fmtDur(a.durationMs)+'</span>';
       var rc=riskCount(a.risk); if(rc) h+='<span class="mt-risk"'+(riskHigh(a.risk)?' data-high="1"':'')+' title="'+rc+' risk flag(s)">⚠ '+rc+'</span>';
       if(col) h+='<span class="mt-col" title="'+col+' file(s) also touched by another agent">⇄ '+col+'</span>';
       h+=outsideSuffix(a);
+      }
       h+='</div>';
       var subs=a.subagents||[];
       for(var k=0;k<subs.length;k++){ var su=subs[k];
@@ -4368,6 +4728,8 @@ const OVERVIEW_SCRIPT = `
     }
     if(!vis.length) h+='<div class="mt-none">'+(rqf?('Prompt #'+rqf.index+' started no agent of its own — clear the scope to see the fleet.'):(ACTIVE_ONLY?'No active agents.':'No agents to show.'))+'</div>';
     host.innerHTML=h; wireFilterBar(host);
+    var fh=host.querySelector('.mt-foldhdr');
+    if(fh) fh.addEventListener('click', function(){ SHOW_FOLDED=!SHOW_FOLDED; renderFleet(); });
     // Live conflicts moved to the Actions panel (0.8.3) — the audit surface owns them now.
     var rows=host.querySelectorAll('.mt-agent');
     // Selecting a fleet row picks its change-map slice AND follows what that session is doing. A sibling
@@ -4587,22 +4949,67 @@ const OVERVIEW_SCRIPT = `
     var elsewhere=(under&&SESS)?'<div class="mt-scope" title="The pinned session is not one of this workspace’s — the panels are showing it anyway. Pick a row to review a session from here instead.">reviewing '+esc(String(under).slice(0,8))+' — recorded for another workspace</div>':'';
     if(!rows.length){ host.innerHTML=(SESS?elsewhere+auto:'')+'<div class="mt-none">'+(SESS?'No sessions for this workspace yet.':'Reading sessions…')+'</div>'; return; }
     var h=auto;
+    // A DAY by default (0.9.0). The list had grown to every session ever recorded here — 34 rows back to
+    // 20 days — and the ones you actually switch between are from today. Older rows collapse behind one
+    // header, and FINISHED ones (nothing left to review) do not come back even when it is expanded:
+    // they are what Clear completed exists to remove, not something to scroll past.
+    var DAY=86400000, now=Date.now();
+    var recent=[], older=[], settled=0;
+    for(var q=0;q<rows.length;q++){ var rw=rows[q];
+      var mineQ=(String(rw.id)===String(under));
+      // The session you are REVIEWING always shows, however old — you pinned it on purpose.
+      if(mineQ || rw.current || (now-rw.lastActiveMs)<=DAY){ recent.push(rw); continue; }
+      if(!rw.pending){ settled++; continue; } // finished and old — clearable, not worth a row
+      older.push(rw);
+    }
+    // ALWAYS concat — the fleet fold's shape. The old SHOW_OLDSESS-gated concat meant the loop never reached
+    // i===recent.length while collapsed, so the "▸ N older" header (the only way to OPEN the fold) was
+    // never rendered: collapsed was the default and the rows behind it were unreachable from this pane
+    // while the badge advertised them. The break below is what hides the rows when collapsed.
+    var rows0=recent.concat(older);
     // Two different facts, two different marks: the DOT says which session is live (the one still being
     // written), the HIGHLIGHT says which one you are reviewing. They are usually the same row and
     // sometimes not — conflating them told you the wrong thing exactly when it mattered.
-    for(var i=0;i<rows.length;i++){ var r=rows[i];
+    for(var i=0;i<rows0.length;i++){ var r=rows0[i];
+      if(older.length && i===recent.length){
+        h+='<div class="mt-foldhdr" data-oldsess="1" title="Sessions older than a day that still have edits awaiting review. Finished ones are not listed — use Clear completed to remove them.">'+
+          (SHOW_OLDSESS?'▾ ':'▸ ')+older.length+' older with pending edits</div>';
+        if(!SHOW_OLDSESS) break;
+      }
       var name=r.title||('session '+String(r.id).slice(0,8));
       var mine=(String(r.id)===String(under)); if(mine) seen=true;
-      // Same shape a fleet row uses: what it did, then how long ago. An untouched session says so with
-      // a dash rather than a row of zeros.
-      var stats=r.edits? (r.edits+'e'+(r.files? ' · '+r.files+'f' : '')+
-        (r.pending? ' · <span class="mt-pend">'+r.pending+'⧗</span>' : ' · <span class="mt-done">✓</span>')) : 'no edits';
+      // The same badge set a FLEET row carries (0.9.0), in the same order and the same classes: what it
+      // changed, what it cost, and what it ran on. A session that changed nothing shows no diff rather
+      // than +0 −0 — but still shows its tokens, because asking and reading is work the row should own.
+      var diff=(r.added||r.removed)
+        ? '<span class="mt-diff"><span class="mt-add">+'+(r.added||0)+'</span> <span class="mt-rem">−'+(r.removed||0)+'</span></span>' : '';
+      // No "Ne · Nf" (edits · files): the ± lines beside it already say how much this session changed,
+      // and two more bare counts in the same row read as noise rather than as information.
+      var bits=[];
+      if(r.pending) bits.push('<span class="mt-pend">'+r.pending+' pending</span>');
+      else if(r.edits) bits.push('<span class="mt-done">✓</span>');
+      if(r.tokens) bits.push(fmtTok(r.tokens)+' tok');
+      if(r.durationMs) bits.push(fmtDur(r.durationMs));
+      if(!r.edits && !r.tokens) bits.push('no edits');
+      var meta=bits.length? '<span class="mt-meta">'+bits.join(' · ')+'</span>' : '';
+      // Model and effort are structural facts the harness records. An unknown one is left OUT, never
+      // guessed: the default effort differs by build and model, so a placeholder here would be fiction.
+      var chip=(r.model||r.effort)
+        ? '<span class="mt-schip" title="What this session ran on, as recorded by the harness — never inferred">'+
+          esc(r.model||'')+(r.effort? (r.model?' · ':'')+esc(r.effort)+' effort' : '')+'</span>' : '';
       h+='<div class="mt-trow'+(mine?' sel':'')+'" data-sess-switch="'+esc(r.id)+'" title="'+esc((r.title||r.id)+' — session '+r.id+(r.current?' · live':'')+(mine?' · the session you are reviewing':' · click to review it'))+'">'+
         '<span class="mt-tg">'+(r.current?'●':'○')+'</span>'+
         '<span class="mt-ts">'+esc(name)+'</span>'+
-        '<span class="mt-tct">'+stats+'</span>'+
+        diff+meta+chip+
         '<span class="mt-tct">'+esc(ago(r.lastActiveMs))+(mine?' · reviewing':'')+'</span>'+
+        // Resolve: accept what is left and stop carrying the history. Only offered where there IS
+        // something to resolve, so the row never advertises a no-op.
+        (r.pending? '<button class="mt-resolve" data-resolve="'+esc(r.id)+'" data-name="'+esc(name)+'" data-pending="'+r.pending+'" title="Resolve this session — accept its '+r.pending+' pending edit(s), then clear its records. Files on disk are NOT changed.">resolve</button>' : '')+
         '</div>'; }
+    // Say what is not on screen. A list that silently drops rows is indistinguishable from a store that
+    // never had them, and this one drops the finished ones on purpose.
+    if(settled) h+='<div class="mt-scope" title="Finished sessions older than a day: nothing left to review, so they are not listed. Clean Store → Clear completed sessions removes them from disk.">'+
+      settled+' finished session'+(settled===1?'':'s')+' older than a day not shown — clear them from Clean Store</div>';
     // Pinned to a session this workspace has no row for (another repo's, or one since removed): say so
     // rather than leaving every row unhighlighted with no explanation.
     if(under && !seen) h=elsewhere+h;
@@ -4611,6 +5018,11 @@ const OVERVIEW_SCRIPT = `
     for(var b=0;b<bs.length;b++) bs[b].addEventListener('click', function(){ switchTo(this.getAttribute('data-sess-switch')); });
     var ab=host.querySelector('[data-sess-auto]');
     if(ab) ab.addEventListener('click', function(){ switchTo(''); });
+    var rb=host.querySelectorAll('[data-resolve]');
+    for(var rq=0;rq<rb.length;rq++) rb[rq].addEventListener('click', function(ev){ ev.stopPropagation();
+      vscode.postMessage({type:'resolveSession', session:this.getAttribute('data-resolve'), name:this.getAttribute('data-name'), pending:this.getAttribute('data-pending')}); });
+    var oh=host.querySelector('[data-oldsess]');
+    if(oh) oh.addEventListener('click', function(){ SHOW_OLDSESS=!SHOW_OLDSESS; renderSessions(); });
   }
 
   function renderProcesses(){ var host=document.getElementById('ov-processes'); if(!host) return;
@@ -4730,9 +5142,43 @@ const OVERVIEW_SCRIPT = `
   // The tab badges count what the tab WILL SHOW. Under an ask scope that is the filtered set — a tab
   // reading "Workflows 10" that opens onto "this ask started none" contradicts itself, and the badge is
   // what a reader trusts without opening the tab.
+  // Shown/total, because this pane deliberately hides rows: the last day plus whatever the reader
+  // expanded. "34" over a list of 3 is the same lie the Fleet badge told.
+  function sessionsBadge(){
+    var rows=(SESS&&SESS.sessions)||[], DAY=86400000, now=Date.now(), under=SELF_KEY||'', shown=0;
+    for(var i=0;i<rows.length;i++){ var r=rows[i];
+      if(String(r.id)===String(under) || r.current || (now-r.lastActiveMs)<=DAY) shown++;
+      else if(r.pending && SHOW_OLDSESS) shown++; }
+    return shown===rows.length? String(rows.length) : (shown+'/'+rows.length);
+  }
+  /** True when a fleet row for a session OTHER than the one under review is selected. */
+  function otherAgentSelected(){
+    var s=selAgentSess(); if(!s) return false;
+    var viewing=SELF_KEY? String(SELF_KEY) : selfSession();
+    return String(s)!==String(viewing);
+  }
   function navCounts(){
     var ag=(MT&&MT.agents)||[], wf=(MT&&MT.workflows)||[], ts=(MT&&MT.tasks)||[], r=prSlice();
-    if(!r) return { fleet:ag.length, workflows:wf.length, tasks:ts.length };
+    // The badge counts the rows the pane will actually RENDER — after Active-only and the fold — not
+    // every session ever recorded here. "1/31" read as "1 of 31 agents in this session"; the 31 is every
+    // session in this repo's history, of which one was live and 24 were finished over a week ago. A
+    // count that needs that paragraph to be understood is the wrong count to put on a tab.
+    // Exactly what renderFleet draws: the shared filter, MINUS the rows sitting inside a collapsed
+    // fold. The fold is applied in the renderer rather than in multitaskFilter (which both editors
+    // share and which has no folded clause), so the badge has to subtract it the same way. (No backticks
+    // in this region: it is inside the webview template literal, which they would close.)
+    var visRows=(MTFILTER&&MT)? (MTFILTER(MT, fstate()).agents||[]) : ag;
+    var visN=0;
+    for(var vi=0;vi<visRows.length;vi++) if(!visRows[vi].folded || SHOW_FOLDED) visN++;
+    var fleetLabel=String(visN);
+    // A badge must count THE LIST ITS PANE RENDERS. The Tasks pane renders MT.tasks (every planned task
+    // plus each agent run, for the session under review); the change map's per-agent tasks[] is the
+    // STRICT edit-producing subset, so scoping the badge to it put "Tasks 0" over a pane listing 13.
+    // (No backticks in this region: it is inside the webview template literal, which they would close.)
+    // With a sibling selected the panes still show the reviewed session — its tasks, workflows and
+    // shells are not in this payload — so those badges say nothing rather than describe another session.
+    if(otherAgentSelected()) return { fleet:fleetLabel, workflows:'', tasks:'' };
+    if(!r) return { fleet:fleetLabel, workflows:wf.length, tasks:ts.length };
     var fleet=0;
     for(var i=0;i<ag.length;i++) if(!SELF_KEY || ag[i].session===SELF_KEY) fleet++;
     var runs=0; for(var j=0;j<wf.length;j++) if(has(r.workflowIds, wf[j].id)) runs++;
@@ -4760,11 +5206,11 @@ const OVERVIEW_SCRIPT = `
   function renderNavTabs(){ var c=navCounts();
     var defs=[
       // Sessions leads: which session you are reviewing is the question that precedes every other one.
-      ['sessions','Sessions', SESS&&SESS.sessions? String(SESS.sessions.length) : '',
+      ['sessions','Sessions', SESS&&SESS.sessions? sessionsBadge() : '',
         'Sessions — this workspace’s sessions by conversation recency. Selecting one switches the Overview (and the whole review) to it.', false],
-      ['fleet','Fleet',String(c.fleet),'Fleet — every Claude agent working in this repo’s worktrees; pick one to map just its edits',false],
+      ['fleet','Fleet',String(c.fleet),'Fleet — the agents this pane is showing; pick one to map just its edits. A row is a SESSION recorded for this repo, not a live process, and the badge counts the rows this pane draws under the current filter — so it never implies that every session ever recorded here is running.',false],
       ['workflows','Workflows',String(c.workflows),'Workflows — multi-agent runs (orchestrator + subagents) with their phases and attributed edits',false],
-      ['tasks','Tasks',String(c.tasks),'Tasks — the ACTIVE session’s numbered task list (Claude’s TaskCreate/TaskUpdate plan), with live statuses. Not re-read for a selected sibling agent.',false]];
+      ['tasks','Tasks',String(c.tasks),'Tasks — the REVIEWED session’s numbered task list (Claude’s TaskCreate/TaskUpdate plan), with live statuses. A sibling agent’s tasks are not in this payload, so while one is selected this pane still shows the reviewed session and the badge shows no count rather than another session’s.',false]];
     // The Processes tab is always present: a tab that silently vanishes when the CLI can't answer hides
     // the failure instead of reporting it (the pane itself says which of the three states it is in). The
     // badge is running/total — tinted while a shell is still going, so a live shell is visible from here
@@ -4774,9 +5220,15 @@ const OVERVIEW_SCRIPT = `
     if(psum && rsl){ var ps=(PR.processes||[]), tot=0, run=0;
       for(var p2=0;p2<ps.length;p2++) if(has(rsl.processIds, ps[p2].id)){ tot++; if(ps[p2].running) run++; }
       psum={ running:run, total:tot, failed:0 }; }
-    defs.push(['processes','Processes', psum? (psum.running+'/'+psum.total) : '',
-      'Processes — background shells the ACTIVE session launched with run_in_background: state, runtime and output volume (shell ids are the harness’s own; a transcript records no OS pid). Not re-read for a selected sibling agent.',
-      !!(psum && psum.running>0)]);
+    // Shells are read for the session under review only, and the payload carries none per sibling. With
+    // another agent selected the honest badge is NO badge: showing the reviewed session's count beside a
+    // pane the reader believes is scoped to their selection is the one thing worse than showing nothing.
+    var otherAgent=otherAgentSelected(); // one definition of "a sibling is selected", shared with navCounts
+    defs.push(['processes','Processes', otherAgent? '' : (psum? (psum.running+'/'+psum.total) : ''),
+      otherAgent
+        ? 'Processes — background shells are read for the session under review, never for a selected sibling agent, so no count is shown while one is selected. Open that session from the Sessions tab to see its shells.'
+        : 'Processes — background shells the ACTIVE session launched with run_in_background: state, runtime and output volume (shell ids are the harness’s own; a transcript records no OS pid).',
+      !otherAgent && !!(psum && psum.running>0)]);
     var h=''; for(var i=0;i<defs.length;i++){ var d=defs[i];
       h+='<button class="ov-tab'+(d[0]===NAV?' on':'')+'" data-nav="'+d[0]+'" title="'+esc(d[3])+'">'+d[1]+
         (d[2]!==''?('<span class="ov-tn'+(d[4]?' hot':'')+'"'+(d[4]?' title="a background shell is still running"':'')+'>'+esc(d[2])+'</span>'):'')+'</button>'; }
@@ -4825,7 +5277,22 @@ const OVERVIEW_SCRIPT = `
   }
 
   window.addEventListener('message', function(ev){ var m=ev.data||{};
-    if(m.type==='overview'){ CLI_ERR=false; PINNED=m.pinned||''; setSessLabel(m.session, m.sessionTitle); CM=m.cm||null; MT=m.mt||null; PR=m.pr||null; SESS=m.sessions||SESS; OV_SEEN=true; NAVPOS=m.navPos||null; FILTER=m.filter||'';
+    // This host is not the one driving (the Overview is in an editor tab). It will never receive a
+    // payload, so say so rather than sit on a loading message that will never resolve.
+    if(m.type==='elsewhere'){
+      // An OVERLAY, never innerHTML on .ov-wrap. Replacing the wrap deletes the DOM every render
+      // function draws into, so when this host takes the wheel back its payload arrives and each
+      // renderer bails on the missing node: the panel stays stuck on a message about a tab the reader
+      // already closed, recoverable only by re-resolving the view. The overlay lifts instead.
+      var ovl=document.getElementById('ov-elsewhere');
+      if(!ovl){ ovl=document.createElement('div'); ovl.id='ov-elsewhere';
+        ovl.setAttribute('style','position:fixed;inset:0;z-index:50;padding:14px;overflow:auto;background:var(--vscode-sideBar-background,var(--vscode-editor-background))');
+        document.body.appendChild(ovl); }
+      ovl.innerHTML='<div class="mt-none">The Overview is open in an editor tab, which is driving it.'+
+        '<br><br>Close that tab to bring the Overview back here, or set <b>claudeObservatory.overviewLocation</b> to <b>panel</b>.</div>';
+      return;
+    }
+    if(m.type==='overview'){ var oe=document.getElementById('ov-elsewhere'); if(oe&&oe.parentNode) oe.parentNode.removeChild(oe); CLI_ERR=false; PINNED=m.pinned||''; setSessLabel(m.session, m.sessionTitle); CM=m.cm||null; MT=m.mt||null; PR=m.pr||null; SESS=m.sessions||SESS; OV_SEEN=true; NAVPOS=m.navPos||null; FILTER=m.filter||'';
       // Reset dismissals only when the actual session changes — key on the stable host-provided session id,
       // NOT selfSession() (which falls back to agents[0].session and flips whenever the fleet re-sorts,
       // wiping the user's "clear completed" on every refresh).
@@ -4893,9 +5360,12 @@ const OVERVIEW_SCRIPT = `
     // Bulk actions scope to the SELECTED prompt (Prompts window) if there is one, else act session-wide —
     // the scoped path reuses the id-scoped ops, which resolve the edit set in core (destructive-safe).
     // The order matches relabelBulk's, so the button always does what its label says.
+    // Scope is exactly one of two things: the selected PROMPT, else the selected SESSION. The session
+    // used to be implicit — the host resolved "the reviewed session" — so picking a sibling agent in
+    // Fleet left these acting on a different session than the one named beside them.
     function bulk(id, sess, pr){ var b=document.getElementById(id); if(b) b.addEventListener('click', function(){
       if(PR_ID) vscode.postMessage({type:pr, promptId:PR_ID});
-      else vscode.postMessage({type:sess}); }); }
+      else vscode.postMessage({type:sess, session:selAgentSess()||''}); }); }
     tbtn('ov-refresh','refresh'); // the session is chosen in the Sessions tab, not from a dropdown
     bulk('ov-keepall','keepAll','promptKeep'); bulk('ov-undoall','undoAll','promptUndo'); bulk('ov-clearres','clearResolved','promptClear');
     // the step-through review nav bar — posts to the existing nav commands the status-bar nav bar drives.
@@ -5134,9 +5604,17 @@ export function activate(context: vscode.ExtensionContext): void {
   fileHistoryProvider.view = fileHistoryView;
   const statsProvider = new StatsUsageViewProvider();
   const changeMapProvider = new ChangeMapViewProvider();
+  // Honour the reader's preferred home for the Overview. Deferred to the next tick so the view provider
+  // is registered first — opening the tab before the panel view exists would leave nothing to hand the
+  // wheel back to when the tab is closed.
+  if (vscode.workspace.getConfiguration('claudeObservatory').get<string>('overviewLocation') === 'editor')
+    setTimeout(() => changeMapProvider.openInEditor(), 0);
   // The Prompts window (dock, left of the Overview): picking an ask there scopes the Overview beside it.
   const promptsProvider = new PromptsViewProvider();
-  promptsProvider.onSelect = (id) => changeMapProvider.setPrompt(id);
+  promptsProvider.onSelect = (id) => {
+    changeMapProvider.setPrompt(id);
+    updateStatusItem(); // the nav bar's Prompt counter must move with the click, not the next refresh
+  };
   const tourPanel = new DemoTourPanel(context.globalState);
   editsProvider.view = editsView; // badge lives on the primary view
   editsProvider.updateBadge();
@@ -5307,7 +5785,7 @@ export function activate(context: vscode.ExtensionContext): void {
     if (kind === 'keep-prompt' && root) {
       try {
         // The ask that still has work outstanding — resolved from the data, never a hard-coded index.
-        const p = core.sessionPrompts(root, s).find((r) => r.pending > 0);
+        const p = core.promptWindows(root, s).find((r) => r.pending > 0);
         if (!p) return false;
         await vscode.commands.executeCommand('claudeObservatory.promptKeep', p.id);
         return true;
@@ -5319,7 +5797,7 @@ export function activate(context: vscode.ExtensionContext): void {
       // The task is resolved from the data, never hard-coded: a script that names task ids would go
       // stale the moment the scenario changed.
       try {
-        const m = core.buildChangeMap(root, s, { root });
+        const m = core.cachedChangeMap(root, s, { root, prompts: true }); // in-process on the extension host — read, never rebuild
         const row = m.rollupByTask.find((r) => r.taskId !== null && r.pending > 0);
         if (!row?.taskId) return false;
         await vscode.commands.executeCommand('claudeObservatory.taskKeep', row.taskId);
@@ -5617,10 +6095,11 @@ export function activate(context: vscode.ExtensionContext): void {
    *  review stop: the axis walks what is left to review. Indexed by id (one Map build) rather than a
    *  nested log scan per editId — the old shape was O(N²) per refresh AND per tab switch. */
   const pendingPrompts = (s: string) => {
-    const byId = new Map(cachedLog(s).map((r) => [r.id, r]));
-    return core
-      .sessionPrompts(workspaceRoot() ?? process.cwd(), s)
-      .filter((r) => r.editIds.some((id) => byId.get(id)?.status === 'pending'));
+    // promptWindows, not sessionPrompts: the axis reads windows + edit ids + pending only, and this
+    // runs on every refresh and every keep click — the full view (deltas, attribution, tokens) re-read
+    // the whole transcript per click and grew linearly with it. The pending count rides the window, so
+    // the per-call byId Map build went with it.
+    return core.promptWindows(workspaceRoot() ?? process.cwd(), s).filter((r) => r.pending > 0);
   };
 
   const updateStatusItem = () => {
@@ -5686,7 +6165,13 @@ export function activate(context: vscode.ExtensionContext): void {
       if (reqs.length) {
         const byId = new Map(log.map((r) => [r.id, r]));
         const anchorId = navEditId;
-        const cur = anchorId !== undefined ? reqs.find((r) => r.editIds.includes(anchorId)) : undefined;
+        // The PICKED prompt wins: selecting a row in the Prompts window is an explicit scope, and the
+        // axis not moving with it read as a bug. The edit anchor is the fallback; a picked prompt with
+        // nothing pending falls through to it (this axis walks pending review).
+        const picked = changeMapProvider.getPrompt();
+        const cur =
+          (picked ? reqs.find((r) => r.id === picked) : undefined) ??
+          (anchorId !== undefined ? reqs.find((r) => r.editIds.includes(anchorId)) : undefined);
         const curFiles = cur ? cur.editIds.map((id) => byId.get(id)?.file).filter((f): f is string => !!f) : [];
         promptPos = {
           i: cur ? reqs.indexOf(cur) + 1 : 0,
@@ -5772,7 +6257,7 @@ export function activate(context: vscode.ExtensionContext): void {
     const s = currentSession();
     if (!s) return;
     const root = workspaceRoot() ?? process.cwd();
-    const req = core.sessionPrompts(root, s).find((r) => r.id === promptId || String(r.index) === promptId);
+    const req = core.promptWindows(root, s).find((r) => r.id === promptId || String(r.index) === promptId);
     const pendingIds = core
       .promptEditIds(root, s, promptId)
       .filter((id) => core.findRecord(s, id)?.status === 'pending');
@@ -5804,8 +6289,14 @@ export function activate(context: vscode.ExtensionContext): void {
     }
     const byId = new Map(cachedLog(s).map((r) => [r.id, r]));
     const anchor = navEditId ?? reviewCursorId;
-    const curIdx = anchor === undefined ? -1 : reqs.findIndex((r) => r.editIds.includes(anchor));
+    // Same order as the counter: picked first, anchor fallback — and the step BECOMES the pick below,
+    // or the counter would snap back to the old prompt on the next repaint while the pick-scoped panes
+    // disagreed with the axis that just moved.
+    const picked = changeMapProvider.getPrompt();
+    let curIdx = picked ? reqs.findIndex((r) => r.id === picked) : -1;
+    if (curIdx < 0 && anchor !== undefined) curIdx = reqs.findIndex((r) => r.editIds.includes(anchor));
     const target = reqs[((curIdx < 0 ? (dir === 1 ? -1 : 0) : curIdx) + dir + reqs.length) % reqs.length];
+    changeMapProvider.setPrompt(target.id); // the webview rescopes through the existing 'prompt' message
     const first = target.editIds.find((id) => byId.get(id)?.status === 'pending');
     if (first === undefined) return;
     navEditId = first;
@@ -5821,11 +6312,11 @@ export function activate(context: vscode.ExtensionContext): void {
 
   /** The prompt the CURRENT edit came from — the anchor every nav-bar Prompt action resolves against.
    *  Returns null when nothing is open to anchor on. */
-  const currentPrompt = (): core.SessionPrompt | null => {
+  const currentPrompt = (): core.PromptWindow | null => {
     const s = currentSession();
     const anchor = navEditId ?? reviewCursorId;
     if (!s || anchor === undefined) return null;
-    return core.sessionPrompts(workspaceRoot() ?? process.cwd(), s).find((r) => r.editIds.includes(anchor)) ?? null;
+    return core.promptWindows(workspaceRoot() ?? process.cwd(), s).find((r) => r.editIds.includes(anchor)) ?? null;
   };
 
   /** Newest OTHER session with tracked edits — the switch target when this session is empty.
@@ -5906,6 +6397,8 @@ export function activate(context: vscode.ExtensionContext): void {
     updateStatusItem();
     refreshInline();
   };
+  forceRefreshAll = () => refreshAll(true); // the bulk verbs run outside this closure
+
 
   // --- nav bar handlers (drive the status-bar review toolbar built above) ---
   // The pending edit the Diff axis is parked on, resolved to a live (still-pending) record.
@@ -6013,7 +6506,11 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.workspace.onDidChangeTextDocument((e) => {
       if (!vscode.window.visibleTextEditors.some((ed) => ed.document === e.document)) return;
       if (debounce) clearTimeout(debounce);
-      debounce = setTimeout(refreshInline, 250);
+      // Adaptive: a file whose last locate was expensive (long edit chain × big buffer — measured
+      // ~353ms on a 46-edit chain in 152KB) coalesces at 1.2s instead of stalling every 250ms burst.
+      // Cheap files keep the tight cadence; the cost map is fed by cachedPlacements itself.
+      const cost = placementCostMs.get(e.document.uri.fsPath) ?? 0;
+      debounce = setTimeout(refreshInline, cost > 150 ? 1200 : 250);
     })
   );
 
@@ -6476,8 +6973,10 @@ export function activate(context: vscode.ExtensionContext): void {
       if (file) vscode.commands.executeCommand('vscode.open', vscode.Uri.file(file));
     }),
     // Session-wide bulk actions (view-title buttons).
-    vscode.commands.registerCommand('claudeObservatory.keepAll', () => withSession((s) => keepAllSession(s))()),
-    vscode.commands.registerCommand('claudeObservatory.undoAll', () => withSession((s) => undoAllSession(s))()),
+    // The Overview toolbar passes the session it is LABELLED with; the palette passes nothing and
+    // gets the reviewed one. bulkSession validates either way — these verbs touch every pending edit.
+    vscode.commands.registerCommand('claudeObservatory.keepAll', (sess?: unknown) => withBulkScope(sess, keepAllSession)),
+    vscode.commands.registerCommand('claudeObservatory.undoAll', (sess?: unknown) => withBulkScope(sess, (s) => undoAllSession(s))),
     vscode.commands.registerCommand('claudeObservatory.redoAll', () => withSession((s) => redoAllSession(s))()),
     // Task review actions — the Tasks tab's per-row Accept / Reject / Clear + a "clear every completed
     // task" affordance. The webview posts {taskKeep|taskUndo|taskClear,taskId}; sets are STRICT.
@@ -6485,35 +6984,71 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('claudeObservatory.taskUndo', (taskId: string) => withSession((s) => undoTaskScope(s, taskId))()),
     vscode.commands.registerCommand('claudeObservatory.taskClear', (taskId: string) => withSession((s) => clearTaskScope(s, taskId))()),
     vscode.commands.registerCommand('claudeObservatory.clearCompletedTasks', () => withSession((s) => clearCompletedTasks(s))()),
-    vscode.commands.registerCommand('claudeObservatory.clearResolved', () =>
-      withSession(async (s) => {
-        const resolved = core.readLog(s).filter((r) => r.status !== 'pending').length;
-        if (resolved === 0) {
-          vscode.window.showInformationMessage('No resolved (kept/reverted) edits to clear.');
-          return;
-        }
-        const choice = await vscode.window.showWarningMessage(
-          `Clear ${resolved} resolved (kept/reverted) edit(s)? Pending edits are kept.`,
-          { modal: true },
-          'Clear'
-        );
-        if (choice !== 'Clear') return;
-        const n = core.clearResolved(s);
-        vscode.window.showInformationMessage(`Cleared ${n} resolved edit(s).`);
-      })()
-    ),
+    vscode.commands.registerCommand('claudeObservatory.clearResolved', (sess?: unknown) => withBulkScope(sess, (s) => clearResolvedSession(s))),
     // Store maintenance (parity with the CLI `clean`): reclaim disk (GC orphaned blobs) or drop the
     // whole session. Previously editor-only users had to drop to a terminal for these.
+    // The Overview, as an editor tab. Default stays the bottom panel; this is opt-in per invocation or
+    // via claudeObservatory.overviewLocation.
+    vscode.commands.registerCommand('claudeObservatory.openOverviewInEditor', () => changeMapProvider.openInEditor()),
     vscode.commands.registerCommand('claudeObservatory.cleanStore', () =>
       withSession(async (s) => {
         const pick = await vscode.window.showQuickPick(
           [
             { label: '$(trash) Reclaim disk', description: 'garbage-collect orphaned blobs in this session', act: 'gc' as const },
+            { label: '$(history) Clear completed sessions…', description: 'drop finished sessions with nothing left to review', act: 'completed' as const },
             { label: '$(close) Drop this session…', description: "delete this session's captured edits + blobs (files on disk are NOT changed)", act: 'drop' as const },
           ],
           { placeHolder: 'Clean the Claude Observatory store' }
         );
         if (!pick) return;
+        if (pick.act === 'completed') {
+          // Spelled out, never a bare "Clear": this drops whole sessions, not resolved edits.
+          const doomed = core.reapableSessions(workspaceRoot() ?? process.cwd());
+          if (doomed.length === 0) {
+            vscode.window.showInformationMessage('No completed sessions to clear — every other session is still live, still has pending edits, or only just went quiet.');
+            return;
+          }
+          const fin = doomed.filter((d) => d.reason === 'finished').length;
+          const aband = doomed.filter((d) => d.reason === 'abandoned');
+          const lost = aband.reduce((n, d) => n + d.pending, 0);
+          const names = doomed.slice(0, 5).map((d) => d.title || d.id).join(', ');
+          // The abandoned half DISCARDS UNREVIEWED EDITS. That is the whole reason this dialog exists,
+          // so it leads with that number rather than burying it under a session count.
+          const ok = await vscode.window.showWarningMessage(
+            `Clear ${doomed.length} session(s)?` +
+              (aband.length ? ` ${lost} edit(s) have never been reviewed and will be discarded.` : ' All of them are fully reviewed.'),
+            {
+              modal: true,
+              detail:
+                `${fin} finished (nothing left to review)` +
+                (aband.length ? `, ${aband.length} abandoned (no activity for over two weeks, ${lost} unreviewed edit(s))` : '') +
+                `\n\n${names}${doomed.length > 5 ? `, and ${doomed.length - 5} more` : ''}` +
+                `\n\nThis deletes their captured edits + blobs. Files on disk are NOT changed. Never included: the session you are in, anything mid-capture, anything from another workspace, anything reviewed-and-quiet for under a day, or anything with pending edits that is under two weeks old.`,
+            },
+            'Clear sessions'
+          );
+          if (ok !== 'Clear sessions') return;
+          // Spawned: the delete loop is one recursive rm per session on the host thread otherwise —
+          // the same class of post-confirm freeze this release removed from resolve/clear-resolved.
+          // (The preview above stays in-process: reapableSessions measures ~6ms.) The CLI applies the
+          // SAME rails, so the sets cannot drift.
+          void vscode.window.withProgress(
+            { location: vscode.ProgressLocation.Notification, title: 'Clearing completed sessions…' },
+            () =>
+              new Promise<void>((fin2) => {
+                spawnCliJson(['clean', '--completed', '--json'], workspaceRoot() ?? process.cwd(), (data) => {
+                  const dropped = data && typeof data === 'object' && Array.isArray((data as { dropped?: unknown }).dropped)
+                    ? ((data as { dropped: unknown[] }).dropped.length)
+                    : null;
+                  if (dropped !== null) vscode.window.showInformationMessage(`Cleared ${dropped} completed session(s).`);
+                  else vscode.window.showErrorMessage('Could not clear sessions — is the claude-observatory CLI installed?');
+                  refreshAll(true);
+                  fin2();
+                });
+              })
+          );
+          return;
+        }
         if (pick.act === 'gc') {
           const r = core.gcSession(s);
           vscode.window.showInformationMessage(`Reclaimed ${r.removed} orphaned blob(s) (${(r.bytes / 1024).toFixed(1)} KB).`);

@@ -416,6 +416,23 @@ class ObservatoryService(private val project: Project) : Disposable {
         }
         refreshEditTree() // kick a background tree fetch; repaints when it lands
         notifyListeners()
+        warmRecentSessions()
+    }
+
+    /** When this project last pre-built its recent sessions, so an idle IDE does not loop on it. */
+    @Volatile private var warmedAt = 0L
+
+    /**
+     * Spend idle time pre-building the sessions you are likely to switch to (0.9.0).
+     *
+     * Detached and rate-limited to once every ten minutes: the point is to remove the 6.2 s a cold switch
+     * used to cost, not to add a background job that competes with the refresh that just ran.
+     */
+    private fun warmRecentSessions() {
+        val now = System.currentTimeMillis()
+        if (now - warmedAt < 10 * 60_000L) return
+        warmedAt = now
+        ApplicationManager.getApplication().executeOnPooledThread { ObservatoryCli.warmRecent(project.basePath) }
     }
 
     /**

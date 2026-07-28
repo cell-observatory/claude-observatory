@@ -255,6 +255,9 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
         if (q != null) service.setFilter(q)
     }
 
+    /** Always the REVIEWED session: this bar's verbs pair per-session edit ids read from that session's
+     *  log, so scoping them to a selected sibling would send ids into the wrong worktree. The panel's
+     *  own toolbar carries fleet-row scoping through session-only CLI verbs instead. */
     private fun withSession(block: (String) -> Unit) {
         val s = service.currentSession()
             ?: return ReviewOps.notify(project, "No active Claude Code session for this project", NotificationType.WARNING)
@@ -382,10 +385,17 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
     }
     private fun hasPendingPrompts(): Boolean = pendingPrompts().isNotEmpty()
 
-    /** The pending prompt the Diff anchor (navEditId) falls in, or null. */
+    /** The prompt the axis is ON: the PICKED one first, else the one the Diff anchor falls in.
+     *
+     *  Selecting a row in the Prompts window is an explicit statement of scope — the axis not moving
+     *  with it read as a bug (it kept showing the prompt of whatever edit happened to be open). A picked
+     *  prompt with nothing pending falls through to the anchor: this axis walks pending review, the same
+     *  rule revealPrompt applies. */
     private fun currentPrompt(): SessionPrompt? {
+        val pending = pendingPrompts()
+        service.selectedPromptId?.let { id -> pending.firstOrNull { it.id == id }?.let { return it } }
         val anchor = navEditId ?: return null
-        return pendingPrompts().firstOrNull { anchor in it.editIds }
+        return pending.firstOrNull { anchor in it.editIds }
     }
     private fun hasCurrentPrompt(): Boolean = currentPrompt() != null
 
@@ -448,15 +458,20 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
 
     private fun promptCounterTip(): String? =
         currentPrompt()?.let { "#${it.index}: ${clipAsk(it.text.ifBlank { it.title })}" }
-            ?: "the prompt the current edit came from"
+            ?: "the picked prompt, or the one the current edit came from"
 
     private fun navPrompt(dir: Int) {
         val reqs = pendingPrompts()
         if (reqs.isEmpty()) return
-        val anchor = navEditId
-        val curIdx = if (anchor != null) reqs.indexOfFirst { anchor in it.editIds } else -1
+        // Step from wherever the axis actually IS (picked first, anchor fallback — same order as
+        // currentPrompt), and make the step BECOME the pick: with a pick set, leaving it behind would
+        // snap the counter back to the old prompt on the next repaint, and the panes the pick scopes
+        // would disagree with the axis that just moved.
+        var curIdx = service.selectedPromptId?.let { id -> reqs.indexOfFirst { it.id == id } } ?: -1
+        if (curIdx < 0) curIdx = navEditId?.let { a -> reqs.indexOfFirst { a in it.editIds } } ?: -1
         val start = if (curIdx < 0) (if (dir == 1) -1 else 0) else curIdx
         val target = reqs[(start + dir + reqs.size) % reqs.size]
+        service.selectedPromptId = target.id // fires the listener path — every scoped surface follows
         revealPrompt(target.id)
     }
 

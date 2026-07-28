@@ -3,7 +3,7 @@
  * Uses the `diff` package, so it is loaded only by review commands — never by the capture hook.
  */
 import { createPatch, diffLines } from 'diff';
-import { EditRecord, readBlob } from './store';
+import { EditRecord, readBlob, hasBlob } from './store';
 
 const RESET = '\x1b[0m';
 const GREEN = '\x1b[32m';
@@ -48,6 +48,12 @@ export function lineDelta(sessionId: string, rec: EditRecord): { added: number; 
   const key = `${rec.beforeBlob ?? ''}\u0000${rec.afterBlob ?? ''}`;
   const hit = deltaMemo.get(key);
   if (hit) return hit;
+  // Blobs are content-addressed, but READABILITY is per session — and the key above is not. `blobText`
+  // yields '' for a snapshot this session lost, so memoizing that answer under a content key hands the
+  // wrong delta to every other session holding the same bytes. observe's delta cache then persists it
+  // under a `hasBlob` guard that only ever inspected the HEALTHY session, so the bad number outlives
+  // the process in a store that never lost anything. Compute it and return it; never publish it.
+  const intact = hasBlob(sessionId, rec.beforeBlob) && hasBlob(sessionId, rec.afterBlob);
   const before = blobText(sessionId, rec.beforeBlob);
   const after = blobText(sessionId, rec.afterBlob);
   let added = 0;
@@ -58,8 +64,10 @@ export function lineDelta(sessionId: string, rec: EditRecord): { added: number; 
     else if (part.removed) removed += lines;
   }
   const out = { added, removed };
-  if (deltaMemo.size >= DELTA_MEMO_CAP) deltaMemo.clear(); // simple bound; refills from the same blobs
-  deltaMemo.set(key, out);
+  if (intact) {
+    if (deltaMemo.size >= DELTA_MEMO_CAP) deltaMemo.clear(); // simple bound; refills from the same blobs
+    deltaMemo.set(key, out);
+  }
   return out;
 }
 

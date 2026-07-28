@@ -37,7 +37,10 @@ if [ -n "${APPDATA:-}" ]; then
   done
 fi
 INSTALLED=0
-for DEST in "${PLUGIN_DIRS[@]}"; do
+# `${arr[@]}` on an EMPTY array is an unbound-variable error under `set -u`, so with no IDE installed
+# this died with a bash internal error at this line and the explanatory message below never printed —
+# the one case where it most needed to. The `+` form expands to nothing instead.
+for DEST in ${PLUGIN_DIRS[@]+"${PLUGIN_DIRS[@]}"}; do
   rm -rf "$DEST/claude-observatory-jetbrains"
   unzip -qo "$ZIP" -d "$DEST/"
   echo "✓ installed $(basename "$ZIP") → $DEST/claude-observatory-jetbrains"

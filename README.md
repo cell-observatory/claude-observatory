@@ -9,7 +9,7 @@
 [![Pages](https://github.com/cell-observatory/claude-observatory/actions/workflows/pages.yml/badge.svg)](https://github.com/cell-observatory/claude-observatory/actions/workflows/pages.yml)
 [![Release](https://github.com/cell-observatory/claude-observatory/actions/workflows/release.yml/badge.svg)](https://github.com/cell-observatory/claude-observatory/actions/workflows/release.yml)
 [![Dependabot](https://img.shields.io/badge/dependabot-enabled-025E8C?logo=dependabot&logoColor=white)](https://github.com/cell-observatory/claude-observatory/blob/main/.github/dependabot.yml)
-[![Version](https://img.shields.io/badge/version-v0.8.9-blue)](https://github.com/cell-observatory/claude-observatory/releases/latest)
+[![Version](https://img.shields.io/badge/version-v0.9.0-blue)](https://github.com/cell-observatory/claude-observatory/releases/latest)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/cell-observatory/claude-observatory/blob/main/LICENSE)
 
 
@@ -31,7 +31,25 @@ rather than throwaway prototypes.
 
 </details>
 
-**New in 0.8.9 — demo mode, in both editors.** The demo simulator has existed since 0.8.0, but only in the
+**New in 0.9.0 — the Overview's cache actually hits, and sessions read like fleet rows.** Opening an older
+session and watching it redraw for twelve seconds was not a cold cache; it was a cache being thrown away on
+almost every tick. Everything a change map derives from the project directory is a *count* of sibling
+sessions, but the stamp carried every file's `(mtime, size)` — so one session appending a single line
+invalidated every other session's map, and both editors refresh on the transcript watcher, which made the
+trigger and the invalidator the same event. A refresh that cost **16.0 s** now costs **2.4 s** and
+rewrites one cache file instead of 32. Edit placement is memoized across processes (**2.27 s → 0.28 s**,
+byte-identical), conversations quiet for over a week **fold** into one collapsed group instead of being
+rebuilt on every tick (**cold 15.9 s → 9.1 s**), and a folded row with no cached map says *not loaded*
+rather than showing zeros. Session rows now carry the same badges a fleet row does — ±lines, pending,
+tokens, wall-clock and a model · effort chip — and **Clear completed sessions…** drops the stored
+edits of sessions whose review is finished, never touching the session you are in, anything with pending
+edits, anything mid-capture, anything from another workspace, or anything whose conversation moved in the
+last 24 hours.
+
+<details>
+<summary><b>New in 0.8.9</b> — demo mode, in both editors</summary>
+
+The demo simulator has existed since 0.8.0, but only in the
 terminal. It is now one command away in **VS Code** and **JetBrains**: **Start Demo Mode** replays a
 scripted Claude Code session through the real capture pipeline while you watch the panels fill, then opens
 a **guided tour** — forty-one steps over every panel and named feature, or thirteen if you pick the
@@ -44,6 +62,8 @@ installed, so it is the first thing you can try. The simulated session now runs 
 tasks and nine edits, and covers the cases whose panels could previously only render an empty state: a
 second agent in a sibling worktree with a live file collision, a deletion, a failed tool call, a write
 outside the workspace, a failing background shell, and a three-phase workflow run.
+
+</details>
 
 <details>
 <summary><b>New in 0.8.8</b> — prompts, tasks, sessions, and a defined vocabulary</summary>
@@ -359,7 +379,9 @@ claude-observatory changemap       # the Overview view-model: per-file/per-folde
 claude-observatory views           # several read-only views in ONE process: {name: payload}, each byte-identical to its own command; --views a,b,c to pick. A failed view is null, never fatal to the batch; mutating verbs are refused
 claude-observatory metrics         # session rollup: per-edit diff stats · action/error counts · per-subagent duration/tokens · tool latency (median/p95/max); --json
 claude-observatory summary         # per-session review recap (kept/reverted per file); --markdown to export
-claude-observatory clean           # GC orphaned blobs; --resolved [--under <path> | --ids <a,b,c>] | --drop <id> | --older-than 30d | --all
+claude-observatory clean           # GC orphaned blobs + superseded cache files; --resolved [--under <path> | --ids <a,b,c>] | --completed [--stale <Nd>] [--dry-run] | --drop <id> | --older-than 30d | --all
+claude-observatory resolve         # finish a session in one step: accept every pending edit, then drop its records; --json
+claude-observatory warm            # pre-build the change-map caches for sessions active recently, so switching to one is instant (--since 24h); skips the session under review; --json
 claude-observatory update          # update the CLI + installed editor extensions to the latest release (--check to only report)
 claude-observatory uninstall       # remove the capture hooks (--all also reverts the bundled status line)
 claude-observatory version [--check]  # print the installed version; --check also shows the latest release
@@ -514,6 +536,25 @@ Built to add **zero overhead** to your Claude sessions:
   edit: consecutive snapshots are one edit apart, so the hops compose backwards from the buffer —
   6.3× faster on an 800-line file with 30 pending edits at 3 changed lines each, 39.4× at 15, 71.9× at
   40, with identical placements, and a 5,000-line / 500-edit file holds +171 MB instead of +665 MB.
+- **The Overview's cache actually hits now (0.9.0)** — it was being invalidated on nearly every tick, not
+  merely running cold. Everything a change map derives from the project directory is a *count* of sibling
+  sessions, but the cache stamp carried each file's `(mtime, size)`; since every session in a project
+  shares that directory, one session appending a single line threw away every other session's cached map.
+  Both editors refresh on the transcript watcher, so the trigger and the invalidator were the same event.
+  Measured on a 4.6 MB / 2,800-edit / 405-file session in a repo with 31 siblings, an unrelated session
+  appending now costs **2.4 s instead of 16.0 s**, and rewrites **1 cache file instead of 32** — the one
+  being that session's own map, which genuinely must rebuild.
+- **Edit placement is memoized across processes (0.9.0)** — 75 % of an edit-tree build was the diff inside
+  the placement pass (1.74 s of 2.27 s) against 22 ms of reading the files. That result was already
+  memoized per file on content hashes, but only within one process, and the Overview runs in a fresh one
+  every tick. The memo now has a disk tier: **2.27 s → 0.28 s** in a cold process, byte-identical output,
+  and saving one file re-diffs one file instead of all 405.
+- **Week-old sessions are folded (0.9.0)** — the Overview built a full change map for every sibling in the
+  repo without bound; 24 of the 33 here were finished conversations more than a week old. They now collapse
+  into one group and are served from cache when warm, never rebuilt on the critical path — **cold Overview
+  15.9 s → 9.1 s**. The session being viewed is never folded, and a folded row with no cached map says
+  *not loaded* rather than showing zeros; nothing on the refresh path builds those later, so they stay that
+  way until you open one.
 
 ## Packages
 

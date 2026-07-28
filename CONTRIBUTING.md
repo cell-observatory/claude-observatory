@@ -138,6 +138,7 @@ Copy this shape for any new structured view.
 | Build core + CLI | `npm run build` |
 | Build the VS Code bundle | `npm run build:vscode` |
 | Build the JetBrains plugin | `gradle buildPlugin` (in `packages/jetbrains`) |
+  (Gradle itself needs a JVM to launch: on a bare macOS either `brew install gradle` or `JAVA_HOME=/opt/homebrew/opt/openjdk@21 ./gradlew …` — the build then provisions its own JDK 21 toolchain.)
 | Unit + smoke tests | `npm test` (runs `version:check` → build → build:vscode → `node --test` on core + smoke) |
 | End-to-end CLI + hook | `npm run e2e` (`bash test/e2e.sh`, isolated temp `$HOME`) |
 

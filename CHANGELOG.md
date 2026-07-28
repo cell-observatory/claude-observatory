@@ -5,6 +5,237 @@ All notable changes to Claude Observatory are recorded here, following
 Per-tag release artifacts and auto-generated notes are on the
 [Releases page](https://github.com/cell-observatory/claude-observatory/releases).
 
+## [0.9.0] — 2026-07-27
+
+**The Overview's cache almost never hit.** Opening an older session and watching it take twelve seconds
+to draw, every few seconds, was not the cache being cold — it was the cache being thrown away on nearly
+every tick. Measured on a real 4.6 MB / 2,800-edit / 405-file session in a repo with 31 sibling sessions:
+a cache hit served the whole Overview in **0.12 s**, and a miss cost **14.25 s** and rewrote **33 cache
+files across 31 session directories**. Almost every refresh was a miss.
+
+The cause was one line of the cache stamp. Everything a change map derives from the project directory is
+`summary.fleet` — a *count of sibling session ids* — but the stamp carried `mtime:size` for every file in
+that directory. Since every session in a project shares that directory, **one session appending a single
+line invalidated every other session's cached map**, and both editors refresh on the transcript watcher,
+so the thing that triggered the refresh was the same thing that guaranteed it would miss. The stamp is now
+the id list itself, taken from the same call the map derives the value from so the two cannot drift apart.
+A refresh taken while another session is actively appending went from **16.0 s to 2.4 s**, and from
+rewriting **32 cache files to 1** — that one being the appending session's own map, which genuinely has to
+rebuild. With nothing appending the same refresh costs 1.9 s and rewrites nothing. (These figures come
+from an independent re-measurement against a frozen clone of the store, which put the before-case at
+16.0–16.5 s rather than the 14.25 s first recorded here: the improvement is larger than first claimed, and
+"rewrites nothing" was only ever true of the idle case.)
+
+**Edit placement is memoized on disk.** Profiling what remained showed 75 % of `buildEditTree` was the
+Myers diff inside `locateEditsInCurrent` — 1.74 s of 2.27 s — against 22 ms of actually reading those 405
+files. That result was already memoized per file, keyed on the current file text's hash and the edit
+chain's blob SHAs, but only within one process, and the Overview runs in a fresh CLI process every tick.
+The memo now has a disk tier. Because every input is content-identified there is no staleness window: a
+changed file is simply a different key, so saving one file re-diffs one file where the map's own cache
+would discard all 405. **`buildEditTree` in a fresh process: 2.27 s → 0.28 s**, byte-identical output. A
+placement computed from a blob that could not be read is deliberately never persisted.
+
+**Sessions quiet for over a week are folded.** The Overview built a full change map for every sibling
+session in the repo, without bound — 24 of the 33 here were more than a week old, finished conversations
+nobody was looking at. Those now collapse into one group in both editors and are served from the cache
+when it is already warm, never rebuilt on the critical path. The session you are *viewing* is never
+folded, however old it is; pinning an old session is precisely the case for building it. A folded row with
+no cached map reports **not loaded** rather than `+0 −0`, because "nothing was built" and "this session
+changed nothing" are different facts with identical numbers. **Cold Overview 15.9 s → 9.1 s.**
+
+Note what that buys and what it costs: the cold saving comes from *not computing* 24 of the 31 rows, and
+nothing on the refresh path ever builds them afterwards. On a store whose cache was never warm those rows
+stay **not loaded** until you open one of those sessions (or run a CLI verb that walks them all, such as
+`tasklog`). Showing them costs about 0.5 s a tick, which is the trade the fold exists to let you decline.
+
+**Clear completed sessions.** `clean --completed`, and a *Clear completed sessions…* entry in both
+editors' Clean Store chooser, drop the stored edits and blobs of sessions whose review is finished.
+Refusal rails guard it, each with its own fixture in one test: never the session you are in, never one
+whose conversation moved in the last 24 hours, never one with a capture in flight — and one with pending
+edits only once its conversation has been dead past the stale window (14 days by default, `--stale` ≥24h),
+in which case those unreviewed edits are DISCARDED and every confirm dialog leads with that count — plus a fifth, added after review found it missing: never a session recorded for a DIFFERENT
+workspace. (Session resolution walks up to the filesystem root, so a session launched in `~` or a monorepo
+root resolves from any subdirectory of it; listing such a session is right, deleting it is not.) Files on
+disk are never touched.
+
+**A sweep for the same bug elsewhere.** The cause above — an expensive derivation reached through the
+wrong door — was not unique to the Overview, so every caller of the raw change-map builder was audited and
+every read-only command was timed against the same real session. Five call sites were bypassing the disk
+cache entirely: the cross-agent task log rebuilt *every* worktree sibling's map from scratch on each run
+(**`tasklog` 12.42 s → 0.11 s**), the task feed rebuilt the whole map to look up one task's interval — under
+a comment claiming it reused what the Overview had already built — and three more, two of which run
+**in-process on the VS Code extension host**, which is precisely where a raw build was previously measured
+freezing the UI for 2.8 s. All five now read the cache.
+
+Separately, `fileMemory` walked every session's entire log once *per file*, so a caller asking about a
+session's 405 files paid 405 × 40 log scans — and it got slower with every session ever recorded, because
+the scan is over the store rather than the session. It now builds one file-keyed index per pass:
+**6.6x faster per file** and `insights` **~4x faster**, with byte-identical output verified file by file
+against the previous implementation. (Absolute per-file figures vary with store size and disk state: this
+machine measured 4.7 ms → 1.13 ms, an independent run on a frozen clone 10.69 ms → 1.63 ms.)
+
+**Session rows carry the fleet's badges.** A session row said its name, its edit counts and how long ago
+it ran; a fleet row said what it changed, what it cost and what it ran on. They are now the same row:
+lines added/removed, pending, tokens, wall-clock, and a model · effort chip, keeping the last-active
+time and the "reviewing" mark. Bare edit and file counts were tried and dropped: the ± lines beside them
+already say how much a session changed, and two more numbers in the same row read as noise. A session
+that changed nothing shows no diff at all rather than `+0 −0`, but still shows its tokens — asking and
+reading is work the row should own. Model and effort are structural facts the harness records — an
+unknown one is left out rather than defaulted, because the default effort differs by build and model.
+
+Line deltas cost two content-blob reads per edit, which is the one thing the session listing was built to
+avoid. Caching the total alone was not enough — a live log grows constantly, so the whole-log sum re-paid
+**+0.17 s per refresh at 1,732 edits and +0.71 s at 7,914**, worse the longer a session ran. The sum is
+now recomputed in full every time but from a cache keyed by each edit's **blob pair**, which costs 0.08 s
+on that same 7,914-edit session. A running total was tried first and rejected: see below.
+
+**A tab badge counts the pane it labels, or says nothing.** Picking a sibling agent in Fleet left Tasks
+and Workflows counting the session under review — a different session's numbers under a pane the reader
+had just scoped. The fix is not to scope those panes: their contents are not in the payload, because
+tasks, workflows and shells are read only for the session under review. So with a sibling selected those
+badges go **blank** rather than describing a session the pane is not showing. Selecting a *prompt* does
+scope Workflows, which is filtered from the prompt's own slice; the Tasks pane is not prompt-filtered, so
+its badge keeps counting the whole list — a `0` over a pane listing thirteen tasks is worse than no badge.
+The Fleet badge counts the rows the pane actually draws, after the Active-only filter and the fold: `1/31`
+read as "one of 31 agents in this session" when the 31 was every session in the repo's history.
+
+**A measured optimization sweep, both editors and the CLI.** Four measurement agents profiled every hot
+path against a real 45-session store; each fix below carries its before/after from that store, not an
+estimate. The multitask view parsed every sibling's full transcript on every ~3s tick for two integers
+per row (458MB of reads, 88% of the view's CPU) — the boundary-crossing counts are now memoized per
+transcript state like the risk counts already were: **multitask 1.4–2.2s → 0.38s, the idle Overview tick
+1.43s → 0.33s**, peak RSS roughly halved. Change-map builds were quadratic in session length — a
+per-edit rebuild of the session's file set inside `flagsFor` — and are now linear: **the 12k-edit warm
+build 1.56s → 36ms**. In VS Code, inline placements re-diffed every open file on every keep click
+(~350ms per hot file) because their cache keyed on the whole session log; they now key on each file's
+own pending chain, and typing in a file whose last locate was expensive coalesces at 1.2s instead of
+stalling every burst. The status bar's prompt axis re-read the whole transcript per keep click (60ms and
+growing with the conversation; ~290ms by the time it was fixed) — the ask list is now cached against the
+transcript alone, so a click re-pays ~4ms. The Edits and Diffs trees rebuild once per refresh cycle
+instead of 2–4×, Clear Resolved and per-session Resolve spawn the CLI instead of freezing the host
+~0.8s at the moment the user confirms, and one hung CLI child can no longer stop Overview refreshes
+forever (spawns now carry a 120s kill timeout). In JetBrains, the clear-completed preview no longer
+spawns the CLI on the UI thread, the usage readout is throttled like its stats sibling, and the
+sessions-row **resolve** link is hit-tested against the drawn text itself rather than a fixed pixel
+column that disagreed with it at any other UI scale.
+
+**The bundled status line renders in half the time.** One jq pass instead of sixteen, and the session
+title comes from a 4MB tail of the transcript instead of a whole-file scan that grew with the
+conversation: **777ms → 412ms warm** on a real 10MB-transcript session. On plans with no rolling limits
+(Enterprise / API) the local token scan's week window now quantizes to the hour, so its file cache can
+actually hit — the scan was silently re-parsing ~300MB of transcripts every ten minutes, forever. A scan
+that hits its 12s safety timeout now still records that it ran, instead of re-paying the full timeout on
+every later render.
+
+**The GC reaches its blind spots.** `clean` iterated store directories, so cache directories for
+sessions with no store dir were never visited — 27 superseded-version payloads survived on a real store,
+a set that grew with every cache-version bump. The GC now sweeps the cache tree itself (superseded
+versions only; a live cache for a transcript-only session is a working cache). Usage cursors are keyed
+by a hash of the transcript path, which nothing could reverse — new cursors record their transcript so
+the GC can reap ones whose transcript is gone, and path-less legacy cursors go after 30 quiet days. And
+a 3.7MB `blob-memo.json` written by a build that never shipped is now cleaned up.
+
+**One meaning for "pending".** Two panels in the same window reported different numbers for the same
+session — 2,800 against 1,855 — because some surfaces counted raw records and others counted the display
+units the change map draws, after chained edits to the same code collapse into one review unit. Every
+counting surface now uses the collapsed units: the Stats scoreboard and progress bar, the fleet rows, and
+"N pending across siblings". The daily and hourly activity series stay raw on purpose — those answer "how
+much did Claude do", not "how much is left to review", and collapsing them would under-report the work.
+
+**A plan with no rolling windows says so.** Claude Code sends `rate_limits.*` only for Claude.ai
+subscription plans, so on Enterprise or an API key the 5-hour and weekly bars could never fill — and an
+empty bar reads as "you have used none of your quota" rather than "this plan has no rolling quota". When
+a status-line reading arrives carrying no limits, both editors replace those two rows with what this
+machine can actually measure — the status line's own 5h/wk totals when it has written them, a 24h/wk
+local scan as the fallback — with no percentage, because there
+is no denominator and inventing one would be a guess wearing a number's clothes. Nothing has reported yet
+is kept as a third state, distinct from "no limits" — otherwise everyone who has not installed the status
+line would be told they have no plan. The UI does not print the word "Enterprise": an API key produces
+the same signal and nothing in the payload distinguishes them.
+
+**`clean --completed` can be previewed.** It discards unreviewed edits, and the only way to find out what
+it would take was to run it. `--dry-run` lists what would go without dropping anything, and the JetBrains
+confirm dialog now leads with those real counts and names — it previously asked for a recursive delete in
+generic prose while the VS Code dialog had always stated the numbers. `--stale` gained a 24-hour floor:
+the abandoned branch is the one that discards unreviewed work, and `--stale 0d` reaped every
+workspace-local session holding it the moment it was typed. Run from a directory with no sessions, the
+verb now says that, instead of reporting that every session was spared by the rails.
+
+**The Overview can dock as an editor tab (VS Code).** *Open Overview in Editor* (palette, or
+`claudeObservatory.overviewLocation`) moves the Overview to a full-height editor tab; whichever host
+holds it drives the refresh — never both — and the bottom panel says where it went. JetBrains needs no
+equivalent: its tool windows already float and dock natively.
+
+**The nav bar's Prompt axis follows the picked prompt.** Selecting a row in the Prompts window is an
+explicit statement of scope, so the axis counter moves with it immediately (the current edit's prompt is
+the fallback), and stepping the axis becomes the pick — the counter and the pick-scoped panes can never
+disagree about which ask is under review. Both editors.
+
+**Prompts is its own view.** It moved out of the shared bottom dock into a dedicated Prompts container.
+VS Code remembers view placement per profile, so an existing profile keeps wherever you last dragged it —
+new installs start it in the panel, and *Show the Prompts window* focuses it wherever it lives.
+
+### Fixed
+- **`install-jetbrains.sh` no longer dies before its own error message.** With no JetBrains IDE
+  installed, expanding the empty plugin-dir array under `set -u` aborted the script with a bash error
+  instead of printing where it had looked.
+
+- **A delta computed from an unreadable blob poisoned other sessions' caches.** `lineDelta`'s memo is
+  keyed by the two blob SHAs, but blobs are content-addressed while *readability* is per session: a
+  session that had lost a snapshot computed a wrong delta from an empty string and published it under a
+  content key every other session shares. The per-session delta cache then persisted it behind a
+  `hasBlob` guard that had only ever inspected the healthy session, so the bad number outlived the
+  process in a store that never lost anything, and nothing could heal it because the key never changes. A
+  delta is now returned but never published unless both blobs were actually read.
+- **A blob-derived total was persisted under a log-only stamp.** `sessionCounts` caches `added`/`removed`
+  in a sidecar keyed to the log's mtime and size — but those numbers come from blobs, and a finished
+  session's log never changes again, so a sum computed while a snapshot was missing would have been
+  frozen permanently. An incomplete pass now serves its answer and caches nothing.
+- **The bulk verbs stopped refreshing the panels.** Accept All, Revert All and Clear Resolved lost the
+  forced refresh when they were rescoped, leaving the Overview showing pre-change counts: the store
+  watcher's unforced tick lands inside the 3-second coalescing window and the spawn already in flight
+  started before the mutation.
+- **A Fleet row's own bulk buttons were always refused.** Validation ran against this workspace's
+  sessions, which resolve by walking *up* from the working directory — and a sibling worktree is never an
+  ancestor. Every Fleet row's Accept/Revert was therefore a control that could only fail. JetBrains needs no equivalent rail there: its scoped ids come from Swing selection over the CLI's own fleet payload, never an untrusted webview boundary — safe by construction rather than by validation.
+- **The docked Overview left the bottom panel dead.** Opening the Overview in an editor tab told the
+  panel where it had gone only if the panel resolved *after* the tab, which is the rarer order; and the
+  notice replaced the panel's DOM, so when the tab closed and the payload came back every renderer bailed
+  on the missing nodes and the panel stayed stuck on a message about a tab the reader had already closed.
+  The notice is an overlay now, and it lifts on the next payload.
+- **JetBrains: the folded group never actually folded.** `TreeUtil.expandAll` expanded the fold, which
+  fired the expansion listener, which set the flag the re-collapse was guarded on — so a week of old
+  sessions sprang open on every transcript tick. It also drops `promiseExpandAll`'s promise, so on the
+  async path the deferred expansion landed after the collapse: both timings ended expanded. The repaint
+  now walks the nodes itself.
+- **JetBrains printed "Cleared the completed completed session(s)."** The count fell back to a string
+  sentinel that was then interpolated into a sentence expecting a number.
+- **`warm` rebuilt the session under review** — the one the Overview builds every tick and whose
+  transcript invalidates it seconds later. It also held every warmed session's file cache at once, so
+  peak memory scaled with how many sessions were active rather than with the largest one.
+- **A cached payload changed meaning without changing version.** Sibling rows began carrying collapsed
+  counts while the stamp inputs stayed identical, so a valid cache entry would have served the old raw
+  numbers indefinitely. The cache version is the only thing that can tell those apart, and it was bumped.
+
+- **A running total cannot be validated, so it is not used.** The first version of the line-delta cache
+  stored how far it had counted and resumed from there whenever the log had only grown. Resuming from a
+  number is inheriting it: one bad entry — observed for real, a sum of 0 over 2,800 edits — is never
+  recomputed, and nothing can notice, because there is nothing to check a derived total against. Adding
+  a version gate and a boundary check narrowed the ways in without removing the failure mode. The cache
+  is now keyed by each edit's **blob pair** — the content itself — so an entry is either a hit on exactly
+  those bytes or a miss, the sum is rebuilt in full on every log change, and identical edits collapse
+  onto one entry. Same cost, and a wrong number is bounded by one edit instead of permanent.
+- **A running workflow's attribution froze.** The cache stamped `subagents/workflows/`, whose entries are
+  `wf_<id>` *directories* — and a directory's mtime does not move when a file inside it grows. So a
+  workflow that was still running never invalidated the map, which is the exact failure the stamp exists
+  to prevent, one level too shallow. It now descends into the run directories.
+- **`clean --older-than` could delete the session you were in.** It filtered on the *store log's* mtime,
+  so a long conversation that made its edits early looked ancient by that clock, and the sink is a
+  recursive delete. The live session is now excluded; the verb is otherwise unchanged.
+- **Two builds fought over one cache file.** The cache version is now part of the file name, not just the
+  stamp inside it. Builds that disagree about the stamp's shape used the same path, so each one's write
+  was a permanent miss for the other — a 0 % hit rate with no symptom beyond "the Overview is slow".
+
 ## [0.8.9] — 2026-07-26
 
 **Demo mode, in both editors.** The demo simulator has existed since 0.8.0, but only in the terminal —

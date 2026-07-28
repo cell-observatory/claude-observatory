@@ -17,7 +17,7 @@ import { reasoningByEdit, transcriptInsights, findTranscript, flagsFor } from '.
 import { parseActions, summarizeActions, compactLabel } from './actions';
 import { parseSubagents, allSessionTaskRows } from './subagents';
 import { buildEgressReport } from './egress';
-import { projectSessionIds, listRepoSiblings, SiblingSession } from './fleet';
+import { projectSessionIds, listRepoSiblings, SiblingSession, isFoldedAge } from './fleet';
 import { parseWorkflows, workflowWindows, workflowForTs } from './workflows';
 import { taskSnaps, digest12 } from './tasks';
 import { sessionPrompts } from './prompts';
@@ -912,8 +912,22 @@ export function taskEditIds(cwd: string, session: string, taskId: string): numbe
 
 // --- cross-process change-map cache (the Overview's dominant cost) ---
 
-/** Bump to invalidate every persisted map after a shape or semantics change. */
-const MAP_CACHE_VERSION = 1;
+/**
+ * Bump to invalidate every persisted map after a shape or semantics change.
+ *
+ * It is folded into the cache FILENAME, not just the stamp inside it, so that two builds which disagree
+ * about the stamp's shape use different files instead of fighting over one. They did: a VS Code extension
+ * host bundling an older core wrote a 4-field `derivedInputsStamp` to the very same path the CLI wrote a
+ * 5-field one to, and since a mismatched stamp means "rebuild, then overwrite", each process's write was
+ * a permanent miss for the other — a guaranteed 0 % hit rate for as long as both were installed, with no
+ * symptom beyond "the Overview is slow". Orphaned versions do linger (an entry is ~1.5 MB on a large
+ * session); the directory is derived, disposable, and already reaped per-session when a session is dropped.
+ */
+// 3: sibling rows carry COLLAPSED edits/pending (fleet.ts). The stamp inputs did not change, so a v2
+// entry stays "valid" while holding the old raw numbers — the fleet would report 2,800 pending against
+// the Sessions row's 1,855, from cache, indefinitely. When the MEANING of a cached payload changes, the
+// version is the only thing that can tell the two apart.
+const MAP_CACHE_VERSION = 3;
 
 /** (mtimeMs:size) for a file, or '' when it can't be stat'd. */
 /**
@@ -922,20 +936,45 @@ const MAP_CACHE_VERSION = 1;
  * A directory's own mtime moves when an entry is added or removed but not when one grows, and a
  * subagent's transcript grows for as long as that agent works. Stat-only, over a handful of files.
  */
+function entryStamp(dir: string, name: string): string {
+  try {
+    const st = fs.statSync(path.join(dir, name));
+    return `${name}:${st.mtimeMs}:${st.size}`;
+  } catch {
+    return `${name}:?`;
+  }
+}
+
 function dirStamp(dir: string | null): string {
   if (!dir) return '';
   try {
     return fs
       .readdirSync(dir)
       .sort()
-      .map((n) => {
-        try {
-          const st = fs.statSync(path.join(dir, n));
-          return `${n}:${st.mtimeMs}:${st.size}`;
-        } catch {
-          return `${n}:?`;
-        }
-      })
+      .map((n) => entryStamp(dir, n))
+      .join(',');
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * `dirStamp` one level deeper — for an input directory whose entries are themselves DIRECTORIES.
+ *
+ * A directory's mtime moves when an entry is added or removed but not when one grows, which is exactly
+ * what `dirStamp` exists to work around. Applied to `subagents/workflows/`, whose entries are `wf_<id>/`
+ * directories, it hit that same wall one level up: `workflowWindows` reads `wf_<id>/agent-*.jsonl`, and
+ * those files grow for as long as the workflow runs without moving their directory's stamp — so a RUNNING
+ * workflow's window and its edits' `workflowId` attribution froze at whatever they were when the run's
+ * first agent was created.
+ */
+function nestedDirStamp(dir: string | null): string {
+  if (!dir) return '';
+  try {
+    return fs
+      .readdirSync(dir, { withFileTypes: true })
+      .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+      .map((e) => (e.isDirectory() ? `${e.name}/[${dirStamp(path.join(dir, e.name))}]` : entryStamp(dir, e.name)))
       .join(',');
   } catch {
     return '';
@@ -957,15 +996,23 @@ function derivedInputsStamp(cwd: string, session: string, includeWorkspace: bool
   const subs = base ? path.join(base, 'subagents') : null;
   return [
     dirStamp(subs),
-    dirStamp(subs ? path.join(subs, 'workflows') : null),
-    dirStamp(base ? path.join(base, 'workflows') : null),
-    // The project dir is one file per session: this covers every sibling transcript at once.
-    dirStamp(transcript ? path.dirname(transcript) : null),
+    nestedDirStamp(subs ? path.join(subs, 'workflows') : null),
+    nestedDirStamp(base ? path.join(base, 'workflows') : null),
+    // The project dir's ONLY contribution to a map is `summary.fleet`, a COUNT of the sibling session
+    // ids in it (see the projectSessionIds call in buildChangeMap) — so the stamp IS that id list, and
+    // never the entries' mtime/size. Stamping those made one session's append invalidate every OTHER
+    // session's cached map in the project, because they all share the directory: measured on a repo
+    // with 31 siblings, a single live transcript growing by one line rebuilt 33 cache files and cost
+    // 14.2 s, against 0.12 s to serve the same Overview from disk. Both editors refresh on the
+    // transcript watcher, so that fired on very nearly every tick — the cache almost never hit.
+    // Deriving the stamp from the same call the map derives the value from is also what keeps the two
+    // from drifting apart later.
+    projectSessionIds(cwd).join(','),
     // Only for the session being RENDERED. A sibling's map is the "finished session whose inputs never
     // change again" case this disk cache exists for, and siblings share files with the active session —
     // 14 of 30 on a real repo — so stamping their workspace too made one save rebuild all of them
     // (9.6 s cold, 542 ms warm), for a map whose class attribution nobody is looking at.
-    includeWorkspace ? workspaceStamp(session) : '',
+    includeWorkspace ? workspaceStamp(session, cwd) : '',
   ].join('|');
 }
 
@@ -981,10 +1028,17 @@ function derivedInputsStamp(cwd: string, session: string, includeWorkspace: bool
  *
  * Stat-only, over the distinct files in the log (readLog is memoized), so it costs microseconds.
  */
-function workspaceStamp(session: string): string {
+function workspaceStamp(session: string, root: string): string {
   let files: string[];
   try {
-    files = [...new Set(readLog(session).map((r) => r.file))].sort();
+    // ROOT-SCOPED, despite stamping "the workspace": a session's log can reference files outside the
+    // worktree, and one of them being SELF-REWRITING makes the cache permanently cold — found live: a
+    // session that edited ~/.claude/statusline-last.json, which the status line rewrites every few
+    // seconds, so every warm pass rebuilt that session forever. Out-of-root churn is exactly the noise
+    // this cache exists to ignore; out-of-root EDITS still invalidate through the log/transcript stamps
+    // whenever the session itself acts.
+    const rootAbs = path.resolve(root) + path.sep;
+    files = [...new Set(readLog(session).map((r) => r.file))].filter((f) => path.resolve(f).startsWith(rootAbs)).sort();
   } catch {
     return '';
   }
@@ -1057,6 +1111,66 @@ function mapCachePath(session: string, key: string): string {
   return path.join(dir, `${key}.json`);
 }
 
+/**
+ * Delete cached map payloads left behind by an EARLIER cache version, for one session.
+ *
+ * The version is part of the file NAME (see MAP_CACHE_VERSION), which is what stops two builds fighting
+ * over one file — but it also means a bump orphans every old file instead of overwriting it. Measured
+ * after the 1→2 bump on a real store: 33 unreachable files, 5.02 MB, against 4.46 MB live. More dead
+ * cache than live, and `removeSession` only fires when a session is explicitly dropped, so the sessions
+ * you actually work in keep theirs forever.
+ *
+ * Runs from the blob GC (`clean`), never on the read path: identifying an orphan costs a readdir plus a
+ * read of each entry's stamp prefix, which is not a price a refresh should pay. Returns bytes reclaimed.
+ */
+/** Every session id holding a changemap-cache directory — including ids with NO store dir. The GC used
+ *  to iterate store ids only, so caches minted for sessions this store no longer tracks were never even
+ *  visited: 27 superseded-version payloads found surviving exactly that way, growing per version bump. */
+export function cachedMapSessionIds(): string[] {
+  try {
+    return fs.readdirSync(path.join(rootDir(), 'changemap-cache')).filter((d) => isSafeSessionId(d));
+  } catch {
+    return []; // no cache tree yet
+  }
+}
+
+export function pruneStaleMaps(session: string): { removed: number; bytes: number } {
+  const out = { removed: 0, bytes: 0 };
+  if (!isSafeSessionId(session)) return out;
+  const dir = path.join(rootDir(), 'changemap-cache', session);
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return out; // no cache for this session
+  }
+  const live = `${MAP_CACHE_VERSION}|`;
+  for (const n of names) {
+    // Only the hashed map/view payloads are versioned this way; the sibling caches beside them
+    // (placements.json, deltas.json) are content-keyed and own their own version field.
+    if (!/^[0-9a-f]{16}\.json$/.test(n)) continue;
+    const p = path.join(dir, n);
+    try {
+      const fd = fs.openSync(p, 'r');
+      const buf = Buffer.alloc(64);
+      const read = fs.readSync(fd, buf, 0, 64, 0);
+      fs.closeSync(fd);
+      // `{"stamp":"<version>|…` — anything whose stamp does not start with the live version is
+      // unreachable by construction: the key that would address it hashes to a different filename.
+      const head = buf.subarray(0, read).toString('utf8');
+      const m = /^\{"stamp":"(\d+)\|/.exec(head);
+      if (!m || m[1] + '|' === live) continue;
+      const size = fs.statSync(p).size;
+      fs.unlinkSync(p);
+      out.removed++;
+      out.bytes += size;
+    } catch {
+      /* unreadable or already gone — leave it */
+    }
+  }
+  return out;
+}
+
 export function cachedChangeMap(cwd: string, session: string, opts: { root: string; prompts?: boolean }): ChangeMap {
   const transcript = findTranscript(cwd, session);
   const tStamp = fileStamp(transcript);
@@ -1064,7 +1178,19 @@ export function cachedChangeMap(cwd: string, session: string, opts: { root: stri
   const build = (): ChangeMap => buildChangeMap(cwd, session, opts);
   if (!tStamp && !lStamp) return build(); // nothing stable to key on
   const stamp = `${MAP_CACHE_VERSION}|${tStamp}|${lStamp}|${opts.prompts ? 'p' : '-'}|${derivedInputsStamp(cwd, session, true)}`;
-  const key = crypto.createHash('sha256').update(`map ${cwd} ${session} ${opts.root}`).digest('hex').slice(0, 16);
+  // `prompts` belongs in the KEY, not only the stamp: two callers disagreeing about it would otherwise
+  // share one filename and each write would be a permanent miss for the other.
+  //
+  // The corollary bit us immediately: the Overview is the only thing that WRITES this cache, and it
+  // always passes `prompts: true`, so any reader passing `false` addresses a filename nothing creates
+  // and rebuilds the whole map — in-process, on the extension host, measured at 4.7 s / 1.1 GB on a
+  // 7,912-edit session. A reader that wants the Overview's cached answer must ask for the Overview's
+  // key. If a genuine prompts-free producer ever appears, this is safe again; until then, `true`.
+  const key = crypto
+    .createHash('sha256')
+    .update(`map v${MAP_CACHE_VERSION} ${opts.prompts ? 'p' : '-'} ${cwd} ${session} ${opts.root}`)
+    .digest('hex')
+    .slice(0, 16);
   const p = mapCachePath(session, key);
   try {
     const hit = JSON.parse(fs.readFileSync(p, 'utf8')) as { stamp: string; map: ChangeMap };
@@ -1126,16 +1252,35 @@ export function overviewChangeMap(cwd: string, session: string, opts: { root: st
   const seed: SiblingSession[] = sibs.length
     ? sibs
     : [{ id: session, worktree: cwd, gitBranch: null, phase: null } as unknown as SiblingSession];
-  const agents = seed.map((sib) => ({
-    ...(sib.id === session && sib.worktree === cwd && root === cwd
+  const now = Date.now();
+  const agents = seed.map((sib) => {
+    const lastMs = (sib as { lastMs?: number }).lastMs ?? 0; // transcript mtime — drives tab order
+    // The session being RENDERED is never folded, however old it is: the user picked it on purpose,
+    // and the whole point of pinning an old session is to look at what it did.
+    const self = sib.id === session && sib.worktree === cwd && root === cwd;
+    // Fold by ID alone: `self` also demands worktree/root equality (that gate decides whether `base`
+    // can be REUSED for the row), but a session launched from a subdirectory has worktree ≠ cwd — and
+    // folding it would mark the very session the reader is looking at "not loaded" while the panels
+    // around it render the map that was just built. cmdMultitask already folds id-only; now they agree.
+    const folded = sib.id !== session && isFoldedAge(lastMs, now);
+    const built = self
       ? base // reuse, never rebuild: half the work in the common single-agent case
-      : siblingChangeMap(sib.worktree, sib.id, { root: sib.worktree })),
-    session: sib.id,
-    worktree: sib.worktree,
-    gitBranch: sib.gitBranch ?? null,
-    phase: (sib as { phase?: string | null }).phase ?? null,
-    lastMs: (sib as { lastMs?: number }).lastMs ?? 0, // transcript mtime — drives tab order
-  })).sort((a: { lastMs: number }, b: { lastMs: number }) => b.lastMs - a.lastMs); // most recent first
+      : folded
+        ? siblingOverviewCached(sib.worktree, sib.id, { root: sib.worktree })?.map ?? null
+        : siblingChangeMap(sib.worktree, sib.id, { root: sib.worktree });
+    return {
+      ...(built ?? unbuiltChangeMap(sib.id)),
+      session: sib.id,
+      worktree: sib.worktree,
+      gitBranch: sib.gitBranch ?? null,
+      phase: (sib as { phase?: string | null }).phase ?? null,
+      lastMs,
+      /** Collapsed in the fleet surfaces — a conversation older than FLEET_FOLD_MS. */
+      folded,
+      /** False ⇒ the numbers above are placeholders, not findings. Only ever false for a folded row. */
+      loaded: built !== null,
+    };
+  }).sort((a: { lastMs: number }, b: { lastMs: number }) => b.lastMs - a.lastMs); // most recent first
   // The current session's `taskId: null` roll — edits inside no strict task interval — surfaced directly
   // so a renderer never has to dig it out of rollupByTask.
   const unassigned =
@@ -1152,37 +1297,79 @@ export function overviewChangeMap(cwd: string, session: string, opts: { root: st
   return { ...base, rollupByAgent: rollupByAgent(agents), agents: slimAgents, unassigned };
 }
 
-export function siblingOverview(cwd: string, session: string, opts: { root: string; bins?: number }): SiblingOverview {
-  const transcript = findTranscript(cwd, session);
-  const tStamp = fileStamp(transcript);
+/** Where a sibling's payload lives and what stamp it must carry, or null when there is nothing to key on. */
+function siblingSlot(cwd: string, session: string, opts: { root: string; bins?: number }): { p: string; stamp: string } | null {
+  const tStamp = fileStamp(findTranscript(cwd, session));
   const lStamp = fileStamp(logPath(session));
+  if (!tStamp && !lStamp) return null; // neither input exists — nothing stable to key on
   const bins = opts.bins ?? 20;
-  const build = (): SiblingOverview => ({
-    map: buildChangeMap(cwd, session, opts),
-    sparkline: activityBins(parseActions(cwd, session).map((a) => a.ts), bins),
-    todos: transcriptInsights(cwd, session).todos,
-  });
-  // Nothing stable to key on (neither input exists) — just build it.
-  if (!tStamp && !lStamp) return build();
   const stamp = `${MAP_CACHE_VERSION}|${tStamp}|${lStamp}|${bins}|${derivedInputsStamp(cwd, session, false)}`;
-  const key = crypto.createHash('sha256').update(`${cwd} ${session} ${opts.root}`).digest('hex').slice(0, 16);
-  const p = mapCachePath(session, key);
+  const key = crypto.createHash('sha256').update(`v${MAP_CACHE_VERSION} ${cwd} ${session} ${opts.root}`).digest('hex').slice(0, 16);
+  return { p: mapCachePath(session, key), stamp };
+}
+
+function readSiblingSlot(slot: { p: string; stamp: string }): SiblingOverview | null {
   try {
-    const hit = JSON.parse(fs.readFileSync(p, 'utf8')) as { stamp: string; view: SiblingOverview };
-    if (hit && hit.stamp === stamp && hit.view && hit.view.map) return hit.view;
+    const hit = JSON.parse(fs.readFileSync(slot.p, 'utf8')) as { stamp: string; view: SiblingOverview };
+    if (hit && hit.stamp === slot.stamp && hit.view && hit.view.map) return hit.view;
   } catch {
-    /* absent or unreadable — rebuild */
+    /* absent or unreadable */
   }
-  const view = build();
-  try {
-    fs.mkdirSync(path.dirname(p), { recursive: true, mode: 0o700 });
-    const tmp = `${p}.${process.pid}.tmp`; // pid-scoped so concurrent CLI processes can't collide
-    fs.writeFileSync(tmp, JSON.stringify({ stamp, view }), { mode: 0o600 });
-    fs.renameSync(tmp, p); // atomic: a concurrent reader sees old-or-new, never a torn view
-  } catch {
-    /* cache is best-effort */
+  return null;
+}
+
+/**
+ * A sibling's payload IF it is already on disk — never builds one.
+ *
+ * This is what a FOLDED sibling gets (see FLEET_FOLD_MS). A week-old finished conversation is worth
+ * showing when the answer is already sitting in the cache, and is not worth seconds of transcript
+ * parsing on a refresh nobody asked for. A null here means "not built", which a renderer must show as
+ * such — reporting it as an empty session would be a lie with the same shape as the truth.
+ */
+export function siblingOverviewCached(cwd: string, session: string, opts: { root: string; bins?: number }): SiblingOverview | null {
+  const slot = siblingSlot(cwd, session, opts);
+  return slot ? readSiblingSlot(slot) : null;
+}
+
+export function siblingOverview(cwd: string, session: string, opts: { root: string; bins?: number }): SiblingOverview {
+  const slot = siblingSlot(cwd, session, opts);
+  const hit = slot ? readSiblingSlot(slot) : null;
+  if (hit) return hit;
+  const view: SiblingOverview = {
+    map: buildChangeMap(cwd, session, opts),
+    sparkline: activityBins(parseActions(cwd, session).map((a) => a.ts), opts.bins ?? 20),
+    todos: transcriptInsights(cwd, session).todos,
+  };
+  if (slot) {
+    try {
+      fs.mkdirSync(path.dirname(slot.p), { recursive: true, mode: 0o700 });
+      const tmp = `${slot.p}.${process.pid}.tmp`; // pid-scoped so concurrent CLI processes can't collide
+      fs.writeFileSync(tmp, JSON.stringify({ stamp: slot.stamp, view }), { mode: 0o600 });
+      fs.renameSync(tmp, slot.p); // atomic: a concurrent reader sees old-or-new, never a torn view
+    } catch {
+      /* cache is best-effort */
+    }
   }
   return view;
+}
+
+/**
+ * The map shape a sibling occupies when it was NOT built (a folded session with a cold cache).
+ *
+ * Every field is present so renderers need no special case to walk it, but the agent row carries
+ * `loaded: false` alongside — that flag, not these zeros, is what a renderer must read. "Nothing was
+ * built" and "this session changed nothing" are different facts with identical numbers.
+ */
+function unbuiltChangeMap(session: string): ChangeMap {
+  return {
+    summary: {
+      session, units: 0, rawEdits: 0, pending: 0, kept: 0, undone: 0, added: 0, removed: 0,
+      actions: 0, errors: 0, subagents: 0, fleet: 0, egress: 0, compactions: 0, spanMs: 0,
+    },
+    edits: [], compactions: [], files: [], modules: [],
+    rollupByTask: [], rollupBySubagent: [], rollupByWorkflow: [],
+    workflows: [], prompts: [], tasks: [],
+  };
 }
 
 /**

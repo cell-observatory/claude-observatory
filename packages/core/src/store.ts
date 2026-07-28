@@ -102,6 +102,23 @@ function blobsDir(sessionId: string): string {
   return path.join(storeDir(sessionId), 'blobs');
 }
 
+/**
+ * Is this snapshot still on disk? A `stat`, never a read.
+ *
+ * Readers deliberately treat a missing blob as empty text (`blobText`, `tree.readText`) so a GC'd
+ * snapshot degrades instead of crashing. That is right for rendering and WRONG for anything that
+ * persists the result: the derived value gets stored under the intact SHA and is then indistinguishable
+ * from an honest one, forever. Anything caching a blob-derived value asks this first.
+ */
+export function hasBlob(sessionId: string, sha: string | null): boolean {
+  if (!sha) return true; // no snapshot recorded is a legitimate state, not a missing one
+  try {
+    return fs.existsSync(path.join(blobsDir(sessionId), sha));
+  } catch {
+    return false;
+  }
+}
+
 function stagingDir(sessionId: string): string {
   return path.join(storeDir(sessionId), 'staging');
 }
@@ -779,8 +796,7 @@ export function allStoreSessionIds(): string[] {
 export function pruneEmptySession(sessionId: string): boolean {
   try {
     if (fs.existsSync(logPath(sessionId))) return false; // has (or had) review state — keep
-    const sdir = stagingDir(sessionId);
-    if (fs.existsSync(sdir) && fs.readdirSync(sdir).length > 0) return false; // in-flight capture
+    if (hasInflightCapture(sessionId)) return false;
     const bdir = blobsDir(sessionId);
     if (fs.existsSync(bdir) && fs.readdirSync(bdir).length > 0) return false; // live-referenced blobs
     removeSession(sessionId);
@@ -788,6 +804,43 @@ export function pruneEmptySession(sessionId: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * True while a capture is mid-flight for this session — a pre-snapshot or a bash manifest is staged.
+ *
+ * The honest "do not touch this session" signal, and the one thing a clock cannot tell you: a hook
+ * writes staging BEFORE the tool runs and clears it after, so a session can look quiet by every
+ * timestamp we have while an edit is in the air. Every reaper checks it.
+ */
+export function hasInflightCapture(sessionId: string): boolean {
+  try {
+    const sdir = stagingDir(sessionId);
+    return fs.existsSync(sdir) && fs.readdirSync(sdir).length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * RESOLVE a session: accept every pending edit, then drop the resolved records.
+ *
+ * The two halves already exist as separate verbs, and doing them by hand is the common way to finish
+ * with a session — accept what is left, then stop carrying its history. Composed here so both editors
+ * and the CLI perform the identical sequence, and so "resolved" means one thing.
+ *
+ * Files on disk are NOT touched: accepting is a review verdict, never a write. This keeps the session
+ * itself — use `removeSession` to delete it outright.
+ */
+export function resolveSession(sessionId: string): { accepted: number; cleared: number } {
+  const pending = readLog(sessionId)
+    .filter((r) => r.status === 'pending')
+    .map((r) => r.id);
+  // Accept FIRST: clearResolved only drops records that already carry a verdict, so the other order
+  // would clear the previously-resolved ones and leave everything just accepted still in the log.
+  const accepted = pending.length ? setStatusMany(sessionId, pending, 'kept').length : 0;
+  const cleared = clearResolved(sessionId);
+  return { accepted, cleared };
 }
 
 /** Remove an entire session directory from the store. */

@@ -307,8 +307,80 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.equal(sidebarIds[sidebarIds.length - 1], 'claudeObservatory.observations', 'Observations is the LAST sidebar view (0.8.7)');
     assert.equal(sidebarIds[sidebarIds.indexOf('claudeObservatory.actions') - 1], 'claudeObservatory.fileHistory', 'Actions sits directly after File History');
     assert.ok(!dock.some((v) => v.id === 'claudeObservatory.actions'), 'Actions is no longer in the bottom-panel dock');
-    assert.deepEqual(dock.map((v) => v.id), ['claudeObservatory.prompts', 'claudeObservatory.changemap', 'claudeObservatory.stats'], 'the dock is Prompts · Overview · Stats (0.8.8)');
+    // 0.9.0: Prompts moved to its OWN panel container, so it is a separate draggable unit rather than a
+    // tab wedged beside Overview and Stats. VS Code offers no manifest option to place a view in the
+    // secondary side bar, but a container of its own is what makes dragging it there stick cleanly.
+    const promptsC = pkg.contributes.views.claudeObservatoryPrompts;
+    assert.deepEqual(dock.map((v) => v.id), ['claudeObservatory.changemap', 'claudeObservatory.stats'], 'the dock is Overview · Stats (0.9.0)');
+    assert.deepEqual(promptsC.map((v) => v.id), ['claudeObservatory.prompts'], 'Prompts has its own container');
+    assert.ok(
+      pkg.contributes.viewsContainers.panel.some((c) => c.id === 'claudeObservatoryPrompts'),
+      'and that container is contributed'
+    );
     assert.ok(webviewProviders['claudeObservatory.prompts'], 'the Prompts window is registered as a webview view');
+    // 0.9.0: the Overview can also live in an EDITOR TAB. The bottom panel stays the default, the two
+    // hosts share one renderer (wire()), and exactly ONE of them drives refreshes — two ticking hosts
+    // would double every CLI spawn, which is the cost this release spent itself reducing.
+    {
+      const src = fs.readFileSync(path.resolve(__dirname, '../dist/extension.js'), 'utf8');
+      assert.ok(typeof commands['claudeObservatory.openOverviewInEditor'] === 'function', 'the command is registered');
+      assert.ok(/createWebviewPanel\(\s*"claudeObservatory\.overviewEditor"/.test(src), 'it opens a webview EDITOR panel');
+      assert.ok(/this\.wire\(panel\)/.test(src) && /this\.wire\(view\)/.test(src), 'both hosts go through the same wiring');
+      assert.ok(/if \(!this\.editorPanel\) this\.view = view/.test(src), 'the panel view yields while a tab is open');
+      assert.ok(/this\.view = this\.panelView/.test(src), '…and takes the wheel back when the tab closes');
+      assert.ok(/this\.view === view/.test(src) && /this\.view === panel/.test(src), 'only the DRIVING host refreshes on visibility');
+      const pkgCfg = pkg.contributes.configuration.properties || pkg.contributes.configuration[0].properties;
+      assert.equal(pkgCfg['claudeObservatory.overviewLocation'].default, 'panel', 'the bottom panel remains the default');
+    }
+    // 0.9.0: the bulk verbs are scoped to exactly one of two things — the selected PROMPT, else the
+    // selected SESSION. The session used to be implicit (the host resolved "the reviewed session"), so
+    // picking a sibling agent in Fleet left Accept All accepting a different session than the toolbar
+    // was labelled with. The webview now names it and the host VALIDATES it before it becomes a store
+    // path: these verbs touch every pending edit in a session, so an unchecked id is not acceptable.
+    const bundle = fs.readFileSync(path.resolve(__dirname, '../dist/extension.js'), 'utf8');
+    assert.ok(/type:\s*sess,\s*session:\s*selAgentSess\(\)/.test(bundle), 'the toolbar posts the session it is scoped to');
+    assert.ok(/function bulkSession[\s\S]{0,600}isSafeSessionId/.test(bundle), 'the host rejects an unsafe session id');
+    assert.ok(/function bulkSession[\s\S]{0,700}sessionMeta/.test(bundle), 'and one that is not this workspace\'s');
+    for (const cmd of ['keepAll', 'undoAll', 'clearResolved'])
+      assert.ok(
+        new RegExp(`registerCommand\\("claudeObservatory\\.${cmd}",\\s*\\(sess\\)`).test(bundle),
+        `${cmd} takes the scoped session (the palette still passes nothing and gets the reviewed one)`
+      );
+    // BEHAVIOURAL, because the assertions above only pin the wiring's shape: an early `return cur` in
+    // bulkSession satisfies every one of them while silently acting on the wrong session. Seed a SECOND
+    // session in this workspace, accept-all scoped to IT, and check the edits that changed are its own.
+    {
+      const OTHER = 'scopedOther';
+      core.ensureStore(OTHER);
+      const g = path.join(ws, "scoped.ts");
+      fs.writeFileSync(g, 'x\n');
+      core.appendLog(OTHER, {
+        id: 1, ts: 5000, tool: 'Edit', file: g, status: 'pending',
+        beforeBlob: core.writeBlob(OTHER, Buffer.from('x\n')),
+        afterBlob: core.writeBlob(OTHER, Buffer.from('x\ny\n')),
+      });
+      const otherTx = path.join(proj, OTHER + '.jsonl');
+      fs.writeFileSync(otherTx,
+        JSON.stringify({ timestamp: new Date(5000).toISOString(), type: "user", cwd: ws, message: { role: 'user', content: 'other' } }) + '\n');
+      // Age it so the REVIEWED session stays S. Written last it would be the newest transcript and thus
+      // the session `currentSession()` resolves to — which would make a broken scope hit the right
+      // session by accident, and this whole block prove nothing.
+      const old = (Date.now() - 3_600_000) / 1000;
+      fs.utimesSync(otherTx, old, old);
+      const pendingOf = (s) => core.readLog(s).filter((r) => r.status === 'pending').length;
+      const beforeSelf = pendingOf(S);
+      assert.equal(pendingOf(OTHER), 1, 'the second session starts with a pending edit');
+      await commands['claudeObservatory.keepAll'](OTHER);
+      assert.equal(pendingOf(OTHER), 0, 'Accept All scoped to the OTHER session accepted its edit');
+      assert.equal(pendingOf(S), beforeSelf, '…and left the reviewed session untouched');
+      // …and a traversing id must never become a store path. Asserted as "changed nothing here and did
+      // not throw" rather than by accepting the reviewed session, which would wreck the fixture the rest
+      // of this test depends on.
+      const beforeOther = pendingOf(OTHER);
+      await commands['claudeObservatory.keepAll']('../escape');
+      assert.equal(pendingOf(OTHER), beforeOther, 'an unsafe id is refused, not followed');
+      assert.equal(pendingOf(S), beforeSelf, '…and does not silently retarget another session either');
+    }
     // 0.8.7 QoL: the sidebar trees carry VS Code's native Collapse-All button (showCollapseAll) — the
     // file-Explorer affordance the user asked for, on Edits · Diffs · Actions (+ Observations).
     for (const id of ['claudeObservatory.edits', 'claudeObservatory.diffs', 'claudeObservatory.actions', 'claudeObservatory.observations'])
@@ -753,8 +825,15 @@ test('extension: three views, click commands, inline annotations, chat, status s
     // row re-points the change map and the feed but NOT these two, so both panes say so.
     assert.ok(/function offSession/.test(cmView.webview.html) && /function scopeNote/.test(cmView.webview.html), 'the session-scope note exists for the tabs the fleet selection does not re-point');
     assert.ok(/scopeNote\('Tasks'\)/.test(cmView.webview.html) && /scopeNote\('Background shells'\)/.test(cmView.webview.html), 'both session-scoped panes carry the note');
-    assert.ok(/ACTIVE session’s numbered task list/.test(cmView.webview.html) && /background shells the ACTIVE session launched/.test(cmView.webview.html),
+    // 0.9.0: "ACTIVE" became "REVIEWED" in the Tasks tooltip — the pane follows the session under review,
+    // and calling that the active session read as "the one Claude is running in", which is a different
+    // thing the moment you pin an older session.
+    assert.ok(/REVIEWED session’s numbered task list/.test(cmView.webview.html) && /background shells the ACTIVE session launched/.test(cmView.webview.html),
       'the tab tooltips name the scope too');
+    // …and both now say what happens to their BADGE while a sibling is selected, since neither pane can
+    // be scoped to one: a count from the reviewed session beside a pane the reader believes they scoped
+    // is the failure this release set out to remove.
+    assert.ok(/no count is shown while one is selected/.test(cmView.webview.html), 'the tooltips explain the blanked badge');
     assert.ok(!/\.mt-scope \{[^}]*var\(--mt-attn\)/.test(cmView.webview.html), 'the scope note does not borrow the amber that means "outside the workspace"');
     // 0.8.7 (5) REQUESTS — its own WINDOW in the dock (left of the Overview), not a tab inside it, so
     // the list of asks and the view it scopes are visible at the same time. Picking one filters the

@@ -5,12 +5,12 @@
  * (§S6) that buildChangeMap already bakes into each edit: an edit in no real in_progress interval is
  * `unassigned` (taskId === null) and is EXCLUDED from task rows — never swept into a neighbour.
  *
- * Thin by design — it composes the existing parsers (listRepoSiblings + buildChangeMap) rather than
+ * Thin by design — it composes the existing parsers (listRepoSiblings + the cached siblingChangeMap) rather than
  * re-deriving attribution. Git-free, path-only, no model calls, nothing stored.
  */
 import { EditStatus } from './store';
 import { listRepoSiblings } from './fleet';
-import { buildChangeMap, fileStatus } from './changemap';
+import { siblingChangeMap, fileStatus } from './changemap';
 
 /** One logical task, unioned across the agents (sessions) and subagents that contributed edits to it. */
 export interface TaskLogEntry {
@@ -49,7 +49,10 @@ interface Acc {
 export function crossAgentTaskLog(cwd: string): TaskLogEntry[] {
   const by = new Map<string, Acc>();
   for (const sib of listRepoSiblings(cwd)) {
-    const map = buildChangeMap(sib.worktree, sib.id, { root: sib.worktree });
+    // The CACHED sibling build, exactly as the Overview does it (changemap.ts). Calling the raw builder
+    // here re-derived every sibling's whole change map on every invocation — 12.4 s on a repo with 31
+    // siblings, for a 12 KB answer — while an identical, already-warm copy sat on disk beside it.
+    const map = siblingChangeMap(sib.worktree, sib.id, { root: sib.worktree });
     // Label from the STRICT-span task identities (map.tasks), which cover exactly the edit-producing
     // tasks and share ids with edit.taskId — the strict identities, whose ids
     // only overlap where content matches, leaving most strict-span tasks unlabelled.

@@ -327,7 +327,8 @@ in the others instantly. The layout is deliberately identical; only the host chr
 | Install | `code --install-extension claude-observatory.vsix` | `./scripts/install-jetbrains.sh` (or Install Plugin from Disk) |
 | Auto-update | daily background check → one-click **Update now** | add the [plugin repository](../packages/jetbrains/README.md#auto-updates) once → IDE-native updates |
 | **Edits · Diffs · File History · Actions** (the sidebar) | **Claude Edits** — microscope in the Activity Bar, badged with the pending count | **Claude Observatory** tool window, left stripe |
-| **Prompts · Overview · Stats** (the bottom panel) | **Claude Observatory** bottom panel, side by side (like Terminal/Problems) | **Claude Observatory Dashboards** tool window, bottom stripe — the same three panes side by side |
+| **Overview · Stats** (the bottom panel) | **Claude Observatory** bottom panel, side by side (like Terminal/Problems). The Overview can also be docked as a full-height **editor tab** — palette: *Open Overview in Editor*, or set `claudeObservatory.overviewLocation`; whichever host holds it drives the refresh, never both | **Claude Observatory Dashboards** tool window, bottom stripe |
+| **Prompts** | its own **Prompts** view (new installs start it in the bottom panel; drag it to the secondary sidebar if you like) — an existing profile keeps wherever you last dragged it, since VS Code remembers view placement per profile | part of the **Claude Observatory Dashboards** tool window |
 | Inline menu (**✨ #N · +A −R · view changes · Keep · Undo · Chat · View diff**) | CodeLens above each edit + ✨ gutter star + bold green/red highlight + coral ruler mark | lens above each edit + clickable ✨ gutter star + bold green/red highlight + coral stripe |
 | Click **view changes** | opens the **inline review bubble** at the edit — the diff in git's colors + reasoning + `+A −R`, Keep/Undo/Chat/Prev/Next on its toolbar (no tab) | opens the edit's unified **diff** (reasoning in title, Keep/Undo/Chat on toolbar) |
 | File spotlight | 📄 spotlight (tab-bar) | 📄 spotlight (editor banner) |
@@ -1000,11 +1001,7 @@ re-point the change map and the feed.
 The **Switch Session** picker reads the same rows. Each entry leads with the session's title, the live
 session comes first, the rest follow by conversation recency, the row currently in effect is
 preselected, and typing filters by title or id. The listing is built from directory stats plus a bounded
-title scan cached in a small on-disk sidecar per session. Each row also reports what that session did —
-its captured edits, the files they touched, how many still await review — read from its edit log and
-cached in the same sidecar under the log's own `(mtime, size)`: a finished session is never re-read, and
-a live one is re-read only for those three numbers. What made the old picker slow was doing that work
-for every session on every open, uncached, alongside a full transcript parse for each title.
+title scan cached in a small on-disk sidecar per session. Each row shows the session's title and when its conversation was last active; the full stats live on the Sessions tab's rows.
 
 `claude-observatory sessions` prints the same listing as text; `--json` emits it whole:
 

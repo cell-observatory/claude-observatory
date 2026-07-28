@@ -121,6 +121,36 @@ object ReviewOps {
         if (res.ok) status(project, res.message) else notify(project, res.message, NotificationType.ERROR)
     }
 
+    /**
+     * Revert every pending edit in a SESSION, via `undo --all --session <id>` — no local records.
+     *
+     * The record-taking overload pairs ids with a log, which is only safe when both come from the same
+     * session. The Overview toolbar can be scoped to a sibling, so it uses this instead: the CLI resolves
+     * the set from the session it is given, and nothing can cross a session boundary.
+     */
+    fun undoAllInSession(project: Project, session: String) {
+        val ok = Messages.showYesNoDialog(
+            project,
+            "Revert every pending edit in this session?\n\nThis rewrites files on disk. Accepted edits are left alone.",
+            "Claude Observatory",
+            "Revert All",
+            "Cancel",
+            Messages.getWarningIcon(),
+        )
+        if (ok != Messages.YES) return
+        runBg(project, "Reverting all pending edits") {
+            val r = ObservatoryCli.undoScope(session, null, project.basePath)
+            ApplicationManager.getApplication().invokeLater {
+                if (r == null) notify(project, cliFailMsg("revert the session"), NotificationType.ERROR)
+                else {
+                    ObservatoryService.getInstance(project).refresh(force = true)
+                    VfsUtil.markDirtyAndRefresh(true, true, true, *arrayOf(LocalFileSystem.getInstance().findFileByPath(project.basePath ?: "")).filterNotNull().toTypedArray())
+                    notify(project, "Reverted the session's pending edits.")
+                }
+            }
+        }
+    }
+
     /** Undo all PENDING edits in scope, newest-first — with a dirty-buffer guard + confirm. Accepted
      *  edits are left on disk; revert those individually. The revert itself is ONE CLI call backed by
      *  core.undoScope (the single scoped-revert implementation the CLI + VS Code also use), not a per-id
@@ -247,14 +277,18 @@ object ReviewOps {
         }
     }
 
-    fun clearResolved(project: Project, session: String, resolvedCount: Int) {
+    /** [resolvedCount] null = unknown (a sibling session — its log is not loaded here): the dialog is
+     *  phrased count-free and the toast reports the CLI's own figure, never an interpolated sentinel. */
+    fun clearResolved(project: Project, session: String, resolvedCount: Int?) {
+        val what = resolvedCount?.let { "$it resolved edit(s)" } ?: "this session's resolved edits"
         val ok = Messages.showYesNoDialog(
-            project, "Clear $resolvedCount resolved edit(s) from the log? Pending edits are kept.",
+            project, "Clear $what from the log? Pending edits are kept.",
             "Claude Observatory", "Clear", "Cancel", Messages.getQuestionIcon(),
         )
         if (ok != Messages.YES) return
         runBg(project, "Clearing resolved edits") {
-            if (ObservatoryCli.clearResolved(session, project.basePath)) done(project, "Cleared $resolvedCount resolved edit(s)")
+            val r = ObservatoryCli.clearResolvedJson(session, project.basePath)
+            if (r != null) done(project, "Cleared $r resolved edit(s)")
             else done(project, cliFailMsg("clear resolved edits"), NotificationType.ERROR)
         }
     }
@@ -474,12 +508,73 @@ object ReviewOps {
         val session = ObservatoryService.getInstance(project).currentSession()
             ?: return notify(project, "No active Claude Code session for this project", NotificationType.WARNING)
         val gcOpt = "Reclaim disk — garbage-collect orphaned blobs"
+        // Spelled out, never a bare "Clear": this drops whole SESSIONS, where every other clear verb in
+        // the product drops resolved EDITS. The two are one keystroke apart and not remotely undoable.
+        val completedOpt = "Clear completed sessions — drop finished sessions with nothing left to review"
         val dropOpt = "Drop this session — delete its edits + blobs (files on disk are unchanged)"
         val popup = com.intellij.openapi.ui.popup.JBPopupFactory.getInstance()
-            .createPopupChooserBuilder(listOf(gcOpt, dropOpt))
+            .createPopupChooserBuilder(listOf(gcOpt, completedOpt, dropOpt))
             .setTitle("Clean the store")
             .setItemChosenCallback { chosen ->
                 val drop = chosen == dropOpt
+                val completed = chosen == completedOpt
+                if (completed) {
+                    // Popup callbacks run on the EDT, and the counts preview SPAWNS the CLI — inline it
+                    // froze the IDE between the popup click and the confirm dialog (~80ms warm, bounded
+                    // only by the 30s exec timeout on a slow store). So: preview on a pooled thread,
+                    // dialog back on the EDT, and only then the destructive verb in its own task.
+                    runBg(project, "Checking completed sessions…") {
+                        // Ask the CLI what would actually go, and put THOSE numbers in the dialog. This
+                        // used to be prose alone, so the reader confirmed a recursive delete of
+                        // unreviewed work without being told how many sessions or how many edits — the
+                        // VS Code dialog has always led with the counts, and the more destructive
+                        // surface should not say less.
+                        val preview = ObservatoryCli.cleanCompletedPreview(project.basePath)
+                        val doomed: List<Triple<String, String, Int>> = try {
+                            com.google.gson.JsonParser.parseString(preview.stdout).asJsonObject
+                                .getAsJsonArray("sessions").map { it.asJsonObject }
+                                .map {
+                                    Triple(
+                                        it.get("title")?.takeIf { t -> !t.isJsonNull }?.asString?.ifBlank { null }
+                                            ?: it.get("id").asString,
+                                        it.get("reason")?.takeIf { r -> !r.isJsonNull }?.asString ?: "finished",
+                                        it.get("pending")?.takeIf { p -> !p.isJsonNull }?.asInt ?: 0,
+                                    )
+                                }
+                        } catch (_: Exception) {
+                            emptyList()
+                        }
+                        ApplicationManager.getApplication().invokeLater {
+                            if (project.isDisposed) return@invokeLater
+                            if (preview.ok && doomed.isEmpty()) {
+                                return@invokeLater notify(project, NO_COMPLETED_MSG, NotificationType.INFORMATION)
+                            }
+                            // A preview we could not read is not a reason to guess a number; fall back to the prose.
+                            val lost = doomed.sumOf { it.third }
+                            val lead = if (doomed.isEmpty()) {
+                                "Clear finished and abandoned sessions?"
+                            } else {
+                                "Clear ${doomed.size} session(s)?" +
+                                    (if (lost > 0) "  $lost edit(s) have never been reviewed and will be DISCARDED." else "") +
+                                    "\n\n" + doomed.take(5).joinToString("\n") { "  • ${it.first} (${it.second})" } +
+                                    (if (doomed.size > 5) "\n  … and ${doomed.size - 5} more" else "")
+                            }
+                            val ok = Messages.showYesNoDialog(
+                                project,
+                                lead + "\n\n" +
+                                    "FINISHED means nothing left to review. ABANDONED means the conversation has been dead for " +
+                                    "over two weeks and its edits were never reviewed — those unreviewed edits are DISCARDED.\n\n" +
+                                    "This deletes their captured edits + blobs. Files on disk are NOT changed.\n\n" +
+                                    "Never included: the session you are in, anything mid-capture, anything from another " +
+                                    "workspace, anything reviewed-and-quiet for under a day, or anything with pending edits " +
+                                    "that is under two weeks old.",
+                                "Claude Observatory", "Clear Sessions", "Cancel", Messages.getWarningIcon(),
+                            )
+                            if (ok == Messages.YES) runClean(project, session, CleanVerb.COMPLETED)
+                        }
+                    }
+                    return@setItemChosenCallback
+                }
                 if (drop) {
                     val ok = Messages.showYesNoDialog(
                         project, "Drop session $session? This deletes its captured edits + blobs. Files on disk are NOT changed.",
@@ -487,20 +582,52 @@ object ReviewOps {
                     )
                     if (ok != Messages.YES) return@setItemChosenCallback
                 }
-                runBg(project, "Cleaning store…") {
-                    val r = if (drop) ObservatoryCli.dropSession(session, project.basePath) else ObservatoryCli.gc(session, project.basePath)
+                runClean(project, session, if (drop) CleanVerb.DROP else CleanVerb.GC)
+            }
+            .createPopup()
+        if (anchor != null) popup.showInCenterOf(anchor) else popup.showCenteredInCurrentWindow(project)
+    }
+
+    /** The three destructive clean verbs, one value each — two booleans made (drop ∧ completed)
+     *  representable but meaningless. */
+    private enum class CleanVerb { DROP, COMPLETED, GC }
+
+    /** Shared by all clean verbs, phrased once. */
+    private const val NO_COMPLETED_MSG =
+        "No completed sessions to clear — every other session is still live, still has " +
+            "pending edits, or only just went quiet."
+
+    /** The destructive half of cleanStore, in its own background task — the confirm dialogs above stay
+     *  pure UI. */
+    private fun runClean(project: Project, session: String, verb: CleanVerb) {
+        runBg(project, "Cleaning store…") {
+                    val r = when (verb) {
+                        CleanVerb.DROP -> ObservatoryCli.dropSession(session, project.basePath)
+                        CleanVerb.COMPLETED -> ObservatoryCli.cleanCompleted(project.basePath)
+                        CleanVerb.GC -> ObservatoryCli.gc(session, project.basePath)
+                    }
                     ApplicationManager.getApplication().invokeLater {
                         if (r.ok) {
                             ObservatoryService.getInstance(project).refresh(force = true) // the store just changed
-                            notify(project, if (drop) "Dropped session $session." else "Reclaimed disk (GC complete).")
+                            notify(
+                                project,
+                                when {
+                                    verb == CleanVerb.DROP -> "Dropped session $session."
+                                    // The CLI is the authority on how many qualified; report ITS count, never a
+                                    // guess — and never report a deletion that did not happen.
+                                    verb == CleanVerb.COMPLETED -> when (val n = droppedCount(r.stdout)) {
+                                        null -> "Cleared the completed sessions."
+                                        0 -> NO_COMPLETED_MSG
+                                        else -> "Cleared $n completed session(s)."
+                                    }
+                                    else -> "Reclaimed disk (GC complete)."
+                                },
+                            )
                         } else {
                             notify(project, "Clean failed — ${r.stderr.take(160)}", NotificationType.ERROR)
                         }
                     }
                 }
-            }
-            .createPopup()
-        if (anchor != null) popup.showInCenterOf(anchor) else popup.showCenteredInCurrentWindow(project)
     }
 
     /** Switch Session with no explicit anchor (Find Action / keymap) — centers the chooser in the window. */
@@ -525,7 +652,7 @@ object ReviewOps {
     }
 
     /** `sessions --json` rows (0.8.8): id + title + conversation recency + which session is live. The
-     *  listing is stat-only in core — no store log is parsed, so the popup opens without the multi-second
+     *  listing is sidecar-cached in core — a log is re-parsed only when it changed, so the popup opens without the multi-second
      *  stall the old pending-count listing paid. Falls back to the in-process store list (ids only) when
      *  the CLI is missing: the chooser must never fail to open. */
     private fun sessionEntries(project: Project): List<SessionRow> {
@@ -720,6 +847,21 @@ object ReviewOps {
                 }
             }
         }
+    }
+
+    /**
+     * How many sessions `clean --completed --json` actually dropped.
+     *
+     * Read from the CLI's own answer rather than counted here: the eligibility rules live in core, and a
+     * second count in the UI is a second definition of "completed" waiting to disagree. Falls back to a
+     * count-free message rather than inventing a number if the payload cannot be read.
+     */
+    private fun droppedCount(stdout: String): Int? = try {
+        com.google.gson.JsonParser.parseString(stdout).asJsonObject.getAsJsonArray("dropped")?.size() ?: 0
+    } catch (_: Exception) {
+        // null, not a string: this value is interpolated into "Cleared $n completed session(s)", and the
+        // old "the completed" sentinel rendered as "Cleared the completed completed session(s)."
+        null
     }
 
     /** What `demo --clean --json` says it actually reclaimed, as phrases for the confirmation. */

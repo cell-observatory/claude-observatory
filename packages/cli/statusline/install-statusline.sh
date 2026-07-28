@@ -48,26 +48,38 @@ if ! locale charmap 2>/dev/null | grep -qi 'utf'; then
 fi
 
 input=$(cat)
-j() { printf '%s' "$input" | jq -r "$1"; }
-
-dir=$(j '.workspace.current_dir // .cwd // ""')
-model=$(j '.model.display_name // ""')
-effort=$(j '.effort.level // ""')            # reasoning effort (low/medium/high/xhigh/max); absent if unsupported
-thinking=$(j '.thinking.enabled // false')   # extended thinking on/off
-ostyle=$(j '.output_style.name // ""')       # active output style (hidden when default)
-dur_ms=$(j '.cost.total_duration_ms // empty') # wall-clock session duration
-ctx=$(j '.context_window.used_percentage // empty')
-ctx_in=$(j '.context_window.total_input_tokens // 0')
-ctx_out=$(j '.context_window.total_output_tokens // 0')
-ctx_size=$(j '.context_window.context_window_size // empty')
-sid=$(j '.session_id // ""')
-tp=$(j '.transcript_path // ""')
+# ONE jq pass for every scalar this render reads. The old per-field j() helper spawned jq sixteen
+# times (~150ms of a 550ms render, measured). One field per LINE, not @tsv: @tsv escapes backslashes,
+# which would corrupt Windows paths, and none of these fields can legally contain a newline. Absent
+# maps to an empty line ("" — never `empty`, which would DROP the line and shift every later field),
+# so the read chain below stays aligned. bash 3.2-safe: no mapfile.
+{
+  IFS= read -r dir
+  IFS= read -r model
+  IFS= read -r effort      # reasoning effort (low/medium/high/xhigh/max); empty if unsupported
+  IFS= read -r thinking    # extended thinking on/off
+  IFS= read -r ostyle      # active output style (hidden when default)
+  IFS= read -r dur_ms      # wall-clock session duration
+  IFS= read -r ctx
+  IFS= read -r ctx_in
+  IFS= read -r ctx_out
+  IFS= read -r ctx_size
+  IFS= read -r sid
+  IFS= read -r tp
+  IFS= read -r five_pct
+  IFS= read -r five_reset
+  IFS= read -r week_pct
+  IFS= read -r week_reset
+} < <(printf '%s' "$input" | jq -r '[
+  (.workspace.current_dir // .cwd // ""), (.model.display_name // ""), (.effort.level // ""),
+  (.thinking.enabled // false), (.output_style.name // ""), (.cost.total_duration_ms // ""),
+  (.context_window.used_percentage // ""), (.context_window.total_input_tokens // 0),
+  (.context_window.total_output_tokens // 0), (.context_window.context_window_size // ""),
+  (.session_id // ""), (.transcript_path // ""),
+  (.rate_limits.five_hour.used_percentage // ""), (.rate_limits.five_hour.resets_at // ""),
+  (.rate_limits.seven_day.used_percentage // ""), (.rate_limits.seven_day.resets_at // "")
+][] | tostring' 2>/dev/null)
 branch=$(git -C "$dir" --no-optional-locks rev-parse --abbrev-ref HEAD 2>/dev/null)
-
-five_pct=$(j '.rate_limits.five_hour.used_percentage // empty')
-five_reset=$(j '.rate_limits.five_hour.resets_at // empty')
-week_pct=$(j '.rate_limits.seven_day.used_percentage // empty')
-week_reset=$(j '.rate_limits.seven_day.resets_at // empty')
 
 DIM=$'\033[2m'; R=$'\033[0m'
 # color a usage percentage: green <50, yellow 50-79, red >=80
@@ -131,10 +143,11 @@ printf '%b\n' "$line1"
 # grep pre-filters (no full JSON parse); each candidate line is validated by jq, last valid wins.
 title=""
 if [ -n "$tp" ] && [ -f "$tp" ]; then
-  while IFS= read -r ln; do
-    t=$(printf '%s' "$ln" | jq -r 'select(.type=="ai-title") | .aiTitle // empty' 2>/dev/null)
-    [ -n "$t" ] && title="$t"
-  done < <(grep '"type":"ai-title"' "$tp" 2>/dev/null | tail -n 5)
+  # Bounded to the last 4MB (ai-title rides near the end; matches core TITLE_TAIL_SCAN) — the whole-file
+  # grep was ~144ms on a 10MB transcript and grew with it. One jq for all candidates, not one per line;
+  # fromjson? skips the possibly-truncated first line of the tail instead of aborting the stream.
+  title=$(tail -c 4194304 "$tp" 2>/dev/null | grep '"type":"ai-title"' | tail -n 5 |
+    jq -Rr 'fromjson? | select(.type=="ai-title") | .aiTitle // empty' 2>/dev/null | tail -n 1)
 fi
 [ -z "$title" ] && title=$(basename "$dir")
 [ "${#title}" -gt 48 ] && title="${title:0:47}…"
@@ -169,10 +182,14 @@ printf '%b\n' "$line2"
 # throttled (<=10 min), cached scan live in statusline-usage.json. Needs python3; if it is
 # absent, or nothing has calibrated yet, the ~estimate is simply omitted. Delete the state
 # file to recalibrate. python returns "<e5> <e7>" (0 = none); we treat 0 as "don't show".
-est5=""; est7=""
-if command -v python3 >/dev/null 2>&1 && { [ -n "$five_pct" ] || [ -n "$week_pct" ]; }; then
+est5=""; est7=""; meas5=""; meas7=""
+# No rate_limits gate. rate_limits.* is sent ONLY for Claude.ai subscription plans, so gating the scan
+# on it meant an Enterprise or API account — which has no rolling windows to report — got no usage
+# readout at all, when the tokens it burned sit in the very same transcripts everyone else scans.
+# The scan is what produces the MEASURED totals; the percentages only calibrate the ~estimate on top.
+if command -v python3 >/dev/null 2>&1; then
   CFG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-  read -r est5 tot5 est7 tot7 <<<"$(python3 - "$CFG_DIR/statusline-usage.json" "$CFG_DIR/projects" \
+  read -r est5 tot5 est7 tot7 meas5 meas7 <<<"$(python3 - "$CFG_DIR/statusline-usage.json" "$CFG_DIR/projects" \
       "${five_pct:-0}" "${five_reset:-0}" "${week_pct:-0}" "${week_reset:-0}" 2>/dev/null <<'PYEOF'
 import sys, os, json, glob, time, datetime, signal
 sp, proj = sys.argv[1], sys.argv[2]
@@ -206,12 +223,24 @@ def scan(path, since):
             t += (u.get('input_tokens', 0) or 0) + (u.get('output_tokens', 0) or 0) + (u.get('cache_creation_input_tokens', 0) or 0)
     except Exception: pass
     return t
-if ((now - last) >= THR or not st) and (r5 or r7):
-    class TO(Exception): pass
-    try: signal.signal(signal.SIGALRM, lambda *a: (_ for _ in ()).throw(TO())); signal.alarm(12)
+# `r5 or r7` used to be required here too. Without a reset time the windows simply anchor at now
+# (see ws5/ws7 below), which is exactly right for a plan that has no reset to anchor to.
+if (now - last) >= THR or not st:
+    # BaseException, NOT Exception: nearly all scan wall-time is inside scan(), whose broad
+    # except Exception swallowed the alarm — so the 12s cap did not cap, and a partial per-file count
+    # could be persisted into fc under a stable key. BaseException passes through untouched, reaches
+    # the TO handler below, and the state dump there is what keeps later renders from re-paying the
+    # timeout. The alarm seconds are env-tunable so a test can exercise this path deterministically.
+    class TO(BaseException): pass
+    try: signal.signal(signal.SIGALRM, lambda *a: (_ for _ in ()).throw(TO())); signal.alarm(int(os.environ.get("STATUSLINE_SCAN_ALARM", "12")))
     except Exception: pass
     ws5 = (r5 - W5) if r5 else now - W5
-    ws7 = (r7 - W7) if r7 else now - W7
+    # No reset clock (Enterprise / API): a raw now-anchored ws7 moves every scan, so the (mtime, ws7)
+    # cache key could never match twice and every 600s scan re-parsed the full week window (~1.3s,
+    # forever, measured). Quantized to the hour, the key holds between scans and a full re-parse
+    # happens once an hour; the readout drifts by at most the bucket width at the window edge, which
+    # is honest for an estimate that has no true account window to disagree with.
+    ws7 = (r7 - W7) if r7 else int((now - W7) // 3600 * 3600)
     try:
         nL5 = nL7 = 0.0; nfc = {}
         for path in glob.glob(os.path.join(proj, '**', '*.jsonl'), recursive=True):
@@ -232,14 +261,26 @@ if ((now - last) >= THR or not st) and (r5 or r7):
             json.dump({'v': 1, 'last_scan': last, 'L5': L5, 'L7': L7, 'tpp5': tpp5, 'tpp7': tpp7, 'fc': fc}, open(tmp, 'w'))
             os.replace(tmp, sp)
         except Exception: pass
-    except TO: pass
+    except TO:
+        # The scan hit the alarm. Persist last_scan anyway (with the OLD totals): without this the dump
+        # below never runs, last_scan never advances, and every future render re-enters the scan and
+        # pays the full 12s — the one state this file exists to prevent. Stale-but-bounded beats that.
+        last = now
+        try:
+            tmp = sp + ".tmp"
+            json.dump({"v": 1, "last_scan": last, "L5": L5, "L7": L7, "tpp5": tpp5, "tpp7": tpp7, "fc": fc}, open(tmp, "w"))
+            os.replace(tmp, sp)
+        except Exception: pass
     try: signal.alarm(0)
     except Exception: pass
 e5 = int(p5 * tpp5) if (p5 and tpp5) else 0
 e7 = int(p7 * tpp7) if (p7 and tpp7) else 0
 t5 = int(tpp5 * 100) if tpp5 else 0   # projected 100% budget (tokens) for the 5h window
 t7 = int(tpp7 * 100) if tpp7 else 0   # projected 100% budget (tokens) for the week window
-print(f"{e5} {t5} {e7} {t7}")
+# L5/L7 are MEASURED from the transcripts on this machine, not projected from a percentage. They are
+# the only usage figure an account with no rolling windows can be given, and honest for everyone else.
+# (No apostrophes in these comments: the heredoc is inside $( ), where bash still tracks quotes.)
+print(f"{e5} {t5} {e7} {t7} {int(L5)} {int(L7)}")
 PYEOF
 )"
 fi
@@ -252,7 +293,7 @@ _old=$(cat "$_LAST" 2>/dev/null || echo '{}')
 # If the existing file is corrupt/truncated/empty, --argjson would abort the jq below on EVERY
 # turn and the persist would silently stop updating forever — fall back to '{}' so it self-heals.
 printf '%s' "$_old" | jq -e . >/dev/null 2>&1 || _old='{}'
-printf '%s' "$input" | jq -c --argjson old "$_old" --arg est5 "${est5:-}" --arg est7 "${est7:-}" '{
+printf '%s' "$input" | jq -c --argjson old "$_old" --arg est5 "${est5:-}" --arg est7 "${est7:-}" --arg meas5 "${meas5:-}" --arg meas7 "${meas7:-}" '{
   ts: now,
   model: (.model.display_name // $old.model // ""),
   dir: (.workspace.current_dir // .cwd // $old.dir // ""),
@@ -264,7 +305,9 @@ printf '%s' "$input" | jq -c --argjson old "$_old" --arg est5 "${est5:-}" --arg 
   week_pct: (.rate_limits.seven_day.used_percentage // $old.week_pct),
   week_reset: (.rate_limits.seven_day.resets_at // $old.week_reset),
   five_tok: (($est5 | tonumber?) // $old.five_tok),
-  week_tok: (($est7 | tonumber?) // $old.week_tok)
+  week_tok: (($est7 | tonumber?) // $old.week_tok),
+  five_meas: (($meas5 | tonumber?) // $old.five_meas),
+  week_meas: (($meas7 | tonumber?) // $old.week_meas)
 }' > "$_LAST.tmp" 2>/dev/null && mv "$_LAST.tmp" "$_LAST" 2>/dev/null || true
 
 # Line 3 — the usage bars
@@ -281,10 +324,14 @@ if [ -n "$five_pct" ]; then c=$(uc "$five_pct"); s=""; [ -n "$five_reset" ] && s
   # ~used/projected-total (total = 100% of the window's estimated budget); used-only until it calibrates
   if [ "${est5:-0}" != 0 ]; then if [ "${tot5:-0}" != 0 ]; then s="$s ${DIM}~$(human "$est5")/$(human "$tot5")${R}"; else s="$s ${DIM}~$(human "$est5")${R}"; fi; fi
   parts+=("${c}5h [$(bar "$five_pct" 8 "$c")] $(printf '%.0f' "$five_pct")%${R}${s}")
+# No percentage, but a real measurement: show it. A bare "5h —" on an Enterprise or API account reads as
+# "still loading" forever, when the truth is that this plan has no rolling window to report a share of.
+elif [ "${meas5:-0}" != 0 ]; then parts+=("${DIM}5h${R} $(human "$meas5") ${DIM}tok${R}")
 else parts+=("${DIM}5h —${R}"); fi
 if [ -n "$week_pct" ]; then c=$(uc "$week_pct"); s=""; [ -n "$week_reset" ] && s=" ${DIM}·$(until_str "$week_reset")${R}"
   if [ "${est7:-0}" != 0 ]; then if [ "${tot7:-0}" != 0 ]; then s="$s ${DIM}~$(human "$est7")/$(human "$tot7")${R}"; else s="$s ${DIM}~$(human "$est7")${R}"; fi; fi
   parts+=("${c}wk [$(bar "$week_pct" 8 "$c")] $(printf '%.0f' "$week_pct")%${R}${s}")
+elif [ "${meas7:-0}" != 0 ]; then parts+=("${DIM}wk${R} $(human "$meas7") ${DIM}tok${R}")
 else parts+=("${DIM}wk —${R}"); fi
 out=""
 for p in "${parts[@]}"; do

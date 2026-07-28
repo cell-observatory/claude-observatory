@@ -54,6 +54,10 @@ class PlacementsCache(private val project: Project) : Disposable {
         val service = ObservatoryService.getInstance(project)
         val session = service.currentSession() ?: return emptyList()
         if (service.log().none { it.pending && it.file == file }) return emptyList()
+        // Accepted gap vs VS Code (0.9.0): the sibling keys per-file on the pending CHAIN, so a keep in
+        // one file does not re-locate every open file. Here the whole-log key stands because the recompute
+        // is already off-thread (pooled, 350ms quiet, superseded-checked) — the VS Code hazard was an EDT
+        // stall, which this path structurally lacks; the cost is redundant background locates only.
         val key = "$file|$textKey|$session:${StoreReader.logKey(session)}"
         cache[key]?.let { return it }
         newest[file] = key

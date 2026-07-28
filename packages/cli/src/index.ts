@@ -292,6 +292,72 @@ function cmdDoctor(args: string[]): void {
   process.exit(fails ? 1 : 0);
 }
 
+/**
+ * `resolve [--session <id>] [--json]` — accept every pending edit in a session, then clear its resolved
+ * records. Files on disk are never touched (accepting is a verdict, not a write), and the session is
+ * kept — `clean --drop` deletes one outright.
+ */
+function cmdResolve(args: string[]): void {
+  const core = require('@claude-observatory/core') as Core;
+  const session = getSessionId(args);
+  const r = core.resolveSession(session);
+  if (args.includes('--json')) {
+    emitJson({ session, accepted: r.accepted, cleared: r.cleared });
+    return;
+  }
+  process.stdout.write(
+    c.green('✓ ') + `resolved ${session.slice(0, 8)}: accepted ${r.accepted} pending edit(s), cleared ${r.cleared} record(s)\n`
+  );
+}
+
+/**
+ * `warm [--root <d>] [--since <dur>] [--json]` — build the change map for this workspace's RECENT
+ * sessions so switching to one is a cache read instead of a rebuild.
+ *
+ * Switching to a large session was measured at 6.8 s cold against 1.4 s warm, and nothing warmed a
+ * session until you switched to it — so the cost landed on the reader every time. This is that work,
+ * moved off the critical path: the editors spawn it detached after a refresh settles.
+ *
+ * Deliberately serial. It exists to spend idle time, not to contend with the refresh that just finished
+ * — a fan-out of full change-map builds is exactly the ~500 MB-per-process work this project already
+ * spawns one at a time. The only bound on HOW MANY it builds is `--since`, so the per-session caches are
+ * dropped between sessions: without that, peak RSS scaled with how many sessions happened to be active
+ * in the window rather than with the largest one.
+ */
+function cmdWarm(args: string[]): void {
+  const core = require('@claude-observatory/core') as Core;
+  const cwd = flagValue(args, '--root') ?? process.cwd();
+  const spec = flagValue(args, '--since');
+  const sinceMs = spec ? parseDuration(spec) : 24 * 60 * 60_000;
+  if (spec && sinceMs === null) fail(`bad --since value "${spec}" (use e.g. 24h or 2d)`);
+  const now = Date.now();
+  const recent = core
+    .sessionMeta(cwd)
+    .sessions
+    // Skip the session under review. The Overview's own `views` spawn already builds it every tick, and
+    // its transcript invalidates that build seconds later — so warming it is work that is both duplicated
+    // and immediately wasted. Measured: dropping it took this from 7.7 s to the cost of the rest.
+    .filter((r) => !r.current && now - r.lastActiveMs <= (sinceMs as number))
+    .sort((a, b) => b.lastActiveMs - a.lastActiveMs);
+  const warmed: string[] = [];
+  for (const r of recent) {
+    try {
+      // The same cached build a switch performs. Its side effect — the map, placement and delta caches
+      // on disk — is the entire point; the returned value is discarded.
+      core.cachedChangeMap(cwd, r.id, { root: cwd, prompts: true });
+      warmed.push(r.id);
+      core.clearFsCache(); // the next session shares none of this one's file cache — hold one at a time
+    } catch {
+      /* a session that cannot be built is not a reason to abandon the rest */
+    }
+  }
+  if (args.includes('--json')) {
+    emitJson({ warmed, since: spec ?? '24h' });
+    return;
+  }
+  process.stdout.write(c.green('✓ ') + `warmed ${warmed.length} session(s) active in the last ${spec ?? '24h'}\n`);
+}
+
 function cmdSessions(args: string[] = []): void {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   // This WORKSPACE's sessions by conversation recency, titled from a bounded sidecar-cached scan —
@@ -915,11 +981,43 @@ function cmdMultitask(args: string[]): void {
   const fleet = core.summarizeFleet(siblings);
   const collisions = core.fleetConflicts(siblings); // live conflicts: a file pending in 2+ both-active siblings
 
+  const now = Date.now();
   const agents = siblings.map((sib) => {
     const transcript = core.findTranscript(sib.worktree, sib.id);
     const pd = transcript
       ? core.agentPhaseDetail(transcript)
       : { phase: 'idle' as const, confidence: 'heuristic' as const };
+    // FOLDED: a conversation more than FLEET_FOLD_MS old, and not the one under review. 24 of the 33
+    // siblings in this repo qualify, and building their maps was most of what a cold refresh cost.
+    // Serve one from the disk cache if it is already there; otherwise report the row as UNBUILT and
+    // move on. Identity, phase and file list stay honest — they come from listRepoSiblings, which is
+    // sidecar-cached and cheap. Everything below this line is a transcript parse and is skipped.
+    const folded = sib.id !== session && core.isFoldedAge(sib.lastMs, now);
+    const cached = folded ? core.siblingOverviewCached(sib.worktree, sib.id, { root: sib.worktree }) : null;
+    if (folded && !cached) {
+      return {
+        session: sib.id,
+        worktree: sib.worktree,
+        gitBranch: sib.gitBranch,
+        self: sib.self,
+        phase: pd.phase,
+        phaseConfidence: pd.confidence,
+        sparkline: [],
+        todos: [],
+        subagents: [],
+        files: sib.files,
+        diff: { added: 0, removed: 0 },
+        tokens: 0,
+        durationMs: 0,
+        risk: sib.risk,
+        outside: { reads: 0, writes: 0 },
+        compactions: 0,
+        folded: true,
+        // The zeros above are placeholders. A renderer must read THIS, not them: "not built" and
+        // "changed nothing" are different facts that look identical in the numbers.
+        loaded: false,
+      };
+    }
     // Full (slow-tier) payload: whole-file builds per agent — aggregated HERE so renderers stay thin.
     // EVERY sibling, the session under review included, comes from the on-disk cache: it is keyed to the
     // (transcript, log) stamps, so a session that is still being written misses it naturally and a
@@ -927,9 +1025,8 @@ function cmdMultitask(args: string[]): void {
     // right for the live conversation and badly wrong for a PINNED one — switching to a long finished
     // session paid seconds of transcript parsing on every refresh tick, forever. Live facts (phase,
     // subagent phases) are computed below, outside the cache, so nothing frozen is reported as current.
-    const view = core.siblingOverview(sib.worktree, sib.id, { root: sib.worktree });
+    const view = cached ?? core.siblingOverview(sib.worktree, sib.id, { root: sib.worktree });
     const map = view.map;
-    const sibActions = core.parseActions(sib.worktree, sib.id); // memoized — the sparkline used it too
     // Per-sibling tokens + wall-clock (one light transcript pass) — so Fleet shows the same metric style
     // as Workflows already do. Cached on this slow tier alongside buildChangeMap.
     const usage = core.sessionUsage(sib.worktree, sib.id);
@@ -967,13 +1064,15 @@ function cmdMultitask(args: string[]): void {
       durationMs: usage.durationMs,
       risk: sib.risk,
       // Boundary crossings for the fleet row's ↗ suffix — the footprint's one unique fact, kept after
-      // the badge row was folded into risk/egress. Computed off the actions already parsed for the
-      // sparkline, never a second scan.
-      outside: {
-        reads: core.outsideReads(sibActions, sib.worktree).length,
-        writes: core.outsideWrites(sibActions, sib.worktree).length,
-      },
+      // the badge row was folded into risk/egress.
+      // Two integers from a sidecar-memoized count — NOT a transcript parse. The parse that used to sit
+      // here was 88% of this view's CPU and 458MB of reads per tick, for numbers that only change when
+      // the transcript does. (Its comment claimed "memoized — the sparkline used it too"; the sparkline
+      // moved into the cached siblingOverview long ago, leaving the parse with no second customer.)
+      outside: core.outsideCounts(sib.worktree, sib.id),
       compactions: map.summary.compactions,
+      folded,
+      loaded: true,
     };
   });
 
@@ -1421,7 +1520,9 @@ function cmdTaskClear(args: string[]): void {
   const session = getSessionId(args);
   const json = args.includes('--json');
   if (args.includes('--completed')) {
-    const map = core.buildChangeMap(process.cwd(), session, { root: process.cwd() });
+    // Cached: the map this reads is the same one the Overview just built, and re-deriving it cost
+    // seconds on a large session for a rollup that is already sitting on disk.
+    const map = core.cachedChangeMap(process.cwd(), session, { root: process.cwd(), prompts: true });
     // A settled task: strict-attributed edits present, none pending, none undone.
     const settled = map.rollupByTask.filter((t) => t.taskId !== null && t.edits > 0 && t.pending === 0 && t.undone === 0);
     let cleared = 0;
@@ -1627,13 +1728,81 @@ function cmdClean(args: string[]): void {
     process.stdout.write(c.green('✓ ') + `dropped session ${id}\n`);
     return;
   }
+  // Destructive: drop every session whose review is finished — nothing pending, conversation over.
+  if (args.includes('--completed')) {
+    // `--stale <Nd>` moves the ABANDONED threshold only; a session with nothing left to review is
+    // reaped on the (much shorter) quiet clock regardless.
+    const si2 = args.indexOf('--stale');
+    const staleSpec = si2 >= 0 ? args[si2 + 1] : null;
+    if (si2 >= 0 && !staleSpec) fail('`clean --completed --stale <Nd>` requires a duration');
+    const staleMs = staleSpec ? parseDuration(staleSpec) : null;
+    if (staleSpec && staleMs === null) fail(`bad --stale value "${staleSpec}" (use e.g. 14d or 36h)`);
+    // A FLOOR, because this is the branch that discards edits nobody reviewed. The `finished` branch is
+    // protected by the fixed 24h quiet clock; without the same floor here, `--stale 0d` reaps every
+    // workspace-local session that has unreviewed work the moment it is typed, with no confirmation and
+    // nothing to undo it. Anyone who genuinely wants that can pass --stale 1d and lose only a day.
+    if (staleMs !== null && staleMs < core.REAP_QUIET_MS)
+      fail(`--stale must be at least 24h — it discards unreviewed edits (got "${staleSpec}")`);
+    // `--dry-run` answers "what WOULD go" without going. It exists because this verb discards
+    // unreviewed edits and, until now, the only way to find out what it would take was to run it. The
+    // JetBrains dialog uses it to state the counts and names before asking, which is what the VS Code
+    // dialog always did by calling core in-process.
+    const dry = args.includes('--dry-run');
+    const doomed = core.reapableSessions(process.cwd(), Date.now(), staleMs ?? undefined);
+    if (!dry) for (const s of doomed) core.removeSession(s.id);
+    if (json) {
+      emitJson({ dropped: dry ? [] : doomed.map((s) => s.id), sessions: doomed, dryRun: dry });
+      return;
+    }
+    if (doomed.length === 0) {
+      // Say WHY there is nothing, and distinguish "the rails spared everything" from "this directory has
+      // no sessions at all" — running it from a subdirectory hits the second and read like the first.
+      const anyHere = core.sessionMeta(process.cwd()).sessions.length > 0;
+      process.stdout.write(
+        anyHere
+          ? 'No sessions to clear — every other one is live, has edits still under review, or is too recent.\n'
+          : `No sessions recorded for ${process.cwd()} — run this from the directory Claude Code was started in.\n`
+      );
+      return;
+    }
+    if (dry) {
+      const fin0 = doomed.filter((s) => s.reason === 'finished').length;
+      const ab0 = doomed.filter((s) => s.reason === 'abandoned');
+      process.stdout.write(
+        `would clear ${doomed.length} session(s): ${fin0} finished` +
+          (ab0.length ? `, ${ab0.length} abandoned (${ab0.reduce((n, s) => n + s.pending, 0)} unreviewed edit(s) would be discarded)` : '') +
+          '\n'
+      );
+      return;
+    }
+    const fin = doomed.filter((s) => s.reason === 'finished').length;
+    const aband = doomed.filter((s) => s.reason === 'abandoned');
+    const lost = aband.reduce((n, s) => n + s.pending, 0);
+    process.stdout.write(
+      c.green('✓ ') +
+        `cleared ${doomed.length} session(s): ${fin} finished` +
+        (aband.length ? `, ${aband.length} abandoned (${lost} unreviewed edit(s) discarded)` : '') +
+        '\n'
+    );
+    return;
+  }
   // Destructive: drop sessions inactive longer than N.
   const oi = args.indexOf('--older-than');
   if (oi >= 0) {
     const spec = args[oi + 1];
     const ms = spec ? parseDuration(spec) : null;
     if (ms === null) fail(`bad --older-than value "${spec ?? ''}" (use e.g. 30d or 12h)`);
-    const stale = core.listSessions().filter((s) => s.lastMs < Date.now() - ms);
+    // `lastMs` is the STORE LOG's mtime, so a long-running conversation that made its edits early
+    // looks ancient by this clock — and this verb's sink is a recursive delete. Excluding the session
+    // the user is actually in costs one resolve and removes the only way this can eat live data.
+    const live = (() => {
+      try {
+        return core.resolveSessionId(process.cwd());
+      } catch {
+        return null;
+      }
+    })();
+    const stale = core.listSessions().filter((s) => s.lastMs < Date.now() - ms && s.id !== live);
     for (const s of stale) core.removeSession(s.id);
     if (json) {
       emitJson({ dropped: stale.map((s) => s.id), olderThan: spec });
@@ -1666,19 +1835,56 @@ function cmdClean(args: string[]): void {
   let removed = 0;
   let bytes = 0;
   let pruned = 0;
+  let maps = 0;
+  let cursors = 0;
+  if (!only) {
+    // Blind spots the store-id loop below cannot see (all three found live on a real store):
+    // 1. Cache dirs for sessions with NO store dir — version-bump orphans survive there forever, since
+    //    nothing else visits them. Superseded VERSIONS only: a live-version cache for a transcript-only
+    //    session is a working cache, not garbage.
+    const storeIds = new Set(targets);
+    for (const id of core.cachedMapSessionIds()) {
+      if (storeIds.has(id)) continue; // the main loop prunes these
+      const m = core.pruneStaleMaps(id);
+      maps += m.removed;
+      bytes += m.bytes;
+    }
+    // 2. Usage cursors whose transcript is gone (hash-keyed, unreachable from any session id).
+    const uc = core.reapUsageCursors();
+    cursors = uc.removed;
+    bytes += uc.bytes;
+    // 3. blob-memo.json: written only by an uncommitted 0.8.6-era build — no released version ever read
+    //    it. 3.7MB of nothing with no owner; this is the only place that can know to drop it.
+    try {
+      const fs = require('fs') as typeof import('fs');
+      const bm = require('path').join(core.rootDir(), 'blob-memo.json') as string;
+      const st = fs.statSync(bm);
+      fs.rmSync(bm, { force: true });
+      bytes += st.size;
+    } catch {
+      /* absent on any store that never ran that build */
+    }
+  }
   for (const id of targets) {
     const r = core.gcSession(id);
     removed += r.removed;
     bytes += r.bytes;
+    // Cached map payloads from an earlier cache version are unreachable but never overwritten, because
+    // the version is part of the filename. The GC is where they get collected.
+    const m = core.pruneStaleMaps(id);
+    maps += m.removed;
+    bytes += m.bytes;
     if (core.pruneEmptySession(id)) pruned++;
   }
   if (json) {
-    emitJson({ removed, bytes, pruned });
+    emitJson({ removed, bytes, pruned, staleMaps: maps, cursors });
     return;
   }
   process.stdout.write(
     c.green('✓ ') +
       `garbage-collected ${removed} orphaned blob(s), freed ${fmtBytes(bytes)}` +
+      (maps ? `, dropped ${maps} superseded cache file(s)` : '') +
+      (cursors ? `, reaped ${cursors} orphaned usage cursor(s)` : '') +
       (pruned ? `, pruned ${pruned} empty stub session(s)` : '') +
       '\n'
   );
@@ -2694,8 +2900,13 @@ function usage(): void {
       `  demo --touch [--json]  keep a running demo inside the fleet's active window (mtime only)\n` +
       `  demo --clean [--json]  remove every trace (both sessions, stores, demo folder, scratch dir)\n` +
       `  demo --status [--json] whether a demo is recorded for this folder\n` +
+      `  resolve [--session <id>]  accept every pending edit in a session, then clear its records; --json\n` +
+      `  warm [--root <d>]    pre-build recent sessions so switching to one is instant (--since <dur>); --json\n` +
       `  clean [opts]         GC orphaned blobs (--session <id> scopes; --json for structured output);\n` +
       `                       --drop <id> | --older-than <Nd> | --all | --resolved [--under <path> | --ids <a,b,c>]\n` +
+      `                       --completed [--stale <Nd>] [--dry-run]  drop FINISHED sessions (nothing\n` +
+      `                       left to review) and ABANDONED ones (unreviewed but dead >14d; their edits\n` +
+      `                       are discarded) — --dry-run lists what would go without dropping anything\n` +
       `  stats [--json]       usage stats (edits/tokens/messages/thinking/output) by session & window\n` +
       `  summary [--markdown] per-session review recap (kept/reverted per file); --markdown to export\n` +
       `  insights [--json]    Observations view: recap + per-edit reasoning/flags/file-memory + next steps\n\n` +
@@ -2865,6 +3076,13 @@ function main(): void {
       break;
     case 'sessions':
       cmdSessions(rest);
+      break;
+    // Deliberately NOT a `views` member: it WRITES caches, and that batch is read-only by contract.
+    case 'resolve':
+      cmdResolve(rest);
+      break;
+    case 'warm':
+      cmdWarm(rest);
       break;
     case 'list':
       cmdList(rest);

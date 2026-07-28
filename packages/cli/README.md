@@ -37,7 +37,7 @@ claude-observatory task-keep <taskId>  # keep every pending edit in a task's str
 claude-observatory task-undo <taskId>  # revert every pending edit in that same strict span; --json
 claude-observatory task-clear <taskId> # drop a task's resolved edits (--completed clears every settled task); --json
 claude-observatory demo                # simulate a Claude session LIVE through the real pipeline (isolated demo-* session + folder) — review works for real; --fast for scripts; demo --clean removes every trace
-claude-observatory clean               # GC orphaned blobs (--resolved [--under <path> | --ids <a,b,c>] | --drop <id> | --older-than 30d | --all)
+claude-observatory clean               # GC orphaned blobs + superseded cache files (--resolved [--under <path> | --ids <a,b,c>] | --completed [--stale <Nd>] [--dry-run] | --drop <id> | --older-than 30d | --all)
 claude-observatory statusline          # install/refresh the bundled status line (needs bash + jq)
 claude-observatory init --project      # install the hook into a repo's ./.claude/settings.json (for teams)
 ```
@@ -54,7 +54,7 @@ claude-observatory tasklog --json      # cross-agent task log: one row per stabl
 claude-observatory chat-context --json # zero-token, ready-to-paste chat prompt about an action/edit/subagent/task (--tool-use-id | --edit | --agent | --task)
 claude-observatory changemap           # the Overview view-model: the per-prompt slices + per-file/per-folder churn rollups (per task/subagent/workflow/agent) as JSON
 claude-observatory views --json        # several read-only views in ONE process: {name: payload}, each byte-identical to its own command (--views a,b,c to pick). One spawn per refresh instead of eight — what the JetBrains plugin drives its whole tick through
-claude-observatory sessions --json     # {active, sessions:[{id, title, lastActiveMs, current}]} — built from directory stats + a cached title scan, never from a session's edit log
+claude-observatory sessions --json    # {active, sessions:[{id, title, lastActiveMs, current, edits, pending, files, added, removed, tokens, durationMs, model, effort}]} — counts come from a cached per-session sidecar and re-derive only when that session's log changed
 claude-observatory blob <sha>          # raw blob bytes to stdout
 claude-observatory locate --file <f>   # per-pending-edit line indices in the LIVE buffer (text on stdin; JSON out)
 claude-observatory observe             # recap + per-edit reasoning/flags/file-memory as JSON

@@ -9,7 +9,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import { readLog, maxOf, rootDir } from './store';
+import { maxOf, rootDir } from './store';
+import { reviewEdits } from './groups';
 import { lineDelta, friendlyModel } from './format';
 import { findTranscript } from './observe';
 import { parseActions, summarizeActions, parseCompactLine, CompactionEvent } from './actions';
@@ -204,11 +205,55 @@ export function removeUsageCursor(transcript: string): void {
   }
 }
 
+/** Reap usage cursors whose transcript no longer exists.
+ *
+ *  Cursors are keyed by a HASH of the transcript path, so they are unreachable from a session id —
+ *  `removeSession` cannot delete them, and they leaked forever. New cursors record their transcript
+ *  (see StoredCursor.transcript); one whose recorded transcript is gone is dead weight. Old-format
+ *  cursors carry no path at all, so the only honest signal left is age: reaped after 30 quiet days,
+ *  which for a LIVE transcript merely costs one incremental re-scan on the next usage read. */
+export function reapUsageCursors(now: number = Date.now()): { removed: number; bytes: number } {
+  const out = { removed: 0, bytes: 0 };
+  const dir = path.join(rootDir(), 'usage-cursors');
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(dir);
+  } catch {
+    return out; // no cursors yet
+  }
+  for (const f of entries) {
+    if (!f.endsWith('.json')) continue;
+    const p = path.join(dir, f);
+    let dead = false;
+    try {
+      const raw = JSON.parse(fs.readFileSync(p, 'utf8')) as StoredCursor;
+      if (typeof raw.transcript === 'string') dead = !fs.existsSync(raw.transcript);
+      else dead = now - fs.statSync(p).mtimeMs > 30 * 24 * 3600_000; // path-less legacy: age is all there is
+    } catch {
+      dead = true; // unreadable is unusable — a cursor that cannot load only costs a re-scan anyway
+    }
+    if (!dead) continue;
+    try {
+      out.bytes += fs.statSync(p).size;
+      fs.rmSync(p, { force: true });
+      out.removed++;
+    } catch {
+      /* best effort */
+    }
+  }
+  return out;
+}
+
 /** Cursor state as written to disk. `seen` must be persisted in FULL: duplicate message ids recur
  *  hundreds of lines apart in real transcripts (a resumed session re-emits earlier turns), so a
  *  last-id or fixed-window dedup would silently double-count those turns' tokens. */
 interface StoredCursor {
   v: number;
+  /** The transcript this cursor belongs to. The FILENAME is a one-way hash of this path, so without it
+   *  stored, nothing could ever map a cursor back to its transcript — `removeSession` knows only the
+   *  session id, and the GC had no way to tell a live cursor from one whose transcript is long gone
+   *  (47 orphans, growing ~15KB per session forever). Additive: readers ignore it, old cursors lack it. */
+  transcript?: string;
   mtimeMs: number;
   size: number;
   offset: number;
@@ -260,6 +305,7 @@ function saveCursor(transcript: string, cur: UsageCursor): void {
   const p = cursorPath(transcript);
   const stored: StoredCursor = {
     v: CURSOR_VERSION,
+    transcript: path.resolve(transcript),
     mtimeMs: cur.mtimeMs,
     size: cur.size,
     offset: cur.offset,
@@ -531,7 +577,9 @@ function toolLatenciesUncached(transcriptPath: string): number[] {
 
 /** Roll up the session's metrics. `cwd` locates the transcript; falls back gracefully when absent. */
 export function sessionMetrics(cwd: string, sessionId: string): SessionMetrics {
-  const log = readLog(sessionId);
+  // DISPLAY units (same-code collapsed), like the change map and the session listing — one meaning for
+  // "edits" across the product. Counting raw records here made Stats disagree with the Overview.
+  const log = reviewEdits(sessionId);
   const edits: EditMetrics = { count: log.length, added: 0, removed: 0, pending: 0, kept: 0, undone: 0 };
   for (const r of log) {
     const d = lineDelta(sessionId, r);

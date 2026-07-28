@@ -477,18 +477,6 @@ const promptRow = (ix, live, delta, edits, ask, extra, dur, sel, resp) => `
       <div style="font-size:10.5px;line-height:1.5;color:var(--dim)">${resp}</div></div>` : ''}
   </div>`;
 
-// The dock's PROMPTS window, compact — for the whole-IDE mockups. Three asks, newest first, the
-// scoped one outlined: enough to show what the window is without competing with the panes beside it.
-const compactPromptRow = (ix, facts, ask, sel) => `
-  <div style="border:1px solid var(${sel ? '--accent' : '--border2'});border-radius:5px;margin:5px 14px;padding:5px 8px;${sel ? 'background:var(--bg);' : ''}">
-    <div style="display:flex;gap:8px;align-items:center;font-size:10px"><span class="mono" style="color:var(--ink)">#${ix}</span><span class="mono" style="color:var(--faint);font-size:9px">${facts}</span></div>
-    <div style="font-size:10.5px;line-height:1.4;color:var(--dim);margin-top:3px">${ask}</div>
-  </div>`;
-const promptsCol =
-  compactPromptRow(3, '2 tool calls', 'add a Processes tab so I can see the shells still running', false) +
-  compactPromptRow(2, '31 edits · 1 shell', 'stream the loader instead of reading the whole file', true) +
-  compactPromptRow(1, '18 edits', 'split the training loop out of models.py', false);
-
 // One FEED entry — exactly what core.FeedEntry carries: a timestamp, the call as its label, its target
 // as detail, and an error marker when the call reported one. No result column: the feed has no such field.
 const feedRow = (ts, tool, target, failed) => `
@@ -498,6 +486,7 @@ const feedRow = (ts, tool, target, failed) => `
     <span class="mono" style="color:var(--dim);min-width:0;overflow:hidden;white-space:nowrap">${target}</span>
     ${failed ? `<span style="margin-left:auto;color:var(--pending);font-size:10px;flex:none">✕ error</span>` : ''}
   </div>`;
+
 // One PROCESSES row: state · shell id · its description · runtime and output volume.
 const procRow = (state, color, id, desc, meta) => `
   <div style="display:flex;align-items:baseline;gap:9px;padding:4px 16px;font-size:11.5px">
@@ -534,8 +523,10 @@ const taskPill = (label, delta, color, dashed) =>
   `<span style="width:9px;height:9px;border-radius:50%;background:${color};flex:none"></span>` +
   `<span style="color:var(--dim);overflow:hidden;text-overflow:ellipsis">${label}</span>` +
   (delta ? `<span class="mono" style="color:var(--faint);font-size:10px;flex:none">${delta}</span>` : '') + `</span>`;
-// One Sessions-tab row (0.8.8): ● live / ○ past · the session's own title · when it was last active.
-// No pending count by design — the listing is built from directory stats, never from a session's log.
+// One Sessions-tab row (0.9.0): ● live / ○ past · the session's own title · then the SAME badge set a
+// fleet row carries — what it changed (± lines), what is left to review, what it cost, and what it ran
+// on — and when it was last active. Bare edit and file counts were dropped: the ± lines beside them
+// already say how much changed, and two more numbers in one row read as noise.
 const sessionRow = (live, title, stats, when, reviewing) => `
   <div style="display:flex;align-items:center;gap:9px;padding:5px 16px;font-size:12px${reviewing ? ';background:var(--side);box-shadow:inset 2px 0 0 var(--accent)' : ''}">
     <span style="color:var(--${live ? 'blue' : 'faint'});flex:none">${live ? '●' : '○'}</span>
@@ -758,16 +749,13 @@ const scenes = {
       <div style="border-top:1px solid var(--border);background:var(--panel);">
         <div class="paneltabs"><span>PROBLEMS</span><span>OUTPUT</span><span>TERMINAL</span><span class="on">④ CLAUDE OBSERVATORY</span></div>
         <div class="row" style="align-items:stretch;height:168px;">
-          ${['PROMPTS|What you asked for, in order. Select one and everything beside it — fleet, runs, tasks, shells, the change map — narrows to the work that ask caused.'].map(c => {
-            const [h, d] = c.split('|');
-            return `<div class="col" style="flex:1.1;border-right:1px solid var(--border);"><div class="colhead" style="color:var(--coral)">${h}</div><div style="font-size:11px;color:var(--dim);padding:2px 16px;line-height:1.5;">${d}</div></div>`;
-          }).join('')}
           <div class="col" style="flex:1.5;border-right:1px solid var(--border);">
             <div class="colhead" style="color:var(--coral)">OVERVIEW</div>
             <div style="font-size:11px;color:var(--dim);padding:2px 16px;line-height:1.55;">Master–detail — a left nav drives the change-map:
               <div style="margin-top:5px;"><b style="color:var(--blue)">ⓐ Fleet · Workflows · Tasks · Sessions</b> — agents / runs / the task list / this workspace&rsquo;s sessions</div>
               <div><b style="color:var(--kept)">ⓑ Folders strip</b> — one tile per changed directory; click to filter</div>
               <div><b style="color:var(--pending)">ⓒ Files ledger</b> — every changed file, ranked by churn</div>
+              <div style="margin-top:5px;color:var(--faint);">Can also be docked as a full-height editor tab.</div>
             </div>
           </div>
           <div class="col" style="flex:1;"><div class="colhead" style="color:var(--coral)">STATS</div><div style="font-size:11px;color:var(--dim);padding:2px 16px;line-height:1.5;">Review scoreboard · token plots · context&nbsp;/&nbsp;plan usage bars.</div></div>
@@ -812,7 +800,6 @@ const scenes = {
       <div style="border-top:1px solid var(--border);background:var(--panel);">
         <div class="paneltabs"><span>PROBLEMS</span><span>OUTPUT</span><span>TERMINAL</span><span class="on">④ CLAUDE OBSERVATORY</span></div>
         <div class="row" style="align-items:stretch;height:184px;">
-          ${mapPane('1', 'PROMPTS', promptsCol)}
           ${mapPane('1.55', 'OVERVIEW', changeMapCol)}
           ${mapPane('1', 'STATS', statsCol(30, 30).replace(/<div class="uhead">USAGE<\/div>[\s\S]*$/, '<div class="urow"><span class="lbl">ctx</span><span class="track"><span class="fill" style="width:39%;background:var(--kept)"></span></span><span class="pct" style="color:var(--kept)">39%</span><span class="sub">390k/1M</span></div>'), true)}
         </div>
@@ -851,7 +838,6 @@ const scenes = {
       <div style="border-top:1px solid var(--border);background:var(--panel);">
         <div class="paneltabs"><span>PROBLEMS</span><span>OUTPUT</span><span>TERMINAL</span><span class="on">CLAUDE OBSERVATORY</span></div>
         <div class="row" style="align-items:stretch;height:212px;">
-          <div class="col" style="flex:1;border-right:1px solid var(--border);"><div class="colhead">PROMPTS</div>${promptsCol}</div>
           <div class="col" style="flex:1.55;border-right:1px solid var(--border);"><div class="colhead">OVERVIEW</div>${changeMapCol}</div>
           <div class="col" style="flex:1;"><div class="colhead">STATS</div>${statsCol(34, 34).replace(/<div class="uhead">USAGE<\/div>[\s\S]*$/, '<div class="urow"><span class="lbl">ctx</span><span class="track"><span class="fill" style="width:39%;background:var(--kept)"></span></span><span class="pct" style="color:var(--kept)">39%</span><span class="sub">390k/1M</span></div>')}</div>
         </div>
@@ -944,7 +930,7 @@ const scenes = {
   //     scopes the Overview beside it (the scoped row is outlined, and its scope bar appears there).
   'prompts': scene(700, `
     <div class="window" style="padding-bottom:8px;">
-      <div class="viewhead" style="padding-top:12px;">PROMPTS <span style="float:right;color:var(--faint)">6 asks · 4 with edits · 71 edits</span></div>
+      <div class="viewhead" style="padding-top:12px;">CLAUDE OBSERVATORY PROMPTS <span style="float:right;color:var(--faint)">6 asks · 4 with edits · 71 edits</span></div>
       <div style="font-size:10.5px;color:var(--faint);padding:0 16px 8px;line-height:1.45;border-bottom:1px solid var(--border)">What you asked for, in order. Select one to scope the Overview beside it — its fleet, runs, tasks, shells and change map narrow to the work that ask caused.</div>
       ${promptRow(6, 'now', '', '', 'add a Processes tab so I can see the shells that are still running, and let me click one to follow its output', '2 tool calls · 41k tok', '~4m', false)}
       ${promptRow(5, '', '+412 −96', '31 edits · 8f · 3fo · 12 pending', 'the loader is still reading the whole file into memory — stream it instead, and add a test that fails on the old behaviour', '190k tok · 2 tasks · 1 subagent · 1 shell', '22m', true,
@@ -974,10 +960,10 @@ const scenes = {
         <span style="color:var(--faint);flex:none">○</span>
         <span style="color:var(--dim)">Auto — newest session in this workspace</span>
       </div>
-      ${sessionRow(true, 'Extend the training pipeline', '5e · 4f · <span style="color:var(--pending)">5⧗</span>', 'now', true)}
-      ${sessionRow(false, 'Split the training loop out of models.py', '18e · 5f · <span style="color:var(--kept)">✓</span>', '2h ago', false)}
-      ${sessionRow(false, 'Add type hints to the dataset module', '9e · 3f · <span style="color:var(--kept)">✓</span>', 'yesterday', false)}
-      ${sessionRow(false, 'session 9f2ab6c1', 'no edits', '3d ago', false)}
+      ${sessionRow(true, 'Extend the training pipeline', '<span style="color:var(--kept)">+412</span> <span style="color:var(--reverted)">−96</span> · <span style="color:var(--pending)">5 pending</span> · 190k tok · 22m · Opus 5 · xhigh', 'now', true)}
+      ${sessionRow(false, 'Split the training loop out of models.py', '<span style="color:var(--kept)">+188</span> <span style="color:var(--reverted)">−41</span> · <span style="color:var(--kept)">✓</span> · 120k tok · 31m · Opus 5 · high', '2h ago', false)}
+      ${sessionRow(false, 'Add type hints to the dataset module', '<span style="color:var(--kept)">+94</span> <span style="color:var(--reverted)">−12</span> · <span style="color:var(--kept)">✓</span> · 58k tok · 11m · Sonnet 5', 'yesterday', false)}
+      ${sessionRow(false, 'session 9f2ab6c1', '<span style="color:var(--faint)">no edits</span> · 12k tok · 4m', '3d ago', false)}
     </div>`),
 
   // L2. 0.8.7 — the FEED under whatever the nav selected: a live tail while the thing is still working,

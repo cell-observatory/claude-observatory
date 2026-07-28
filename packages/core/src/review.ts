@@ -3,7 +3,8 @@
  * with it (kept / reverted / pending, per file, acceptance rate). Rendered once here so the CLI and
  * both editors export the identical markdown (e.g. to paste into a PR).
  */
-import { readLog, minOf, maxOf } from './store';
+import { minOf, maxOf } from './store';
+import { reviewEdits } from './groups';
 import { lineDelta } from './format';
 
 export interface ReviewFileSummary {
@@ -30,7 +31,8 @@ export interface ReviewSummary {
 }
 
 export function reviewSummary(session: string): ReviewSummary {
-  const log = readLog(session);
+  // DISPLAY units, like every other count in the product (see sessionCounts).
+  const log = reviewEdits(session);
   const byFile = new Map<string, ReviewFileSummary>();
   let kept = 0;
   let undone = 0;
