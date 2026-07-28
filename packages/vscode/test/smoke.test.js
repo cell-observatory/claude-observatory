@@ -1163,7 +1163,10 @@ test('extension: three views, click commands, inline annotations, chat, status s
     // green) — only running the real script against a DOM stub catches that class.
     {
       const vm = require('node:vm');
-      const scripts = [...cmView.webview.html.matchAll(/<script[^>]*>([\s\S]*?)<\/script\s*>/gi)];
+      // The close pattern is js/bad-tag-filter's canonical shape — case-insensitive, any junk before
+      // the `>` — so the sanitizer-bypass scanner has nothing left to escalate on a parser that only
+      // ever reads our own generated shell.
+      const scripts = [...cmView.webview.html.matchAll(/<script[^>]*>([\s\S]*?)<\/script[^>]*>/gi)];
       assert.ok(scripts.length >= 1, 'the overview shell embeds its script');
       const mkEl = () => ({
         innerHTML: '', textContent: '', title: '', hidden: true, style: {}, dataset: {}, value: '', checked: false,
