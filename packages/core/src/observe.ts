@@ -6,12 +6,17 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { diffArrays } from 'diff';
-import { EditRecord, EditStatus, readLog, readBlob, logPath, maxOf, listSessions, SessionInfo, allStoreSessionIds, rootDir, isSafeSessionId } from './store';
+import { EditRecord, EditStatus, readLog, readBlob, logPath, maxOf, listSessions, SessionInfo, allStoreSessionIds, rootDir, isSafeSessionId, hasInflightCapture, hasBlob } from './store';
 import { lineDelta } from './format';
 import { projectDir, resolveSessionId } from './session';
 import { claudeConfigDir } from './paths';
 import { cachedAnalysis } from './analyze';
 import { cachedByFiles } from './fscache';
+import { reviewEdits } from './groups';
+// NOTE: metrics.ts imports `findTranscript` from this module, so this pair is CIRCULAR. It is safe only
+// because both directions are used at CALL time, never at module-init time — nothing here runs during
+// load. `test/core.test.js` requires each module first in a child process to keep that true.
+import { sessionUsage, sessionVitals } from './metrics';
 
 /** Locate the Claude Code transcript jsonl for a session, walking up from cwd (like resolveSessionId). */
 export function findTranscript(cwd: string, sessionId: string): string | null {
@@ -264,6 +269,18 @@ export interface SessionMetaRow {
   edits: number;
   pending: number;
   files: number;
+  /** Lines added / removed across the session's captured edits (sidecar-cached — see SessionCounts). */
+  added: number;
+  removed: number;
+  /** Total tokens the conversation consumed, and its wall-clock span. Both ride sessionUsage's persisted
+   *  byte cursor, so a finished session is a stat and the live one is a delta parse. */
+  tokens: number;
+  durationMs: number;
+  /** The model serving the session's latest turn ('' when no turn exists yet) and the reasoning effort
+   *  it declared ('' when it never declared one — unset is reported as unknown, never guessed, because
+   *  the default differs by build and model). */
+  model: string;
+  effort: string;
 }
 
 export interface SessionMeta {
@@ -279,6 +296,82 @@ export interface SessionMeta {
  * come from a BOUNDED transcript scan (tail for the latest ai-title, head for the first prompt) behind
  * an on-disk sidecar keyed to the transcript's (mtime,size), so even a cold CLI spawn answers in stats.
  */
+/**
+ * How long a conversation must have been quiet before "it is finished" is a safe thing to assume.
+ *
+ * A DAY, not the five minutes the phase heuristic uses to call a session `done`. That heuristic decides
+ * how to draw a badge; this one decides whether to recursively delete a session's edit history and undo
+ * snapshots, and the two do not deserve the same clock. `current` protects only ONE session — it is the
+ * newest transcript in the project dir — so with several Claude sessions open in a repo (which the whole
+ * Fleet view exists for) every other one is a candidate the moment it goes quiet. Five minutes of quiet
+ * is a user thinking about their next prompt; a day is a session they have moved on from.
+ */
+export const REAP_QUIET_MS = 24 * 60 * 60_000;
+
+/**
+ * How long a conversation must be dead before it counts as ABANDONED rather than merely quiet.
+ *
+ * A session with unreviewed edits is not finished — but one nobody has spoken to in a fortnight is never
+ * going to be reviewed either, and it is the bulk of what accumulates. Two weeks is chosen to be
+ * conservative about what it discards: on the store this was built against it clears 11 sessions while
+ * dropping 108 unreviewed edits, where a one-week threshold would drop 792.
+ */
+export const REAP_STALE_MS = 14 * 24 * 60 * 60_000;
+
+export interface ReapCandidate {
+  id: string;
+  title: string | null;
+  /** Transcript mtime — CONVERSATION recency, not store-write recency. See the note below. */
+  lastActiveMs: number;
+  edits: number;
+  /** Unreviewed edits that would be DISCARDED with it. Always 0 for a `finished` candidate. */
+  pending: number;
+  /** `finished` = nothing left to review. `abandoned` = still had pending edits, but nobody came back. */
+  reason: 'finished' | 'abandoned';
+}
+
+/**
+ * Sessions in `cwd` whose review is finished and whose data is safe to discard.
+ *
+ * Every clause is a refusal, and each one is load-bearing:
+ *  - not `current` — never the session the user is working in;
+ *  - `pending === 0` — nothing left to review, which is the whole definition of finished here;
+ *  - quiet for REAP_QUIET_MS — a session with no pending edits *yet* is not a finished one;
+ *  - no in-flight capture — the one liveness signal no timestamp can give us (see hasInflightCapture).
+ *
+ * Staleness is measured on `lastActiveMs` (transcript mtime), never on the store log's mtime. Accepting
+ * a batch of old edits writes the log, so a log-mtime clock would make reviewing a dead session look
+ * like reviving it — and, worse for a reaper, a long live conversation that made all its edits early
+ * looks ANCIENT by that clock. The list is cheap: sessionMeta is sidecar-cached, one stat per session.
+ */
+export function reapableSessions(cwd: string, now: number = Date.now(), staleMs: number = REAP_STALE_MS): ReapCandidate[] {
+  // THIS workspace only, by exact match. sessionMeta's own provenance rail is `findTranscript`, which
+  // WALKS UP to the filesystem root — so a session started in an ancestor directory (~, ~/Github, a
+  // monorepo root, all ordinary launch dirs) resolves here and would be reaped from a subdirectory.
+  // Listing such a session is fine; deleting it is not, so the destructive path narrows the rule.
+  const here = projectDir(cwd);
+  return sessionMeta(cwd)
+    .sessions.filter((r) => {
+      const t = findTranscript(cwd, r.id);
+      if (!t || path.dirname(path.resolve(t)) !== path.resolve(here)) return false;
+      if (r.current || hasInflightCapture(r.id)) return false;
+      const quiet = now - r.lastActiveMs;
+      // Two ways to be done with a session, and they need different clocks. FINISHED: nothing left to
+      // review — a day of quiet is enough. ABANDONED: it still has unreviewed edits, but the conversation
+      // has been dead for a fortnight and nobody is coming back. Without the second clause almost nothing
+      // qualifies on a real store: most old sessions were simply never reviewed to the end.
+      return r.pending === 0 ? quiet > REAP_QUIET_MS : quiet > staleMs;
+    })
+    .map((r) => ({
+      id: r.id,
+      title: r.title,
+      lastActiveMs: r.lastActiveMs,
+      edits: r.edits,
+      pending: r.pending,
+      reason: r.pending === 0 ? ('finished' as const) : ('abandoned' as const),
+    }));
+}
+
 export function sessionMeta(cwd: string, reviewing?: string | null): SessionMeta {
   const active = (() => {
     try {
@@ -305,12 +398,32 @@ export function sessionMeta(cwd: string, reviewing?: string | null): SessionMeta
       }
     }
     if (!lastActiveMs) return;
+    // Tokens/duration and model/effort share ONE incremental cursor over the transcript, so asking for
+    // both costs a single delta parse — and nothing at all for a session whose transcript has not moved.
+    let tokens = 0;
+    let durationMs = 0;
+    let model = '';
+    let effort = '';
+    try {
+      const u = sessionUsage(cwd, id);
+      tokens = u.total;
+      durationMs = u.durationMs;
+      const v = sessionVitals(cwd, id);
+      model = v.model?.label ?? ''; // the display label ('Opus 4.8'), so renderers stay thin
+      effort = v.effort?.level ?? '';
+    } catch {
+      /* an unreadable transcript still identifies a session — report the row without its vitals */
+    }
     rows.push({
       id,
       title: fastSessionTitle(transcript, id),
       lastActiveMs,
       current: id === active,
       ...sessionCounts(id),
+      tokens,
+      durationMs,
+      model,
+      effort,
     });
   };
   for (const id of allStoreSessionIds()) push(id);
@@ -329,9 +442,26 @@ export interface SessionCounts {
   edits: number;
   pending: number;
   files: number;
+  /**
+   * Lines this session added / removed across every captured edit.
+   *
+   * These DO cost content-blob reads — two per edit, the one thing this listing was built to avoid. A
+   * live log grows constantly, so caching the total alone still re-paid the whole sum on every refresh:
+   * +0.17 s a tick at 1,732 edits, +0.71 s at 7,914, worse the longer the session ran.
+   *
+   * What makes it cheap is a per-BLOB-PAIR delta cache (see deltaCache): the sum is recomputed in full
+   * every time, but from map lookups instead of blob reads. A running total was tried first and rejected
+   * — it cannot be validated. One entry written wrong (observed: a sum of 0 over 2,800 edits) is
+   * inherited by every later pass, and nothing can notice, because there is nothing to check it against.
+   * A blob pair is CONTENT, so a cache keyed by it is either a hit on the same bytes or a miss.
+   */
+  added: number;
+  removed: number;
 }
 
-const COUNTS_SIDECAR_VERSION = 2; // 2: added `files`; a v1 entry lacks it and must be recomputed
+// 5: counts are over DISPLAY units (same-code collapsed), matching the change map; 4: line deltas moved
+// to the per-blob-pair cache (deltaCache); 2: added `files`.
+const COUNTS_SIDECAR_VERSION = 5;
 
 /**
  * A session's captured-edit counts, cached in the same sidecar the title uses and keyed to the LOG's
@@ -342,7 +472,7 @@ const COUNTS_SIDECAR_VERSION = 2; // 2: added `files`; a v1 entry lacks it and m
  * the transcript would not be, which is why nothing here parses one.
  */
 export function sessionCounts(sessionId: string): SessionCounts {
-  const empty: SessionCounts = { edits: 0, pending: 0, files: 0 };
+  const empty: SessionCounts = { edits: 0, pending: 0, files: 0, added: 0, removed: 0 };
   let stamp = '';
   try {
     const st = fs.statSync(logPath(sessionId));
@@ -351,21 +481,47 @@ export function sessionCounts(sessionId: string): SessionCounts {
     return empty; // no store — the session captured nothing
   }
   const sidecar = path.join(rootDir(), 'session-meta', `${sessionId}.json`);
-  let side: { stamp?: string; title?: string | null; counts?: SessionCounts; countsStamp?: string } = {};
+  type Side = {
+    stamp?: string;
+    title?: string | null;
+    counts?: SessionCounts;
+    countsStamp?: string;
+  };
+  let side: Side = {};
   try {
     side = JSON.parse(fs.readFileSync(sidecar, 'utf8'));
     if (side && side.countsStamp === stamp && side.counts) return side.counts;
   } catch {
     /* absent or unreadable — count */
   }
+  // The DISPLAY units, not the raw records — `reviewEdits` applies the same same-code collapse the
+  // change map draws. Counting raw records here made the Sessions row and the Overview's summary bar
+  // disagree about the same session under the same word: 5,198 pending against 3,609, and +939,803
+  // against +355,905, because 1,589 records collapsed away. One product, one meaning for "pending".
+  const log = reviewEdits(sessionId);
   const counts = { ...empty };
   const files = new Set<string>();
-  for (const r of readLog(sessionId)) {
+  for (const r of log) {
     counts.edits++;
     if (r.status === 'pending') counts.pending++;
     files.add(r.file);
   }
   counts.files = files.size;
+  // The sum is computed IN FULL every time, from a per-blob-pair cache. Full means a wrong number can
+  // never outlive one log change; content-keyed means the cache cannot be wrong in the first place.
+  const deltas = deltaCache(sessionId);
+  for (const r of log) {
+    const d = deltas.get(r);
+    counts.added += d.added;
+    counts.removed += d.removed;
+  }
+  deltas.flush();
+  // The stamp above covers the LOG only, but `added`/`removed` are derived from BLOBS. A record whose
+  // snapshot is missing (observed at ~4.7% of reads mid-rewrite — see writeStaging) yields a wrong sum,
+  // and a finished session's log never changes again, so persisting it here would make that number
+  // permanent — exactly the inherited-forever failure the per-pair cache was chosen to avoid. Serve
+  // this pass, cache nothing, and recompute next time when the blob may be back.
+  if (!deltas.complete()) return counts;
   try {
     fs.mkdirSync(path.dirname(sidecar), { recursive: true, mode: 0o700 });
     const tmp = `${sidecar}.${process.pid}.tmp`;
@@ -377,6 +533,76 @@ export function sessionCounts(sessionId: string): SessionCounts {
     /* a cache we could not write is a cache we recompute — never an error */
   }
   return counts;
+}
+
+/** Bump when the stored shape changes. */
+const DELTA_CACHE_VERSION = 1;
+
+/**
+ * A session's line deltas, cached per BLOB PAIR on disk.
+ *
+ * The key is `<beforeSha>:<afterSha>` — the content itself — so an entry is either a hit on exactly
+ * those bytes or a miss. That is the whole reason this shape was chosen over a running total: a total
+ * is a derived number with nothing to check it against, and one bad write is inherited forever. Blobs
+ * are immutable and content-addressed, so a hit here is exact by construction, and identical edits
+ * across records collapse onto one entry (within this session — the file is per session).
+ *
+ * Lives beside the session's other derived copies so dropping a session reaps it too.
+ */
+function deltaCache(sessionId: string): { get(r: EditRecord): { added: number; removed: number }; flush(): void; complete(): boolean } {
+  const file = isSafeSessionId(sessionId)
+    ? path.join(rootDir(), 'changemap-cache', sessionId, 'deltas.json')
+    : null;
+  const map = new Map<string, [number, number]>();
+  if (file) {
+    try {
+      const j = JSON.parse(fs.readFileSync(file, 'utf8')) as { version?: number; pairs?: Record<string, [number, number]> };
+      if (j && j.version === DELTA_CACHE_VERSION && j.pairs) for (const [k, v] of Object.entries(j.pairs)) map.set(k, v);
+    } catch {
+      /* absent or unreadable — recompute */
+    }
+  }
+  const keep = new Map<string, [number, number]>();
+  let dirty = false;
+  let complete = true; // false once any record's blobs could not be read
+  return {
+    complete: () => complete,
+    get(r) {
+      const key = `${r.beforeBlob ?? '-'}:${r.afterBlob ?? '-'}`;
+      const cached = map.get(key);
+      if (cached) {
+        keep.set(key, cached); // retained: this pass used it
+        return { added: cached[0], removed: cached[1] };
+      }
+      const d = lineDelta(sessionId, r);
+      const v: [number, number] = [d.added, d.removed];
+      // A blob that cannot be READ is not the same as an edit with no blob. `blobText` returns '' for a
+      // GC'd snapshot so rendering degrades instead of crashing — which means lineDelta happily reports
+      // "the whole file was removed" and we would file that under the INTACT sha. Content-keying makes a
+      // hit exact only when the content was actually there; nothing would ever heal this entry, because
+      // the key never changes. Same guard placementStore already applies to the same hazard.
+      if (hasBlob(sessionId, r.beforeBlob) && hasBlob(sessionId, r.afterBlob)) {
+        keep.set(key, v);
+        dirty = true;
+      } else {
+        complete = false; // this pass's SUM is a guess; the caller must not persist it (see sessionCounts)
+      }
+      return { added: v[0], removed: v[1] };
+    },
+    flush() {
+      // Write only when something changed, and keep only the pairs still referenced — a log that drops
+      // records (clean --resolved) must not leave their entries behind forever.
+      if (!file || (!dirty && keep.size === map.size)) return;
+      try {
+        fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+        const tmp = `${file}.${process.pid}.tmp`;
+        fs.writeFileSync(tmp, JSON.stringify({ version: DELTA_CACHE_VERSION, pairs: Object.fromEntries(keep) }), { mode: 0o600 });
+        fs.renameSync(tmp, file);
+      } catch {
+        /* cache is best-effort */
+      }
+    },
+  };
 }
 
 const TITLE_SIDECAR_VERSION = 1;
@@ -823,6 +1049,25 @@ function flagInputs(sessionId: string, rec: EditRecord): { addedText: string; re
   return value;
 }
 
+/** The distinct test-pattern files in a log, derived ONCE per log array.
+ *
+ *  flagsFor's no-test-sibling check needs only this list, but it rebuilt the full file Set per record —
+ *  and buildChangeMap calls flagsFor per edit, which made map builds quadratic: measured n^1.8, 1.58s
+ *  warm at 12k edits with 83.6% of the build inside this function. Keyed on ARRAY IDENTITY because every
+ *  hot caller (buildChangeMap, the CLI summary loop, the editors' cachedLog) passes one stable array per
+ *  pass; a caller that passes fresh copies simply falls back to paying per call, never to a wrong answer. */
+const testFilesMemo = new WeakMap<readonly EditRecord[], string[]>();
+function testFilesOf(log: readonly EditRecord[]): string[] {
+  let t = testFilesMemo.get(log);
+  if (!t) {
+    const seen = new Set<string>();
+    for (const r of log) if (/\.(test|spec)\.|_test\.|test_/.test(r.file)) seen.add(r.file);
+    t = [...seen];
+    testFilesMemo.set(log, t);
+  }
+  return t;
+}
+
 export function flagsFor(sessionId: string, rec: EditRecord, log?: EditRecord[]): Flag[] {
   const flags: Flag[] = [];
   const blob = flagInputs(sessionId, rec);
@@ -837,9 +1082,8 @@ export function flagsFor(sessionId: string, rec: EditRecord, log?: EditRecord[])
   if (removed > 30) flags.push({ level: 'warn', message: `large deletion (−${removed} lines)` });
   // source file with no test sibling touched anywhere in the session
   if (/\.(ts|tsx|js|jsx|py|go|rs)$/.test(rec.file) && !/\.(test|spec)\.|_test\.|test_/.test(rec.file)) {
-    const files = new Set((log ?? readLog(sessionId)).map((r) => r.file));
     const stem = path.basename(rec.file).replace(/\.[^.]+$/, '');
-    const hasTest = [...files].some((f) => /\.(test|spec)\.|_test\.|test_/.test(f) && f.includes(stem));
+    const hasTest = testFilesOf(log ?? readLog(sessionId)).some((f) => f.includes(stem));
     if (!hasTest) flags.push({ level: 'info', message: 'no test file changed for this source' });
   }
   return flags;
@@ -851,7 +1095,7 @@ const HEURISTIC_STEP_CAP = 8;
 
 /** Session-level heuristic next-steps (zero-token). */
 export function heuristicSuggestions(sessionId: string): string[] {
-  const log = readLog(sessionId);
+  const log = reviewEdits(sessionId); // DISPLAY units, so this agrees with the panels it advises about
   const out: string[] = [];
   const pending = log.filter((r) => r.status === 'pending').length;
   if (pending) out.push(`${pending} edit(s) still pending review — Accept or Revert them.`);
@@ -990,6 +1234,29 @@ export interface UsageLine {
   //                           isn't installed/writing on this host, so the 5h/week bars can't fill
   cachedAtMs: number | null; // statusline-last.json mtime, epoch ms — only the terminal TUI runs the
   //                            statusLine, so panel-only sessions leave the cache (and 5h/week) stale
+  /**
+   * Whether this account's plan reports rolling-window limits at all.
+   *
+   * Claude Code sends `rate_limits.*` ONLY for Claude.ai subscription plans (Pro/Max/Team). An
+   * Enterprise or API account never receives it, so the 5h and weekly bars can never fill — and an
+   * empty bar reads as "you have used none of your quota" when the truth is "this plan has no rolling
+   * quota". `null` means nothing has reported either way yet (no status-line cache).
+   *
+   * Note what this does NOT claim: it says the plan reports no rolling windows, not that the account is
+   * Enterprise specifically. API-key use produces the same signal, and there is nothing in the payload
+   * that distinguishes them — so the UI must not label it "Enterprise".
+   */
+  rollingLimits: boolean | null;
+  /** Measured token totals per rolling window, replacing the 5h/weekly bars on a plan that has no
+   *  windows. Populated only when `rollingLimits === false`. Deliberately no percentage — there is no
+   *  quota to divide by, and inventing a denominator would be the same wrong-by-plausible answer the
+   *  empty bars already gave.
+   *
+   *  A LIST rather than fixed fields, because there are two sources with different windows: the status
+   *  line measures 5h/7d (it anchors on the same clocks it draws), and this module's own fallback
+   *  measures 24h/7d from `computeStats`. Whichever answers, the label travels with the number, so a
+   *  row can never be drawn under a window it was not measured over. */
+  localWindows: { label: string; tokens: number }[] | null;
 }
 
 /** Statusline cache older than this ⇒ the UI should surface its age and the terminal remedy. */
@@ -1023,6 +1290,8 @@ export function usageLine(cwd: string, sessionId: string): UsageLine {
     weekTokens: null,
     statuslineCache: false,
     cachedAtMs: null,
+    rollingLimits: null,
+    localWindows: null,
   };
   const fin = (v: unknown): v is number => typeof v === 'number' && isFinite(v); // reject NaN from a corrupt cache
   const cachePath = path.join(claudeConfigDir(), 'statusline-last.json');
@@ -1045,6 +1314,21 @@ export function usageLine(cwd: string, sessionId: string): UsageLine {
     out.weekReset = toEpochMs(last.week_reset);
     if (fin(last.five_tok) && last.five_tok > 0) out.fiveTokens = last.five_tok;
     if (fin(last.week_tok) && last.week_tok > 0) out.weekTokens = last.week_tok;
+    // The status line has written a reading. If it carried no rolling percentages, this plan does not
+    // have them — the statusline keeps the last known-good across a turn that omits rate_limits, so a
+    // subscription account cannot flicker into this branch BETWEEN turns. It can land here transiently
+    // on the very first turn of a brand-new cache (rate_limits arrive only with the first API response);
+    // the next percentaged write heals it, and the merge semantics make that state permanent.
+    out.rollingLimits = out.fiveHourPct !== null || out.weekPct !== null;
+    // Prefer the status line's own measurement. It scans the same transcripts, but anchors its windows
+    // on the reset clocks it draws — so taking its numbers is what keeps this panel and that line from
+    // reporting two different totals for one account, which is the whole point of reading its cache.
+    if (out.rollingLimits === false) {
+      const w: { label: string; tokens: number }[] = [];
+      if (fin(last.five_meas) && last.five_meas > 0) w.push({ label: '5h', tokens: last.five_meas });
+      if (fin(last.week_meas) && last.week_meas > 0) w.push({ label: 'wk', tokens: last.week_meas }); // "wk", as the status line itself prints it
+      if (w.length) out.localWindows = w;
+    }
   } catch {
     /* no statusline cache yet (or corrupt JSON) — fall back to a transcript estimate below */
   }
@@ -1052,6 +1336,20 @@ export function usageLine(cwd: string, sessionId: string): UsageLine {
   // old while the transcript is live — prefer the transcript's ctx whenever it is newer. When a
   // terminal session is open the statusline rewrites the cache every render, so its exact values
   // still win. 5h/week always come from the cache: they have no other source.
+  // Only on a plan with no rolling windows, so a Pro/Max account pays nothing for a readout it will
+  // Fallback only: an older status line writes no measured totals, and this panel should still say
+  // something true rather than nothing. ~51ms cold / ~7ms warm over this machine's transcripts.
+  if (out.rollingLimits === false && out.localWindows === null) {
+    try {
+      const w = require('./stats').computeStats() as import('./stats').StatsResult;
+      out.localWindows = [
+        { label: '24h', tokens: w.windows.day.tokens },
+        { label: 'wk', tokens: w.windows.week.tokens },
+      ];
+    } catch {
+      /* a stats scan that fails is not a reason to lose the rest of the usage line */
+    }
+  }
   const transcript = findTranscript(cwd, sessionId);
   let transcriptNewer = false;
   if (transcript && out.cachedAtMs !== null) {

@@ -17,6 +17,7 @@ const glyphs = {
   'list-ordered': 'eb16', // Prompt axis Review: step through one prompt's edits in order
   'diff': 'eae1', // nav bar: open the current edit as a full diff tab
   'export': 'ebac', // nav bar: export a shareable review summary
+  'cloud-download': 'eac2', // version dropdown: Update now
 };
 
 let rules = '';

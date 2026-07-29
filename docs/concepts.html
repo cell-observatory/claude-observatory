@@ -15,7 +15,7 @@
     --shadow:0 30px 70px -40px rgba(40,25,15,.40), 0 8px 22px -18px rgba(40,25,15,.25);
     --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,Roboto,Helvetica,sans-serif;
     --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
-    --col:1140px;
+    --col:max(1140px, 90vw);
   }
   @media (prefers-color-scheme:dark){:root{
     --bg:#0e0e11;--surface:#161619;--surface-2:#1a1a1e;--ink:#ececef;--ink-soft:#a5a4ac;--ink-faint:#76757d;
@@ -26,13 +26,13 @@
   :root[data-theme="dark"]{--bg:#0e0e11;--surface:#161619;--surface-2:#1a1a1e;--ink:#ececef;--ink-soft:#a5a4ac;--ink-faint:#76757d;--line:rgba(255,255,255,.11);--line-soft:rgba(255,255,255,.06);--accent:#e08a63;--accent-ink:#ef9f7c;--accent-soft:rgba(224,138,99,.14);--shadow:0 30px 70px -40px rgba(0,0,0,.8),0 8px 22px -18px rgba(0,0,0,.6)}
   *{box-sizing:border-box;margin:0;padding:0}
   html{scroll-behavior:smooth;scroll-padding-top:80px;-webkit-text-size-adjust:100%}
-  body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:17px;line-height:1.62;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+  body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:1.0625rem;line-height:1.62;-webkit-font-smoothing:antialiased;overflow-x:hidden}
   .wrap{width:min(var(--col),90%);margin-inline:auto}
   a{color:inherit;text-decoration:none}
   h1,h2,h3{font-weight:640;letter-spacing:-.021em;line-height:1.1;text-wrap:balance;overflow-wrap:break-word}
   .hl{color:var(--accent)}
   .eyebrow{font-family:var(--mono);font-size:.72rem;text-transform:uppercase;letter-spacing:.2em;color:var(--accent-ink);font-weight:600}
-  .lede{color:var(--ink-soft);font-size:clamp(1.05rem,2vw,1.24rem);line-height:1.55;max-width:56ch;text-wrap:pretty}
+  .lede{color:var(--ink-soft);font-size:clamp(1.05rem,2vw,1.24rem);line-height:1.55;text-wrap:pretty}
   /* A long command inside prose (`claude-observatory changemap --json`) is one unbreakable token: at
      320px it ran 3px past the viewport and scrolled the whole page sideways. Wrap it rather than clip
      it — the same treatment .cmd code already gets on the demo page. */
@@ -70,8 +70,8 @@
 
   .group{padding-block:clamp(44px,6vh,80px);border-top:1px solid var(--line-soft)}
   .group h2{font-size:clamp(1.5rem,2.8vw,2.1rem);margin:12px 0 10px}
-  .group>.wrap>p.glede{color:var(--ink-soft);max-width:64ch;margin-bottom:8px}
-  .term{margin-top:clamp(26px,4vh,40px);max-width:72ch}
+  .group>.wrap>p.glede{color:var(--ink-soft);margin-bottom:8px}
+  .term{margin-top:clamp(26px,4vh,40px);}
   .term h3{font-size:1.12rem;margin-bottom:8px}
   .term h3 a{color:inherit}
   .term h3 a:hover{color:var(--accent-ink)}
@@ -83,8 +83,8 @@
   .surface{margin-top:clamp(30px,4.5vh,46px);max-width:min(100%,860px)}
   .surface h3{font-size:1.12rem;margin-bottom:6px}
   .surface .id{font-family:var(--mono);font-size:.78rem;color:var(--ink-faint);margin-left:8px}
-  .surface p{color:var(--ink-soft);margin-bottom:8px;max-width:72ch}
-  pre.ex{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:16px 18px;font-family:var(--mono);font-size:.82rem;line-height:1.7;color:var(--ink-soft);overflow-x:auto;margin-top:14px;max-width:72ch}
+  .surface p{color:var(--ink-soft);margin-bottom:8px;}
+  pre.ex{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:16px 18px;font-family:var(--mono);font-size:.82rem;line-height:1.7;color:var(--ink-soft);overflow-x:auto;margin-top:14px;}
   pre.ex .p{color:var(--accent-ink)}
   pre.ex .ok{color:#4a9d63}
 
@@ -103,6 +103,17 @@
   .foot .flinks a{color:var(--ink-soft)}
   .foot .flinks a:hover{color:var(--ink)}
   .foot .fine{font-family:var(--mono);font-size:.74rem;margin-top:16px}
+
+  /* Big screens: the column already grows via --col (66vw capped at 1560px); type follows in two
+     gentle steps so a 27–32" display gets a page, not a ribbon. px-sized chrome stays fixed — only
+     the reading measure and rem-based text scale. */
+  /* FLUID scaling, no steps: the root font tracks viewport width continuously (floor = today's 16px,
+     so anything ≤ ~1490px is pixel-identical to before; cap 24px ≈ a 32" display), and every rem-sized
+     rule — which is nearly all of this site's type, clamp() caps included — follows it. Root, not
+     body: rem resolves against html, which is why the first body-only attempt visibly moved nothing.
+     The column spans most of the width (86vw, floored at the old 1140px), and because type and column
+     scale together, characters-per-line stays roughly constant at every size. */
+  html{font-size:clamp(16px, 9px + 0.47vw, 24px)}
 </style>
 </head>
 <body>
@@ -114,7 +125,6 @@
       <a href="showcase.html">Home</a>
       <a href="demo.html">Demo</a>
       <a href="getting-started.html">Getting started</a>
-      <a class="more" href="features.html">Features&nbsp;→</a>
       <a href="https://github.com/cell-observatory/claude-observatory">GitHub</a>
     </div>
     <div class="right">
@@ -143,7 +153,7 @@
 
     <div class="term" id="session"><h3><a href="#session">Session</a></h3>
       <p>A <b>session</b> is one Claude Code conversation. Claude Code assigns it an identifier and writes its transcript to disk; the observatory keeps one store per session and presents the session by name — its title or first prompt — with the raw identifier available in tooltips.</p>
-      <p>One session at a time is under review. The <b>Sessions</b> tab lists every session recorded for the workspace, ordered by when its conversation was last active, and selecting a row changes which session every window shows. Each row carries what that session did — captured edits, files touched, and how many still await review — read from its store log and cached in a per-session sidecar keyed to that log, so a listing costs one stat per session and re-reads only what changed.</p>
+      <p>One session at a time is under review. The <b>Sessions</b> tab lists every session recorded for the workspace, ordered by when its conversation was last active, and selecting a row changes which session every window shows. Each row carries what that session did — ±lines, pending count, tokens, duration, and model · effort, and how many still await review — read from its store log and cached in a per-session sidecar keyed to that log, so a listing costs one stat per session and re-reads only what changed.</p>
       <figure class="cfig"><img src="media/sessions.png" loading="lazy" alt="The Sessions tab: one row per session in this workspace, the live one marked, each showing Claude's title for the session, or its short id when it has none, and when its conversation was last active"><figcaption>Every session recorded for this workspace, newest conversation first.</figcaption></figure></div>
 
     <div class="term" id="transcript"><h3><a href="#transcript">Transcript</a></h3>
@@ -300,7 +310,6 @@ work is attributed to the prompt that STARTED it — a shell launched here belon
     <h2>Further reading</h2>
     <div class="doclinks">
       <a class="primary" href="showcase.html">← Back to home</a>
-      <a href="features.html">Features</a>
       <a href="getting-started.html">Getting started</a>
       <a href="https://github.com/cell-observatory/claude-observatory/blob/main/docs/DEMO.md">Walkthrough</a>
       <a href="https://github.com/cell-observatory/claude-observatory/blob/main/docs/ARCHITECTURE.md">How it works</a>
@@ -314,8 +323,8 @@ work is attributed to the prompt that STARTED it — a shell launched here belon
     <div class="row">
       <span class="brand"><span class="m">🔬</span> Claude Observatory</span>
       <div class="flinks">
-        <a href="features.html">Features</a>
         <a href="concepts.html">Concepts</a>
+        <a href="releases.html">Releases</a>
         <a href="https://github.com/cell-observatory/claude-observatory/blob/main/docs/DEMO.md">Demo</a>
         <a href="https://github.com/cell-observatory/claude-observatory/blob/main/docs/ARCHITECTURE.md">How it works</a>
         <a href="https://github.com/cell-observatory/claude-observatory/blob/main/docs/REMOTE.md">Remote</a>

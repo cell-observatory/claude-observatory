@@ -39,11 +39,15 @@ import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.DefaultActionGroup
+import com.intellij.openapi.actionSystem.Presentation
 import com.intellij.openapi.actionSystem.ToggleAction
+import com.intellij.openapi.actionSystem.ex.CustomComponentAction
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.DumbAware
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.ui.Messages
+import com.intellij.notification.NotificationType
 import com.intellij.openapi.ui.SimpleToolWindowPanel
 import com.intellij.ui.ColoredTreeCellRenderer
 import com.intellij.ui.JBColor
@@ -169,6 +173,10 @@ private fun statusColor(status: String): JBColor = when (status) {
  * Both payloads are aggregated in core (the single backend) — this panel only paints. Realtime rides on
  * the transcript watcher / store watcher via ObservatoryService.refresh. Parity with the VS Code Overview.
  */
+/** Tag for the sessions-row "resolve" fragment — file-scoped so the (non-inner) renderer class and the
+ *  panel's click handler share one identity to hit-test against. */
+private val SESSIONS_RESOLVE_TAG = Any()
+
 class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true, true) {
 
     /** Live panels by project, so the guided tour can bring a named tab forward and point at it. A
@@ -255,11 +263,17 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
     @Volatile private var map: ChangeMap? = null
     private var selected: NavSel = NavSel.Main
 
+    /** Whether the reader has opened the folded "older sessions" group. Not persisted: opening it is a
+     *  look-at-this-now intent, and restoring it across sessions re-enters the state the fold avoids. */
+    private var foldOpen = false
+
     /** The Overview title-bar toolbars (one ActionToolbar per group), kept so a nav step or a change of
      *  prompt scope can refresh their scoped labels + counters. */
     private var overviewToolbars: List<ActionToolbar> = emptyList()
     /** The shared step-through review nav bar (parity with the status-bar widget), hosted in this toolbar. */
-    private val reviewNavBar = ReviewNavBar(project) { onNavChanged() }
+    // The bar always acts on the REVIEWED session (its verbs pair per-session edit ids with the ids it
+    // read from that session's log); the panel's own toolbar carries the fleet-row scoping instead.
+    private val reviewNavBar = ReviewNavBar(project, { onNavChanged() })
     /** The live detail panel — kept so a nav step can refresh its bottom summary without a full rebuild. */
     private var currentDetail: AgentDetail? = null
     /** Is the Folders strip showing every folder? Panel-level, because [renderDetail] rebuilds the detail
@@ -299,6 +313,10 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
     private data class TaskRow(val task: SessionTask, val roll: TaskRoll?)
     /** The "N done · show all" collapse row — completed tasks fold behind it (fleet dismiss pattern). */
     private data class DoneTasksToggle(val count: Int, val open: Boolean)
+    /** The "N older with pending edits · show all" collapse row in the Sessions tab (0.9.0). */
+    private data class OlderSessionsToggle(val count: Int, val open: Boolean)
+    private var oldSessionsOpen = false
+    @Volatile private var lastSessions: SessionsResult? = null // BGT-read by sessionLabelAction.update()
     private var tasksOpen = false
     private var lastTasks: List<SessionTask> = emptyList()
     /** The reader's own Active-only value, parked while the guided tour runs. null = no tour is holding it. */
@@ -490,26 +508,39 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         //     the picked ASK when the Prompts window has one selected — that is the explicit scope the
         //     reader named, and every pane on this panel is already filtered to it. ---
         val leftGroup = DefaultActionGroup().apply {
+            add(sessionLabelAction())
             add(bulkAction("Accept All", NavTint.ACCEPT_ALL, { "Accept All in $it" },
                 { withSession { s -> ReviewOps.keepAll(project, s) } },
-                { r -> withSession { s -> ReviewOps.keepAll(project, s, editsOfPrompt(r), "prompt #${r.index}") } }))
+                // The REVIEWED session, never withSession: the prompt's edit ids come from the
+                // reviewed session's log, and ids are small per-session integers — pairing them with a
+                // selected SIBLING's session id would accept unrelated edits in that worktree while the
+                // confirm dialog listed this one's files. Prompts belong to the reviewed conversation
+                // by definition (VS Code's prompt verbs carry no session for the same reason).
+                { r -> withReviewedSession { s -> ReviewOps.keepAll(project, s, editsOfPrompt(r), "prompt #${r.index}") } }))
             add(bulkAction("Reject All", NavTint.REVERT_ALL, { "Reject All in $it" },
-                { withSession { s -> ReviewOps.undoAll(project, s, service().log(), "this session") } },
-                { r -> withSession { s -> ReviewOps.undoIds(project, s, editsOfPrompt(r), "prompt #${r.index}", "prompt #${r.index}") } }))
+                // Session-only: `undo --all --session s`, so no records cross a session boundary.
+                { withSession { s -> ReviewOps.undoAllInSession(project, s) } },
+                { r -> withReviewedSession { s -> ReviewOps.undoIds(project, s, editsOfPrompt(r), "prompt #${r.index}", "prompt #${r.index}") } }))
             add(bulkAction("Clear Resolved", NavTint.CLEAR, { "Clear in $it" },
                 {
                     withSession { s ->
-                        val resolved = service().log().count { !it.pending }
-                        if (resolved > 0) ReviewOps.clearResolved(project, s, resolved) else ReviewOps.notify(project, "No resolved edits to clear")
+                        // Count only what we can actually see: the reviewed session's log. For a sibling
+                        // the count is UNKNOWN here (null) — ReviewOps phrases the dialog count-free and
+                        // reports the CLI's own cleared figure, instead of interpolating a -1 sentinel
+                        // into a destructive confirmation (which is what shipped: "Clear -1 resolved
+                        // edit(s)?").
+                        val resolved = if (s == service().currentSession()) service().log().count { !it.pending } else null
+                        if (resolved != 0) ReviewOps.clearResolved(project, s, resolved) else ReviewOps.notify(project, "No resolved edits to clear")
                     }
                 },
                 { r -> withSession { s -> ReviewOps.clearResolvedIds(project, s, r.editIds, "prompt #${r.index}") } }))
-            add(exportAction())
+            add(exportGroup())
         }
         // --- TOP row RIGHT cluster: Search · Active only · Clear completed | Spotlight · Refresh | demo ---
-        //     Demo mode LAST, and on this panel as well as the Edits tree (VS Code puts it on both title
-        //     bars). It is the one cluster here that is not about the session under review, so it sits at
-        //     the end behind its own separator rather than among the review controls.
+        //     Demo mode LAST among the controls, and on this panel as well as the Edits tree (VS Code
+        //     puts it on both title bars). It is the one cluster here that is not about the session
+        //     under review, so it sits at the end behind its own separator rather than among the review
+        //     controls. The VERSION chip closes the row — pinned to the right edge (VS Code parity).
         val rightGroup = DefaultActionGroup().apply {
             add(reviewNavBar.searchAction())
             add(activeOnlyToggle())
@@ -519,6 +550,8 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             add(action("Refresh", AllIcons.Actions.Refresh) { rebuild(force = true) })
             addSeparator()
             DemoVerbs.ALL.forEach { v -> add(demoAction(v.text, v.icon, v.wantDemo) { v.run(project) }) }
+            addSeparator()
+            add(versionGroup())
         }
 
         fun mkTb(name: String, g: DefaultActionGroup): ActionToolbar =
@@ -659,8 +692,22 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
                 val i = sessionsList.locationToIndex(e.point)
                 if (i < 0 || !sessionsList.getCellBounds(i, i).contains(e.point)) return
                 when (val row = sessionsModel.get(i)) {
-                    is SessionRow -> pinSession(row)
+                    // A click in the trailing "resolve" zone resolves that row instead of switching to
+                    // it: accept what is pending, then drop its records (Swing lists have no per-row
+                    // buttons, so the hit region is the label's own tail).
+                    is SessionRow ->
+                        if (row.pending > 0 && resolveFragmentHit(i, row, e)) resolveSessionRow(row)
+                        else pinSession(row)
                     AutoSessionRow -> pinSession(null)
+                    // Repaint from the REMEMBERED payload: a toggle is a display state, and refetching
+                    // here would make expanding the list spawn a CLI call.
+                    is OlderSessionsToggle -> {
+                        oldSessionsOpen = !oldSessionsOpen
+                        suppressSel = true
+                        repaintSessions(lastSessions)
+                        restoreSelection()
+                        suppressSel = false
+                    }
                     else -> {}
                 }
             }
@@ -694,11 +741,24 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         })
         // Clicking a nav tree's "N hidden · show all" row does the same for its agents / workflow runs.
         fleetTree.addMouseListener(unhideListener(fleetTree, dismissedAgents))
+        // Remember whether the folded group is open, so the repaint on the next transcript tick does not
+        // slam it shut under the reader (see the re-collapse in repaintNav).
+        fleetTree.addTreeExpansionListener(object : javax.swing.event.TreeExpansionListener {
+            private fun isFold(e: javax.swing.event.TreeExpansionEvent) =
+                (e.path?.lastPathComponent as? DefaultMutableTreeNode)?.userObject is FoldedGroup
+            // `repainting` gates these: the repaint below expands and collapses nodes itself, and a
+            // programmatic move is not the reader saying anything about what they want open.
+            override fun treeExpanded(e: javax.swing.event.TreeExpansionEvent) { if (!repainting && isFold(e)) foldOpen = true }
+            override fun treeCollapsed(e: javax.swing.event.TreeExpansionEvent) { if (!repainting && isFold(e)) foldOpen = false }
+        })
         workflowsTree.addMouseListener(unhideListener(workflowsTree, dismissedWorkflows))
 
         ObservatoryService.getInstance(project).addListener { rebuild() }
         rebuild()
     }
+
+    /** True while a repaint is driving the tree, so its own expand/collapse is not read as a reader gesture. */
+    private var repainting = false
 
     private fun selectDetail(sel: NavSel) {
         selected = sel
@@ -708,6 +768,108 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         renderDetail()
         refreshScopeNotes()
         refreshOverviewToolbar()
+        repaintNavCounts() // the badges describe the SELECTED session (0.9.0) — see below
+    }
+
+    /**
+     * Resolve one session from its own row: accept its pending edits, then clear its records.
+     *
+     * Confirmed, because clearing the records cannot be undone. The accept itself writes no file — it
+     * records a verdict — and the session is kept; `Clean Store → Drop` deletes one outright.
+     */
+    private fun resolveSessionRow(row: SessionRow) {
+        val ok = Messages.showYesNoDialog(
+            project,
+            "Resolve “${row.displayName}”?\n\n" +
+                "Accepts its ${row.pending} pending edit(s), then clears this session's review records.\n\n" +
+                "Accepting changes NO file on disk — it records a verdict. Clearing the records cannot be undone, " +
+                "and the session itself is kept.",
+            "Claude Observatory",
+            "Resolve Session",
+            "Cancel",
+            Messages.getWarningIcon(),
+        )
+        if (ok != Messages.YES) return
+        com.intellij.openapi.progress.ProgressManager.getInstance().run(
+            object : com.intellij.openapi.progress.Task.Backgroundable(project, "Resolving ${row.displayName}…") {
+                override fun run(indicator: com.intellij.openapi.progress.ProgressIndicator) {
+            val r = ObservatoryCli.resolveSession(row.id, project.basePath)
+            ApplicationManager.getApplication().invokeLater {
+                if (r.ok) {
+                    service().refresh(force = true)
+                    ReviewOps.notify(project, "Resolved ${row.displayName}.")
+                } else {
+                    ReviewOps.notify(project, "Could not resolve ${row.displayName} — ${r.stderr.take(160)}", NotificationType.ERROR)
+                }
+            }
+                }
+            }
+        )
+    }
+
+    /** The session the nav badges describe: a selected agent (or its parent, for a subagent row). */
+    private fun scopedSession(): String? = when (val s = selected) {
+        is NavSel.Agent -> s.session
+        is NavSel.Subagent -> s.session
+        else -> null
+    }
+
+    /** True when a fleet row for a session OTHER than the one under review is selected. */
+    private fun otherAgentSelected(): Boolean {
+        val s = scopedSession() ?: return false
+        return s != (lastResult?.agents?.firstOrNull { it.self }?.session ?: service().currentSession())
+    }
+
+    /**
+     * Badge the Fleet · Workflows · Tasks · Processes tabs (0.9.0).
+     *
+     * A badge must count THE LIST ITS PANE RENDERS. Scoping Tasks to the change map's per-agent `tasks`
+     * was wrong twice over: that is the STRICT edit-producing subset (it read "Tasks 0" over a pane
+     * listing 13), and for a sibling it described a session the pane was not showing. A sibling's tasks,
+     * workflows and shells are not in this payload — fetching them per sibling measured 1.2 s a refresh
+     * — so while one is selected those badges say NOTHING rather than another session's numbers.
+     *
+     * Fleet is the exception and keeps a count: it is repo-wide, its pane really does list every agent,
+     * so selected/total is honest where a bare "1" would not be.
+     */
+    private fun repaintNavCounts() {
+        if (!::navTabs.isInitialized) return
+        // The rows the pane will actually DRAW — Active-only and the week-old fold applied — not every
+        // session ever recorded for this repo. "Fleet 33" over a tree showing 2 rows reads as 33 live
+        // agents, which is what the badge is asked and what it must answer.
+        val agents = lastResult?.agents.orEmpty()
+            .filter { MultitaskFilter.showAgent(it, activeOnly, dismissedAgents) }
+            // `folded` is decided in core and shipped on the row — the fold rule lives in ONE place.
+            .filter { !it.folded || it.self || it.session == scopedSession() }
+        val other = otherAgentSelected()
+        if (navTabs.tabCount > FLEET_TAB) {
+            navTabs.setTitleAt(
+                FLEET_TAB,
+                when {
+                    agents.isEmpty() -> "Fleet"
+                    scopedSession() != null && agents.size > 1 -> "Fleet 1/${agents.size}"
+                    else -> "Fleet ${agents.size}"
+                },
+            )
+        }
+        if (navTabs.tabCount > WORKFLOWS_TAB) {
+            val runs = lastResult?.workflows?.size ?: 0
+            navTabs.setTitleAt(WORKFLOWS_TAB, if (other || runs == 0) "Workflows" else "Workflows $runs")
+        }
+        if (navTabs.tabCount > TASKS_TAB) {
+            val tasks = lastTasks
+            val done = tasks.count { it.status == "completed" }
+            navTabs.setTitleAt(TASKS_TAB, if (other || tasks.isEmpty()) "Tasks" else "Tasks $done/${tasks.size}")
+        }
+        // Shells cannot be scoped either; repaintProcesses owns the unscoped label, so only blank it here.
+        if (other && navTabs.tabCount > PROCESSES_TAB) {
+            navTabs.setTitleAt(PROCESSES_TAB, "Processes")
+            navTabs.setToolTipTextAt(
+                PROCESSES_TAB,
+                "Background shells are read for the session under review, never for a selected sibling agent, " +
+                    "so no count is shown while one is selected. Open that session from the Sessions tab to see its shells.",
+            )
+        }
     }
 
     /** What `feed --kind task` resolves against: the row's STRICT 12-hex task id (core.taskIdForSubject).
@@ -959,12 +1121,22 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             else allAgents.filter { self == null || it.session == self }
         val shown = scopedAgents.filter { MultitaskFilter.showAgent(it, activeOnly, dismissedAgents) }
         if (rq == null) fleetInfoNode(allAgents, shown)?.let { fleetRoot.add(it) }
-        shown.forEach { agent ->
+        val agentNodeFor: (RunningAgent) -> DefaultMutableTreeNode = { agent ->
             val collides = agent.files.any { it in collisionFiles }
             val agentNode = DefaultMutableTreeNode(AgentRow(agent, collides))
             val subs = if (rq == null) agent.subagents else agent.subagents.filter { it.agentId in rq.agentIds }
             subs.forEach { agentNode.add(DefaultMutableTreeNode(SubRow(agent.session, it))) }
-            fleetRoot.add(agentNode)
+            agentNode
+        }
+        // FOLDED (0.9.0): conversations quiet for over a week sink under one collapsed parent, and the
+        // Overview no longer rebuilds their change maps every refresh — 24 of 33 siblings in a mature
+        // repo. A tree node is the fold: it starts collapsed, and opening it is the ask.
+        val (liveAgents, oldAgents) = shown.partition { !it.folded }
+        liveAgents.forEach { fleetRoot.add(agentNodeFor(it)) }
+        if (oldAgents.isNotEmpty()) {
+            val group = DefaultMutableTreeNode(FoldedGroup(oldAgents.size))
+            oldAgents.forEach { group.add(agentNodeFor(it)) }
+            fleetRoot.add(group)
         }
         if (rq != null) {
             val hiddenAgents = allAgents.size - scopedAgents.size
@@ -980,10 +1152,29 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             }
         }
         fleetModel.reload()
-        TreeUtil.expandAll(fleetTree)
+        // Expand every agent's subagents, and set the folded group to whatever the reader last chose.
+        //
+        // This was `TreeUtil.expandAll(fleetTree)` followed by a guarded re-collapse, which could never
+        // work: expandAll expands the folded group too, that fires treeExpanded, the listener sets
+        // foldOpen = true, and the very next line skips the collapse because foldOpen is now true. A
+        // week of old sessions sprang open on every transcript tick. expandAll also delegates to
+        // promiseExpandAll and drops the promise, so on the async path the deferred expansion lands
+        // AFTER the collapse and re-opens it — both timings end expanded.
+        //
+        // Walking the nodes ourselves is synchronous, decides the fold once, and never expands it as a
+        // side effect of expanding something else.
+        repainting = true
+        try {
+            com.cellobservatory.observatory.model.FleetTreeFold.apply(fleetTree, fleetRoot, foldOpen) { it is FoldedGroup }
+        } finally {
+            repainting = false
+        }
         repaintWorkflows(res?.workflows)
         repaintTasks(res?.tasks ?: emptyList())
         repaintProcesses(lastProcesses)
+        // LAST, deliberately: repaintTasks and repaintProcesses set their own tab titles, so a scoped
+        // badge written before them survived only until the next tick.
+        repaintNavCounts()
         restoreSelection()
         suppressSel = false
         refreshScopeNotes()
@@ -1034,9 +1225,19 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         val sum = res?.summary?.let {
             if (rqP == null) it else ProcessSummary(total = all.size, running = all.count { p -> p.running }, failed = 0)
         }
+        // Shells are read for the session under review only, and the payload carries none per sibling.
+        // With another agent selected the honest badge is NO badge (0.9.0): the reviewed session's count
+        // beside a pane the reader believes is scoped to their selection is worse than showing nothing.
+        val otherAgent = scopedSession()?.let { it != service().currentSession() } ?: false
+        navTabs.setToolTipTextAt(
+            PROCESSES_TAB,
+            if (otherAgent) "Background shells are read for the session under review, never for a selected sibling agent, " +
+                "so no count is shown while one is selected. Open that session from the Sessions tab to see its shells."
+            else PROCESSES_TIP,
+        )
         navTabs.setTitleAt(
             PROCESSES_TAB,
-            if (sum == null || sum.total == 0) "Processes"
+            if (otherAgent || sum == null || sum.total == 0) "Processes"
             else "Processes ${sum.running}/${sum.total}" +
                 (if (sum.failed > 0) " · ${sum.failed} failed" else "") +
                 (if (folded > 0) " · $folded cleared" else ""),
@@ -1086,6 +1287,7 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
      *  marked. The rows come from the stat-only `sessions --json` listing — no session's edit log is read
      *  to build them, which is what makes opening this tab (and the Switch Session popup) instant. */
     private fun repaintSessions(res: SessionsResult?) {
+        lastSessions = res
         val rows = res?.sessions ?: emptyList()
         sessionsList.emptyText.text = when {
             res != null -> "No sessions for this workspace yet — this fills in when Claude Code first edits a file here"
@@ -1094,9 +1296,27 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         }
         sessionsModel.clear()
         if (res != null) sessionsModel.addElement(AutoSessionRow)
-        rows.forEach { sessionsModel.addElement(it) }
+        // A DAY by default (0.9.0), same rule as the VS Code list. This had grown to every session ever
+        // recorded here — 34 rows back to 20 days — and the ones you switch between are from today.
+        // Older rows collapse behind one header; FINISHED ones (nothing left to review) are not listed at
+        // all, because they are what Clear completed removes rather than something to scroll past.
+        val pinned = com.cellobservatory.observatory.settings.ObservatorySettings.instance.state.session
+            ?.takeIf { it.isNotBlank() }
+        val now = System.currentTimeMillis()
+        val day = 86_400_000L
+        val recent = rows.filter { it.current || it.id == pinned || now - it.lastActiveMs <= day }
+        val older = rows.filter { it !in recent && it.pending > 0 }
+        val settled = rows.count { it !in recent && it.pending == 0 }
+        recent.forEach { sessionsModel.addElement(it) }
+        if (older.isNotEmpty()) {
+            sessionsModel.addElement(OlderSessionsToggle(older.size, oldSessionsOpen))
+            if (oldSessionsOpen) older.forEach { sessionsModel.addElement(it) }
+        }
+        // Say what is NOT on screen: a list that silently drops rows is indistinguishable from a store
+        // that never had them, and this one drops the finished ones on purpose.
+        if (settled > 0) sessionsModel.addElement(FilterInfo("$settled finished session(s) older than a day not shown — clear them from Clean Store"))
         val tabIdx = navTabs.indexOfComponent(sessionsPane)
-        if (tabIdx >= 0) navTabs.setTitleAt(tabIdx, if (rows.isEmpty()) "Sessions" else "Sessions ${rows.size}")
+        if (tabIdx >= 0) navTabs.setTitleAt(tabIdx, if (rows.isEmpty()) "Sessions" else "Sessions ${recent.size}/${rows.size}")
         // Mark which row the observatory is on now (the pinned one, else the live one) without firing the
         // selection listener — restoring a highlight must never re-pin anything.
         val pinnedId = com.cellobservatory.observatory.settings.ObservatorySettings.instance.state.session
@@ -1326,18 +1546,182 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         border = JBUI.Borders.empty(4, 6, 5, 6)
     }
 
-    /** The session selector — shows the human-readable session NAME in FULL (title / first prompt), the
-     *  raw id in the tooltip (VS Code parity, 2026-07-17); clicking it opens the Switch-session chooser. */
-    /** Export — a shareable review summary (kept / reverted per file) as markdown, opened in an editor tab
-     *  (mirrors the VS Code exportSummary; core.reviewSummaryMarkdown via `summary --markdown`). */
-    private fun exportAction(): AnAction =
-        action("Export", NavTint.tint(AllIcons.ToolbarDecorator.Export, NavTint.BLUE), "Export a shareable review summary (kept / reverted per file) as markdown") {
-            withSession { s ->
-                ReviewOps.openMarkdown(
-                    project, "claude-observatory-review-summary",
-                    "Could not export the review summary (is the claude-observatory CLI installed?)",
-                ) { ObservatoryCli.summaryMarkdown(s, project.basePath) }
+    /** The session-name label leading the top row — VS Code's `ov-sess-label`: the human-readable
+     *  session title (the Sessions rows' title — Claude's ai-title, else the first prompt) on ONE
+     *  line, never wrapped and NEVER clipped (user call 2026-07-28): the whole name shows, and a tight
+     *  row is the toolbar's problem (its overflow), not the title's. The tooltip carries the raw
+     *  session id. A label, not a control: switching sessions is a Sessions-tab click. */
+    private fun sessionLabelAction(): AnAction =
+        object : AnAction(), CustomComponentAction, DumbAware {
+            override fun getActionUpdateThread() = ActionUpdateThread.BGT
+            override fun actionPerformed(e: AnActionEvent) {} // a label, not a control
+            override fun update(e: AnActionEvent) {
+                val s = map?.summary
+                val sess = s?.session.orEmpty()
+                // The SAME source VS Code's label reads: the Sessions rows carry Claude's title for
+                // every session (ai-title, else first prompt — sidecar-cached in core). The change-map
+                // summary's title alone is blank for sessions whose transcript insights carry neither,
+                // which is how the demo session rendered as its raw id.
+                val rowTitle = lastSessions?.sessions?.firstOrNull { it.id == sess }?.title?.trim().orEmpty()
+                val title = rowTitle.ifEmpty { s?.title?.trim().orEmpty() }
+                // setText(text, FALSE): titles are prose — with mnemonic parsing on, "save_load"
+                // renders as "saveload" and "&" vanishes (underscore/ampersand become mnemonics).
+                e.presentation.setText(
+                    "🔬 " + title.ifEmpty { if (sess.isEmpty()) "session —" else "session ${sess.take(8)}" },
+                    false,
+                )
+                e.presentation.description =
+                    (if (title.isEmpty()) "" else "$title — ") +
+                        (if (sess.isEmpty()) "no active Claude Code session" else "session $sess") +
+                        " · switch in the Sessions tab"
             }
+            override fun createCustomComponent(presentation: Presentation, place: String): JComponent =
+                JBLabel().apply {
+                    // Uncapped: the FULL title renders (JLabel is single-line by nature, so it can
+                    // never wrap); a row too tight for label + buttons overflows into the toolbar's
+                    // own "…" chevron rather than costing the title characters.
+                    font = JBUI.Fonts.smallFont()
+                    border = JBUI.Borders.empty(0, 4, 0, 6)
+                }
+            override fun updateCustomComponent(component: JComponent, presentation: Presentation) {
+                (component as JBLabel).text = presentation.text
+                component.toolTipText = presentation.description
+            }
+        }
+
+    /** Release-channel info for the version chip — fetched off the EDT via the CLI (`version --check
+     *  --json`, the shared backend), cached an hour. @Volatile: the popup builds its rows on whatever
+     *  thread expands it. */
+    @Volatile private var versionInfo: ObservatoryCli.VersionCheck? = null
+    @Volatile private var versionFetchedAtMs = 0L
+
+    private fun refreshVersionInfo(force: Boolean = false) {
+        val now = System.currentTimeMillis()
+        // The throttle holds on FAILURE too (a shorter negative TTL): the platform expands a popup
+        // group's children on every toolbar update pass, so a missing/old/offline CLI must not spawn
+        // a `version --check` process per tick — 30s-capped spawns with no in-flight guard pile up.
+        val ttlMs = if (versionInfo == null) 5 * 60 * 1000L else 60 * 60 * 1000L
+        if (!force && versionFetchedAtMs != 0L && now - versionFetchedAtMs < ttlMs) return
+        versionFetchedAtMs = now
+        ApplicationManager.getApplication().executeOnPooledThread {
+            ObservatoryCli.versionCheck(project.basePath)?.let { versionInfo = it }
+        }
+    }
+
+    /** This plugin's OWN installed version — what the chip label shows (each surface shows what is
+     *  actually running there; the CLI reports its own in the dropdown's rows). */
+    private fun pluginVersion(): String =
+        com.intellij.ide.plugins.PluginManagerCore.getPlugin(
+            com.intellij.openapi.extensions.PluginId.getId("com.cell-observatory.claude-observatory")
+        )?.version ?: ""
+
+    /** The version chip closing the top row (VS Code's `ov-version`, pinned right): the running
+     *  version, opening Update Now + the Stable ⇄ Pre-release channel switch. Every action runs the
+     *  CLI's `update` — the one updater for all surfaces — then asks for an IDE restart. */
+    private fun versionGroup(): AnAction =
+        object : DefaultActionGroup("v" + pluginVersion().ifEmpty { "—" }, true), DumbAware {
+            @Suppress("OVERRIDE_DEPRECATION") // displayTextInToolbar: still honored; renders the label
+            override fun displayTextInToolbar() = true
+            override fun getActionUpdateThread() = ActionUpdateThread.BGT
+            override fun update(e: AnActionEvent) {
+                // The chip itself signals an available update — a dot beside the version, the same
+                // signal VS Code's chip shows — and each tick (throttled) keeps the info current.
+                refreshVersionInfo()
+                val v = versionInfo
+                val chLatest = if (v?.channel == "dev") v.devLatest ?: v.stableLatest else v?.stableLatest
+                e.presentation.setText(
+                    "v" + pluginVersion().ifEmpty { "—" } + (if (v?.updateAvailable == true) " ●" else ""),
+                    false,
+                )
+                e.presentation.description =
+                    (if (v?.updateAvailable == true && chLatest != null) "Update available — v$chLatest. " else "") +
+                        "Claude Observatory version — update, or switch between the stable and pre-release channels"
+            }
+            override fun getChildren(e: AnActionEvent?): Array<AnAction> {
+                val v = versionInfo
+                    ?: return arrayOf(action("Checking for releases…", AllIcons.Actions.Refresh, "Fetch release info again (needs the claude-observatory CLI + network)") { refreshVersionInfo(force = true) })
+                val rows = mutableListOf<AnAction>()
+                val chLatest = if (v.channel == "dev") v.devLatest ?: v.stableLatest else v.stableLatest
+                if (v.updateAvailable && chLatest != null) {
+                    rows += action("Update Now — v$chLatest", AllIcons.Actions.Download, "Update the CLI + both editor plugins, then restart the IDE") { runUpdateCli(null) }
+                    rows += com.intellij.openapi.actionSystem.Separator.getInstance()
+                }
+                val stableText = (if (v.channel != "dev") "✓ " else "") + "Stable" + (v.stableLatest?.let { " — v$it" } ?: "")
+                val devText = (if (v.channel == "dev") "✓ " else "") + "Pre-release" + (v.devLatest?.let { " — v$it" } ?: " — none yet")
+                rows += action(stableText, AllIcons.Actions.Commit, "Tagged releases") {
+                    if (v.channel != "stable") runUpdateCli("stable")
+                }
+                rows += action(devText, AllIcons.Actions.Lightning, "Rolling build of the dev branch — newest features, less soak") {
+                    if (v.channel != "dev") runUpdateCli("dev")
+                }
+                return rows.toTypedArray()
+            }
+        }.apply {
+            templatePresentation.description =
+                "Claude Observatory version — update, or switch between the stable and pre-release channels"
+        }
+
+    /** Run the CLI's `update` (optionally switching `--channel`) in the background and report. The
+     *  CLI pass rewrites the installed plugin on disk; the restart POP-UP appears only when something
+     *  was actually installed (the CLI prints its exact up-to-date summary line otherwise), and
+     *  "Restart IDE" performs the restart — parity with VS Code's Reload-Window offer. */
+    private fun runUpdateCli(channel: String?) {
+        val what = when (channel) { null -> "Updating Claude Observatory"; "dev" -> "Switching to the Pre-release channel"; else -> "Switching to the Stable channel" }
+        ReviewOps.notify(project, "$what — this refreshes the CLI and both editor plugins…")
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val (ok, out) = ObservatoryCli.update(channel, project.basePath)
+            versionFetchedAtMs = 0L
+            refreshVersionInfo(force = true)
+            ApplicationManager.getApplication().invokeLater {
+                when {
+                    !ok -> ReviewOps.notify(project, "$what failed: ${out.take(300).ifBlank { "is the claude-observatory CLI installed?" }}", NotificationType.ERROR)
+                    out.contains("everything is up to date") || out.contains("CLI is up to date") ->
+                        ReviewOps.notify(project, "$what done — already on the newest build, no restart needed.")
+                    else -> {
+                        val restart = Messages.showYesNoDialog(
+                            project,
+                            "$what done — the plugin on disk was replaced.\n\nRestart the IDE now to load the new build?",
+                            "Claude Observatory",
+                            "Restart IDE",
+                            "Later",
+                            Messages.getQuestionIcon(),
+                        )
+                        if (restart == Messages.YES) ApplicationManager.getApplication().restart()
+                        else ReviewOps.notify(project, "New build loads on the next IDE restart.")
+                    }
+                }
+            }
+        }
+    }
+
+    /** Export — ONE dropdown, both exports (parity with VS Code's Export button + picker): the
+     *  shareable review summary (kept / reverted per file, markdown), or the FULL session trace of
+     *  everything the observatory recorded (JSON; core.buildSessionTrace via the `export` verb). */
+    private fun exportGroup(): AnAction =
+        object : DefaultActionGroup("Export", true), DumbAware {
+            @Suppress("OVERRIDE_DEPRECATION") // displayTextInToolbar: still honored; renders the label
+            override fun displayTextInToolbar() = true
+        }.apply {
+            templatePresentation.icon = NavTint.tint(AllIcons.ToolbarDecorator.Export, NavTint.BLUE)
+            templatePresentation.description =
+                "Export — a shareable review summary (markdown), or the full session trace of everything recorded (JSON)"
+            add(action("Review Summary (markdown)", AllIcons.FileTypes.Text) {
+                withSession { s ->
+                    ReviewOps.openMarkdown(
+                        project, "claude-observatory-review-summary",
+                        "Could not export the review summary (is the claude-observatory CLI installed?)",
+                    ) { ObservatoryCli.summaryMarkdown(s, project.basePath) }
+                }
+            })
+            add(action("Full Session Trace (JSON)", AllIcons.FileTypes.Json) {
+                withSession { s ->
+                    ReviewOps.openJson(
+                        project, "claude-observatory-trace",
+                        "Could not export the session trace — is the claude-observatory CLI installed? " +
+                            "For very large sessions, run `claude-observatory export --out trace.json` in a terminal.",
+                    ) { ObservatoryCli.traceJson(s, project.basePath) }
+                }
+            })
         }
 
     /** An Overview-toolbar button: [text] renders beside the icon (VS Code shows these labels), with an
@@ -1398,8 +1782,27 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
     private fun service() = ObservatoryService.getInstance(project)
 
     /** Run [block] with the active session, or warn if there is none — mirrors ObservationsPanel.withSession. */
-    private fun withSession(block: (String) -> Unit) {
+    /**
+     * The session the Overview's own actions act on: the SELECTED fleet row, else the reviewed one.
+     *
+     * Every caller below reaches the store through a session-only CLI verb (`keep --all`, `undo --all`,
+     * `clean --resolved`), never by handing it records read from another session's log — edit ids are
+     * per-session integers, so pairing a sibling's id with this session's records would apply them to
+     * unrelated edits and revert files in the wrong worktree.
+     */
+    /** The REVIEWED session only — for verbs whose payload (edit ids, prompt scopes) was derived from
+     *  the reviewed session's log and must never travel to a selected sibling. */
+    private fun withReviewedSession(block: (String) -> Unit) {
         val s = service().currentSession()
+        if (s == null) {
+            ReviewOps.notify(project, "No active Claude Code session for this project", com.intellij.notification.NotificationType.WARNING)
+            return
+        }
+        block(s)
+    }
+
+    private fun withSession(block: (String) -> Unit) {
+        val s = scopedSession() ?: service().currentSession()
         if (s == null) {
             ReviewOps.notify(project, "No active Claude Code session for this project", com.intellij.notification.NotificationType.WARNING)
             return
@@ -1466,6 +1869,8 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
     // --- nav node userObjects ---
 
     private class AgentRow(val agent: RunningAgent, val collides: Boolean)
+    /** Parent of the week-old sessions (0.9.0) — collapsed by default; see the fleet build above. */
+    private class FoldedGroup(val count: Int)
     private class SubRow(val session: String, val sub: MtSubagent)
     private class WfRunRow(val run: WorkflowRun) {
         val id: String get() = run.id
@@ -1490,6 +1895,11 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         ) {
             when (val node = (value as? DefaultMutableTreeNode)?.userObject) {
                 is AgentRow -> renderAgent(node)
+                is FoldedGroup -> {
+                    icon = AllIcons.Vcs.History
+                    append("${node.count} older session${if (node.count == 1) "" else "s"}", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                    toolTipText = "Conversations quiet for over a week. They are not rebuilt on refresh — expanding one is what asks for it."
+                }
                 is SubRow -> renderSubagent(node.sub)
                 is FilterInfo -> {
                     icon = AllIcons.General.Filter
@@ -1513,6 +1923,13 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             append("$glyph${if (heuristic) "~" else ""} ", attrs)
             append("$head  ", SimpleTextAttributes.REGULAR_ATTRIBUTES)
             append(baseName(a.worktree), SimpleTextAttributes.GRAYED_ATTRIBUTES)
+            // A folded session whose map was never built has no numbers — and +0 −0 / 0 tok would read
+            // as "this session did nothing", which is a different claim entirely. Say which one it is.
+            if (!a.loaded) {
+                append("  not loaded", SimpleTextAttributes.GRAYED_ITALIC_ATTRIBUTES)
+                toolTipText = "Folded — the change map for this session was not rebuilt, so there are no numbers to show. Open it from the Sessions tab to build one."
+                return
+            }
             if (a.added > 0 || a.removed > 0) {
                 append("  +${a.added}", MT_ADD)
                 append(" −${a.removed}", MT_REM)
@@ -1690,6 +2107,20 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         override fun customizeCellRenderer(
             list: javax.swing.JList<out Any>, value: Any?, index: Int, selected: Boolean, hasFocus: Boolean,
         ) {
+            if (value is OlderSessionsToggle) {
+                append(
+                    "${value.count} older with pending edits · ${if (value.open) "hide" else "show all"}",
+                    SimpleTextAttributes.GRAYED_ATTRIBUTES,
+                )
+                toolTipText = "Sessions older than a day that still have edits awaiting review. " +
+                    "Finished ones are not listed — use Clean Store → Clear completed sessions to remove them."
+                return
+            }
+            if (value is FilterInfo) {
+                icon = AllIcons.General.Filter
+                append(value.text, SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                return
+            }
             if (value === AutoSessionRow) {
                 val following = pinned() == null
                 append(
@@ -1707,20 +2138,57 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
                 SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, if (row.current) MT_WORKING else JBColor.GRAY),
             )
             append(row.displayName, SimpleTextAttributes.REGULAR_ATTRIBUTES)
-            // The same facts a fleet row carries, in the same style: what it did, then how long ago.
+            // The same badge set a FLEET row carries (0.9.0), in the same order and the same colours:
+            // what it changed, what it cost, what it ran on — then how long ago.
+            if (row.added > 0 || row.removed > 0) {
+                append("  +${row.added}", MT_ADD)
+                append(" −${row.removed}", MT_REM)
+            }
+            // No edit/file counts: the ± lines beside them already say how much this session changed, and
+            // two more bare numbers in the same row read as noise. Only the REVIEW state earns a word.
             if (row.edits > 0) {
-                append("  ${row.edits} edit${if (row.edits == 1) "" else "s"}", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
-                if (row.files > 0) append(" · ${row.files} file${if (row.files == 1) "" else "s"}", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
-                if (row.pending > 0) append(" · ${row.pending}⧗", SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, CM_PENDING))
-                else append(" · reviewed", SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, CM_KEPT))
-            } else {
+                if (row.pending > 0) {
+                    append("  ${row.pending} pending", SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, CM_PENDING))
+                } else append("  reviewed", SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, CM_KEPT))
+            } else if (row.tokens == 0L) {
+                // Only claim "no edits" when there is nothing else to report either; a conversation that
+                // only asked and read still did work, and its tokens below say so.
                 append("  no edits", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
             }
+            if (row.tokens > 0 || row.durationMs > 0) {
+                append("  ${fmtTok(row.tokens)} tok · ${fmtDur(row.durationMs)}", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
+            }
+            // Model / effort are structural facts the harness records. An unknown one is left OUT rather
+            // than defaulted: the default effort differs by build and model, so a placeholder is fiction.
+            if (row.model.isNotBlank() || row.effort.isNotBlank()) {
+                val chip = listOf(row.model, if (row.effort.isNotBlank()) "${row.effort} effort" else "")
+                    .filter { it.isNotBlank() }.joinToString(" · ")
+                append("  [$chip]", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
+            }
             append("  ${relTime(row.lastActiveMs)}" + if (row.current) "  · active" else "", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
+            // A LABELLED affordance, drawn last. Tagged, because the click handler hit-tests the
+            // FRAGMENT, not a pixel column: the old `x > width - 52` zone was unscaled (half the label at
+            // 2x UI scale) and anchored to the list's right edge while the text is left-aligned — on a
+            // wide panel the visible word switched sessions and an invisible strip of empty space
+            // resolved them.
+            if (row.pending > 0) append("   resolve", SimpleTextAttributes.LINK_PLAIN_ATTRIBUTES, SESSIONS_RESOLVE_TAG)
             toolTipText = "${row.displayName}\nsession ${row.id}" +
                 (if (row.current) "\nthe live session for this workspace" else "") +
                 "\nClick to review this session — it becomes the subject of every observatory window."
         }
+    }
+
+    /** True when the click landed on the row's "resolve" fragment itself. The renderer is configured for
+     *  the row with its REAL selection state (selection can change fonts, which moves fragment bounds),
+     *  then asked which fragment owns the x — the same layout the paint used, so zone and label cannot
+     *  disagree, at any UI scale. */
+    private fun resolveFragmentHit(index: Int, row: SessionRow, e: MouseEvent): Boolean {
+        val bounds = sessionsList.getCellBounds(index, index) ?: return false
+        val comp = sessionsList.cellRenderer.getListCellRendererComponent(
+            sessionsList, row, index, sessionsList.isSelectedIndex(index), false
+        ) as? com.intellij.ui.SimpleColoredComponent ?: return false
+        comp.setBounds(0, 0, bounds.width, bounds.height) // fragment layout depends on the component size
+        return comp.getFragmentTagAt(e.point.x - bounds.x) === SESSIONS_RESOLVE_TAG
     }
 
     /** Wraps a tree cell renderer so rows that carry activity bins — fleet agents, workflow runs + their

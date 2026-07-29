@@ -6,7 +6,7 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
-import { EditRecord, EditStatus, readLog, readBlob } from './store';
+import { EditRecord, EditStatus, readBlob, rootDir, isSafeSessionId } from './store';
 import { lineDelta } from './format';
 import { detectClasses, classAt } from './classes';
 import * as crypto from 'crypto';
@@ -111,7 +111,7 @@ function toEdit(session: string, rec: EditRecord): TreeEdit {
 }
 
 /** Group a file's edits under the class each currently falls in (line geometry from ranges.ts). */
-function buildFile(session: string, rel: string, file: string, recs: EditRecord[]): TreeFile {
+function buildFile(session: string, rel: string, file: string, recs: EditRecord[], store: PlacementStore): TreeFile {
   let text = '';
   try {
     text = fs.readFileSync(file, 'utf8');
@@ -122,11 +122,17 @@ function buildFile(session: string, rel: string, file: string, recs: EditRecord[
   if (spans.length === 0) {
     return { rel, file, classes: [], loose: recs.map((r) => toEdit(session, r)) };
   }
+  // A blob that cannot be READ is not the same as an edit with no blob: the chain hash is over blob
+  // SHAs, so a dropped blob keys identically to an intact one but places differently. In-process that
+  // only ever mattered until exit; persisted, it would outlive the process as a wrong answer. Track it
+  // and keep such a result out of the disk tier (the memo above is still fine for this run).
+  let blobsIntact = true;
   const readText = (sha: string | null): string => {
-    if (!sha) return '';
+    if (!sha) return ''; // no snapshot recorded — a legitimate state (file created), not a failure
     try {
       return readBlob(session, sha).toString('utf8');
     } catch {
+      blobsIntact = false;
       return '';
     }
   };
@@ -139,7 +145,7 @@ function buildFile(session: string, rel: string, file: string, recs: EditRecord[
   // follows surviving lines, so a hop between unrelated states drops them and the earlier edits come
   // back unplaced. Feeding the same three edits as (2,0,1) yields [[],[1],[3]] where chronological order
   // yields [[1],[3],[5]] — a silently missing placement, not a slower one.
-  const lines = locateCached(textKey, recs, readText, text);
+  const lines = locateCached(textKey, recs, readText, text, store, () => blobsIntact);
   for (let i = 0; i < recs.length; i++) {
     const r = recs[i];
     const line = lines[i];
@@ -166,10 +172,100 @@ function buildFile(session: string, rel: string, file: string, recs: EditRecord[
  *  the unit worth caching is the FILE, not the edit — one entry now covers every edit in it. All inputs
  *  are content-identified (blobs are immutable; the file text is hashed once per file), so a hit is
  *  exact: when the file on disk changes, or any edit in the chain does, the key changes with it. */
-const lineMemo = new Map<string, (number | undefined)[]>();
+/**
+ * Each entry carries whether it may be PERSISTED, because this memo outlives the disk store below.
+ *
+ * `lineMemo` is module-global; a `placementStore` is created per `buildEditTree` call. So on the second
+ * build in one process every lookup is an L1 hit, and if that path does not re-retain the key, the
+ * store's `keep` set is empty and its pruning flush rewrites placements.json as `{}` — the disk tier
+ * deleting itself on the second call, in exactly the long-lived process (the VS Code extension host)
+ * that benefits from it most. Reproduced: entries 1 → 0 → 0.
+ */
+const lineMemo = new Map<string, { lines: Placements; persistable: boolean }>();
 const LINE_MEMO_CAP = 2000; // one entry per FILE now, not per edit
 
-function locateCached(textKey: string, recs: EditRecord[], readText: (sha: string | null) => string, text: string): (number | undefined)[] {
+type Placements = (number | undefined)[];
+
+/** Bump when the stored shape or the key's meaning changes. */
+const PLACEMENT_VERSION = 1;
+
+/**
+ * The disk tier behind `lineMemo` — the same memo, surviving the process.
+ *
+ * Placement is where a change-map build actually spends its time: profiled on a 405-file / 2,800-edit
+ * session, 75 % of `buildEditTree`'s 2.27 s was the Myers diff inside `locateEditsInCurrent`, against
+ * 22 ms of reading those files off disk. `lineMemo` already collapses that to nothing — but only within
+ * one process, and the Overview runs in a FRESH CLI process on every refresh tick, so it never got the
+ * chance. This makes the same entries readable by the next process.
+ *
+ * Persisting a memo is only safe because this key is content-exact (see `locateCached`): the current
+ * file text is hashed, and blobs are immutable and identified by SHA. Nothing here is keyed by mtime,
+ * so there is no stale-read window — a changed file or a changed edit chain is simply a different key.
+ * That granularity is the point: saving one file re-diffs one file, where the change map's own cache
+ * would discard all 405.
+ */
+interface PlacementStore {
+  get(key: string): Placements | undefined;
+  set(key: string, lines: Placements, persistable: boolean): void;
+  /** `prune`: drop entries this pass did not use. Only ever true for an UNFILTERED build (see below). */
+  flush(prune: boolean): void;
+}
+
+function placementStore(session: string): PlacementStore {
+  const file = isSafeSessionId(session)
+    ? path.join(rootDir(), 'changemap-cache', session, 'placements.json')
+    : null; // an unsafe id must never become a path segment
+  const disk = new Map<string, Placements>();
+  if (file) {
+    try {
+      const j = JSON.parse(fs.readFileSync(file, 'utf8')) as { version?: number; entries?: Record<string, (number | null)[]> };
+      if (j && j.version === PLACEMENT_VERSION && j.entries) {
+        // `undefined` (an unplaced edit) is not representable in JSON and serializes to null; map it back
+        // rather than letting "unplaced" quietly become line 0.
+        for (const [k, v] of Object.entries(j.entries)) disk.set(k, v.map((n) => (n === null ? undefined : n)));
+      }
+    } catch {
+      /* absent, unreadable, or a version we do not understand — start empty */
+    }
+  }
+  const keep = new Map<string, Placements>();
+  return {
+    get(key) {
+      const hit = disk.get(key);
+      if (hit) keep.set(key, hit); // used this pass — must survive a pruning rewrite
+      return hit;
+    },
+    set(key, lines, persistable) {
+      if (persistable) keep.set(key, lines);
+    },
+    flush(prune) {
+      if (!file) return;
+      // A FILTERED build only visits the matching files, so its `keep` is a subset by construction —
+      // pruning against it would let `tree --filter foo` throw away every other file's placements and
+      // make the next full build cold. Filtered passes may only ADD.
+      const out = prune ? keep : new Map([...disk, ...keep]);
+      if (out.size === disk.size && [...out.keys()].every((k) => disk.has(k))) return; // nothing to write
+      try {
+        fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+        const tmp = `${file}.${process.pid}.tmp`; // pid-scoped so concurrent builds cannot collide
+        // 0600/0700 like every other file in the store (SECURITY.md).
+        fs.writeFileSync(tmp, JSON.stringify({ version: PLACEMENT_VERSION, entries: Object.fromEntries(out) }), { mode: 0o600 });
+        fs.renameSync(tmp, file); // atomic: a concurrent reader sees old-or-new, never a torn file
+      } catch {
+        /* cache is best-effort */
+      }
+    },
+  };
+}
+
+function locateCached(
+  textKey: string,
+  recs: EditRecord[],
+  readText: (sha: string | null) => string,
+  text: string,
+  store: PlacementStore,
+  blobsIntact: () => boolean
+): Placements {
   // The chain is HASHED, not concatenated: at 82 chars per edit the raw key was 91% of the entry, so a
   // full memo of 2,000 files at 500 edits each retained 86 MB (7.7 MB hashed) in a long-lived host.
   const chain = crypto
@@ -179,7 +275,18 @@ function locateCached(textKey: string, recs: EditRecord[], readText: (sha: strin
     .slice(0, 16);
   const key = `${textKey} ${recs.length}:${chain}`;
   const hit = lineMemo.get(key);
-  if (hit) return hit;
+  // An L1 hit must STILL be offered to the store. The memo outlives the store (see lineMemo), so on the
+  // second build in one process this is the only path taken — and a store whose `keep` set stayed empty
+  // prunes the file down to nothing on flush.
+  if (hit) {
+    store.set(key, hit.lines, hit.persistable);
+    return hit.lines;
+  }
+  const onDisk = store.get(key); // marks it retained for this pass
+  if (onDisk) {
+    memoize(key, onDisk, true); // it came FROM disk, so it is persistable by construction
+    return onDisk;
+  }
   // Blob reads only on a miss, and PULLED one at a time — materialising every snapshot up front held
   // the file's whole history resident.
   const lines = locateEditsInCurrent(
@@ -187,14 +294,19 @@ function locateCached(textKey: string, recs: EditRecord[], readText: (sha: strin
     (i) => ({ before: readText(recs[i].beforeBlob), after: readText(recs[i].afterBlob) }),
     text
   ).map((p) => p.lines[0]);
-  if (lineMemo.size >= LINE_MEMO_CAP) lineMemo.clear();
-  lineMemo.set(key, lines);
+  const persistable = blobsIntact(); // only after the reads, which is what sets the flag
+  memoize(key, lines, persistable);
+  store.set(key, lines, persistable);
   return lines;
+}
+
+function memoize(key: string, lines: Placements, persistable: boolean): void {
+  if (lineMemo.size >= LINE_MEMO_CAP) lineMemo.clear();
+  lineMemo.set(key, { lines, persistable });
 }
 
 
 export function buildEditTree(session: string, opts: { root?: string; filter?: string } = {}): EditTree {
-  const log = readLog(session);
   const filter = opts.filter || '';
   const relOf = (file: string): string => {
     const r = opts.root ? path.relative(opts.root, file) : file;
@@ -210,6 +322,8 @@ export function buildEditTree(session: string, opts: { root?: string; filter?: s
     grouped.get(rel)!.edits.push(rec);
   }
   const byRel = new Map<string, TreeFile>();
-  for (const [rel, g] of grouped) byRel.set(rel, buildFile(session, rel, g.file, g.edits));
+  const store = placementStore(session);
+  for (const [rel, g] of grouped) byRel.set(rel, buildFile(session, rel, g.file, g.edits, store));
+  store.flush(!filter); // a filtered pass saw only some files — it may add entries, never prune them
   return subtree([...grouped.keys()], '', byRel);
 }

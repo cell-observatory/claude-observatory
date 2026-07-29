@@ -1,5 +1,6 @@
 package com.cellobservatory.observatory.ui.inline
 
+import com.cellobservatory.observatory.core.ClaudePaths
 import com.cellobservatory.observatory.model.EditRecord
 import com.cellobservatory.observatory.services.ObservatoryService
 import com.cellobservatory.observatory.services.PlacementsCache
@@ -133,7 +134,7 @@ class InlineOverlay(private val project: Project) : Disposable {
         val service = ObservatoryService.getInstance(project)
         val session = service.currentSession()
         val pending = if (file == null || session == null) emptyList()
-        else service.log().filter { it.pending && it.file == file }
+        else ClaudePaths.storeKey(file).let { key -> service.log().filter { it.pending && it.file == key } }
         if (!ObservatorySettings.instance.state.inlineReview ||
             editor.document.lineCount > MAX_INLINE_LINES ||
             file == null || session == null || pending.isEmpty()

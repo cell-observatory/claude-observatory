@@ -244,9 +244,8 @@ class TourController(private val project: Project) : com.intellij.openapi.Dispos
         // inside Prompts or Stats — `prompts` and `finish` are on the Essentials track — and a folded
         // pane is not showing, so `ring()` bails and the step narrates a panel the reader cannot see.
         // Restored in stop(), exactly like the Active-only filter above.
-        foldedPrompts = !settings().dashShowPrompts
         foldedStats = !settings().dashShowStats
-        if (foldedPrompts || foldedStats) setDockPanes(prompts = true, stats = true)
+        if (foldedStats) setDockPanes(stats = true)
         openWindow()
         applyStep(0)
     }
@@ -301,13 +300,12 @@ class TourController(private val project: Project) : com.intellij.openapi.Dispos
 
     private fun settings() = com.cellobservatory.observatory.settings.ObservatorySettings.instance.state
 
-    /** Which dock side panes the tour folded away, so stop() can put them back. */
-    private var foldedPrompts = false
+    /** Whether the tour unfolded the dock's Stats pane, so stop() can put it back. (Prompts is its own
+     *  tool window since 0.9.0 — showing it needs no fold bookkeeping.) */
     private var foldedStats = false
 
-    /** Show or hide the Dashboards side panes, through the same path the title-bar toggles use. */
-    private fun setDockPanes(prompts: Boolean, stats: Boolean) {
-        settings().dashShowPrompts = prompts
+    /** Show or hide the Dashboards Stats pane, through the same path the title-bar toggle uses. */
+    private fun setDockPanes(stats: Boolean) {
         settings().dashShowStats = stats
         com.cellobservatory.observatory.ui.ObservatoryDashboardsFactory.applyPanes(project)
     }
@@ -445,9 +443,8 @@ class TourController(private val project: Project) : com.intellij.openapi.Dispos
         disarm()
         ChangeMapPanel.of(project)?.setShowAll(false)
         // Give back exactly what the reader had before the tour opened them.
-        if (foldedPrompts || foldedStats) {
-            setDockPanes(prompts = !foldedPrompts, stats = !foldedStats)
-            foldedPrompts = false
+        if (foldedStats) {
+            setDockPanes(stats = false)
             foldedStats = false
         }
         ring(null)
@@ -649,23 +646,34 @@ class TourController(private val project: Project) : com.intellij.openapi.Dispos
     private fun activate(step: DemoStep): JComponent? {
         val mgr = ToolWindowManager.getInstance(project)
         return when (step.view) {
-            "overview", "prompts", "stats" -> {
-                mgr.getToolWindow("Claude Observatory Dashboards")?.show(null)
+            "overview", "stats" -> {
+                mgr.getToolWindow("Observatory Dashboards")?.show(null)
                 val panel = ChangeMapPanel.of(project)
                 if (step.view == "overview") step.tab?.let { panel?.selectNavTab(it) }
-                // Prompts, the Overview and Stats are always-visible columns of the same bottom split,
-                // so raising the window IS the activation. The anchor then decides WHICH control is
-                // ringed, by asking every panel: names are globally unique, so exactly one answers —
-                // and that is what lets a Prompts step ring Accept Prompt, which lives in the Overview.
+                // The Overview and Stats are always-visible columns of the same bottom split, so raising
+                // the window IS the activation. The anchor then decides WHICH control is ringed, by
+                // asking every panel: names are globally unique, so exactly one answers.
                 com.cellobservatory.observatory.ui.stats.StatsPanel.of(project)?.tourAnchor(step.anchor)
-                    ?: com.cellobservatory.observatory.ui.PromptsPanel.of(project)?.tourAnchor(step.anchor)
                     ?: panel?.tourAnchor(step.anchor)
                     // No fallback to the whole panel. An outline around EVERYTHING points at nothing, and
                     // most steps carry no anchor at all — so the old fallback ringed the entire Overview
                     // for the majority of the tour. VS Code rings nothing in that case; so does this.
             }
+            "prompts" -> {
+                // Prompts lives in the Observatory Timeline window (0.9.0) — raise IT and select its
+                // tab. The anchor chain keeps the ChangeMapPanel because a Prompts step can ring
+                // Accept Prompt, which lives in the Overview.
+                val tw = mgr.getToolWindow("Observatory Timeline")
+                tw?.show(null)
+                tw?.contentManager?.let { cm -> cm.contents.firstOrNull { it.displayName == "Prompts" }?.let { cm.setSelectedContent(it) } }
+                com.cellobservatory.observatory.ui.PromptsPanel.of(project)?.tourAnchor(step.anchor)
+                    ?: ChangeMapPanel.of(project)?.tourAnchor(step.anchor)
+            }
             "edits", "diffs", "fileHistory", "actions", "observations" -> {
-                val tw = mgr.getToolWindow("Claude Observatory") ?: return null
+                // Actions + Observations moved to the Timeline window (0.9.0); the per-edit trees stay
+                // in Traces. Route each tab to the window that actually holds it.
+                val inTimeline = step.view == "actions" || step.view == "observations"
+                val tw = mgr.getToolWindow(if (inTimeline) "Observatory Timeline" else "Observatory Traces") ?: return null
                 tw.show(null)
                 val name = when (step.view) {
                     "edits" -> "Edits"; "diffs" -> "Diffs"; "fileHistory" -> "File History"
@@ -694,7 +702,9 @@ class TourController(private val project: Project) : com.intellij.openapi.Dispos
 
     private fun openNewestPendingEdit(): Boolean {
         val service = com.cellobservatory.observatory.services.ObservatoryService.getInstance(project)
-        val base = project.basePath?.let { it + java.io.File.separator }
+        // storeKey (#43): basePath is system-independent (`C:/repo`) while record paths are OS-native
+        // (`C:\repo\…`) — a raw prefix of basePath + '\' can never match on Windows.
+        val base = project.basePath?.let { com.cellobservatory.observatory.core.ClaudePaths.storeKey(it) + java.io.File.separator }
         // Openable means INSIDE the workspace — the scenario's last edit is the report written outside it,
         // and the step is about the inline margins of a project file — and still ON DISK, because one edit
         // is a deletion and it becomes the newest pending the moment the reader accepts anything.

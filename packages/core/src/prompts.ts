@@ -18,7 +18,7 @@ import * as crypto from 'crypto';
 import { findTranscript } from './observe';
 import { parseActions } from './actions';
 import { parseWorkflows } from './workflows';
-import { readLog } from './store';
+import { reviewEdits } from './groups';
 import { lineDelta } from './format';
 import { cachedByFiles } from './fscache';
 import { logPath } from './store';
@@ -127,6 +127,61 @@ function toMs(v: unknown): number {
  * The session as a list of the user's asks, each carrying what it produced. Memoized against the
  * transcript AND the store log, since both feed it.
  */
+/** One row of the prompt AXIS: an ask's window plus its DISPLAY-unit edit ids and pending count. */
+export interface PromptWindow {
+  id: string;
+  index: number;
+  ts: number;
+  title: string;
+  editIds: number[];
+  pending: number;
+}
+
+/**
+ * The prompt-axis slice of a session — what the status bar and the nav bar's Prompt group step over.
+ *
+ * `sessionPrompts` computes far more than the axis reads: a lineDelta per display record, transcript-wide
+ * action/task/agent attribution, token windows. The axis needs the windows, their edit ids and which are
+ * pending — and it asks on EVERY refresh and every keep click. The asks come from the transcript-keyed
+ * `askScan`, so a log-only change (a keep) re-pays only reviewEdits + a binary-search ownership pass,
+ * never a transcript read.
+ */
+export function promptWindows(cwd: string, sessionId: string): PromptWindow[] {
+  const transcript = findTranscript(cwd, sessionId);
+  if (!transcript) return [];
+  return cachedByFiles('promptWindows', [transcript, logPath(sessionId)], () => {
+    const { asks } = askScan(transcript);
+    if (!asks.length) return [];
+    const reqs: PromptWindow[] = asks.map((a, i) => ({
+      id: promptId(a.ts, a.text),
+      index: i + 1,
+      ts: a.ts,
+      title: a.text.length > 96 ? a.text.slice(0, 95) + '…' : a.text,
+      editIds: [],
+      pending: 0,
+    }));
+    // Same ownership rule as sessionPrompts: an edit belongs to the ask whose window its ts falls in.
+    const owner = (ts: number): PromptWindow | null => {
+      if (!ts || ts < reqs[0].ts) return null;
+      let lo = 0;
+      let hi = reqs.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1;
+        if (reqs[mid].ts <= ts) lo = mid;
+        else hi = mid - 1;
+      }
+      return reqs[lo];
+    };
+    for (const rec of reviewEdits(sessionId)) {
+      const r = owner(rec.ts);
+      if (!r) continue;
+      r.editIds.push(rec.id);
+      if (rec.status === 'pending') r.pending++;
+    }
+    return reqs;
+  });
+}
+
 export function sessionPrompts(cwd: string, sessionId: string): SessionPrompt[] {
   const transcript = findTranscript(cwd, sessionId);
   if (!transcript) return [];
@@ -135,45 +190,55 @@ export function sessionPrompts(cwd: string, sessionId: string): SessionPrompt[] 
   );
 }
 
-function sessionPromptsUncached(transcript: string, cwd: string, sessionId: string): SessionPrompt[] {
-  let lines: string[];
-  try {
-    lines = fs.readFileSync(transcript, 'utf8').split('\n');
-  } catch {
-    return [];
-  }
-
-  // 1. the asks themselves — and, in the SAME pass, the assistant token usage per moment (this file is
-  //    already fully read, so tokens cost no extra IO). One assistant message can span several lines
-  //    that share a message.id and repeat the usage; count each id once, exactly as the Stats cursor does.
-  const asks: { ts: number; text: string }[] = [];
-  const tokenAt: { ts: number; tokens: number }[] = [];
-  const seenMsg = new Set<string>();
-  for (const line of lines) {
-    const t = line.trim();
-    if (!t) continue;
-    let o: any;
+/** Phase 1 of sessionPrompts — the asks and the per-moment assistant token usage — memoized on the
+ *  TRANSCRIPT alone. Everything else the prompt views derive is keyed on the log too, so before this
+ *  split a keep click (a log-only change) re-read and re-parsed the whole transcript to recover facts
+ *  that had not moved: ~60ms per click at 10MB, growing linearly with the conversation. */
+function askScan(transcript: string): { asks: { ts: number; text: string }[]; tokenAt: { ts: number; tokens: number }[] } {
+  return cachedByFiles('promptAsks', [transcript], () => {
+    let lines: string[];
     try {
-      o = JSON.parse(t);
+      lines = fs.readFileSync(transcript, 'utf8').split('\n');
     } catch {
-      continue;
+      return { asks: [], tokenAt: [] };
     }
-    const msg = o.message;
-    if (msg && msg.role === 'assistant' && o.isSidechain !== true && msg.usage && typeof msg.id === 'string' && !seenMsg.has(msg.id)) {
-      seenMsg.add(msg.id);
-      const u = msg.usage;
-      const tk = num(u.input_tokens) + num(u.output_tokens) + num(u.cache_read_input_tokens) + num(u.cache_creation_input_tokens);
+    // The asks themselves — and, in the SAME pass, the assistant token usage per moment (this file is
+    // already fully read, so tokens cost no extra IO). One assistant message can span several lines
+    // that share a message.id and repeat the usage; count each id once, exactly as the Stats cursor does.
+    const asks: { ts: number; text: string }[] = [];
+    const tokenAt: { ts: number; tokens: number }[] = [];
+    const seenMsg = new Set<string>();
+    for (const line of lines) {
+      const t = line.trim();
+      if (!t) continue;
+      let o: any;
+      try {
+        o = JSON.parse(t);
+      } catch {
+        continue;
+      }
+      const msg = o.message;
+      if (msg && msg.role === 'assistant' && o.isSidechain !== true && msg.usage && typeof msg.id === 'string' && !seenMsg.has(msg.id)) {
+        seenMsg.add(msg.id);
+        const u = msg.usage;
+        const tk = num(u.input_tokens) + num(u.output_tokens) + num(u.cache_read_input_tokens) + num(u.cache_creation_input_tokens);
+        const ts = toMs(o.timestamp ?? o.ts);
+        if (ts && tk) tokenAt.push({ ts, tokens: tk });
+      }
+      const text = userPrompt(o);
+      if (text === null) continue;
       const ts = toMs(o.timestamp ?? o.ts);
-      if (ts && tk) tokenAt.push({ ts, tokens: tk });
+      if (!ts) continue; // an undated ask cannot own a window
+      asks.push({ ts, text });
     }
-    const text = userPrompt(o);
-    if (text === null) continue;
-    const ts = toMs(o.timestamp ?? o.ts);
-    if (!ts) continue; // an undated ask cannot own a window
-    asks.push({ ts, text });
-  }
+    asks.sort((a, b) => a.ts - b.ts);
+    return { asks, tokenAt };
+  });
+}
+
+function sessionPromptsUncached(transcript: string, cwd: string, sessionId: string): SessionPrompt[] {
+  const { asks, tokenAt } = askScan(transcript);
   if (!asks.length) return [];
-  asks.sort((a, b) => a.ts - b.ts);
 
   const reqs: SessionPrompt[] = asks.map((a, i) => ({
     id: promptId(a.ts, a.text),
@@ -240,7 +305,8 @@ function sessionPromptsUncached(transcript: string, cwd: string, sessionId: stri
     if (!s) m.set(id, (s = new Set()));
     s.add(v);
   };
-  for (const rec of readLog(sessionId)) {
+  // DISPLAY units: an ask's rollup must not count records the change map collapsed away.
+  for (const rec of reviewEdits(sessionId)) {
     const r = owner(rec.ts);
     if (!r) continue;
     r.editIds.push(rec.id);

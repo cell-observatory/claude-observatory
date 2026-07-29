@@ -17,3 +17,23 @@ import * as path from 'path';
 export function claudeConfigDir(): string {
   return process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
 }
+
+/**
+ * Canonicalize a path's DRIVE-LETTER case (issue #43).
+ *
+ * Windows filesystems are case-insensitive but our record keys are strings: the same file reported as
+ * `C:\\repo\\x` by one hook event and `c:\\repo\\x` by the next was tracked as two files, giving every
+ * file a phantom created-record (+N −0) and a deleted-record twin (+0 −N) — and undoing the phantom
+ * create DELETED the untouched file. A pure string transform, deliberately: it must be total (deletion
+ * records reference paths that no longer exist, so realpath is not an option), free (it runs per record
+ * in readLog), and platform-independent (the same tests run on every CI OS). Per-component case drift
+ * beyond the drive letter is not normalized — no report of it exists, and resolving it would need
+ * syscalls with all the costs this transform exists to avoid.
+ */
+export function canonPath(p: string): string {
+  if (p.length >= 2 && p[1] === ':' && (p[2] === '\\' || p[2] === '/' || p.length === 2)) {
+    const d = p[0];
+    if (d >= 'a' && d <= 'z') return d.toUpperCase() + p.slice(1);
+  }
+  return p;
+}

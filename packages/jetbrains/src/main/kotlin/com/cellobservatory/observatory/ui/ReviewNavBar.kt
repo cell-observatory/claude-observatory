@@ -1,6 +1,7 @@
 package com.cellobservatory.observatory.ui
 
 import com.cellobservatory.observatory.core.ChatRef
+import com.cellobservatory.observatory.core.ClaudePaths
 import com.cellobservatory.observatory.model.EditRecord
 import com.cellobservatory.observatory.model.SessionPrompt
 import com.cellobservatory.observatory.model.folderLabelOf
@@ -122,7 +123,7 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
     /** File axis — steps across every file with pending edits; the counter opens the Edits tool window. */
     fun fileAxis(): List<AnAction> = listOf(
         iconAct("Previous changed file", NavTint.tint(AllIcons.Actions.Back, NavTint.BLUE), ::sessionHasPending) { navFile(-1) },
-        textAct(::fileCounterText) { ToolWindowManager.getInstance(project).getToolWindow("Claude Observatory")?.activate(null) },
+        textAct(::fileCounterText) { ToolWindowManager.getInstance(project).getToolWindow("Observatory Traces")?.activate(null) },
         iconAct("Next changed file", NavTint.tint(AllIcons.Actions.Forward, NavTint.BLUE), ::sessionHasPending) { navFile(1) },
     )
 
@@ -157,12 +158,12 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
 
     fun acceptFileAction(showText: Boolean = true): AnAction =
         labelAct(showText, "Accept File", "Accept every pending edit in this file", NavTint.ACCEPT_FILE, ::activeHasPending) {
-            activeFilePath()?.let { f -> withSession { s -> ReviewOps.keepAll(project, s, service.log().filter { it.file == f }, File(f).name) } }
+            activeFilePath()?.let { f -> withSession { s -> ReviewOps.keepAll(project, s, service.log().filter { it.file == ClaudePaths.storeKey(f) }, File(f).name) } }
         }
 
     fun rejectFileAction(showText: Boolean = true): AnAction =
         labelAct(showText, "Reject File", "Reject (revert) every pending edit in this file", NavTint.REJECT, ::activeHasPending) {
-            activeFilePath()?.let { f -> withSession { s -> ReviewOps.undoAll(project, s, service.log().filter { it.file == f }, File(f).name, f) } }
+            activeFilePath()?.let { f -> withSession { s -> ReviewOps.undoAll(project, s, service.log().filter { it.file == ClaudePaths.storeKey(f) }, File(f).name, f) } }
         }
 
     fun clearResolvedAction(showText: Boolean = true): AnAction =
@@ -190,7 +191,8 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
     private fun pendingFiles(): List<String> = service.log().filter { it.pending }.map { it.file }.distinct().sorted()
     private fun pendingInActiveFile(): List<EditRecord> {
         val f = activeFilePath() ?: return emptyList()
-        return service.log().filter { it.pending && it.file == f }.sortedBy { it.id }
+        val key = ClaudePaths.storeKey(f) // hoisted: this runs per toolbar tick over every record
+        return service.log().filter { it.pending && it.file == key }.sortedBy { it.id }
     }
     private fun activeHasPending(): Boolean = pendingInActiveFile().isNotEmpty()
 
@@ -219,7 +221,7 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
         val files = pendingFiles()
         if (files.isEmpty()) return null
         val active = activeFilePath()
-        val idx = active?.let { files.indexOf(it) } ?: -1
+        val idx = active?.let { files.indexOf(ClaudePaths.storeKey(it)) } ?: -1
         val base = "File ${if (idx >= 0) idx + 1 else "–"}/${files.size}"
         if (!richCounters || idx < 0 || active == null) return base
         val edits = pendingInActiveFile().size
@@ -239,7 +241,7 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
     private fun navFile(dir: Int) {
         val files = pendingFiles()
         if (files.isEmpty()) return
-        val idx = activeFilePath()?.let { files.indexOf(it) } ?: -1
+        val idx = activeFilePath()?.let { files.indexOf(ClaudePaths.storeKey(it)) } ?: -1
         val target = files[((if (idx < 0) 0 else idx) + dir + files.size) % files.size]
         val first = service.log().filter { it.pending && it.file == target }.minByOrNull { it.id } ?: return
         navEditId = first.id
@@ -255,6 +257,9 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
         if (q != null) service.setFilter(q)
     }
 
+    /** Always the REVIEWED session: this bar's verbs pair per-session edit ids read from that session's
+     *  log, so scoping them to a selected sibling would send ids into the wrong worktree. The panel's
+     *  own toolbar carries fleet-row scoping through session-only CLI verbs instead. */
     private fun withSession(block: (String) -> Unit) {
         val s = service.currentSession()
             ?: return ReviewOps.notify(project, "No active Claude Code session for this project", NotificationType.WARNING)
@@ -382,10 +387,17 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
     }
     private fun hasPendingPrompts(): Boolean = pendingPrompts().isNotEmpty()
 
-    /** The pending prompt the Diff anchor (navEditId) falls in, or null. */
+    /** The prompt the axis is ON: the PICKED one first, else the one the Diff anchor falls in.
+     *
+     *  Selecting a row in the Prompts window is an explicit statement of scope — the axis not moving
+     *  with it read as a bug (it kept showing the prompt of whatever edit happened to be open). A picked
+     *  prompt with nothing pending falls through to the anchor: this axis walks pending review, the same
+     *  rule revealPrompt applies. */
     private fun currentPrompt(): SessionPrompt? {
+        val pending = pendingPrompts()
+        service.selectedPromptId?.let { id -> pending.firstOrNull { it.id == id }?.let { return it } }
         val anchor = navEditId ?: return null
-        return pendingPrompts().firstOrNull { anchor in it.editIds }
+        return pending.firstOrNull { anchor in it.editIds }
     }
     private fun hasCurrentPrompt(): Boolean = currentPrompt() != null
 
@@ -448,15 +460,20 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
 
     private fun promptCounterTip(): String? =
         currentPrompt()?.let { "#${it.index}: ${clipAsk(it.text.ifBlank { it.title })}" }
-            ?: "the prompt the current edit came from"
+            ?: "the picked prompt, or the one the current edit came from"
 
     private fun navPrompt(dir: Int) {
         val reqs = pendingPrompts()
         if (reqs.isEmpty()) return
-        val anchor = navEditId
-        val curIdx = if (anchor != null) reqs.indexOfFirst { anchor in it.editIds } else -1
+        // Step from wherever the axis actually IS (picked first, anchor fallback — same order as
+        // currentPrompt), and make the step BECOME the pick: with a pick set, leaving it behind would
+        // snap the counter back to the old prompt on the next repaint, and the panes the pick scopes
+        // would disagree with the axis that just moved.
+        var curIdx = service.selectedPromptId?.let { id -> reqs.indexOfFirst { it.id == id } } ?: -1
+        if (curIdx < 0) curIdx = navEditId?.let { a -> reqs.indexOfFirst { a in it.editIds } } ?: -1
         val start = if (curIdx < 0) (if (dir == 1) -1 else 0) else curIdx
         val target = reqs[(start + dir + reqs.size) % reqs.size]
+        service.selectedPromptId = target.id // fires the listener path — every scoped surface follows
         revealPrompt(target.id)
     }
 

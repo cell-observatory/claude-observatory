@@ -18,10 +18,12 @@
   <extensions defaultExtensionNs="com.intellij">
     <!-- Stripe icons need explicit 13x13 size + palette hex colors (the IDE recolors known hex
          values per theme; `currentColor` is not supported by the platform SVG icon loader). -->
-    <toolWindow id="Claude Observatory" anchor="left" icon="/icons/toolWindowObservatory.svg"
+    <toolWindow id="Observatory Traces" anchor="left" icon="/icons/toolWindowObservatory.svg"
                 factoryClass="com.cellobservatory.observatory.ui.ObservatoryToolWindowFactory"/>
-    <toolWindow id="Claude Observatory Dashboards" anchor="bottom" icon="/icons/toolWindowObservatory.svg"
+    <toolWindow id="Observatory Dashboards" anchor="bottom" icon="/icons/toolWindowObservatory.svg"
                 factoryClass="com.cellobservatory.observatory.ui.ObservatoryDashboardsFactory"/>
+    <toolWindow id="Observatory Timeline" anchor="right" icon="/icons/toolWindowObservatory.svg"
+                factoryClass="com.cellobservatory.observatory.ui.ObservatoryTimelineFactory"/>
     <!-- The guided tour's window. Declared (not registered at runtime, which invokes an override-only
          platform API) and unavailable until a tour runs — see TourToolWindowFactory. -->
     <toolWindow id="Claude Observatory Tour" anchor="right" canCloseContents="false"

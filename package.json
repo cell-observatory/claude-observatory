@@ -1,6 +1,6 @@
 {
   "name": "claude-observatory-monorepo",
-  "version": "0.8.9",
+  "version": "0.9.0",
   "private": true,
   "description": "Standalone, git-free, per-edit Keep/Undo for Claude Code on established and mission-critical codebases — terminal, VS Code and JetBrains, zero extra tokens.",
   "workspaces": [
@@ -13,13 +13,14 @@
     "build:core": "npm run build -w @claude-observatory/core",
     "build:cli": "npm run build -w claude-observatory",
     "build:vscode": "npm run build -w claude-observatory-vscode",
-    "test": "npm run version:check && npm run check:privacy && npm run build && npm run build:vscode && node --test packages/core/test/core.test.js packages/vscode/test/smoke.test.js",
+    "test": "npm run version:check && npm run check:privacy && npm run check:webview && npm run build && npm run build:vscode && node --test packages/core/test/core.test.js packages/vscode/test/smoke.test.js",
     "e2e": "npm run build && bash test/e2e.sh",
     "test:all": "npm test && bash test/e2e.sh",
     "version:check": "node scripts/version.mjs",
     "version:set": "node scripts/version.mjs",
     "release": "bash scripts/release.sh",
     "clean": "rm -rf packages/*/dist release",
+    "check:webview": "node scripts/check-webview-syntax.mjs",
     "check:privacy": "node scripts/check-docs-privacy.mjs"
   },
   "devDependencies": {

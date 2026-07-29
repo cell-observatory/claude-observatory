@@ -11,7 +11,7 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
-import { readLog, readBlob, findRecord, EditRecord, minOf, maxOf } from './store';
+import { readLog, readBlob, findRecord, EditRecord, minOf, maxOf, sidecarMemo } from './store';
 import { findTranscript } from './observe';
 import { findSubagentsDir } from './subagents';
 import { scoreCommand, CommandRisk } from './risk';
@@ -358,6 +358,40 @@ function parseTranscriptActionsUncached(transcriptPath: string, includeSidechain
  * Every tool call Claude made this session, in transcript (chronological) order, each correlated with
  * its result (ok/isError) and — for file-edit tools — the store EditRecord it produced. Zero token.
  */
+/**
+ * Boundary-crossing COUNTS for a session — how many distinct outside-the-worktree reads and writes its
+ * transcript records — memoized on the transcript's (mtime,size) in the session-meta sidecar.
+ *
+ * This exists because the fleet needs exactly two integers per sibling and was paying a full transcript
+ * parse for them: `parseActions` per sibling inside every ~3s tick measured 458MB of I/O and 88% of the
+ * multitask view's CPU, ~97% of it siblings whose transcripts had not changed in days. The counts are a
+ * pure function of (transcript content, worktree root) — `outsideReads`/`outsideWrites` read only each
+ * action's category and target against the root — so the same stamp discipline the risk memo uses
+ * (fleet.ts) makes a hit exact. `linkEditIds` is deliberately skipped: edit-id linkage cannot change
+ * which paths lie outside the root.
+ */
+export function outsideCounts(cwd: string, sessionId: string): { reads: number; writes: number } {
+  const transcript = findTranscript(cwd, sessionId);
+  if (!transcript) return { reads: 0, writes: 0 };
+  let stamp = '';
+  try {
+    const st = fs.statSync(transcript);
+    // cwd is in the stamp because the SAME session replayed against a different root changes what
+    // counts as "outside" — not a tick-to-tick concern, but stamps are cheap and wrong hits are not.
+    stamp = `1|${st.mtimeMs}:${st.size}|${cwd}`;
+  } catch {
+    /* unreadable — compute without a cache */
+  }
+  // Lazy requires: egress/risk import the ActionRecord type from THIS module, so a top-level value
+  // import back at them would be a require cycle whose safety depends on declaration order forever.
+  const { outsideReads } = require('./egress') as typeof import('./egress');
+  const { outsideWrites } = require('./risk') as typeof import('./risk');
+  return sidecarMemo(sessionId, 'outside', stamp, () => {
+    const actions = parseTranscriptActions(transcript, { includeSidechain: false });
+    return { reads: outsideReads(actions, cwd).length, writes: outsideWrites(actions, cwd).length };
+  });
+}
+
 export function parseActions(cwd: string, sessionId: string): ActionRecord[] {
   const transcript = findTranscript(cwd, sessionId);
   if (!transcript) return [];

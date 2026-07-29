@@ -19,7 +19,7 @@
     --shadow:0 30px 70px -40px rgba(40,25,15,.40), 0 8px 22px -18px rgba(40,25,15,.25);
     --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,Roboto,Helvetica,sans-serif;
     --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
-    --col:1140px;
+    --col:max(1140px, 90vw);
   }
   @media (prefers-color-scheme:dark){:root{
     --bg:#0e0e11; --surface:#161619; --surface-2:#1a1a1e; --surface-3:#202024;
@@ -51,7 +51,7 @@
   *{box-sizing:border-box;margin:0;padding:0}
   [hidden]{display:none!important}
   html{scroll-behavior:smooth;scroll-padding-top:80px;-webkit-text-size-adjust:100%}
-  body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:17px;line-height:1.62;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+  body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:1.0625rem;line-height:1.62;-webkit-font-smoothing:antialiased;overflow-x:hidden}
   .wrap{width:min(var(--col),90%);margin-inline:auto}
   .wrap.wide{width:min(1420px,96%)}
   a{color:inherit;text-decoration:none}
@@ -99,8 +99,8 @@
 
   /* hero */
   .hero{padding-top:clamp(32px,5vw,60px);padding-bottom:8px;text-align:center}
-  .hero h1{font-size:clamp(2rem,5vw,3.3rem);margin:16px auto 14px;max-width:22ch}
-  .hero .lede{margin-inline:auto;max-width:60ch}
+  .hero h1{font-size:clamp(2rem,5vw,3.3rem);margin:16px auto 14px;}
+  .hero .lede{margin-inline:auto;}
 
   /* the IDE frame: sidebar + editor on top, the dashboards dock below — the real VS Code layout */
   .ide{border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);overflow:hidden;background:var(--ed-bg);margin-top:22px}
@@ -239,7 +239,7 @@
 
   /* controls */
   .demo-ui{margin-top:8px}
-  .narr{min-height:3.4em;font-size:1.02rem;color:var(--ink-soft);max-width:70ch;text-wrap:pretty}
+  .narr{min-height:3.4em;font-size:1.02rem;color:var(--ink-soft);text-wrap:pretty}
   .narr .hl{color:var(--accent-ink);font-weight:560}
   .hintline{font-size:.85rem;color:var(--accent-ink);min-height:1.6em;margin-top:4px}
   .ctrl{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:12px}
@@ -256,9 +256,9 @@
   .tcount{font-family:var(--mono);font-size:.74rem;color:var(--ink-faint);letter-spacing:.1em;min-width:64px;font-variant-numeric:tabular-nums}
 
   /* install cta */
-  .center{text-align:center;margin-inline:auto;max-width:660px}
-  .center .lede{margin-inline:auto;max-width:52ch}
-  .cmd{display:flex;align-items:center;gap:12px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:13px 12px 13px 16px;font-family:var(--mono);font-size:.9rem;flex-wrap:wrap;max-width:640px;margin:26px auto 0}
+  .center{text-align:center;margin-inline:auto}
+  .center .lede{margin-inline:auto;}
+  .cmd{display:flex;align-items:center;gap:12px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:13px 12px 13px 16px;font-family:var(--mono);font-size:.9rem;flex-wrap:wrap;margin:26px auto 0}
   .cmd .pr{white-space:nowrap;flex:none;color:var(--accent)}
   /* WRAP, never clip: a row narrower than its command used to scroll, which put the Copy button outside
      the visible box on a phone and cut the command itself mid-word. */
@@ -281,6 +281,17 @@
     .prompt-strip .caret{animation:none}
     .progress i{transition:none}
   }
+
+  /* Big screens: the column already grows via --col (66vw capped at 1560px); type follows in two
+     gentle steps so a 27–32" display gets a page, not a ribbon. px-sized chrome stays fixed — only
+     the reading measure and rem-based text scale. */
+  /* FLUID scaling, no steps: the root font tracks viewport width continuously (floor = today's 16px,
+     so anything ≤ ~1490px is pixel-identical to before; cap 24px ≈ a 32" display), and every rem-sized
+     rule — which is nearly all of this site's type, clamp() caps included — follows it. Root, not
+     body: rem resolves against html, which is why the first body-only attempt visibly moved nothing.
+     The column spans most of the width (86vw, floored at the old 1140px), and because type and column
+     scale together, characters-per-line stays roughly constant at every size. */
+  html{font-size:clamp(16px, 9px + 0.47vw, 24px)}
 </style>
 </head>
 <body>
@@ -293,7 +304,6 @@
       <a href="demo.html" style="color:var(--ink)">Demo</a>
       <a href="getting-started.html">Getting started</a>
       <a href="concepts.html">Concepts</a>
-      <a class="more" href="features.html">Features&nbsp;→</a>
       <a href="https://github.com/cell-observatory/claude-observatory">GitHub</a>
     </div>
     <div class="right">
@@ -308,7 +318,7 @@
   <div class="wrap">
     <span class="eyebrow">Interactive demo</span>
     <h1>The full panels, <span class="hl">step by step</span></h1>
-    <p class="lede">Claude Observatory is built for established and mission-critical codebases. This is a scripted replay of its bundled demo session over a small Python training pipeline, laid out the way it sits in the editor: the Claude Edits sidebar and the file on top, the Claude Observatory panels below. Nothing calls a model. The review clicks are yours, and unless you have asked your system to reduce motion, each step applies itself after a short pause if you only watch. This is a shortened version: the demo bundled with the CLI and both editors runs to three prompts, six tasks and nine edits, and adds a second agent in a sibling worktree, a deletion, a failed tool call, a workflow still running and a write outside the workspace &mdash; run <code>claude-observatory demo</code>, or <b>Start Demo Mode</b> in your editor, to see it.</p>
+    <p class="lede">Claude Observatory is built for established and mission-critical codebases. This is a scripted replay of its bundled demo session over a small Python training pipeline, laid out the way it sits in the editor: the Observatory Traces sidebar and the file on top, the Claude Observatory panels below. Nothing calls a model. The review clicks are yours, and unless you have asked your system to reduce motion, each step applies itself after a short pause if you only watch. This is a shortened version: the demo bundled with the CLI and both editors runs to three prompts, six tasks and nine edits, and adds a second agent in a sibling worktree, a deletion, a failed tool call, a workflow still running and a write outside the workspace &mdash; run <code>claude-observatory demo</code>, or <b>Start Demo Mode</b> in your editor, to see it.</p>
   </div>
 </header>
 
@@ -328,10 +338,10 @@
       </div>
     </div>
 
-    <div class="ide" aria-label="Simulated editor with the Claude Edits sidebar above and the Observations, Overview, and Stats panels below">
+    <div class="ide" aria-label="Simulated editor with the Observatory Traces sidebar above and the Observations, Overview, and Stats panels below">
       <div class="ide-top">
-        <aside class="side" aria-label="Claude Edits sidebar (simulated)">
-          <div class="side-h">Claude Edits</div>
+        <aside class="side" aria-label="Observatory Traces sidebar (simulated)">
+          <div class="side-h">Observatory Traces</div>
           <div id="side-tree"></div>
         </aside>
         <div class="editor">
@@ -399,7 +409,7 @@
   <div class="wrap">
     <span class="eyebrow">Run it for real</span>
     <h2>The same session, in your editor</h2>
-    <p class="lede" style="margin-inline:auto;max-width:52ch">The bundled demo replays through the real capture pipeline, in your own editor, at zero tokens. It goes further than this page: three prompts, six tasks and nine edits, a second agent holding the same file, a workflow still running, and a <b>guided tour</b> that drives the panels for you — forty-one steps, or thirteen if you are short of time.</p>
+    <p class="lede" style="margin-inline:auto;">The bundled demo replays through the real capture pipeline, in your own editor, at zero tokens. It goes further than this page: three prompts, six tasks and nine edits, a second agent holding the same file, a workflow still running, and a <b>guided tour</b> that drives the panels for you — forty-one steps, or thirteen if you are short of time.</p>
     <div class="cmd"><span class="pr">VS&nbsp;Code</span><code>Claude Observatory: Start Demo Mode</code><button class="copy" data-copy="Claude Observatory: Start Demo Mode">Copy</button></div>
     <p class="cmd-note">…from the command palette, the ▶ on the Edits panel, or <b>Try the demo</b> in the empty panel.</p>
     <div class="cmd"><span class="pr">JetBrains</span><code>Claude Observatory: Start Demo Mode</code><button class="copy" data-copy="Claude Observatory: Start Demo Mode">Copy</button></div>
@@ -420,8 +430,8 @@
     <div class="row">
       <span class="brand"><span class="m">🔬</span> Claude Observatory</span>
       <div class="flinks">
-        <a href="features.html">Features</a>
         <a href="concepts.html">Concepts</a>
+        <a href="releases.html">Releases</a>
         <a href="https://github.com/cell-observatory/claude-observatory/blob/main/docs/DEMO.md">Demo</a>
         <a href="https://github.com/cell-observatory/claude-observatory/blob/main/docs/ARCHITECTURE.md">How it works</a>
         <a href="https://github.com/cell-observatory/claude-observatory/blob/main/docs/REMOTE.md">Remote</a>
@@ -569,7 +579,7 @@
     ];
     var STEPS=[
       {ed:'seed',landed:0,typing:true,
-       narr:'You send Claude a prompt. The observatory sits beside the session — hooks, not a wrapper — and records what happens, at zero extra tokens. Below the editor are three of its panels: Observations from the Claude Edits sidebar, with the Overview and Stats dashboards from the bottom dock.'},
+       narr:'You send Claude a prompt. The observatory sits beside the session — hooks, not a wrapper — and records what happens, at zero extra tokens. Below the editor are three of its panels: Observations from the Observatory Timeline panel, with the Overview and Stats dashboards from the bottom dock.'},
       {ed:'seed',landed:0,plan:true,
        narr:'Claude plans three to-dos and opens the matching numbered task list. Attribution is strict: an edit joins a task only if it was captured while that task was in progress. Anything outside those windows stays unassigned.'},
       {ed:1,landed:1,
@@ -684,7 +694,7 @@
       if(ub)ub.addEventListener('click',function(){resolveGate();});
 
       // ---- observations ----
-      // ---- sidebar: the Claude Edits tree — folders by module, files with status dots + deltas ----
+      // ---- sidebar: the Observatory Traces tree — folders by module, files with status dots + deltas ----
       var landed=landedEdits(step), sh='';
       if(landed.length){
         var byMod={};landed.forEach(function(e){(byMod[e.module]=byMod[e.module]||[]).push(e);});

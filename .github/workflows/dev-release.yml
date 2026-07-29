@@ -1,0 +1,93 @@
+name: Dev pre-release
+
+# The ROLLING pre-release: every push to the persistent `dev` branch re-stamps the version as
+# <base>-dev.<run#>, re-runs the full ubuntu suite + e2e, rebuilds every artifact release.sh builds,
+# force-moves the `dev-latest` TAG (a tag name distinct from the branch, so refs never turn
+# ambiguous), and refreshes ONE GitHub release marked `prerelease` — which keeps it invisible to
+# `releases/latest`, i.e. to every stable-channel install. The pre-release channel
+# (`claude-observatory update --channel dev`, or the editors' version dropdown) always serves the
+# tip of dev. macOS/Windows coverage for dev comes from the PR runs that merged into it; this job
+# gates publishing on the ubuntu suite only.
+on:
+  push:
+    branches: [dev]
+
+permissions:
+  contents: write
+
+# One rolling release — a second push while a build runs would race the tag + asset uploads.
+concurrency:
+  group: dev-release
+  cancel-in-progress: true
+
+jobs:
+  dev-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - name: Stamp the rolling dev version
+        # <base>-dev.<run#> across every package + the lockfile + the README badge (version.mjs is
+        # the single stamping tool, so `npm test`'s version:check passes on the stamped tree). The
+        # base strips any committed prerelease suffix defensively — dev's committed version is the
+        # NEXT stable target (e.g. 0.10.0), bumped right after each promote.
+        run: |
+          BASE="$(node -p "require('./package.json').version")"
+          BASE="${BASE%%-*}"
+          VER="${BASE}-dev.${{ github.run_number }}"
+          node scripts/version.mjs "$VER"
+          echo "VER=$VER" >> "$GITHUB_ENV"
+          echo "stamped $VER"
+      - run: npm ci
+      - run: npm test
+      - run: bash test/e2e.sh
+      - run: npm run release
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+      - run: ./gradlew buildPlugin --console=plain
+        working-directory: packages/jetbrains
+      - name: Refresh the rolling pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="dev-latest"
+          # STABLE asset names: --clobber only replaces same-named files, and the updater's
+          # `.find(/\.tgz$/)` must never race a pile of stale versioned tarballs.
+          cp release/claude-observatory-*.tgz "release/claude-observatory-cli-dev.tgz"
+          cp release/claude-observatory.vsix "release/claude-observatory-vscode-dev.vsix"
+          cp packages/jetbrains/build/distributions/*.zip "release/claude-observatory-jetbrains-dev.zip"
+          # The pre-release channel's JetBrains repo descriptor. Subscribing an IDE to
+          #   https://github.com/cell-observatory/claude-observatory/releases/download/dev-latest/updatePlugins.xml
+          # auto-updates the plugin from the rolling build (the stable URL stays releases/latest/…).
+          cat > release/updatePlugins.xml <<XML
+          <?xml version="1.0" encoding="UTF-8"?>
+          <plugins>
+            <plugin id="com.cell-observatory.claude-observatory" version="${VER}"
+                    url="https://github.com/cell-observatory/claude-observatory/releases/download/${TAG}/claude-observatory-jetbrains-dev.zip">
+              <name>Claude Observatory</name>
+              <idea-version since-build="252"/>
+            </plugin>
+          </plugins>
+          XML
+          # Move the rolling tag to this commit; the release object follows its tag.
+          git tag -f "$TAG"
+          git push origin -f "refs/tags/$TAG"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --prerelease \
+              --title "Pre-release ${VER} (rolling, from dev)" \
+              --notes "Rolling build of the \`dev\` branch — refreshed on every push. Install/follow it with \`claude-observatory update --channel dev\` or the editors' version dropdown."
+          fi
+          gh release upload "$TAG" --clobber \
+            release/claude-observatory-cli-dev.tgz \
+            release/claude-observatory-vscode-dev.vsix \
+            release/claude-observatory-jetbrains-dev.zip \
+            release/updatePlugins.xml
+          gh release edit "$TAG" --prerelease \
+            --title "Pre-release ${VER} (rolling, from dev)" \
+            --notes "Rolling build of the \`dev\` branch at ${GITHUB_SHA} — refreshed on every push. Install/follow it with \`claude-observatory update --channel dev\` or the editors' version dropdown."

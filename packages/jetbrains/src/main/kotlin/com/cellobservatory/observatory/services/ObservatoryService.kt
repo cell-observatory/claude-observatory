@@ -1,5 +1,6 @@
 package com.cellobservatory.observatory.services
 
+import com.cellobservatory.observatory.core.ClaudePaths
 import com.cellobservatory.observatory.core.ObservatoryCli
 import com.cellobservatory.observatory.core.SessionResolver
 import com.cellobservatory.observatory.core.StoreReader
@@ -110,10 +111,11 @@ class ObservatoryService(private val project: Project) : Disposable {
         return cachedLog
     }
 
-    /** Pending-edit count for a file path — O(1), cached with the log (drives the Project-view badge). */
+    /** Pending-edit count for a file path — O(1), cached with the log (drives the Project-view badge).
+     *  The badge hands over VirtualFile paths, so bridge to the store key (#43). */
     fun pendingCount(path: String): Int {
         log() // ensure the cache is current
-        return pendingByFile[path] ?: 0
+        return pendingByFile[ClaudePaths.storeKey(path)] ?: 0
     }
 
     // Review-loop cursor: id of the pending edit last opened, so repeated ←/→ invocations step
@@ -416,6 +418,23 @@ class ObservatoryService(private val project: Project) : Disposable {
         }
         refreshEditTree() // kick a background tree fetch; repaints when it lands
         notifyListeners()
+        warmRecentSessions()
+    }
+
+    /** When this project last pre-built its recent sessions, so an idle IDE does not loop on it. */
+    @Volatile private var warmedAt = 0L
+
+    /**
+     * Spend idle time pre-building the sessions you are likely to switch to (0.9.0).
+     *
+     * Detached and rate-limited to once every ten minutes: the point is to remove the 6.2 s a cold switch
+     * used to cost, not to add a background job that competes with the refresh that just ran.
+     */
+    private fun warmRecentSessions() {
+        val now = System.currentTimeMillis()
+        if (now - warmedAt < 10 * 60_000L) return
+        warmedAt = now
+        ApplicationManager.getApplication().executeOnPooledThread { ObservatoryCli.warmRecent(project.basePath) }
     }
 
     /**
@@ -481,7 +500,7 @@ class ObservatoryStartup : ProjectActivity {
                 // Tool-window stripe badge: overlay a dot while edits are pending (parity with VS Code's title count).
                 val updateBadge = Runnable {
                     com.intellij.openapi.wm.ToolWindowManager.getInstance(project)
-                        .getToolWindow("Claude Observatory")
+                        .getToolWindow("Observatory Traces")
                         ?.setIcon(com.cellobservatory.observatory.ui.Icons.toolWindowIcon(svc.counts().pending))
                 }
                 svc.addListener(updateBadge)

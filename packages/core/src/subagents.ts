@@ -247,7 +247,17 @@ export function parseSubagents(cwd: string, sessionId: string): SubagentInfo[] {
     const actions = parseTranscriptActions(jsonlPath, { includeSidechain: true });
     const m = meta.get(agentId);
     const sidecar = readSidecar(path.join(dir, `agent-${agentId}.meta.json`)); // fills gaps the parent lacks
-    const { todos, currentTask } = todosFromTranscript(jsonlPath);
+    // Sidecar-memoized per (agent transcript mtime,size): the tick re-parsed every subagent transcript
+    // for its todo list on every refresh — 28 files / 31MB on a real live session, 100-215ms per tick,
+    // the largest non-inherent cost the 0.9.0 profile found — when a FINISHED agent's file never moves.
+    let tStamp = '';
+    try {
+      const st = fs.statSync(jsonlPath);
+      tStamp = `1|${st.mtimeMs}:${st.size}`;
+    } catch {
+      /* unreadable — compute uncached */
+    }
+    const { todos, currentTask } = sidecarMemo(sessionId, `todos:${agentId}`, tStamp, () => todosFromTranscript(jsonlPath));
     // Live tail read — async_launched subagents have no status to trust. Detail (not the bare label) so
     // consumers can tell a structural phase from a staleness heuristic instead of asserting it as truth.
     const { phase, confidence } = agentPhaseDetail(jsonlPath);

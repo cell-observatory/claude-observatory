@@ -238,6 +238,47 @@ object ObservatoryCli {
     /** Drop a whole session from the store (`clean --drop <id>`). */
     fun dropSession(session: String, workDir: String?): CliResult = run(listOf("clean", "--drop", session), workDir)
 
+    /** Accept every pending edit in a session, then clear its records (`resolve --session <id>`).
+     *  Files on disk are never touched, and the session itself is kept. */
+    fun resolveSession(session: String, workDir: String?): CliResult =
+        run(listOf("resolve", "--session", session, "--json"), workDir)
+
+    /**
+     * Pre-build the change maps of sessions active in the last day, DETACHED (`warm`).
+     *
+     * Switching to a session nothing had built measured 6.2 s against 1.5 s once its caches existed, and
+     * nothing built one until you switched to it. This spends idle time instead. Fire-and-forget on
+     * purpose: it must never delay the refresh that triggered it, and its failure costs a slow switch
+     * rather than a broken panel — so the process is started and abandoned, never awaited.
+     */
+    fun warmRecent(workDir: String?) {
+        try {
+            val resolved = resolveBin()
+            val exec = if (SystemInfo.isWindows) listOf("cmd", "/c", resolved) else listOf(resolved)
+            ProcessBuilder(exec + listOf("warm", "--root", workDir ?: ".", "--since", "24h"))
+                .directory(workDir?.let { java.io.File(it) })
+                .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                .redirectError(ProcessBuilder.Redirect.DISCARD)
+                .start()
+        } catch (_: Exception) {
+            /* no CLI on PATH — switching stays as slow as it was before 0.9.0, which is not a failure */
+        }
+    }
+
+    /**
+     * Drop every FINISHED session — nothing pending, conversation over (`clean --completed`).
+     *
+     * The predicate lives in core, not here: which sessions are safe to delete is exactly the kind of
+     * rule that must not exist twice. The CLI refuses the current session, anything with pending edits,
+     * anything that only just went quiet, and anything with a capture in flight.
+     */
+    fun cleanCompleted(workDir: String?): CliResult = run(listOf("clean", "--completed", "--json"), workDir)
+
+    /** What `cleanCompleted` WOULD drop, without dropping it — so the confirm dialog can state real
+     *  numbers instead of generic prose. The eligibility rules stay in core; this only asks. */
+    fun cleanCompletedPreview(workDir: String?): CliResult =
+        run(listOf("clean", "--completed", "--dry-run", "--json"), workDir)
+
     fun keep(session: String, id: Int, workDir: String?): Boolean =
         run(listOf("keep", id.toString(), "--session", session, "--json"), workDir).ok
 
@@ -268,7 +309,26 @@ object ObservatoryCli {
             add("--session"); add(session); add("--json")
         }, workDir))
 
-    data class UndoScopeResult(val undone: Int, val conflicts: Int, val total: Int)
+    data class UndoScopeResult(
+        val undone: Int,
+        val conflicts: Int,
+        val total: Int,
+        /** Edits the CLI REFUSED outright (e.g. the #43 phantom guard) — 0 from older CLIs. */
+        val errors: Int = 0,
+        /** The first refusal's message — it names the remediation (`clean --phantoms`). */
+        val firstError: String? = null,
+    )
+
+    private fun parseUndoScope(stdout: String): UndoScopeResult? = try {
+        val o = JsonParser.parseString(stdout).asJsonObject
+        UndoScopeResult(
+            o.get("undone").asInt, o.get("conflicts").asInt, o.get("total").asInt,
+            o.get("errors")?.takeIf { it.isJsonPrimitive }?.asInt ?: 0,
+            o.get("firstError")?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString,
+        )
+    } catch (_: Exception) {
+        null
+    }
 
     /** Revert every PENDING edit in a scope in ONE call (the CLI's `undo --all` / `undo --under`, backed
      *  by core.undoScope — the single scoped-revert implementation both editors share). `under` = null
@@ -282,12 +342,7 @@ object ObservatoryCli {
         }
         val r = run(args, workDir)
         if (!r.ok) return null
-        return try {
-            val o = JsonParser.parseString(r.stdout).asJsonObject
-            UndoScopeResult(o.get("undone").asInt, o.get("conflicts").asInt, o.get("total").asInt)
-        } catch (_: Exception) {
-            null
-        }
+        return parseUndoScope(r.stdout)
     }
 
     data class RedoScopeResult(val redone: Int, val conflicts: Int, val total: Int)
@@ -319,9 +374,16 @@ object ObservatoryCli {
         if (ids.isEmpty()) return UndoScopeResult(0, 0, 0)
         val r = run(listOf("undo", "--ids", ids.joinToString(","), "--session", session, "--json"), workDir)
         if (!r.ok) return null
+        return parseUndoScope(r.stdout)
+    }
+
+    /** `clean --resolved --json` — returns the CLI's own `cleared` count, or null on failure. The count
+     *  comes from the verb, never a UI-side guess, so the toast can not disagree with what happened. */
+    fun clearResolvedJson(session: String, workDir: String?): Int? {
+        val r = run(listOf("clean", "--resolved", "--session", session, "--json"), workDir)
+        if (!r.ok) return null
         return try {
-            val o = JsonParser.parseString(r.stdout).asJsonObject
-            UndoScopeResult(o.get("undone").asInt, o.get("conflicts").asInt, o.get("total").asInt)
+            com.google.gson.JsonParser.parseString(r.stdout).asJsonObject.get("cleared").asInt
         } catch (_: Exception) {
             null
         }
@@ -604,6 +666,60 @@ object ObservatoryCli {
     fun summaryMarkdown(session: String, workDir: String?): String? {
         val r = run(listOf("summary", "--markdown", "--session", session), workDir)
         return if (r.ok) r.stdout else null
+    }
+
+    /** The FULL session trace — everything the observatory recorded — as JSON (`export`). Core
+     *  composes it, so this plugin, VS Code, and the CLI export the identical document. */
+    fun traceJson(session: String, workDir: String?): String? {
+        val r = run(listOf("export", "--session", session), workDir)
+        return if (r.ok) r.stdout else null
+    }
+
+    data class VersionCheck(
+        val current: String,
+        val channel: String, // "stable" | "dev"
+        val latest: String?,
+        val updateAvailable: Boolean,
+        val stableLatest: String?,
+        val devLatest: String?,
+    )
+
+    /** `version --check --json` — the version dropdown's payload: the installed CLI version, the
+     *  followed channel, and both channels' newest releases (one GitHub fetch, CLI-side). Null when
+     *  the CLI is missing, offline, or predates the channels. */
+    fun versionCheck(workDir: String?): VersionCheck? {
+        val r = run(listOf("version", "--check", "--json"), workDir)
+        if (!r.ok) return null
+        return try {
+            val o = JsonParser.parseString(r.stdout).asJsonObject
+            fun s(k: String) = o.get(k)?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString
+            VersionCheck(
+                current = s("current") ?: "",
+                channel = s("channel") ?: "stable",
+                latest = s("latest"),
+                updateAvailable = o.get("updateAvailable")?.takeIf { it.isJsonPrimitive }?.asBoolean ?: false,
+                stableLatest = s("stableLatest"),
+                devLatest = s("devLatest"),
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** `update [--channel X]` — the ONE updater for every surface: refreshes the CLI, both editor
+     *  plugins, and the status line; `--channel` also switches release channels. LONG (downloads) —
+     *  callers run it on a pooled thread and tell the user to restart the IDE afterwards. */
+    fun update(channel: String?, workDir: String?): Pair<Boolean, String> {
+        val args = buildList {
+            add("update")
+            if (channel != null) {
+                add("--channel"); add(channel)
+            }
+        }
+        val r = run(args, workDir, timeoutMs = 300_000)
+        // On failure the ERROR is on stderr (the CLI's fail() writes there) — stdout carries progress
+        // lines that would bury it in the toast.
+        return r.ok to (if (r.ok) r.stdout else r.stderr.ifBlank { r.stdout })
     }
 
     /** Setup diagnostics as markdown. `doctor` exits 1 when there are failures but still prints, so

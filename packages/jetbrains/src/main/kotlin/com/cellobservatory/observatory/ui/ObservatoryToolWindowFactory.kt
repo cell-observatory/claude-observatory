@@ -10,9 +10,20 @@ import com.intellij.ui.content.ContentFactory
 import javax.swing.Icon
 import javax.swing.JComponent
 
-/** Sidebar review window (VS Code activity-bar analog): Edits + Diffs + File History + Actions +
- *  Observations. 0.8.7: Observations moved here from the bottom dock, which freed that dock for the
- *  Prompts window beside the Overview. */
+/** An icon + text tab. The label must be the displayName — the new UI (PyCharm 2025+) renders content
+ *  tabs by text and may drop the icon, so an empty displayName leaves the tab blank/invisible.
+ *  File-level: both windows below build their tabs with it. */
+private fun iconTab(factory: ContentFactory, component: JComponent, label: String, icon: Icon): Content =
+    factory.createContent(component, label, false).apply {
+        this.icon = icon          // Content.setIcon — the tab glyph
+        description = label        // Content.setDescription — the hover tooltip
+        popupIcon = icon           // shown in the tab-overflow chooser
+        isCloseable = false
+    }
+
+/** "Observatory Traces" — the sidebar review window (VS Code activity-bar analog): Edits + Diffs +
+ *  File History. 0.9.0: Actions and Observations moved to the Observatory Timeline window, with
+ *  Prompts — the timeline-shaped surfaces live together, and this window is purely per-edit review. */
 class ObservatoryToolWindowFactory : ToolWindowFactory, DumbAware {
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
         val factory = ContentFactory.getInstance()
@@ -20,22 +31,21 @@ class ObservatoryToolWindowFactory : ToolWindowFactory, DumbAware {
         cm.addContent(iconTab(factory, EditsTreePanel(project, EditsTreePanel.Mode.EDITS), "Edits", Icons.Microscope))
         cm.addContent(iconTab(factory, EditsTreePanel(project, EditsTreePanel.Mode.DIFFS), "Diffs", AllIcons.Actions.Diff))
         cm.addContent(iconTab(factory, FileHistoryPanel(project), "File History", AllIcons.Vcs.History))
-        // Actions timeline — moved out of the Observations dock window (0.8.0 r4), pinned at the bottom.
+    }
+}
+
+/** "Observatory Timeline" — the timeline-shaped surfaces, one window (VS Code's Observatory Timeline
+ *  panel container, literally): Prompts · Actions · Observations as tabs, anchored right. 0.9.0 first
+ *  grouped Actions + Observations into the Dashboards window "in its own shape"; the literal third
+ *  window is what actually matches the product's three-surface layout. */
+class ObservatoryTimelineFactory : ToolWindowFactory, DumbAware {
+    override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
+        val factory = ContentFactory.getInstance()
+        val cm = toolWindow.contentManager
+        cm.addContent(iconTab(factory, PromptsPanel(project), "Prompts", AllIcons.Actions.ListFiles))
         cm.addContent(iconTab(factory, ActionsPanel(project), "Actions", AllIcons.Debugger.Console))
-        // …and Observations after it (0.8.7), so the whole read-and-review side of the product lives in
-        // one window and the bottom dock is free for the two views that must be seen side by side.
         cm.addContent(iconTab(factory, ObservationsPanel(project), "Observations", AllIcons.Actions.IntentionBulb))
     }
-
-    /** An icon + text tab. The label must be the displayName — the new UI (PyCharm 2025+) renders content
-     *  tabs by text and may drop the icon, so an empty displayName leaves the tab blank/invisible. */
-    private fun iconTab(factory: ContentFactory, component: JComponent, label: String, icon: Icon): Content =
-        factory.createContent(component, label, false).apply {
-            this.icon = icon          // Content.setIcon — the tab glyph
-            description = label        // Content.setDescription — the hover tooltip
-            popupIcon = icon           // shown in the tab-overflow chooser
-            isCloseable = false
-        }
 }
 
 /** Bottom dashboards window (VS Code panel analog, next to Terminal/Problems). 0.8.7 layout —
@@ -65,17 +75,12 @@ class ObservatoryDashboardsFactory : ToolWindowFactory, DumbAware {
 
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
         val stats = com.cellobservatory.observatory.ui.stats.StatsPanel(project)
-        val promptsPane = titled("Prompts", PromptsPanel(project))
         val statsPane = titled("Stats", stats)
-        // Default split: Prompts 20% | Overview 65% | Stats 15% — the master-detail Overview stays the
-        // centerpiece, and the Prompts pane is wide enough to read a prompt wrapped over a few lines.
-        val right = com.intellij.ui.OnePixelSplitter(false, 0.81f).apply {
+        // Overview 81% | Stats 19%. Prompts moved to the Observatory Timeline window (with Actions and
+        // Observations), so the dock is just the two panes that must be seen side by side.
+        val split = com.intellij.ui.OnePixelSplitter(false, 0.81f).apply {
             firstComponent = titled("Overview", ChangeMapPanel(project))
             secondComponent = statsPane
-        }
-        val split = com.intellij.ui.OnePixelSplitter(false, 0.20f).apply {
-            firstComponent = promptsPane
-            secondComponent = right
         }
 
         // Prompts and Stats FOLD AWAY. This dock is short — a bottom tool window is a few hundred pixels
@@ -85,8 +90,7 @@ class ObservatoryDashboardsFactory : ToolWindowFactory, DumbAware {
         // affordance sits in the window's own chrome instead of stealing more room from the panel.
         val state = com.cellobservatory.observatory.settings.ObservatorySettings.instance.state
         fun apply() {
-            split.firstComponent = if (state.dashShowPrompts) promptsPane else null
-            right.secondComponent = if (state.dashShowStats) statsPane else null
+            split.secondComponent = if (state.dashShowStats) statsPane else null
             split.revalidate(); split.repaint()
         }
         fun paneToggle(label: String, icon: Icon, get: () -> Boolean, set: (Boolean) -> Unit) =
@@ -101,7 +105,6 @@ class ObservatoryDashboardsFactory : ToolWindowFactory, DumbAware {
             }
         toolWindow.setTitleActions(
             listOf(
-                paneToggle("Prompts", AllIcons.Actions.ListFiles, { state.dashShowPrompts }, { state.dashShowPrompts = it }),
                 paneToggle("Stats", AllIcons.Actions.Profile, { state.dashShowStats }, { state.dashShowStats = it }),
             )
         )

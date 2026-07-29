@@ -1,5 +1,6 @@
 package com.cellobservatory.observatory.ui
 
+import com.cellobservatory.observatory.core.ClaudePaths
 import com.cellobservatory.observatory.model.EditRecord
 import com.cellobservatory.observatory.model.TreeFileNode
 import com.cellobservatory.observatory.model.TreeFolderNode
@@ -238,10 +239,10 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
                 withSession { s -> ReviewOps.redoAll(project, s, service().log(), "this session") }
             },
             fileScopedAction("Accept All Edits in Current File", NavTint.ACCEPT_FILE) { s, vf ->
-                ReviewOps.keepAll(project, s, service().log().filter { it.file == vf.path }, vf.name)
+                ReviewOps.keepAll(project, s, service().log().filter { it.file == ClaudePaths.storeKey(vf.path) }, vf.name)
             },
             fileScopedAction("Reject All Edits in Current File", NavTint.REJECT) { s, vf ->
-                ReviewOps.undoAll(project, s, service().log().filter { it.file == vf.path }, vf.name, vf.path)
+                ReviewOps.undoAll(project, s, service().log().filter { it.file == ClaudePaths.storeKey(vf.path) }, vf.name, vf.path)
             },
             action("Clear Resolved Edits", NavTint.CLEAR) {
                 withSession { s ->
@@ -429,7 +430,7 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
             override fun getActionUpdateThread() = ActionUpdateThread.BGT
             override fun update(e: AnActionEvent) {
                 val path = activeFilePath()
-                e.presentation.isEnabledAndVisible = path != null && service().log().any { it.pending && it.file == path }
+                e.presentation.isEnabledAndVisible = path != null && service().log().any { it.pending && it.file == ClaudePaths.storeKey(path) }
             }
 
             override fun actionPerformed(e: AnActionEvent) {

@@ -228,3 +228,24 @@ export function uninstallStatusline(file: string = settingsPath()): {
   }
   return { changed, settingsPath: p, scriptRemoved };
 }
+
+/**
+ * Is OUR bundled status line the one installed on this machine? True only when the settings.json
+ * statusLine command points at a statusline.sh under the config dir AND that script exists — a user
+ * running some other status line (or none) must never have theirs touched by an update.
+ */
+export function statuslineInstalled(): boolean {
+  const dir = claudeConfigDir();
+  try {
+    const settings = JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8'));
+    const cmd = settings?.statusLine?.command;
+    // The FULL config-dir path, matching uninstallStatusline — a bare 'statusline.sh' substring also
+    // matched a user's own ~/tools/my-statusline.sh, and `update` would then have overwritten a status
+    // line that was never ours.
+    const ourScript = path.join(dir, 'statusline.sh');
+    if (typeof cmd !== 'string' || !cmd.includes(ourScript)) return false;
+    return fs.existsSync(ourScript);
+  } catch {
+    return false; // no settings, unreadable settings — nothing of ours to refresh
+  }
+}

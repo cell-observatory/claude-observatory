@@ -103,4 +103,32 @@ class StoreReaderTest {
         assertEquals(0, sessions[0].pending) // session's edit was kept
         assertEquals(1, sessions[1].pending) // other's edit is pending
     }
+
+    @Test
+    fun `drive-letter case twins heal to one canonical path — the readLog mirror of issue 43`() {
+        writeLog(
+            """{"id":1,"ts":1000,"tool":"Bash","file":"C:\\repo\\ci.yml","beforeBlob":null,"afterBlob":"aa","status":"pending"}""",
+            """{"id":2,"ts":2000,"tool":"Bash","file":"c:\\repo\\ci.yml","beforeBlob":"aa","afterBlob":null,"status":"pending"}""",
+        )
+        val log = StoreReader.readLog(session)
+        assertEquals(2, log.size)
+        assertEquals(setOf("C:\\repo\\ci.yml"), log.map { it.file }.toSet()) // one file, not two
+    }
+
+    @Test
+    fun `canonPath and storeKey bridge editor paths to store keys`() {
+        // canonPath mirrors core's paths.ts exactly — total, platform-independent.
+        assertEquals("C:\\repo\\x.ts", ClaudePaths.canonPath("c:\\repo\\x.ts"))
+        assertEquals("C:/repo/x.ts", ClaudePaths.canonPath("C:/repo/x.ts"))
+        assertEquals("/unix/path", ClaudePaths.canonPath("/unix/path"))
+        assertEquals("cargo.toml", ClaudePaths.canonPath("cargo.toml"))
+        // storeKey: IntelliJ VirtualFile paths are system-independent (forward slashes, any drive
+        // case) — the store holds OS-native canonical paths. Drive-shaped input flips + canonicalizes…
+        assertEquals("C:\\repo\\x.ts", ClaudePaths.storeKey("c:/repo/x.ts"))
+        assertEquals("C:\\repo\\x.ts", ClaudePaths.storeKey("C:/repo/x.ts"))
+        assertEquals("C:\\repo\\x.ts", ClaudePaths.storeKey("C:\\repo\\x.ts")) // idempotent on store form
+        // …and everything else passes through untouched (a backslash is a legal POSIX filename char).
+        assertEquals("/w/a.txt", ClaudePaths.storeKey("/w/a.txt"))
+        assertEquals("/w/odd\\name", ClaudePaths.storeKey("/w/odd\\name"))
+    }
 }

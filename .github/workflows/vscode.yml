@@ -4,7 +4,7 @@ name: VS Code
 # extension's build health carries its own README badge and the bundle is downloadable per-commit.
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
   workflow_dispatch:
 

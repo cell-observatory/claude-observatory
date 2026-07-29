@@ -145,10 +145,15 @@ test('extension: three views, click commands, inline annotations, chat, status s
     constructor(v) { this.value = v || ''; this.isTrusted = false; this.supportThemeIcons = false; }
     appendMarkdown(s) { this.value += s; return this; }
   }
+  // Faithful to vscode-uri: `fsPath` LOWER-CASES a Windows drive letter (uriToFsPath with
+  // keepDriveLetterCasing=false). On windows-latest this hands the extension the same skewed paths
+  // real VS Code produces, so the star/CodeLens assertions below exercise the #43 canon boundary —
+  // an identity mock here would let a missing canonFsPath() pass green on every OS.
+  const toFsPath = (p) => (p && p.length >= 2 && p[1] === ':' && p[0] >= 'A' && p[0] <= 'Z' ? p[0].toLowerCase() + p.slice(1) : p);
   const Uri = {
-    file: (p) => ({ scheme: 'file', path: p, fsPath: p }),
+    file: (p) => ({ scheme: 'file', path: p, fsPath: toFsPath(p) }),
     from: (o) => ({ scheme: o.scheme, path: o.path, query: o.query || '' }),
-    joinPath: (base, ...parts) => ({ scheme: 'file', path: [base && base.path, ...parts].filter(Boolean).join('/'), fsPath: [base && base.fsPath, ...parts].filter(Boolean).join('/') }),
+    joinPath: (base, ...parts) => ({ scheme: 'file', path: [base && base.path, ...parts].filter(Boolean).join('/'), fsPath: toFsPath([base && base.fsPath, ...parts].filter(Boolean).join('/')) }),
   };
   const doc = {
     uri: Uri.file(F),
@@ -281,10 +286,10 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.ok(editsTree && diffsTree, 'Edits and Diffs views registered');
     // 0.8.0 panel consolidation: Timeline folded into Observations. Round 3: the standalone Multitasking
     // view is folded INTO the Overview (master–detail). Actions is now a SIDEBAR view (moved out of the
-    // bottom-panel Observations dock into the Claude Edits activity-bar window, at the bottom).
+    // old bottom-panel Observations dock; 0.9.0 groups it with Prompts + Observations in the Timeline panel).
     assert.ok(!trees['claudeObservatory.timeline'], 'the standalone Timeline view is gone (folded into Observations)');
     assert.ok(!webviewProviders['claudeObservatory.multitask'] && !trees['claudeObservatory.multitask'], 'the standalone Multitasking view is gone (folded into the Overview)');
-    assert.ok(trees['claudeObservatory.actions'], 'Actions is registered as a timeline-style tree (now in the sidebar window)');
+    assert.ok(trees['claudeObservatory.actions'], 'Actions is registered as a timeline-style tree (now in the Observatory Timeline panel)');
 
     // `workspaceRoot()` is folders[0] and every caller reads it live, so adding/removing/reordering
     // folders changes which session the whole extension is about — and nothing else announces it (the
@@ -295,20 +300,98 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.doesNotThrow(() => folderChangeHandlers.forEach((cb) => cb({ added: [], removed: [] })),
       'a folder change refreshes without throwing');
 
-    // The Actions view lives in the "Claude Edits" SIDEBAR container (activity-bar) — NOT in the
-    // bottom-panel dock. 0.8.7: Observations joined it there (LAST, with the edits/diffs trees), which
-    // freed the dock for Prompts · Overview · Stats — three windows side by side, so the list of asks
-    // and the Overview it scopes are visible at the same time.
+    // 0.9.0 regrouping: the SIDEBAR ("Observatory Traces") is purely the per-edit review side — Edits ·
+    // Diffs · File History — and the timeline-shaped surfaces (Prompts · Actions · Observations) live
+    // together in the "Observatory Timeline" panel container. The dock ("Observatory Dashboards") keeps
+    // Overview · Stats.
     const pkg = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../package.json'), 'utf8'));
     const sidebar = pkg.contributes.views.claudeObservatory;
     const dock = pkg.contributes.views.claudeObservatoryDock;
-    const sidebarIds = sidebar.map((v) => v.id);
-    assert.ok(sidebarIds.includes('claudeObservatory.actions'), 'Actions view is in the Claude Edits sidebar container');
-    assert.equal(sidebarIds[sidebarIds.length - 1], 'claudeObservatory.observations', 'Observations is the LAST sidebar view (0.8.7)');
-    assert.equal(sidebarIds[sidebarIds.indexOf('claudeObservatory.actions') - 1], 'claudeObservatory.fileHistory', 'Actions sits directly after File History');
-    assert.ok(!dock.some((v) => v.id === 'claudeObservatory.actions'), 'Actions is no longer in the bottom-panel dock');
-    assert.deepEqual(dock.map((v) => v.id), ['claudeObservatory.prompts', 'claudeObservatory.changemap', 'claudeObservatory.stats'], 'the dock is Prompts · Overview · Stats (0.8.8)');
+    const timeline = pkg.contributes.views.claudeObservatoryPrompts;
+    assert.deepEqual(sidebar.map((v) => v.id),
+      ['claudeObservatory.edits', 'claudeObservatory.diffs', 'claudeObservatory.fileHistory'],
+      'the Traces sidebar is exactly the three per-edit review views');
+    assert.deepEqual(timeline.map((v) => v.id),
+      ['claudeObservatory.prompts', 'claudeObservatory.actions', 'claudeObservatory.observations'],
+      'the Timeline panel is Prompts, then Actions, then Observations');
+    assert.ok(!dock.some((v) => v.id === 'claudeObservatory.actions'), 'Actions is not in the Dashboards dock');
+    const containerTitles = Object.fromEntries([...pkg.contributes.viewsContainers.activitybar, ...pkg.contributes.viewsContainers.panel].map((c) => [c.id, c.title]));
+    assert.deepEqual(containerTitles,
+      { claudeObservatory: 'Observatory Traces', claudeObservatoryDock: 'Observatory Dashboards', claudeObservatoryPrompts: 'Observatory Timeline' },
+      'the three containers carry the 0.9.0 names');
+    // 0.9.0: the Timeline container is a separate draggable unit rather than tabs wedged beside
+    // Overview and Stats. VS Code offers no manifest option to place a view in the secondary side bar,
+    // but a container of its own is what makes dragging it there stick cleanly. (Its exact contents are
+    // asserted above — Prompts · Actions · Observations.)
+    assert.deepEqual(dock.map((v) => v.id), ['claudeObservatory.changemap', 'claudeObservatory.stats'], 'the dock is Overview · Stats (0.9.0)');
+    assert.ok(
+      pkg.contributes.viewsContainers.panel.some((c) => c.id === 'claudeObservatoryPrompts'),
+      'and that container is contributed'
+    );
     assert.ok(webviewProviders['claudeObservatory.prompts'], 'the Prompts window is registered as a webview view');
+    // 0.9.0: the Overview can also live in an EDITOR TAB. The bottom panel stays the default, the two
+    // hosts share one renderer (wire()), and exactly ONE of them drives refreshes — two ticking hosts
+    // would double every CLI spawn, which is the cost this release spent itself reducing.
+    {
+      const src = fs.readFileSync(path.resolve(__dirname, '../dist/extension.js'), 'utf8');
+      assert.ok(typeof commands['claudeObservatory.openOverviewInEditor'] === 'function', 'the command is registered');
+      assert.ok(/createWebviewPanel\(\s*"claudeObservatory\.overviewEditor"/.test(src), 'it opens a webview EDITOR panel');
+      assert.ok(/this\.wire\(panel\)/.test(src) && /this\.wire\(view\)/.test(src), 'both hosts go through the same wiring');
+      assert.ok(/if \(!this\.editorPanel\) this\.view = view/.test(src), 'the panel view yields while a tab is open');
+      assert.ok(/this\.view = this\.panelView/.test(src), '…and takes the wheel back when the tab closes');
+      assert.ok(/this\.view === view/.test(src) && /this\.view === panel/.test(src), 'only the DRIVING host refreshes on visibility');
+      const pkgCfg = pkg.contributes.configuration.properties || pkg.contributes.configuration[0].properties;
+      assert.equal(pkgCfg['claudeObservatory.overviewLocation'].default, 'panel', 'the bottom panel remains the default');
+    }
+    // 0.9.0: the bulk verbs are scoped to exactly one of two things — the selected PROMPT, else the
+    // selected SESSION. The session used to be implicit (the host resolved "the reviewed session"), so
+    // picking a sibling agent in Fleet left Accept All accepting a different session than the toolbar
+    // was labelled with. The webview now names it and the host VALIDATES it before it becomes a store
+    // path: these verbs touch every pending edit in a session, so an unchecked id is not acceptable.
+    const bundle = fs.readFileSync(path.resolve(__dirname, '../dist/extension.js'), 'utf8');
+    assert.ok(/type:\s*sess,\s*session:\s*selAgentSess\(\)/.test(bundle), 'the toolbar posts the session it is scoped to');
+    assert.ok(/function bulkSession[\s\S]{0,600}isSafeSessionId/.test(bundle), 'the host rejects an unsafe session id');
+    assert.ok(/function bulkSession[\s\S]{0,700}sessionMeta/.test(bundle), 'and one that is not this workspace\'s');
+    for (const cmd of ['keepAll', 'undoAll', 'clearResolved'])
+      assert.ok(
+        new RegExp(`registerCommand\\("claudeObservatory\\.${cmd}",\\s*\\(sess\\)`).test(bundle),
+        `${cmd} takes the scoped session (the palette still passes nothing and gets the reviewed one)`
+      );
+    // BEHAVIOURAL, because the assertions above only pin the wiring's shape: an early `return cur` in
+    // bulkSession satisfies every one of them while silently acting on the wrong session. Seed a SECOND
+    // session in this workspace, accept-all scoped to IT, and check the edits that changed are its own.
+    {
+      const OTHER = 'scopedOther';
+      core.ensureStore(OTHER);
+      const g = path.join(ws, "scoped.ts");
+      fs.writeFileSync(g, 'x\n');
+      core.appendLog(OTHER, {
+        id: 1, ts: 5000, tool: 'Edit', file: g, status: 'pending',
+        beforeBlob: core.writeBlob(OTHER, Buffer.from('x\n')),
+        afterBlob: core.writeBlob(OTHER, Buffer.from('x\ny\n')),
+      });
+      const otherTx = path.join(proj, OTHER + '.jsonl');
+      fs.writeFileSync(otherTx,
+        JSON.stringify({ timestamp: new Date(5000).toISOString(), type: "user", cwd: ws, message: { role: 'user', content: 'other' } }) + '\n');
+      // Age it so the REVIEWED session stays S. Written last it would be the newest transcript and thus
+      // the session `currentSession()` resolves to — which would make a broken scope hit the right
+      // session by accident, and this whole block prove nothing.
+      const old = (Date.now() - 3_600_000) / 1000;
+      fs.utimesSync(otherTx, old, old);
+      const pendingOf = (s) => core.readLog(s).filter((r) => r.status === 'pending').length;
+      const beforeSelf = pendingOf(S);
+      assert.equal(pendingOf(OTHER), 1, 'the second session starts with a pending edit');
+      await commands['claudeObservatory.keepAll'](OTHER);
+      assert.equal(pendingOf(OTHER), 0, 'Accept All scoped to the OTHER session accepted its edit');
+      assert.equal(pendingOf(S), beforeSelf, '…and left the reviewed session untouched');
+      // …and a traversing id must never become a store path. Asserted as "changed nothing here and did
+      // not throw" rather than by accepting the reviewed session, which would wreck the fixture the rest
+      // of this test depends on.
+      const beforeOther = pendingOf(OTHER);
+      await commands['claudeObservatory.keepAll']('../escape');
+      assert.equal(pendingOf(OTHER), beforeOther, 'an unsafe id is refused, not followed');
+      assert.equal(pendingOf(S), beforeSelf, '…and does not silently retarget another session either');
+    }
     // 0.8.7 QoL: the sidebar trees carry VS Code's native Collapse-All button (showCollapseAll) — the
     // file-Explorer affordance the user asked for, on Edits · Diffs · Actions (+ Observations).
     for (const id of ['claudeObservatory.edits', 'claudeObservatory.diffs', 'claudeObservatory.actions', 'claudeObservatory.observations'])
@@ -325,8 +408,8 @@ test('extension: three views, click commands, inline annotations, chat, status s
     // in-process, so it genuinely works before `claude-observatory init`.
     // The tour is NOT a sidebar view: a slot there sits in the very container whose other views the
     // tour keeps asking you to look at. It is a detachable webview panel, floating by default.
-    assert.ok(!sidebarIds.includes('claudeObservatory.tour'), 'the tour takes no sidebar slot');
-    assert.equal(sidebarIds[0], 'claudeObservatory.edits', 'so Edits still leads the container');
+    assert.ok(!sidebar.some((v) => v.id === 'claudeObservatory.tour'), 'the tour takes no sidebar slot');
+    assert.equal(sidebar[0].id, 'claudeObservatory.edits', 'so Edits still leads the container');
     for (const c of ['tourDock', 'tourFloat'])
       assert.ok(pkg.contributes.commands.some((x) => x.command === `claudeObservatory.${c}`), `${c} is contributed`);
     for (const c of ['startDemo', 'restartDemo', 'startTour', 'tourNext', 'tourBack', 'exitDemo'])
@@ -753,8 +836,15 @@ test('extension: three views, click commands, inline annotations, chat, status s
     // row re-points the change map and the feed but NOT these two, so both panes say so.
     assert.ok(/function offSession/.test(cmView.webview.html) && /function scopeNote/.test(cmView.webview.html), 'the session-scope note exists for the tabs the fleet selection does not re-point');
     assert.ok(/scopeNote\('Tasks'\)/.test(cmView.webview.html) && /scopeNote\('Background shells'\)/.test(cmView.webview.html), 'both session-scoped panes carry the note');
-    assert.ok(/ACTIVE session’s numbered task list/.test(cmView.webview.html) && /background shells the ACTIVE session launched/.test(cmView.webview.html),
+    // 0.9.0: "ACTIVE" became "REVIEWED" in the Tasks tooltip — the pane follows the session under review,
+    // and calling that the active session read as "the one Claude is running in", which is a different
+    // thing the moment you pin an older session.
+    assert.ok(/REVIEWED session’s numbered task list/.test(cmView.webview.html) && /background shells the ACTIVE session launched/.test(cmView.webview.html),
       'the tab tooltips name the scope too');
+    // …and both now say what happens to their BADGE while a sibling is selected, since neither pane can
+    // be scoped to one: a count from the reviewed session beside a pane the reader believes they scoped
+    // is the failure this release set out to remove.
+    assert.ok(/no count is shown while one is selected/.test(cmView.webview.html), 'the tooltips explain the blanked badge');
     assert.ok(!/\.mt-scope \{[^}]*var\(--mt-attn\)/.test(cmView.webview.html), 'the scope note does not borrow the amber that means "outside the workspace"');
     // 0.8.7 (5) REQUESTS — its own WINDOW in the dock (left of the Overview), not a tab inside it, so
     // the list of asks and the view it scopes are visible at the same time. Picking one filters the
@@ -1023,6 +1113,9 @@ test('extension: three views, click commands, inline annotations, chat, status s
       ['undoOpenFile', 'claudeObservatory.undoOpenFile'],
       ['toggleHeatmap', 'claudeObservatory.toggleHeatmap'],
       ['searchEdits', 'claudeObservatory.searchEdits'],
+      ['exportSummary', 'claudeObservatory.exportSummary'],
+      ['exportMenu', 'claudeObservatory.exportMenu'],
+      ['versionUpdate', 'claudeObservatory.updateNow'],
     ]) {
       assert.ok(typeof commands[cmd] === 'function', `${cmd} registered`);
       let seen = 0;
@@ -1032,6 +1125,91 @@ test('extension: three views, click commands, inline annotations, chat, status s
       commands[cmd] = real;
       assert.equal(seen, 1, `the Overview nav-bar "${msg}" control routes to ${cmd}`);
     }
+    // Export: the QuickPick menu routes to both documents, and exportTrace opens the FULL session
+    // trace as a JSON document (core.buildSessionTrace — same shape the CLI `export` verb emits).
+    assert.ok(typeof commands['claudeObservatory.exportTrace'] === 'function', 'exportTrace registered');
+    quickPick = 1; // the menu's second row: "Full session trace"
+    let traced = 0;
+    const realTrace = commands['claudeObservatory.exportTrace'];
+    commands['claudeObservatory.exportTrace'] = () => { traced++; };
+    await commands['claudeObservatory.exportMenu']();
+    commands['claudeObservatory.exportTrace'] = realTrace;
+    assert.equal(traced, 1, 'the Export menu routes "Full session trace" to exportTrace');
+    quickPick = null;
+    await commands['claudeObservatory.exportTrace']();
+    assert.ok(opened && opened.uri && typeof opened.uri.content === 'string', 'exportTrace opened a document');
+    assert.ok(
+      opened.uri.language === 'json' && opened.uri.content.includes('"edits"') && opened.uri.content.includes('"exportedAt"'),
+      'the document is the session-trace JSON'
+    );
+
+    // The version chip (0.9.0): pinned at the controls row's right edge; its menu routes channel
+    // switches to the switchChannel command (with the channel argument intact).
+    assert.ok(/id="ov-version"/.test(bundleSrc), 'the version chip is in the Overview navbar markup');
+    assert.ok(typeof commands['claudeObservatory.switchChannel'] === 'function', 'switchChannel registered');
+    let switched = 0;
+    const realSwitch = commands['claudeObservatory.switchChannel'];
+    commands['claudeObservatory.switchChannel'] = (ch) => { switched++; assert.equal(ch, 'dev', 'the picked channel rides along'); };
+    cmMsgHandler({ type: 'switchChannel', channel: 'dev' });
+    assert.equal(switched, 1, 'the version menu routes channel switches to switchChannel');
+    // The refusal check runs WHILE the spy is installed — restored first, a forwarded bad value
+    // would hit the real command (which no-ops under the mock) and this assert could never fail.
+    cmMsgHandler({ type: 'switchChannel', channel: 'evil' });
+    assert.equal(switched, 1, 'an unknown channel value is refused, never forwarded');
+    commands['claudeObservatory.switchChannel'] = realSwitch;
+
+    // The webview's own display path, EXECUTED: markup + routing asserts cannot see a renderer whose
+    // state lives in the wrong scope (the chip once rendered v— forever while every other assert was
+    // green) — only running the real script against a DOM stub catches that class.
+    {
+      const vm = require('node:vm');
+      // The close pattern is js/bad-tag-filter's canonical shape — case-insensitive, any junk before
+      // the `>` — so the sanitizer-bypass scanner has nothing left to escalate on a parser that only
+      // ever reads our own generated shell.
+      const scripts = [...cmView.webview.html.matchAll(/<script[^>]*>([\s\S]*?)<\/script[^>]*>/gi)];
+      assert.ok(scripts.length >= 1, 'the overview shell embeds its script');
+      const mkEl = () => ({
+        innerHTML: '', textContent: '', title: '', hidden: true, style: {}, dataset: {}, value: '', checked: false,
+        classList: { toggle() {}, add() {}, remove() {}, contains: () => false },
+        setAttribute() {}, getAttribute: () => null, hasAttribute: () => false, removeAttribute() {},
+        addEventListener() {}, appendChild() {}, removeChild() {}, contains: () => false,
+        querySelectorAll: () => [], querySelector: () => null, parentNode: null, firstChild: null,
+        getContext: () => null, getBoundingClientRect: () => ({ width: 0, height: 0, left: 0, top: 0 }),
+      });
+      const els = new Map();
+      const elFor = (id) => { if (!els.has(id)) els.set(id, mkEl()); return els.get(id); };
+      let msgListener = null;
+      const winStub = {
+        addEventListener: (t, cb) => { if (t === 'message') msgListener = cb; },
+        matchMedia: () => ({ matches: false, addEventListener() {} }),
+        setInterval: () => 0, clearInterval() {}, setTimeout: () => 0, clearTimeout() {},
+        requestAnimationFrame: () => 0, devicePixelRatio: 1, scrollY: 0,
+      };
+      const docStub = {
+        getElementById: elFor, addEventListener() {}, createElement: mkEl,
+        querySelectorAll: () => [], querySelector: () => null, body: mkEl(), documentElement: mkEl(),
+      };
+      const sandbox = {
+        window: winStub, document: docStub, console,
+        acquireVsCodeApi: () => ({ postMessage() {}, getState: () => null, setState() {} }),
+        URLSearchParams, JSON, Math, Date, String, Number, Array, Object, RegExp, parseInt, parseFloat, isFinite, NaN, Infinity, undefined,
+        getComputedStyle: () => ({ getPropertyValue: () => '' }),
+        ResizeObserver: class { observe() {} unobserve() {} disconnect() {} },
+        IntersectionObserver: class { observe() {} unobserve() {} disconnect() {} },
+        requestAnimationFrame: () => 0, setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0, clearInterval() {},
+        localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+      };
+      winStub.document = docStub;
+      sandbox.globalThis = sandbox;
+      vm.createContext(sandbox);
+      assert.doesNotThrow(() => vm.runInContext(scripts[scripts.length - 1][1], sandbox), 'the overview script initializes under the DOM stub');
+      assert.ok(typeof msgListener === 'function', 'the script listens for host messages');
+      msgListener({ data: { type: 'version', v: { current: '9.9.9', channel: 'stable', stableLatest: '9.9.9', devLatest: '9.10.0-dev.3', updateAvailable: true } } });
+      assert.match(elFor('ov-version').innerHTML, /9\.9\.9/, 'the chip RENDERS the version the host delivered');
+      assert.match(elFor('ov-vermenu').innerHTML, /Pre-release/, 'the menu carries the channel rows');
+      assert.match(elFor('ov-vermenu').innerHTML, /Update now/, 'and the Update row when an update is available');
+    }
+
     // (3) THE PROMPT AXIS — the LAST axis on the review nav bar. Step/Review/Accept/Reject
     // affordances scoped to one of the user's own asks (the Subtask axis is gone in 0.8.8).
     for (const id of ['ov-promptprev', 'ov-promptcount', 'ov-promptnext', 'ov-reviewprompt', 'ov-acceptprompt', 'ov-rejectprompt']) {
@@ -1221,7 +1399,8 @@ test('extension: three views, click commands, inline annotations, chat, status s
     // reviewNext must step through EVERY pending edit, not always reopen the oldest: #1 (line 0) →
     // #2 (line 3) → wrap back to #1.
     await commands['claudeObservatory.reviewNext']();
-    assert.ok(opened && opened.uri.fsPath === F, 'reviewNext opened the file with the oldest pending edit');
+    // `.path` (raw), not `.fsPath`: the faithful mock lower-cases the drive on Windows (#43).
+    assert.ok(opened && opened.uri.path === F, 'reviewNext opened the file with the oldest pending edit');
     assert.equal(lastShown.selection.active.line, 0, 'first reviewNext lands on edit #1');
     await commands['claudeObservatory.reviewNext']();
     assert.equal(lastShown.selection.active.line, 3, 'second reviewNext advances to edit #2');
@@ -1268,7 +1447,7 @@ test('extension: three views, click commands, inline annotations, chat, status s
 
     // openFileAtEdit opens the real file
     await commands['claudeObservatory.openFileAtEdit'](edits[0]);
-    assert.ok(opened && opened.uri.fsPath === F, 'openFileAtEdit opened the file');
+    assert.ok(opened && opened.uri.path === F, 'openFileAtEdit opened the file');
 
     // diff still works (Diffs view / inline)
     await commands['claudeObservatory.openDiff'](edits[0]);
@@ -1295,6 +1474,19 @@ test('extension: three views, click commands, inline annotations, chat, status s
     await commands['claudeObservatory.keepAtCursor']();
     assert.equal(core.findRecord(S, 2).status, 'kept', 'keepAtCursor kept the edit under the cursor');
     assert.ok(typeof commands['claudeObservatory.undoAtCursor'] === 'function', 'undoAtCursor registered');
+
+    // The dirty-buffer guard must BLOCK the undo while the file has unsaved changes — and on
+    // windows-latest the faithful Uri mock lower-cases the drive, so this exercises the #43
+    // canonFsPath boundary the guard depends on (pre-fix it failed OPEN on Windows).
+    vscode.workspace.textDocuments.push({ uri: Uri.file(F), isDirty: true });
+    const warnsBefore = warnMessages.length;
+    await commands['claudeObservatory.undo'](edits[0]);
+    assert.ok(
+      warnMessages.length > warnsBefore && /unsaved changes/.test(warnMessages[warnMessages.length - 1]),
+      'a dirty buffer blocks the undo with a warning'
+    );
+    assert.equal(core.findRecord(S, 1).status, 'pending', 'the record is untouched while the buffer is dirty');
+    vscode.workspace.textDocuments.pop();
 
     await commands['claudeObservatory.undo'](edits[0]);
     const after = fs.readFileSync(F, 'utf8');

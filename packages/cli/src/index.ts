@@ -274,7 +274,10 @@ function cmdDoctor(args: string[]): void {
     return;
   }
   const icon = (l: string) => (l === 'ok' ? c.green('✓') : l === 'warn' ? c.yellow('⚠') : c.red('✗'));
-  process.stdout.write(c.bold(`claude-observatory doctor`) + c.dim(`  v${version()}\n\n`));
+  process.stdout.write(
+    c.bold(`claude-observatory doctor`) +
+      c.dim(`  v${version()} · ${(require('@claude-observatory/core') as typeof import('@claude-observatory/core')).getUpdateChannel() === 'dev' ? 'pre-release (dev)' : 'stable'} channel\n\n`)
+  );
   for (const ch of checks) {
     process.stdout.write(`${icon(ch.level)} ${ch.label}\n    ${c.dim(ch.detail)}\n`);
     if (ch.fix) process.stdout.write(`    ${c.cyan('→ ' + ch.fix)}\n`);
@@ -290,6 +293,72 @@ function cmdDoctor(args: string[]): void {
           : c.green('all checks passed') + '\n')
   );
   process.exit(fails ? 1 : 0);
+}
+
+/**
+ * `resolve [--session <id>] [--json]` — accept every pending edit in a session, then clear its resolved
+ * records. Files on disk are never touched (accepting is a verdict, not a write), and the session is
+ * kept — `clean --drop` deletes one outright.
+ */
+function cmdResolve(args: string[]): void {
+  const core = require('@claude-observatory/core') as Core;
+  const session = getSessionId(args);
+  const r = core.resolveSession(session);
+  if (args.includes('--json')) {
+    emitJson({ session, accepted: r.accepted, cleared: r.cleared });
+    return;
+  }
+  process.stdout.write(
+    c.green('✓ ') + `resolved ${session.slice(0, 8)}: accepted ${r.accepted} pending edit(s), cleared ${r.cleared} record(s)\n`
+  );
+}
+
+/**
+ * `warm [--root <d>] [--since <dur>] [--json]` — build the change map for this workspace's RECENT
+ * sessions so switching to one is a cache read instead of a rebuild.
+ *
+ * Switching to a large session was measured at 6.8 s cold against 1.4 s warm, and nothing warmed a
+ * session until you switched to it — so the cost landed on the reader every time. This is that work,
+ * moved off the critical path: the editors spawn it detached after a refresh settles.
+ *
+ * Deliberately serial. It exists to spend idle time, not to contend with the refresh that just finished
+ * — a fan-out of full change-map builds is exactly the ~500 MB-per-process work this project already
+ * spawns one at a time. The only bound on HOW MANY it builds is `--since`, so the per-session caches are
+ * dropped between sessions: without that, peak RSS scaled with how many sessions happened to be active
+ * in the window rather than with the largest one.
+ */
+function cmdWarm(args: string[]): void {
+  const core = require('@claude-observatory/core') as Core;
+  const cwd = flagValue(args, '--root') ?? process.cwd();
+  const spec = flagValue(args, '--since');
+  const sinceMs = spec ? parseDuration(spec) : 24 * 60 * 60_000;
+  if (spec && sinceMs === null) fail(`bad --since value "${spec}" (use e.g. 24h or 2d)`);
+  const now = Date.now();
+  const recent = core
+    .sessionMeta(cwd)
+    .sessions
+    // Skip the session under review. The Overview's own `views` spawn already builds it every tick, and
+    // its transcript invalidates that build seconds later — so warming it is work that is both duplicated
+    // and immediately wasted. Measured: dropping it took this from 7.7 s to the cost of the rest.
+    .filter((r) => !r.current && now - r.lastActiveMs <= (sinceMs as number))
+    .sort((a, b) => b.lastActiveMs - a.lastActiveMs);
+  const warmed: string[] = [];
+  for (const r of recent) {
+    try {
+      // The same cached build a switch performs. Its side effect — the map, placement and delta caches
+      // on disk — is the entire point; the returned value is discarded.
+      core.cachedChangeMap(cwd, r.id, { root: cwd, prompts: true });
+      warmed.push(r.id);
+      core.clearFsCache(); // the next session shares none of this one's file cache — hold one at a time
+    } catch {
+      /* a session that cannot be built is not a reason to abandon the rest */
+    }
+  }
+  if (args.includes('--json')) {
+    emitJson({ warmed, since: spec ?? '24h' });
+    return;
+  }
+  process.stdout.write(c.green('✓ ') + `warmed ${warmed.length} session(s) active in the last ${spec ?? '24h'}\n`);
 }
 
 function cmdSessions(args: string[] = []): void {
@@ -326,6 +395,16 @@ function relFile(file: string): string {
   return r && !r.startsWith('..') ? r : file;
 }
 
+/** #43: an `--under` operand can arrive with a lower-cased Windows drive letter (shells) or forward
+ *  slashes (JetBrains passes VirtualFile paths) — resolve to the OS-native absolute form and
+ *  canonicalize the drive case so it matches canonical record paths. Callers validate emptiness
+ *  FIRST: `path.resolve('')` is the cwd, which would silently widen an invalid scope to everything. */
+function canonUnder(under: string): string {
+  const path = require('path');
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  return core.canonPath(path.resolve(under));
+}
+
 function statusLabel(s: string): string {
   if (s === 'pending') return c.yellow('pending');
   if (s === 'kept') return c.green('kept');
@@ -347,8 +426,9 @@ function cmdList(args: string[]): void {
         : null;
   if (only) log = log.filter((r) => r.status === only);
   const fi = args.indexOf('--file');
-  const sub = flagValue(args, '--file');
-  if (fi >= 0 && !sub) fail('`list --file <substr>` requires a value');
+  const subRaw = flagValue(args, '--file');
+  if (fi >= 0 && !subRaw) fail('`list --file <substr>` requires a value');
+  const sub = subRaw && core.canonPath(subRaw); // #43: match canonical record paths
   if (sub) log = log.filter((r) => r.file.includes(sub));
 
   if (args.includes('--json')) {
@@ -915,11 +995,43 @@ function cmdMultitask(args: string[]): void {
   const fleet = core.summarizeFleet(siblings);
   const collisions = core.fleetConflicts(siblings); // live conflicts: a file pending in 2+ both-active siblings
 
+  const now = Date.now();
   const agents = siblings.map((sib) => {
     const transcript = core.findTranscript(sib.worktree, sib.id);
     const pd = transcript
       ? core.agentPhaseDetail(transcript)
       : { phase: 'idle' as const, confidence: 'heuristic' as const };
+    // FOLDED: a conversation more than FLEET_FOLD_MS old, and not the one under review. 24 of the 33
+    // siblings in this repo qualify, and building their maps was most of what a cold refresh cost.
+    // Serve one from the disk cache if it is already there; otherwise report the row as UNBUILT and
+    // move on. Identity, phase and file list stay honest — they come from listRepoSiblings, which is
+    // sidecar-cached and cheap. Everything below this line is a transcript parse and is skipped.
+    const folded = sib.id !== session && core.isFoldedAge(sib.lastMs, now);
+    const cached = folded ? core.siblingOverviewCached(sib.worktree, sib.id, { root: sib.worktree }) : null;
+    if (folded && !cached) {
+      return {
+        session: sib.id,
+        worktree: sib.worktree,
+        gitBranch: sib.gitBranch,
+        self: sib.self,
+        phase: pd.phase,
+        phaseConfidence: pd.confidence,
+        sparkline: [],
+        todos: [],
+        subagents: [],
+        files: sib.files,
+        diff: { added: 0, removed: 0 },
+        tokens: 0,
+        durationMs: 0,
+        risk: sib.risk,
+        outside: { reads: 0, writes: 0 },
+        compactions: 0,
+        folded: true,
+        // The zeros above are placeholders. A renderer must read THIS, not them: "not built" and
+        // "changed nothing" are different facts that look identical in the numbers.
+        loaded: false,
+      };
+    }
     // Full (slow-tier) payload: whole-file builds per agent — aggregated HERE so renderers stay thin.
     // EVERY sibling, the session under review included, comes from the on-disk cache: it is keyed to the
     // (transcript, log) stamps, so a session that is still being written misses it naturally and a
@@ -927,9 +1039,8 @@ function cmdMultitask(args: string[]): void {
     // right for the live conversation and badly wrong for a PINNED one — switching to a long finished
     // session paid seconds of transcript parsing on every refresh tick, forever. Live facts (phase,
     // subagent phases) are computed below, outside the cache, so nothing frozen is reported as current.
-    const view = core.siblingOverview(sib.worktree, sib.id, { root: sib.worktree });
+    const view = cached ?? core.siblingOverview(sib.worktree, sib.id, { root: sib.worktree });
     const map = view.map;
-    const sibActions = core.parseActions(sib.worktree, sib.id); // memoized — the sparkline used it too
     // Per-sibling tokens + wall-clock (one light transcript pass) — so Fleet shows the same metric style
     // as Workflows already do. Cached on this slow tier alongside buildChangeMap.
     const usage = core.sessionUsage(sib.worktree, sib.id);
@@ -967,13 +1078,15 @@ function cmdMultitask(args: string[]): void {
       durationMs: usage.durationMs,
       risk: sib.risk,
       // Boundary crossings for the fleet row's ↗ suffix — the footprint's one unique fact, kept after
-      // the badge row was folded into risk/egress. Computed off the actions already parsed for the
-      // sparkline, never a second scan.
-      outside: {
-        reads: core.outsideReads(sibActions, sib.worktree).length,
-        writes: core.outsideWrites(sibActions, sib.worktree).length,
-      },
+      // the badge row was folded into risk/egress.
+      // Two integers from a sidecar-memoized count — NOT a transcript parse. The parse that used to sit
+      // here was 88% of this view's CPU and 458MB of reads per tick, for numbers that only change when
+      // the transcript does. (Its comment claimed "memoized — the sparkline used it too"; the sparkline
+      // moved into the cached siblingOverview long ago, leaving the parse with no second customer.)
+      outside: core.outsideCounts(sib.worktree, sib.id),
       compactions: map.summary.compactions,
+      folded,
+      loaded: true,
     };
   });
 
@@ -1074,7 +1187,7 @@ function flagValue(args: string[], name: string): string | undefined {
 }
 
 /** Flags that consume the token after them — so a numeric VALUE is never read as a positional id. */
-const VALUE_FLAGS = new Set(['--session', '--file', '--under', '--ids', '--root', '--filter', '--dir']);
+const VALUE_FLAGS = new Set(['--session', '--file', '--under', '--ids', '--root', '--filter', '--dir', '--channel']);
 
 /**
  * The positional edit id if one was typed, else undefined — requireId's scan without the failure.
@@ -1165,10 +1278,12 @@ function cmdKeep(args: string[]): void {
   const ui = args.indexOf('--under');
   if (args.includes('--all') || fi >= 0 || ui >= 0) {
     refuseScopeWithId(args, "keep");
-    const fileSub = flagValue(args, "--file");
-    if (fi >= 0 && !fileSub) fail('`keep --file <substr>` requires a value');
-    const under = flagValue(args, "--under");
-    if (ui >= 0 && !under) fail('`keep --under <path>` requires a value');
+    const fileSubRaw = flagValue(args, "--file");
+    if (fi >= 0 && !fileSubRaw) fail('`keep --file <substr>` requires a value');
+    const fileSub = fileSubRaw && core.canonPath(fileSubRaw); // #43: match canonical record paths
+    const underRaw = flagValue(args, "--under");
+    if (ui >= 0 && !underRaw) fail('`keep --under <path>` requires a value');
+    const under = underRaw && canonUnder(underRaw);
     const targets = core
       .readLog(session)
       .filter(
@@ -1233,8 +1348,9 @@ function cmdUndo(args: string[]): void {
     refuseScopeWithId(args, "undo");
     const fileSub = flagValue(args, "--file");
     if (fi >= 0 && !fileSub) fail('`undo --file <substr>` requires a value');
-    const under = flagValue(args, "--under");
-    if (ui >= 0 && !under) fail('`undo --under <path>` requires a value');
+    const underRaw = flagValue(args, "--under");
+    if (ui >= 0 && !underRaw) fail('`undo --under <path>` requires a value');
+    const under = underRaw && canonUnder(underRaw); // #43: undoScope canonicalizes fileSub itself
     let ids: number[] | undefined;
     if (idi >= 0) {
       const raw = args[idi + 1];
@@ -1245,7 +1361,7 @@ function cmdUndo(args: string[]): void {
     const res = core.undoScope(session, { under, fileSubstr: fileSub, ids });
     core.autoClearDemo(session); // a fully reviewed demo session leaves no residue
     if (args.includes('--json')) {
-      emitJson({ undone: res.undone, conflicts: res.conflicts, total: res.total });
+      emitJson({ undone: res.undone, conflicts: res.conflicts, errors: res.errors, firstError: res.firstError ?? null, total: res.total });
       return;
     }
     const scope = fileSub ? ` in files matching "${fileSub}"` : under ? ` under ${relFile(under)}` : ids ? ` in ${ids.length} selected edit(s)` : '';
@@ -1255,11 +1371,15 @@ function cmdUndo(args: string[]): void {
       return;
     }
     process.stdout.write(
-      (res.conflicts ? c.yellow('⚠ ') : c.green('✓ ')) +
+      (res.conflicts || res.errors ? c.yellow('⚠ ') : c.green('✓ ')) +
         `reverted ${res.undone} edit(s)${scope}` +
         (res.conflicts ? ` · ${res.conflicts} conflict(s) left (undo individually with --force)` : '') +
+        (res.errors ? ` · ${res.errors} refused` : '') +
         '\n'
     );
+    // The refusal's remediation pointer (e.g. `clean --phantoms`) must reach the user — a bulk revert
+    // that silently swallows it leaves a session that never empties and no way to learn why.
+    if (res.errors && res.firstError) process.stdout.write(c.yellow('  ↳ ') + res.firstError + '\n');
     return;
   }
   const id = requireId(args);
@@ -1293,8 +1413,9 @@ function cmdRedo(args: string[]): void {
     refuseScopeWithId(args, "redo");
     const fileSub = flagValue(args, "--file");
     if (fi >= 0 && !fileSub) fail('`redo --file <substr>` requires a value');
-    const under = flagValue(args, "--under");
-    if (ui >= 0 && !under) fail('`redo --under <path>` requires a value');
+    const underRaw = flagValue(args, "--under");
+    if (ui >= 0 && !underRaw) fail('`redo --under <path>` requires a value');
+    const under = underRaw && canonUnder(underRaw); // #43: redoScope canonicalizes fileSub itself
     let bulkIds: number[] | undefined;
     if (idi >= 0) {
       const raw = args[idi + 1];
@@ -1421,7 +1542,9 @@ function cmdTaskClear(args: string[]): void {
   const session = getSessionId(args);
   const json = args.includes('--json');
   if (args.includes('--completed')) {
-    const map = core.buildChangeMap(process.cwd(), session, { root: process.cwd() });
+    // Cached: the map this reads is the same one the Overview just built, and re-deriving it cost
+    // seconds on a large session for a rollup that is already sitting on disk.
+    const map = core.cachedChangeMap(process.cwd(), session, { root: process.cwd(), prompts: true });
     // A settled task: strict-attributed edits present, none pending, none undone.
     const settled = map.rollupByTask.filter((t) => t.taskId !== null && t.edits > 0 && t.pending === 0 && t.undone === 0);
     let cleared = 0;
@@ -1584,8 +1707,9 @@ function cmdClean(args: string[]): void {
   // a file/folder (the editors' folder/file Clear action).
   if (args.includes('--resolved')) {
     const ui = args.indexOf('--under');
-    const under = flagValue(args, "--under");
-    if (ui >= 0 && !under) fail('`clean --resolved --under <path>` requires a value');
+    const underRaw = flagValue(args, "--under");
+    if (ui >= 0 && !underRaw) fail('`clean --resolved --under <path>` requires a value');
+    const under = underRaw && canonUnder(underRaw); // #43
     // --ids <a,b,c> clears an EXPLICIT edit set — the scope a prompt names, which no path can express
     // (one ask edits many folders). Same resolver both editors use, so neither invents its own scope.
     const idi = args.indexOf('--ids');
@@ -1627,13 +1751,98 @@ function cmdClean(args: string[]): void {
     process.stdout.write(c.green('✓ ') + `dropped session ${id}\n`);
     return;
   }
+  // Repair (issue #43): drop Windows drive-letter-case phantom pairs — a pending create + delete twin
+  // for one file under two cases, both capture artifacts. Provable pairs only; real work is never touched.
+  if (args.includes('--phantoms')) {
+    const sess = flagValue(args, '--session') ?? core.resolveSessionId(process.cwd());
+    if (!sess) fail('no session resolved — pass --session <id>');
+    const r = core.repairCasePhantoms(sess);
+    if (json) {
+      emitJson({ session: sess, pairs: r.pairs, ids: r.ids });
+      return;
+    }
+    process.stdout.write(
+      r.pairs
+        ? c.green('✓ ') + `removed ${r.pairs} phantom pair(s) (${r.ids.length} records) from ${sess}\n`
+        : `no phantom pairs found in ${sess} — nothing changed\n`
+    );
+    return;
+  }
+  // Destructive: drop every session whose review is finished — nothing pending, conversation over.
+  if (args.includes('--completed')) {
+    // `--stale <Nd>` moves the ABANDONED threshold only; a session with nothing left to review is
+    // reaped on the (much shorter) quiet clock regardless.
+    const si2 = args.indexOf('--stale');
+    const staleSpec = si2 >= 0 ? args[si2 + 1] : null;
+    if (si2 >= 0 && !staleSpec) fail('`clean --completed --stale <Nd>` requires a duration');
+    const staleMs = staleSpec ? parseDuration(staleSpec) : null;
+    if (staleSpec && staleMs === null) fail(`bad --stale value "${staleSpec}" (use e.g. 14d or 36h)`);
+    // A FLOOR, because this is the branch that discards edits nobody reviewed. The `finished` branch is
+    // protected by the fixed 24h quiet clock; without the same floor here, `--stale 0d` reaps every
+    // workspace-local session that has unreviewed work the moment it is typed, with no confirmation and
+    // nothing to undo it. Anyone who genuinely wants that can pass --stale 1d and lose only a day.
+    if (staleMs !== null && staleMs < core.REAP_QUIET_MS)
+      fail(`--stale must be at least 24h — it discards unreviewed edits (got "${staleSpec}")`);
+    // `--dry-run` answers "what WOULD go" without going. It exists because this verb discards
+    // unreviewed edits and, until now, the only way to find out what it would take was to run it. The
+    // JetBrains dialog uses it to state the counts and names before asking, which is what the VS Code
+    // dialog always did by calling core in-process.
+    const dry = args.includes('--dry-run');
+    const doomed = core.reapableSessions(process.cwd(), Date.now(), staleMs ?? undefined);
+    if (!dry) for (const s of doomed) core.removeSession(s.id);
+    if (json) {
+      emitJson({ dropped: dry ? [] : doomed.map((s) => s.id), sessions: doomed, dryRun: dry });
+      return;
+    }
+    if (doomed.length === 0) {
+      // Say WHY there is nothing, and distinguish "the rails spared everything" from "this directory has
+      // no sessions at all" — running it from a subdirectory hits the second and read like the first.
+      const anyHere = core.sessionMeta(process.cwd()).sessions.length > 0;
+      process.stdout.write(
+        anyHere
+          ? 'No sessions to clear — every other one is live, has edits still under review, or is too recent.\n'
+          : `No sessions recorded for ${process.cwd()} — run this from the directory Claude Code was started in.\n`
+      );
+      return;
+    }
+    if (dry) {
+      const fin0 = doomed.filter((s) => s.reason === 'finished').length;
+      const ab0 = doomed.filter((s) => s.reason === 'abandoned');
+      process.stdout.write(
+        `would clear ${doomed.length} session(s): ${fin0} finished` +
+          (ab0.length ? `, ${ab0.length} abandoned (${ab0.reduce((n, s) => n + s.pending, 0)} unreviewed edit(s) would be discarded)` : '') +
+          '\n'
+      );
+      return;
+    }
+    const fin = doomed.filter((s) => s.reason === 'finished').length;
+    const aband = doomed.filter((s) => s.reason === 'abandoned');
+    const lost = aband.reduce((n, s) => n + s.pending, 0);
+    process.stdout.write(
+      c.green('✓ ') +
+        `cleared ${doomed.length} session(s): ${fin} finished` +
+        (aband.length ? `, ${aband.length} abandoned (${lost} unreviewed edit(s) discarded)` : '') +
+        '\n'
+    );
+    return;
+  }
   // Destructive: drop sessions inactive longer than N.
   const oi = args.indexOf('--older-than');
   if (oi >= 0) {
     const spec = args[oi + 1];
     const ms = spec ? parseDuration(spec) : null;
     if (ms === null) fail(`bad --older-than value "${spec ?? ''}" (use e.g. 30d or 12h)`);
-    const stale = core.listSessions().filter((s) => s.lastMs < Date.now() - ms);
+    // `lastMs` is the STORE LOG's mtime, so a long-running conversation that made its edits early
+    // looks ancient by this clock — and this verb's sink is a recursive delete. Excluding the session
+    // the user is actually in costs one resolve and removes the only way this can eat live data.
+    const live = (() => {
+      try {
+        return core.resolveSessionId(process.cwd());
+      } catch {
+        return null;
+      }
+    })();
+    const stale = core.listSessions().filter((s) => s.lastMs < Date.now() - ms && s.id !== live);
     for (const s of stale) core.removeSession(s.id);
     if (json) {
       emitJson({ dropped: stale.map((s) => s.id), olderThan: spec });
@@ -1666,19 +1875,56 @@ function cmdClean(args: string[]): void {
   let removed = 0;
   let bytes = 0;
   let pruned = 0;
+  let maps = 0;
+  let cursors = 0;
+  if (!only) {
+    // Blind spots the store-id loop below cannot see (all three found live on a real store):
+    // 1. Cache dirs for sessions with NO store dir — version-bump orphans survive there forever, since
+    //    nothing else visits them. Superseded VERSIONS only: a live-version cache for a transcript-only
+    //    session is a working cache, not garbage.
+    const storeIds = new Set(targets);
+    for (const id of core.cachedMapSessionIds()) {
+      if (storeIds.has(id)) continue; // the main loop prunes these
+      const m = core.pruneStaleMaps(id);
+      maps += m.removed;
+      bytes += m.bytes;
+    }
+    // 2. Usage cursors whose transcript is gone (hash-keyed, unreachable from any session id).
+    const uc = core.reapUsageCursors();
+    cursors = uc.removed;
+    bytes += uc.bytes;
+    // 3. blob-memo.json: written only by an uncommitted 0.8.6-era build — no released version ever read
+    //    it. 3.7MB of nothing with no owner; this is the only place that can know to drop it.
+    try {
+      const fs = require('fs') as typeof import('fs');
+      const bm = require('path').join(core.rootDir(), 'blob-memo.json') as string;
+      const st = fs.statSync(bm);
+      fs.rmSync(bm, { force: true });
+      bytes += st.size;
+    } catch {
+      /* absent on any store that never ran that build */
+    }
+  }
   for (const id of targets) {
     const r = core.gcSession(id);
     removed += r.removed;
     bytes += r.bytes;
+    // Cached map payloads from an earlier cache version are unreachable but never overwritten, because
+    // the version is part of the filename. The GC is where they get collected.
+    const m = core.pruneStaleMaps(id);
+    maps += m.removed;
+    bytes += m.bytes;
     if (core.pruneEmptySession(id)) pruned++;
   }
   if (json) {
-    emitJson({ removed, bytes, pruned });
+    emitJson({ removed, bytes, pruned, staleMaps: maps, cursors });
     return;
   }
   process.stdout.write(
     c.green('✓ ') +
       `garbage-collected ${removed} orphaned blob(s), freed ${fmtBytes(bytes)}` +
+      (maps ? `, dropped ${maps} superseded cache file(s)` : '') +
+      (cursors ? `, reaped ${cursors} orphaned usage cursor(s)` : '') +
       (pruned ? `, pruned ${pruned} empty stub session(s)` : '') +
       '\n'
   );
@@ -1731,6 +1977,38 @@ function cmdStats(args: string[]): void {
 }
 
 /** `summary` — a per-session review recap (kept/reverted per file + acceptance rate); --markdown to export. */
+/** `export` — the FULL session trace: everything the observatory recorded for one session (the edit
+ *  log with per-edit deltas and unified diffs, capture skips, prompts, every action, tasks,
+ *  subagents, egress, outside-workspace writes, observations, token usage, and the change-map
+ *  summary) as ONE JSON document. Core composes it (`buildSessionTrace`), so the CLI and both
+ *  editors export the identical thing. `--out <file>` writes it; otherwise it prints to stdout. */
+function cmdExport(args: string[]): void {
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  const fs = require('fs');
+  const path = require('path');
+  const session = getSessionId(args);
+  const ri = args.indexOf('--root');
+  const root = flagValue(args, '--root');
+  if (ri >= 0 && !root) fail('`export --root <path>` requires a value');
+  const oi = args.indexOf('--out');
+  const out = flagValue(args, '--out');
+  if (oi >= 0 && !out) fail('`export --out <file>` requires a value');
+  const trace = core.buildSessionTrace(process.cwd(), session, { root: root ?? process.cwd(), toolVersion: version() });
+  const body = JSON.stringify(trace, null, 2) + '\n';
+  if (out) {
+    fs.writeFileSync(out, body);
+    process.stdout.write(
+      c.green('✓ ') +
+        `wrote the full session trace to ${relFile(path.resolve(out))} ` +
+        `(${trace.edits.length} edit(s), ${trace.actions?.length ?? 0} action(s))\n`
+    );
+  } else {
+    process.stdout.write(body);
+  }
+  if (trace.errors.length)
+    process.stderr.write(c.yellow('⚠ ') + `sections that failed to build: ${trace.errors.join(', ')}\n`);
+}
+
 function cmdSummary(args: string[]): void {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const session = getSessionId(args);
@@ -1760,6 +2038,7 @@ function cmdSummary(args: string[]): void {
     process.stdout.write('\n' + c.dim('reverted: ') + s.reverted.map((r) => '#' + r.id).join(' ') + '\n');
   }
   process.stdout.write(c.dim('\nexport:  claude-observatory summary --markdown > review.md\n'));
+  process.stdout.write(c.dim('         claude-observatory export --out trace.json   (the full session trace)\n'));
 }
 
 // --- machine-readable commands for non-Node front-ends (JetBrains plugin, scripts) ---
@@ -1787,7 +2066,7 @@ function cmdLocate(args: string[]): void {
   const fi = args.indexOf('--file');
   const file = flagValue(args, '--file');
   if (!file) fail('`locate --file <path>` is required (current buffer text on stdin)');
-  const abs = path.resolve(file);
+  const abs = core.canonPath(path.resolve(file)); // #43: both editors pass editor-cased paths
   let current: string;
   try {
     current = fs.readFileSync(0, 'utf8'); // stdin
@@ -2128,6 +2407,10 @@ async function cmdSuggest(args: string[]): Promise<void> {
 // --- self-update: fetch the latest GitHub Release and reinstall the CLI (no registry, no deps) ---
 
 const RELEASE_REPO = 'cell-observatory/claude-observatory';
+/** The releases API base — overridable so the update/channel integration test (and an enterprise
+ *  release mirror) can stand in for github.com. Everything else about the flow stays identical:
+ *  asset downloads follow the `browser_download_url`s the API payload itself carries. */
+const RELEASES_API = process.env.CLAUDE_OBSERVATORY_RELEASES_API || `https://api.github.com/repos/${RELEASE_REPO}`;
 // The VS Code-family extension id (publisher.name). We detect the extension by its install DIR (like
 // the JetBrains plugin dirs) so detection never depends on the editor CLI being on PATH; the CLI is
 // only needed to APPLY the update, and is resolved from app-bundle locations when it's off PATH.
@@ -2157,7 +2440,10 @@ type ReleaseAsset = { name: string; browser_download_url: string; digest?: strin
 
 /** GET a URL following redirects, resolving to the response body. Rejects on non-200. */
 function httpGet(url: string, redirects = 5): Promise<Buffer> {
-  const https = require('https');
+  // Protocol-aware: production traffic is https (github.com + its CDN), while the update/channel
+  // integration test serves a LOCAL http mock of the releases API — the one way the real download →
+  // verify → install path gets exercised end-to-end without touching the network.
+  const https = url.startsWith('http://') ? require('http') : require('https');
   return new Promise((resolve, reject) => {
     const req = https.get(
       url,
@@ -2224,9 +2510,35 @@ async function updateCliBinary(assets: ReleaseAsset[], latest: string, current: 
   const dest = await downloadAsset(tgz!);
   const cp = require('child_process');
   process.stdout.write(c.dim('installing globally (npm i -g) …\n'));
-  const r = cp.spawnSync('npm', ['i', '-g', dest], { stdio: 'inherit' });
+  // npm is npm.cmd on Windows — a bare spawn can't exec it without a shell (same rule as the
+  // status-line respawn below).
+  const winShell = process.platform === 'win32';
+  // shell mode concatenates args UNQUOTED — a temp path with a space (spaced Windows usernames)
+  // would split; quote the one arg that carries a user-controlled path.
+  const r = cp.spawnSync(winShell ? 'npm.cmd' : 'npm', ['i', '-g', winShell ? `"${dest}"` : dest], { stdio: 'inherit', shell: winShell });
   if (r.status !== 0) fail(`npm install failed (exit ${r.status ?? '?'}). Try: npm i -g ${dest}`);
   process.stdout.write(c.green('✓ ') + `updated the CLI ${current} → ${latest}\n`);
+  refreshInstalledStatusline();
+}
+
+/** The bundled status line updates WITH the CLI. Updating the observatory used to leave the installed
+ *  ~/.claude/statusline.sh stale until the user re-ran `claude-observatory statusline` by hand — one
+ *  update command now covers both. Runs the freshly-installed GLOBAL binary (not this process, whose
+ *  bundled copy is the old version), and only when ours is actually installed. */
+function refreshInstalledStatusline(): void {
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  if (!core.statuslineInstalled()) return; // some other status line (or none) — never touch it
+  const cp = require('child_process');
+  process.stdout.write(c.dim('refreshing the bundled status line…\n'));
+  const winShell = process.platform === 'win32';
+  const r = cp.spawnSync(winShell ? 'claude-observatory.cmd' : 'claude-observatory', ['statusline'], {
+    stdio: 'inherit',
+    shell: winShell,
+  });
+  if (r.status !== 0)
+    process.stdout.write(
+      c.dim(`status line refresh did not complete — run \`claude-observatory statusline\` yourself.\n`)
+    );
 }
 
 /** Editors in the VS Code family (code/cursor/…) on PATH that already have our extension, with the
@@ -2527,30 +2839,65 @@ async function refreshJetbrainsPlugin(
  * `--check` reports only; `--cli-only` is the old CLI-only behavior; `--force` reinstalls even if
  * already current.
  */
+/** The releases LIST (newest first, drafts invisible anonymously) — ONE fetch answers both
+ *  channels: the first regular release is what `releases/latest` serves, the first prerelease is
+ *  the rolling dev build. Channel choice happens in core (`resolveReleaseFromList`), pure. */
+async function fetchReleases(): Promise<any[]> {
+  try {
+    const list = JSON.parse((await httpGet(`${RELEASES_API}/releases?per_page=100`)).toString('utf8'));
+    return Array.isArray(list) ? list : [];
+  } catch (e: any) {
+    fail(`could not check for updates (need network access to github.com): ${e?.message || e}`);
+  }
+}
+
+const CHANNEL_LABEL = { stable: 'stable', dev: 'pre-release (dev)' } as const;
+
 async function cmdUpdate(args: string[]): Promise<void> {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const current = version();
   const cliOnly = args.includes('--cli-only');
   const checkOnly = args.includes('--check');
   const force = args.includes('--force');
-  let release: any;
-  try {
-    release = JSON.parse((await httpGet(`https://api.github.com/repos/${RELEASE_REPO}/releases/latest`)).toString('utf8'));
-  } catch (e: any) {
-    fail(`could not check for updates (need network access to github.com): ${e?.message || e}`);
-  }
-  const latest = String(release.tag_name || '').replace(/^v/i, '');
+  // --channel <stable|dev>: SWITCH channels — persist the choice and install that channel's newest
+  // in the same breath (a switch installs even when the target version isn't "newer": moving from a
+  // dev build back to stable is a downgrade by semver and must still happen).
+  const chI = args.indexOf('--channel');
+  const chRaw = flagValue(args, '--channel');
+  if (chI >= 0 && !chRaw) fail('`update --channel <stable|dev>` requires a value');
+  const requested = chRaw ? core.normalizeChannel(chRaw) : null;
+  if (chRaw && !requested) fail(`unknown channel "${chRaw}" — use stable or dev (pre-release)`);
+  const switching = requested !== null && requested !== core.getUpdateChannel();
+  const channel = requested ?? core.getUpdateChannel();
+
+  const releases = await fetchReleases();
+  const release: any = core.resolveReleaseFromList(releases, channel);
+  if (!release) fail('no published release found for the repository.');
+  if (channel === 'dev' && release.prerelease !== true)
+    process.stdout.write(c.dim('no pre-release published yet — the stable release is the newest there is.\n'));
+  const latest = core.versionOfRelease(release) ?? '';
   if (!latest) fail('no published release found for the repository.');
   const assets: ReleaseAsset[] = release.assets || [];
-  const cliStale = core.isNewer(latest, current);
+  const cliStale = switching ? latest !== current : core.isNewer(latest, current);
 
   if (checkOnly) {
+    // A PREVIEW is honest about being one: `--check --channel dev` shows what the switch WOULD do —
+    // it never persists, its rows use switch semantics (a switch installs on any version DIFFERENCE,
+    // downgrades included), and the closing hint names the command that actually applies it.
+    process.stdout.write(
+      c.dim(
+        switching
+          ? `channel: ${CHANNEL_LABEL[channel]} (previewing — you follow ${CHANNEL_LABEL[core.getUpdateChannel()]}; nothing switched)\n`
+          : `channel: ${CHANNEL_LABEL[channel]}\n`
+      )
+    );
+    const stale = (v: string) => (switching ? latest !== v : core.isNewer(latest, v));
     process.stdout.write(cliStale ? c.yellow(`CLI: update available ${current} → ${latest}\n`) : c.green(`CLI: up to date (${current})\n`));
     if (!cliOnly) {
       const vs = vscodeInstalls();
       if (vs.length === 0) process.stdout.write(c.dim('VS Code: extension not detected\n'));
       else for (const h of vs) {
-        if (!core.isNewer(latest, h.version)) process.stdout.write(c.green(`${h.label}: up to date (${h.version})\n`));
+        if (!stale(h.version)) process.stdout.write(c.green(`${h.label}: up to date (${h.version})\n`));
         else process.stdout.write(c.yellow(`${h.label}: ${h.version} → ${latest}`) + (h.cli ? '\n' : c.yellow('  (installed but no CLI found to update — install the shell `code` command)\n')));
       }
       const fs = require('fs');
@@ -2559,11 +2906,28 @@ async function cmdUpdate(args: string[]): Promise<void> {
       if (jb.length === 0) process.stdout.write(c.dim('JetBrains: plugin not detected\n'));
       else for (const d of jb) {
         const v = jbInstalledVersion(path.join(d, JB_PLUGIN_DIRNAME));
-        process.stdout.write(v && !core.isNewer(latest, v) ? c.green(`JetBrains: up to date (${v})\n`) : c.yellow(`JetBrains: ${v || 'installed'} → ${latest} (${d})\n`));
+        process.stdout.write(v && !stale(v) ? c.green(`JetBrains: up to date (${v})\n`) : c.yellow(`JetBrains: ${v || 'installed'} → ${latest} (${d})\n`));
       }
     }
-    process.stdout.write(c.dim('run `claude-observatory update` to apply.\n'));
+    if (channel === 'stable') {
+      // The pre-release channel's tip, one dim line — the list is already in hand, and this is the
+      // only place a stable user learns the channel exists from the terminal.
+      const pre: any = releases.find((r: any) => r?.prerelease === true && !r?.draft);
+      const preVer = core.versionOfRelease(pre);
+      if (preVer)
+        process.stdout.write(c.dim(`pre-release channel: ${preVer} — switch with \`claude-observatory update --channel dev\`\n`));
+    }
+    process.stdout.write(
+      c.dim(switching ? `run \`claude-observatory update --channel ${requested}\` to apply.\n` : 'run `claude-observatory update` to apply.\n')
+    );
     return;
+  }
+
+  // Persist the switch only once the target channel RESOLVED — a typo or an offline check must not
+  // strand the config on a channel whose release was never even looked up.
+  if (requested !== null && requested !== core.getUpdateChannel()) {
+    core.setUpdateChannel(requested);
+    process.stdout.write(c.green('✓ ') + `switched to the ${CHANNEL_LABEL[requested]} channel\n`);
   }
 
   if (cliOnly) {
@@ -2572,9 +2936,10 @@ async function cmdUpdate(args: string[]): Promise<void> {
     return;
   }
 
-  if (cliStale) await updateCliBinary(assets, latest, current);
-  const vscode = await refreshVscodeExtension(assets, latest, force);
-  const jetbrains = await refreshJetbrainsPlugin(assets, latest, force);
+  if (cliStale) await updateCliBinary(assets, latest, current); // refreshes the status line itself
+  else refreshInstalledStatusline(); // CLI already current — still heal a statusline.sh an older CLI wrote
+  const vscode = await refreshVscodeExtension(assets, latest, force || switching);
+  const jetbrains = await refreshJetbrainsPlugin(assets, latest, force || switching);
   if (vscode === 'blocked' || jetbrains === 'blocked') {
     // Something is installed but couldn't be updated — never let this pass as success/silence.
     process.stdout.write(c.yellow('⚠ ') + 'an installed extension could not be updated (see the note above).\n');
@@ -2589,7 +2954,9 @@ async function cmdUpdate(args: string[]): Promise<void> {
           c.dim('  install the VS Code / JetBrains extensions via scripts/bootstrap.sh or the release assets.\n')
       );
     } else {
-      process.stdout.write(c.green('✓ ') + `everything is up to date (${latest})\n`);
+      process.stdout.write(
+        c.green('✓ ') + `everything is up to date (${latest}${channel === 'dev' ? ', pre-release channel' : ''})\n`
+      );
     }
   }
 }
@@ -2599,26 +2966,45 @@ async function cmdUpdate(args: string[]): Promise<void> {
  *  `-v` / `--version` stay a pure one-line print so scripts can rely on them. */
 async function cmdVersion(args: string[]): Promise<void> {
   const cur = version();
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  const json = args.includes('--json');
   if (!(args.includes('--check') || args.includes('--latest'))) {
+    // Network-free forms. `--json` is what the editors' version chip renders BEFORE any fetch:
+    // the installed version + the followed channel, instantly.
+    if (json) {
+      emitJson({ current: cur, channel: core.getUpdateChannel() });
+      return;
+    }
     process.stdout.write(`claude-observatory ${cur}\n`);
     return;
   }
-  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
-  let latest = '';
-  try {
-    const release = JSON.parse(
-      (await httpGet(`https://api.github.com/repos/${RELEASE_REPO}/releases/latest`)).toString('utf8')
-    );
-    latest = String(release.tag_name || '').replace(/^v/i, '');
-  } catch (e: any) {
-    fail(`could not fetch the latest release (installed ${cur}; need network access to github.com): ${e?.message || e}`);
-  }
+  const channel = core.getUpdateChannel();
+  const releases = await fetchReleases();
+  const pick = (ch: 'stable' | 'dev') => {
+    const r: any = core.resolveReleaseFromList(releases, ch);
+    // dev falls back to stable when no prerelease exists — report null instead, so a consumer can
+    // tell "no pre-release published" apart from "the pre-release equals stable".
+    return ch === 'dev' && r && r.prerelease !== true ? null : core.versionOfRelease(r);
+  };
+  const stableLatest = pick('stable');
+  const devLatest = pick('dev');
+  const latest = (channel === 'dev' ? devLatest ?? stableLatest : stableLatest) ?? '';
   if (!latest) fail('no published release found for the repository.');
-  writeUpdateCache({ checkedMs: Date.now(), latestTag: latest }); // an explicit check also freshens the daily nudge
+  writeUpdateCache({
+    checkedMs: Date.now(),
+    latestTag: stableLatest,
+    latestDevTag: devLatest,
+  }); // an explicit check also freshens the daily nudge
   const newer = core.isNewer(latest, cur);
+  if (json) {
+    // The editors' version dropdown: one call answers the chip, the Update row, and both channel rows.
+    emitJson({ current: cur, channel, latest, updateAvailable: newer, stableLatest, devLatest });
+    return;
+  }
   process.stdout.write(
-    `installed   ${c.bold(cur)}\n` +
-      `latest      ${c.bold(latest)}   ${newer ? c.yellow('← update available') : c.green('✓ up to date')}\n`
+    `installed   ${c.bold(cur)}   ${c.dim(`(${CHANNEL_LABEL[channel]} channel)`)}\n` +
+      `latest      ${c.bold(latest)}   ${newer ? c.yellow('← update available') : c.green('✓ up to date')}\n` +
+      (channel === 'stable' && devLatest ? c.dim(`pre-release ${devLatest}   (switch: \`update --channel dev\`)\n`) : '')
   );
   if (newer) {
     process.stdout.write(c.dim('run `claude-observatory update` to apply, or `update --check` to see every surface.\n'));
@@ -2638,11 +3024,14 @@ function usage(): void {
       `  status               show hooks + hook-path health + session + edit counts\n` +
       `  doctor [--json]      diagnose setup (hooks, PATH, config dir, session, status line) with fixes;\n` +
       `                       --markdown (--md) emits the report as Markdown\n` +
-      `  update [--check] [--cli-only] [--force]\n` +
+      `  update [--check] [--cli-only] [--force] [--channel stable|dev]\n` +
       `                       update the CLI AND refresh the locally-installed editor extensions from\n` +
-      `                       the latest GitHub Release (VS Code via \`code --install-extension\`;\n` +
-      `                       JetBrains by unzip into plugin dirs). --check reports only; --cli-only\n` +
-      `                       skips the extensions; --force reinstalls even if already current\n` +
+      `                       the followed release channel (VS Code via \`code --install-extension\`;\n` +
+      `                       JetBrains by unzip into plugin dirs), and refresh the bundled status\n` +
+      `                       line when ours is installed. --check reports only; --cli-only\n` +
+      `                       skips the extensions; --force reinstalls even if already current;\n` +
+      `                       --channel switches between stable and the rolling pre-release (dev)\n` +
+      `                       and installs that channel's newest in the same run\n` +
       `  sessions             this workspace's sessions, newest conversation first (● = this directory's)\n` +
       `  list [filters]       list edits (grouped by file); filters: --pending|--kept|--undone, --file <substr>\n` +
       `  timeline [--json]    edits newest-first as a chronological feed (time · id · Δ · file)\n` +
@@ -2694,10 +3083,18 @@ function usage(): void {
       `  demo --touch [--json]  keep a running demo inside the fleet's active window (mtime only)\n` +
       `  demo --clean [--json]  remove every trace (both sessions, stores, demo folder, scratch dir)\n` +
       `  demo --status [--json] whether a demo is recorded for this folder\n` +
+      `  resolve [--session <id>]  accept every pending edit in a session, then clear its records; --json\n` +
+      `  warm [--root <d>]    pre-build recent sessions so switching to one is instant (--since <dur>); --json\n` +
       `  clean [opts]         GC orphaned blobs (--session <id> scopes; --json for structured output);\n` +
       `                       --drop <id> | --older-than <Nd> | --all | --resolved [--under <path> | --ids <a,b,c>]\n` +
+      `                       --completed [--stale <Nd>] [--dry-run]  drop FINISHED sessions (nothing\n` +
+      `                       left to review) and ABANDONED ones (unreviewed but dead >14d; their edits\n` +
+      `                       are discarded) — --dry-run lists what would go without dropping anything\n` +
+      `                       --phantoms [--session <id>]  remove Windows path-case phantom pairs (#43)\n` +
       `  stats [--json]       usage stats (edits/tokens/messages/thinking/output) by session & window\n` +
       `  summary [--markdown] per-session review recap (kept/reverted per file); --markdown to export\n` +
+      `  export [--out <f>]   the FULL session trace as JSON — every edit with its diff, skips, prompts,\n` +
+      `                       actions, tasks, subagents, egress, outside writes, observations, usage\n` +
       `  insights [--json]    Observations view: recap + per-edit reasoning/flags/file-memory + next steps\n\n` +
       `machine-readable (for front-ends/scripts; list/status/sessions/keep/undo/redo also take --json):\n` +
       `  blob <sha>           raw blob bytes to stdout\n` +
@@ -2723,7 +3120,9 @@ function usage(): void {
       `  recap                one-line session recap   [--json --fresh --claude-bin <path>]\n` +
       `  suggest              next-steps + suggestions [--json --fresh --claude-bin <path>]\n\n` +
       `  --session <id>       target a specific session instead of the newest\n` +
-      `  version [--check]    print the installed version; --check (or --latest) also shows the latest release\n` +
+      `  version [--check] [--json]\n` +
+      `                       print the installed version (--json adds the channel); --check (or --latest)\n` +
+      `                       also shows the newest release of BOTH channels (--json feeds the editors' chip)\n` +
       `  --version            print the installed CLI version\n`
   );
 }
@@ -2734,7 +3133,7 @@ function usage(): void {
 // fills the cache for the NEXT run. Only for interactive (TTY) human invocations — never the capture
 // hot path, `--json` output, or the JetBrains plugin. Opt out: CLAUDE_OBSERVATORY_NO_UPDATE_CHECK=1.
 
-type UpdateCache = { checkedMs: number; latestTag: string | null };
+type UpdateCache = { checkedMs: number; latestTag: string | null; latestDevTag?: string | null };
 
 function updateCachePath(): string {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
@@ -2745,7 +3144,11 @@ function readUpdateCache(): UpdateCache | null {
   try {
     const j = JSON.parse(require('fs').readFileSync(updateCachePath(), 'utf8'));
     if (typeof j?.checkedMs === 'number') {
-      return { checkedMs: j.checkedMs, latestTag: typeof j.latestTag === 'string' ? j.latestTag : null };
+      return {
+        checkedMs: j.checkedMs,
+        latestTag: typeof j.latestTag === 'string' ? j.latestTag : null,
+        latestDevTag: typeof j.latestDevTag === 'string' ? j.latestDevTag : null,
+      };
     }
   } catch {
     /* no cache yet / unreadable — treated as "never checked" */
@@ -2768,11 +3171,14 @@ function writeUpdateCache(v: UpdateCache): void {
  *  Prints nothing; failures are swallowed so an offline machine just keeps the previous cached tag. */
 async function refreshUpdateCache(): Promise<void> {
   try {
-    const release = JSON.parse(
-      (await httpGet(`https://api.github.com/repos/${RELEASE_REPO}/releases/latest`)).toString('utf8')
+    const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+    const list = JSON.parse(
+      (await httpGet(`${RELEASES_API}/releases?per_page=100`)).toString('utf8')
     );
-    const tag = String(release.tag_name || '').replace(/^v/i, '') || null;
-    writeUpdateCache({ checkedMs: Date.now(), latestTag: tag });
+    const releases: any[] = Array.isArray(list) ? list : [];
+    const stable: any = core.resolveReleaseFromList(releases, 'stable');
+    const dev: any = releases.find((r: any) => r?.prerelease === true && !r?.draft) ?? null;
+    writeUpdateCache({ checkedMs: Date.now(), latestTag: core.versionOfRelease(stable), latestDevTag: core.versionOfRelease(dev) });
   } catch {
     /* offline / rate-limited: the parent already wrote a throttle timestamp; keep the old tag */
   }
@@ -2794,12 +3200,14 @@ function maybeCheckForUpdate(cmd: string | undefined, rest: string[]): void {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const cache = readUpdateCache();
   const cur = version();
-  if (cache?.latestTag && core.isNewer(cache.latestTag, cur)) {
-    const latest = cache.latestTag;
+  // The nudge follows the ACTIVE channel: a dev-channel install compares against the rolling
+  // pre-release tag, never against stable (which is older than every dev build by construction).
+  const channelTag = core.getUpdateChannel() === 'dev' ? cache?.latestDevTag ?? cache?.latestTag : cache?.latestTag;
+  if (channelTag && core.isNewer(channelTag, cur)) {
     // Print AFTER the command's output, once, to stderr — never pollutes stdout / --json consumers.
     process.on('exit', () => {
       try {
-        process.stderr.write(c.dim(`\nupdate available (${cur} → ${latest}) — run \`claude-observatory update\`\n`));
+        process.stderr.write(c.dim(`\nupdate available (${cur} → ${channelTag}) — run \`claude-observatory update\`\n`));
       } catch {
         /* stream already closed */
       }
@@ -2807,7 +3215,9 @@ function maybeCheckForUpdate(cmd: string | undefined, rest: string[]): void {
   }
   const DAY = 24 * 60 * 60 * 1000;
   if (!cache || Date.now() - cache.checkedMs > DAY) {
-    writeUpdateCache({ checkedMs: Date.now(), latestTag: cache?.latestTag ?? null }); // optimistic throttle
+    // The optimistic throttle must carry BOTH tags forward — dropping latestDevTag here silently
+    // ate a dev-channel machine's known-update nudge until the next successful network refresh.
+    writeUpdateCache({ checkedMs: Date.now(), latestTag: cache?.latestTag ?? null, latestDevTag: cache?.latestDevTag ?? null });
     try {
       require('child_process')
         .spawn(process.execPath, [__filename, '__update-check'], { detached: true, stdio: 'ignore' })
@@ -2865,6 +3275,13 @@ function main(): void {
       break;
     case 'sessions':
       cmdSessions(rest);
+      break;
+    // Deliberately NOT a `views` member: it WRITES caches, and that batch is read-only by contract.
+    case 'resolve':
+      cmdResolve(rest);
+      break;
+    case 'warm':
+      cmdWarm(rest);
       break;
     case 'list':
       cmdList(rest);
@@ -2950,6 +3367,9 @@ function main(): void {
       break;
     case 'summary':
       cmdSummary(rest);
+      break;
+    case 'export':
+      cmdExport(rest);
       break;
     case 'blob':
       cmdBlob(rest);
