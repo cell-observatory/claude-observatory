@@ -68,7 +68,7 @@ function getSessionId(args: string[]): string {
   if (!id) {
     fail(
       `could not resolve an active Claude Code session for ${process.cwd()}.\n` +
-      `  Run this from your workspace root, or pass --session <id>.`
+        `  Run this from your workspace root, or pass --session <id>.`
     );
   }
   // Reject a traversing/garbage session id before it reaches any store path (read, write, or delete).
@@ -113,17 +113,17 @@ function cmdInit(project: boolean, withStatusline = false): void {
   }
   process.stdout.write(
     c.green('✓ ') +
-    `installed capture hooks into ${res.settingsPath}\n` +
-    (res.backupPath ? c.dim(`  backup: ${res.backupPath}\n`) : '') +
-    c.dim(`  command: ${command}\n`) +
-    (project
-      ? c.yellow(
-        '  note: project hooks call `claude-observatory` on PATH — teammates need it installed ' +
-        '(npm i -g claude-observatory) for capture to run.\n'
-      )
-      : '') +
-    `Edits made by Claude Code (Edit/Write/MultiEdit/NotebookEdit — plus files changed by Bash; ` +
-    `set CLAUDE_OBSERVATORY_NO_BASH=1 to opt out) will now be tracked.\n`
+      `installed capture hooks into ${res.settingsPath}\n` +
+      (res.backupPath ? c.dim(`  backup: ${res.backupPath}\n`) : '') +
+      c.dim(`  command: ${command}\n`) +
+      (project
+        ? c.yellow(
+            '  note: project hooks call `claude-observatory` on PATH — teammates need it installed ' +
+              '(npm i -g claude-observatory) for capture to run.\n'
+          )
+        : '') +
+      `Edits made by Claude Code (Edit/Write/MultiEdit/NotebookEdit — plus files changed by Bash; ` +
+      `set CLAUDE_OBSERVATORY_NO_BASH=1 to opt out) will now be tracked.\n`
   );
   if (statuslineNote) process.stdout.write(statuslineNote);
   if (withStatusline) cmdStatusline();
@@ -168,12 +168,12 @@ function cmdUninstall(args: string[]): void {
   // We can't remove the global CLI or the editor extensions from here — print the exact steps.
   process.stdout.write(
     '\n' + c.bold('To finish removing Claude Observatory:\n') +
-    c.dim('  • CLI:        ') + 'npm rm -g claude-observatory\n' +
-    c.dim('  • VS Code:    ') + 'uninstall the “Claude Observatory” extension (Extensions view)\n' +
-    c.dim('  • JetBrains:  ') + 'Settings → Plugins → Claude Observatory → Uninstall\n' +
-    (args.includes('--purge-store')
-      ? ''
-      : c.dim('  • Stored edits: ') + '`claude-observatory clean --all`  (or re-run with `--purge-store`)\n')
+      c.dim('  • CLI:        ') + 'npm rm -g claude-observatory\n' +
+      c.dim('  • VS Code:    ') + 'uninstall the “Claude Observatory” extension (Extensions view)\n' +
+      c.dim('  • JetBrains:  ') + 'Settings → Plugins → Claude Observatory → Uninstall\n' +
+      (args.includes('--purge-store')
+        ? ''
+        : c.dim('  • Stored edits: ') + '`claude-observatory clean --all`  (or re-run with `--purge-store`)\n')
   );
 }
 
@@ -228,14 +228,14 @@ function cmdStatus(args: string[] = []): void {
   const last = log.length ? core.relTime(core.maxOf(log.map((r) => r.ts))) : 'never';
   process.stdout.write(
     `active session:  ${session}\n` +
-    `store:           ${core.storeDir(session)}\n` +
-    `last capture:    ${last}\n` +
-    `edits:           ${log.length}  ${c.dim(`(${by('pending')} pending · ${by('kept')} kept · ${by('undone')} undone)`)}\n`
+      `store:           ${core.storeDir(session)}\n` +
+      `last capture:    ${last}\n` +
+      `edits:           ${log.length}  ${c.dim(`(${by('pending')} pending · ${by('kept')} kept · ${by('undone')} undone)`)}\n`
   );
   if (skips.length) {
     process.stdout.write(
       c.yellow(`not captured:    ${skips.length} change(s)`) +
-      c.dim(' — too large (>5MB) / binary, or a Bash tree too large to snapshot\n')
+        c.dim(' — too large (>5MB) / binary, or a Bash tree too large to snapshot\n')
     );
   }
 }
@@ -276,7 +276,7 @@ function cmdDoctor(args: string[]): void {
   const icon = (l: string) => (l === 'ok' ? c.green('✓') : l === 'warn' ? c.yellow('⚠') : c.red('✗'));
   process.stdout.write(
     c.bold(`claude-observatory doctor`) +
-    c.dim(`  v${version()} · ${(require('@claude-observatory/core') as typeof import('@claude-observatory/core')).getUpdateChannel() === 'dev' ? 'pre-release (dev)' : 'stable'} channel\n\n`)
+      c.dim(`  v${version()} · ${(require('@claude-observatory/core') as typeof import('@claude-observatory/core')).getUpdateChannel() === 'dev' ? 'pre-release (dev)' : 'stable'} channel\n\n`)
   );
   for (const ch of checks) {
     process.stdout.write(`${icon(ch.level)} ${ch.label}\n    ${c.dim(ch.detail)}\n`);
@@ -286,11 +286,11 @@ function cmdDoctor(args: string[]): void {
   const warns = checks.filter((ch) => ch.level === 'warn').length;
   process.stdout.write(
     '\n' +
-    (fails
-      ? c.red(`${fails} problem(s) to fix`) + (warns ? c.yellow(` · ${warns} warning(s)`) : '') + '\n'
-      : warns
-        ? c.yellow(`critical checks passed · ${warns} warning(s)`) + '\n'
-        : c.green('all checks passed') + '\n')
+      (fails
+        ? c.red(`${fails} problem(s) to fix`) + (warns ? c.yellow(` · ${warns} warning(s)`) : '') + '\n'
+        : warns
+          ? c.yellow(`critical checks passed · ${warns} warning(s)`) + '\n'
+          : c.green('all checks passed') + '\n')
   );
   process.exit(fails ? 1 : 0);
 }
@@ -455,7 +455,7 @@ function cmdList(args: string[]): void {
   const pending = log.filter((r) => r.status === 'pending').length;
   process.stdout.write(
     c.bold(`${log.length} edit(s)`) +
-    c.dim(`  ·  ${pending} pending${only ? ` · ${only} only` : ''}  ·  session ${session}\n\n`)
+      c.dim(`  ·  ${pending} pending${only ? ` · ${only} only` : ''}  ·  session ${session}\n\n`)
   );
   for (const [file, recs] of byFile) {
     process.stdout.write(c.cyan(relFile(file)) + '\n');
@@ -543,7 +543,7 @@ function cmdActions(args: string[]): void {
     .join(' · ');
   process.stdout.write(
     c.bold('Actions') +
-    c.dim(`  ${sum.total} total · ${cats}${sum.errors ? ` · ${sum.errors} error(s)` : ''} · session ${session}\n\n`)
+      c.dim(`  ${sum.total} total · ${cats}${sum.errors ? ` · ${sum.errors} error(s)` : ''} · session ${session}\n\n`)
   );
   const ci = args.indexOf('--category');
   const catFilter = ci >= 0 ? args[ci + 1] : '';
@@ -965,7 +965,7 @@ function cmdSiblings(args: string[]): void {
   }
   process.stdout.write(
     c.bold('Fleet') +
-    c.dim(`  ${sum.total} session(s) · ${sum.active} active · ${sum.siblings} sibling(s) · ${sum.pending} pending across siblings\n\n`)
+      c.dim(`  ${sum.total} session(s) · ${sum.active} active · ${sum.siblings} sibling(s) · ${sum.pending} pending across siblings\n\n`)
   );
   for (const s of sessions) {
     const dot = s.active ? c.green('●') : c.dim('○');
@@ -1145,26 +1145,26 @@ function cmdMetrics(args: string[]): void {
   process.stdout.write(c.bold('Metrics') + c.dim(`  session ${session}\n\n`));
   process.stdout.write(
     `  edits         ${m.edits.count}  ${c.green('+' + m.edits.added)} ${c.red('-' + m.edits.removed)}  ` +
-    c.dim(`${m.edits.pending} pending · ${m.edits.kept} kept · ${m.edits.undone} undone`) +
-    '\n'
+      c.dim(`${m.edits.pending} pending · ${m.edits.kept} kept · ${m.edits.undone} undone`) +
+      '\n'
   );
   process.stdout.write(`  actions       ${m.actions.total}${m.actions.errors ? c.red(`  ${m.actions.errors} error(s)`) : ''}\n`);
   process.stdout.write(
     `  subagents     ${m.subagents.count}` +
-    (m.subagents.count
-      ? c.dim(
-        `  ${m.subagents.totalActions} action(s) · ${m.subagents.totalEdits} edit(s)` +
-        (m.subagents.totalDurationMs ? ` · ${fmtDur(m.subagents.totalDurationMs)}` : '') +
-        (m.subagents.totalTokens ? ` · ${human(m.subagents.totalTokens)} tok` : '')
-      )
-      : '') +
-    '\n'
+      (m.subagents.count
+        ? c.dim(
+            `  ${m.subagents.totalActions} action(s) · ${m.subagents.totalEdits} edit(s)` +
+              (m.subagents.totalDurationMs ? ` · ${fmtDur(m.subagents.totalDurationMs)}` : '') +
+              (m.subagents.totalTokens ? ` · ${human(m.subagents.totalTokens)} tok` : '')
+          )
+        : '') +
+      '\n'
   );
   if (m.toolLatency.count)
     process.stdout.write(
       `  tool latency  ` +
-      c.dim(`median ${fmtDur(m.toolLatency.medianMs)} · p95 ${fmtDur(m.toolLatency.p95Ms)} · max ${fmtDur(m.toolLatency.maxMs)} (${m.toolLatency.count} call(s))`) +
-      '\n'
+        c.dim(`median ${fmtDur(m.toolLatency.medianMs)} · p95 ${fmtDur(m.toolLatency.p95Ms)} · max ${fmtDur(m.toolLatency.maxMs)} (${m.toolLatency.count} call(s))`) +
+        '\n'
     );
   if (m.spanMs) process.stdout.write(`  span          ${c.dim(fmtDur(m.spanMs))}\n`);
 }
@@ -1215,8 +1215,8 @@ function refuseScopeWithId(args: string[], verb: string): void {
   if (id === undefined) return;
   fail(
     `\`${verb}\` was given both a scope flag and edit id ${id}, which mean different things.\n` +
-    `  For just that edit:   claude-observatory ${verb} ${id}\n` +
-    `  For the whole scope:  drop the id and re-run.`
+      `  For just that edit:   claude-observatory ${verb} ${id}\n` +
+      `  For the whole scope:  drop the id and re-run.`
   );
 }
 
@@ -1372,10 +1372,10 @@ function cmdUndo(args: string[]): void {
     }
     process.stdout.write(
       (res.conflicts || res.errors ? c.yellow('⚠ ') : c.green('✓ ')) +
-      `reverted ${res.undone} edit(s)${scope}` +
-      (res.conflicts ? ` · ${res.conflicts} conflict(s) left (undo individually with --force)` : '') +
-      (res.errors ? ` · ${res.errors} refused` : '') +
-      '\n'
+        `reverted ${res.undone} edit(s)${scope}` +
+        (res.conflicts ? ` · ${res.conflicts} conflict(s) left (undo individually with --force)` : '') +
+        (res.errors ? ` · ${res.errors} refused` : '') +
+        '\n'
     );
     // The refusal's remediation pointer (e.g. `clean --phantoms`) must reach the user — a bulk revert
     // that silently swallows it leaves a session that never empties and no way to learn why.
@@ -1435,9 +1435,9 @@ function cmdRedo(args: string[]): void {
     }
     process.stdout.write(
       (bulk.conflicts ? c.yellow('⚠ ') : c.green('✓ ')) +
-      `re-applied ${bulk.redone} edit(s)${scope}` +
-      (bulk.conflicts ? ` · ${bulk.conflicts} conflict(s) left (redo individually with --force)` : '') +
-      '\n'
+        `re-applied ${bulk.redone} edit(s)${scope}` +
+        (bulk.conflicts ? ` · ${bulk.conflicts} conflict(s) left (redo individually with --force)` : '') +
+        '\n'
     );
     return;
   }
@@ -1474,9 +1474,9 @@ function requireTaskId(args: string[], session: string): string {
   if (!known.includes(found)) {
     fail(
       `no task ${found} in session ${session}.\n` +
-      (known.length
-        ? `  This session's task ids: ${known.join(', ')}`
-        : '  This session has no tasks (nothing ever entered in_progress).')
+        (known.length
+          ? `  This session's task ids: ${known.join(', ')}`
+          : '  This session has no tasks (nothing ever entered in_progress).')
     );
   }
   return found;
@@ -1508,9 +1508,9 @@ function cmdTaskKeep(args: string[]): void {
   }
   process.stdout.write(
     c.green('✓ ') +
-    `kept ${res.kept} edit(s) in task ${taskId}` +
-    (res.total !== res.kept ? c.dim(` (${res.total} in the task's strict span)`) : '') +
-    '\n'
+      `kept ${res.kept} edit(s) in task ${taskId}` +
+      (res.total !== res.kept ? c.dim(` (${res.total} in the task's strict span)`) : '') +
+      '\n'
   );
 }
 
@@ -1528,9 +1528,9 @@ function cmdTaskUndo(args: string[]): void {
   }
   process.stdout.write(
     (res.conflicts ? c.yellow('⚠ ') : c.green('✓ ')) +
-    `reverted ${res.undone} edit(s) in task ${taskId}` +
-    (res.conflicts ? ` · ${res.conflicts} conflict(s) left (undo individually with --force)` : '') +
-    '\n'
+      `reverted ${res.undone} edit(s) in task ${taskId}` +
+      (res.conflicts ? ` · ${res.conflicts} conflict(s) left (undo individually with --force)` : '') +
+      '\n'
   );
 }
 
@@ -1616,11 +1616,11 @@ async function cmdDemo(args: string[]): Promise<void> {
     process.stdout.write(
       c.dim(
         `${steps.length} steps · start the session they describe with: claude-observatory demo\n` +
-        (track === 'everything'
-          ? `  the short track is ${sizes.essentials} of these: demo --tour --essentials\n`
-          : track === 'essentials'
-            ? `  the other ${sizes.remainder}: demo --tour --remainder   ·   all ${sizes.everything}: demo --tour\n`
-            : `  all ${sizes.everything} steps: demo --tour\n`)
+          (track === 'everything'
+            ? `  the short track is ${sizes.essentials} of these: demo --tour --essentials\n`
+            : track === 'essentials'
+              ? `  the other ${sizes.remainder}: demo --tour --remainder   ·   all ${sizes.everything}: demo --tour\n`
+              : `  all ${sizes.everything} steps: demo --tour\n`)
       )
     );
     return;
@@ -1645,10 +1645,10 @@ async function cmdDemo(args: string[]): Promise<void> {
     }
     process.stdout.write(
       c.green('✓ ') +
-      `removed ${res.sessions.length} demo session(s)` +
-      (res.workspaces.length ? ` and ${res.workspaces.map(relFile).join(', ')}` : '') +
-      (res.scratch.length ? ` and ${res.scratch.length} scratch dir(s)` : '') +
-      '\n'
+        `removed ${res.sessions.length} demo session(s)` +
+        (res.workspaces.length ? ` and ${res.workspaces.map(relFile).join(', ')}` : '') +
+        (res.scratch.length ? ` and ${res.scratch.length} scratch dir(s)` : '') +
+        '\n'
     );
     return;
   }
@@ -1682,10 +1682,10 @@ async function cmdDemo(args: string[]): Promise<void> {
   }
   process.stdout.write(
     c.green('✓ ') +
-    `demo session ${res.session} is live — ${res.edits} pending edits in ${relFile(res.workspace)}` +
-    (res.sibling ? ', plus a second agent on demo/hotfix' : '') +
-    '\n' +
-    c.dim('  guided tour: claude-observatory demo --tour   ·   remove every trace: claude-observatory demo --clean\n')
+      `demo session ${res.session} is live — ${res.edits} pending edits in ${relFile(res.workspace)}` +
+      (res.sibling ? ', plus a second agent on demo/hotfix' : '') +
+      '\n' +
+      c.dim('  guided tour: claude-observatory demo --tour   ·   remove every trace: claude-observatory demo --clean\n')
   );
 }
 
@@ -1810,8 +1810,8 @@ function cmdClean(args: string[]): void {
       const ab0 = doomed.filter((s) => s.reason === 'abandoned');
       process.stdout.write(
         `would clear ${doomed.length} session(s): ${fin0} finished` +
-        (ab0.length ? `, ${ab0.length} abandoned (${ab0.reduce((n, s) => n + s.pending, 0)} unreviewed edit(s) would be discarded)` : '') +
-        '\n'
+          (ab0.length ? `, ${ab0.length} abandoned (${ab0.reduce((n, s) => n + s.pending, 0)} unreviewed edit(s) would be discarded)` : '') +
+          '\n'
       );
       return;
     }
@@ -1820,9 +1820,9 @@ function cmdClean(args: string[]): void {
     const lost = aband.reduce((n, s) => n + s.pending, 0);
     process.stdout.write(
       c.green('✓ ') +
-      `cleared ${doomed.length} session(s): ${fin} finished` +
-      (aband.length ? `, ${aband.length} abandoned (${lost} unreviewed edit(s) discarded)` : '') +
-      '\n'
+        `cleared ${doomed.length} session(s): ${fin} finished` +
+        (aband.length ? `, ${aband.length} abandoned (${lost} unreviewed edit(s) discarded)` : '') +
+        '\n'
     );
     return;
   }
@@ -1922,11 +1922,11 @@ function cmdClean(args: string[]): void {
   }
   process.stdout.write(
     c.green('✓ ') +
-    `garbage-collected ${removed} orphaned blob(s), freed ${fmtBytes(bytes)}` +
-    (maps ? `, dropped ${maps} superseded cache file(s)` : '') +
-    (cursors ? `, reaped ${cursors} orphaned usage cursor(s)` : '') +
-    (pruned ? `, pruned ${pruned} empty stub session(s)` : '') +
-    '\n'
+      `garbage-collected ${removed} orphaned blob(s), freed ${fmtBytes(bytes)}` +
+      (maps ? `, dropped ${maps} superseded cache file(s)` : '') +
+      (cursors ? `, reaped ${cursors} orphaned usage cursor(s)` : '') +
+      (pruned ? `, pruned ${pruned} empty stub session(s)` : '') +
+      '\n'
   );
 }
 
@@ -1966,11 +1966,11 @@ function cmdStats(args: string[]): void {
   for (const [label, key] of metrics) {
     process.stdout.write(
       pad(label, 11) +
-      pad(human(w.session[key]), 10) +
-      pad(human(w.day[key]), 10) +
-      pad(human(w.week[key]), 10) +
-      human(w.month[key]) +
-      '\n'
+        pad(human(w.session[key]), 10) +
+        pad(human(w.day[key]), 10) +
+        pad(human(w.week[key]), 10) +
+        human(w.month[key]) +
+        '\n'
     );
   }
   process.stdout.write(c.dim('\nthinking tokens are estimated (~chars/4); tokens include cache.\n'));
@@ -1999,8 +1999,8 @@ function cmdExport(args: string[]): void {
     fs.writeFileSync(out, body);
     process.stdout.write(
       c.green('✓ ') +
-      `wrote the full session trace to ${relFile(path.resolve(out))} ` +
-      `(${trace.edits.length} edit(s), ${trace.actions?.length ?? 0} action(s))\n`
+        `wrote the full session trace to ${relFile(path.resolve(out))} ` +
+        `(${trace.edits.length} edit(s), ${trace.actions?.length ?? 0} action(s))\n`
     );
   } else {
     process.stdout.write(body);
@@ -2024,14 +2024,14 @@ function cmdSummary(args: string[]): void {
   const pct = s.acceptanceRate === null ? '—' : `${Math.round(s.acceptanceRate * 100)}%`;
   process.stdout.write(
     c.bold('Review summary') +
-    c.dim(`  session ${session}\n\n`) +
-    `${s.total} edit(s) · ${c.yellow(s.pending + ' pending')} · ${c.green(s.kept + ' kept')} · ` +
-    `${c.dim(s.undone + ' reverted')} · ${pct} accepted\n\n`
+      c.dim(`  session ${session}\n\n`) +
+      `${s.total} edit(s) · ${c.yellow(s.pending + ' pending')} · ${c.green(s.kept + ' kept')} · ` +
+      `${c.dim(s.undone + ' reverted')} · ${pct} accepted\n\n`
   );
   for (const f of s.files) {
     process.stdout.write(
       `  ${c.cyan(relFile(f.file))}  ${c.green('+' + f.added)} ${c.red('-' + f.removed)}  ` +
-      `${c.dim(`${f.kept} kept · ${f.undone} reverted · ${f.pending} pending`)}\n`
+        `${c.dim(`${f.kept} kept · ${f.undone} reverted · ${f.pending} pending`)}\n`
     );
   }
   if (s.reverted.length) {
@@ -2510,10 +2510,12 @@ async function updateCliBinary(assets: ReleaseAsset[], latest: string, current: 
   const dest = await downloadAsset(tgz!);
   const cp = require('child_process');
   process.stdout.write(c.dim('installing globally (npm i -g) …\n'));
-  const npmCmd = process.platform === 'win32' ? ['cmd.exe', ['/d', '/s', '/c', `npm.cmd i -g "${dest}"`]] : ['npm', ['i', '-g', dest]];
-  const r = process.platform === 'win32'
-    ? cp.spawnSync(npmCmd[0], npmCmd[1], { stdio: 'inherit' })
-    : cp.spawnSync(npmCmd[0], npmCmd[1], { stdio: 'inherit' });
+  // npm is npm.cmd on Windows — a bare spawn can't exec it without a shell (same rule as the
+  // status-line respawn below).
+  const winShell = process.platform === 'win32';
+  // shell mode concatenates args UNQUOTED — a temp path with a space (spaced Windows usernames)
+  // would split; quote the one arg that carries a user-controlled path.
+  const r = cp.spawnSync(winShell ? 'npm.cmd' : 'npm', ['i', '-g', winShell ? `"${dest}"` : dest], { stdio: 'inherit', shell: winShell });
   if (r.status !== 0) fail(`npm install failed (exit ${r.status ?? '?'}). Try: npm i -g ${dest}`);
   process.stdout.write(c.green('✓ ') + `updated the CLI ${current} → ${latest}\n`);
   refreshInstalledStatusline();
@@ -2528,9 +2530,11 @@ function refreshInstalledStatusline(): void {
   if (!core.statuslineInstalled()) return; // some other status line (or none) — never touch it
   const cp = require('child_process');
   process.stdout.write(c.dim('refreshing the bundled status line…\n'));
-  const r = process.platform === 'win32'
-    ? cp.spawnSync('cmd.exe', ['/d', '/s', '/c', 'claude-observatory.cmd statusline'], { stdio: 'inherit' })
-    : cp.spawnSync('claude-observatory', ['statusline'], { stdio: 'inherit' });
+  const winShell = process.platform === 'win32';
+  const r = cp.spawnSync(winShell ? 'claude-observatory.cmd' : 'claude-observatory', ['statusline'], {
+    stdio: 'inherit',
+    shell: winShell,
+  });
   if (r.status !== 0)
     process.stdout.write(
       c.dim(`status line refresh did not complete — run \`claude-observatory statusline\` yourself.\n`)
@@ -2645,9 +2649,9 @@ async function refreshVscodeExtension(
   for (const h of noCli) {
     process.stdout.write(
       c.yellow('  ⚠ ') +
-      `${h.label} extension ${h.version} is installed, but its CLI wasn't found on PATH or in the usual app locations — can't auto-update it.\n` +
-      c.dim(`    Fix: in ${h.label}, ⇧⌘P → "Shell Command: Install 'code' command in PATH", then re-run \`claude-observatory update\`;\n`) +
-      c.dim(`    or install claude-observatory-vscode-v${latest}.vsix from the release manually.\n`)
+        `${h.label} extension ${h.version} is installed, but its CLI wasn't found on PATH or in the usual app locations — can't auto-update it.\n` +
+        c.dim(`    Fix: in ${h.label}, ⇧⌘P → "Shell Command: Install 'code' command in PATH", then re-run \`claude-observatory update\`;\n`) +
+        c.dim(`    or install claude-observatory-vscode-v${latest}.vsix from the release manually.\n`)
     );
   }
   const actionable = stale.filter((h) => h.cli);
@@ -2946,8 +2950,8 @@ async function cmdUpdate(args: string[]): Promise<void> {
     if (vscode === 'absent' && jetbrains === 'absent') {
       process.stdout.write(
         c.green('✓ ') +
-        `CLI is up to date (${latest}); no editor extensions detected locally.\n` +
-        c.dim('  install the VS Code / JetBrains extensions via scripts/bootstrap.sh or the release assets.\n')
+          `CLI is up to date (${latest}); no editor extensions detected locally.\n` +
+          c.dim('  install the VS Code / JetBrains extensions via scripts/bootstrap.sh or the release assets.\n')
       );
     } else {
       process.stdout.write(
@@ -2999,8 +3003,8 @@ async function cmdVersion(args: string[]): Promise<void> {
   }
   process.stdout.write(
     `installed   ${c.bold(cur)}   ${c.dim(`(${CHANNEL_LABEL[channel]} channel)`)}\n` +
-    `latest      ${c.bold(latest)}   ${newer ? c.yellow('← update available') : c.green('✓ up to date')}\n` +
-    (channel === 'stable' && devLatest ? c.dim(`pre-release ${devLatest}   (switch: \`update --channel dev\`)\n`) : '')
+      `latest      ${c.bold(latest)}   ${newer ? c.yellow('← update available') : c.green('✓ up to date')}\n` +
+      (channel === 'stable' && devLatest ? c.dim(`pre-release ${devLatest}   (switch: \`update --channel dev\`)\n`) : '')
   );
   if (newer) {
     process.stdout.write(c.dim('run `claude-observatory update` to apply, or `update --check` to see every surface.\n'));
@@ -3010,116 +3014,116 @@ async function cmdVersion(args: string[]): Promise<void> {
 function usage(): void {
   process.stdout.write(
     `claude-observatory — per-edit Keep/Undo for Claude Code\n\n` +
-    `  init [--project] [--with-statusline]\n` +
-    `                       install capture hooks (--project = repo ./.claude/settings.json;\n` +
-    `                       --with-statusline also installs the bundled status line)\n` +
-    `  statusline           install/refresh the bundled claude-statusline (usage bars; needs bash+jq)\n` +
-    `  uninstall [--project] [--all] [--purge-store]\n` +
-    `                       remove the capture hooks (--all also reverts the bundled status line +\n` +
-    `                       prints teardown steps; --purge-store also deletes the stored edits)\n` +
-    `  status               show hooks + hook-path health + session + edit counts\n` +
-    `  doctor [--json]      diagnose setup (hooks, PATH, config dir, session, status line) with fixes;\n` +
-    `                       --markdown (--md) emits the report as Markdown\n` +
-    `  update [--check] [--cli-only] [--force] [--channel stable|dev]\n` +
-    `                       update the CLI AND refresh the locally-installed editor extensions from\n` +
-    `                       the followed release channel (VS Code via \`code --install-extension\`;\n` +
-    `                       JetBrains by unzip into plugin dirs), and refresh the bundled status\n` +
-    `                       line when ours is installed. --check reports only; --cli-only\n` +
-    `                       skips the extensions; --force reinstalls even if already current;\n` +
-    `                       --channel switches between stable and the rolling pre-release (dev)\n` +
-    `                       and installs that channel's newest in the same run\n` +
-    `  sessions             this workspace's sessions, newest conversation first (● = this directory's)\n` +
-    `  list [filters]       list edits (grouped by file); filters: --pending|--kept|--undone, --file <substr>\n` +
-    `  timeline [--json]    edits newest-first as a chronological feed (time · id · Δ · file)\n` +
-    `  actions [--json]     the full action timeline: EVERY tool call Claude made (reads, greps, bash,\n` +
-    `                       web, subagents, to-dos), each with its result (alias: trace); --category <c> | --errors | --limit <n>\n` +
+      `  init [--project] [--with-statusline]\n` +
+      `                       install capture hooks (--project = repo ./.claude/settings.json;\n` +
+      `                       --with-statusline also installs the bundled status line)\n` +
+      `  statusline           install/refresh the bundled claude-statusline (usage bars; needs bash+jq)\n` +
+      `  uninstall [--project] [--all] [--purge-store]\n` +
+      `                       remove the capture hooks (--all also reverts the bundled status line +\n` +
+      `                       prints teardown steps; --purge-store also deletes the stored edits)\n` +
+      `  status               show hooks + hook-path health + session + edit counts\n` +
+      `  doctor [--json]      diagnose setup (hooks, PATH, config dir, session, status line) with fixes;\n` +
+      `                       --markdown (--md) emits the report as Markdown\n` +
+      `  update [--check] [--cli-only] [--force] [--channel stable|dev]\n` +
+      `                       update the CLI AND refresh the locally-installed editor extensions from\n` +
+      `                       the followed release channel (VS Code via \`code --install-extension\`;\n` +
+      `                       JetBrains by unzip into plugin dirs), and refresh the bundled status\n` +
+      `                       line when ours is installed. --check reports only; --cli-only\n` +
+      `                       skips the extensions; --force reinstalls even if already current;\n` +
+      `                       --channel switches between stable and the rolling pre-release (dev)\n` +
+      `                       and installs that channel's newest in the same run\n` +
+      `  sessions             this workspace's sessions, newest conversation first (● = this directory's)\n` +
+      `  list [filters]       list edits (grouped by file); filters: --pending|--kept|--undone, --file <substr>\n` +
+      `  timeline [--json]    edits newest-first as a chronological feed (time · id · Δ · file)\n` +
+      `  actions [--json]     the full action timeline: EVERY tool call Claude made (reads, greps, bash,\n` +
+      `                       web, subagents, to-dos), each with its result (alias: trace); --category <c> | --errors | --limit <n>\n` +
 
-    `  egress [--json]      what this session reached beyond here: web hosts, MCP servers, network shell,\n` +
-    `                       and the files it READ from outside the workspace (--root <d>)\n` +
-    `  risk [--json]        shell commands that can destroy data / escalate privilege / touch secrets,\n` +
-    `                       plus the edits that landed OUTSIDE the workspace (--all, --root <d>)\n` +
-    `                       (with risk tiers), MCP servers, network, subagents — exercised, not approved\n` +
-    `  processes [--json]   background shells this session left running (runtime · exit code · output);\n` +
-    `                       --id <shell> shows one shell's full command + a tail of its output\n` +
-    `  prompts [--json]     the session as the list of things YOU asked for, each with the edits,\n` +
-    `                       files, folders, tokens, agents, workflows, tasks and shells it produced;\n` +
-    `                       --id <n> drills into one; --id <n> --response prints Claude’s reply to it\n` +
-    `  feed [--json]        what ONE thing is doing now — a tail of its activity;\n` +
-    `                       --kind session|agent|workflow|task|process --id <id> [--limit <n>]\n` +
-    `  subagents [--json]   every subagent this session spawned, each with its own action timeline + metrics (alias: agents)\n` +
-    `  siblings [--json]    the other Claude Code sessions in THIS project (active/idle · pending · files · risk);\n` +
-    `                       agent-facing digest for cross-agent awareness (alias: fleet); --all includes self;\n` +
-    `                       --repo widens to every WORKTREE of the repo (adds worktree/branch/phase + conflicts)\n` +
-    `  multitask                the multi-agent view: one row per running agent across every worktree (live phase,\n` +
-    `                       sparkline, ±lines, risk) + nested subagents (phase/current task) + live file conflicts\n` +
-    `  tasklog                    cross-agent task log: one row per stable taskId, unioned across worktrees + subagents\n` +
-    `  metrics [--json]     session numbers: ±lines, action/error counts, subagent duration/tokens, tool latency\n` +
-    `  diff <id>            show before/after for an edit\n` +
-    `  keep <id>            mark an edit kept; bulk: --all | --file <substr> | --under <path>\n` +
-    `                       an id and a bulk flag are mutually exclusive (they mean different things)\n` +
-    `  undo <id> [--force]  surgically undo an edit (--force = per-file restore);\n` +
-    `                       bulk (pending only): --all | --file <substr> | --under <path> | --ids <a,b,c>\n` +
-    `                       an id and a bulk flag are mutually exclusive\n` +
-    `  redo <id> [--force]  re-apply an undone edit;\n` +
-    `                       bulk (undone only): --all | --file <substr> | --under <path> | --ids <a,b,c>\n` +
-    `                       an id and a bulk flag are mutually exclusive\n` +
-    `  task-keep <taskId>   keep every pending edit in a task's strict in-progress span (--json)\n` +
-    `  task-undo <taskId>   revert every pending edit in a task's strict in-progress span (--json)\n` +
-    `  task-clear <taskId>  drop a task's resolved (kept/undone) edits (--json);\n` +
-    `                       --completed clears every settled task (edits present, all kept)\n` +
-    `  demo [--fast] [--speed <n>] [--dir <folder>] [--no-fleet] [--json]\n` +
-    `                       simulate a Claude session LIVE in an isolated demo-* session and folder:\n` +
-    `                       a real transcript + captured edits + a subagent + a three-phase workflow\n` +
-    `                       + a second agent in a sibling worktree — watch every panel update, then\n` +
-    `                       review/undo for real; --fast for scripts/tests, --no-fleet for one agent.\n` +
-    `                       Running it again RESETS the demo (it replaces any previous demo here)\n` +
-    `  demo --tour [--essentials | --remainder] [--json]\n` +
-    `                       the guided tour: what to look at, panel by panel. --essentials is the\n` +
-    `                       short track through the same script; --remainder is its exact complement\n` +
-    `  demo --touch [--json]  keep a running demo inside the fleet's active window (mtime only)\n` +
-    `  demo --clean [--json]  remove every trace (both sessions, stores, demo folder, scratch dir)\n` +
-    `  demo --status [--json] whether a demo is recorded for this folder\n` +
-    `  resolve [--session <id>]  accept every pending edit in a session, then clear its records; --json\n` +
-    `  warm [--root <d>]    pre-build recent sessions so switching to one is instant (--since <dur>); --json\n` +
-    `  clean [opts]         GC orphaned blobs (--session <id> scopes; --json for structured output);\n` +
-    `                       --drop <id> | --older-than <Nd> | --all | --resolved [--under <path> | --ids <a,b,c>]\n` +
-    `                       --completed [--stale <Nd>] [--dry-run]  drop FINISHED sessions (nothing\n` +
-    `                       left to review) and ABANDONED ones (unreviewed but dead >14d; their edits\n` +
-    `                       are discarded) — --dry-run lists what would go without dropping anything\n` +
-    `                       --phantoms [--session <id>]  remove Windows path-case phantom pairs (#43)\n` +
-    `  stats [--json]       usage stats (edits/tokens/messages/thinking/output) by session & window\n` +
-    `  summary [--markdown] per-session review recap (kept/reverted per file); --markdown to export\n` +
-    `  export [--out <f>]   the FULL session trace as JSON — every edit with its diff, skips, prompts,\n` +
-    `                       actions, tasks, subagents, egress, outside writes, observations, usage\n` +
-    `  insights [--json]    Observations view: recap + per-edit reasoning/flags/file-memory + next steps\n\n` +
-    `machine-readable (for front-ends/scripts; list/status/sessions/keep/undo/redo also take --json):\n` +
-    `  blob <sha>           raw blob bytes to stdout\n` +
-    `  tree [--root <d>] [--filter <q>]   folder→file→class→edit view-model as JSON (both editors)\n` +
-    `  changemap [--root <d>]             session change-map (edits + per-file/per-folder rollups + per-agent slices) as JSON\n` +
-    `  views [--views <a,b,c>] [--root <d>]\n` +
-    `                       run several READ-ONLY views in ONE process and emit {name: payload} —\n` +
-    `                       each is byte-identical to its own command. Default set: changemap,\n` +
-    `                       multitask, prompts, processes, sessions, observations, risk, egress;\n` +
-    `                       stats is accepted by name too, though nothing batches it by default.\n` +
-    `                       A view that fails is null rather than fatal to the batch; a mutating\n` +
-    `                       verb is refused. The JetBrains Overview polls its eight views through it.\n` +
-    `  chat-context [--tool-use-id <id> | --edit <n> | --agent <id> | --task <id>]\n` +
-    `                       assemble a zero-token, ready-to-paste chat prompt about an action/edit/subagent/task\n` +
-    `  locate --file <f>    per-pending-edit line indices in the live buffer (text on stdin; JSON out)\n` +
-    `  observe              recap + per-edit reasoning/flags/memory as JSON\n` +
-    `  observations [--root <d>]   Observations view-model: recap + timeline runs (adjacent same-file\n` +
-    `                       edits coalesced ×N, each with reasoning) + next steps, as JSON\n` +
-    `  usage                ctx / 5h / week snapshot + session token split + model/effort/compaction\n` +
-    `                       vitals, as JSON\n\n` +
-    `opt-in, token-spending (runs \`claude -p\`; returns the cached result unless --fresh):\n` +
-    `  analyze <id>         deep-analyze one edit    [--json --fresh --claude-bin <path>]\n` +
-    `  recap                one-line session recap   [--json --fresh --claude-bin <path>]\n` +
-    `  suggest              next-steps + suggestions [--json --fresh --claude-bin <path>]\n\n` +
-    `  --session <id>       target a specific session instead of the newest\n` +
-    `  version [--check] [--json]\n` +
-    `                       print the installed version (--json adds the channel); --check (or --latest)\n` +
-    `                       also shows the newest release of BOTH channels (--json feeds the editors' chip)\n` +
-    `  --version            print the installed CLI version\n`
+      `  egress [--json]      what this session reached beyond here: web hosts, MCP servers, network shell,\n` +
+      `                       and the files it READ from outside the workspace (--root <d>)\n` +
+      `  risk [--json]        shell commands that can destroy data / escalate privilege / touch secrets,\n` +
+      `                       plus the edits that landed OUTSIDE the workspace (--all, --root <d>)\n` +
+      `                       (with risk tiers), MCP servers, network, subagents — exercised, not approved\n` +
+      `  processes [--json]   background shells this session left running (runtime · exit code · output);\n` +
+      `                       --id <shell> shows one shell's full command + a tail of its output\n` +
+      `  prompts [--json]     the session as the list of things YOU asked for, each with the edits,\n` +
+      `                       files, folders, tokens, agents, workflows, tasks and shells it produced;\n` +
+      `                       --id <n> drills into one; --id <n> --response prints Claude’s reply to it\n` +
+      `  feed [--json]        what ONE thing is doing now — a tail of its activity;\n` +
+      `                       --kind session|agent|workflow|task|process --id <id> [--limit <n>]\n` +
+      `  subagents [--json]   every subagent this session spawned, each with its own action timeline + metrics (alias: agents)\n` +
+      `  siblings [--json]    the other Claude Code sessions in THIS project (active/idle · pending · files · risk);\n` +
+      `                       agent-facing digest for cross-agent awareness (alias: fleet); --all includes self;\n` +
+      `                       --repo widens to every WORKTREE of the repo (adds worktree/branch/phase + conflicts)\n` +
+      `  multitask                the multi-agent view: one row per running agent across every worktree (live phase,\n` +
+      `                       sparkline, ±lines, risk) + nested subagents (phase/current task) + live file conflicts\n` +
+      `  tasklog                    cross-agent task log: one row per stable taskId, unioned across worktrees + subagents\n` +
+      `  metrics [--json]     session numbers: ±lines, action/error counts, subagent duration/tokens, tool latency\n` +
+      `  diff <id>            show before/after for an edit\n` +
+      `  keep <id>            mark an edit kept; bulk: --all | --file <substr> | --under <path>\n` +
+      `                       an id and a bulk flag are mutually exclusive (they mean different things)\n` +
+      `  undo <id> [--force]  surgically undo an edit (--force = per-file restore);\n` +
+      `                       bulk (pending only): --all | --file <substr> | --under <path> | --ids <a,b,c>\n` +
+      `                       an id and a bulk flag are mutually exclusive\n` +
+      `  redo <id> [--force]  re-apply an undone edit;\n` +
+      `                       bulk (undone only): --all | --file <substr> | --under <path> | --ids <a,b,c>\n` +
+      `                       an id and a bulk flag are mutually exclusive\n` +
+      `  task-keep <taskId>   keep every pending edit in a task's strict in-progress span (--json)\n` +
+      `  task-undo <taskId>   revert every pending edit in a task's strict in-progress span (--json)\n` +
+      `  task-clear <taskId>  drop a task's resolved (kept/undone) edits (--json);\n` +
+      `                       --completed clears every settled task (edits present, all kept)\n` +
+      `  demo [--fast] [--speed <n>] [--dir <folder>] [--no-fleet] [--json]\n` +
+      `                       simulate a Claude session LIVE in an isolated demo-* session and folder:\n` +
+      `                       a real transcript + captured edits + a subagent + a three-phase workflow\n` +
+      `                       + a second agent in a sibling worktree — watch every panel update, then\n` +
+      `                       review/undo for real; --fast for scripts/tests, --no-fleet for one agent.\n` +
+      `                       Running it again RESETS the demo (it replaces any previous demo here)\n` +
+      `  demo --tour [--essentials | --remainder] [--json]\n` +
+      `                       the guided tour: what to look at, panel by panel. --essentials is the\n` +
+      `                       short track through the same script; --remainder is its exact complement\n` +
+      `  demo --touch [--json]  keep a running demo inside the fleet's active window (mtime only)\n` +
+      `  demo --clean [--json]  remove every trace (both sessions, stores, demo folder, scratch dir)\n` +
+      `  demo --status [--json] whether a demo is recorded for this folder\n` +
+      `  resolve [--session <id>]  accept every pending edit in a session, then clear its records; --json\n` +
+      `  warm [--root <d>]    pre-build recent sessions so switching to one is instant (--since <dur>); --json\n` +
+      `  clean [opts]         GC orphaned blobs (--session <id> scopes; --json for structured output);\n` +
+      `                       --drop <id> | --older-than <Nd> | --all | --resolved [--under <path> | --ids <a,b,c>]\n` +
+      `                       --completed [--stale <Nd>] [--dry-run]  drop FINISHED sessions (nothing\n` +
+      `                       left to review) and ABANDONED ones (unreviewed but dead >14d; their edits\n` +
+      `                       are discarded) — --dry-run lists what would go without dropping anything\n` +
+      `                       --phantoms [--session <id>]  remove Windows path-case phantom pairs (#43)\n` +
+      `  stats [--json]       usage stats (edits/tokens/messages/thinking/output) by session & window\n` +
+      `  summary [--markdown] per-session review recap (kept/reverted per file); --markdown to export\n` +
+      `  export [--out <f>]   the FULL session trace as JSON — every edit with its diff, skips, prompts,\n` +
+      `                       actions, tasks, subagents, egress, outside writes, observations, usage\n` +
+      `  insights [--json]    Observations view: recap + per-edit reasoning/flags/file-memory + next steps\n\n` +
+      `machine-readable (for front-ends/scripts; list/status/sessions/keep/undo/redo also take --json):\n` +
+      `  blob <sha>           raw blob bytes to stdout\n` +
+      `  tree [--root <d>] [--filter <q>]   folder→file→class→edit view-model as JSON (both editors)\n` +
+      `  changemap [--root <d>]             session change-map (edits + per-file/per-folder rollups + per-agent slices) as JSON\n` +
+      `  views [--views <a,b,c>] [--root <d>]\n` +
+      `                       run several READ-ONLY views in ONE process and emit {name: payload} —\n` +
+      `                       each is byte-identical to its own command. Default set: changemap,\n` +
+      `                       multitask, prompts, processes, sessions, observations, risk, egress;\n` +
+      `                       stats is accepted by name too, though nothing batches it by default.\n` +
+      `                       A view that fails is null rather than fatal to the batch; a mutating\n` +
+      `                       verb is refused. The JetBrains Overview polls its eight views through it.\n` +
+      `  chat-context [--tool-use-id <id> | --edit <n> | --agent <id> | --task <id>]\n` +
+      `                       assemble a zero-token, ready-to-paste chat prompt about an action/edit/subagent/task\n` +
+      `  locate --file <f>    per-pending-edit line indices in the live buffer (text on stdin; JSON out)\n` +
+      `  observe              recap + per-edit reasoning/flags/memory as JSON\n` +
+      `  observations [--root <d>]   Observations view-model: recap + timeline runs (adjacent same-file\n` +
+      `                       edits coalesced ×N, each with reasoning) + next steps, as JSON\n` +
+      `  usage                ctx / 5h / week snapshot + session token split + model/effort/compaction\n` +
+      `                       vitals, as JSON\n\n` +
+      `opt-in, token-spending (runs \`claude -p\`; returns the cached result unless --fresh):\n` +
+      `  analyze <id>         deep-analyze one edit    [--json --fresh --claude-bin <path>]\n` +
+      `  recap                one-line session recap   [--json --fresh --claude-bin <path>]\n` +
+      `  suggest              next-steps + suggestions [--json --fresh --claude-bin <path>]\n\n` +
+      `  --session <id>       target a specific session instead of the newest\n` +
+      `  version [--check] [--json]\n` +
+      `                       print the installed version (--json adds the channel); --check (or --latest)\n` +
+      `                       also shows the newest release of BOTH channels (--json feeds the editors' chip)\n` +
+      `  --version            print the installed CLI version\n`
   );
 }
 
@@ -3246,189 +3250,189 @@ function main(): void {
   // process.exit() throws nothing, so a command's own exit is never caught here; async commands keep
   // their own .catch(fail) below.
   try {
-    switch (cmd) {
-      case 'capture': {
-        // Hot path: load only the zero-dep capture module, never the diff-based engine.
-        const { runCapture } = require('@claude-observatory/core/dist/capture');
-        runCapture();
-        process.exit(0);
-        break;
-      }
-      case 'init':
-        cmdInit(rest.includes('--project'), rest.includes('--with-statusline'));
-        break;
-      case 'statusline':
-        cmdStatusline();
-        break;
-      case 'uninstall':
-        cmdUninstall(rest);
-        break;
-      case 'status':
-        cmdStatus(rest);
-        break;
-      case 'doctor':
-        cmdDoctor(rest);
-        break;
-      case 'sessions':
-        cmdSessions(rest);
-        break;
-      // Deliberately NOT a `views` member: it WRITES caches, and that batch is read-only by contract.
-      case 'resolve':
-        cmdResolve(rest);
-        break;
-      case 'warm':
-        cmdWarm(rest);
-        break;
-      case 'list':
-        cmdList(rest);
-        break;
-      case 'timeline':
-        cmdTimeline(rest);
-        break;
-      case 'actions':
-      case 'trace':
-        cmdActions(rest);
-        break;
-      case 'risk':
-        cmdRisk(rest);
-        break;
-      case 'egress':
-        cmdEgress(rest);
-        break;
-      case 'footprint':
-        cmdFootprint(rest);
-        break;
-      case 'capabilities':
-        // 0.8.6 shipped this verb; 0.8.7 renamed it to `footprint`. Keep it working rather than answering
-        // an upgrade with "unknown command", and put the notice on STDERR — a line on stdout would corrupt
-        // `capabilities --json` for anything already piping it.
-        process.stderr.write(c.dim('`capabilities` was renamed to `footprint` in 0.8.7 — running `footprint`.\n'));
-        cmdFootprint(rest);
-        break;
-      case 'processes':
-        cmdProcesses(rest);
-        break;
-      case 'prompts':
-        cmdPrompts(rest);
-        break;
-      case 'feed':
-        cmdFeed(rest);
-        break;
-      case 'subagents':
-      case 'agents':
-        cmdSubagents(rest);
-        break;
-      case 'siblings':
-      case 'fleet':
-        cmdSiblings(rest);
-        break;
-      case 'multitask':
-        cmdMultitask(rest);
-        break;
-      case 'tasklog':
-        cmdTaskLog(rest);
-        break;
-      case 'metrics':
-        cmdMetrics(rest);
-        break;
-      case 'diff':
-        cmdDiff(rest);
-        break;
-      case 'keep':
-        cmdKeep(rest);
-        break;
-      case 'undo':
-        cmdUndo(rest);
-        break;
-      case 'redo':
-        cmdRedo(rest);
-        break;
-      case 'task-keep':
-        cmdTaskKeep(rest);
-        break;
-      case 'task-undo':
-        cmdTaskUndo(rest);
-        break;
-      case 'task-clear':
-        cmdTaskClear(rest);
-        break;
-      case 'demo':
-        void cmdDemo(rest);
-        break;
-      case 'clean':
-        cmdClean(rest);
-        break;
-      case 'stats':
-        cmdStats(rest);
-        break;
-      case 'summary':
-        cmdSummary(rest);
-        break;
-      case 'export':
-        cmdExport(rest);
-        break;
-      case 'blob':
-        cmdBlob(rest);
-        break;
-      case 'locate':
-        cmdLocate(rest);
-        break;
-      case 'tree':
-        cmdTree(rest);
-        break;
-      case 'views':
-        cmdViews(rest);
-        break;
-      case 'changemap':
-        cmdChangeMap(rest);
-        break;
-      case 'chat-context':
-        cmdChatContext(rest);
-        break;
-      case 'observe':
-        cmdObserve(rest);
-        break;
-      case 'observations':
-        cmdObservations(rest);
-        break;
-      case 'insights':
-        cmdInsights(rest);
-        break;
-      case 'usage':
-        cmdUsage(rest);
-        break;
-      case 'analyze':
-        cmdAnalyze(rest).catch((e) => fail(String(e?.message || e)));
-        break;
-      case 'recap':
-        cmdRecap(rest).catch((e) => fail(String(e?.message || e)));
-        break;
-      case 'update':
-        cmdUpdate(rest).catch((e) => fail(String(e?.message || e)));
-        break;
-      case '__update-check':
-        // Internal, hidden: spawned detached by maybeCheckForUpdate to refresh the update cache.
-        void refreshUpdateCache();
-        break;
-      case 'suggest':
-        cmdSuggest(rest).catch((e) => fail(String(e?.message || e)));
-        break;
-      case '--version':
-      case '-v':
-        process.stdout.write(`claude-observatory ${version()}\n`);
-        break;
-      case 'version':
-        cmdVersion(rest).catch((e) => fail(String(e?.message || e)));
-        break;
-      case undefined:
-      case '-h':
-      case '--help':
-      case 'help':
-        usage();
-        break;
-      default:
-        fail(`unknown command "${cmd}". Run \`claude-observatory help\`.`);
+  switch (cmd) {
+    case 'capture': {
+      // Hot path: load only the zero-dep capture module, never the diff-based engine.
+      const { runCapture } = require('@claude-observatory/core/dist/capture');
+      runCapture();
+      process.exit(0);
+      break;
     }
+    case 'init':
+      cmdInit(rest.includes('--project'), rest.includes('--with-statusline'));
+      break;
+    case 'statusline':
+      cmdStatusline();
+      break;
+    case 'uninstall':
+      cmdUninstall(rest);
+      break;
+    case 'status':
+      cmdStatus(rest);
+      break;
+    case 'doctor':
+      cmdDoctor(rest);
+      break;
+    case 'sessions':
+      cmdSessions(rest);
+      break;
+    // Deliberately NOT a `views` member: it WRITES caches, and that batch is read-only by contract.
+    case 'resolve':
+      cmdResolve(rest);
+      break;
+    case 'warm':
+      cmdWarm(rest);
+      break;
+    case 'list':
+      cmdList(rest);
+      break;
+    case 'timeline':
+      cmdTimeline(rest);
+      break;
+    case 'actions':
+    case 'trace':
+      cmdActions(rest);
+      break;
+    case 'risk':
+      cmdRisk(rest);
+      break;
+    case 'egress':
+      cmdEgress(rest);
+      break;
+    case 'footprint':
+      cmdFootprint(rest);
+      break;
+    case 'capabilities':
+      // 0.8.6 shipped this verb; 0.8.7 renamed it to `footprint`. Keep it working rather than answering
+      // an upgrade with "unknown command", and put the notice on STDERR — a line on stdout would corrupt
+      // `capabilities --json` for anything already piping it.
+      process.stderr.write(c.dim('`capabilities` was renamed to `footprint` in 0.8.7 — running `footprint`.\n'));
+      cmdFootprint(rest);
+      break;
+    case 'processes':
+      cmdProcesses(rest);
+      break;
+    case 'prompts':
+      cmdPrompts(rest);
+      break;
+    case 'feed':
+      cmdFeed(rest);
+      break;
+    case 'subagents':
+    case 'agents':
+      cmdSubagents(rest);
+      break;
+    case 'siblings':
+    case 'fleet':
+      cmdSiblings(rest);
+      break;
+    case 'multitask':
+      cmdMultitask(rest);
+      break;
+    case 'tasklog':
+      cmdTaskLog(rest);
+      break;
+    case 'metrics':
+      cmdMetrics(rest);
+      break;
+    case 'diff':
+      cmdDiff(rest);
+      break;
+    case 'keep':
+      cmdKeep(rest);
+      break;
+    case 'undo':
+      cmdUndo(rest);
+      break;
+    case 'redo':
+      cmdRedo(rest);
+      break;
+    case 'task-keep':
+      cmdTaskKeep(rest);
+      break;
+    case 'task-undo':
+      cmdTaskUndo(rest);
+      break;
+    case 'task-clear':
+      cmdTaskClear(rest);
+      break;
+    case 'demo':
+      void cmdDemo(rest);
+      break;
+    case 'clean':
+      cmdClean(rest);
+      break;
+    case 'stats':
+      cmdStats(rest);
+      break;
+    case 'summary':
+      cmdSummary(rest);
+      break;
+    case 'export':
+      cmdExport(rest);
+      break;
+    case 'blob':
+      cmdBlob(rest);
+      break;
+    case 'locate':
+      cmdLocate(rest);
+      break;
+    case 'tree':
+      cmdTree(rest);
+      break;
+    case 'views':
+      cmdViews(rest);
+      break;
+    case 'changemap':
+      cmdChangeMap(rest);
+      break;
+    case 'chat-context':
+      cmdChatContext(rest);
+      break;
+    case 'observe':
+      cmdObserve(rest);
+      break;
+    case 'observations':
+      cmdObservations(rest);
+      break;
+    case 'insights':
+      cmdInsights(rest);
+      break;
+    case 'usage':
+      cmdUsage(rest);
+      break;
+    case 'analyze':
+      cmdAnalyze(rest).catch((e) => fail(String(e?.message || e)));
+      break;
+    case 'recap':
+      cmdRecap(rest).catch((e) => fail(String(e?.message || e)));
+      break;
+    case 'update':
+      cmdUpdate(rest).catch((e) => fail(String(e?.message || e)));
+      break;
+    case '__update-check':
+      // Internal, hidden: spawned detached by maybeCheckForUpdate to refresh the update cache.
+      void refreshUpdateCache();
+      break;
+    case 'suggest':
+      cmdSuggest(rest).catch((e) => fail(String(e?.message || e)));
+      break;
+    case '--version':
+    case '-v':
+      process.stdout.write(`claude-observatory ${version()}\n`);
+      break;
+    case 'version':
+      cmdVersion(rest).catch((e) => fail(String(e?.message || e)));
+      break;
+    case undefined:
+    case '-h':
+    case '--help':
+    case 'help':
+      usage();
+      break;
+    default:
+      fail(`unknown command "${cmd}". Run \`claude-observatory help\`.`);
+  }
   } catch (e: any) {
     fail(String(e?.message || e));
   }
