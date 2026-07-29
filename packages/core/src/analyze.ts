@@ -6,7 +6,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { spawn } from 'child_process';
+import { spawnTool } from './spawn';
 import { findRecord, readBlob, readLog, storeDir } from './store';
 import { summarize } from './observe';
 
@@ -88,10 +88,9 @@ export function runClaude(
   return new Promise((resolve, reject) => {
     const args = ['-p'];
     if (opts.resumeSessionId) args.push('--resume', opts.resumeSessionId);
-    // Windows: npm installs `claude` as a .cmd shim, which spawn() can't exec without a shell.
+    // Windows: npm installs `claude` as a .cmd shim, which needs cmd.exe — see core/spawn.
     const bin = opts.claudeBin || 'claude';
-    const winShell = process.platform === 'win32';
-    const child = spawn(winShell ? `"${bin}"` : bin, args, { stdio: ['pipe', 'pipe', 'pipe'], shell: winShell });
+    const child = spawnTool(bin, args, { stdio: ['pipe', 'pipe', 'pipe'] });
     let out = '';
     let err = '';
     const timer = setTimeout(() => {

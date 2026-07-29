@@ -242,14 +242,17 @@ function cmdStatus(args: string[] = []): void {
 
 /** Does `bin` resolve on PATH? Cross-platform; null if we couldn't determine it. */
 function onPath(bin: string): boolean | null {
-  const cp = require('child_process');
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   try {
+    // Named `where.exe`, not `where`, so the launcher keeps it direct: this function's whole answer is
+    // res.error ("couldn't determine") vs res.status ("not on PATH"), and a shell collapses the two.
+    // `direct` says that out loud at both call sites rather than relying on the .exe suffix rule.
     const res =
       process.platform === 'win32'
-        ? cp.spawnSync('where', [bin], { stdio: 'ignore' })
+        ? core.spawnToolSync('where.exe', [bin], { stdio: 'ignore', direct: true })
         // Pass `bin` as $1, never interpolated into the shell string — no injection even if a future
         // caller passes a config-derived value.
-        : cp.spawnSync('sh', ['-c', 'command -v "$1"', 'sh', bin], { stdio: 'ignore' });
+        : core.spawnToolSync('sh', ['-c', 'command -v "$1"', 'sh', bin], { stdio: 'ignore', direct: true });
     if (res.error) return null;
     return res.status === 0;
   } catch {
@@ -2381,12 +2384,14 @@ function statuslineActive(): boolean {
 /** Install/refresh the bundled status line (idempotent; honors CLAUDE_CONFIG_DIR; needs bash+jq). */
 function cmdStatusline(): void {
   const fs = require('fs');
-  const cp = require('child_process');
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const script = statuslineInstallerPath();
   if (!fs.existsSync(script)) {
     fail(`bundled installer missing (${script}) — install from https://github.com/cell-observatory/claude-statusline`);
   }
-  const res = cp.spawnSync('bash', [script], { stdio: 'inherit' });
+  // `direct`: bash is a real .exe that libuv resolves unaided, and the hint below is reachable ONLY
+  // through res.error — a shell would report a missing bash as exit 127 and kill that branch.
+  const res = core.spawnToolSync('bash', [script], { stdio: 'inherit', direct: true });
   if (res.error) {
     const winHint = process.platform === 'win32' ? ' — on Windows run this from Git Bash or WSL' : '';
     fail(`could not run bash: ${res.error.message} (the status line needs bash + jq${winHint})`);
@@ -2421,11 +2426,17 @@ const VSCODE_EXT_ID = 'cell-observatory.claude-observatory-vscode';
 const VSCODE_EXT_ID_OLD = 'claude-observatory.claude-observatory-vscode';
 // One row per VS Code-family editor: where it keeps installed extensions (relative to $HOME), the CLI
 // that drives `--install-extension`, and the macOS .app name used to locate that CLI when off PATH.
-const VSCODE_EDITORS: { label: string; extDirs: string[]; cli: string; app: string }[] = [
-  { label: 'VS Code', extDirs: ['.vscode/extensions', '.vscode-server/extensions'], cli: 'code', app: 'Visual Studio Code' },
-  { label: 'Cursor', extDirs: ['.cursor/extensions'], cli: 'cursor', app: 'Cursor' },
-  { label: 'VSCodium', extDirs: ['.vscodium/extensions'], cli: 'codium', app: 'VSCodium' },
-  { label: 'Windsurf', extDirs: ['.windsurf/extensions'], cli: 'windsurf', app: 'Windsurf' },
+// `app` is the macOS bundle name; `winApp` the Windows install FOLDER, which is not the same string —
+// VS Code ships as "Visual Studio Code.app" but installs to `Programs\Microsoft VS Code`, so the
+// win32 fallback below was looking somewhere that never exists and detection quietly rested on
+// `where code` alone. (VS Code's layout is from its own docs; the other three are best-effort, which
+// costs nothing — these are existsSync candidates, so a wrong guess is skipped, a missing one is a
+// real editor we fail to find.)
+const VSCODE_EDITORS: { label: string; extDirs: string[]; cli: string; app: string; winApp: string }[] = [
+  { label: 'VS Code', extDirs: ['.vscode/extensions', '.vscode-server/extensions'], cli: 'code', app: 'Visual Studio Code', winApp: 'Microsoft VS Code' },
+  { label: 'Cursor', extDirs: ['.cursor/extensions'], cli: 'cursor', app: 'Cursor', winApp: 'cursor' },
+  { label: 'VSCodium', extDirs: ['.vscodium/extensions'], cli: 'codium', app: 'VSCodium', winApp: 'VSCodium' },
+  { label: 'Windsurf', extDirs: ['.windsurf/extensions'], cli: 'windsurf', app: 'Windsurf', winApp: 'Windsurf' },
 ];
 // The JetBrains plugin unzips to this dir inside each IDE's plugins/ folder; we drop a version
 // sentinel beside it so a later `update` can tell whether the installed plugin is already current.
@@ -2508,14 +2519,13 @@ async function updateCliBinary(assets: ReleaseAsset[], latest: string, current: 
   const tgz = assets.find((a) => /\.tgz$/.test(a.name));
   if (!tgz) fail(`release v${latest} has no CLI tarball asset to install.`);
   const dest = await downloadAsset(tgz!);
-  const cp = require('child_process');
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   process.stdout.write(c.dim('installing globally (npm i -g) …\n'));
-  // npm is npm.cmd on Windows — a bare spawn can't exec it without a shell (same rule as the
-  // status-line respawn below).
-  const winShell = process.platform === 'win32';
-  // shell mode concatenates args UNQUOTED — a temp path with a space (spaced Windows usernames)
-  // would split; quote the one arg that carries a user-controlled path.
-  const r = cp.spawnSync(winShell ? 'npm.cmd' : 'npm', ['i', '-g', winShell ? `"${dest}"` : dest], { stdio: 'inherit', shell: winShell });
+  // npm is npm.cmd on Windows, which cannot be spawned without cmd.exe. The launcher also does the
+  // quoting `dest` needs (spaced Windows usernames put a space in every temp path).
+  const r = core.spawnToolSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['i', '-g', dest], {
+    stdio: 'inherit',
+  });
   if (r.status !== 0) fail(`npm install failed (exit ${r.status ?? '?'}). Try: npm i -g ${dest}`);
   process.stdout.write(c.green('✓ ') + `updated the CLI ${current} → ${latest}\n`);
   refreshInstalledStatusline();
@@ -2528,13 +2538,12 @@ async function updateCliBinary(assets: ReleaseAsset[], latest: string, current: 
 function refreshInstalledStatusline(): void {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   if (!core.statuslineInstalled()) return; // some other status line (or none) — never touch it
-  const cp = require('child_process');
   process.stdout.write(c.dim('refreshing the bundled status line…\n'));
-  const winShell = process.platform === 'win32';
-  const r = cp.spawnSync(winShell ? 'claude-observatory.cmd' : 'claude-observatory', ['statusline'], {
-    stdio: 'inherit',
-    shell: winShell,
-  });
+  const r = core.spawnToolSync(
+    process.platform === 'win32' ? 'claude-observatory.cmd' : 'claude-observatory',
+    ['statusline'],
+    { stdio: 'inherit' }
+  );
   if (r.status !== 0)
     process.stdout.write(
       c.dim(`status line refresh did not complete — run \`claude-observatory statusline\` yourself.\n`)
@@ -2547,8 +2556,8 @@ function refreshInstalledStatusline(): void {
  *  .app bundles, Windows Programs dirs, common Linux dirs). Returns null when not found — the extension
  *  is still DETECTED via its dir, so a null means "installed but we can't drive an update", which the
  *  caller must SURFACE, never swallow. Mirrors core.resolveBin (candidates → PATH fallback). */
-function resolveEditorCli(cli: string, app: string): string | null {
-  if (onPath(cli)) return cli; // bare name; spawnSync resolves it via PATH
+function resolveEditorCli(cli: string, app: string, winApp: string): string | null {
+  if (onPath(cli)) return cli; // bare name; the launcher routes it through cmd.exe on Windows
   const fs = require('fs');
   const path = require('path');
   const os = require('os');
@@ -2559,8 +2568,17 @@ function resolveEditorCli(cli: string, app: string): string | null {
       cands.push(path.join(root, `${app}.app`, 'Contents', 'Resources', 'app', 'bin', cli));
     }
   } else if (process.platform === 'win32') {
-    if (process.env.LOCALAPPDATA) cands.push(path.join(process.env.LOCALAPPDATA, 'Programs', app, 'bin', `${cli}.cmd`));
-    if (process.env.ProgramFiles) cands.push(path.join(process.env.ProgramFiles, app, 'bin', `${cli}.cmd`));
+    // Two roots (per-user "User Setup" and machine-wide "System Setup") × two layouts: most of the
+    // family keeps its CLI in `bin\`, Cursor buries it under `resources\app\bin\`.
+    for (const root of [
+      process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Programs', winApp) : null,
+      process.env.ProgramFiles ? path.join(process.env.ProgramFiles, winApp) : null,
+      process.env['ProgramFiles(x86)'] ? path.join(process.env['ProgramFiles(x86)'] as string, winApp) : null,
+    ]) {
+      if (!root) continue;
+      cands.push(path.join(root, 'bin', `${cli}.cmd`));
+      cands.push(path.join(root, 'resources', 'app', 'bin', `${cli}.cmd`));
+    }
   } else {
     cands.push(`/usr/share/${cli}/bin/${cli}`, `/usr/bin/${cli}`, `/snap/bin/${cli}`, path.join(home, '.local', 'bin', cli));
   }
@@ -2611,7 +2629,7 @@ function vscodeInstalls(): { label: string; version: string; cli: string | null;
         if (v && (best === null || core.isNewer(v, best))) best = v;
       }
     }
-    if (best !== null) out.push({ label: ed.label, version: best, cli: resolveEditorCli(ed.cli, ed.app), extDirs: ed.extDirs, hasOld });
+    if (best !== null) out.push({ label: ed.label, version: best, cli: resolveEditorCli(ed.cli, ed.app, ed.winApp), extDirs: ed.extDirs, hasOld });
   }
   return out;
 }
@@ -2661,17 +2679,19 @@ async function refreshVscodeExtension(
     if (!vsix) {
       process.stdout.write(c.yellow(`  ⚠ release v${latest} has no .vsix asset — could not update the VS Code extension\n`));
     } else {
-      const cp = require('child_process');
       const dest = await downloadAsset(vsix);
       for (const h of actionable) {
-        const r = cp.spawnSync(h.cli as string, ['--install-extension', dest, '--force'], { stdio: 'inherit' });
+        // `h.cli` is `code`/`cursor`/… — a bare name on PATH, or an explicit `…\bin\code.cmd` on
+        // Windows. BOTH are unspawnable there without cmd.exe, which is why this never once worked
+        // on Windows before the launcher: libuv only extension-searches .com/.exe.
+        const r = core.spawnToolSync(h.cli as string, ['--install-extension', dest, '--force'], { stdio: 'inherit' });
         if (r.status === 0) {
           process.stdout.write(c.green('✓ ') + `${h.label} extension ${h.version} → ${latest}\n`);
           installed++;
           // Publisher change (0.8.6): drop the old-id install, but only once the renamed extension is
           // confirmed on disk — a --force reinstall of a pre-rename .vsix must not uninstall itself.
           if (h.hasOld && hasExtFolder(h.extDirs, VSCODE_EXT_ID)) {
-            const u = cp.spawnSync(h.cli as string, ['--uninstall-extension', VSCODE_EXT_ID_OLD], { stdio: 'pipe' });
+            const u = core.spawnToolSync(h.cli as string, ['--uninstall-extension', VSCODE_EXT_ID_OLD], { stdio: 'pipe' });
             if (u.status === 0) process.stdout.write(c.dim(`  removed the old ${VSCODE_EXT_ID_OLD} install (publisher changed in 0.8.6).\n`));
             else process.stdout.write(c.yellow(`  ⚠ ${h.label} still has the pre-0.8.6 install — uninstall the older "Claude Observatory" entry in its Extensions view.\n`));
           }
@@ -2736,16 +2756,20 @@ function jetbrainsPluginDirs(): string[] {
 
 /** Extract a .zip into destDir (unzip on macOS/Linux; Expand-Archive on Windows). */
 function extractZip(zip: string, destDir: string): boolean {
-  const cp = require('child_process');
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   if (process.platform === 'win32') {
-    const r = cp.spawnSync(
-      'powershell',
-      ['-NoProfile', '-Command', `Expand-Archive -LiteralPath "${zip}" -DestinationPath "${destDir}" -Force`],
-      { stdio: 'ignore' }
+    // Both paths travel by ENVIRONMENT, never interpolated into the -Command string: a path holding
+    // a `"`, a `$` (PowerShell expands those inside double quotes) or a `'` would otherwise rewrite
+    // the command. `direct` because powershell.exe is a real image AND its -Command payload carries
+    // quotes of its own, which cmd.exe cannot round-trip.
+    const r = core.spawnToolSync(
+      'powershell.exe',
+      ['-NoProfile', '-Command', 'Expand-Archive -LiteralPath $env:CO_ZIP -DestinationPath $env:CO_DEST -Force'],
+      { stdio: 'ignore', direct: true, env: { ...process.env, CO_ZIP: zip, CO_DEST: destDir } }
     );
     return r.status === 0;
   }
-  return cp.spawnSync('unzip', ['-qo', zip, '-d', destDir], { stdio: 'ignore' }).status === 0;
+  return core.spawnToolSync('unzip', ['-qo', zip, '-d', destDir], { stdio: 'ignore', direct: true }).status === 0;
 }
 
 /** The installed JetBrains plugin version, read from its own jar (`lib/claude-observatory-jetbrains-
@@ -3219,8 +3243,10 @@ function maybeCheckForUpdate(cmd: string | undefined, rest: string[]): void {
     // ate a dev-channel machine's known-update nudge until the next successful network refresh.
     writeUpdateCache({ checkedMs: Date.now(), latestTag: cache?.latestTag ?? null, latestDevTag: cache?.latestDevTag ?? null });
     try {
-      require('child_process')
-        .spawn(process.execPath, [__filename, '__update-check'], { detached: true, stdio: 'ignore' })
+      // process.execPath ends in .exe on Windows, so the launcher keeps this DIRECT — routing a
+      // detached spawn through cmd.exe would flash a console window once a day.
+      (require('@claude-observatory/core') as typeof import('@claude-observatory/core'))
+        .spawnTool(process.execPath, [__filename, '__update-check'], { detached: true, stdio: 'ignore' })
         .unref();
     } catch {
       /* couldn't spawn the background check — no nudge this cycle, no harm */

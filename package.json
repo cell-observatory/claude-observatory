@@ -12,7 +12,7 @@
     "build": "npm run build -w @claude-observatory/core && npm run build -w claude-observatory",
     "build:core": "npm run build -w @claude-observatory/core",
     "build:cli": "npm run build -w claude-observatory",
-    "build:vscode": "npm run build -w claude-observatory-vscode",
+    "build:vscode": "npm run build -w @claude-observatory/core && npm run build -w claude-observatory-vscode",
     "test": "npm run version:check && npm run check:privacy && npm run check:webview && npm run build && npm run build:vscode && node --test packages/core/test/core.test.js packages/vscode/test/smoke.test.js",
     "e2e": "npm run build && bash test/e2e.sh",
     "test:all": "npm test && bash test/e2e.sh",

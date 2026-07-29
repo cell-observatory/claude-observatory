@@ -8,7 +8,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import * as cp from 'child_process';
+import type * as cp from 'child_process'; // types only — every spawn goes through core/spawn
 import * as https from 'https';
 import * as os from 'os';
 import * as crypto from 'crypto';
@@ -3060,9 +3060,10 @@ function spawnCliJson(args: string[], cwd: string, cb: (data: unknown | null) =>
     cb(data);
   };
   try {
-    const bin = resolveObservatoryBin();
-    const winShell = process.platform === 'win32';
-    child = cp.spawn(winShell ? `"${bin}"` : bin, args, { cwd, stdio: ['ignore', 'pipe', 'ignore'], shell: winShell });
+    // `--root <cwd>` carries a workspace path. The old shape passed an args ARRAY with shell:true,
+    // which concatenates them UNQUOTED — so every panel here returned nothing on Windows for anyone
+    // whose workspace sat under a spaced path (C:\Users\First Last\…). core/spawn quotes it.
+    child = core.spawnTool(resolveObservatoryBin(), args, { cwd, stdio: ['ignore', 'pipe', 'ignore'] });
   } catch {
     once(null);
     return;
@@ -3731,13 +3732,8 @@ class StatsUsageViewProvider implements vscode.WebviewViewProvider {
     if (session) args.push('--session', session);
     let child: cp.ChildProcess;
     try {
-      // Windows: npm installs the CLI as a .cmd shim, which spawn() can't exec without a shell.
-      const bin = resolveObservatoryBin();
-      const winShell = process.platform === 'win32';
-      child = cp.spawn(winShell ? `"${bin}"` : bin, args, {
-        stdio: ['ignore', 'pipe', 'ignore'],
-        shell: winShell,
-      });
+      // Windows: npm installs the CLI as a .cmd shim, which needs cmd.exe — see core/spawn.
+      child = core.spawnTool(resolveObservatoryBin(), args, { stdio: ['ignore', 'pipe', 'ignore'] });
     } catch {
       this.statsRunning = false;
       this.postStatsError();
@@ -4067,13 +4063,11 @@ class ChangeMapViewProvider implements vscode.WebviewViewProvider {
     if (now - this.warmedAt < 10 * 60_000) return; // at most once every ten minutes
     this.warmedAt = now;
     try {
-      const bin = resolveObservatoryBin();
-      const winShell = process.platform === 'win32';
-      const child = cp.spawn(winShell ? `"${bin}"` : bin, ['warm', '--root', cwd, '--since', '24h'], {
+      // Also `--root <cwd>`: same unquoted-concatenation defect as spawnCliJson above.
+      const child = core.spawnTool(resolveObservatoryBin(), ['warm', '--root', cwd, '--since', '24h'], {
         cwd,
         stdio: 'ignore',
         detached: true,
-        shell: winShell,
       });
       child.on('error', () => {
         /* no CLI on PATH — switching stays slow, which is the pre-0.9.0 behaviour, not a failure */
@@ -5527,16 +5521,15 @@ async function fetchLatestRelease(): Promise<any> {
 }
 
 /** Run the CLI's `update` (the one updater for every surface) with a progress notification, then
- *  offer a window reload. Windows: the CLI is an npm `.cmd` shim, which spawn() can't exec without a
- *  shell — quoted binary + `shell`, the same treatment every other CLI spawn in this file gets. */
+ *  offer a window reload. Windows: the CLI is an npm `.cmd` shim, which needs cmd.exe — core/spawn
+ *  handles that, and the quoting, for every CLI spawn in this file. */
 function runObservatoryUpdate(args: string[], title: string, doneMsg: string, upToDateMsg: string): Thenable<void> {
-  const winShell = process.platform === 'win32';
   const bin = resolveObservatoryBin();
   return vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title },
     () =>
       new Promise<void>((resolve) => {
-        cp.execFile(winShell ? `"${bin}"` : bin, args, { timeout: 300000, shell: winShell }, (err, stdout, stderr) => {
+        core.execFileTool(bin, args, { timeout: 300000 }, (err, stdout, stderr) => {
           versionInfoCache = null; // the chip must re-learn the world after an install
           if (err) {
             vscode.window.showErrorMessage(
@@ -6856,7 +6849,10 @@ export function activate(context: vscode.ExtensionContext): void {
     // Setup check: run `doctor` and open the diagnostics (hooks, PATH, config, session, status line) in a tab.
     vscode.commands.registerCommand('claudeObservatory.doctor', async () => {
       // spawnSync (not execFileSync) so we still capture stdout when doctor exits non-zero on failures.
-      const res = cp.spawnSync(resolveObservatoryBin(), ['doctor', '--markdown'], { encoding: 'utf8', cwd: workspaceRoot() });
+      // Through the launcher: this omitted `shell` while every sibling spawn had it, so on Windows
+      // it could never exec the .cmd shim — the one diagnostic a stuck user is told to run always
+      // reported "is the CLI installed?", on a perfectly good install.
+      const res = core.spawnToolSync(resolveObservatoryBin(), ['doctor', '--markdown'], { encoding: 'utf8', cwd: workspaceRoot() });
       if (res.error || typeof res.stdout !== 'string' || !res.stdout.trim()) {
         vscode.window.showErrorMessage('Claude Observatory: could not run doctor — is the claude-observatory CLI installed?');
         return;
@@ -6907,7 +6903,7 @@ export function activate(context: vscode.ExtensionContext): void {
       // PROBE it, never stat it: resolveBin returns the bare name as its PATH fallback, and statting that
       // against the extension host's cwd is false for every perfectly good install outside its fixed
       // candidate list. Spawning is the only check that answers the question actually being asked.
-      const probe = cp.spawnSync(resolveObservatoryBin(), ['--version'], { encoding: 'utf8', timeout: 5000 });
+      const probe = core.spawnToolSync(resolveObservatoryBin(), ['--version'], { encoding: 'utf8', timeout: 5000 });
       if (probe.error || probe.status !== 0) {
         const go = await vscode.window.showWarningMessage(
           'Claude Observatory: the claude-observatory CLI is not on PATH. The demo will replay and the sidebar will fill, but the Overview, Prompts and Stats panels read their data through the CLI and will stay empty.',

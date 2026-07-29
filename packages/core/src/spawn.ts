@@ -14,7 +14,7 @@
  *      without us. Those callers should pass `direct`; see the ENOENT note below.)
  *
  * So on win32 those spawns MUST go through `cmd.exe`. But passing an args ARRAY together with
- * `shell: true` is deprecated (DEP0190, Node 22.15+) — and worse than deprecated, it is wrong: shell
+ * `shell: true` is deprecated as DEP0190 — and worse than deprecated, it is wrong: shell
  * mode concatenates the arguments with a single space and NO quoting, so `--root C:\Users\First
  * Last\repo` arrives at the child as two arguments and the command silently does the wrong thing.
  *
@@ -45,6 +45,7 @@
  *     `/d`, which only suppresses AutoRun, so reaching this needs a deliberate machine-wide setting.
  */
 import * as cp from 'child_process';
+import type { Readable, Writable } from 'stream';
 
 export interface LaunchOpts {
   /** Injected so the win32 shape is unit-testable from macOS/Linux. Defaults to `process.platform`. */
@@ -73,9 +74,15 @@ const CMD_SPECIAL = /[\s"&|<>^()%!,;=]/;
 export function quoteForCmd(arg: string): string {
   if (arg === '') return '""';
   if (!CMD_SPECIAL.test(arg)) return arg;
+  const bare = arg.replace(/"/g, '');
   // Doubling a RUN of trailing backslashes is the standard Windows rule: `C:\dir\` would otherwise
-  // close as `"C:\dir\"`, where the `\` escapes our own quote and the rest of the line joins in.
-  return '"' + arg.replace(/"/g, '').replace(/(\\+)$/, '$1$1') + '"';
+  // close as `"C:\dir\"`, where the `\` escapes our own quote and every argument after it joins the
+  // token. Counted in a loop, not with `/(\\+)$/` — that regex backtracks quadratically on a long run
+  // of backslashes that ISN'T at the end (js/polynomial-redos; measured 508 ms at 32k, vs 0.006 ms
+  // here), and this function's input includes paths that come from the environment.
+  let slashes = 0;
+  while (slashes < bare.length && bare.charCodeAt(bare.length - 1 - slashes) === 0x5c) slashes++;
+  return '"' + bare + '\\'.repeat(slashes) + '"';
 }
 
 /**
@@ -103,6 +110,18 @@ function split<T extends object>(options: T & LaunchOpts): [T, LaunchOpts] {
   return [rest as T, { platform, direct }];
 }
 
+// Mirrors Node's stdio-based narrowing: an all-`pipe` stdio guarantees the three streams, and callers
+// pipe stdin/stdout precisely so they can use them without a null check on every line.
+export function spawnTool(
+  file: string,
+  args: readonly string[],
+  options: cp.SpawnOptions & { stdio: ['pipe', 'pipe', 'pipe'] } & LaunchOpts
+): cp.ChildProcessByStdio<Writable, Readable, Readable>;
+export function spawnTool(
+  file: string,
+  args?: readonly string[],
+  options?: cp.SpawnOptions & LaunchOpts
+): cp.ChildProcess;
 export function spawnTool(
   file: string,
   args: readonly string[] = [],

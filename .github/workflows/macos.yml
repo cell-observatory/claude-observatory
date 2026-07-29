@@ -20,7 +20,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: [20, 22]
+        # 24 is here for one reason: DEP0190 is not a runtime warning on 20 or 22, so without a
+        # lane that emits it, "the update no longer prints a deprecation warning" (#45) is a claim
+        # CI cannot check. The reporter was on 24.18.
+        node: [20, 22, 24]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4

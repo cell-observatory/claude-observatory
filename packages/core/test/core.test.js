@@ -7682,6 +7682,18 @@ test('spawn: launchSpec builds a cmd.exe-safe command string on win32, and leave
   assert.equal(core.quoteForCmd('a"b'), '"ab"', 'an embedded quote is dropped — cmd cannot express one');
   assert.equal(core.quoteForCmd('C:\\a b\\repo\\'), '"C:\\a b\\repo\\\\"', 'a trailing \\ is doubled');
   assert.equal(core.quoteForCmd('C:\\a b\\repo\\\\'), '"C:\\a b\\repo\\\\\\\\"', 'a RUN of them, too');
+  assert.equal(core.quoteForCmd('\\\\server\\share\\x y'), '"\\\\server\\share\\x y"', 'a UNC path is untouched');
+
+  // The trailing-backslash rule was first written as `/(\\+)$/`, which backtracks quadratically on a
+  // long run of backslashes that ISN'T at the end — 508 ms at 32k inputs, and this function's input
+  // includes environment-derived paths. The bound is ~4 orders of magnitude above the real cost
+  // (~0.006 ms), so it flags the regression without flaking on a slow runner.
+  const pathological = '\\'.repeat(32000) + ' x';
+  const began = process.hrtime.bigint();
+  const quoted = core.quoteForCmd(pathological);
+  const ms = Number(process.hrtime.bigint() - began) / 1e6;
+  assert.ok(quoted.endsWith(' x"'), 'still correct on the pathological input');
+  assert.ok(ms < 100, `quoteForCmd must stay linear (took ${ms.toFixed(1)} ms — js/polynomial-redos)`);
 
   // POSIX must be byte-for-byte what it was before this module existed.
   assert.deepEqual(core.launchSpec('npm', ['i', '-g', '/tmp/co.tgz'], { platform: 'darwin' }), {
@@ -7723,7 +7735,7 @@ test('spawn: launchSpec builds a cmd.exe-safe command string on win32, and leave
   }
 });
 
-test('spawn: our launch shape does not trigger the DEP0190 deprecation', () => {
+test('spawn: our launch shape does not trigger the DEP0190 deprecation', (t) => {
   // Read the warning off a CHILD's stderr: Node latches each deprecation per process, so asking the
   // test runner itself would answer only once and then lie forever after.
   const warnedBy = (file, args) =>
@@ -7737,17 +7749,22 @@ test('spawn: our launch shape does not trigger the DEP0190 deprecation', () => {
       { encoding: 'utf8' }
     ).stderr || '';
 
-  // POSITIVE CONTROL — proves the assertion below is capable of failing on this Node. DEP0190
-  // landed in 22.15/23.11, so on the CI matrix it exists on node 22 and not on node 20; on the
-  // node-20 lanes the assertion below is honestly vacuous and the node-22 lanes carry it.
-  const [maj, min] = process.versions.node.split('.').map(Number);
-  const hasDep0190 = maj > 23 || (maj === 23 && min >= 11) || (maj === 22 && min >= 15);
-  if (hasDep0190) {
-    assert.match(warnedBy('echo', ['hi']), /DEP0190/, 'an args array with shell:true still deprecates here');
-  }
-
+  // ASK THE RUNTIME, never a version number. DEP0190 has moved between documentation-only, runtime,
+  // and "application code only" across releases, and a hardcoded `>= 22.15` gate asserted the control
+  // on node 22.23.1, which does NOT emit it — turning three green lanes red for the wrong reason.
+  const control = warnedBy('echo', ['hi']); // the shape being replaced
   const s = core.launchSpec('echo', ['hi'], { platform: 'win32' }); // force the win32 shape anywhere
+
   assert.doesNotMatch(warnedBy(s.file, s.args), /DEP0190|DeprecationWarning/, 'ours never warns');
+
+  if (/DEP0190/.test(control)) {
+    // The instrument demonstrably fires here, so the assertion above carries real weight.
+    t.diagnostic(`node ${process.versions.node} emits DEP0190 — the deprecated shape was proven to warn`);
+  } else {
+    // Honest about it: on this runtime the assertion above cannot fail, whatever the implementation.
+    // The shell:true-implies-empty-args invariant in the unit test is what guards the shape here.
+    t.diagnostic(`node ${process.versions.node} does not emit DEP0190 at runtime — assertion is vacuous on this lane`);
+  }
 });
 
 test('spawn: a launched command delivers the argv a bare spawn would, spaces and all', () => {
@@ -7884,4 +7901,53 @@ test('spawn(win32): a real .cmd shim round-trips through real cmd.exe', { skip: 
   assert.equal(r.error, undefined, 'a .cmd is launchable through the launcher (it is not, without one)');
   assert.equal(r.status, 0, `shim exited non-zero: ${r.stderr}`);
   assert.deepEqual(JSON.parse(r.stdout.trim()), args, 'cmd.exe round-trips spaces AND & exactly');
+});
+
+test('spawn: no source file spawns a child process except through the launcher', () => {
+  // The Windows rules above are not knowledge a future edit will have. This is the tripwire: every
+  // spawn in the project must go through core/spawn, so there is exactly ONE place that can be wrong.
+  // It keys on the child_process IMPORT rather than on call names, because `.exec(` is also RegExp's.
+  //
+  // WALK the source dirs — do not list files. A hardcoded list misses the most likely future edit of
+  // all, which is a NEW file; and the specifier must tolerate the `node:` prefix (already house style
+  // in scripts/) and the dynamic form, or the guard is a stile with no fence beside it.
+  const roots = [
+    ['packages/core/src', path.resolve(__dirname, '../src')],
+    ['packages/cli/src', path.resolve(__dirname, '../../cli/src')],
+    ['packages/vscode/src', path.resolve(__dirname, '../../vscode/src')],
+  ];
+  const files = [];
+  const walk = (rel, abs) => {
+    for (const e of fs.readdirSync(abs, { withFileTypes: true })) {
+      if (e.isDirectory()) walk(`${rel}/${e.name}`, path.join(abs, e.name));
+      else if (/\.(ts|mts|cts|js|mjs|cjs)$/.test(e.name)) files.push([`${rel}/${e.name}`, path.join(abs, e.name)]);
+    }
+  };
+  for (const [rel, abs] of roots) walk(rel, abs);
+  const scanned = files.filter(([rel]) => rel !== 'packages/core/src/spawn.ts');
+  assert.ok(scanned.length > 20, `sanity: expected to walk the source tree, found ${scanned.length} files`);
+  assert.ok(
+    scanned.some(([rel]) => rel === 'packages/vscode/src/extension.ts') &&
+      scanned.some(([rel]) => rel === 'packages/cli/src/index.ts'),
+    'sanity: the walk must reach the two biggest offenders-by-history'
+  );
+
+  // `require('child_process')`, `from 'child_process'`, `import('child_process')` — with or without
+  // the `node:` prefix. `import type * as cp` is exempt: extension.ts needs cp.ChildProcess for a
+  // variable's type, and a type import cannot spawn anything.
+  const REACHES_CHILD_PROCESS = /(?:require|import)\s*\(\s*['"](?:node:)?child_process['"]\s*\)|\bfrom\s+['"](?:node:)?child_process['"]/;
+  const offenders = [];
+  for (const [rel, abs] of scanned) {
+    fs.readFileSync(abs, 'utf8')
+      .split('\n')
+      .forEach((line, i) => {
+        if (/^\s*import\s+type\b/.test(line)) return;
+        if (REACHES_CHILD_PROCESS.test(line)) offenders.push(`${rel}:${i + 1}  ${line.trim()}`);
+      });
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    'these reach child_process directly instead of core/spawn — see packages/core/src/spawn.ts:\n  ' + offenders.join('\n  ')
+  );
 });
