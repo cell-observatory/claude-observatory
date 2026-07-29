@@ -1,4 +1,5 @@
 export * from './paths';
+export * from './spawn';
 export * from './store';
 export * from './session';
 export * from './undo';

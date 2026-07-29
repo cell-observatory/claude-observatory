@@ -7642,3 +7642,246 @@ test('cli: the update/switch mechanism WORKS end-to-end — mock releases API, r
     srv.close();
   }
 });
+
+// --- the one launcher for every child process (win32 shell rules + DEP0190) --------------------
+
+test('spawn: launchSpec builds a cmd.exe-safe command string on win32, and leaves posix untouched', () => {
+  // The win32 shape is asserted from macOS/Linux because launchSpec takes `platform` — that is the
+  // whole reason it does. Without it none of this would be testable off a Windows runner.
+  const win = (f, a) => core.launchSpec(f, a, { platform: 'win32' });
+
+  assert.deepEqual(
+    win('C:\\Program Files\\Microsoft VS Code\\bin\\code.cmd', [
+      '--install-extension',
+      'C:\\Users\\First Last\\AppData\\Local\\Temp\\co.vsix',
+      '--force',
+    ]),
+    {
+      file:
+        '"C:\\Program Files\\Microsoft VS Code\\bin\\code.cmd" --install-extension ' +
+        '"C:\\Users\\First Last\\AppData\\Local\\Temp\\co.vsix" --force',
+      args: [],
+      shell: true,
+    },
+    'a .cmd shim and a spaced temp path both get quoted into ONE command string'
+  );
+  assert.deepEqual(
+    win('npm.cmd', ['i', '-g', 'C:\\Temp\\co.tgz']),
+    { file: 'npm.cmd i -g C:\\Temp\\co.tgz', args: [], shell: true },
+    'clean tokens stay bare so the command still reads like a command'
+  );
+
+  // Every character cmd.exe reads as syntax must force quoting. These are all LEGAL in a Windows
+  // path (`C:\Users\me\R&D\repo`), so an unquoted one is both a broken command and an injection.
+  for (const ch of [' ', '&', '|', '<', '>', '^', '(', ')', '%', '!', ',', ';', '=', '"']) {
+    const q = core.quoteForCmd(`a${ch}b`);
+    assert.ok(q.startsWith('"') && q.endsWith('"'), `${JSON.stringify(ch)} must force quoting (got ${q})`);
+  }
+  assert.equal(core.quoteForCmd('--force'), '--force', 'a clean token is left bare');
+  assert.equal(core.quoteForCmd(''), '""', 'an empty argument must survive as an empty argument');
+  assert.equal(core.quoteForCmd('a"b'), '"ab"', 'an embedded quote is dropped — cmd cannot express one');
+  assert.equal(core.quoteForCmd('C:\\a b\\repo\\'), '"C:\\a b\\repo\\\\"', 'a trailing \\ is doubled');
+  assert.equal(core.quoteForCmd('C:\\a b\\repo\\\\'), '"C:\\a b\\repo\\\\\\\\"', 'a RUN of them, too');
+
+  // POSIX must be byte-for-byte what it was before this module existed.
+  assert.deepEqual(core.launchSpec('npm', ['i', '-g', '/tmp/co.tgz'], { platform: 'darwin' }), {
+    file: 'npm',
+    args: ['i', '-g', '/tmp/co.tgz'],
+    shell: false,
+  });
+  assert.deepEqual(core.launchSpec('sh', ['-c', 'command -v "$1"', 'sh', 'jq'], { platform: 'linux' }), {
+    file: 'sh',
+    args: ['-c', 'command -v "$1"', 'sh', 'jq'],
+    shell: false,
+  });
+
+  // A real executable image never needs the shell — the daily update check spawns process.execPath
+  // DETACHED, and cmd.exe there would flash a console window on the desktop once a day.
+  assert.equal(core.needsWinShell('C:\\Program Files\\nodejs\\node.exe'), false);
+  assert.equal(core.needsWinShell('C:\\x\\NODE.EXE'), false, 'the extension test is case-insensitive');
+  assert.equal(core.needsWinShell('C:\\x\\thing.com'), false, '.com counts too');
+  assert.equal(core.needsWinShell('C:\\x\\node.exe.cmd'), true, 'anchored at the END — this one IS a .cmd');
+  assert.equal(core.needsWinShell('code'), true, 'a bare name may be a .cmd shim, which libuv will never find');
+  assert.equal(win('powershell', ['-Command', 'x']).shell, true, 'bare names default to the shell');
+  assert.equal(
+    core.launchSpec('powershell', ['-Command', 'x'], { platform: 'win32', direct: true }).shell,
+    false,
+    '`direct` opts a caller out when its args cannot survive cmd quoting'
+  );
+
+  // THE invariant. DEP0190 fires on a POPULATED args array alongside shell:true, and shell mode
+  // concatenates such an array unquoted. Both failure modes are excluded by this one assertion, so
+  // it has to hold for every input — this is what the pre-fix code violated at all seven sites.
+  for (const [file, args] of [
+    ['npm.cmd', ['i', '-g', 'C:\\a b\\x.tgz']],
+    ['claude-observatory.cmd', ['changemap', '--json', '--root', 'C:\\Users\\First Last\\repo']],
+    ['code', []],
+    ['x.exe', ['a b']],
+  ]) {
+    const s = win(file, args);
+    if (s.shell) assert.equal(s.args.length, 0, `shell:true must carry an EMPTY args array (${file})`);
+  }
+});
+
+test('spawn: our launch shape does not trigger the DEP0190 deprecation', () => {
+  // Read the warning off a CHILD's stderr: Node latches each deprecation per process, so asking the
+  // test runner itself would answer only once and then lie forever after.
+  const warnedBy = (file, args) =>
+    cp.spawnSync(
+      process.execPath,
+      [
+        '-e',
+        `require('child_process').spawnSync(${JSON.stringify(file)}, ${JSON.stringify(args)}, ` +
+          `{ shell: true, stdio: 'ignore' })`,
+      ],
+      { encoding: 'utf8' }
+    ).stderr || '';
+
+  // POSITIVE CONTROL — proves the assertion below is capable of failing on this Node. DEP0190
+  // landed in 22.15/23.11, so on the CI matrix it exists on node 22 and not on node 20; on the
+  // node-20 lanes the assertion below is honestly vacuous and the node-22 lanes carry it.
+  const [maj, min] = process.versions.node.split('.').map(Number);
+  const hasDep0190 = maj > 23 || (maj === 23 && min >= 11) || (maj === 22 && min >= 15);
+  if (hasDep0190) {
+    assert.match(warnedBy('echo', ['hi']), /DEP0190/, 'an args array with shell:true still deprecates here');
+  }
+
+  const s = core.launchSpec('echo', ['hi'], { platform: 'win32' }); // force the win32 shape anywhere
+  assert.doesNotMatch(warnedBy(s.file, s.args), /DEP0190|DeprecationWarning/, 'ours never warns');
+});
+
+test('spawn: a launched command delivers the argv a bare spawn would, spaces and all', () => {
+  // The probe lives at a space-free path and only the --root VALUE carries a space: that is the real
+  // shape (`spawnCliJson(bin, [.., '--root', cwd])` with a workspace under C:\Users\First Last).
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-spawn-'));
+  const probe = path.join(dir, 'argv.js');
+  fs.writeFileSync(probe, 'console.log(JSON.stringify(process.argv.slice(2)))');
+  const args = ['changemap', '--json', '--root', path.join(dir, 'First Last', 'repo')];
+
+  // Whatever shape this platform's launchSpec chose, RUNNING it must reproduce the bare-spawn argv.
+  // (On Windows process.execPath ends in .exe so this takes the direct branch; off Windows it takes
+  // the shell branch. Asserting which one would just re-assert the unit test above — and asserting
+  // `shell === true` here is exactly the mistake that would turn the Windows lane red.)
+  const out = core.spawnToolSync(process.execPath, [probe, ...args], { encoding: 'utf8' });
+  assert.deepEqual(JSON.parse(out.stdout.trim()), args, 'the spaced --root value arrived as ONE argument');
+
+  // POSITIVE CONTROL — the shape this replaces DOES corrupt it. If this stops splitting, the
+  // assertion above has stopped proving anything. Run it in a GRANDCHILD: the deprecated form emits
+  // DEP0190, and a stray one on the runner's stderr would read in CI as the very bug being fixed.
+  const naive = cp
+    .spawnSync(
+      process.execPath,
+      [
+        '-e',
+        `const r = require('child_process').spawnSync(${JSON.stringify(process.execPath)}, ` +
+          `${JSON.stringify([probe, ...args])}, { shell: true, encoding: 'utf8' }); ` +
+          `process.stdout.write(r.stdout || '')`,
+      ],
+      { encoding: 'utf8' }
+    )
+    .stdout.trim();
+  const split = JSON.parse(naive);
+  assert.equal(split.length, args.length + 1, 'the one spaced --root value arrived as TWO arguments');
+  assert.ok(
+    split.some((a) => a.endsWith(`${path.sep}First`)) && split.includes(`Last${path.sep}repo`),
+    'and it broke exactly at the space'
+  );
+});
+
+test('spawn: the wrappers apply the spec and forward cwd/env/stdio', () => {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cc-wrap-')));
+  const probe = path.join(dir, 'probe.js');
+  fs.writeFileSync(
+    probe,
+    'console.log(JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd(), tag: process.env.CO_TAG }))'
+  );
+  const args = [probe, 'a b', 'R&D'];
+  const opts = { cwd: dir, env: { ...process.env, CO_TAG: 'forwarded' }, encoding: 'utf8' };
+
+  const sync = JSON.parse(core.spawnToolSync(process.execPath, args, opts).stdout.trim());
+  assert.deepEqual(sync.argv, ['a b', 'R&D'], 'spawnToolSync: argv survives spaces and cmd syntax');
+  assert.equal(fs.realpathSync(sync.cwd), dir, 'spawnToolSync: cwd is forwarded, not eaten by split()');
+  assert.equal(sync.tag, 'forwarded', 'spawnToolSync: env is forwarded');
+
+  // The wrappers must go THROUGH launchSpec, not around it. The discriminator is ENOENT fidelity:
+  // a shell reports a missing binary as exit 127, a direct spawn as error ENOENT / status null.
+  // A wrapper that ignored the spec would answer the direct way for both of these.
+  const missing = 'claude-observatory-definitely-not-a-real-binary';
+  const viaShell = core.spawnToolSync(missing, [], { platform: 'win32', stdio: 'ignore' });
+  assert.equal(viaShell.error, undefined, 'forced win32: went through a shell, so no spawn error');
+  assert.notEqual(viaShell.status, null, 'forced win32: the shell itself ran and reported a status');
+  const viaDirect = core.spawnToolSync(missing, [], { platform: 'win32', direct: true, stdio: 'ignore' });
+  assert.equal(viaDirect.error && viaDirect.error.code, 'ENOENT', '`direct` keeps the real spawn error');
+
+  // The same discriminator for the other two wrappers — each has its own code path to the spec.
+  const asyncErrCode = (o) =>
+    new Promise((resolve) => {
+      const c = core.spawnTool(missing, [], { ...o, stdio: 'ignore' });
+      c.on('error', (e) => resolve(e.code));
+      c.on('close', (code) => resolve(`exit:${code}`));
+    });
+  const execErrCode = (o) =>
+    new Promise((resolve) => core.execFileTool(missing, [], o, (err) => resolve(err && err.code)));
+
+  return Promise.all([
+    asyncErrCode({ platform: 'win32' }).then((c) =>
+      assert.notEqual(c, 'ENOENT', 'spawnTool: forced win32 went through a shell')
+    ),
+    asyncErrCode({ platform: 'win32', direct: true }).then((c) =>
+      assert.equal(c, 'ENOENT', 'spawnTool: `direct` keeps the real spawn error')
+    ),
+    execErrCode({ platform: 'win32' }).then((c) =>
+      assert.notEqual(c, 'ENOENT', 'execFileTool: forced win32 went through a shell')
+    ),
+    execErrCode({ platform: 'win32', direct: true }).then((c) =>
+      assert.equal(c, 'ENOENT', 'execFileTool: `direct` keeps the real spawn error')
+    ),
+    new Promise((resolve, reject) => {
+      core.execFileTool(process.execPath, args, opts, (err, stdout) => {
+        try {
+          assert.equal(err, null);
+          const r = JSON.parse(String(stdout).trim());
+          assert.deepEqual(r.argv, ['a b', 'R&D'], 'execFileTool: argv survives');
+          assert.equal(r.tag, 'forwarded', 'execFileTool: env is forwarded');
+          resolve();
+        } catch (e) {
+          reject(e);
+        }
+      });
+    }),
+    new Promise((resolve, reject) => {
+      const child = core.spawnTool(process.execPath, args, { ...opts, stdio: ['ignore', 'pipe', 'ignore'] });
+      let out = '';
+      child.stdout.on('data', (d) => (out += d));
+      child.on('close', () => {
+        try {
+          const r = JSON.parse(out.trim());
+          assert.deepEqual(r.argv, ['a b', 'R&D'], 'spawnTool: argv survives');
+          assert.equal(fs.realpathSync(r.cwd), dir, 'spawnTool: cwd is forwarded');
+          resolve();
+        } catch (e) {
+          reject(e);
+        }
+      });
+    }),
+  ]);
+});
+
+test('spawn(win32): a real .cmd shim round-trips through real cmd.exe', { skip: process.platform !== 'win32' }, () => {
+  // Everything above proves the SHAPE. Only the Windows runner can prove the shape is right, because
+  // only there does shell:true mean cmd.exe — elsewhere Node runs /bin/sh, whose quoting rules are
+  // not the ones this module encodes. This is also the case the whole module exists for: a .cmd
+  // shim, which libuv cannot launch and cannot even find.
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cc-cmd-')));
+  const probe = path.join(dir, 'probe.js');
+  fs.writeFileSync(probe, 'console.log(JSON.stringify(process.argv.slice(2)))');
+  const shim = path.join(dir, 'shim.cmd');
+  fs.writeFileSync(shim, `@echo off\r\n"${process.execPath}" "${probe}" %*\r\n`);
+
+  const spaced = path.join(dir, 'First Last', 'repo');
+  const args = ['changemap', '--json', '--root', spaced, '--session', 'a&b'];
+  const r = core.spawnToolSync(shim, args, { encoding: 'utf8' });
+  assert.equal(r.error, undefined, 'a .cmd is launchable through the launcher (it is not, without one)');
+  assert.equal(r.status, 0, `shim exited non-zero: ${r.stderr}`);
+  assert.deepEqual(JSON.parse(r.stdout.trim()), args, 'cmd.exe round-trips spaces AND & exactly');
+});
