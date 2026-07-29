@@ -182,8 +182,8 @@ export function demoActionState(
  *
  * A tour left playing must still finish, and a reader who only watches should still see Keep and Undo
  * actually happen rather than be told about them — so an unanswered ask self-applies instead of being
- * skipped. Nine seconds is the same grace `docs/demo.html` gives its gates, deliberately: the page and
- * the product should behave alike rather than two ways.
+ * skipped. Nine seconds is the same grace the site's interactive demo (docs/showcase.html#demo) gives
+ * its gates, deliberately: the page and the product should behave alike rather than two ways.
  */
 export const DEMO_ACTION_COUNTDOWN_MS = 9_000;
 

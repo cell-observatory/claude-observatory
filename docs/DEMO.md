@@ -13,7 +13,7 @@ which run it came from.
 
 ## Zero-setup demo — try it without Claude
 
-The **[interactive demo](https://cell-observatory.github.io/claude-observatory/demo.html)** replays the
+The **[interactive demo](https://cell-observatory.github.io/claude-observatory/showcase.html#demo)** replays the
 scenario in the browser, with no editor and no Claude session required. Locally, the built-in simulator
 replays the same scripted session through the **real pipeline** — a genuine transcript, edits captured
 by the same hooks, a subagent, a workflow run, and a second agent in a sibling worktree — inside isolated

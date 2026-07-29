@@ -60,6 +60,25 @@ function setBadgeVersion(next) {
   writeFileSync(join(root, README), read(README).replace(badgeRe, (_all, a, _v, c) => `${a}${badgeEncode(next)}${c}`));
 }
 
+// The SITE lists the current stable version (user ask 2026-07-29). The pages carry
+// `<span data-co-version>vX.Y.Z</span>` markers stamped here — correct by construction, because the
+// site only deploys from main, whose committed version IS the current stable; the version:check gate
+// in CI keeps the markers from ever drifting.
+const SITE_FILES = ['docs/releases.html', 'docs/showcase.html', 'docs/getting-started.html', 'docs/concepts.html'];
+// Attribute-tolerant: the markers carry classes (`brandver`) and ids (`rel-stable`) beside the
+// data attribute — a bare `<span data-co-version>` pattern silently stamped NOTHING once they did.
+const siteVersionRe = /(<span[^>]*\bdata-co-version\b[^>]*>v)([^<]+)(<\/span>)/g;
+
+function siteVersionsOf(rel) {
+  const all = [...read(rel).matchAll(siteVersionRe)].map((m) => m[2]);
+  if (all.length === 0) throw new Error(`no data-co-version marker found in ${rel}`);
+  return all;
+}
+
+function setSiteVersion(rel, next) {
+  writeFileSync(join(root, rel), read(rel).replace(siteVersionRe, (_all, a, _v, c) => `${a}${next}${c}`));
+}
+
 function versionOf(rel) {
   const m = read(rel).match(reFor(rel));
   if (!m) throw new Error(`no version field found in ${rel}`);
@@ -129,7 +148,8 @@ if (arg && arg !== '--write' && arg !== 'check') {
   for (const t of CORE_PIN_FILES) setCorePin(t, arg);
   setLockfileVersions(arg);
   setBadgeVersion(arg);
-  console.log(`✓ set version ${arg} across ${targets.length} files (+ ${CORE_PIN_FILES.length} core pins + ${LOCKFILE} + the README badge)`);
+  for (const t of SITE_FILES) setSiteVersion(t, arg);
+  console.log(`✓ set version ${arg} across ${targets.length} files (+ ${CORE_PIN_FILES.length} core pins + ${LOCKFILE} + the README badge + ${SITE_FILES.length} site pages)`);
   process.exit(0);
 }
 
@@ -141,7 +161,8 @@ if (arg === '--write') {
   for (const t of CORE_PIN_FILES) setCorePin(t, rootVersion);
   setLockfileVersions(rootVersion);
   setBadgeVersion(rootVersion);
-  console.log(`✓ propagated root version ${rootVersion} to ${targets.length} files (+ ${CORE_PIN_FILES.length} core pins + ${LOCKFILE} + the README badge)`);
+  for (const t of SITE_FILES) setSiteVersion(t, rootVersion);
+  console.log(`✓ propagated root version ${rootVersion} to ${targets.length} files (+ ${CORE_PIN_FILES.length} core pins + ${LOCKFILE} + the README badge + ${SITE_FILES.length} site pages)`);
   process.exit(0);
 }
 
@@ -162,6 +183,11 @@ if (checkLockfile(rootVersion)) drift = true;
   const v = badgeVersionOf();
   if (v !== rootVersion) drift = true;
   console.log(`${v === rootVersion ? '✓' : '✗'} ${README} (version badge): ${v}`);
+}
+for (const t of SITE_FILES) {
+  const bad = siteVersionsOf(t).filter((v) => v !== rootVersion);
+  if (bad.length) drift = true;
+  console.log(`${bad.length === 0 ? '✓' : '✗'} ${t} (site version): ${bad[0] ?? rootVersion}`);
 }
 if (drift) {
   console.error(`\nversion drift — root is ${rootVersion}. Run \`node scripts/version.mjs --write\` to fix.`);

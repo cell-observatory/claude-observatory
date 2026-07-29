@@ -5,6 +5,39 @@ All notable changes to Claude Observatory are recorded here, following
 Per-tag release artifacts and auto-generated notes are on the
 [Releases page](https://github.com/cell-observatory/claude-observatory/releases).
 
+## [Unreleased]
+
+<!-- Every feature/fix PR into `dev` appends its line here; a promote renames this section to the
+     release version and opens a fresh one. -->
+
+## [0.9.1] — 2026-07-29
+
+### Fixed
+- **The version chip's Update now stays in the menu.** It only rendered when the followed channel had
+  something newer — so the moment you were up to date, the update button you'd been told about was
+  simply missing, and a menu whose main action comes and goes reads as broken. It is always present
+  now: with an update available it reads "Update now — vX" (dot on the chip, restart/reload pop-up
+  after installing); current, it reads "up to date" and stays clickable — a safe no-op that reports
+  up to date, re-checks the release feed, and never offers a restart. And "up to date" is only
+  claimed when the release feed actually answered — with no data (offline, first paint) the row
+  stays but claims nothing. Both editors. (This release uses the hotfix path: cherry-picked onto
+  `main` from `dev` and tagged `v0.9.1`, while the same fix rolls on the pre-release channel — see
+  CONTRIBUTING's "Hotfixes".)
+
+### Changed
+- **The site's interactive demo moved to the homepage and caught up with the product.** The full
+  step-by-step demo now lives on the front page (the old demo page redirects), replacing the smaller
+  autoplay film, and its mock finally matches today's layout: the Observatory Traces
+  sidebar, the editor, and the Claude session with the Observatory Timeline share the top row, the
+  Overview carries the product's two-row review bar (axes, session bulk actions, and the version
+  chip) over a fleet showing parallel agents and a workflow run with its tasks, the Stats pane leads
+  with Edits and Session tokens, and the
+  **Observatory Dashboards** dock below holds the Overview and Stats. The feature tour reads
+  navigation → title → text → image, every page shares one navigation bar (Install always lands on
+  the homepage's install section, the reference page is labeled **Docs**, the current page is
+  highlighted), the current release number is shown live in the brand and footer chips, and the
+  Releases page links the full changelog.
+
 ## [0.9.0] — 2026-07-28
 
 **The Overview's cache almost never hit.** Opening an older session and watching it take twelve seconds
