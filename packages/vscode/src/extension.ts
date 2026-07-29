@@ -4989,7 +4989,11 @@ const OVERVIEW_SCRIPT = `
     chip.title=(v.updateAvailable?'Update available — ':'')+'Claude Observatory version — update, or switch between the stable and pre-release channels';
     var chLatest=v.channel==='dev'?(v.devLatest||v.stableLatest):v.stableLatest;
     var h='';
-    if(v.updateAvailable&&chLatest) h+='<button class="vm-row" data-va="update"><i class="codicon codicon-cloud-download"></i> Update now<span class="vm-ver">v'+esc(chLatest)+'</span></button><div class="vm-sec"></div>';
+    // ALWAYS present (user call 2026-07-28): a menu whose main action appears only sometimes reads
+    // as broken. Clicking while current is a safe no-op — the host shows the up-to-date toast with
+    // no reload offer — and doubles as a manual re-check. "up to date" is only claimed when the
+    // release feed was actually consulted; with no data (offline, first paint) the slot shows '—'.
+    h+='<button class="vm-row" data-va="update"><i class="codicon codicon-cloud-download"></i> Update now<span class="vm-ver">'+(v.updateAvailable&&chLatest?'v'+esc(chLatest):(chLatest?'up to date':'—'))+'</span></button><div class="vm-sec"></div>';
     h+='<button class="vm-row" data-va="stable"'+(v.channel!=='dev'?' disabled':'')+'><i class="codicon codicon-check" style="visibility:'+(v.channel!=='dev'?'visible':'hidden')+'"></i> Stable<span class="vm-ver">'+(v.stableLatest?'v'+esc(v.stableLatest):'—')+'</span></button>';
     h+='<button class="vm-row" data-va="dev"'+(v.channel==='dev'?' disabled':'')+'><i class="codicon codicon-check" style="visibility:'+(v.channel==='dev'?'visible':'hidden')+'"></i> Pre-release<span class="vm-ver">'+(v.devLatest?'v'+esc(v.devLatest):'none yet')+'</span></button>';
     if(v.offline) h+='<div class="vm-note">release info unavailable — offline?</div>';

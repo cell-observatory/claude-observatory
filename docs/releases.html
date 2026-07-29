@@ -43,8 +43,9 @@
   .nav .row{display:flex;align-items:center;gap:20px;height:60px}
   .brand{display:flex;align-items:center;gap:9px;font-weight:640;letter-spacing:-.02em;font-size:1.02rem}
   .brand .m{font-size:1.2rem}
+  .brand .brandver{font-family:var(--mono);font-size:.7rem;font-weight:500;color:var(--ink-faint);margin-left:4px;letter-spacing:0}
   .nav .links{display:flex;gap:26px;margin-inline:auto;font-size:.95rem;color:var(--ink-soft)}
-  .nav .links a:hover{color:var(--ink)} .nav .links a.more{color:var(--accent-ink)}
+  .nav .links a{white-space:nowrap} .nav .links a:hover{color:var(--ink)} .nav .links a[aria-current="page"]{color:var(--ink);font-weight:620} .nav .links a.more{color:var(--accent-ink)}
   .nav .right{display:flex;align-items:center;gap:10px}
   .icon-btn,.ghost{border:1px solid var(--line);background:var(--surface);color:var(--ink-soft);border-radius:999px;padding:7px 13px;font-size:.85rem;font-family:var(--mono);cursor:pointer;transition:.15s}
   .icon-btn:hover,.ghost:hover{color:var(--ink);border-color:var(--ink-faint)}
@@ -53,10 +54,10 @@
      does not fit pushes the cluster past the viewport and scrolls the WHOLE page sideways. Measured at
      +29px on every page at 320px (brand + the three right-hand buttons) and +29/+30px at 768px on the
      six-link pages, where the links are shown but no longer fit. The ghost GitHub button is the widest
-     item and the only redundant one: GitHub is already the last entry in .links, and below 720px the ☰
+     item and the only redundant one: GitHub is already the last entry in .links, and below 900px the ☰
      menu reveals those, so dropping it costs no route to anything. */
   @media (max-width:900px){ .nav .right .ghost{display:none} }
-  @media (max-width:720px){
+  @media (max-width:900px){
     .menu-btn{display:inline-flex}
     .nav .links{display:none}
     .nav.open .links{display:flex;flex-direction:column;align-items:flex-start;position:absolute;top:60px;left:0;right:0;margin:0;padding:14px 5% 18px;gap:14px;background:var(--bg);border-bottom:1px solid var(--line);box-shadow:var(--shadow)}
@@ -120,12 +121,14 @@
 
 <nav class="nav" id="nav">
   <div class="wrap row">
-    <a class="brand" href="showcase.html"><span class="m">🔬</span> Claude Observatory</a>
+    <a class="brand" href="showcase.html"><span class="m">🔬</span> Claude Observatory <span class="brandver" data-co-version>v0.9.1</span></a>
     <div class="links">
       <a href="showcase.html">Home</a>
-      <a href="demo.html">Demo</a>
+      <a href="showcase.html#install">Install</a>
       <a href="getting-started.html">Getting started</a>
-      <a href="https://github.com/cell-observatory/claude-observatory">GitHub</a>
+      <a href="concepts.html">Docs</a>
+      <a href="releases.html" aria-current="page">Releases</a>
+      <a class="more" href="https://github.com/cell-observatory/claude-observatory">GitHub</a>
     </div>
     <div class="right">
       <button class="icon-btn menu-btn" id="menu" aria-label="Toggle navigation menu" aria-expanded="false">☰</button>
@@ -151,6 +154,7 @@
     <h2>Stable and Pre-release</h2>
     <div class="term" id="stable">
       <h3><a href="#stable">Stable</a></h3>
+      <p><b>Current stable: <a href="https://github.com/cell-observatory/claude-observatory/releases/latest" style="color:var(--accent-ink);text-decoration:underline;text-underline-offset:3px"><span data-co-version id="rel-stable">v0.9.1</span></a></b> · current pre-release: <span id="rel-dev">rolling</span> — read live from the releases feed (the static value is the fallback from this page’s last deploy). Every release’s changes: the <a href="https://github.com/cell-observatory/claude-observatory/blob/main/CHANGELOG.md" style="color:var(--accent-ink);text-decoration:underline;text-underline-offset:3px">full changelog</a>.</p>
       <p><b>Tagged releases, cut from <code>main</code>.</b> Each one is a version like <code>v0.9.0</code>: the full three-OS test matrix and the end-to-end suite ran on the exact commit, the artifacts (CLI tarball, VS&nbsp;Code <code>.vsix</code>, JetBrains plugin zip) are attached to the GitHub Release, and the changelog names what changed. This is the default channel — <code>releases/latest</code> serves it, and nothing on it ever moves after it is published.</p>
     </div>
     <div class="term" id="prerelease">
@@ -167,7 +171,7 @@
     <p class="glede">Both editors pin a <b>version chip</b> at the right edge of the Overview's toolbar. It shows the version you are running; when the channel you follow has something newer, a dot appears. Its menu holds everything this page describes:</p>
     <div class="term">
       <h3>Update now</h3>
-      <p>Installs the newest release of the channel you follow — the CLI, both editor plugins, and the bundled status line, all in one pass. Reload the VS&nbsp;Code window (or restart the IDE) afterwards to load the new build.</p>
+      <p>Always in the menu. Installs the newest release of the channel you follow — the CLI, both editor plugins, and the bundled status line, all in one pass — then offers the reload (VS&nbsp;Code) or restart (JetBrains) that loads it. When nothing is newer it says so and installs nothing; clicking it also re-checks the release feed.</p>
     </div>
     <div class="term">
       <h3>Stable ⇄ Pre-release</h3>
@@ -215,7 +219,36 @@ downloading claude-observatory-cli-dev.tgz …
       <h3>Promoting to main</h3>
       <p>When dev has soaked, a single <code>dev → main</code> PR promotes everything, and a version tag on the merge cuts the official release. Stable users see one coherent update with a changelog; pre-release users see the same content arrive as an ordinary (slightly newer) version.</p>
     </div>
+    <div class="term">
+      <h3>Hotfixes</h3>
+      <p>A critical fix that cannot wait for the next promote ships as a patch release cherry-picked from dev onto the stable line (<code>v0.9.0 → v0.9.1</code>). Stable users get it immediately; pre-release users already carry it — their rolling builds outrank the patch, so nothing downgrades.</p>
+    </div>
     <p style="margin-top:18px">The contributor-side details — workflows, version stamping, what to bump after a promote — live in <a href="https://github.com/cell-observatory/claude-observatory/blob/main/CONTRIBUTING.md" style="color:var(--accent-ink);text-decoration:underline;text-underline-offset:3px">CONTRIBUTING</a>.</p>
+  </div>
+</section>
+
+<section class="group" id="contributing">
+  <div class="wrap">
+    <span class="eyebrow">Contributing a change</span>
+    <h2>One standardized path, and your feature ships the same hour</h2>
+    <p class="glede">Every change — a maintainer's or a first-time contributor's — takes the same road:</p>
+    <div class="term">
+      <h3>1 · Branch and open a PR against <code>dev</code></h3>
+      <p>Fork (or branch), build the change, open a pull request with <code>dev</code> as the base. GitHub preselects <code>main</code> — switch it; a maintainer retargets any PR that misses this. The PR template carries the two things every change answers: the <b>cross-editor parity checklist</b> (features ship in the CLI, VS&nbsp;Code, <em>and</em> JetBrains, with shared logic in core exposed over <code>--json</code>) and a "tested on" line.</p>
+    </div>
+    <div class="term">
+      <h3>2 · Say what changed, where users will read it</h3>
+      <p>Add one line under <code>## [Unreleased]</code> in <code>CHANGELOG.md</code> as part of the PR. A promote renames that section to the release version — your words ship with the release that carries your work. User-facing changes update the docs and screenshots they touch, in the same PR.</p>
+    </div>
+    <div class="term">
+      <h3>3 · The gauntlet runs itself</h3>
+      <p>Every PR gets the full three-OS test matrix, both editor builds, and CodeQL — regardless of where it came from. Fork PRs run with a read-only token, and nothing can publish from a PR: the release machinery only fires after a maintainer merges.</p>
+    </div>
+    <div class="term">
+      <h3>4 · Merged means installable</h3>
+      <p>The merge push republishes the rolling pre-release within minutes. <code>claude-observatory update --channel dev</code> — or the version chip in either editor — and you are running your own feature the same hour. The stable channel picks it up with the next promote, batched and changelogged.</p>
+    </div>
+    <p style="margin-top:18px">The full contributor guide — repo layout, the worked end-to-end example, the build & test cheat-sheet — is <a href="https://github.com/cell-observatory/claude-observatory/blob/main/CONTRIBUTING.md" style="color:var(--accent-ink);text-decoration:underline;text-underline-offset:3px">CONTRIBUTING</a>.</p>
   </div>
 </section>
 
@@ -228,9 +261,10 @@ downloading claude-observatory-cli-dev.tgz …
     <div class="doclinks">
       <a class="primary" href="showcase.html">← Back to home</a>
       <a href="getting-started.html">Getting started</a>
-      <a href="concepts.html">Concepts</a>
+      <a href="concepts.html">Docs</a>
+      <a href="https://github.com/cell-observatory/claude-observatory/blob/main/CHANGELOG.md">Changelog</a>
       <a href="https://github.com/cell-observatory/claude-observatory/blob/main/CONTRIBUTING.md">Contribute</a>
-      <a href="https://github.com/cell-observatory/claude-observatory#quickstart">Install</a>
+      <a href="showcase.html#install">Install</a>
     </div>
   </div>
 </section>
@@ -238,9 +272,9 @@ downloading claude-observatory-cli-dev.tgz …
 <footer class="foot" id="footer">
   <div class="wrap">
     <div class="row">
-      <span class="brand"><span class="m">🔬</span> Claude Observatory</span>
+      <span class="brand"><span class="m">🔬</span> Claude Observatory <span class="brandver" data-co-version>v0.9.1</span></span>
       <div class="flinks">
-        <a href="concepts.html">Concepts</a>
+        <a href="concepts.html">Docs</a>
         <a href="releases.html">Releases</a>
         <a href="https://github.com/cell-observatory/claude-observatory/blob/main/docs/DEMO.md">Demo</a>
         <a href="https://github.com/cell-observatory/claude-observatory/blob/main/docs/ARCHITECTURE.md">How it works</a>
@@ -253,6 +287,46 @@ downloading claude-observatory-cli-dev.tgz …
 </footer>
 
 <script>
+  // Every data-co-version chip shows the CURRENT STABLE, read live from the releases feed
+  // (session-cached; the stamped value is the fallback from this page's last deploy).
+  (function(){
+    var els=document.querySelectorAll('[data-co-version]'); if(!els.length) return;
+    function apply(v){ for(var i=0;i<els.length;i++) els[i].textContent='v'+v; }
+    try{ var c=sessionStorage.getItem('co-stable'); if(c) apply(c); }catch(e){}
+    fetch('https://api.github.com/repos/cell-observatory/claude-observatory/releases/latest',{headers:{Accept:'application/vnd.github+json'}})
+      .then(function(r){ return r.ok?r.json():null; })
+      .then(function(rel){ if(!rel) return; var tag=String(rel.tag_name||'').replace(/^v/i,'');
+        if(/^\d{1,9}\.\d{1,9}\.\d{1,9}/.test(tag)){ try{sessionStorage.setItem('co-stable',tag);}catch(e){} apply(tag); } })
+      .catch(function(){ /* offline / rate-limited: the stamped fallback stands */ });
+  })();
+  // The channel versions, LIVE: the page's numbers come from the releases feed itself, so they are
+  // right even between deploys (the stamped values remain as the no-JS fallback). Mirrors the CLI's
+  // resolution: stable = first regular release; pre-release = first prerelease, version from the tag
+  // when version-shaped, else the first semver in the title (the rolling tag never moves).
+  (function(){
+    var stableEl=document.getElementById('rel-stable'), devEl=document.getElementById('rel-dev');
+    if(!stableEl) return;
+    fetch('https://api.github.com/repos/cell-observatory/claude-observatory/releases?per_page=20',
+      {headers:{Accept:'application/vnd.github+json'}})
+      .then(function(r){ return r.ok ? r.json() : null; })
+      .then(function(list){
+        if(!Array.isArray(list)) return;
+        function ver(rel){ if(!rel) return null;
+          var tag=String(rel.tag_name||'').replace(/^v/i,'');
+          if(/^\d{1,9}\.\d{1,9}\.\d{1,9}/.test(tag)) return tag;
+          var m=String(rel.name||'').slice(0,256).match(/\d{1,9}\.\d{1,9}\.\d{1,9}(?:-[0-9A-Za-z][0-9A-Za-z.-]{0,127})?/);
+          return m?m[0]:null; }
+        var stable=null, dev=null;
+        for(var i=0;i<list.length;i++){ var r=list[i]; if(r.draft) continue;
+          if(r.prerelease===true){ if(!dev) dev=r; } else if(!stable) stable=r; }
+        var sv=ver(stable), dv=ver(dev);
+        if(sv && stableEl) stableEl.textContent='v'+sv;
+        if(dv && devEl) devEl.textContent='v'+dv;
+        // The brand/footer chips carry data-co-version too, so the first IIFE already retargets
+        // them to the live stable — this block only fills the channel claims above.
+      })
+      .catch(function(){ /* offline / rate-limited: the stamped fallback stands */ });
+  })();
   (function(){
     var root=document.documentElement,btn=document.getElementById('theme'),KEY='co-theme';
     try{var s=localStorage.getItem(KEY);if(s)root.setAttribute('data-theme',s);}catch(e){}

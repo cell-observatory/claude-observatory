@@ -9,12 +9,12 @@
 [![Pages](https://github.com/cell-observatory/claude-observatory/actions/workflows/pages.yml/badge.svg)](https://github.com/cell-observatory/claude-observatory/actions/workflows/pages.yml)
 [![Release](https://github.com/cell-observatory/claude-observatory/actions/workflows/release.yml/badge.svg)](https://github.com/cell-observatory/claude-observatory/actions/workflows/release.yml)
 [![Dependabot](https://img.shields.io/badge/dependabot-enabled-025E8C?logo=dependabot&logoColor=white)](https://github.com/cell-observatory/claude-observatory/blob/main/.github/dependabot.yml)
-[![Version](https://img.shields.io/badge/version-v0.9.0-blue)](https://github.com/cell-observatory/claude-observatory/releases/latest)
+[![Version](https://img.shields.io/badge/version-v0.9.1-blue)](https://github.com/cell-observatory/claude-observatory/releases/latest)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/cell-observatory/claude-observatory/blob/main/LICENSE)
 
 
 
-**[🔬 Live showcase →](https://cell-observatory.github.io/claude-observatory/)** &nbsp;·&nbsp; **[Interactive demo →](https://cell-observatory.github.io/claude-observatory/demo.html)** &nbsp;·&nbsp; [Changelog](CHANGELOG.md)
+**[🔬 Live showcase →](https://cell-observatory.github.io/claude-observatory/)** &nbsp;·&nbsp; **[Interactive demo →](https://cell-observatory.github.io/claude-observatory/showcase.html#demo)** &nbsp;·&nbsp; [Changelog](CHANGELOG.md)
 
 **Per-edit Keep / Undo for [Claude Code](https://claude.com/claude-code).** Every file change Claude makes
 becomes a reviewable entry with its own surgical undo — in your **terminal**, **VS Code**, and **JetBrains
@@ -60,7 +60,7 @@ product: the Prompts window, the `prompts` command, and the `prompts[]` key of t
 side; the Tasks tab, the `task-keep` / `task-undo` / `task-clear` verbs, and the per-task rollup on the
 other. A **Sessions** tab ends the Overview's left nav: it lists this workspace's sessions by
 conversation recency, and selecting one switches what the whole observatory reviews. The
-**[Concepts](https://cell-observatory.github.io/claude-observatory/concepts.html)** page defines the
+**[Docs](https://cell-observatory.github.io/claude-observatory/concepts.html)** page defines the
 vocabulary the observatory is built from — the record, the two groupings of a session (prompts and
 tasks), the agents, the audits, and the review verbs — and every prose surface uses it consistently, in
 the register described in [docs/STYLE.md](docs/STYLE.md).
@@ -110,8 +110,8 @@ claude-observatory init          # add --with-statusline for the 5h/week Usage b
 Observatory** view in your editor (or run `claude-observatory list`) to review.
 
 **Try it without Claude** — the same scenario is clickable in the browser on the
-**[interactive demo](https://cell-observatory.github.io/claude-observatory/demo.html)** page, nothing to
-install. In your editor, run **Start Demo Mode** from the VS Code command palette or JetBrains Find Action, use
+**[interactive demo](https://cell-observatory.github.io/claude-observatory/showcase.html#demo)** on the
+homepage, nothing to install. In your editor, run **Start Demo Mode** from the VS Code command palette or JetBrains Find Action, use
 the buttons at the end of the Overview's nav bar, or click **Try the demo** in an empty panel. It replays a scripted
 session through the real pipeline in an isolated `demo-*` session and an `observatory-demo/` folder it
 creates in the current directory, then walks you through every panel. In the terminal the same replay is
@@ -141,7 +141,7 @@ The observatory is built for surgical Claude use on established and mission-crit
 every change as it lands and accept, edit, or revert each one while Claude accelerates the work. Every surface below ships in
 **both editors**, and most ship in the terminal as well. The terms used here — session, prompt, task,
 edit, action — are defined on the
-**[Concepts](https://cell-observatory.github.io/claude-observatory/concepts.html)** page.
+**[Docs](https://cell-observatory.github.io/claude-observatory/concepts.html)** page.
 
 The **Observatory Dashboards** bottom panel holds the Overview and Stats side by side like Terminal /
 Problems; Prompts sits with Actions and Observations in the **Observatory Timeline** panel.

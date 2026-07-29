@@ -1204,10 +1204,19 @@ test('extension: three views, click commands, inline annotations, chat, status s
       vm.createContext(sandbox);
       assert.doesNotThrow(() => vm.runInContext(scripts[scripts.length - 1][1], sandbox), 'the overview script initializes under the DOM stub');
       assert.ok(typeof msgListener === 'function', 'the script listens for host messages');
-      msgListener({ data: { type: 'version', v: { current: '9.9.9', channel: 'stable', stableLatest: '9.9.9', devLatest: '9.10.0-dev.3', updateAvailable: true } } });
+      msgListener({ data: { type: 'version', v: { current: '9.9.9', channel: 'stable', stableLatest: '9.9.10', devLatest: '9.10.0-dev.3', updateAvailable: true } } });
       assert.match(elFor('ov-version').innerHTML, /9\.9\.9/, 'the chip RENDERS the version the host delivered');
       assert.match(elFor('ov-vermenu').innerHTML, /Pre-release/, 'the menu carries the channel rows');
-      assert.match(elFor('ov-vermenu').innerHTML, /Update now/, 'and the Update row when an update is available');
+      assert.match(elFor('ov-vermenu').innerHTML, /Update now<span class="vm-ver">v9\.9\.10/, 'the Update row NAMES the version it would install');
+      assert.doesNotMatch(elFor('ov-vermenu').innerHTML, /up to date/, 'and never claims up to date while an update exists');
+      // The Update row is ALWAYS present — up to date shows the affordance too, safely clickable.
+      msgListener({ data: { type: 'version', v: { current: '9.9.9', channel: 'stable', stableLatest: '9.9.9', devLatest: null, updateAvailable: false } } });
+      assert.match(elFor('ov-vermenu').innerHTML, /Update now/, 'the Update row survives being up to date');
+      assert.match(elFor('ov-vermenu').innerHTML, /up to date/, 'and says so instead of hiding');
+      // No release data (offline / first paint): the row stays, but claims nothing it has not checked.
+      msgListener({ data: { type: 'version', v: { current: '9.9.9', channel: 'stable', stableLatest: null, devLatest: null, updateAvailable: false, offline: true } } });
+      assert.match(elFor('ov-vermenu').innerHTML, /Update now<span class="vm-ver">—/, 'with no feed data the Update row shows an em-dash');
+      assert.doesNotMatch(elFor('ov-vermenu').innerHTML, /up to date/, 'and does not assert up to date it never verified');
     }
 
     // (3) THE PROMPT AXIS — the LAST axis on the review nav bar. Step/Review/Accept/Reject

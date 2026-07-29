@@ -1639,13 +1639,25 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             }
             override fun getChildren(e: AnActionEvent?): Array<AnAction> {
                 val v = versionInfo
-                    ?: return arrayOf(action("Checking for releases…", AllIcons.Actions.Refresh, "Fetch release info again (needs the claude-observatory CLI + network)") { refreshVersionInfo(force = true) })
+                    ?: return arrayOf(
+                        // The Update row stays reachable even before (or without) release info —
+                        // the CLI does its own check, so clicking is always safe (VS Code parity).
+                        action("Update Now", AllIcons.Actions.Download, "Update the CLI + both editor plugins; reports up to date when nothing is newer") { runUpdateCli(null) },
+                        com.intellij.openapi.actionSystem.Separator.getInstance(),
+                        action("Checking for releases…", AllIcons.Actions.Refresh, "Fetch release info again (needs the claude-observatory CLI + network)") { refreshVersionInfo(force = true) },
+                    )
                 val rows = mutableListOf<AnAction>()
                 val chLatest = if (v.channel == "dev") v.devLatest ?: v.stableLatest else v.stableLatest
-                if (v.updateAvailable && chLatest != null) {
-                    rows += action("Update Now — v$chLatest", AllIcons.Actions.Download, "Update the CLI + both editor plugins, then restart the IDE") { runUpdateCli(null) }
-                    rows += com.intellij.openapi.actionSystem.Separator.getInstance()
-                }
+                // ALWAYS present (user call 2026-07-28, VS Code parity): clicking while current is a
+                // safe no-op — runUpdateCli branches on the CLI's up-to-date output and shows a
+                // balloon instead of the restart dialog — and doubles as a manual re-check.
+                // "up to date" is only claimed when the release feed actually answered.
+                val updateText =
+                    if (v.updateAvailable && chLatest != null) "Update Now — v$chLatest"
+                    else if (chLatest != null) "Update Now — up to date (v${v.current.ifEmpty { "—" }})"
+                    else "Update Now"
+                rows += action(updateText, AllIcons.Actions.Download, "Update the CLI + both editor plugins; reports up to date when nothing is newer") { runUpdateCli(null) }
+                rows += com.intellij.openapi.actionSystem.Separator.getInstance()
                 val stableText = (if (v.channel != "dev") "✓ " else "") + "Stable" + (v.stableLatest?.let { " — v$it" } ?: "")
                 val devText = (if (v.channel == "dev") "✓ " else "") + "Pre-release" + (v.devLatest?.let { " — v$it" } ?: " — none yet")
                 rows += action(stableText, AllIcons.Actions.Commit, "Tagged releases") {

@@ -179,11 +179,20 @@ Every feature PR must satisfy:
 - **Propose** with the [Feature request](.github/ISSUE_TEMPLATE/feature_request.yml) issue form —
   it asks which surface it affects, which platforms it must land in, and the expected `--json`
   surface.
-- **Open a PR** using the [pull request template](.github/pull_request_template.md) — it carries the
-  parity checklist above and a "tested on: CLI / VS Code / JetBrains" line. Fill both in.
+- **Open a PR against `dev`** using the [pull request template](.github/pull_request_template.md) —
+  it carries the parity checklist above and a "tested on: CLI / VS Code / JetBrains" line. Fill both
+  in. GitHub preselects `main` as the base (it stays the default branch for the installer URLs) —
+  switch it to `dev`; a maintainer will retarget any PR that misses this.
+- **Add your changelog line** under `## [Unreleased]` in `CHANGELOG.md` as part of the PR — one
+  entry in the changelog's voice, saying what changed and why it matters. A promote renames that
+  section to the release version, so your words ship with the release that carries your work.
+- **After the merge**: every push to `dev` republishes the rolling pre-release within minutes — run
+  `claude-observatory update --channel dev` (or use the Overview's version chip) and you are using
+  your own feature the same hour. It reaches the stable channel with the next `dev → main` promote.
 
-By convention, features ship on **all** platforms; a platform-specific exception needs a reason in
-the issue/PR.
+Every PR runs the full three-OS test matrix, both editor builds, and CodeQL, whatever its origin;
+fork PRs run with a read-only token, and nothing publishes until a maintainer merges. By convention,
+features ship on **all** platforms; a platform-specific exception needs a reason in the issue/PR.
 
 ### Branches & releases: how a change reaches users
 
@@ -204,6 +213,19 @@ feature/fix branch ──PR──▶ dev (pre-release channel) ──PR──▶
   committed version to the next target (the rolling builds derive `<next>-dev.<n>` from it).
 - `main` stays the default branch (installer URLs and docs point at `raw/main`), and history that
   shipped keeps the names it shipped with — the changelog's past entries are immutable.
+
+**Version numbering.** `dev`'s committed version is the NEXT stable target (currently the next
+minor), so rolling builds are `<target>-dev.<n>`. The target is a FLOOR: at promote time you may
+raise it (bump, then tag higher) but never tag below it — a stable below the published dev builds
+strands the pre-release channel above the version line, and its auto-update goes quiet.
+
+**Hotfixes.** A critical fix that must reach STABLE users before the next promote does not ship
+from `dev` (which carries unreleased work). Instead: land the fix on `dev` as usual, then
+cherry-pick it onto `main` (or a branch from the last release tag, if `main` has moved), bump the
+patch version (`node scripts/version.mjs 0.9.1`), add a `[0.9.1]` changelog section, and tag — the
+Release workflow publishes it. The ordering stays coherent by construction: stable users get the
+patch, and pre-release users — whose `<next>-dev.<n>` builds already carry the fix and outrank the
+patch — correctly ignore it.
 
 The user-facing story of the two channels lives on
 [the Releases page](https://cell-observatory.github.io/claude-observatory/releases.html).
