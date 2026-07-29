@@ -2510,9 +2510,10 @@ async function updateCliBinary(assets: ReleaseAsset[], latest: string, current: 
   const dest = await downloadAsset(tgz!);
   const cp = require('child_process');
   process.stdout.write(c.dim('installing globally (npm i -g) …\n'));
-  const npmBin = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-  const args = ['i', '-g', dest];
-  const r = cp.spawnSync(npmBin, args, { stdio: 'inherit' });
+  const npmCmd = process.platform === 'win32' ? ['cmd.exe', ['/d', '/s', '/c', `npm.cmd i -g "${dest}"`]] : ['npm', ['i', '-g', dest]];
+  const r = process.platform === 'win32'
+    ? cp.spawnSync(npmCmd[0], npmCmd[1], { stdio: 'inherit' })
+    : cp.spawnSync(npmCmd[0], npmCmd[1], { stdio: 'inherit' });
   if (r.status !== 0) fail(`npm install failed (exit ${r.status ?? '?'}). Try: npm i -g ${dest}`);
   process.stdout.write(c.green('✓ ') + `updated the CLI ${current} → ${latest}\n`);
   refreshInstalledStatusline();
@@ -2527,8 +2528,9 @@ function refreshInstalledStatusline(): void {
   if (!core.statuslineInstalled()) return; // some other status line (or none) — never touch it
   const cp = require('child_process');
   process.stdout.write(c.dim('refreshing the bundled status line…\n'));
-  const cliBin = process.platform === 'win32' ? 'claude-observatory.cmd' : 'claude-observatory';
-  const r = cp.spawnSync(cliBin, ['statusline'], { stdio: 'inherit' });
+  const r = process.platform === 'win32'
+    ? cp.spawnSync('cmd.exe', ['/d', '/s', '/c', 'claude-observatory.cmd statusline'], { stdio: 'inherit' })
+    : cp.spawnSync('claude-observatory', ['statusline'], { stdio: 'inherit' });
   if (r.status !== 0)
     process.stdout.write(
       c.dim(`status line refresh did not complete — run \`claude-observatory statusline\` yourself.\n`)
