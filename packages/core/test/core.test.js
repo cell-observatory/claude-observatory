@@ -8004,3 +8004,72 @@ test('failure: the JetBrains plugin mirrors cliFailureMessage (cross-editor pari
     'the old stderr-first rule must be gone, not merely shadowed'
   );
 });
+
+test('statusline(win32): OUR script is recognised through Git Bash / WSL / Cygwin paths', () => {
+  // The installer is bash, so on Windows it writes an MSYS-shaped path; path.join() here writes a
+  // native one. A raw substring test between those is false forever, which is why `update` silently
+  // never refreshed the status line on Windows and `uninstall --all` orphaned it.
+  const dir = 'C:\\Users\\First Last\\.claude';
+  const ours = (cmd) => core.referencesOurStatusline(cmd, dir, 'win32');
+
+  assert.ok(ours('bash /c/Users/First Last/.claude/statusline.sh'), 'Git Bash / MSYS drive prefix');
+  assert.ok(ours('bash "/c/Users/First Last/.claude/statusline.sh"'), 'MSYS, quoted — what we now write');
+  assert.ok(ours('bash /mnt/c/Users/First Last/.claude/statusline.sh'), 'WSL');
+  assert.ok(ours('bash /cygdrive/c/Users/First Last/.claude/statusline.sh'), 'Cygwin');
+  assert.ok(ours('bash "C:\\Users\\First Last\\.claude\\statusline.sh"'), 'native, quoted');
+  assert.ok(ours('bash C:/Users/First Last/.claude/statusline.sh'), 'native with forward slashes');
+  assert.ok(ours('bash c:\\users\\first last\\.claude\\statusline.sh'), 'NTFS is case-insensitive');
+
+  // POSITIVE CONTROL for the trap: normalizing SEPARATORS alone passes the native cases above and
+  // fails every MSYS one — the exact half-fix that would look right and leave Windows broken.
+  const separatorsOnly = (cmd) =>
+    cmd.replace(/\\/g, '/').toLowerCase().includes(path.join(dir, 'statusline.sh').replace(/\\/g, '/').toLowerCase());
+  assert.ok(!separatorsOnly('bash /c/Users/First Last/.claude/statusline.sh'), 'the half-fix misses MSYS');
+  assert.ok(ours('bash /c/Users/First Last/.claude/statusline.sh'), 'the real fix does not');
+
+  // A FOREIGN status line must still be refused, or `update` would overwrite someone else's.
+  assert.ok(!ours('bash /c/Users/First Last/tools/statusline.sh'), 'same filename, foreign directory');
+  assert.ok(!ours('/usr/local/bin/starship init'), 'an unrelated status line');
+  assert.ok(!ours(''), 'empty');
+  // POSIX must stay case-SENSITIVE — folding case there would claim a user's own script as ours.
+  assert.ok(core.referencesOurStatusline('bash /home/u/.claude/statusline.sh', '/home/u/.claude', 'linux'));
+  assert.ok(!core.referencesOurStatusline('bash /home/u/.claude/StatusLine.sh', '/home/u/.claude', 'linux'));
+});
+
+test('statusline: uninstall never orphans a statusLine that still points at the script', () => {
+  // The settings edit was gated on the match but the unlink was NOT, so on Windows (where the match
+  // always failed) `uninstall --all` deleted the script and left settings.json pointing at it —
+  // Claude Code then errored on every render, once a minute, with nothing naming us.
+  const home = freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const dir = path.join(home, '.claude');
+  fs.mkdirSync(dir, { recursive: true });
+  const script = path.join(dir, 'statusline.sh');
+  const sp = path.join(dir, 'settings.json');
+
+  // A statusLine that names statusline.sh but is NOT ours (a foreign path) — the shape that used to
+  // fall between the two gates.
+  fs.writeFileSync(script, '#!/bin/bash\necho x\n');
+  fs.writeFileSync(sp, JSON.stringify({ statusLine: { type: 'command', command: 'bash /opt/theirs/statusline.sh' } }));
+  const r = core.uninstallStatusline(sp);
+  assert.equal(r.changed, false, "a foreign statusLine is left alone");
+  assert.equal(r.scriptRemoved, false, 'and the script it still references is NOT deleted');
+  assert.ok(fs.existsSync(script), 'the script survives, so nothing is orphaned');
+
+  // And the normal case still works end to end: ours goes, settings and script both.
+  fs.writeFileSync(sp, JSON.stringify({ statusLine: { type: 'command', command: `bash "${script}"` } }));
+  const r2 = core.uninstallStatusline(sp);
+  assert.equal(r2.changed, true, 'ours is reverted');
+  assert.equal(r2.scriptRemoved, true, 'and its script removed');
+  assert.equal(JSON.parse(fs.readFileSync(sp, 'utf8')).statusLine, undefined);
+  assert.ok(!fs.existsSync(script));
+});
+
+test('statusline: the vendored installer keeps the fixes a sync would silently drop', () => {
+  // scripts/sync-statusline.sh overwrites this file wholesale from upstream, which does not carry
+  // these. Without this test a sync would quietly re-break Windows and no one would know.
+  const sh = fs.readFileSync(path.resolve(__dirname, '../../cli/statusline/install-statusline.sh'), 'utf8');
+  assert.match(sh, /CMD="bash \\"\$CLAUDE_DIR\/statusline\.sh\\""/, 'the statusLine command must be QUOTED');
+  assert.doesNotMatch(sh, /CMD="bash \$CLAUDE_DIR\/statusline\.sh"/, 'the unquoted upstream form must not come back');
+  assert.match(sh, /winget install jqlang\.jq/, 'the jq error must name a Windows route');
+});
