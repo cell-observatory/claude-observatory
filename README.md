@@ -22,7 +22,7 @@ IDEs** — at **zero extra Claude tokens**. The review model resembles Cursor's 
 is standalone, shareable, and git-free. It is built for **established and mission-critical codebases**
 rather than throwaway prototypes.
 
-![The observatory in VS Code: the Observatory Traces sidebar (Edits · Diffs · File History), inline review in the editor, the Observatory Dashboards bottom panel (Overview · Stats), and the Observatory Timeline panel (Prompts · Actions · Observations), and the microscope scoreboard in the status bar](docs/media/layout.png)
+![The observatory in VS Code: the Observatory Traces sidebar (Edits · Diffs · File History), the editor with the inline lens and the compact review bar, the Observatory Dashboards bottom panel (Overview · Stats), the Observatory Timeline panel (Prompts · Observations · Actions) with its session selector and Group tabs toggle, and the microscope scoreboard in the status bar](docs/media/layout.png)
 
 <details>
 <summary><b>Anatomy</b> — every surface, named</summary>
@@ -31,25 +31,25 @@ rather than throwaway prototypes.
 
 </details>
 
-**New in 0.9.0 — the Overview's cache actually hits, and sessions read like fleet rows.** Opening an older
-session and watching it redraw for twelve seconds was not a cold cache; it was a cache being thrown away on
-almost every tick. Everything a change map derives from the project directory is a *count* of sibling
-sessions, but the stamp carried every file's `(mtime, size)` — so one session appending a single line
-invalidated every other session's map, and both editors refresh on the transcript watcher, which made the
-trigger and the invalidator the same event. A refresh that cost **16.0 s** now costs **2.4 s** and
-rewrites one cache file instead of 32. Edit placement is memoized across processes (**2.27 s → 0.28 s**,
-byte-identical), conversations quiet for over a week **fold** into one collapsed group instead of being
-rebuilt on every tick (**cold 15.9 s → 9.1 s**), and a folded row with no cached map says *not loaded*
-rather than showing zeros. Session rows now carry the same badges a fleet row does — ±lines, pending,
-tokens, wall-clock and a model · effort chip — and **Clear completed sessions…** drops the stored
-edits of sessions whose review is finished, never touching the session you are in, anything with pending
-edits, anything mid-capture, anything from another workspace, or anything whose conversation moved in the
-last 24 hours. **Windows stores no longer forge phantom edits**: drive-letter case is canonicalized at
-capture and on every lookup in all three front-ends, undo refuses the destructive half of an existing
-phantom pair, and `clean --phantoms` removes the pairs for good (#43). **Export** grew a second form —
-the **full session trace**, everything the observatory recorded as one JSON document, from the same
-Export button in both editors or `claude-observatory export`. (Earlier releases: see the
-[changelog](CHANGELOG.md).)
+**New in 0.10.0 — the review bar comes into the editor, and the Timeline becomes one window.** Both
+editors now put the review controls over the code itself while the open file has edits awaiting review.
+JetBrains draws a **floating toolbar** on the platform's own floating-toolbar layer. VS Code still has no
+floating-widget API for extensions — that has not changed — so it gives the one surface that *can* float
+over code, a comment thread, a **compact bar** form: one row of Keep · Undo · steppers · Diff · Details
+under a live title. `editorReviewSurface` names the choice in both editors, spelled the same where the two
+overlap. Resolving a single edit carries you to the next one still awaiting review, across files;
+**pending counts** show as badges in the project tree in both editors and on the editor tab in VS Code;
+and the Prompt axis gained **Rewind to before this prompt**, which reverts every unreviewed edit from one
+ask onward rather than only the edits that ask produced.
+
+VS Code's `claudeObservatory.prompts`, `.actions` and `.observations` views were **consolidated into one
+`claudeObservatory.timeline` webview** whose tab strip carries Prompts · Observations · Actions — the shape
+JetBrains already had. That is the release's one breaking change: VS Code remembers view placement per
+profile, so a layout that had those three views dragged elsewhere resets once. A **session selector** leads
+that window, listing the sessions still active in the workspace; a **Group tabs** toggle beside each tab
+strip puts the tabs side by side as resizable, collapsible columns; and JetBrains gained the two
+inline-review pieces it had been missing, **ghost text for removed lines** and the **`+A −R` churn** in its
+lens. (Earlier releases: see the [changelog](CHANGELOG.md).)
 
 The observatory groups a session's work two ways, and names both. A **prompt** is one of your own turns
 together with the work it caused, attributed by what it **started**; picking one in the **Prompts**
@@ -162,7 +162,13 @@ edit, action — are defined on the
 **[Docs](https://cell-observatory.github.io/claude-observatory/concepts.html)** page.
 
 The **Observatory Dashboards** bottom panel holds the Overview and Stats side by side like Terminal /
-Problems; Prompts sits with Actions and Observations in the **Observatory Timeline** panel.
+Problems. The **Observatory Timeline** panel is a single window whose tab strip carries **Prompts ·
+Observations · Actions**; in 0.10.0 VS Code's three separate views became that one tabbed window, which
+is what JetBrains already had. Beside the tabs in both windows sits a **Group tabs** toggle that puts the
+tabs side by side as columns instead of one at a time — the Timeline shows all three, and the Overview
+pairs Sessions with Fleet and Workflows with Tasks and Processes. Grouped columns are resizable by
+dragging the divider between two of them (double-click resets the pair) and each can be folded to a
+narrow **rail** that keeps the section's name and badge and is itself the button that brings it back.
 
 ### Prompts
 
@@ -178,10 +184,33 @@ narrow to the work that ask caused, the bulk actions retarget to it ("Accept All
 that dropped rows says how many and why. The Tasks tab is the exception — the task list stays session-wide.
 Attribution is by what **started** the work, never by what finished during it.
 
+Leading the whole Timeline window, above the tabs, a **session selector** names the session the observatory
+is reviewing and lists the ones still **active** in this workspace, so moving between two live conversations
+is one click; picking one switches the whole observatory, not just the Timeline. A last row, **All
+sessions…**, hands over to the Overview's Sessions tab, which remains the full list of every session
+recorded for the workspace. In VS Code the same short list is also a command, **Switch to an active
+session**.
+
+Picking an ask anywhere — the Prompt axis on the nav bar, **Review prompt**, **Rewind** — selects it in the
+Prompts list too and scrolls it into view, and picking one in the list moves the axis. There is one prompt
+selection, and every surface reads it.
+
+The Prompt axis on the nav bar carries **Rewind to before this prompt** — revert every unreviewed edit from
+that ask **onward**, not just the ones it produced. That is the difference between undoing a prompt and
+undoing the state it created: rejecting a middle prompt reverts a base later edits were built on, while
+rewinding puts the tree back to before you asked. Its confirmation names both the records it will revert
+and the review units they collapse to, and the **Redo** offered on its result restores exactly that set:
+the ids that rewind actually moved, never the ask's whole window. The CLI's `redo --from-prompt <id>` is
+the wider verb — it re-applies every undone edit from that ask onward, including any you had rejected
+before the rewind — so a script that wants the button's behaviour passes the rewind's `ids` to
+`redo --ids`.
+
 ### Overview
 
 The Overview is a **master–detail** map of the whole fleet. The left nav (~25%) has five tabs, each
-opening with a one-line description. **Fleet** lists every running agent across the repo's git worktrees —
+opening with a one-line description; a toggle pairs the related ones **side by side** instead — Sessions
+beside Fleet, and Workflows beside Tasks and Processes — widening the nav while the change map keeps the
+rest. **Fleet** lists every running agent across the repo's git worktrees —
 a live phase (working / awaiting-input / awaiting-permission / idle / errored / done; `~` marks an
 inferred one), worktree and branch, an activity sparkline, ±diff, tokens·time, risk, a conflict badge, and
 an ↗ suffix counting the files read or written outside the workspace — each unfolding to its nested
@@ -229,7 +258,7 @@ with live n/m counters on each axis.
 
 ### Observations
 
-Observations lives in the Observatory Timeline panel, alongside Prompts and Actions. A session recap sits on
+Observations is a tab of the Observatory Timeline panel, beside Prompts and Actions. A session recap sits on
 top (Claude Code's own title, zero token; ✨ to refine via `claude -p --resume`), then a **Context** section
 naming what shaped the session — the skills it invoked, the plans it wrote, the memory it read, whether it
 was resumed from a compaction, plus the instruction files present where Claude Code auto-loads them — each
@@ -293,23 +322,57 @@ prompts for permission, so auto-approved and hand-approved work are indistinguis
 ![File History: the active file's edits, newest first, following the editor — kept edits struck through](docs/media/file-history.png)
 
 **Inline review, right in the editor.** A **✨ gutter star** at each pending edit, a clearly-visible
-green whole-line highlight on added lines and a red one on deletions (removed text shown as red ghost
-text) — each carrying a **bold change-bar** in the gutter, green for added and red for removed — plus a
-**Claude-coral marker** on the scrollbar. Above each
-edit sits an **inline menu**: **✦ #N · +A −R · view changes**, then **✓ Keep · ↩ Undo · Chat · ⧉ View
-diff**. Kept edits grey out; reverted edits stay struck through everywhere.
+green whole-line highlight on added lines and a red one on deletions, with the removed text as red **ghost
+text** — each carrying a **bold change-bar** in the gutter, green for added and red for removed — plus a
+**Claude-coral marker** on the scrollbar. The ghost text reached JetBrains in 0.10.0, along with the
+`+A −R` churn in its lens, so a pure deletion is navigable there too. Above each edit sits an **inline
+menu**, shortened in 0.10.0 to the verbs that fit a lens row:
 
-![Inline review: the ✨ gutter star, a clearly-visible green/red whole-line highlight with matching change-bars, the inline menu (✨ #N view changes · Keep · Undo · Chat · View diff), and the edit's before ⟷ after with the reasoning in the title](docs/media/inline-review.png)
+```text
+VS Code     🔬 #12  +8 −3 · 2/5 │ ✓ Keep │ ↩ Undo │ 💬 Chat │ ⧉ Diff │ ⋯ Details
+JetBrains   ✦ #12  +8 −3 · edit 2/5 in file · file 1/3  view changes    ✓ Keep    ↩ Undo    ❝ Chat    ⧉ View diff
+```
 
-In **VS Code**, "view changes" opens an **inline review bubble** right at the edit — the diff in git's own
-colors plus Claude's reasoning, with **Keep · Undo · Chat · Prev · Next** on its toolbar. In
-**JetBrains**, the ✨ lens opens the edit's before ⟷ after as a **unified diff** (Keep / Undo / Chat / View
-diff on the lens; reasoning in the title).
+Everything that needs to be legible — the File axis, the reasoning, the diff — lives on the review bar and
+the bubble below, where the font is the workbench font rather than the lens's dim grey. Kept edits grey
+out; reverted edits stay struck through everywhere.
+
+![Inline review: the ✨ gutter star, a green whole-line highlight with its change bar, the 0.10.0 lens row (🔬 #N +A −R · n/m · Keep · Undo · Chat · Diff · Details) and the compact review bar under it](docs/media/inline-review.png)
+
+**The review bar, over the code.** Both editors now carry the review controls into the file itself, in the
+form each API allows, and both spell the choice `editorReviewSurface`, with the shared values meaning the
+same thing in either editor.
+
+- **JetBrains** draws a true **floating toolbar** on the platform's own floating-toolbar layer while the
+  open file has edits awaiting review: **Keep · Undo · Chat · View diff · ‹ `Diff n/m` › · Accept File ·
+  Reject File · Spotlight · Clear Resolved**. It replaces the editor notification banner by default;
+  `editorReviewSurface` picks `floating` (default), `banner`, `both`, or `none`.
+- **VS Code** has no floating-widget API for extensions — a comment thread is the only interactive surface
+  that can float over code, and that has not changed. What is new is that the comment thread now has a
+  **compact bar** form: a single row with no body, carrying **Keep · Undo · ⌃⌄ · ‹› · Diff · Details**
+  under a live title, `✦ Claude edit #12 · +8 −3 · Diff 2/5 · File 1/3`. It auto-shows while the active
+  file has edits awaiting review and never steals focus. `editorReviewSurface` picks `floating` (default —
+  the bar), `bubble` (the full review bubble: Claude's reasoning and the diff in git's colors, about
+  15–25 lines tall), or `none`. **⋯ Details** and **Collapse** swap between the two at any time, and only
+  one is ever on screen.
+
+`claudeObservatory.pinnedPeek` now governs the **bubble** alone — VS Code's bar is a navigation bar, so it
+always follows. With `none`, the lens, the status-bar nav bar and the **Show the review bar at this edit**
+command all still work.
+
+Keeping or reverting a **single** edit opens the next one still awaiting review, in another file when that
+is where it is (`claudeObservatory.revealNextOnResolve`; in JetBrains the settings checkbox **After keeping
+or reverting one edit, open the next edit still awaiting review** — on by default in both). Bulk actions,
+redo, and the diff editor's own buttons never move you. In JetBrains that setting governs the floating bar
+as well: turn it off and the bar stays on the file you are reading.
+
+Files with edits awaiting review carry the **count as a badge** in the editor's own project tree in both
+editors, and on the **editor tab** in VS Code — so unreviewed work is visible without opening a panel.
 
 **More, mirrored in both editors:**
 
 - **Navigation bar** — a review stepper on four surfaces: the **status bar** (both editors), the **editor
-  tab bar**, a floating **review bubble** over the current edit (VS Code), and the Overview's title bar
+  tab bar**, the **floating review bar** over the current edit (both editors), and the Overview's title bar
   (its fullest, two-row form is described above). Two axes step the work — **Diff n/m** across the open
   file's pending edits and **File n/m** across every file with edits — alongside Keep / Undo,
   Accept / Reject File, Clear resolved, a **Spotlight** toggle, and Search. The bar is two-tier: the File
@@ -321,8 +384,8 @@ diff on the lens; reasoning in the title).
 - **Revision navigation** — step a file's edit history in a *current-vs-revision* diff with **⌥⌘-** /
   **⌥⌘=** in VS Code and **⌥⌘[** / **⌥⌘]** in JetBrains (VS Code's own Fold and Unfold already hold the
   bracket chord), or with the buttons atop **File History**.
-- **Per-file review** — **Accept all / Reject all in this file** from the Edits toolbar, the editor banner,
-  and the File-History toolbar.
+- **Per-file review** — **Accept all / Reject all in this file** from the Edits toolbar, the File-History
+  toolbar, JetBrains' floating bar (or its editor banner when enabled), and VS Code's review bubble.
 - **Chat handoff** — the chat button on any action, edit, subagent, or task hands your own Claude a
   **context-preloaded** prompt: the target, Claude's own reasoning, and the before/after diff or
   command/result, assembled by `chat-context`. **Zero-token** — Observatory never calls a model.
@@ -360,6 +423,8 @@ claude-observatory keep <id>       # mark reviewed; no disk change (bulk: --all 
 claude-observatory undo <id>       # surgically undo one edit (bulk: --all | --file <substr> | --under <path>)
 claude-observatory undo <id> --force   # per-file restore fallback (used on overlap conflicts)
 claude-observatory redo <id>       # re-apply an undone edit (--force to override later edits)
+claude-observatory undo --from-prompt <id>  # rewind: revert every pending edit from that ask ONWARD; --json adds ids + units
+claude-observatory redo --from-prompt <id>  # re-apply every UNDONE edit from that ask onward — including any you rejected before the rewind; to restore only what one rewind moved, pass its --json ids to `redo --ids <a,b,c>`
 claude-observatory task-keep <taskId>   # keep every pending edit in a task's strict in-progress span; --json
 claude-observatory task-undo <taskId>   # revert every pending edit in a task's strict in-progress span; --json
 claude-observatory task-clear <taskId>  # drop a task's resolved edits (--completed clears every settled task); --json

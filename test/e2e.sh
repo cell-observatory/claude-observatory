@@ -221,6 +221,10 @@ LOC2=$(cc locate --file "$J" < "$J")
 ok "locate places EVERY pending edit, not just the newest" "printf '%s' \"\$LOC2\" | jq -e '[.placements[] | select(.lines | length > 0)] | length >= 2' >/dev/null"
 ok "locate's first placement is non-empty (chain composed, not severed)" "printf '%s' \"\$LOC2\" | jq -e '.placements[0].lines | length > 0' >/dev/null"
 ok "locate carries deletion hunks for the JetBrains overlay"  "printf '%s' \"\$LOC2\" | jq -e '.placements[0] | has(\"removed\")' >/dev/null"
+# delta rides along so a lens can print "+A −R" without a second spawn, and only for placements that
+# actually render (a superseded edit places nothing, so nothing reads its delta).
+ok "locate carries a per-placement delta"                     "printf '%s' \"\$LOC2\" | jq -e '[.placements[]|select(.lines|length>0)]|all(.delta.added>=0 and (.delta|has(\"removed\")))' >/dev/null"
+ok "delta counts a real deletion"                             "printf 'a\nb\nc\nd\n' > \"\$WS/del.txt\" && hook PreToolUse Edit \"\$WS/del.txt\" && printf 'a\n' > \"\$WS/del.txt\" && hook PostToolUse Edit \"\$WS/del.txt\" && cc locate --file \"\$WS/del.txt\" < \"\$WS/del.txt\" | jq -e '.placements[-1].delta.removed>=3' >/dev/null"
 # A flag name is never a flag VALUE, and a scope flag never coexists with an explicit id.
 cc locate --file --json < "$J" >/dev/null 2>&1; ok "locate --file --json fails instead of placing edits in a file called --json" "[ \$? -ne 0 ]"
 cc keep --file main 1 --json >/dev/null 2>&1;   ok "keep --file <substr> <id> is refused (id would be discarded)"              "[ \$? -ne 0 ]"
@@ -696,6 +700,92 @@ ok "views --views picks a subset, and only that subset"                "cc views
 ok "an unknown view is null, never fatal to the batch"                 "cc views --views prompts,nope --session \"\$SESSION\" --root \"\$WS\" --json | jq -e '.nope==null and (.prompts|type)==\"object\"' >/dev/null"
 ok "views will not batch a MUTATING command"                           "cc views --views keep --session \"\$SESSION\" --root \"\$WS\" --json | jq -e '.keep==null' >/dev/null"
 
+echo "════════ E2E 24: 0.10.0 rewind — undo/redo --from-prompt ════════"
+# The boundary is "this ask and everything after it", so the fixture needs edits on BOTH sides of an ask.
+# Capture stamps its own ts, so the edits are made first and the asks are then written to bracket them —
+# the only way to get a deterministic boundary without hand-writing store records.
+RW=rewind010
+: > "$HOME/.claude/projects/$MANGLE/$RW.jsonl"
+RF1="$WS/rw-one.txt"; RF2="$WS/rw-two.txt"
+printf 'keep-me\n' > "$RF1"; printf 'revert-me\n' > "$RF2"
+hookR(){ printf '{"session_id":"%s","cwd":"%s","hook_event_name":"%s","tool_name":"Edit","tool_input":{"file_path":"%s"}}' "$RW" "$WS" "$1" "$2" | node "$CAPTURE"; }
+hookR PreToolUse "$RF1"; printf 'edited-one\n' > "$RF1"; hookR PostToolUse "$RF1"   # #1
+hookR PreToolUse "$RF2"; printf 'edited-two\n' > "$RF2"; hookR PostToolUse "$RF2"   # #2
+RTS=$(cc timeline --session "$RW" --json | jq -r '[.edits[]|.ts]|sort|@tsv')
+RT1=$(printf '%s' "$RTS" | cut -f1); RT2=$(printf '%s' "$RTS" | cut -f2)
+node -e '
+  const fs=require("fs");
+  const [proj, sess, t1, t2]=process.argv.slice(1);
+  const ask=(ms,text)=>JSON.stringify({timestamp:new Date(Number(ms)).toISOString(),type:"user",message:{role:"user",content:text}});
+  fs.writeFileSync(proj+"/"+sess+".jsonl",[ask(Number(t1)-1,"first ask"),ask(Number(t2)-1,"second ask")].join("\n")+"\n");
+' "$HOME/.claude/projects/$MANGLE" "$RW" "$RT1" "$RT2"
+ok "the fixture really splits into two asks owning one edit each" "cc prompts --session \"\$RW\" --json | jq -e '(.prompts|length)==2 and ([.prompts[]|select((.editIds|length)==1)]|length)==2' >/dev/null"
+# The preflight a confirmation dialog is built from: it must COUNT without touching disk, or the two
+# editors cannot state the same numbers before the user commits to the rewind.
+RWD=$(cc undo --from-prompt 2 --dry-run --session "$RW" --json)
+ok "undo --from-prompt --dry-run counts the scope"       "printf '%s' \"\$RWD\" | jq -e '.dryRun==true and .pending==1 and .units==1 and (.files|length)==1 and (.ids|length)==1' >/dev/null"
+ok "…and reverts NOTHING (the file is untouched)"        "grep -qx 'edited-two' '$RF2'"
+ok "…and leaves the edit pending"                        "cc list --pending --session \"\$RW\" --json | jq -e '[.edits[].id]|length==2' >/dev/null"
+# An IGNORED --dry-run performs the mutation it was meant to preview, so every path that cannot preview
+# must refuse it rather than drop it. The positional-id form is the dangerous one: it skips the scope branch.
+ok "--dry-run is refused where it would mean nothing"    "! cc undo --all --dry-run --session \"\$RW\" --json >/dev/null 2>&1"
+ok "undo <id> --dry-run refuses instead of undoing"      "! cc undo 1 --dry-run --session \"\$RW\" >/dev/null 2>&1 && cc list --pending --session \"\$RW\" --json | jq -e '[.edits[].id]|length==2' >/dev/null"
+ok "redo/keep --dry-run refuse too"                      "! cc redo --all --dry-run --session \"\$RW\" >/dev/null 2>&1 && ! cc keep --all --dry-run --session \"\$RW\" >/dev/null 2>&1"
+# `clean` is the same trap on the most expensive verb in the product. --dry-run IS real on
+# `clean --completed`, which is exactly why a reader tries it on a sibling scope; before the guard,
+# `clean --all --dry-run` deleted every session in the store and printed "✓ dropped all N session(s)".
+ok "clean --all --dry-run refuses instead of wiping the store" "! cc clean --all --dry-run >/dev/null 2>&1 && [ -d \"\$STORE/\$RW\" ] && cc list --pending --session \"\$RW\" --json | jq -e '[.edits[].id]|length==2' >/dev/null"
+ok "…and so do its other destructive scopes"                   "! cc clean --older-than 1d --dry-run >/dev/null 2>&1 && ! cc clean --drop \"\$RW\" --dry-run >/dev/null 2>&1 && [ -d \"\$STORE/\$RW\" ]"
+# The positive control: the one scope that genuinely previews still does, or the guard above would be
+# indistinguishable from "--dry-run was removed from clean".
+ok "clean --completed --dry-run still previews without dropping" "cc clean --completed --dry-run --json | jq -e '.dryRun==true and (.dropped|length)==0' >/dev/null && [ -d \"\$STORE/\$RW\" ]"
+# A flag VALUE is never an edit id: `keep --from-prompt 2` must not quietly keep edit #2.
+ok "a flag value is never read as an edit id"            "! cc keep --from-prompt 2 --session \"\$RW\" >/dev/null 2>&1 || cc list --pending --session \"\$RW\" --json | jq -e '[.edits[].id]|length==2' >/dev/null"
+RWJ=$(cc undo --from-prompt 2 --session "$RW" --json)
+ok "undo --from-prompt reverts the later ask only"      "printf '%s' \"\$RWJ\" | jq -e '.undone==1 and .total==1' >/dev/null"
+ok "undo --from-prompt --json names WHICH edits reverted" "printf '%s' \"\$RWJ\" | jq -e '(.ids|type)==\"array\" and (.ids|length)==1' >/dev/null"
+ok "…and reports review units beside raw records"      "printf '%s' \"\$RWJ\" | jq -e '.units==1' >/dev/null"
+ok "the later ask's file is back to its original"      "grep -qx 'revert-me' '$RF2'"
+ok "the earlier ask's file is untouched"               "grep -qx 'edited-one' '$RF1'"
+RWR=$(cc redo --from-prompt 2 --session "$RW" --json)
+ok "redo --from-prompt re-applies that window's undone edits" "printf '%s' \"\$RWR\" | jq -e '.redone==1 and (.ids|length)==1' >/dev/null"
+ok "the file is re-applied"                            "grep -qx 'edited-two' '$RF2'"
+# `redo --from-prompt` is the prompt's WINDOW, not "exactly what that rewind reverted", and the difference
+# destroys work: checkpointScope answers with every record in the window whatever its status, so an edit
+# rejected BEFORE the rewind is undone-and-in-window and comes back. Both editors' Redo buttons avoid this
+# by passing the rewind's own `ids`. Pinned here so the help text and the docs cannot drift back to the
+# stronger claim they used to make.
+cc undo 1 --session "$RW" >/dev/null                   # a deliberate rejection, before any rewind
+ok "the pre-rewind rejection is reverted on disk"      "grep -qx 'keep-me' '$RF1'"
+RWX=$(cc undo --from-prompt 2 --session "$RW" --json)
+ok "the rewind moves only the still-pending edit"      "printf '%s' \"\$RWX\" | jq -e '.undone==1 and .ids==[2]' >/dev/null"
+RWY=$(cc redo --from-prompt 1 --session "$RW" --json)
+ok "redo --from-prompt re-applies the REJECTED edit too" "printf '%s' \"\$RWY\" | jq -e '.redone==2 and .ids==[1,2]' >/dev/null"
+ok "…so the rejected edit is back on disk (documented)" "grep -qx 'edited-one' '$RF1'"
+ok "rewinding from ask 1 covers BOTH asks"             "cc undo --from-prompt 1 --session \"\$RW\" --json | jq -e '.undone==2' >/dev/null"
+ok "an unknown prompt id fails loudly (exit 1)"        "! cc undo --from-prompt nope --session \"\$RW\" --json >/dev/null 2>&1"
+ok "a missing --from-prompt value fails"               "! cc undo --from-prompt --session \"\$RW\" --json >/dev/null 2>&1"
+ok "--from-prompt refuses to share with another scope" "! cc undo --from-prompt 1 --all --session \"\$RW\" --json >/dev/null 2>&1"
+ok "a real prompt with nothing pending is an honest zero, not an error" "cc undo --from-prompt 2 --session \"\$RW\" --json | jq -e '.undone==0 and .total==0' >/dev/null"
+
+# `pending` and `units` are two different counts of the same set, and a confirmation dialog prints BOTH.
+# They only disagree when a same-code chain collapses, so this needs its OWN session: chaining inside the
+# fixture above would empty window 1's editIds and break its boundary assertions.
+RC=rewind010chain
+: > "$HOME/.claude/projects/$MANGLE/$RC.jsonl"
+RCF="$WS/rw-chain.txt"; printf 'L1\nA\nL3\n' > "$RCF"
+hookC(){ printf '{"session_id":"%s","cwd":"%s","hook_event_name":"%s","tool_name":"Edit","tool_input":{"file_path":"%s"}}' "$RC" "$WS" "$1" "$2" | node "$CAPTURE"; }
+hookC PreToolUse "$RCF"; printf 'L1\nB\nL3\n' > "$RCF"; hookC PostToolUse "$RCF"   # #1
+hookC PreToolUse "$RCF"; printf 'L1\nC\nL3\n' > "$RCF"; hookC PostToolUse "$RCF"   # #2 — same line, chains with #1
+RCT=$(cc timeline --session "$RC" --json | jq -r '[.edits[].ts]|min')
+node -e '
+  const fs=require("fs");
+  const [proj, sess, t]=process.argv.slice(1);
+  fs.writeFileSync(proj+"/"+sess+".jsonl",
+    JSON.stringify({timestamp:new Date(Number(t)-1).toISOString(),type:"user",message:{role:"user",content:"one ask"}})+"\n");
+' "$HOME/.claude/projects/$MANGLE" "$RC" "$RCT"
+ok "two chained edits collapse to ONE review unit"     "cc list --pending --session \"\$RC\" --json | jq -e '(.edits|length)==1' >/dev/null"
+ok "the rewind counts BOTH: 2 raw records, 1 unit"     "cc undo --from-prompt 1 --dry-run --session \"\$RC\" --json | jq -e '.pending==2 and .units==1' >/dev/null"
 
 echo "════════════════════════════════════════════════════════"
 echo "E2E RESULT: $pass passed, $fail failed"

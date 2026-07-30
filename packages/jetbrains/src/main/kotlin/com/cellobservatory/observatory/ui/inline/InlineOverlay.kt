@@ -2,6 +2,7 @@ package com.cellobservatory.observatory.ui.inline
 
 import com.cellobservatory.observatory.core.ClaudePaths
 import com.cellobservatory.observatory.model.EditRecord
+import com.cellobservatory.observatory.model.Placement
 import com.cellobservatory.observatory.services.ObservatoryService
 import com.cellobservatory.observatory.services.PlacementsCache
 import com.cellobservatory.observatory.settings.ObservatorySettings
@@ -48,6 +49,47 @@ private val CLAUDE_MARK = JBColor(Color(0xCC785C), Color(0xE0906F))
 // region reads at a glance. JBColor can't alpha-blend like VS Code, so these are solid tints picked to
 // match the strengthened VS Code ADDED_LINE_BG (rgba green @ 0.30, blended over the editor bg).
 private val ADDED_LINE_BG = JBColor(Color(0xCD, 0xE4, 0xD0), Color(0x2F, 0x47, 0x33))
+
+// The red twin of ADDED_LINE_BG, on the surviving line a removed hunk now follows. Derived the same way:
+// the VS Code REMOVED_LINE_BG is rgba(229, 83, 75, 0.30), blended here over the light (#FFFFFF) and dark
+// (#1E1E1E) editor backgrounds, because JBColor cannot alpha-blend.
+private val REMOVED_LINE_BG = JBColor(Color(0xF7, 0xCB, 0xC9), Color(0x5A, 0x2E, 0x2C))
+
+// The ghost text itself. Darker on light, where the pure #E5534B washes out against REMOVED_LINE_BG.
+private val GHOST_FG = JBColor(Color(0xB3, 0x26, 0x1E), Color(0xE5, 0x53, 0x4B))
+
+/**
+ * A one-line preview of a hunk an edit REMOVED: its first non-blank line, trimmed, with a "…(+N)" tail
+ * when the hunk removed more than one line.
+ *
+ * Byte-parity with the VS Code `ghostText` — the same hunk must read identically in both editors — so note
+ * the truncation rule exactly as written there: it fires only when the head EXCEEDS 60 characters, and
+ * then yields 60 of them (59 plus the ellipsis). GhostLabelTest pins both sides of that boundary.
+ *
+ * This is the ONE carve-out from the standing "never ellipsize content text" rule. An after-line-end inlay
+ * has no width to wrap into and no tooltip to hang the rest on, and the label is a POINTER to the diff
+ * rather than the content: the full removed text is one click away on the ✦ lens or the gutter star.
+ */
+internal fun ghostLabel(lines: List<String>): String {
+    val head = (lines.firstOrNull { it.isNotBlank() } ?: "").trim()
+    val shown = if (head.length > 60) head.take(59) + "…" else head
+    val more = lines.size - 1
+    return if (more > 0) "− $shown …(+$more)" else "− $shown"
+}
+
+/**
+ * The buffer lines an edit is REACHABLE at — what the gutter star and the lens anchor on.
+ *
+ * Normally the lines it added. A PURE deletion has none: its text no longer exists in the buffer, so it
+ * anchors on the surviving lines its removed hunks now follow. Mirrors VS Code's `anchorLines`, which its
+ * star, its CodeLens and its cursor lookup all use, so a deletion-only edit keeps an at-the-code
+ * Keep/Undo in both editors instead of only ghost text in one of them.
+ */
+internal fun anchorLines(p: Placement, lineCount: Int): List<Int> {
+    val added = p.lines.filter { it < lineCount }
+    if (added.isNotEmpty() || lineCount <= 0) return added
+    return p.removed.map { it.anchor.coerceIn(0, lineCount - 1) }.distinct()
+}
 
 /**
  * The inline review overlay: per pending edit, a clickable "✓ Keep #N · ↩ Undo · 💬 Chat · ⧉ View diff" lens
@@ -146,7 +188,12 @@ class InlineOverlay(private val project: Project) : Disposable {
             .placementsFor(file, editor.document.text, editor.document.modificationStamp.toString())
             ?: return // stale — KEEP the previous artifacts (RangeMarkers track edits) until locate lands
         // Identical geometry ⇒ nothing to do. Rebuilding anyway would flicker on every keystroke.
-        val sig = "$session|$file|" + placements.joinToString(";") { "${it.id}:${it.lines}" } +
+        // The deletion anchors and the churn are part of the geometry: without them a hunk that only
+        // moved its anchor, or a delta the CLI has just computed, would never repaint its ghost or lens.
+        val sig = "$session|$file|" +
+            placements.joinToString(";") { p ->
+                "${p.id}:${p.lines}:${p.removed.map { it.anchor }}:${p.delta?.let { "${it.added}/${it.removed}" } ?: ""}"
+            } +
             "|" + pending.joinToString(",") { it.id.toString() } + "|hm=$heatmapOn"
         if (renderSig[editor] == sig) return
         clear(editor)
@@ -159,17 +206,15 @@ class InlineOverlay(private val project: Project) : Disposable {
         // Only the LATEST edit per anchor line gets a gutter star + inline lens: several edits often
         // land on one line, and one menu per edit is noisy/ambiguous. Older same-line edits stay in the
         // Timeline; undoing the latest surgically reveals the previous state (its lens then takes over).
+        val lineCount = editor.document.lineCount
         val latestByAnchor = HashMap<Int, Int>()
         for (p in placements) {
-            val ls = p.lines.filter { it < editor.document.lineCount }
-            if (ls.isEmpty()) continue
-            val anchor = ls.min()
+            val anchor = anchorLines(p, lineCount).minOrNull() ?: continue
             latestByAnchor[anchor] = maxOf(latestByAnchor[anchor] ?: Int.MIN_VALUE, p.id)
         }
         for (p in placements) {
             val rec = pending.find { it.id == p.id } ?: continue
-            val lines = p.lines.filter { it < editor.document.lineCount }
-            if (lines.isEmpty()) continue
+            val lines = p.lines.filter { it < lineCount }
             // A SUBTLE green line fill (toned down, not the default diff green) + a coral error-stripe mark
             // per changed line, so a file Claude edited heavily doesn't drown in color. Shown for ALL edits.
             for (line in lines) {
@@ -177,8 +222,9 @@ class InlineOverlay(private val project: Project) : Disposable {
                 h.setErrorStripeMarkColor(CLAUDE_MARK)
                 hs.add(h)
             }
-            val first = lines.min()
-            regions.add(lines.min()..lines.max() to rec)
+            // A pure deletion has no added lines, so it anchors on its ghost line instead — see anchorLines.
+            val first = anchorLines(p, lineCount).minOrNull() ?: continue
+            regions.add((lines.minOrNull() ?: first)..(lines.maxOrNull() ?: first) to rec)
             // Gutter star + lens only for the latest edit anchored at this line (others -> Timeline).
             if (rec.id != latestByAnchor[first]) continue
             val gutter = markup.addLineHighlighter(first, HighlighterLayer.CARET_ROW - 1, null)
@@ -186,7 +232,31 @@ class InlineOverlay(private val project: Project) : Disposable {
             hs.add(gutter)
             editor.inlayModel.addBlockElement(
                 editor.document.getLineStartOffset(first), false, true, 0,
-                LensRenderer(project, session, rec),
+                LensRenderer(project, session, rec, p.delta),
+            )?.let { ins.add(it) }
+        }
+        // Lines an edit REMOVED are gone from the buffer, so they are SHOWN rather than highlighted: a red
+        // fill + coral stripe on the surviving line the hunk now follows, plus the removed text itself as
+        // italic ghost text after that line's end. Hunks that clamp onto the same line merge into ONE
+        // label, three-space separated (VS Code parity) — two after-line-end inlays on one line would
+        // paint over each other.
+        val ghostByLine = LinkedHashMap<Int, MutableList<String>>()
+        if (lineCount > 0) {
+            val pendingIds = pending.mapTo(HashSet()) { it.id } // set, not a scan per placement
+            for (p in placements) {
+                if (p.id !in pendingIds) continue
+                for (del in p.removed) {
+                    ghostByLine.getOrPut(del.anchor.coerceIn(0, lineCount - 1)) { mutableListOf() }
+                        .add(ghostLabel(del.lines))
+                }
+            }
+        }
+        for ((line, labels) in ghostByLine) {
+            val h = markup.addLineHighlighter(line, HighlighterLayer.CARET_ROW - 1, TextAttributes(null, REMOVED_LINE_BG, null, null, Font.PLAIN))
+            h.setErrorStripeMarkColor(CLAUDE_MARK)
+            hs.add(h)
+            editor.inlayModel.addAfterLineEndElement(
+                editor.document.getLineEndOffset(line), false, GhostTextRenderer(labels.joinToString("   ")),
             )?.let { ins.add(it) }
         }
         // Heatmap: dim every UNMODIFIED line (flat grey, no syntax colors) so Claude's edits stand out.
@@ -194,8 +264,17 @@ class InlineOverlay(private val project: Project) : Disposable {
         // The layer must sit ABOVE HighlighterLayer.SYNTAX (2000) — a foreground at CARET_ROW-2 (998)
         // loses the merge to syntax colors and the dim never shows (the 0.8.x "Spotlight does nothing"
         // bug); SELECTION-1 wins over syntax + inspections while still yielding to the selection.
-        if (heatmapOn) {
-            val changed = placements.flatMap { it.lines }.filter { it < editor.document.lineCount }.toHashSet()
+        // The "changed" set is the added lines PLUS the deletion-anchor lines (VS Code parity): a line whose
+        // only claim is that Claude deleted something there must stay bright, or Spotlight dims the very
+        // thing it was toggled to find. Empty ⇒ nothing to spotlight, so dimming the whole file would say
+        // "none of this is Claude's" about a file that is entirely pending.
+        // Computed inside the guard, not above it: this runs on every debounced render, spotlight or not.
+        val changed = if (!heatmapOn) emptySet() else
+            placements.flatMapTo(HashSet<Int>()) { p -> p.lines.filter { it < lineCount } }
+                .also { it.addAll(ghostByLine.keys) }
+        // Empty ⇒ nothing to spotlight, and dimming everything would say "none of this is Claude's" about
+        // a file that is entirely pending.
+        if (heatmapOn && changed.isNotEmpty()) {
             val dimAttrs = TextAttributes(com.intellij.ui.JBColor.GRAY, null, null, null, Font.PLAIN)
             var runStart = -1
             fun flushDim(end: Int) {
@@ -294,6 +373,39 @@ class InlineOverlay(private val project: Project) : Disposable {
 
     companion object {
         fun getInstance(project: Project): InlineOverlay = project.getService(InlineOverlay::class.java)
+    }
+}
+
+/**
+ * The removed-lines ghost: [text] painted in italic red after a line's end, standing in for text that is
+ * no longer in the buffer. Not clickable — the actions for that edit are on the lens and the gutter star
+ * above it; this is the evidence, not a control.
+ */
+private class GhostTextRenderer(private val text: String) : com.intellij.openapi.editor.EditorCustomElementRenderer {
+
+    private fun font(inlay: Inlay<*>) =
+        com.intellij.util.ui.UIUtil.getFontWithFallback(
+            inlay.editor.colorsScheme.getFont(com.intellij.openapi.editor.colors.EditorFontType.ITALIC),
+        ).deriveFont(inlay.editor.colorsScheme.editorFontSize.toFloat())
+
+    override fun calcWidthInPixels(inlay: Inlay<*>): Int =
+        inlay.editor.component.getFontMetrics(font(inlay)).stringWidth(text) + com.intellij.util.ui.JBUI.scale(16)
+
+    override fun paint(
+        inlay: Inlay<*>,
+        g: java.awt.Graphics,
+        targetRegion: java.awt.Rectangle,
+        textAttributes: TextAttributes,
+    ) {
+        val f = font(inlay)
+        g.font = f
+        g.color = GHOST_FG
+        val fm = g.getFontMetrics(f)
+        g.drawString(
+            text,
+            targetRegion.x + com.intellij.util.ui.JBUI.scale(8),
+            targetRegion.y + fm.ascent + (targetRegion.height - fm.height) / 2,
+        )
     }
 }
 

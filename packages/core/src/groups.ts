@@ -143,14 +143,35 @@ export function pendingGroups(session: string): Map<number, number[]> {
   return computeGroups(session, 'pending');
 }
 
+/**
+ * Every grouped id → its group's ascending members, across ALL THREE statuses in one map.
+ *
+ * Built because the obvious per-id lookup is quadratic in disguise: it read the whole log to learn one
+ * record's status, then scanned that status's groups linearly. Called once per review unit — which is what
+ * [checkpointScope] does — a 7,922-record session spent 1.2 s answering a question whose answer was that
+ * NOTHING was pending, blocking VS Code's extension host to say "nothing to rewind".
+ *
+ * Merging the statuses is safe, not a shortcut: `computeGroupsUncached` filters the log by status before
+ * grouping, so member ids are strictly partitioned by status and no id can appear under two of them. A
+ * pending-only index would be wrong — it silently drops kept/undone multi-member groups, and half-redoing
+ * a straddling group is the exact failure the expansion exists to prevent.
+ */
+function membersIndex(session: string): Map<number, number[]> {
+  return cachedByFiles(`groupIndex`, [logPath(session)], () => {
+    const index = new Map<number, number[]>();
+    for (const status of ['pending', 'kept', 'undone'] as EditStatus[]) {
+      for (const members of computeGroups(session, status).values()) {
+        if (members.length < 2) continue; // a lone edit is its own group; `?? [id]` covers it
+        for (const id of members) index.set(id, members);
+      }
+    }
+    return index;
+  });
+}
+
 /** Ascending member ids of the same-status group containing `id` (or `[id]` if ungrouped/unknown). */
 export function groupMembers(session: string, id: number): number[] {
-  const rec = readLog(session).find((r) => r.id === id);
-  if (!rec) return [id];
-  for (const members of computeGroups(session, rec.status).values()) {
-    if (members.includes(id)) return members;
-  }
-  return [id];
+  return membersIndex(session).get(id) ?? [id];
 }
 
 /** The representative (most-recent) id of the group containing `id`. */

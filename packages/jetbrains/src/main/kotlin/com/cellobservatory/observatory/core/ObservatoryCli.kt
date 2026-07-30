@@ -1,6 +1,7 @@
 package com.cellobservatory.observatory.core
 
 import com.cellobservatory.observatory.model.DemoStep
+import com.cellobservatory.observatory.model.LocateParser
 import com.cellobservatory.observatory.model.Placement
 import com.cellobservatory.observatory.model.TourParser
 import com.cellobservatory.observatory.model.UndoResult
@@ -317,6 +318,11 @@ object ObservatoryCli {
         val errors: Int = 0,
         /** The first refusal's message — it names the remediation (`clean --phantoms`). */
         val firstError: String? = null,
+        /** WHICH edits actually reverted — empty from a pre-0.10 CLI, which reported only counts. */
+        val ids: List<Int> = emptyList(),
+        /** Review units the reverted set collapses to; null unless this was a `--from-prompt` rewind,
+         *  whose two counts differ (raw records vs the units the Prompts rows print). */
+        val units: Int? = null,
     )
 
     private fun parseUndoScope(stdout: String): UndoScopeResult? = try {
@@ -325,10 +331,17 @@ object ObservatoryCli {
             o.get("undone").asInt, o.get("conflicts").asInt, o.get("total").asInt,
             o.get("errors")?.takeIf { it.isJsonPrimitive }?.asInt ?: 0,
             o.get("firstError")?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString,
+            intList(o, "ids"),
+            o.get("units")?.takeIf { it.isJsonPrimitive }?.asInt,
         )
     } catch (_: Exception) {
         null
     }
+
+    /** An optional int array — absent (older CLI) reads as empty, never as null. */
+    private fun intList(o: com.google.gson.JsonObject, key: String): List<Int> =
+        o.get(key)?.takeIf { it.isJsonArray }?.asJsonArray?.mapNotNull { it.takeIf { e -> e.isJsonPrimitive }?.asInt }
+            ?: emptyList()
 
     /** Revert every PENDING edit in a scope in ONE call (the CLI's `undo --all` / `undo --under`, backed
      *  by core.undoScope — the single scoped-revert implementation both editors share). `under` = null
@@ -345,7 +358,26 @@ object ObservatoryCli {
         return parseUndoScope(r.stdout)
     }
 
-    data class RedoScopeResult(val redone: Int, val conflicts: Int, val total: Int)
+    data class RedoScopeResult(
+        val redone: Int,
+        val conflicts: Int,
+        val total: Int,
+        /** WHICH edits re-applied — empty from a pre-0.10 CLI. */
+        val ids: List<Int> = emptyList(),
+        /** Review units, only on a `--from-prompt` restore (see [UndoScopeResult.units]). */
+        val units: Int? = null,
+    )
+
+    private fun parseRedoScope(stdout: String): RedoScopeResult? = try {
+        val o = JsonParser.parseString(stdout).asJsonObject
+        RedoScopeResult(
+            o.get("redone").asInt, o.get("conflicts").asInt, o.get("total").asInt,
+            intList(o, "ids"),
+            o.get("units")?.takeIf { it.isJsonPrimitive }?.asInt,
+        )
+    } catch (_: Exception) {
+        null
+    }
 
     /** Re-apply every UNDONE edit in a scope in ONE call (the CLI's `redo --all` / `redo --under`, backed
      *  by core.redoScope — the forward mirror of undoScope). `under` = null re-applies the whole session;
@@ -358,12 +390,7 @@ object ObservatoryCli {
         }
         val r = run(args, workDir)
         if (!r.ok) return null
-        return try {
-            val o = JsonParser.parseString(r.stdout).asJsonObject
-            RedoScopeResult(o.get("redone").asInt, o.get("conflicts").asInt, o.get("total").asInt)
-        } catch (_: Exception) {
-            null
-        }
+        return parseRedoScope(r.stdout)
     }
 
     /** Revert an EXPLICIT pending-edit id set in ONE call (`undo --ids <a,b,c>`, backed by
@@ -375,6 +402,141 @@ object ObservatoryCli {
         val r = run(listOf("undo", "--ids", ids.joinToString(","), "--session", session, "--json"), workDir)
         if (!r.ok) return null
         return parseUndoScope(r.stdout)
+    }
+
+    /**
+     * A scoped op's outcome when the CLI's own REASON matters.
+     *
+     * [undoScope] and friends collapse a failure to null, and for them that is the whole truth: their
+     * callers say "the CLI failed or isn't installed", which is what a missing binary means. A REWIND can
+     * fail for reasons only the CLI knows — an unknown prompt id, a session whose transcript is gone — and
+     * a destructive button that reports none of them is the silent-fail this project forbids.
+     */
+    data class ScopedOutcome<T : Any>(val result: T?, val error: String?)
+
+    /**
+     * Rewind to before one ask: revert every PENDING edit that ask and everything after it produced
+     * (`undo --from-prompt <id>`), in ONE call. The boundary and the group expansion are core's — see
+     * `checkpointScope` — so the two editors revert exactly the same set.
+     *
+     * [promptId] must be the stable 12-hex prompt id, NEVER the display index: the CLI accepts either, but
+     * an index is a position in a list that grows with every ask, so a stale panel would rewind the wrong
+     * one. The result's `units` is the review-unit count the Prompts rows show, which differs from `undone`
+     * whenever a same-code group straddles the boundary.
+     */
+    fun undoFromPrompt(session: String, promptId: String, workDir: String?): ScopedOutcome<UndoScopeResult> {
+        val r = run(listOf("undo", "--from-prompt", promptId, "--session", session, "--json"), workDir)
+        if (!r.ok) return ScopedOutcome(null, failureMessage(r.stdout, r.stderr, "the CLI exited ${r.exitCode} without saying why"))
+        return parseUndoScope(r.stdout)?.let { ScopedOutcome(it, null) }
+            ?: ScopedOutcome(null, "the CLI answered `undo --from-prompt` with output this build cannot read")
+    }
+
+    /**
+     * What a rewind WOULD revert, counted without touching disk — `undo --from-prompt <id> --dry-run`.
+     *
+     * The three numbers a destructive confirmation has to state, and the only way this plugin can get them:
+     * the boundary and the group expansion live in core, and every other exposure of that scope performs
+     * the revert. [pending] is raw store records, [units] the review units they collapse to (what the
+     * Prompts rows count) — the two differ exactly when a same-code group straddles the boundary — and
+     * [files] how many files they touch.
+     */
+    data class RewindPreview(
+        val pending: Int,
+        val units: Int,
+        /** 0 also means "this build did not report the file list", so a caller states no file count rather
+         *  than printing a zero it cannot stand behind. */
+        val files: Int,
+        /**
+         * True when the CLI IGNORED `--dry-run` and performed the revert anyway.
+         *
+         * The CLI on PATH is version-skewed from this plugin in BOTH directions — it is installed and
+         * updated separately — so any build that honours `--from-prompt` without honouring `--dry-run`
+         * lands here: an intermediate rolling pre-release, a hand-built checkout, or a future one that
+         * drops the flag again. An unrecognized boolean flag is silently dropped by an argument scan, so
+         * the alternative to detecting this is reverting someone's work without ever asking and reporting
+         * nothing. Cheap to keep, and it guards the most destructive verb in the product.
+         */
+        val performed: Boolean = false,
+    )
+
+    /** Parse the preflight payload. `internal` so the shape is unit-testable without a subprocess. */
+    internal fun parseRewindPreview(stdout: String): RewindPreview? = try {
+        val o = JsonParser.parseString(stdout).asJsonObject
+        fun int(k: String): Int? = o.get(k)?.takeIf { it.isJsonPrimitive }?.asInt
+        val dry = o.get("dryRun")?.takeIf { it.isJsonPrimitive }?.asBoolean ?: false
+        when {
+            // A preview, as asked for.
+            dry -> {
+                val pending = int("pending") ?: return null
+                val units = int("units") ?: return null
+                RewindPreview(pending, units, o.get("files")?.takeIf { it.isJsonArray }?.asJsonArray?.size() ?: 0)
+            }
+            // NOT a preview but a completed revert: this build dropped the flag and did the work.
+            o.has("undone") -> RewindPreview(int("undone") ?: 0, int("units") ?: 0, 0, performed = true)
+            else -> null // some other shape entirely — the caller falls back to a count-free confirmation
+        }
+    } catch (_: Exception) {
+        null
+    }
+
+    /**
+     * Count a rewind's scope without performing it. Null when the CLI could not answer, and the caller then
+     * confirms count-free rather than blocking the rewind — a preflight that fails is a missing number, not
+     * a reason to withhold the feature. [supportsFromPrompt] gates the path, so a pre-0.10 CLI reaches this
+     * only when its `--version` was unreadable (that gate answers TRUE there by design) — and then this run
+     * fails on the unknown flag and returns null, which is exactly the fallback. Not memoized: the answer
+     * changes with every keep and undo.
+     */
+    fun previewRewind(session: String, promptId: String, workDir: String?): RewindPreview? {
+        val r = run(listOf("undo", "--from-prompt", promptId, "--dry-run", "--session", session, "--json"), workDir)
+        if (!r.ok) return null
+        return parseRewindPreview(r.stdout)
+    }
+
+    /**
+     * Re-apply an EXPLICIT id set (`redo --ids <a,b,c>`) — how a rewind's Redo undoes itself.
+     *
+     * It must be the ids the rewind actually reverted, never the rewind's scope re-resolved. The scope is
+     * every record in the window whatever its status, so re-resolving it would also re-apply an edit the
+     * reader had deliberately REJECTED before the rewind ran — resurrecting rejected code on disk, and
+     * counting it in the toast without ever naming it. `undo --from-prompt --json` hands back exactly what
+     * moved; that is the set to send here.
+     *
+     * Returns a [ScopedOutcome] rather than a bare nullable so the CLI's own reason reaches the toast: a
+     * null-collapsing helper would turn a refusal back into silence.
+     */
+    fun redoScopeIds(session: String, ids: List<Int>, workDir: String?): ScopedOutcome<RedoScopeResult> {
+        if (ids.isEmpty()) return ScopedOutcome(null, "no edits to restore")
+        val r = run(listOf("redo", "--ids", ids.joinToString(","), "--session", session, "--json"), workDir)
+        if (!r.ok) return ScopedOutcome(null, failureMessage(r.stdout, r.stderr, "the CLI exited ${r.exitCode} without saying why"))
+        return parseRedoScope(r.stdout)?.let { ScopedOutcome(it, null) }
+            ?: ScopedOutcome(null, "the CLI answered `redo --ids` with output this build cannot read")
+    }
+
+    /** Memo for [supportsFromPrompt], keyed on the work dir — the CLI resolved there is what answers. */
+    private val fromPromptSupport = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+
+    /**
+     * Whether the CLI on PATH understands `--from-prompt` (0.10+).
+     *
+     * A pre-0.10 CLI does not have the flag, and its `undo` would fall through to `requireId`, whose scan
+     * skips only `--session` and then takes the first all-digit token — so a prompt id made entirely of
+     * decimal digits could be read as an edit id. Unlikely (12 hex chars, P ≈ 0.36 % all-decimal, and it
+     * must also be small enough to name a real edit) but not impossible, and the failure would be a
+     * SILENT revert of the wrong edit.
+     *
+     * Memoized because it spawns, and resolved lazily from `actionPerformed` — never from an action
+     * `update()`, which the platform runs per toolbar tick. A version string this cannot parse returns
+     * TRUE and lets the CLI's own error surface: refusing on an unreadable version would disable the
+     * feature for anyone whose wrapper prints a banner first.
+     */
+    fun supportsFromPrompt(workDir: String?): Boolean = fromPromptSupport.getOrPut(workDir ?: "") {
+        val r = run(listOf("--version"), workDir, timeoutMs = 15_000)
+        if (!r.ok) return@getOrPut true
+        val m = Regex("""(\d+)\.(\d+)""").find(r.stdout) ?: return@getOrPut true
+        val major = m.groupValues[1].toIntOrNull() ?: return@getOrPut true
+        val minor = m.groupValues[2].toIntOrNull() ?: return@getOrPut true
+        major > 0 || minor >= 10
     }
 
     /** `clean --resolved --json` — returns the CLI's own `cleared` count, or null on failure. The count
@@ -407,18 +569,12 @@ object ObservatoryCli {
         return if (r.ok) parseInt(r.stdout, "cleared") else null
     }
 
-    /** Per-pending-edit current line indices in the LIVE buffer text (may be unsaved). */
+    /** Per-pending-edit geometry in the LIVE buffer text (may be unsaved): added lines, deleted hunks and
+     *  churn. Parsing lives in [LocateParser] so the payload contract is testable without a subprocess. */
     fun locate(session: String, file: String, currentText: String, workDir: String?): List<Placement> {
         val r = run(listOf("locate", "--file", file, "--session", session), workDir, stdin = currentText)
         if (!r.ok) return emptyList()
-        return try {
-            JsonParser.parseString(r.stdout).asJsonObject.getAsJsonArray("placements").map { el ->
-                val o = el.asJsonObject
-                Placement(o.get("id").asInt, o.getAsJsonArray("lines").map { it.asInt })
-            }
-        } catch (_: Exception) {
-            emptyList()
-        }
+        return LocateParser.parse(r.stdout)
     }
 
     /** `sessions --json` — every store session incl. its human-readable title (0.8.6), for the chooser.

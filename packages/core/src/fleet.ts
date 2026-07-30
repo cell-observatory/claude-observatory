@@ -22,6 +22,18 @@ import { sessionCounts } from './observe';
 export const FLEET_ACTIVE_MS = 60_000;
 
 /**
+ * Is a session live right now, by the one definition the whole product uses? Every "active" surface —
+ * the fleet rows, the Overview's Active-only filter, the Timeline's session selector — must agree, so the
+ * comparison lives here rather than being re-spelled per caller.
+ *
+ * `lastMs` is a transcript mtime (see [SiblingSession.lastMs]). A falsy one means "never seen", which is
+ * not active.
+ */
+export function isFleetActive(lastMs: number, now: number = Date.now()): boolean {
+  return !!lastMs && now - lastMs <= FLEET_ACTIVE_MS;
+}
+
+/**
  * A session whose conversation last moved longer ago than this is FOLDED: still listed, but collapsed
  * in the fleet surfaces and never rebuilt on the Overview's critical path.
  *
@@ -149,7 +161,7 @@ function buildSibling(
   return {
     id,
     self: id === activeSessionId,
-    active: now - lastMs <= FLEET_ACTIVE_MS,
+    active: isFleetActive(lastMs, now),
     lastMs,
     // DISPLAY units — the same collapse the Overview and the Sessions rows apply, so "N pending across
     // siblings" cannot disagree with the row the reader clicks into. sessionCounts is sidecar-cached on

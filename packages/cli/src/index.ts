@@ -1198,7 +1198,7 @@ function flagValue(args: string[], name: string): string | undefined {
 }
 
 /** Flags that consume the token after them — so a numeric VALUE is never read as a positional id. */
-const VALUE_FLAGS = new Set(['--session', '--file', '--under', '--ids', '--root', '--filter', '--dir', '--channel']);
+const VALUE_FLAGS = new Set(['--session', '--file', '--under', '--ids', '--root', '--filter', '--dir', '--channel', '--from-prompt']);
 
 /**
  * The positional edit id if one was typed, else undefined — requireId's scan without the failure.
@@ -1231,11 +1231,44 @@ function refuseScopeWithId(args: string[], verb: string): void {
   );
 }
 
+/**
+ * Resolve `--from-prompt <id>` into the rewind scope: this ask and everything after it.
+ *
+ * Shared by `undo` and `redo` so one definition of the boundary serves both directions. Three failure
+ * modes are told apart deliberately, because "nothing happened" and "you named a prompt that does not
+ * exist" must not look alike to a caller about to revert someone's work:
+ *   - no transcript            → fail (the boundaries come from it)
+ *   - no such prompt           → fail, naming the valid range
+ *   - a real prompt, empty set → return it; the caller reports an honest zero and exits 0
+ *
+ * Must be called BEFORE `requireId`: that scan skips only `--session`, so it would otherwise read an
+ * all-digit prompt id (or a bare index) as a positional edit id.
+ */
+function checkpointArg(
+  core: typeof import('@claude-observatory/core'),
+  args: string[],
+  session: string,
+  verb: string
+): import('@claude-observatory/core').CheckpointScope {
+  const ref = flagValue(args, '--from-prompt');
+  if (!ref) fail(`\`${verb} --from-prompt <id>\` requires a prompt id — run \`claude-observatory prompts\` to list them`);
+  const cwd = process.cwd();
+  const windows = core.promptWindows(cwd, session);
+  if (!windows.length) fail('no transcript for this session — the prompt boundaries come from it');
+  if (!windows.some((w) => w.id === ref || String(w.index) === ref)) {
+    fail(`no prompt \`${ref}\` in this session — run \`claude-observatory prompts\` to list them (1..${windows.length})`);
+  }
+  return core.checkpointScope(cwd, session, ref as string);
+}
+
 function requireId(args: string[]): number {
   let raw: string | undefined;
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === '--session') {
-      i++; // skip the session VALUE so a numeric session id isn't mistaken for the edit id
+    // Skip every flag's VALUE, not just `--session`'s: any of them can be numeric, and reading one as the
+    // edit id silently acts on a DIFFERENT edit than the caller named. `keep --from-prompt 2` used to keep
+    // edit #2 — the wrong verb on the wrong record, reported as success.
+    if (VALUE_FLAGS.has(args[i])) {
+      i++;
       continue;
     }
     if (/^\d+$/.test(args[i])) {
@@ -1245,6 +1278,32 @@ function requireId(args: string[]): number {
   }
   if (!raw) fail('expected an edit id, e.g. `claude-observatory diff 3`');
   return parseInt(raw, 10);
+}
+
+/**
+ * `--dry-run` means "tell me, do not do it". Exactly two scopes implement it, so anywhere else the flag
+ * must REFUSE rather than be ignored: an ignored `--dry-run` performs the very mutation the caller was
+ * trying to preview, and reports it as success.
+ *
+ * `clean` is here because it is the most expensive place to get this wrong. `--dry-run` is real on
+ * `clean --completed`, which is reason enough for a reader to try it on a sibling scope — and
+ * `clean --all --dry-run` used to delete every session in the store and print `✓ dropped all N session(s)`.
+ */
+const DRY_RUN_SCOPES: Record<string, string> = {
+  undo: '--from-prompt', // the rewind preflight: count what it would revert
+  clean: '--completed', // list the sessions the reap would drop
+};
+
+function refuseUnsupportedDryRun(args: string[], verb: string): void {
+  if (!args.includes('--dry-run')) return;
+  const previewable = DRY_RUN_SCOPES[verb];
+  if (previewable && args.includes(previewable)) return;
+  fail(
+    `\`${verb} --dry-run\` is not supported.\n` +
+      '  Only `undo --from-prompt <id> --dry-run` and `clean --completed --dry-run` can preview;\n' +
+      '  every other scope would perform the change it was asked to describe.\n' +
+      `  Drop --dry-run to ${verb} for real.`
+  );
 }
 
 function cmdDiff(args: string[]): void {
@@ -1258,6 +1317,17 @@ function cmdDiff(args: string[]): void {
 }
 
 function cmdKeep(args: string[]): void {
+  refuseUnsupportedDryRun(args, 'keep');
+  // `keep` has no rewind scope: accepting "this ask and everything after it" is what `keep --all` or an
+  // explicit id set already say, and less ambiguously. Say so, rather than letting the generic "expected
+  // an edit id" leave the reader thinking they mistyped the id.
+  if (args.includes('--from-prompt')) {
+    fail(
+      '`keep --from-prompt <id>` is not supported — only `undo` and `redo` take a rewind scope.\n' +
+        '  For one ask\'s edits:   claude-observatory keep --ids <a,b,c>\n' +
+        '  For the whole session: claude-observatory keep --all'
+    );
+  }
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const session = getSessionId(args);
   const json = args.includes('--json');
@@ -1344,6 +1414,7 @@ function cmdKeep(args: string[]): void {
 }
 
 function cmdUndo(args: string[]): void {
+  refuseUnsupportedDryRun(args, 'undo');
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const session = getSessionId(args);
   // Bulk: --all (every pending in the session), --file <substr> (pending edits in matching files),
@@ -1355,27 +1426,66 @@ function cmdUndo(args: string[]): void {
   const fi = args.indexOf('--file');
   const ui = args.indexOf('--under');
   const idi = args.indexOf('--ids');
-  if (args.includes('--all') || fi >= 0 || ui >= 0 || idi >= 0) {
+  const fp = args.indexOf('--from-prompt');
+  if (args.includes('--all') || fi >= 0 || ui >= 0 || idi >= 0 || fp >= 0) {
     refuseScopeWithId(args, "undo");
+    // `--from-prompt` IS a scope — combining it with another one would silently pick a winner.
+    if (fp >= 0 && (args.includes('--all') || fi >= 0 || ui >= 0 || idi >= 0)) {
+      fail('`undo --from-prompt <id>` is a scope of its own — drop the other scope flag and re-run.');
+    }
     const fileSub = flagValue(args, "--file");
     if (fi >= 0 && !fileSub) fail('`undo --file <substr>` requires a value');
     const underRaw = flagValue(args, "--under");
     if (ui >= 0 && !underRaw) fail('`undo --under <path>` requires a value');
     const under = underRaw && canonUnder(underRaw); // #43: undoScope canonicalizes fileSub itself
     let ids: number[] | undefined;
+    let units: number | undefined;
     if (idi >= 0) {
       const raw = args[idi + 1];
       if (!raw) fail('`undo --ids <a,b,c>` requires a comma-separated id list');
       ids = raw.split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => Number.isInteger(n));
       if (!ids.length) fail('`undo --ids <a,b,c>` got no valid integer ids');
     }
+    if (fp >= 0) {
+      const scope = checkpointArg(core, args, session, 'undo');
+      ids = scope.ids; // group-expanded: a same-code chain straddling the boundary reverts whole
+      units = scope.units;
+      // PREFLIGHT. A rewind's confirmation has to state what it is about to rewrite, and only this scope
+      // can count it: the raw records, the review units they collapse to, and the files. An editor that
+      // shells out cannot get those any other way — every other exposure of this scope performs the
+      // revert — so without `--dry-run` one editor could show the numbers (by calling core in-process)
+      // and the other could not, which is the same feature behaving differently per editor.
+      if (args.includes('--dry-run')) {
+        if (args.includes('--json')) {
+          emitJson({ dryRun: true, pending: scope.pending, units: scope.units, files: scope.files, ids: scope.ids });
+          return;
+        }
+        process.stdout.write(
+          scope.pending === 0
+            ? c.dim('no pending edits to rewind from that prompt onward\n')
+            : `would revert ${scope.pending} pending edit(s) (${scope.units} review unit(s)) across ${scope.files.length} file(s)\n`
+        );
+        return;
+      }
+    }
     const res = core.undoScope(session, { under, fileSubstr: fileSub, ids });
     core.autoClearDemo(session); // a fully reviewed demo session leaves no residue
     if (args.includes('--json')) {
-      emitJson({ undone: res.undone, conflicts: res.conflicts, errors: res.errors, firstError: res.firstError ?? null, total: res.total });
+      // `ids` names WHICH edits reverted (the UndoScopeResult already carried them; dropping them left a
+      // caller unable to offer a precise Redo). `units` rides along only for the rewind scope, whose two
+      // counts differ: raw records vs the review units the Prompts rows print.
+      emitJson({
+        undone: res.undone,
+        conflicts: res.conflicts,
+        errors: res.errors,
+        firstError: res.firstError ?? null,
+        total: res.total,
+        ids: res.ids,
+        ...(units === undefined ? {} : { units }),
+      });
       return;
     }
-    const scope = fileSub ? ` in files matching "${fileSub}"` : under ? ` under ${relFile(under)}` : ids ? ` in ${ids.length} selected edit(s)` : '';
+    const scope = fileSub ? ` in files matching "${fileSub}"` : under ? ` under ${relFile(under)}` : fp >= 0 ? ` from prompt ${flagValue(args, '--from-prompt')} onward` : ids ? ` in ${ids.length} selected edit(s)` : '';
     if (res.total === 0) {
       // No pending edits matched the scope — an honest "nothing to do", never a green ✓ 0.
       process.stdout.write(c.dim(`no pending edits to revert${scope}\n`));
@@ -1413,6 +1523,7 @@ function cmdUndo(args: string[]): void {
 }
 
 function cmdRedo(args: string[]): void {
+  refuseUnsupportedDryRun(args, 'redo');
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const session = getSessionId(args);
   // Bulk: --all (every undone in the session) | --file <substr> | --under <path> | --ids <a,b,c> —
@@ -1420,8 +1531,12 @@ function cmdRedo(args: string[]): void {
   const fi = args.indexOf('--file');
   const ui = args.indexOf('--under');
   const idi = args.indexOf('--ids');
-  if (args.includes('--all') || fi >= 0 || ui >= 0 || idi >= 0) {
+  const fp = args.indexOf('--from-prompt');
+  if (args.includes('--all') || fi >= 0 || ui >= 0 || idi >= 0 || fp >= 0) {
     refuseScopeWithId(args, "redo");
+    if (fp >= 0 && (args.includes('--all') || fi >= 0 || ui >= 0 || idi >= 0)) {
+      fail('`redo --from-prompt <id>` is a scope of its own — drop the other scope flag and re-run.');
+    }
     const fileSub = flagValue(args, "--file");
     if (fi >= 0 && !fileSub) fail('`redo --file <substr>` requires a value');
     const underRaw = flagValue(args, "--under");
@@ -1434,12 +1549,27 @@ function cmdRedo(args: string[]): void {
       bulkIds = raw.split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => Number.isInteger(n));
       if (!bulkIds.length) fail('`redo --ids <a,b,c>` got no valid integer ids');
     }
+    if (fp >= 0) {
+      // The prompt's WINDOW, scoped the same way the rewind scopes it — narrower than `redo --all`, which
+      // would also re-apply edits this prompt never touched.
+      //
+      // It is NOT "exactly what the rewind reverted", and cannot be: `checkpointScope` answers with every
+      // record in the window whatever its status, so an edit undone BEFORE the rewind is undone-and-in-scope
+      // and comes back too. Only the ids a particular rewind moved can express that set, which is why both
+      // editors' Redo buttons pass `undo --from-prompt --json`'s `ids` to `--ids` instead of re-resolving
+      // the prompt. The help text says so out loud rather than leaving a reader to discover it.
+      //
+      // Deliberately no `units`: the scope's unit count is computed over the PENDING records (it exists to
+      // make a rewind's confirmation honest), and by the time anything is redone those records are undone,
+      // so the number would always be 0. Emitting a confident 0 is worse than emitting nothing.
+      bulkIds = checkpointArg(core, args, session, 'redo').ids;
+    }
     const bulk = core.redoScope(session, { under, fileSubstr: fileSub, ids: bulkIds });
     if (args.includes('--json')) {
-      emitJson({ redone: bulk.redone, conflicts: bulk.conflicts, total: bulk.total });
+      emitJson({ redone: bulk.redone, conflicts: bulk.conflicts, total: bulk.total, ids: bulk.ids });
       return;
     }
-    const scope = fileSub ? ` in files matching "${fileSub}"` : under ? ` under ${relFile(under)}` : bulkIds ? ` in ${bulkIds.length} selected edit(s)` : '';
+    const scope = fileSub ? ` in files matching "${fileSub}"` : under ? ` under ${relFile(under)}` : fp >= 0 ? ` from prompt ${flagValue(args, '--from-prompt')} onward` : bulkIds ? ` in ${bulkIds.length} selected edit(s)` : '';
     if (bulk.total === 0) {
       process.stdout.write(c.dim(`no undone edits to redo${scope}\n`));
       return;
@@ -1534,15 +1664,19 @@ function cmdTaskUndo(args: string[]): void {
   const res = core.undoTask(process.cwd(), session, taskId);
   core.autoClearDemo(session); // a fully reviewed demo session leaves no residue
   if (args.includes('--json')) {
-    emitJson({ undone: res.undone, conflicts: res.conflicts, total: res.total, ids: res.ids });
+    // Same UndoScopeResult as the bulk path, so it gets the same JSON shape: a refusal that reaches one
+    // caller and not the other is how a session that never empties gets no explanation.
+    emitJson({ undone: res.undone, conflicts: res.conflicts, errors: res.errors, firstError: res.firstError ?? null, total: res.total, ids: res.ids });
     return;
   }
   process.stdout.write(
-    (res.conflicts ? c.yellow('⚠ ') : c.green('✓ ')) +
+    (res.conflicts || res.errors ? c.yellow('⚠ ') : c.green('✓ ')) +
       `reverted ${res.undone} edit(s) in task ${taskId}` +
       (res.conflicts ? ` · ${res.conflicts} conflict(s) left (undo individually with --force)` : '') +
+      (res.errors ? ` · ${res.errors} refused` : '') +
       '\n'
   );
+  if (res.errors && res.firstError) process.stdout.write(c.yellow('  ↳ ') + res.firstError + '\n');
 }
 
 /** `task-clear` (§C) — drop the RESOLVED (kept/undone) edits of a task's STRICT edit set
@@ -1712,6 +1846,9 @@ function fmtBytes(b: number): string {
 }
 
 function cmdClean(args: string[]): void {
+  // Before ANY branch reads its flags: every other scope here deletes sessions outright, and this verb's
+  // sink is a recursive rm.
+  refuseUnsupportedDryRun(args, 'clean');
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const json = args.includes('--json'); // structured results for front-ends/scripts (sibling to keep/undo)
   // Drop resolved (kept/undone) edits in the active session, keep pending. --under <path> scopes it to
@@ -2095,7 +2232,17 @@ function cmdLocate(args: string[]): void {
   );
   // `removed` rides along for free now that one pass computes both — JetBrains renders no deletion
   // ghost text today only because this payload never carried it.
-  const placements = recs.map((r, i) => ({ id: r.id, lines: placed[i].lines, removed: placed[i].removed }));
+  //
+  // `delta` spares a renderer a second round trip for the "+A −R" a lens shows. It is NOT free: lineDelta
+  // is one whole-file diff per record, memoized only in-process, and JetBrains reaches locate by SPAWNING
+  // (once per file, after the buffer settles) so it always starts cold. Bound it to the placements that
+  // will actually render — a superseded edit in a long chain places nothing, so nothing reads its delta,
+  // and on a heavily-chained file that is most of them.
+  const placements = recs.map((r, i) => {
+    const p = placed[i];
+    const renders = p.lines.length > 0 || p.removed.length > 0;
+    return { id: r.id, lines: p.lines, removed: p.removed, ...(renders ? { delta: core.lineDelta(session, r) } : {}) };
+  });
   emitJson({ file: abs, placements });
 }
 
@@ -3377,9 +3524,14 @@ function usage(): void {
       `                       an id and a bulk flag are mutually exclusive (they mean different things)\n` +
       `  undo <id> [--force]  surgically undo an edit (--force = per-file restore);\n` +
       `                       bulk (pending only): --all | --file <substr> | --under <path> | --ids <a,b,c>\n` +
+      `                       --from-prompt <id> rewinds that ask and everything after it\n` +
+      `                       (add --dry-run to count what it would revert without touching disk)\n` +
       `                       an id and a bulk flag are mutually exclusive\n` +
       `  redo <id> [--force]  re-apply an undone edit;\n` +
       `                       bulk (undone only): --all | --file <substr> | --under <path> | --ids <a,b,c>\n` +
+      `                       --from-prompt <id> re-applies EVERY undone edit from that ask onward — including\n` +
+      `                       ones you had reverted before the rewind. To restore only what one rewind moved,\n` +
+      `                       pass that rewind's --json ids to --ids (what the editors' Redo button does)\n` +
       `                       an id and a bulk flag are mutually exclusive\n` +
       `  task-keep <taskId>   keep every pending edit in a task's strict in-progress span (--json)\n` +
       `  task-undo <taskId>   revert every pending edit in a task's strict in-progress span (--json)\n` +

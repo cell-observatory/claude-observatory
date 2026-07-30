@@ -34,6 +34,11 @@
     <statusBarWidgetFactory id="claudeObservatoryActions" order="after claudeObservatoryStatus"
                             implementation="com.cellobservatory.observatory.ui.ObservatoryActionsWidgetFactory"/>
     <editorNotificationProvider implementation="com.cellobservatory.observatory.ui.editor.ObservatoryEditorBanner"/>
+    <!-- The floating review bar over the code. `implementation` only, with no group id: the EP consumes
+         the ActionGroup INSTANCE the provider returns, so a registered <group> would be dead weight.
+         Which of this and the banner appear is the `editorReviewSurface` setting (default: this one). -->
+    <editorFloatingToolbarProvider
+        implementation="com.cellobservatory.observatory.ui.editor.ObservatoryFloatingToolbarProvider"/>
     <applicationConfigurable parentId="tools" id="com.cell-observatory.claude-observatory.settings"
                              displayName="Claude Observatory"
                              instance="com.cellobservatory.observatory.settings.ObservatoryConfigurable"/>

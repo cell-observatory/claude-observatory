@@ -27,6 +27,12 @@ test('extension: three views, click commands, inline annotations, chat, status s
   const AG = 'sa0000000001';
   fs.writeFileSync(path.join(proj, S + '.jsonl'), [
     JSON.stringify({ type: 'ai-title', aiTitle: 'Reviewing app.txt edits' }),
+    // Two of the USER's asks, stamped in the same epoch-ms space as the seeded edits below (500 < 1000
+    // and 1500 < 2000), so each ask owns exactly one edit. Without these the transcript has no user turn
+    // at all — sessionPrompts returns [] — and nothing that reviews BY ASK (the prompt axis, the rewind)
+    // can be tested.
+    JSON.stringify({ timestamp: new Date(500).toISOString(), type: 'user', message: { role: 'user', content: 'introduce feature scaling' } }),
+    JSON.stringify({ timestamp: new Date(1500).toISOString(), type: 'user', message: { role: 'user', content: 'add a validate() method' } }),
     // top-level type:'assistant' so resolution passes via hasAssistantRecord, not the all-stub fallback
     JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [
       { type: 'text', text: 'Operation 1 — introduce feature scaling' },
@@ -89,6 +95,7 @@ test('extension: three views, click commands, inline annotations, chat, status s
   const contentProviders = {};
   const webviewProviders = {};
   const configWrites = []; // [key, value] — demo mode must never write claudeObservatory.session
+  const configValues = {}; // live setting values, so a test can flip one and exercise its OFF path
   const folderChangeHandlers = []; // onDidChangeWorkspaceFolders subscribers, so a test can fire one
   let progressCancelled = false; // drives the demo replay's cancellation path without a 17s paced run
   const openTabs = []; // window.tabGroups contents — exitDemo must close the demo's editors
@@ -117,6 +124,11 @@ test('extension: three views, click commands, inline annotations, chat, status s
   let decoProvider = null;
   let commentController = null;
   const commentThreads = [];
+  const contextKeys = {}; // every setContext the extension publishes — the when-clauses' other half
+  const configHandlers = []; // onDidChangeConfiguration subscribers, so a test can fire a real change
+  /** Fire a settings change for exactly `key`, the way VS Code does. */
+  const fireConfigChange = (key) =>
+    configHandlers.forEach((cb) => cb({ affectsConfiguration: (k) => k === `claudeObservatory.${key}` }));
   const statusBarItems = []; // every createStatusBarItem() returns a distinct item (the nav bar has many)
   let clipboardText = '';
   let decoCounter = 0;
@@ -177,6 +189,7 @@ test('extension: three views, click commands, inline annotations, chat, status s
     TextEditorRevealType: { InCenter: 2 },
     CommentMode: { Editing: 0, Preview: 1 },
     CommentThreadCollapsibleState: { Collapsed: 0, Expanded: 1 },
+    CommentThreadState: { Unresolved: 0, Resolved: 1 },
     workspace: {
       workspaceFolders: [{ uri: Uri.file(ws) }],
       textDocuments: [],
@@ -184,11 +197,17 @@ test('extension: three views, click commands, inline annotations, chat, status s
       registerTextDocumentContentProvider: (s, p) => { contentProviders[s] = p; return { dispose() {} }; },
       createFileSystemWatcher: () => ({ onDidChange() {}, onDidCreate() {}, onDidDelete() {}, dispose() {} }),
       onDidChangeTextDocument: () => ({ dispose() {} }),
-      onDidChangeConfiguration: () => ({ dispose() {} }),
+      onDidChangeConfiguration: (cb) => { configHandlers.push(cb); return { dispose() {} }; },
       // Captured so the test can FIRE a folder change: `workspaceRoot()` is folders[0], so this
       // event is the only thing that tells the extension the session it is showing just changed.
       onDidChangeWorkspaceFolders: (cb) => { folderChangeHandlers.push(cb); return { dispose() {} }; },
-      getConfiguration: () => ({ get: (_k, def) => def, update: (k, v) => { configWrites.push([k, v]); return Promise.resolve(); } }),
+      // Backed by a mutable map so a test can exercise a setting's OFF path. Returning the caller's
+      // default unconditionally made every "…and with the setting off, nothing happens" assertion pass
+      // while actually running the ON path.
+      getConfiguration: () => ({
+        get: (k, def) => (k in configValues ? configValues[k] : def),
+        update: (k, v) => { configWrites.push([k, v]); configValues[k] = v; return Promise.resolve(); },
+      }),
       openTextDocument: (uri) => Promise.resolve({ uri, lineCount: 5, getText: () => 'AAA\nb\nc\nZZZ\n', lineAt: (n) => ({ range: new Range(n, 0, n, 3) }) }),
     },
     window: {
@@ -244,6 +263,9 @@ test('extension: three views, click commands, inline annotations, chat, status s
       registerCommand: (id, cb) => { commands[id] = cb; return { dispose() {} }; },
       executeCommand: (cmd, ...args) => {
         if (cmd === 'vscode.diff') { diffCalls.push(args); return Promise.resolve(); }
+        // setContext has no registered handler in the host either — it is a message to the workbench.
+        // Recording it is the only way a test can see the keys the package.json when-clauses read.
+        if (cmd === 'setContext') { contextKeys[args[0]] = args[1]; return Promise.resolve(); }
         return Promise.resolve(commands[cmd] && commands[cmd](...args));
       },
     },
@@ -252,7 +274,7 @@ test('extension: three views, click commands, inline annotations, chat, status s
         commentController = {
           id, label, commentingRangeProvider: undefined,
           createCommentThread: (uri, range, comments) => {
-            const thread = { uri, range, comments, collapsibleState: undefined, canReply: undefined, contextValue: undefined, label: undefined, disposed: false, dispose() { thread.disposed = true; } };
+            const thread = { uri, range, comments, collapsibleState: undefined, canReply: undefined, contextValue: undefined, label: undefined, state: undefined, disposed: false, dispose() { thread.disposed = true; } };
             commentThreads.push(thread);
             return thread;
           },
@@ -287,9 +309,15 @@ test('extension: three views, click commands, inline annotations, chat, status s
     // 0.8.0 panel consolidation: Timeline folded into Observations. Round 3: the standalone Multitasking
     // view is folded INTO the Overview (master–detail). Actions is now a SIDEBAR view (moved out of the
     // old bottom-panel Observations dock; 0.9.0 groups it with Prompts + Observations in the Timeline panel).
-    assert.ok(!trees['claudeObservatory.timeline'], 'the standalone Timeline view is gone (folded into Observations)');
     assert.ok(!webviewProviders['claudeObservatory.multitask'] && !trees['claudeObservatory.multitask'], 'the standalone Multitasking view is gone (folded into the Overview)');
-    assert.ok(trees['claudeObservatory.actions'], 'Actions is registered as a timeline-style tree (now in the Observatory Timeline panel)');
+    // 0.10.0: Prompts, Actions and Observations are ONE webview with a real tab strip. A panel container
+    // stacks its views under collapsible headers and has no tabs of its own, so the three stopped being
+    // views at all — the two trees became rows the Timeline renders from the same providers.
+    const tlProvider = webviewProviders['claudeObservatory.timeline'];
+    assert.ok(tlProvider, 'the Timeline is registered as a webview view');
+    for (const gone of ['claudeObservatory.actions', 'claudeObservatory.observations'])
+      assert.ok(!trees[gone] && !webviewProviders[gone], `${gone} is no longer a view of its own`);
+    assert.ok(!webviewProviders['claudeObservatory.prompts'], 'and the Prompts webview became the Timeline');
 
     // `workspaceRoot()` is folders[0] and every caller reads it live, so adding/removing/reordering
     // folders changes which session the whole extension is about — and nothing else announces it (the
@@ -311,9 +339,9 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.deepEqual(sidebar.map((v) => v.id),
       ['claudeObservatory.edits', 'claudeObservatory.diffs', 'claudeObservatory.fileHistory'],
       'the Traces sidebar is exactly the three per-edit review views');
-    assert.deepEqual(timeline.map((v) => v.id),
-      ['claudeObservatory.prompts', 'claudeObservatory.actions', 'claudeObservatory.observations'],
-      'the Timeline panel is Prompts, then Actions, then Observations');
+    assert.deepEqual(timeline.map((v) => v.id), ['claudeObservatory.timeline'],
+      'the Timeline panel is ONE view — the webview that draws the three tabs itself');
+    assert.equal(timeline[0].type, 'webview', 'and it is a webview, not a tree');
     assert.ok(!dock.some((v) => v.id === 'claudeObservatory.actions'), 'Actions is not in the Dashboards dock');
     const containerTitles = Object.fromEntries([...pkg.contributes.viewsContainers.activitybar, ...pkg.contributes.viewsContainers.panel].map((c) => [c.id, c.title]));
     assert.deepEqual(containerTitles,
@@ -321,14 +349,13 @@ test('extension: three views, click commands, inline annotations, chat, status s
       'the three containers carry the 0.9.0 names');
     // 0.9.0: the Timeline container is a separate draggable unit rather than tabs wedged beside
     // Overview and Stats. VS Code offers no manifest option to place a view in the secondary side bar,
-    // but a container of its own is what makes dragging it there stick cleanly. (Its exact contents are
-    // asserted above — Prompts · Actions · Observations.)
+    // but a container of its own is what makes dragging it there stick cleanly. (Its one view is
+    // asserted above — the Timeline webview.)
     assert.deepEqual(dock.map((v) => v.id), ['claudeObservatory.changemap', 'claudeObservatory.stats'], 'the dock is Overview · Stats (0.9.0)');
     assert.ok(
       pkg.contributes.viewsContainers.panel.some((c) => c.id === 'claudeObservatoryPrompts'),
       'and that container is contributed'
     );
-    assert.ok(webviewProviders['claudeObservatory.prompts'], 'the Prompts window is registered as a webview view');
     // 0.9.0: the Overview can also live in an EDITOR TAB. The bottom panel stays the default, the two
     // hosts share one renderer (wire()), and exactly ONE of them drives refreshes — two ticking hosts
     // would double every CLI spawn, which is the cost this release spent itself reducing.
@@ -393,15 +420,15 @@ test('extension: three views, click commands, inline annotations, chat, status s
       assert.equal(pendingOf(S), beforeSelf, '…and does not silently retarget another session either');
     }
     // 0.8.7 QoL: the sidebar trees carry VS Code's native Collapse-All button (showCollapseAll) — the
-    // file-Explorer affordance the user asked for, on Edits · Diffs · Actions (+ Observations).
-    for (const id of ['claudeObservatory.edits', 'claudeObservatory.diffs', 'claudeObservatory.actions', 'claudeObservatory.observations'])
+    // file-Explorer affordance the user asked for. Actions and Observations are webview rows now, and
+    // carry their own twisties instead.
+    for (const id of ['claudeObservatory.edits', 'claudeObservatory.diffs'])
       assert.equal(treeViewOpts[id] && treeViewOpts[id].showCollapseAll, true, `${id} tree offers Collapse All`);
-    // …and the palette command that reveals the Requests window after a VS Code layout-persistence hide.
-    assert.ok(typeof commands['claudeObservatory.showPrompts'] === 'function', 'the Show Prompts command is registered');
-    assert.ok(
-      pkg.contributes.commands.some((c) => c.command === 'claudeObservatory.showPrompts'),
-      'Show Prompts is contributed to the command palette'
-    );
+    // …and the palette commands that reveal each Timeline tab after a VS Code layout-persistence hide.
+    for (const c of ['showPrompts', 'showActions', 'showObservations']) {
+      assert.ok(typeof commands[`claudeObservatory.${c}`] === 'function', `${c} is registered`);
+      assert.ok(pkg.contributes.commands.some((x) => x.command === `claudeObservatory.${c}`), `${c} is contributed to the palette`);
+    }
     // Demo mode (0.8.9): the tour view leads the sidebar and only exists while a tour runs, the five
     // commands are contributed, and — the one that decides whether anybody ever finds it — the empty
     // state offers the demo. That last one is the first-run path: the replay drives the capture pipeline
@@ -492,19 +519,33 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.ok(ghost, 'deletion ghost decoration applied');
     assert.equal(ghost.opts.length, 0, 'no ghost text for a pure modification');
 
-    // inline CodeLens = the inline menu per edit: "✨ #N +A −R view changes" (opens the review bubble)
-    // + ✓ Keep · ↩ Undo · 💬 Chat · ⧉ View diff (full diff tab). Reasoning is NOT on the CodeLens —
-    // it rides in the bubble instead.
+    // inline CodeLens = the inline menu per edit: "🔬 #N +A −R · n/m" (opens the floating review bar)
+    // + ✓ Keep · ↩ Undo · 💬 Chat · ⧉ Diff (full diff tab) · ⋯ Details (the bubble). Reasoning is NOT on
+    // the CodeLens — it rides in the bubble instead.
     assert.ok(lensProvider, 'CodeLens provider registered');
     const lenses = lensProvider.provideCodeLenses(doc);
-    assert.ok(lenses.length >= 10, 'enriched CodeLens rows (view-changes + Keep/Undo/Chat/View-diff per edit)');
-    assert.ok(lenses.some((l) => l.command.command === 'claudeObservatory.viewChanges' && /✦ #\d\s+\+\d+\s+.\d+.*view changes/.test(l.command.title)), 'the "✦ #N +A −R … view changes" lens opens the inline review bubble');
-    // the Diff-axis position now rides on the lens (the editor tab bar can't render live text)
-    assert.ok(lenses.some((l) => /edit \d+\/\d+ in file/.test(l.command.title || '')), 'the lens shows the Diff-axis position (edit n/m in file)');
+    assert.ok(lenses.length >= 12, 'enriched CodeLens rows (header + Keep/Undo/Chat/Diff/Details per edit)');
+    const header = lenses.filter((l) => l.command.command === 'claudeObservatory.showReviewBar');
+    assert.ok(header.length >= 2, 'each edit’s lens row leads with a header that opens the floating review bar');
+    assert.ok(header.every((l) => /^🔬 #\d+\s+\+\d+\s+−\d+/.test(l.command.title)),
+      'the header leads with the 🔬 brand emoji — per F5 the ONLY thing in a lens row that escapes the dim grey foreground');
+    // A codicon in a lens is forced to `color: currentColor !important`, i.e. the same dim grey — so the
+    // row must not spend its one coloured glyph on a `$(…)`. This is the assertion that keeps 4.3 true.
+    assert.ok(!lenses.some((l) => /\$\(/.test(l.command.title || '')),
+      'no $(codicon) anywhere in the lens row (they render as unstyleable dim grey)');
+    // the Diff-axis position rides on the lens (the editor tab bar can't render live text); the File axis
+    // moved to the review bar's label, where 13px leaves room for words.
+    assert.ok(header.every((l) => /·\s+\d+\/\d+$/.test(l.command.title)), 'the header ends with the Diff-axis position (n/m)');
+    assert.ok(!lenses.some((l) => /file \d+\/\d+/.test(l.command.title || '')), 'and the File axis is gone from the lens (it lives on the bar)');
+    assert.ok(lenses.every((l) => typeof l.command.tooltip === 'string' && l.command.tooltip.length > 0),
+      'every shortened lens carries a tooltip — VS Code renders it as a real title= on the link');
+    assert.ok(header.every((l) => /edit \d+ of \d+ pending in this file/.test(l.command.tooltip)),
+      'and the header’s tooltip spells out what "n/m" counts');
     assert.ok(lenses.some((l) => l.command.command === 'claudeObservatory.inlineKeep'), 'a Keep lens');
     assert.ok(lenses.some((l) => l.command.command === 'claudeObservatory.inlineUndo'), 'an Undo lens');
     assert.ok(lenses.some((l) => l.command.command === 'claudeObservatory.chatEdit'), 'a Chat lens');
-    assert.ok(lenses.some((l) => l.command.command === 'claudeObservatory.openDiff' && /View diff/.test(l.command.title) && l.command.arguments[0].rec), 'a View-diff lens opens the full diff tab');
+    assert.ok(lenses.some((l) => l.command.command === 'claudeObservatory.openDiff' && /⧉ Diff/.test(l.command.title) && l.command.arguments[0].rec), 'a Diff lens opens the full diff tab');
+    assert.ok(lenses.some((l) => l.command.command === 'claudeObservatory.viewChanges' && /⋯ Details/.test(l.command.title)), 'a Details lens opens the review bubble');
     assert.ok(!lenses.some((l) => l.command.command === 'claudeObservatory.showObservation'), 'no reasoning lens on the CodeLens (reasoning lives in the bubble)');
     // no editor hover provider (the hover card was removed earlier)
     assert.equal(hoverProvider, null, 'no editor hover provider');
@@ -557,8 +598,10 @@ test('extension: three views, click commands, inline annotations, chat, status s
     // Observations view (0.8.0, Timeline folded in): timeline-STYLE — a recap on top, then the edit feed
     // with adjacent same-file edits coalesced into ×N runs (each carrying Claude's reasoning inline),
     // then a Next-steps group at the end. The two app.txt edits coalesce into one ×2 run.
-    const obsTree = trees['claudeObservatory.observations'];
-    assert.ok(obsTree, 'Observations view registered');
+    // 0.10.0: the VIEW is gone, the PROVIDER is not — the Timeline webview renders these exact rows. So
+    // every assertion below still drives the shipped view-model; only where it draws changed.
+    const obsTree = tlProvider.observations;
+    assert.ok(obsTree, 'the Observations feed still has its provider (the Timeline renders it)');
     const obsChildren = obsTree.getChildren();
     assert.equal(obsChildren[0].kind, 'recap', 'first node is the recap line');
     const recapItem = obsTree.getTreeItem(obsChildren[0]);
@@ -605,8 +648,8 @@ test('extension: three views, click commands, inline annotations, chat, status s
     // second tab of the Observations panel: collapsible category subsections (from buildActionGroups),
     // each action TIMESTAMPED; an edit-action drills into its review. The Subagents (agent) category is
     // dropped (those are the Overview fleet). The two seeded Edits form the "Edits" subsection.
-    const actTree = trees['claudeObservatory.actions'];
-    assert.ok(actTree, 'Actions view registered as a tree');
+    const actTree = tlProvider.actions;
+    assert.ok(actTree, 'the Actions feed still has its provider (the Timeline renders it)');
     const actGroups = actTree.getChildren();
     const editGroup = actGroups.find((n) => n.kind === 'agroup' && n.label === 'Edits');
     assert.ok(editGroup, 'the Actions timeline has a collapsible "Edits" category subsection');
@@ -676,6 +719,151 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.ok(firstActions(actTree.getChildren()) === ag1, 'a second getChildren() in the same cycle reuses the computed feed (no second fleet scan)');
     actTree.refresh();
     assert.ok(firstActions(actTree.getChildren()) !== ag1, 'refresh() drops it — the fleet’s time-derived "active" flags are never frozen across cycles');
+
+    // ---- host side: the two feeds, served a level at a time off the SAME providers -----------------
+    // The rendering moved to a webview; the view-model did not. Every row below is the tree item the
+    // provider already built, so a label, a description or a tooltip has exactly one implementation.
+    {
+      const posts = [];
+      let tlMsg = null;
+      const tlView = {
+        webview: {
+          options: {}, html: '',
+          postMessage: (m) => { posts.push(m); return Promise.resolve(true); },
+          onDidReceiveMessage: (cb) => { tlMsg = cb; return { dispose() {} }; },
+        },
+        onDidChangeVisibility: () => ({ dispose() {} }),
+        visible: false, // no subprocess spawn while hidden
+      };
+      tlProvider.resolveWebviewView(tlView);
+      // A tab that leaves the screen stops being served — the Actions root walks every sibling worktree
+      // for live conflicts, and paying for that behind a tab nobody is looking at is what the tree's
+      // visible-only refresh avoided. Coming back is served AT ONCE, not on the next store change.
+      tlMsg({ type: 'view', tab: 'prompts', grouped: false, shows: { prompts: true, observations: false, actions: false } });
+      posts.length = 0;
+      tlMsg({ type: 'view', tab: 'observations', grouped: true, shows: { prompts: true, observations: true, actions: true } });
+      const obsRoot = posts.find((m) => m.type === 'rows' && m.tab === 'observations' && m.parent === '');
+      const actRoot = posts.find((m) => m.type === 'rows' && m.tab === 'actions' && m.parent === '');
+      assert.ok(obsRoot && actRoot, 'a tab coming back on screen is served its root at once');
+      // …and a tab that is NOT shown gets nothing.
+      posts.length = 0;
+      tlMsg({ type: 'view', tab: 'prompts', grouped: false, shows: { prompts: true, observations: false, actions: false } });
+      tlMsg({ type: 'view', tab: 'observations', grouped: false, shows: { prompts: false, observations: true, actions: false } });
+      assert.ok(!posts.some((m) => m.type === 'rows' && m.tab === 'actions'), 'a tab off screen is not built');
+      tlMsg({ type: 'view', tab: 'observations', grouped: true, shows: { prompts: true, observations: true, actions: true } });
+
+      // The rows ARE the tree items.
+      assert.equal(obsRoot.rows[0].key, 'recap', 'the recap leads, on a stable key');
+      {
+        // The row IS the tree item — asserted against the provider itself, so re-deriving a label,
+        // a description or a tooltip anywhere in the serializer breaks this.
+        const live = obsTree.getChildren().map((n) => obsTree.getTreeItem(n));
+        assert.deepEqual(obsRoot.rows.map((r) => r.label), live.map((i) => String(i.label)), 'every label is the tree item’s own');
+        assert.deepEqual(obsRoot.rows.map((r) => r.desc), live.map((i) => (i.description === true ? '' : String(i.description ?? ''))),
+          '…and every description');
+        assert.ok(obsRoot.rows[0].tip.includes('Session recap'), 'the tooltip comes across too (a MarkdownString by its value)');
+      }
+      assert.equal(obsRoot.rows[0].open, null, 'a leaf reports no collapsible state');
+      assert.deepEqual(obsRoot.rows[0].acts.map((a) => a.v), ['refreshRecap'],
+        'and keeps the inline action its tree row had — a webview inherits no context menu');
+      const runRow = obsRoot.rows.find((r) => /×2/.test(r.label));
+      assert.ok(runRow, 'the coalesced ×2 run is a row');
+      assert.equal(runRow.open, false, '…collapsed by default, exactly as the tree item said');
+      assert.deepEqual(runRow.acts.map((a) => a.v), ['keepFile', 'undoFile', 'openFile'], 'with the file-scope actions');
+      assert.match(runRow.desc, /^\+\d+ −\d+/, 'and the tree item’s description, unaltered');
+      // The icon sentinel: '?' means a ThemeIcon nobody mapped, which would otherwise ship as a glyph
+      // that says nothing. The instrument first — a mapping table that matched everything by accident
+      // would report a clean sweep forever.
+      assert.ok(obsRoot.rows.filter((r) => r.glyph).length >= 3 && actRoot.rows.filter((r) => r.glyph).length >= 2,
+        'there are glyphs to check on both feeds');
+      assert.deepEqual(obsRoot.rows.filter((r) => r.glyph === '?').map((r) => r.key), [], 'every Observations icon maps to a mark');
+      assert.deepEqual(actRoot.rows.filter((r) => r.glyph === '?').map((r) => r.key), [], '…and every Actions one');
+      const edGroup = actRoot.rows.find((r) => r.label === 'Edits');
+      assert.ok(edGroup && edGroup.open === false, 'the Actions categories are rows, collapsed by default');
+      // The tab badge counts ACTIONS, off the same roots that were just serialized — never a second parse.
+      assert.equal(actRoot.count, actTree.getChildren().reduce((n, g) => n + (g.kind === 'agroup' ? g.count : 0), 0),
+        'the Actions badge counts the tool calls the categories hold');
+      assert.equal(actRoot.count, 3, '…which for this fixture is the three Edit calls (reads are a noisy category — only their failures leak through)');
+      assert.equal(obsRoot.count, core.readLog(S).length, 'and the Observations badge counts the edits its feed shows');
+
+      // CHILDREN, one level at a time — the whole point of not shipping a 1000-row payload per tick.
+      posts.length = 0;
+      tlMsg({ type: 'children', tab: 'actions', key: edGroup.key });
+      const kids = posts.find((m) => m.type === 'rows' && m.parent === edGroup.key);
+      assert.ok(kids && kids.rows.length === 3, 'the category serves exactly its own rows');
+      assert.ok(kids.rows.every((r) => r.key.startsWith(edGroup.key + '/')), 'a child key is its parent’s plus its own');
+      // A key from no payload at all resolves to nothing rather than throwing or serving the root.
+      posts.length = 0;
+      tlMsg({ type: 'children', tab: 'actions', key: 'nosuchrow' });
+      assert.deepEqual(posts.filter((m) => m.type === 'rows'), [], 'an unknown key is answered with nothing, never with the root');
+
+      // A row CLICK runs the tree item's own command — the webview posted only a key.
+      const linked = kids.rows.find((r) => r.act);
+      assert.ok(linked, 'the edit-action row is clickable');
+      {
+        const seen = [];
+        const real = commands['claudeObservatory.viewChanges'];
+        commands['claudeObservatory.viewChanges'] = (id) => { seen.push(id); };
+        tlMsg({ type: 'row', tab: 'actions', key: linked.key });
+        commands['claudeObservatory.viewChanges'] = real;
+        assert.equal(seen.length, 1, 'a row click runs the command the tree item carried');
+        assert.equal(typeof seen[0], 'number', '…with its arguments');
+      }
+      // A row ACTION runs its verb against the node — and a verb this row does not offer is refused,
+      // which is what stops a webview naming any command it likes.
+      posts.length = 0;
+      tlMsg({ type: 'children', tab: 'observations', key: runRow.key });
+      const editRows = posts.find((m) => m.type === 'rows' && m.parent === runRow.key).rows;
+      assert.equal(editRows.length, 2, 'the run expands to its per-edit rows');
+      assert.deepEqual(editRows[0].acts.map((a) => a.v), ['keep', 'undo', 'analyzeEdit', 'chatEdit', 'openFile'],
+        'each edit row carries the actions its tree row had inline');
+      {
+        const kept = [];
+        const realKeep = commands['claudeObservatory.keep'];
+        commands['claudeObservatory.keep'] = (n) => { kept.push(n); };
+        tlMsg({ type: 'rowAct', tab: 'observations', key: editRows[0].key, verb: 'keep' });
+        commands['claudeObservatory.keep'] = realKeep;
+        assert.equal(kept.length, 1, 'the verb reaches its command');
+        assert.equal(kept[0].rec.id, 2, '…with the NODE the tree would have passed it');
+        const bulk = [];
+        const realAll = commands['claudeObservatory.keepAll'];
+        commands['claudeObservatory.keepAll'] = () => { bulk.push(1); };
+        tlMsg({ type: 'rowAct', tab: 'observations', key: editRows[0].key, verb: 'keepAll' });
+        commands['claudeObservatory.keepAll'] = realAll;
+        assert.deepEqual(bulk, [], 'a verb this row does not offer is refused, not forwarded');
+      }
+      // The tour (and the palette) bring a TAB forward rather than revealing a view that no longer exists.
+      posts.length = 0;
+      tlProvider.setTab('observations');
+      assert.deepEqual(posts.filter((m) => m.type === 'tab').map((m) => m.tab), ['observations'], 'setTab names the tab');
+      // The same gate on the window's OWN refresh, not only on the message that reports the layout —
+      // this is the path every store change takes. Pointing the CLI at a non-executable file keeps a
+      // unit test from launching a real subprocess; the tree posts happen before the spawn either way.
+      {
+        const notABinTl = path.join(ws, 'not-a-binary-timeline');
+        fs.writeFileSync(notABinTl, 'this is not executable\n');
+        const wasBin = process.env.CLAUDE_OBSERVATORY_BIN;
+        process.env.CLAUDE_OBSERVATORY_BIN = notABinTl;
+        tlMsg({ type: 'view', tab: 'prompts', grouped: false, shows: { prompts: true, observations: false, actions: false } });
+        posts.length = 0;
+        tlView.visible = true;
+        tlProvider.refresh(true);
+        tlView.visible = false;
+        if (wasBin === undefined) delete process.env.CLAUDE_OBSERVATORY_BIN; else process.env.CLAUDE_OBSERVATORY_BIN = wasBin;
+        assert.ok(posts.some((m) => m.type === 'sessions'), 'the refresh ran');
+        assert.ok(!posts.some((m) => m.type === 'rows'), '…and built no feed for a tab that is off screen');
+      }
+      // A Claude-generated recap or edit analysis has to REPAINT. Dropping the provider's memo used to be
+      // enough — the tree had its own change event — and now redraws nothing on its own. Asserted from
+      // source because driving it would spawn Claude.
+      {
+        const src = fs.readFileSync(path.resolve(__dirname, '../src/extension.ts'), 'utf8');
+        assert.match(src, /await core\.analyzeEdit\(s, id[\s\S]{0,500}?promptsProvider\.refresh\(true\)/,
+          'analyzing an edit repaints the window that draws the row');
+        assert.match(src, /await core\.analyzeRecap\(s[\s\S]{0,500}?promptsProvider\.refresh\(true\)/,
+          '…and so does refreshing the recap');
+      }
+    }
 
     // Combined Stats + Usage webview: one view — plots on top, usage bars below; both fed via postMessage.
     const stProvider = webviewProviders['claudeObservatory.stats'];
@@ -849,8 +1037,8 @@ test('extension: three views, click commands, inline annotations, chat, status s
     // 0.8.7 (5) REQUESTS — its own WINDOW in the dock (left of the Overview), not a tab inside it, so
     // the list of asks and the view it scopes are visible at the same time. Picking one filters the
     // Overview beside it: fleet · runs · tasks · shells, and the whole change map.
-    const rqProvider = webviewProviders['claudeObservatory.prompts'];
-    assert.ok(rqProvider, 'the Prompts window is registered');
+    const rqProvider = tlProvider; // 0.10.0: Prompts is the Timeline's first TAB, not a view of its own
+    assert.ok(rqProvider, 'the Timeline window is registered');
     let rqMsgHandler = null;
     const rqView = {
       webview: { options: {}, html: '', postMessage: () => {}, onDidReceiveMessage: (cb) => { rqMsgHandler = cb; return { dispose() {} }; } },
@@ -1168,56 +1356,260 @@ test('extension: three views, click commands, inline annotations, chat, status s
       // ever reads our own generated shell.
       const scripts = [...cmView.webview.html.matchAll(/<script[^>]*>([\s\S]*?)<\/script[^>]*>/gi)];
       assert.ok(scripts.length >= 1, 'the overview shell embeds its script');
-      const mkEl = () => ({
-        innerHTML: '', textContent: '', title: '', hidden: true, style: {}, dataset: {}, value: '', checked: false,
-        classList: { toggle() {}, add() {}, remove() {}, contains: () => false },
-        setAttribute() {}, getAttribute: () => null, hasAttribute: () => false, removeAttribute() {},
-        addEventListener() {}, appendChild() {}, removeChild() {}, contains: () => false,
-        querySelectorAll: () => [], querySelector: () => null, parentNode: null, firstChild: null,
-        getContext: () => null, getBoundingClientRect: () => ({ width: 0, height: 0, left: 0, top: 0 }),
-      });
-      const els = new Map();
-      const elFor = (id) => { if (!els.has(id)) els.set(id, mkEl()); return els.get(id); };
-      let msgListener = null;
-      const winStub = {
-        addEventListener: (t, cb) => { if (t === 'message') msgListener = cb; },
-        matchMedia: () => ({ matches: false, addEventListener() {} }),
-        setInterval: () => 0, clearInterval() {}, setTimeout: () => 0, clearTimeout() {},
-        requestAnimationFrame: () => 0, devicePixelRatio: 1, scrollY: 0,
+      const mkEl = () => {
+        // `style` models the API the script uses: the grouped column widths are written as a CSS custom
+        // property, and a bare {} would swallow setProperty (it is not a plain assignment).
+        const style = {
+          setProperty(k, v) { style[k] = String(v); },
+          removeProperty(k) { delete style[k]; },
+          getPropertyValue: (k) => style[k] || '',
+        };
+        const el = {
+          innerHTML: '', textContent: '', title: '', hidden: true, style, dataset: {}, value: '', checked: false, _ls: {},
+          classList: { toggle() {}, add() {}, remove() {}, contains: () => false },
+          setAttribute() {}, getAttribute: () => null, hasAttribute: () => false, removeAttribute() {},
+          addEventListener(t, cb) { (el._ls[t] || (el._ls[t] = [])).push(cb); },
+          // Real, because the drag handlers detach themselves on pointerup — a missing method there would
+          // throw inside the very interaction these assertions drive.
+          removeEventListener(t, cb) { const l = el._ls[t]; if (l) { const i = l.indexOf(cb); if (i >= 0) l.splice(i, 1); } },
+          appendChild() {}, removeChild() {}, contains: () => false,
+          querySelectorAll: () => [], querySelector: () => null, parentNode: null, firstChild: null,
+          getContext: () => null,
+          // A NON-degenerate box: a divider computes its new split as a fraction of the pair it sits
+          // between, and a zero-width rect would make every clamp trivially true.
+          getBoundingClientRect: () => ({ width: 600, height: 300, left: 0, top: 0, right: 600, bottom: 300 }),
+        };
+        return el;
       };
-      const docStub = {
-        getElementById: elFor, addEventListener() {}, createElement: mkEl,
-        querySelectorAll: () => [], querySelector: () => null, body: mkEl(), documentElement: mkEl(),
+      // ONE harness, run more than once: the panel's LAYOUT comes out of its persisted webview state, so
+      // the grouped-nav assertions further down need a second context whose getState() hands back
+      // groupedNav:true. Everything else about the two runs is identical, which is the point — the only
+      // difference between five tabs and two is that one value.
+      const runOverview = (persisted) => {
+        const els = new Map();
+        const elFor = (id) => { if (!els.has(id)) els.set(id, mkEl()); return els.get(id); };
+        let msgListener = null;
+        const winStub = {
+          addEventListener: (t, cb) => { if (t === 'message') msgListener = cb; },
+          matchMedia: () => ({ matches: false, addEventListener() {} }),
+          setInterval: () => 0, clearInterval() {}, setTimeout: () => 0, clearTimeout() {},
+          requestAnimationFrame: () => 0, devicePixelRatio: 1, scrollY: 0,
+        };
+        const docStub = {
+          getElementById: elFor, addEventListener() {}, createElement: mkEl,
+          querySelectorAll: () => [], querySelector: () => null, body: mkEl(), documentElement: mkEl(),
+        };
+        const saved = []; // every vscode.setState — this panel's layout is what it persists
+        const sandbox = {
+          window: winStub, document: docStub, console,
+          acquireVsCodeApi: () => ({ postMessage() {}, getState: () => persisted || null, setState: (s) => saved.push(s) }),
+          URLSearchParams, JSON, Math, Date, String, Number, Array, Object, RegExp, parseInt, parseFloat, isFinite, NaN, Infinity, undefined,
+          getComputedStyle: () => ({ getPropertyValue: () => '' }),
+          ResizeObserver: class { observe() {} unobserve() {} disconnect() {} },
+          IntersectionObserver: class { observe() {} unobserve() {} disconnect() {} },
+          requestAnimationFrame: () => 0, setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0, clearInterval() {},
+          localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+        };
+        winStub.document = docStub;
+        sandbox.globalThis = sandbox;
+        vm.createContext(sandbox);
+        assert.doesNotThrow(() => vm.runInContext(scripts[scripts.length - 1][1], sandbox), 'the overview script initializes under the DOM stub');
+        assert.ok(typeof msgListener === 'function', 'the script listens for host messages');
+        /** Invoke the LAST handler registered for an event — i.e. the one the current markup wired. */
+        const fire = (node, type, ev) => {
+          const l = node._ls[type] || [];
+          const cb = l[l.length - 1];
+          assert.ok(cb, `the stub node has a ${type} handler to fire`);
+          return cb.call(node, ev || { target: node, stopPropagation() {}, preventDefault() {} });
+        };
+        return { elFor, fire, saved, post: (data) => msgListener({ data }) };
       };
-      const sandbox = {
-        window: winStub, document: docStub, console,
-        acquireVsCodeApi: () => ({ postMessage() {}, getState: () => null, setState() {} }),
-        URLSearchParams, JSON, Math, Date, String, Number, Array, Object, RegExp, parseInt, parseFloat, isFinite, NaN, Infinity, undefined,
-        getComputedStyle: () => ({ getPropertyValue: () => '' }),
-        ResizeObserver: class { observe() {} unobserve() {} disconnect() {} },
-        IntersectionObserver: class { observe() {} unobserve() {} disconnect() {} },
-        requestAnimationFrame: () => 0, setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0, clearInterval() {},
-        localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
-      };
-      winStub.document = docStub;
-      sandbox.globalThis = sandbox;
-      vm.createContext(sandbox);
-      assert.doesNotThrow(() => vm.runInContext(scripts[scripts.length - 1][1], sandbox), 'the overview script initializes under the DOM stub');
-      assert.ok(typeof msgListener === 'function', 'the script listens for host messages');
-      msgListener({ data: { type: 'version', v: { current: '9.9.9', channel: 'stable', stableLatest: '9.9.10', devLatest: '9.10.0-dev.3', updateAvailable: true } } });
+      const solo = runOverview(null);
+      const elFor = solo.elFor;
+      solo.post({ type: 'version', v: { current: '9.9.9', channel: 'stable', stableLatest: '9.9.10', devLatest: '9.10.0-dev.3', updateAvailable: true } });
       assert.match(elFor('ov-version').innerHTML, /9\.9\.9/, 'the chip RENDERS the version the host delivered');
       assert.match(elFor('ov-vermenu').innerHTML, /Pre-release/, 'the menu carries the channel rows');
       assert.match(elFor('ov-vermenu').innerHTML, /Update now<span class="vm-ver">v9\.9\.10/, 'the Update row NAMES the version it would install');
       assert.doesNotMatch(elFor('ov-vermenu').innerHTML, /up to date/, 'and never claims up to date while an update exists');
       // The Update row is ALWAYS present — up to date shows the affordance too, safely clickable.
-      msgListener({ data: { type: 'version', v: { current: '9.9.9', channel: 'stable', stableLatest: '9.9.9', devLatest: null, updateAvailable: false } } });
+      solo.post({ type: 'version', v: { current: '9.9.9', channel: 'stable', stableLatest: '9.9.9', devLatest: null, updateAvailable: false } });
       assert.match(elFor('ov-vermenu').innerHTML, /Update now/, 'the Update row survives being up to date');
       assert.match(elFor('ov-vermenu').innerHTML, /up to date/, 'and says so instead of hiding');
       // No release data (offline / first paint): the row stays, but claims nothing it has not checked.
-      msgListener({ data: { type: 'version', v: { current: '9.9.9', channel: 'stable', stableLatest: null, devLatest: null, updateAvailable: false, offline: true } } });
+      solo.post({ type: 'version', v: { current: '9.9.9', channel: 'stable', stableLatest: null, devLatest: null, updateAvailable: false, offline: true } });
       assert.match(elFor('ov-vermenu').innerHTML, /Update now<span class="vm-ver">—/, 'with no feed data the Update row shows an em-dash');
       assert.doesNotMatch(elFor('ov-vermenu').innerHTML, /up to date/, 'and does not assert up to date it never verified');
+
+      // ---- 0.10.0: the grouped left nav, EXECUTED both ways -----------------------------------------
+      // Five tabs or two group tabs of side-by-side columns, decided by one persisted value. Asserted by
+      // running the shipped script rather than by reading its source: the hazard here is a column whose
+      // list never gets rendered into, and only execution can see that.
+      const OVSESS = 'ovSess01';
+      const ovPayload = (pr) => ({
+        type: 'overview', cm: null, session: OVSESS, sessionTitle: 'the reviewed session', pinned: OVSESS, prompt: null, navPos: null, filter: '',
+        mt: {
+          agents: [{ session: OVSESS, worktree: '/w/repo', gitBranch: 'dev', self: true, phase: 'working', sparkline: [1, 2], diff: { added: 3, removed: 1 }, tokens: 900, durationMs: 5000, risk: 0, subagents: [] }],
+          workflows: [{ id: 'wf1', name: 'wf1', description: 'the workflow run', running: true, agents: [], phaseGroups: [], added: 1, removed: 0, tokens: 10, durationMs: 10, edits: 1 }],
+          tasks: [{ id: 7, subject: 'the planned task', status: 'in_progress', taskId: 'tk7' }],
+          collisions: [],
+        },
+        pr,
+        sessions: { active: OVSESS, sessions: [{ id: OVSESS, title: 'the reviewed session', lastActiveMs: Date.now(), current: true, edits: 1, pending: 1, files: 1, added: 3, removed: 1, tokens: 900, durationMs: 5000, model: '', effort: '' }] },
+      });
+      const shells = { processes: [{ id: 'bash_9', command: 'npm test', description: 'npm test', running: true, runtimeMs: 1000, outputBytes: 12 }], summary: { total: 1, running: 1, failed: 0 } };
+      // Solo mode is the control: the same payload, five member tabs, no group tab anywhere.
+      solo.post(ovPayload(shells));
+      const soloTabs = elFor('ov-navtabs').innerHTML;
+      assert.equal((soloTabs.match(/class="ov-tab/g) || []).length, 5, 'ungrouped: the five member tabs, exactly as before');
+      assert.doesNotMatch(soloTabs, /data-nav="g:/, 'and no group tab');
+
+      const grouped = runOverview({ groupedNav: true });
+      // pr:null on the FIRST payload — an older CLI, or the answer not back yet. The Processes column must
+      // still be there (a tab that vanishes when the CLI cannot answer hides the failure), badge blank.
+      grouped.post(ovPayload(null));
+      const gTabs = grouped.elFor('ov-navtabs').innerHTML;
+      assert.equal((gTabs.match(/class="ov-tab/g) || []).length, 2, 'grouped: exactly two tabs');
+      assert.ok(gTabs.includes('>Sessions · Fleet<'), 'named Sessions · Fleet');
+      assert.ok(gTabs.includes('>Workflows · Tasks · Processes<'), '…and Workflows · Tasks · Processes');
+      const wtp = grouped.elFor('ov-group-wtp').innerHTML;
+      assert.equal((wtp.match(/class="ov-groupcol"/g) || []).length, 3, 'the Workflows·Tasks·Processes pane renders THREE columns');
+      for (const k of ['workflows', 'tasks', 'processes'])
+        assert.ok(wtp.includes(`id="ov-g-${k}"`), `the ${k} column carries its own list node`);
+      assert.equal(grouped.elFor('ov-gb-processes').textContent, '', 'with no shells payload the Processes badge is blank — the column is not');
+      assert.equal((grouped.elFor('ov-group-sf').innerHTML.match(/class="ov-groupcol"/g) || []).length, 2, 'and Sessions · Fleet renders two');
+      // The member lists are RENDERED INTO those columns — one renderer per member, writing wherever the
+      // member's list currently lives.
+      assert.match(grouped.elFor('ov-g-workflows').innerHTML, /the workflow run/, 'the Workflows column holds the workflow list');
+      assert.match(grouped.elFor('ov-g-tasks').innerHTML, /the planned task/, 'the Tasks column holds the task list');
+      assert.match(grouped.elFor('ov-g-sessions').innerHTML, /the reviewed session/, 'the Sessions column holds the session list');
+      assert.match(grouped.elFor('ov-g-fleet').innerHTML, /repo/, 'the Fleet column holds the agent list');
+      // …and the badge fills in the moment the payload arrives, without the columns being rebuilt.
+      grouped.post(ovPayload(shells));
+      assert.equal(grouped.elFor('ov-gb-processes').textContent, '1/1', 'the Processes badge appears once the CLI answers');
+      assert.match(grouped.elFor('ov-g-processes').innerHTML, /bash_9/, 'and the Processes column lists the shell');
+      // The tour names MEMBERS, always. Grouped, a step about `fleet` has to bring the group holding it
+      // forward — resolveTab is the one place that knows the mapping, and both paths go through it.
+      grouped.post({ type: 'tour', tab: 'fleet', anchor: 'nav-tabs' });
+      assert.equal(grouped.elFor('ov-group-sf').style.display, 'flex', 'a tour step naming fleet opens the group that contains it');
+      assert.equal(grouped.elFor('ov-group-wtp').style.display, 'none', 'and the other group closes');
+      grouped.post({ type: 'tour', tab: 'processes', anchor: 'nav-tabs' });
+      assert.equal(grouped.elFor('ov-group-wtp').style.display, 'flex', 'a step naming processes opens Workflows · Tasks · Processes');
+      assert.equal(grouped.elFor('ov-group-sf').style.display, 'none', 'and Sessions · Fleet closes');
+      // Grouped mode drives the SAME split variables the master column already uses, so the reader's drag
+      // and the vertical-responsive branch keep working — with its own remembered width. (documentElement
+      // is a stub whose style writes are not observable, so this reads the shipped source.)
+      assert.match(cmView.webview.html, /setProperty\('--ov-nav', \(GROUPNAV\?NAV_WG:NAV_W\)\+'%'\)/, 'the grouped width drives --ov-nav');
+      assert.match(cmView.webview.html, /setProperty\('--ov-navv', \(GROUPNAV\?NAV_HG:NAV_H\)\+'%'\)/, '…and the stacked one drives --ov-navv');
+      assert.match(cmView.webview.html, /groupedNav:GROUPNAV, navWG:NAV_WG, navHG:NAV_HG/, 'all three ride the webview state, not a workspace setting');
+
+      // ---- 0.10.0: the COLUMNS inside a group are the reader's to size and to fold -----------------
+      // Equal to start, dragged on the divider between a pair, and never past the floor that keeps a
+      // name readable — this product wraps or tooltips, it does not clip.
+      assert.equal(grouped.elFor('ov-gc-workflows').style['--ov-cw'], '1', 'columns start on an equal share');
+      const ovDrag = (gutterId, clientX) => {
+        const g = grouped.elFor(gutterId);
+        grouped.fire(g, 'pointerdown', { preventDefault() {}, pointerId: 1, clientX });
+        grouped.fire(g, 'pointermove', { clientX });
+        grouped.fire(g, 'pointerup', {});
+      };
+      ovDrag('ov-cg-tasks', 100000); // drag the Workflows|Tasks divider as far right as it goes
+      const wW = Number(grouped.elFor('ov-gc-workflows').style['--ov-cw']);
+      const wT = Number(grouped.elFor('ov-gc-tasks').style['--ov-cw']);
+      assert.ok(wW > 1 && wT < 1, 'the drag moved the split');
+      assert.ok(Math.abs(wW + wT - 2) < 1e-9, '…without changing the pair’s combined share');
+      // The pair spans 600px in the stub and the floor is 150px, so neither side may end below 150/600
+      // of their combined share. A missing clamp puts the shrinking column at zero.
+      assert.ok(wT >= 2 * (150 / 600) - 1e-9, 'and the shrinking column stopped at the 150px floor, never at zero');
+      assert.equal(grouped.elFor('ov-gc-processes').style['--ov-cw'], '1', 'the third column is untouched by a drag between the other two');
+      // The trap: the Processes column is ALWAYS present and its badge arrives on a later payload. That
+      // payload must not reset a width (or a fold) the reader set seconds earlier.
+      grouped.post(ovPayload(shells));
+      assert.equal(Number(grouped.elFor('ov-gc-workflows').style['--ov-cw']), wW, 'a later payload leaves the dragged width alone');
+      assert.equal(Number(grouped.elFor('ov-gc-tasks').style['--ov-cw']), wT, '…on both sides of the divider');
+      assert.equal(grouped.elFor('ov-gb-processes').textContent, '1/1', 'while the badge it carried still lands');
+      assert.deepEqual(grouped.saved[grouped.saved.length - 1].colW.wtp.map((n) => Math.round(n * 1000)),
+        [Math.round(wW * 1000), Math.round(wT * 1000), 1000], 'the widths are persisted on pointer-up');
+      // FOLDING a column: a rail that still names itself, and a group that always keeps one open.
+      grouped.fire(grouped.elFor('ov-cc-tasks'), 'click');
+      const wtpFolded = grouped.elFor('ov-group-wtp').innerHTML;
+      assert.match(wtpFolded, /class="ov-groupcol rail" id="ov-gc-tasks"/, 'the folded column becomes a rail');
+      // …past the end of the opening tag, so the button's own title cannot satisfy this: the NAME has to
+      // be in the rail's content, which is what the reader sees.
+      assert.match(wtpFolded, /id="ov-cc-tasks"[^>]*>[\s\S]*?Tasks/, '…which still NAMES the member, so it can be clicked back');
+      assert.ok(wtpFolded.includes('id="ov-gb-tasks"'), '…and still carries its badge');
+      assert.ok(!wtpFolded.includes('id="ov-g-tasks"'), 'and its list is not drawn while folded');
+      assert.equal((wtpFolded.match(/class="ov-groupcol"/g) || []).length, 2, 'two columns remain expanded');
+      grouped.fire(grouped.elFor('ov-cc-processes'), 'click');
+      assert.equal((grouped.elFor('ov-group-wtp').innerHTML.match(/class="ov-groupcol"/g) || []).length, 1, 'and then one');
+      assert.ok(!grouped.elFor('ov-group-wtp').innerHTML.includes('id="ov-cc-workflows"'), 'the last expanded column offers no fold button');
+      grouped.fire(grouped.elFor('ov-cc-workflows'), 'click'); // a click that raced the repaint
+      assert.equal((grouped.elFor('ov-group-wtp').innerHTML.match(/class="ov-groupcol"/g) || []).length, 1,
+        'and folding it is refused — a group with every column folded is an empty pane');
+      assert.ok(grouped.saved[grouped.saved.length - 1].colC.tasks, 'the folded set is persisted');
+      assert.ok(!grouped.saved[grouped.saved.length - 1].colC.workflows, '…and the refused fold is not in it');
+      // A later payload must not un-fold anything either.
+      grouped.post(ovPayload(shells));
+      assert.equal((grouped.elFor('ov-group-wtp').innerHTML.match(/class="ov-groupcol"/g) || []).length, 1,
+        'a later payload leaves the folded columns folded');
+      // Restoring gives back the width that was SET, not an equal share — the whole reason a fold leaves
+      // the weight alone. wT came from the drag above and is deliberately not 1.
+      assert.ok(Math.abs(wT - 1) > 0.01, 'the dragged weight is distinguishable from an equal share');
+      grouped.fire(grouped.elFor('ov-cc-tasks'), 'click');
+      assert.equal((grouped.elFor('ov-group-wtp').innerHTML.match(/class="ov-groupcol"/g) || []).length, 2, 'clicking a rail brings the column back');
+      assert.equal(Number(grouped.elFor('ov-gc-tasks').style['--ov-cw']), wT, '…at the width it had before it folded');
+      // Double-click is the way back from a bad drag.
+      grouped.fire(grouped.elFor('ov-cg-tasks'), 'dblclick', {});
+      assert.equal(Number(grouped.elFor('ov-gc-workflows').style['--ov-cw']), 1, 'double-click splits that pair evenly again');
+      assert.equal(Number(grouped.elFor('ov-gc-tasks').style['--ov-cw']), 1, '…on both sides');
+      // And a reload comes back on the layout that was persisted.
+      const reloaded = runOverview({ groupedNav: true, colC: { processes: 1 }, colW: { wtp: [1.7, 0.3, 1], sf: [1, 1] } });
+      reloaded.post(ovPayload(shells));
+      assert.match(reloaded.elFor('ov-group-wtp').innerHTML, /class="ov-groupcol rail" id="ov-gc-processes"/, 'a reload restores the folded column');
+      assert.equal(reloaded.elFor('ov-gc-workflows').style['--ov-cw'], '1.7', '…and the widths that went with it');
     }
+    // 0.10.0: the Group-tabs toggle moved OUT of the top toolbar and onto the tab-strip row — the control
+    // that rearranges the tabs belongs beside the tabs, not three rows away in a panel-wide toolbar.
+    {
+      const html = cmView.webview.html;
+      const toolbarEnd = html.indexOf('<div class="ov">');
+      const tabRow = html.indexOf('class="ov-navtabrow"');
+      const groupnav = html.indexOf('id="ov-groupnav"');
+      const ctl = html.indexOf('class="ov-ctl"');
+      assert.ok(toolbarEnd > 0 && tabRow > toolbarEnd, 'the tab-strip row is below the toolbar');
+      assert.ok(groupnav > tabRow && groupnav < ctl, 'the Group tabs toggle sits on that row, beside the tab strip');
+      assert.ok(groupnav > toolbarEnd, '…and no longer inside the top toolbar');
+      assert.ok(html.includes('title="Group related tabs side by side (Sessions · Fleet / Workflows · Tasks · Processes)"'),
+        'with its title text unchanged');
+      assert.match(html, /groupedNav:GROUPNAV/, 'and its persisted state key unchanged');
+    }
+    // The toggle itself, with the copy the plan fixed on — a title that stops naming what it groups is a
+    // control nobody can find.
+    assert.ok(cmView.webview.html.includes('id="ov-groupnav"'), 'the Overview toolbar carries the grouping toggle');
+    assert.ok(cmView.webview.html.includes('title="Group related tabs side by side (Sessions · Fleet / Workflows · Tasks · Processes)"'),
+      'and says exactly what it does');
+    assert.ok(/id="ov-groupnav"[^>]*codicon-split-horizontal|codicon-split-horizontal/.test(cmView.webview.html), 'with the split-horizontal codicon');
+    assert.match(fs.readFileSync(path.resolve(__dirname, '../src/codicon.ts'), 'utf8'), /codicon-split-horizontal:before/,
+      'which is in the subsetted font — a non-whitelisted name renders a silent blank glyph');
+    // …and the same check over EVERY name the extension writes, because that failure mode is invisible:
+    // an unlisted codicon draws nothing at all — no error, no missing element, no build warning — so a
+    // typo or a glyph added without touching the generator ships as a blank button. The per-glyph
+    // assertions elsewhere in this file stay: the three names composed at runtime ('codicon-'+icon) are
+    // unreachable from source text, so this sweep cannot see them.
+    {
+      const extSrc = fs.readFileSync(path.resolve(__dirname, '../src/extension.ts'), 'utf8');
+      const styleSrc = fs.readFileSync(path.resolve(__dirname, '../src/codicon.ts'), 'utf8');
+      const used = [...new Set([...extSrc.matchAll(/codicon-([a-z0-9-]+)/g)].map((m) => m[1]))];
+      // The instrument first: a regex that silently matched nothing would report a clean font forever.
+      assert.ok(used.includes('debug-step-back') && used.length >= 20,
+        `the sweep found the glyph names it is meant to check (${used.length})`);
+      assert.deepEqual(used.filter((n) => !styleSrc.includes('.codicon-' + n + ':before')), [],
+        'every codicon the extension names is in the generated subset');
+    }
+    // Below the narrow breakpoint the columns STACK. Shrinking three columns into a side bar would clip
+    // the names they exist to show, and this product never truncates content text.
+    assert.match(cmView.webview.html, /@media \(max-width: 640px\)[\s\S]*\.ov-group \{ flex-direction:column; \}/,
+      'the narrow layout stacks the group columns instead of squeezing them');
+    assert.match(cmView.webview.html, /\.ov-groupcol \{[^}]*min-width:150px/, 'and each column has the same 150px floor the nav itself uses');
 
     // (3) THE PROMPT AXIS — the LAST axis on the review nav bar. Step/Review/Accept/Reject
     // affordances scoped to one of the user's own asks (the Subtask axis is gone in 0.8.8).
@@ -1274,6 +1666,40 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.ok(!/setInterval[^;]*prompts/.test(bundleSrc), 'the Prompts window adds no polling timer of its own');
     assert.ok(/"prompts", "--id", id, "--response", "--json", "--session", session/.test(bundleSrc),
       'a row expand fetches Claude’s reply via prompts --id --response --json');
+
+    // 0.10.0: a prompt picked ON THE NAV BAR selects in the Prompts list too. Scoping the Overview and
+    // leaving the list's own selection where it was left the two surfaces naming different asks — the
+    // counter said one, the highlighted row said another.
+    {
+      // The push itself, the loop it must not start, and the same-id guard — which is only observable in
+      // what reaches the WEBVIEW: `selection` reads the same either way, so asserting it alone would pass
+      // with the guard deleted. Every prompt-scoped verb pushes the ask it resolved to, and refreshAll
+      // runs on every store event, so an unguarded setSelection is a repaint per tick.
+      let notified = 0;
+      const realOnSelect = tlProvider.onSelect;
+      tlProvider.onSelect = () => { notified++; };
+      const pushed = [];
+      const realPost = rqView.webview.postMessage;
+      rqView.webview.postMessage = (m) => { pushed.push(m); return Promise.resolve(true); };
+      try {
+        tlProvider.setSelection('nav-picked');
+        assert.equal(tlProvider.selection, 'nav-picked', 'a pick made outside the list becomes its selection');
+        assert.equal(notified, 0, 'and does NOT notify back — that is the select → notify → select loop');
+        assert.deepEqual(pushed.filter((m) => m.type === 'prompts').map((m) => m.selected), ['nav-picked'],
+          '…and the list is told, so the highlighted row is the ask the nav bar picked');
+        pushed.length = 0;
+        tlProvider.setSelection('nav-picked');
+        assert.equal(tlProvider.selection, 'nav-picked', 'setting the same id again is a no-op');
+        assert.deepEqual(pushed, [], '…posting nothing: the same id must not repaint the list on every refresh');
+        pushed.length = 0;
+        tlProvider.setSelection(null);
+        assert.deepEqual(pushed.filter((m) => m.type === 'prompts').map((m) => m.selected), [null],
+          'clearing it IS a change, so that one does post');
+      } finally {
+        rqView.webview.postMessage = realPost;
+        tlProvider.onSelect = realOnSelect;
+      }
+    }
 
     // the live position push: setNavPos posts a {navpos} message to a VISIBLE Overview so the counters update.
     assert.ok(typeof cmProvider.setNavPos === 'function', 'the Overview exposes setNavPos (the host pushes the live Diff/File position)');
@@ -1633,6 +2059,35 @@ test('extension: three views, click commands, inline annotations, chat, status s
     await commands['claudeObservatory.tourBack']();
     assert.equal(tourView.webview.posts.filter((m) => m.type === 'step').pop().i, 0, 'Back returns to the previous one');
 
+    // --- the two views that became TABS -------------------------------------------------------------
+    // Core's `view` set is closed and not ours to extend, so the `actions` and `observations` steps still
+    // exist — they must now reveal the Timeline and bring the right TAB forward instead of revealing a
+    // view that no longer exists. A step that silently landed nowhere would leave the reader staring at
+    // whatever panel happened to be open while the text described another.
+    for (const want of ['actions', 'observations', 'prompts']) {
+      const idx = core.demoTour().findIndex((x) => x.view === want);
+      assert.ok(idx >= 0, `core's script has a ${want} step to land`);
+      const focused = [];
+      const tabbed = [];
+      const realFocus = commands['claudeObservatory.timeline.focus'];
+      commands['claudeObservatory.timeline.focus'] = () => { focused.push(1); };
+      const realTab = tlProvider.setTab.bind(tlProvider);
+      tlProvider.setTab = (t) => { tabbed.push(t); };
+      await commands['claudeObservatory.tourGoto'](idx);
+      tlProvider.setTab = realTab;
+      if (realFocus === undefined) delete commands['claudeObservatory.timeline.focus']; else commands['claudeObservatory.timeline.focus'] = realFocus;
+      assert.deepEqual(focused, [1], `a ${want} step reveals the Timeline window`);
+      assert.deepEqual(tabbed, [want], `…on the ${want} tab`);
+    }
+    // …and the views they used to be are gone from the tour's tree map, so nothing can still try to
+    // reveal them.
+    {
+      const src = fs.readFileSync(path.resolve(__dirname, '../src/extension.ts'), 'utf8');
+      const map = /const TOUR_TREES[^=]*=\s*\{([\s\S]*?)\};/.exec(src);
+      assert.ok(map, 'the tour tree map is findable');
+      assert.ok(!/actions|observations/.test(map[1]), 'the tour no longer reveals Actions/Observations as views');
+    }
+
     // --- action steps: the wait/auto state machine, driven end to end ---
     // Arm a wait step, mutate the store the way a reader would, and assert the tour notices. This is
     // the whole interactive feature; nothing else in the suite covers it.
@@ -1814,6 +2269,1116 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.ok(!fs.existsSync(path.join(ws, 'observatory-demo')), 'and the demo workspace folder');
     assert.deepEqual(configWrites.slice(cfgBeforeExit).filter(([k]) => k === 'session'), [], 'exitDemo writes no config either');
     progressCancelled = false;
+
+    // ---- 0.10.0: the review bar's follow behaviour, auto-advance, and the Explorer badge -------------
+    // A fresh two-file, two-edit session, because everything above has resolved the original fixture's
+    // edits and "carry me to the next PENDING edit" needs two of them, in different files, to be a claim
+    // about anything at all.
+    const RS = 'reviewFollow';
+    const RA = path.join(ws, 'follow-a.txt');
+    const RB = path.join(ws, 'follow-b.txt');
+    fs.writeFileSync(RA, 'A1\n');
+    fs.writeFileSync(RB, 'B1\n');
+    core.ensureStore(RS);
+    const rb1 = core.writeBlob(RS, Buffer.from('A0\n'));
+    const ra1 = core.writeBlob(RS, Buffer.from('A1\n'));
+    core.appendLog(RS, { id: 1, ts: 1000, tool: 'Edit', file: RA, beforeBlob: rb1, afterBlob: ra1, status: 'pending' });
+    const rb2 = core.writeBlob(RS, Buffer.from('B0\n'));
+    const ra2 = core.writeBlob(RS, Buffer.from('B1\n'));
+    core.appendLog(RS, { id: 2, ts: 2000, tool: 'Edit', file: RB, beforeBlob: rb2, afterBlob: ra2, status: 'pending' });
+    configValues['session'] = RS;
+    await commands['claudeObservatory.refresh']?.();
+
+    // Auto-advance ON (its default): resolving edit #1 reveals edit #2 — in the OTHER file.
+    opened = undefined;
+    configValues['revealNextOnResolve'] = true;
+    await commands['claudeObservatory.inlineKeep'](1);
+    assert.equal(core.findRecord(RS, 1).status, 'kept', 'inlineKeep keeps the edit it was given');
+    assert.equal(opened?.uri?.fsPath, RB, 'and with revealNextOnResolve on, the next pending edit is revealed — across the file boundary');
+
+    // …and OFF, it resolves without moving the reader. This is the assertion the old mock could not make:
+    // it returned the caller's default, so the "off" path was never actually exercised.
+    opened = undefined;
+    configValues['revealNextOnResolve'] = false;
+    await commands['claudeObservatory.inlineKeep'](2);
+    assert.equal(core.findRecord(RS, 2).status, 'kept', 'the edit is still kept');
+    assert.equal(opened, undefined, 'but nothing is revealed when the setting is off');
+
+    // The diff editor's own Keep opts out regardless of the setting — a diff tab is a viewer the reader
+    // opened deliberately, and revealing something else behind it would be worse than doing nothing.
+    core.appendLog(RS, { id: 3, ts: 3000, tool: 'Edit', file: RA, beforeBlob: ra1, afterBlob: core.writeBlob(RS, Buffer.from('A2\n')), status: 'pending' });
+    core.appendLog(RS, { id: 4, ts: 4000, tool: 'Edit', file: RB, beforeBlob: ra2, afterBlob: core.writeBlob(RS, Buffer.from('B2\n')), status: 'pending' });
+    opened = undefined;
+    configValues['revealNextOnResolve'] = true;
+    await commands['claudeObservatory.inlineKeep'](3, { advance: false });
+    assert.equal(core.findRecord(RS, 3).status, 'kept', 'the diff-bar path still resolves the edit');
+    assert.equal(opened, undefined, 'but it never navigates away from the diff the reader is reading');
+
+    // The review bubble: PINNED it carries itself to the next edit; unpinned it closes, as it always has.
+    const threadsBefore = commentThreads.length;
+    configValues['pinnedPeek'] = true;
+    await commands['claudeObservatory.viewChanges'](4);
+    const opening = commentThreads.length;
+    assert.ok(opening > threadsBefore, 'viewChanges opens the bubble');
+    core.appendLog(RS, { id: 5, ts: 5000, tool: 'Edit', file: RA, beforeBlob: core.readLog(RS).find((r) => r.id === 3).afterBlob, afterBlob: core.writeBlob(RS, Buffer.from('A3\n')), status: 'pending' });
+    // Precondition: without a SECOND pending edit there is no "next" to follow to, and the assertion
+    // below would pass against a bubble that simply closed.
+    assert.deepEqual(core.readLog(RS).filter((r) => r.status === 'pending').map((r) => r.id), [4, 5], 'two pending edits, so following is a claim about something');
+    await commands['claudeObservatory.peekKeep']();
+    assert.equal(core.findRecord(RS, 4).status, 'kept', 'a pinned Keep still keeps');
+    assert.ok(commentThreads.length > opening, 'and the pinned bubble re-opens on the next pending edit instead of closing');
+    assert.ok(commentThreads[opening - 1].disposed, 'the previous thread is disposed, so only one bubble is ever live');
+
+    configValues['pinnedPeek'] = false;
+    const beforeUnpinned = commentThreads.length;
+    await commands['claudeObservatory.peekKeep']();
+    assert.equal(commentThreads.length, beforeUnpinned, 'unpinned, Keep opens no new bubble');
+    assert.ok(commentThreads[beforeUnpinned - 1].disposed, 'it just closes the one that was open');
+    // The half of the pin that lives in the MANIFEST: two buttons share one toolbar slot, each shown by
+    // the negation of the other's when-clause. Complements, not merely "both present" — a drifted pair
+    // shows two pin buttons at once or none at all, and neither is visible to any code path under test.
+    const threadTitle = pkg.contributes.menus['comments/commentThread/title'];
+    // Scoped to the BUBBLE's block: the bar is a second thread flavour on the same controller and owns
+    // its own inline@0, so a group filter alone would sweep its Keep button in here.
+    const bubbleMenu = threadTitle.filter((m) => /commentThread == claudeEdit\b/.test(m.when));
+    const pinSlot = bubbleMenu.filter((m) => m.group === 'inline@0');
+    assert.deepEqual(pinSlot.map((m) => m.command).sort(),
+      ['claudeObservatory.peekPin', 'claudeObservatory.peekUnpin'],
+      'Pin and Unpin share the first slot of the bubble toolbar');
+    const pinWhen = pinSlot.find((m) => m.command === 'claudeObservatory.peekPin').when;
+    const unpinWhen = pinSlot.find((m) => m.command === 'claudeObservatory.peekUnpin').when;
+    assert.match(pinWhen, /&& !claudeObservatory\.peekPinned$/, 'Pin is offered only while the bubble is unpinned');
+    assert.equal(unpinWhen, pinWhen.replace('!claudeObservatory.peekPinned', 'claudeObservatory.peekPinned'),
+      'and Unpin’s clause is its exact complement — exactly one of them is on the toolbar at any time');
+    // …and the extension sets the very key those clauses read. A rename on either side is silent: the
+    // manifest keeps parsing, the extension keeps running, and the button simply never appears.
+    assert.ok(/"setContext",\s*"claudeObservatory\.peekPinned"/.test(bundle),
+      'the bundle publishes claudeObservatory.peekPinned — the context key both when-clauses test');
+
+    // ---- 0.10.0: the compact FLOATING REVIEW BAR ----------------------------------------------------
+    // A comment thread with an EMPTY body and canReply:false — the widget collapses to its header row,
+    // which is a real toolbar. It is the only interactive surface an extension can float over code (VS
+    // Code exposes no overlay/inset API to the extension host at all), and it is the VS Code answer to
+    // PyCharm's editorFloatingToolbarProvider bar.
+    //
+    // Its own session: three pending edits in one file and one in another, so "Diff n/m" and "File i/k"
+    // are claims about something, and so the steppers have somewhere to step.
+    const BS = 'reviewBar1';
+    const BA = path.join(ws, 'bar-a.txt');
+    const BB = path.join(ws, 'bar-b.txt');
+    const BN = path.join(ws, 'bar-none.txt'); // a file Claude never touched
+    // Each of BA's three edits touches a DIFFERENT line, so each is its own review group: `keepGroup`
+    // keeps the whole same-code unit, and a chain of edits to one line would resolve all three at once —
+    // which would make "the bar moved to the next edit" a claim about a session that had none left.
+    const BA_TEXT = ['a\nb\nc\n', 'A\nb\nc\n', 'A\nB\nc\n', 'A\nB\nC\n'];
+    fs.writeFileSync(BA, BA_TEXT[3]);
+    fs.writeFileSync(BB, 'B1\n');
+    fs.writeFileSync(BN, 'untouched\n');
+    core.ensureStore(BS);
+    for (const id of [1, 2, 3]) {
+      core.appendLog(BS, {
+        id, ts: 1000 * id, tool: 'Edit', file: BA,
+        beforeBlob: core.writeBlob(BS, Buffer.from(BA_TEXT[id - 1])),
+        afterBlob: core.writeBlob(BS, Buffer.from(BA_TEXT[id])),
+        status: 'pending',
+      });
+    }
+    core.appendLog(BS, { id: 4, ts: 4000, tool: 'Edit', file: BB, beforeBlob: core.writeBlob(BS, Buffer.from('b0\n')), afterBlob: core.writeBlob(BS, Buffer.from('b1\n')), status: 'pending' });
+    configValues['session'] = BS;
+
+    // Drive the extension the way the workbench does: an active editor, then a store refresh. The bar is
+    // hung off updateStatusItem, and `show()` awaits openTextDocument, so a macrotask tick is what lets
+    // the thread actually exist before anything is asserted about it.
+    const barDoc = (file) => {
+      const text = fs.readFileSync(file, 'utf8');
+      const lines = text.split('\n');
+      return { uri: Uri.file(file), lineCount: lines.length, getText: () => text, lineAt: (n) => ({ range: new Range(n, 0, n, (lines[n] || '').length) }) };
+    };
+    const focusFile = (file) => { vscode.window.activeTextEditor = { document: barDoc(file), selection: { active: { line: 0 } }, setDecorations() {}, revealRange() {} }; };
+    const settle = async () => { await commands['claudeObservatory.refresh'](); await new Promise((r) => setTimeout(r, 0)); };
+    const liveThreads = () => commentThreads.filter((t) => !t.disposed);
+    const bar = () => liveThreads()[0];
+    const restoreEditor = vscode.window.activeTextEditor;
+
+    focusFile(BA);
+    configValues['editorReviewSurface'] = 'floating';
+    opened = undefined;
+    await settle();
+
+    // (1) It auto-shows, as the bar flavour, and NEVER steals focus: no showTextDocument, no revealRange.
+    // Auto-showing by opening the file would fight whoever is typing in another editor, which is exactly
+    // the failure that makes an auto-surface unusable.
+    assert.equal(liveThreads().length, 1, 'a file with pending edits gets exactly one review surface');
+    assert.equal(bar().contextValue, 'claudeNavBar', 'and it is the BAR flavour, not the bubble');
+    assert.equal(bar().uri.fsPath, toFsPath(BA), 'anchored in the file being reviewed');
+    assert.equal(opened, undefined, 'the auto-shown bar never opens/focuses a document — it must not fight the cursor');
+    assert.equal(bar().canReply, false, 'canReply:false — this is what suppresses the reply box and the whole comment form');
+    assert.deepEqual(bar().comments, [], 'and the body is EMPTY: an empty body is what collapses the widget to its header row');
+    assert.equal(bar().state, vscode.CommentThreadState.Unresolved, 'Unresolved paints the frame + the arrow pointing at the edit');
+    assert.equal(bar().collapsibleState, vscode.CommentThreadCollapsibleState.Expanded, 'and it opens expanded — a collapsed bar shows no toolbar at all');
+
+    // (2) The counters. Both axes, off the same helpers the status bar reads, so the bar can never name a
+    // different position than the counters beside it.
+    assert.match(bar().label, /Claude edit #1\b/, 'the bar names the edit it is parked on');
+    assert.match(bar().label, /\+\d+ −\d+/, 'with its line delta');
+    assert.match(bar().label, /Diff 1\/3/, 'Diff n/m — position among THIS file’s pending edits');
+    assert.match(bar().label, /File 1\/2/, 'File i/k — position among the files with pending edits');
+    // The steppers hide when there is nowhere to step (JetBrains: FloatingDiffStep.applies). A dead
+    // button on a widget that sits on top of code covers text for nothing.
+    assert.equal(contextKeys['claudeObservatory.barMultiEdit'], true, 'three pending edits here — the ⌃⌄ steppers apply');
+    assert.equal(contextKeys['claudeObservatory.barMultiFile'], true, 'two changed files — the ‹› steppers apply');
+
+    // (3) It FOLLOWS a resolve, always — it is a navigation bar, and one that vanished when you used it
+    // would be useless. `pinnedPeek` governs the bubble only, so prove the follow with it OFF.
+    configValues['pinnedPeek'] = false;
+    await commands['claudeObservatory.peekKeep']();
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(core.findRecord(BS, 1).status, 'kept', 'the bar’s Keep keeps the edit it names');
+    assert.equal(liveThreads().length, 1, 'and exactly one bar is still live — it carried itself, it did not clone');
+    assert.equal(bar().contextValue, 'claudeNavBar', 'still the bar, not swapped to the bubble');
+    assert.match(bar().label, /Claude edit #2\b/, 'parked on the next edit awaiting review');
+    assert.match(bar().label, /Diff 1\/2/, 'with its counters recomputed — one fewer edit pending in this file');
+
+    // (4) …and it closes when the file has nothing left to review. Assert against a file that EXISTS and
+    // is simply untouched, not against "no session": the empty-session path proves nothing about this.
+    focusFile(BN);
+    await settle();
+    assert.equal(liveThreads().length, 0, 'no bar over a file with no pending Claude edits');
+    assert.equal(contextKeys['claudeObservatory.barMultiEdit'], false, 'and the stepper keys go down with it');
+    assert.equal(contextKeys['claudeObservatory.barMultiFile'], false);
+    focusFile(BA);
+    await settle();
+    assert.equal(liveThreads().length, 1, 'coming back to a reviewable file brings it straight back');
+
+    // (5) THE BAR AND THE BUBBLE ARE NEVER OPEN AT ONCE. They are two flavours of one thread on one
+    // controller, and every path funnels through the same single `thread` field — this is the assertion
+    // that keeps that true, in both directions and across a refresh.
+    const barId = Number(/Claude edit #(\d+)/.exec(bar().label)[1]);
+    await commands['claudeObservatory.barDetails']();
+    assert.equal(liveThreads().length, 1, '⋯ Details leaves exactly one surface live');
+    assert.equal(bar().contextValue, 'claudeEdit', 'and it is the bubble');
+    assert.match(bar().label, new RegExp(`Claude edit #${barId}\\b`), 'at the SAME edit the bar was on');
+    assert.equal(bar().comments.length, 1, 'the bubble does have a body (the reasoning + the git-coloured diff)');
+    await settle();
+    assert.equal(liveThreads().length, 1, 'a refresh does not open a bar beside the bubble the reader asked for');
+    assert.equal(bar().contextValue, 'claudeEdit', '…and does not replace it either — the surface parked on the target edit is left alone, whichever it is');
+    // …but it is keyed on the EDIT, not on the mode. Move to a different edit — here by moving to the
+    // other changed file — and the surface the setting names takes over again. A mode-keyed guard would
+    // instead strand this bubble and suppress the bar everywhere, with no way for the reader to dismiss
+    // it: a programmatic comment thread has no close button.
+    focusFile(BB);
+    await settle();
+    assert.equal(liveThreads().length, 1, 'moving to another changed file still leaves exactly one surface');
+    assert.equal(bar().contextValue, 'claudeNavBar', 'and the bubble is released — the bar takes over on the new edit');
+    assert.equal(bar().uri.fsPath, toFsPath(BB), 'over the file now being reviewed');
+    assert.equal(contextKeys['claudeObservatory.barMultiEdit'], false, 'one pending edit here — the ⌃⌄ steppers hide (JetBrains: FloatingDiffStep.applies)');
+    assert.equal(contextKeys['claudeObservatory.barMultiFile'], true, '…while the ‹› file steppers still apply');
+    focusFile(BA);
+    await settle();
+    assert.equal(bar().contextValue, 'claudeNavBar', 'and coming back gives the bar, not the abandoned bubble');
+    await commands['claudeObservatory.barDetails']();
+    await commands['claudeObservatory.peekCollapse']();
+    assert.equal(liveThreads().length, 1, 'Collapse leaves exactly one surface live');
+    assert.equal(bar().contextValue, 'claudeNavBar', 'and it is the bar again');
+    assert.match(bar().label, new RegExp(`Claude edit #${barId}\\b`), 'still at the same edit');
+
+    // Stepping the bar keeps it a BAR (a default-mode show() here would silently turn it into a bubble).
+    await commands['claudeObservatory.peekNext']();
+    assert.equal(liveThreads().length, 1, 'stepping opens no second surface');
+    assert.equal(bar().contextValue, 'claudeNavBar', '⌄ Next Edit steps the bar without changing which surface you are on');
+
+    // (5b) An open the reader triggered wins over the auto-sync. Both await a document, and the auto-sync
+    // is re-entered by the very refresh a Keep causes — so without a guard a second thread is built
+    // underneath the one being opened, on an edit resolved from a review cursor the in-flight open has
+    // not parked yet. Whichever resumes last then wins, which is order-dependent in a real host; what is
+    // NOT order-dependent, and is what this asserts, is that the redundant thread gets built at all.
+    focusFile(BB); // one pending edit (#4) — so the auto-sync's target is not the edit opened below
+    await settle();
+    configValues['editorReviewSurface'] = 'none';
+    fireConfigChange('editorReviewSurface'); // clear the screen: the "already parked here" guard must not mask this
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(liveThreads().length, 0, 'nothing live going into the race');
+    configValues['editorReviewSurface'] = 'floating'; // …without firing, so nothing re-shows yet
+    const builtBefore = commentThreads.length;
+    const racing = commands['claudeObservatory.showReviewBar'](2); // an edit in the OTHER file — NOT awaited
+    commands['claudeObservatory.refresh'](); // the auto-sync fires while that open is still in flight
+    await racing;
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(commentThreads.length - builtBefore, 1, 'the auto-sync builds nothing underneath an open the reader triggered');
+    assert.equal(liveThreads().length, 1, 'and exactly one surface is live afterwards');
+    assert.match(bar().label, /Claude edit #2\b/, 'parked where the reader asked, not where the refresh would have put it');
+    focusFile(BA);
+    await settle();
+
+    // (6) The setting. `floating`/`none` are spelled exactly as in JetBrains so the two shared words mean
+    // the same thing in both editors; only the VS-Code-only bubble has a word of its own.
+    configValues['editorReviewSurface'] = 'none';
+    fireConfigChange('editorReviewSurface');
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(liveThreads().length, 0, 'set to `none`, the editor review chrome goes away');
+    await settle();
+    assert.equal(liveThreads().length, 0, '…and stays away across refreshes');
+    // …but the command is still the way in. `none` means "stop auto-showing", not "the bar is gone".
+    opened = undefined;
+    await commands['claudeObservatory.showReviewBar']();
+    assert.equal(liveThreads().length, 1, 'the Show-review-bar command still opens it on demand');
+    assert.equal(bar().contextValue, 'claudeNavBar', 'as the bar');
+    assert.ok(opened, 'and an EXPLICIT open does reveal the edit — unlike the auto-show');
+
+    configValues['editorReviewSurface'] = 'bubble';
+    fireConfigChange('editorReviewSurface');
+    await new Promise((r) => setTimeout(r, 0));
+    await settle();
+    assert.equal(liveThreads().length, 1, 'set to `bubble`, exactly one surface auto-shows');
+    assert.equal(bar().contextValue, 'claudeEdit', 'and it is the bubble');
+    // An unrecognized value reads as the DEFAULT, not as "nothing" — a hand-edited typo must not silently
+    // strip every review control out of the editor with no way to notice (JetBrains: floatingSurface).
+    configValues['editorReviewSurface'] = 'flaoting';
+    fireConfigChange('editorReviewSurface');
+    await new Promise((r) => setTimeout(r, 0));
+    await settle();
+    assert.equal(liveThreads().length, 1, 'a typo still leaves review controls in the editor');
+    assert.equal(bar().contextValue, 'claudeNavBar', '…reading as the default `floating`');
+    delete configValues['editorReviewSurface'];
+    fireConfigChange('editorReviewSurface');
+    await new Promise((r) => setTimeout(r, 0));
+    await settle();
+    assert.equal(bar().contextValue, 'claudeNavBar', 'and the shipped default is the bar');
+
+    // (7) The half that lives in the MANIFEST. The bar's toolbar is a `comments/commentThread/title`
+    // block gated on its OWN contextValue; a drifted command id or a missing declaration is invisible to
+    // every code path above — the button simply never appears.
+    const barMenu = threadTitle.filter((m) => /commentThread == claudeNavBar\b/.test(m.when));
+    assert.deepEqual(barMenu.map((m) => `${m.group} ${m.command}`), [
+      'inline@0 claudeObservatory.peekKeep',
+      'inline@1 claudeObservatory.peekUndo',
+      'inline@2 claudeObservatory.peekPrev',
+      'inline@3 claudeObservatory.peekNext',
+      'inline@4 claudeObservatory.peekPrevFile',
+      'inline@5 claudeObservatory.peekNextFile',
+      'inline@6 claudeObservatory.peekViewDiff',
+      'inline@7 claudeObservatory.barDetails',
+    ], 'the bar toolbar, in order: Keep · Undo · ⌃⌄ · ‹› · Diff · Details');
+    assert.ok(barMenu.every((m) => /commentController == claudeObservatory/.test(m.when)),
+      'every bar button is scoped to our controller — these menus are global to the workbench');
+    assert.ok(!barMenu.some((m) => /commentThread == claudeEdit\b/.test(m.when)) && !bubbleMenu.some((m) => /commentThread == claudeNavBar\b/.test(m.when)),
+      'the two toolbars are disjoint: neither block leaks into the other');
+    assert.ok(bubbleMenu.some((m) => m.command === 'claudeObservatory.peekCollapse'),
+      'and the bubble gained exactly one button — Collapse, the way back to the bar');
+    // Collapse is MINIMIZE, and it has to read that way at 16px with no label beside it. `$(fold-up)` is a
+    // real codicon — so the check below passes it — but its two stacked chevrons close into a lid over a
+    // body at toolbar size, which a reader reported as a trash can: the one meaning this button must never
+    // suggest. `$(chrome-minimize)` is the window-minimize bar, the literal "−", and its whole convention
+    // is "put this back where it came from". Pinned by NAME because the font check cannot see a legible id
+    // that means the wrong thing.
+    assert.equal(pkg.contributes.commands.find((c) => c.command === 'claudeObservatory.peekCollapse').icon, '$(chrome-minimize)',
+      'Collapse wears the minimize bar — not a chevron, which reads as a can with a lid');
+    // The steppers' when-clauses and the keys the extension actually publishes must be the same strings.
+    for (const [cmd, key] of [['claudeObservatory.peekPrev', 'barMultiEdit'], ['claudeObservatory.peekNext', 'barMultiEdit'],
+      ['claudeObservatory.peekPrevFile', 'barMultiFile'], ['claudeObservatory.peekNextFile', 'barMultiFile']]) {
+      assert.match(barMenu.find((m) => m.command === cmd).when, new RegExp(`&& claudeObservatory\\.${key}$`),
+        `${cmd} on the bar is hidden unless ${key}`);
+      assert.ok(new RegExp(`"setContext",\\s*"claudeObservatory\\.${key}"`).test(bundle),
+        `the bundle publishes claudeObservatory.${key} — the key that clause reads`);
+    }
+    // Every button on these two toolbars is icon-only, and an icon id that is not in the shipped codicon
+    // font renders as NOTHING — no error, no warning, no missing element. A blank square where Keep
+    // should be is indistinguishable from a bar that has no Keep at all, so check the ids against the
+    // real font rather than against a list written from memory.
+    const codiconCss = path.resolve(__dirname, '../../../node_modules/@vscode/codicons/dist/codicon.css');
+    assert.ok(fs.existsSync(codiconCss), `@vscode/codicons not found at ${codiconCss} — cannot verify toolbar icons`);
+    const codiconIds = new Set([...fs.readFileSync(codiconCss, 'utf8').matchAll(/\.codicon-([a-z0-9-]+):before/g)].map((m) => m[1]));
+    assert.ok(codiconIds.size > 100, 'the codicon font parsed');
+    for (const m of [...barMenu, ...bubbleMenu]) {
+      const icon = pkg.contributes.commands.find((c) => c.command === m.command)?.icon;
+      assert.match(icon || '', /^\$\([a-z0-9-]+\)$/, `${m.command} on a comment-thread toolbar needs an icon (the toolbar shows no text)`);
+      assert.ok(codiconIds.has(icon.slice(2, -1)), `${m.command}'s icon ${icon} is a real codicon (an unknown id draws a blank)`);
+    }
+    // Every command a menu names has to be DECLARED, or VS Code drops the entry silently.
+    const declared = new Set(pkg.contributes.commands.map((c) => c.command));
+    for (const m of [...barMenu, ...bubbleMenu]) assert.ok(declared.has(m.command), `${m.command} is declared in contributes.commands`);
+    for (const c of ['claudeObservatory.showReviewBar', 'claudeObservatory.barDetails', 'claudeObservatory.peekCollapse', 'claudeObservatory.peekViewDiff'])
+      assert.ok(typeof commands[c] === 'function' && declared.has(c), `${c} is both registered and declared`);
+    // Toolbar-only commands are hidden from the palette (they act on whatever surface is live, so they
+    // are meaningless typed into a picker); `showReviewBar` deliberately is NOT — it takes no argument
+    // and is the way back when editorReviewSurface is `none`.
+    const barPalette = new Map(pkg.contributes.menus.commandPalette.map((m) => [m.command, m.when]));
+    for (const c of ['claudeObservatory.barDetails', 'claudeObservatory.peekCollapse', 'claudeObservatory.peekViewDiff'])
+      assert.equal(barPalette.get(c), 'false', `${c} is toolbar-only`);
+    assert.ok(!barPalette.has('claudeObservatory.showReviewBar'), 'showReviewBar stays in the palette on purpose');
+    const surfaceCfg = pkg.contributes.configuration.properties['claudeObservatory.editorReviewSurface'];
+    assert.deepEqual(surfaceCfg.enum, ['floating', 'bubble', 'none'], 'the surface setting offers exactly the three spellings');
+    assert.equal(surfaceCfg.default, 'floating', 'and defaults to the floating bar');
+    assert.equal(surfaceCfg.enumDescriptions.length, surfaceCfg.enum.length, 'each spelling says what it does');
+    assert.match(pkg.contributes.configuration.properties['claudeObservatory.pinnedPeek'].description, /bubble only/i,
+      'pinnedPeek says out loud that it governs the BUBBLE only — the bar is always pinned');
+
+    vscode.window.activeTextEditor = restoreEditor;
+    configValues['session'] = RS;
+    delete configValues['editorReviewSurface'];
+    await settle();
+
+    // The Explorer/tab badge — the tour has always promised this in both editors; it was only ever true
+    // of the synthetic tree scheme in VS Code.
+    core.appendLog(RS, { id: 6, ts: 6000, tool: 'Edit', file: RA, beforeBlob: core.writeBlob(RS, Buffer.from('A3\n')), afterBlob: core.writeBlob(RS, Buffer.from('A4\n')), status: 'pending' });
+    const badge = decoProvider.provideFileDecoration(Uri.file(RA));
+    assert.equal(badge?.badge, String(core.readLog(RS).filter((r) => r.file === RA && r.status === 'pending').length), 'a file with pending edits carries their count');
+    assert.match(badge?.tooltip ?? '', /pending Claude edit/, 'and says what the number means');
+    assert.equal(badge?.propagate, false, 'files only — folders are the Overview’s job');
+    assert.equal(decoProvider.provideFileDecoration(Uri.file(path.join(ws, "never-edited.txt"))), undefined, 'an untouched file is undecorated');
+    // The badge's colour is the other half that lives in the manifest: VS Code resolves a ThemeColor id
+    // against `contributes.colors`, and an id with no contribution falls back to the default foreground —
+    // the badge still renders, so nothing fails, it just stops being the amber the tour describes.
+    const badgeColor = (pkg.contributes.colors || []).find((c) => c.id === 'claudeObservatory.pendingBadge');
+    assert.ok(badgeColor, 'the pending-badge colour is contributed, so themes can restyle it');
+    assert.equal(badge?.color?.id, badgeColor.id, '…and the decoration asks for exactly that id');
+
+    // ---- the two auto-advance gates nothing above can see -------------------------------------------
+    // Two pending edits, in DIFFERENT files, so "it did not navigate" is a claim about a session that had
+    // somewhere to navigate to.
+    core.appendLog(RS, { id: 7, ts: 7000, tool: 'Edit', file: RB, beforeBlob: core.writeBlob(RS, Buffer.from('B2\n')), afterBlob: core.writeBlob(RS, Buffer.from('B3\n')), status: 'pending' });
+    assert.deepEqual(core.readLog(RS).filter((r) => r.status === 'pending').map((r) => r.id), [6, 7],
+      'two pending edits, one in each file');
+    configValues['revealNextOnResolve'] = true;
+
+    // (a) advance is gated on the edit having actually LEFT pending. The dirty-buffer assertion earlier
+    // drives `undo`, which never enters that path at all — so the gate itself was untested: without it a
+    // refused undo throws the reader into another file having changed nothing.
+    vscode.workspace.textDocuments.push({ uri: Uri.file(RA), isDirty: true });
+    opened = undefined;
+    const warnsBeforeInline = warnMessages.length;
+    await commands['claudeObservatory.inlineUndo'](6);
+    vscode.workspace.textDocuments.pop();
+    assert.ok(warnMessages.slice(warnsBeforeInline).some((m) => /unsaved changes/.test(m)),
+      'a dirty buffer refuses the inline Undo as well');
+    assert.equal(core.findRecord(RS, 6).status, 'pending', 'the record never left pending');
+    assert.equal(opened, undefined, '…so nothing was revealed — auto-advance follows a RESOLVE, not an attempt');
+
+    // (b) the diff editor's opt-out, through the command its title bar actually invokes. Passing
+    // `{ advance: false }` to inlineKeep by hand (above) says nothing about diffKeep — delete the option
+    // at ITS call site and every other assertion here still passes.
+    await commands['claudeObservatory.openDiff']({ kind: 'edit', rec: core.findRecord(RS, 7) });
+    const dkUri = diffCalls[diffCalls.length - 1][1];
+    assert.equal(new URLSearchParams(dkUri.query).get('e'), '7', 'the diff URI the title bar is handed carries the edit id');
+    opened = undefined;
+    await commands['claudeObservatory.diffKeep'](dkUri);
+    // diffKeep fires inlineKeep without awaiting it, so drain the queue before claiming nothing moved.
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(core.findRecord(RS, 7).status, 'kept', 'diffKeep resolves the edit the diff is showing');
+    assert.equal(opened, undefined, 'and never navigates away from the diff, auto-advance on or not');
+
+    // ---- 0.10.0: rewind to before a prompt ---------------------------------------------------------
+    // The BOUNDARY is the whole feature: rewinding from ask #2 takes that ask and everything after it and
+    // leaves ask #1 standing. An assertion that only checked "something was reverted" would pass against
+    // a plain reject-all, which is the thing rewind must not be.
+    // Its own session and transcript: prompt boundaries come from the transcript, and the shared fixture's
+    // own edits have been resolved by the assertions above.
+    const RW = 'rewindSess1';
+    const WA = path.join(ws, 'rewind-a.txt');
+    const WB = path.join(ws, 'rewind-b.txt');
+    fs.writeFileSync(path.join(proj, RW + '.jsonl'), [
+      JSON.stringify({ timestamp: new Date(500).toISOString(), type: 'user', message: { role: 'user', content: 'ask one — scale the features' } }),
+      JSON.stringify({ timestamp: new Date(1500).toISOString(), type: 'user', message: { role: 'user', content: 'ask two — add a validate() method' } }),
+      JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'both asks answered' }] } }),
+    ].join('\n'));
+    core.ensureStore(RW);
+    fs.writeFileSync(WA, 'A-after\n');
+    fs.writeFileSync(WB, 'B-after\n');
+    core.appendLog(RW, { id: 1, ts: 1000, tool: 'Edit', file: WA, beforeBlob: core.writeBlob(RW, Buffer.from('A-before\n')), afterBlob: core.writeBlob(RW, Buffer.from('A-after\n')), status: 'pending' });
+    core.appendLog(RW, { id: 2, ts: 2000, tool: 'Edit', file: WB, beforeBlob: core.writeBlob(RW, Buffer.from('B-before\n')), afterBlob: core.writeBlob(RW, Buffer.from('B-after\n')), status: 'pending' });
+    configValues['session'] = RW;
+    await commands['claudeObservatory.refresh']?.();
+    const rwAsks = core.sessionPrompts(ws, RW);
+    assert.equal(rwAsks.length, 2, 'the fixture transcript carries two asks, one per edit');
+    // DERIVED from core, never hard-coded: the test and the implementation must not be able to disagree
+    // about which ids a boundary covers.
+    const scope2 = core.checkpointScope(ws, RW, rwAsks[1].id);
+    assert.deepEqual(scope2.ids, [2], 'the second ask owns the edit made after it, and only that one');
+    assert.equal(scope2.pending, 1, 'which is pending, so the rewind has something to do');
+    for (const c of ['claudeObservatory.promptRewind', 'claudeObservatory.rewindCurrentPrompt'])
+      assert.ok(typeof commands[c] === 'function', `${c} registered`);
+    const warnBefore = warnMessages.length;
+    await commands['claudeObservatory.promptRewind'](rwAsks[1].id);
+    // The mock reader takes the first offered action, so the modal path RAN — and the statuses below are
+    // the proof, not the fact that the promise resolved.
+    assert.ok(warnMessages.slice(warnBefore).some((m) => /^Rewind to before prompt #\d+\?/.test(m)),
+      'the destructive op confirms before it touches anything, NAMING the ask it will rewind to');
+    // Two counts, deliberately: raw pending records and review units. They legitimately differ, so the
+    // dialog prints both rather than picking one and disagreeing with the row the reader clicked.
+    assert.ok(warnMessages.slice(warnBefore).some((m) => /reverts \d+ pending edit\(s\) \(\d+ review units?\) across \d+ file/.test(m)),
+      'and names the records, the review units and the files');
+    assert.equal(core.findRecord(RW, 2).status, 'undone', 'the second ask’s edit is reverted');
+    assert.equal(core.findRecord(RW, 1).status, 'pending', '…and the FIRST ask’s edit is left alone — the boundary, not a reject-all');
+    assert.equal(fs.readFileSync(WB, 'utf8'), 'B-before\n', 'the file that ask changed is back to what it was before it');
+    assert.equal(fs.readFileSync(WA, 'utf8'), 'A-after\n', 'and the earlier ask’s file is untouched on disk');
+    // Nothing left from that ask onward: the honest nothing-to-do, and no status moves.
+    const rwInfoBefore = infoMessages.length;
+    await commands['claudeObservatory.promptRewind'](rwAsks[1].id);
+    assert.ok(infoMessages.slice(rwInfoBefore).some((m) => /^Nothing to rewind/.test(m)), 'a second rewind says there is nothing to rewind');
+    assert.equal(warnMessages.length, warnBefore + 1, 'and never asks for confirmation of a no-op');
+    assert.equal(core.findRecord(RW, 1).status, 'pending', 'and moves nothing');
+    // The Overview's Prompt-axis button resolves the ask ITSELF and then runs the same path.
+    const rcpSeen = [];
+    const realRewind = commands['claudeObservatory.promptRewind'];
+    commands['claudeObservatory.promptRewind'] = (id) => { rcpSeen.push(id); };
+    await commands['claudeObservatory.reviewNext'](); // parks the review cursor on the one pending edit
+    await commands['claudeObservatory.rewindCurrentPrompt']();
+    commands['claudeObservatory.promptRewind'] = realRewind;
+    assert.deepEqual(rcpSeen, [rwAsks[0].id], 'rewindCurrentPrompt resolves the ask behind the current edit and rewinds from it');
+    // …and from the FIRST ask it takes the whole tail, including the already-reverted later record.
+    await commands['claudeObservatory.promptRewind'](rwAsks[0].id);
+    assert.equal(core.findRecord(RW, 1).status, 'undone', 'rewinding from the first ask takes everything');
+    assert.equal(fs.readFileSync(WA, 'utf8'), 'A-before\n', 'and the tree is back to before the session started');
+    // The Redo the completion toast offers, TAKEN. The mock reader only clicks an action the test names,
+    // and neither rewind above names one — so the restore branch, the escape hatch the confirmation dialog
+    // promises by name ("Redo can restore them"), shipped without ever running. A THIRD rewind, on its own
+    // fresh record: the two above have assertions that depend on the state they left behind.
+    core.appendLog(RW, {
+      id: 3, ts: 2500, tool: 'Edit', file: WA, status: 'pending',
+      beforeBlob: core.writeBlob(RW, Buffer.from('A-before\n')),
+      afterBlob: core.writeBlob(RW, Buffer.from('A-redone\n')),
+    });
+    fs.writeFileSync(WA, 'A-redone\n');
+    assert.equal(core.checkpointScope(ws, RW, rwAsks[1].id).pending, 1, 'the new record is in the second ask’s scope, so the rewind has something to take');
+    const pickWas = infoPick;
+    infoPick = 'Redo'; // the mock reader clicks it on the "Rewound N edit(s)" toast
+    await commands['claudeObservatory.promptRewind'](rwAsks[1].id);
+    infoPick = pickWas;
+    assert.equal(fs.readFileSync(WA, 'utf8'), 'A-redone\n', 'Redo puts back exactly what the rewind had just taken');
+    assert.equal(core.findRecord(RW, 3).status, 'pending', '…as a pending edit again, awaiting review like before');
+    assert.equal(core.findRecord(RW, 1).status, 'undone', 'and it restores only what MOVED — an edit undone earlier stays undone');
+    // The webview route. The Prompt axis' Rewind button posts rewindCurrentPrompt (it has no id to send),
+    // and that is the only sender that exists: Rewind is not in the Overview's bulk-retarget list and no
+    // Prompts row posts one either. The host's `promptRewind` branch is therefore RESERVED — nothing can
+    // reach it today — and the second tuple below pins its routing for the id-carrying sender that will.
+    assert.ok(cmView.webview.html.includes('id="ov-rewindprompt"'), 'the Prompt axis carries a Rewind button');
+    assert.ok(cmView.webview.html.includes("tbtn('ov-rewindprompt','rewindCurrentPrompt')"), 'wired to rewindCurrentPrompt');
+    for (const [msg, cmd, arg] of [['rewindCurrentPrompt', 'claudeObservatory.rewindCurrentPrompt', undefined], ['promptRewind', 'claudeObservatory.promptRewind', 'ask9']]) {
+      const seen = [];
+      const real = commands[cmd];
+      commands[cmd] = (a) => { seen.push(a); };
+      cmMsgHandler({ type: msg, promptId: arg });
+      commands[cmd] = real;
+      assert.deepEqual(seen, [arg], `the Overview's ${msg} routes to ${cmd}`);
+    }
+
+    // ---- 0.10.0: the Timeline's active-session selector ---------------------------------------------
+    assert.match(rqView.webview.html, /id="rq-sess"/, 'the Prompts window carries the session selector');
+    assert.ok(rqView.webview.html.indexOf('id="rq-sess"') < rqView.webview.html.indexOf('class="rq-head"'),
+      'above the Prompts heading — which session these asks belong to precedes every question about them');
+    assert.match(rqView.webview.html, /'session-picker':'#rq-sess'/, 'and the tour anchor points at it');
+    assert.match(rqView.webview.html, /type:'pickSession'/, 'picking a row posts pickSession');
+    assert.match(rqView.webview.html, /type:'allSessions'/, 'and the last row posts allSessions');
+    assert.ok(/\.rq-sname \{[^}]*overflow-wrap:anywhere/.test(rqView.webview.html) && !/\.rq-sname \{[^}]*text-overflow/.test(rqView.webview.html),
+      'session names WRAP — core already capped the title at 64 characters, so clipping it here would lose the only copy');
+    // Three sessions with known recency: one still being written, one quiet for an hour, one quiet for two
+    // that we PIN. The selector's rule is "active, plus whatever I am reviewing" — all three cases at once.
+    const LIVE = 'liveSess001', STALE = 'staleSess01', OLDPIN = 'oldPinned01';
+    for (const [id, secsAgo] of [[LIVE, 0], [STALE, 3600], [OLDPIN, 7200]]) {
+      // A store as well as a transcript: sessionMeta lists the sessions that HAVE one (plus the active and
+      // the pinned), so a transcript alone would leave these three invisible to the listing under test.
+      core.ensureStore(id);
+      const jf = path.join(proj, id + '.jsonl');
+      fs.writeFileSync(jf, JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [] } }));
+      const t = Math.floor(Date.now() / 1000) - secsAgo;
+      fs.utimesSync(jf, t, t); // recency IS the transcript's mtime — the liveness rule reads exactly this
+    }
+    // The Timeline's own render path, EXECUTED. A chip stuck on "session —" forever — or a grouped
+    // column whose list is never rendered into — would satisfy every source assertion above; only
+    // running the shipped script against a DOM stub can see either.
+    {
+      const vm = require('node:vm');
+      const rqScripts = [...rqView.webview.html.matchAll(/<script[^>]*>([\s\S]*?)<\/script[^>]*>/gi)];
+      assert.ok(rqScripts.length >= 1, 'the Timeline shell embeds its script');
+      const mk = () => {
+        // `style` models the API the script uses: the column widths are written as a CSS custom
+        // property, which a bare {} would swallow (setProperty is not a plain assignment).
+        const style = {
+          setProperty(k, v) { style[k] = String(v); },
+          removeProperty(k) { delete style[k]; },
+          getPropertyValue: (k) => style[k] || '',
+        };
+        // A RECORDING classList: the guided tour's highlight is a class on a node, and a no-op stub
+        // would make "the ring is there" unfalsifiable.
+        const cls = new Set();
+        const node = {
+          innerHTML: '', textContent: '', title: '', hidden: true, style, className: '', _ls: {},
+          classList: { toggle() {}, add: (c) => cls.add(c), remove: (c) => cls.delete(c), contains: (c) => cls.has(c) },
+          setAttribute() {}, getAttribute: () => null, hasAttribute: () => false,
+          addEventListener(t, cb) { (node._ls[t] || (node._ls[t] = [])).push(cb); },
+          // Real, because the drag handlers detach themselves on pointerup — a missing method there
+          // would throw inside the very interaction these assertions drive.
+          removeEventListener(t, cb) { const l = node._ls[t]; if (l) { const i = l.indexOf(cb); if (i >= 0) l.splice(i, 1); } },
+          // Fired for real, so the HTML asserted below is the HTML a click actually produces.
+          click() { (node._ls.click || []).forEach((cb) => cb.call(node, { target: node, stopPropagation() {} })); },
+          // A NON-degenerate box: a divider computes its new split as a fraction of the pair it sits
+          // between, and a zero-width rect would make every clamp trivially true.
+          getBoundingClientRect: () => ({ width: 600, height: 300, left: 0, top: 0, right: 600, bottom: 300 }),
+          querySelectorAll: () => [], querySelector: () => null, closest: () => null,
+        };
+        return node;
+      };
+      /** Run the shipped Timeline script against the stub, with a given persisted webview state. */
+      const runTimeline = (persisted) => {
+        const posted = [];
+        const saved = [];
+        const els = new Map();
+        const el = (id) => { if (!els.has(id)) els.set(id, mk()); return els.get(id); };
+        let listener = null;
+        const win = { addEventListener: (t, cb) => { if (t === 'message') listener = cb; } };
+        // `querySelector('#id')` resolves to the same node getElementById hands out, so the tour's
+        // anchor lookup reaches something a test can then inspect.
+        const docS = {
+          getElementById: el, addEventListener() {}, createElement: mk,
+          // `.ring` has to find what is actually ringed, or the "and it goes when the step moves on"
+          // half of the tour assertion would be unfalsifiable against a stub that always answers empty.
+          querySelectorAll: (sel) => (sel === '.ring' ? [...els.values()].filter((n) => n.classList.contains('ring')) : []),
+          querySelector: (sel) => (typeof sel === 'string' && sel[0] === '#' ? el(sel.slice(1)) : null),
+          body: mk(), documentElement: mk(),
+        };
+        const sb = {
+          window: win, document: docS, console,
+          acquireVsCodeApi: () => ({ postMessage: (m) => posted.push(m), getState: () => persisted || null, setState: (s) => saved.push(s) }),
+          JSON, Math, Date, String, Number, Array, Object, RegExp, parseInt, parseFloat, isFinite, undefined,
+          setTimeout: () => 0, clearTimeout() {}, getComputedStyle: () => ({ getPropertyValue: () => '' }),
+        };
+        sb.globalThis = sb;
+        vm.createContext(sb);
+        assert.doesNotThrow(() => vm.runInContext(rqScripts[rqScripts.length - 1][1], sb), 'the Timeline script initializes under the DOM stub');
+        assert.ok(typeof listener === 'function', 'the script listens for host messages');
+        /** Invoke the LAST handler registered for an event — i.e. the one the current markup wired. */
+        const fire = (node, type, ev) => {
+          const l = node._ls[type] || [];
+          const cb = l[l.length - 1];
+          assert.ok(cb, `the stub node has a ${type} handler to fire`);
+          return cb.call(node, ev || { target: node, stopPropagation() {}, preventDefault() {} });
+        };
+        return { el, posted, saved, fire, post: (data) => listener({ data }) };
+      };
+      const solo = runTimeline(null);
+      const el = solo.el;
+      const posted = solo.posted;
+      const listener = (m) => solo.post(m.data);
+      assert.equal(el('rq-sname').textContent, 'session —', 'before any listing arrives the chip claims nothing');
+      listener({ data: { type: 'sessions', current: LIVE, rows: [
+        { id: LIVE, title: 'the live conversation', lastActiveMs: Date.now(), active: true },
+        { id: OLDPIN, title: null, lastActiveMs: Date.now() - 7200000, active: false },
+      ] } });
+      assert.equal(el('rq-sname').textContent, 'the live conversation', 'the chip NAMES the session under review');
+      assert.equal(el('rq-sdot').textContent, '●', 'and marks it live');
+      assert.match(el('rq-schip').title, new RegExp('session ' + LIVE), 'the tooltip carries the full session id');
+      assert.match(el('rq-schip').title, /the live conversation/, 'the title core gave it');
+      assert.match(el('rq-schip').title, /active/, 'and when it was last written to');
+      assert.ok(el('rq-slist').hidden, 'the list starts closed');
+      el('rq-schip').click();
+      assert.equal(el('rq-slist').hidden, false, 'clicking the chip opens it');
+      const listHtml = el('rq-slist').innerHTML;
+      assert.ok(listHtml.includes('data-sid="' + LIVE + '"'), 'the active session is offered');
+      assert.ok(listHtml.includes('data-sid="' + OLDPIN + '"'), '…and the reviewed-but-quiet one, marked ○');
+      assert.match(listHtml, /session oldPinn/, 'a session with no title falls back to its short id, never to a blank row');
+      assert.match(listHtml, /data-sall="1"[\s\S]*All sessions…/, 'and the last row is the way out to the full list');
+      // A session under review the host could not list at all (a pin from another workspace, a listing
+      // that threw): the chip still names the id it is showing.
+      listener({ data: { type: 'sessions', current: 'ghostSess99', rows: [] } });
+      assert.equal(el('rq-sname').textContent, 'session ghostSes', 'with no row for it, the chip still names what it is reviewing');
+      assert.equal(el('rq-sdot').textContent, '○', 'and never claims it is live');
+      // The list was left open, so this is what it renders with nothing to offer: the way out, and only it.
+      assert.match(el('rq-slist').innerHTML, /All sessions…/, 'and the list still offers the full browser');
+      assert.doesNotMatch(el('rq-slist').innerHTML, /data-sid=/, 'with no row to pick');
+
+      // The guided tour's ring SURVIVES a repaint, and lands even though the host broadcasts the anchor
+      // before it names the tab. Both are real: the host's order is fixed (anchor to every panel, then
+      // the view), and every payload rebuilds the node the ring was on.
+      solo.post({ type: 'tour', anchor: 'prompts-list' });
+      solo.post({ type: 'prompts', rq: { prompts: [], summary: { total: 0, withEdits: 0, edits: 0 } }, selected: null });
+      assert.ok(el('rq-list').classList.contains('ring'), 'the tour ring is still on the list after a repaint replaced it');
+      solo.post({ type: 'tour', anchor: null });
+      solo.post({ type: 'prompts', rq: { prompts: [], summary: { total: 0, withEdits: 0, edits: 0 } }, selected: null });
+      assert.ok(!el('rq-list').classList.contains('ring'), 'and it goes when the step moves on');
+      // The RE-APPLY itself is a source assertion, and says why: this stub cannot model a node being
+      // destroyed by an innerHTML assignment, so an executed check cannot tell "the ring was put back"
+      // from "the ring was never lost". In a real DOM the repaint throws the old node away.
+      assert.ok(rqView.webview.html.includes("vscode.postMessage({type:'select', id:null}); });\n    reTour();"),
+        'the Prompts renderer re-applies the tour ring after every repaint');
+
+      // ---- 0.10.0: the TAB STRIP ------------------------------------------------------------------
+      // Three tabs, drawn by the window itself — a panel container stacks its views under collapsible
+      // headers and has no tabs to give it.
+      const tabsHtml = el('tl-tabs').innerHTML;
+      assert.equal((tabsHtml.match(/class="tl-tab/g) || []).length, 3, 'ungrouped: three tabs');
+      for (const k of ['prompts', 'observations', 'actions'])
+        assert.ok(tabsHtml.includes(`data-tab="${k}"`), `the ${k} tab is one of them`);
+      assert.equal(el('tl-pane-prompts').style.display, 'flex', 'Prompts leads');
+      assert.equal(el('tl-pane-actions').style.display, 'none', '…and the others are closed');
+      assert.equal(el('tl-group').style.display, 'none', 'with the grouped pane put away');
+      // The session selector stays ABOVE the tabs, visible whichever one is forward.
+      assert.ok(rqView.webview.html.indexOf('id="rq-sess"') < rqView.webview.html.indexOf('class="tl-tabrow"'),
+        'the session selector row sits above the tab strip');
+      // Only what is on screen is served: the Actions root walks every sibling worktree for conflicts.
+      const view0 = posted.filter((m) => m.type === 'view').pop();
+      assert.ok(view0 && view0.shows.prompts === true && view0.shows.actions === false && view0.shows.observations === false,
+        'the window tells the host which tabs are on screen, so it serves only those');
+
+      // A tab message (the tour's path, and the palette's) brings that tab forward.
+      solo.post({ type: 'tab', tab: 'actions' });
+      assert.equal(el('tl-pane-actions').style.display, 'flex', 'a tab message brings Actions forward');
+      assert.equal(el('tl-pane-prompts').style.display, 'none', '…and closes Prompts');
+      assert.ok(posted.filter((m) => m.type === 'view').pop().shows.actions === true, 'and the host is told to start serving it');
+
+      // ---- the flattened trees --------------------------------------------------------------------
+      // Rows render the provider's own label / description / tooltip; a collapsible row carries a twisty
+      // and, when it opens, asks the host for exactly that level.
+      solo.post({ type: 'rows', tab: 'actions', parent: '', count: 7, err: null, rows: [
+        { key: 'gEdits', label: 'Edits', desc: '3', tip: 'the edit calls', glyph: '✎', tone: '', open: false, act: false, acts: [] },
+        { key: 'cgroup', label: 'Live conflicts', desc: '1', tip: 'two agents in one file', glyph: '⚠', tone: 'attn', open: true, act: false, acts: [] },
+      ] });
+      const actHtml = el('tl-actions').innerHTML;
+      assert.match(actHtml, /data-key="gEdits"/, 'a row keys on the id the host gave it');
+      assert.match(actHtml, />Edits</, '…and shows the tree item’s label');
+      assert.match(actHtml, /the edit calls/, 'the tree item’s tooltip rides the row');
+      assert.match(actHtml, /▸/, 'a collapsed row shows a closed twisty');
+      assert.match(actHtml, /▾/, '…and an expanded one an open twisty');
+      assert.match(actHtml, /t-attn/, 'the ThemeColor becomes a tone class');
+      assert.match(actHtml, /7 tool calls/, 'the header counts what the feed holds');
+      // The DEFAULT-expanded row asked for its children, exactly once.
+      const kidReqs = () => posted.filter((m) => m.type === 'children' && m.tab === 'actions' && m.key === 'cgroup').length;
+      assert.equal(kidReqs(), 1, 'an open row asks the host for its level — once');
+      solo.post({ type: 'rows', tab: 'actions', parent: 'cgroup', rows: [
+        { key: 'cgroup/c0', label: 'app.txt', desc: '2 agents', tip: '/w/app.txt', glyph: '❐', tone: 'attn', open: null, act: true, acts: [] },
+      ] });
+      assert.match(el('tl-actions').innerHTML, /app\.txt/, 'the children render under the open row');
+      // A ROOT payload replaces the tree: children built from the previous tick must not survive it.
+      const before = kidReqs();
+      solo.post({ type: 'rows', tab: 'actions', parent: '', count: 7, rows: [
+        { key: 'cgroup', label: 'Live conflicts', desc: '1', tip: 't', glyph: '⚠', tone: 'attn', open: true, act: false, acts: [] },
+      ] });
+      assert.equal(kidReqs(), before + 1, 'a new root payload drops the children it held and asks again');
+      assert.doesNotMatch(el('tl-actions').innerHTML, /app\.txt/, '…so no row from the previous tick is still on screen');
+
+      // The empty states the two removed views carried as viewsWelcome entries, verbatim.
+      solo.post({ type: 'rows', tab: 'actions', parent: '', count: 0, rows: [] });
+      assert.match(el('tl-actions').innerHTML, /No tool calls in this session yet/, 'Actions keeps its welcome copy');
+      assert.match(el('tl-actions').innerHTML, /Edits, commands, reads, searches, egress, and to-dos appear here as Claude works/, '…in full');
+      solo.post({ type: 'rows', tab: 'observations', parent: '', count: 0, rows: [], hooks: true });
+      assert.match(el('tl-observations').innerHTML, /No edits in this session yet/, 'Observations keeps the hooks-installed variant');
+      solo.post({ type: 'rows', tab: 'observations', parent: '', count: 0, rows: [], hooks: false });
+      assert.match(el('tl-observations').innerHTML, /No tracked Claude edits in this workspace yet/, '…and the no-hooks one');
+      assert.match(el('tl-observations').innerHTML, /Try the demo — no Claude session needed/, 'with the demo offer, as a button');
+      // A feed that could not be built SAYS so — an empty list would read as a session that did nothing.
+      solo.post({ type: 'rows', tab: 'actions', parent: '', rows: [], err: 'transcript unreadable' });
+      assert.match(el('tl-actions').innerHTML, /Could not read this session’s actions/, 'a failed read is stated, not swallowed');
+      assert.match(el('tl-actions').innerHTML, /transcript unreadable/, '…with what went wrong');
+
+      // ---- grouped mode: three columns, resizable and foldable -------------------------------------
+      const grouped = runTimeline({ groupedTabs: true });
+      const gEl = grouped.el;
+      assert.equal(gEl('tl-group').style.display, 'flex', 'grouped: the one pane is on screen');
+      assert.equal((gEl('tl-tabs').innerHTML.match(/class="tl-tab/g) || []).length, 1, 'and the strip carries a single tab');
+      assert.match(gEl('tl-tabs').innerHTML, /Prompts · Observations · Actions/, 'naming all three, in column order');
+      const gHtml = gEl('tl-group').innerHTML;
+      assert.equal((gHtml.match(/class="tl-groupcol"/g) || []).length, 3, 'three columns');
+      for (const k of ['prompts', 'observations', 'actions'])
+        assert.ok(gHtml.includes(`id="tl-g-${k}"`), `the ${k} column carries its own host node`);
+      assert.ok(grouped.posted.filter((m) => m.type === 'view').pop().shows.actions === true, 'and the host is asked for all three');
+      // Members render INTO those columns — one renderer per member, writing wherever it currently lives.
+      grouped.post({ type: 'rows', tab: 'actions', parent: '', count: 2, rows: [
+        { key: 'gEdits', label: 'Edits', desc: '2', tip: 't', glyph: '✎', tone: '', open: false, act: false, acts: [] } ] });
+      assert.match(gEl('tl-g-actions').innerHTML, />Edits</, 'the Actions column holds the Actions rows');
+      assert.equal(gEl('tl-actions').innerHTML, '', '…and not the solo pane it is not using');
+
+      // WIDTHS. Equal to start, then dragged — and the drag never lets a column past its floor.
+      assert.equal(gEl('tl-gc-prompts').style['--tl-cw'], '1', 'columns start on an equal share');
+      const drag = (gutterId, clientX) => {
+        const g = gEl(gutterId);
+        grouped.fire(g, 'pointerdown', { preventDefault() {}, pointerId: 1, clientX });
+        grouped.fire(g, 'pointermove', { clientX });
+        grouped.fire(g, 'pointerup', {});
+      };
+      // Drag the Prompts|Observations divider as far right as it will go. The pair spans 600px in the
+      // stub and the floor is 190px, so neither side may end below 190/600 of their combined share.
+      drag('tl-cg-observations', 100000);
+      const wP = Number(gEl('tl-gc-prompts').style['--tl-cw']);
+      const wO = Number(gEl('tl-gc-observations').style['--tl-cw']);
+      assert.ok(wP > 1 && wO < 1, 'the drag moved the split');
+      assert.ok(Math.abs(wP + wO - 2) < 1e-9, '…without changing the pair’s combined share');
+      assert.ok(wO >= 2 * (190 / 600) - 1e-9, 'and the shrinking column stopped at the 190px floor, never at zero');
+      assert.ok(gEl('tl-gc-actions').style['--tl-cw'] === '1', 'the third column is untouched by a drag between the other two');
+      assert.deepEqual(grouped.saved[grouped.saved.length - 1].colW.map((n) => Math.round(n * 1000)),
+        [Math.round(wP * 1000), Math.round(wO * 1000), 1000], 'the widths are persisted on pointer-up');
+      // A LATER PAYLOAD must not reset them — this is the case a naive implementation gets wrong, because
+      // badges arrive on their own tick long after the reader has set a layout.
+      grouped.post({ type: 'rows', tab: 'actions', parent: '', count: 99, rows: [] });
+      grouped.post({ type: 'prompts', rq: { prompts: [], summary: { total: 0, withEdits: 0, edits: 0 } }, selected: null });
+      assert.equal(Number(gEl('tl-gc-prompts').style['--tl-cw']), wP, 'a later payload leaves the dragged width alone');
+      assert.equal(Number(gEl('tl-gc-observations').style['--tl-cw']), wO, '…on both sides of the divider');
+      // FOLDING. A folded column becomes a rail that still names itself; the last one standing refuses.
+      grouped.fire(gEl('tl-cc-observations'), 'click');
+      const folded = gEl('tl-group').innerHTML;
+      assert.match(folded, /class="tl-groupcol rail" id="tl-gc-observations"/, 'the folded column becomes a rail');
+      assert.match(folded, /id="tl-cc-observations"[^>]*>[\s\S]*?Observations/, '…which still NAMES the member, so it can be clicked back');
+      assert.ok(folded.includes('id="tl-gb-observations"'), '…and still carries its badge');
+      assert.ok(!folded.includes('id="tl-g-observations"'), 'and its list is not drawn while folded');
+      assert.equal((folded.match(/class="tl-groupcol"/g) || []).length, 2, 'two columns remain expanded');
+      grouped.fire(gEl('tl-cc-actions'), 'click');
+      assert.equal((gEl('tl-group').innerHTML.match(/class="tl-groupcol"/g) || []).length, 1, 'and then one');
+      assert.ok(!gEl('tl-group').innerHTML.includes('id="tl-cc-prompts"'), 'the last expanded column offers no fold button');
+      grouped.fire(gEl('tl-cc-prompts'), 'click'); // a click that raced the repaint
+      assert.equal((gEl('tl-group').innerHTML.match(/class="tl-groupcol"/g) || []).length, 1,
+        'and folding it is refused — a group with every column folded is an empty pane');
+      assert.ok(grouped.saved[grouped.saved.length - 1].colC.observations, 'the folded set is persisted');
+      assert.ok(!grouped.saved[grouped.saved.length - 1].colC.prompts, '…and the refused fold is not in it');
+      // Unfolding restores the width the reader had SET, not an equal share — wO came from the drag and
+      // is deliberately not 1.
+      assert.ok(Math.abs(wO - 1) > 0.01, 'the dragged weight is distinguishable from an equal share');
+      grouped.fire(gEl('tl-cc-observations'), 'click');
+      assert.equal((gEl('tl-group').innerHTML.match(/class="tl-groupcol"/g) || []).length, 2, 'clicking a rail brings the column back');
+      assert.equal(Number(gEl('tl-gc-observations').style['--tl-cw']), wO, '…at the width it had before it folded');
+      // Double-click splits that pair evenly again — the way back from a bad drag.
+      grouped.fire(gEl('tl-cg-observations'), 'dblclick', {});
+      assert.equal(Number(gEl('tl-gc-prompts').style['--tl-cw']), 1, 'double-click resets the pair');
+      assert.equal(Number(gEl('tl-gc-observations').style['--tl-cw']), 1, '…on both sides');
+      // A folded column restored from PERSISTED state comes back folded, with the widths it had.
+      const reload = runTimeline({ groupedTabs: true, colC: { actions: 1 }, colW: [1.4, 0.6, 1] });
+      assert.match(reload.el('tl-group').innerHTML, /class="tl-groupcol rail" id="tl-gc-actions"/, 'a reload restores the folded column');
+      assert.equal(reload.el('tl-gc-prompts').style['--tl-cw'], '1.4', '…and the widths that went with it');
+      // The persisted TAB is restored too.
+      const onActions = runTimeline({ tab: 'actions' });
+      assert.equal(onActions.el('tl-pane-actions').style.display, 'flex', 'a reload comes back on the tab it left on');
+    }
+
+    // The selector rides the window's EXISTING refresh, so this drives that refresh. Pointing the CLI at a
+    // non-executable file keeps a unit test from launching a real subprocess: the sessions push is
+    // in-process and happens before the spawn, which then fails at once.
+    const notABin = path.join(ws, 'not-a-binary');
+    fs.writeFileSync(notABin, 'this is not executable\n');
+    const binWas = process.env.CLAUDE_OBSERVATORY_BIN;
+    const sessionsPush = async (pin) => {
+      configValues['session'] = pin;
+      process.env.CLAUDE_OBSERVATORY_BIN = notABin;
+      const posts = [];
+      rqView.webview.postMessage = (m) => { posts.push(m); return Promise.resolve(true); };
+      rqView.visible = true;
+      // The window coalesces to one spawn at a time, and a failed spawn releases that gate on a later
+      // tick — so wait for it rather than racing it. Twenty tries is ~200ms; the gate opens on the first.
+      for (let i = 0; i < 20 && !posts.some((m) => m.type === 'sessions'); i++) {
+        rqProvider.refresh(true);
+        if (!posts.some((m) => m.type === 'sessions')) await new Promise((r) => setTimeout(r, 10));
+      }
+      rqView.visible = false;
+      if (binWas === undefined) delete process.env.CLAUDE_OBSERVATORY_BIN; else process.env.CLAUDE_OBSERVATORY_BIN = binWas;
+      return posts.find((m) => m.type === 'sessions');
+    };
+    const sp = await sessionsPush(OLDPIN);
+    assert.ok(sp, 'the Prompts window is fed the selector rows on its own refresh cadence — no second timer');
+    assert.equal(sp.current, OLDPIN, 'and told which session is under review');
+    const spIds = sp.rows.map((r) => r.id);
+    assert.equal(sp.rows[0].id, OLDPIN, 'the reviewed session leads the list, whatever its age');
+    assert.equal(sp.rows[0].active, false, 'and is marked NOT active — the pin is why it is listed, not liveness');
+    assert.ok(spIds.includes(LIVE), 'a session still being written is listed');
+    assert.equal(sp.rows.find((r) => r.id === LIVE).active, true, 'and marked active');
+    assert.ok(!spIds.includes(STALE), 'a session that is neither active nor under review is NOT — this is the active-only list');
+    // Pinned to something this workspace has no row for: synthesized, so the selector can still name it
+    // and switch away from it.
+    const spGhost = await sessionsPush('ghostSess99');
+    assert.ok(spGhost.rows.some((r) => r.id === 'ghostSess99' && r.title === null),
+      'a pinned session with no row here is synthesized rather than dropped');
+    // The two messages the selector posts, and where they land. 0.10.0: "All sessions…" goes to the
+    // Overview's SESSIONS TAB — the full browser — not to the deprecated switchSession QuickPick.
+    for (const [msg, cmd, arg] of [['pickSession', 'claudeObservatory.pinSession', LIVE], ['allSessions', 'claudeObservatory.showSessions', undefined]]) {
+      const seen = [];
+      const real = commands[cmd];
+      commands[cmd] = (a) => { seen.push(a); };
+      rqMsgHandler({ type: msg, id: arg });
+      commands[cmd] = real;
+      assert.deepEqual(seen, [arg], `the selector's ${msg} routes to ${cmd}`);
+    }
+    // …and it must not ALSO still reach the QuickPick: the whole point is that one row now has one
+    // destination. (A branch that fired both would satisfy the assertion above.)
+    {
+      const qpSeen = [];
+      const realQPCmd = commands['claudeObservatory.switchSession'];
+      const realShow = commands['claudeObservatory.showSessions'];
+      commands['claudeObservatory.switchSession'] = () => { qpSeen.push(1); };
+      commands['claudeObservatory.showSessions'] = () => {};
+      rqMsgHandler({ type: 'allSessions' });
+      commands['claudeObservatory.switchSession'] = realQPCmd;
+      commands['claudeObservatory.showSessions'] = realShow;
+      assert.deepEqual(qpSeen, [], 'and no longer opens the deprecated session QuickPick');
+    }
+    // showSessions itself: reveal the Overview, then bring its Sessions tab forward — through the tour's
+    // OWN path (setTour), so one mechanism moves that tab strip and the two can never disagree.
+    {
+      const focused = [];
+      const realFocus = commands['claudeObservatory.changemap.focus'];
+      commands['claudeObservatory.changemap.focus'] = () => { focused.push(1); };
+      const tourCalls = [];
+      const realSetTour = cmProvider.setTour.bind(cmProvider);
+      cmProvider.setTour = (tab, anchor) => { tourCalls.push([tab, anchor]); };
+      await commands['claudeObservatory.showSessions']();
+      cmProvider.setTour = realSetTour;
+      if (realFocus === undefined) delete commands['claudeObservatory.changemap.focus']; else commands['claudeObservatory.changemap.focus'] = realFocus;
+      assert.deepEqual(focused, [1], 'showSessions reveals the Overview');
+      assert.deepEqual(tourCalls, [['sessions', null]], '…and brings its Sessions tab forward through the tab-strip path the tour uses');
+    }
+    // The same active-only list as a command, so the Timeline selector and the palette drive one
+    // implementation. Active-only, with the way out to the full browser as its last item.
+    assert.ok(typeof commands['claudeObservatory.switchActiveSession'] === 'function', 'switchActiveSession registered');
+    assert.equal(pkg.contributes.commands.find((c) => c.command === 'claudeObservatory.switchActiveSession').icon, '$(pulse)', 'with the pulse icon');
+    configValues['session'] = OLDPIN;
+    let qpItems = null;
+    const realQP = vscode.window.showQuickPick;
+    const pinSeen = [];
+    const realPin = commands['claudeObservatory.pinSession'];
+    commands['claudeObservatory.pinSession'] = (id) => { pinSeen.push(id); };
+    vscode.window.showQuickPick = (items) => { qpItems = items; return Promise.resolve(items[0]); };
+    await commands['claudeObservatory.switchActiveSession']();
+    assert.deepEqual(pinSeen, [OLDPIN], 'a pick routes through pinSession — so a switch made mid-demo never writes settings.json');
+    assert.equal(qpItems[0].label.slice(0, 1), '○', 'the reviewed-but-quiet session leads, marked ○');
+    assert.ok(qpItems.some((i) => i.label.startsWith('● ')), 'a live session is marked ●');
+    assert.ok(!qpItems.some((i) => i.id === STALE), 'and the quiet stranger is absent');
+    assert.match(qpItems[qpItems.length - 1].label, /All sessions…$/, 'the last item is the way out to the full list');
+    // …and that last item falls THROUGH to the full browser rather than pinning an empty id. Same
+    // destination as the webview row: the Overview's Sessions tab, never the deprecated QuickPick.
+    const fallSeen = [];
+    const qpFallSeen = [];
+    const realFull = commands['claudeObservatory.showSessions'];
+    const realQPFall = commands['claudeObservatory.switchSession'];
+    commands['claudeObservatory.showSessions'] = () => { fallSeen.push(1); };
+    commands['claudeObservatory.switchSession'] = () => { qpFallSeen.push(1); };
+    vscode.window.showQuickPick = (items) => Promise.resolve(items[items.length - 1]);
+    await commands['claudeObservatory.switchActiveSession']();
+    assert.deepEqual(fallSeen, [1], 'All sessions… hands over to the Overview’s Sessions tab');
+    assert.deepEqual(qpFallSeen, [], 'and not to the deprecated QuickPick');
+    assert.deepEqual(pinSeen, [OLDPIN], 'and pins nothing on the way');
+    commands['claudeObservatory.showSessions'] = realFull;
+    commands['claudeObservatory.switchSession'] = realQPFall;
+    commands['claudeObservatory.pinSession'] = realPin;
+    vscode.window.showQuickPick = realQP;
+
+    // The Prompt AXIS moves BOTH surfaces. Left to the end of the run deliberately: it opens files and
+    // moves the review cursor, which the axis assertions above read.
+    {
+      // Back to the seeded session, with its edits pending again: the axis steps between asks that still
+      // have something to review, and the run above has been resolving them all the way down.
+      configValues['session'] = S;
+      const log = core.readLog(S);
+      assert.ok(log.length >= 1, 'the seeded session still has records to step');
+      for (const r of log) core.setStatus(S, r.id, 'pending');
+      cmProvider.setPrompt(null);
+      tlProvider.setSelection(null);
+      await commands['claudeObservatory.navPromptNext']();
+      assert.ok(tlProvider.selection, 'stepping the Prompt axis selects that ask in the Prompts list');
+      assert.equal(cmProvider.getPrompt(), tlProvider.selection, '…and the Overview is scoped to the same one');
+      // Review-prompt takes the same route.
+      const other = core.promptWindows(ws, S).find((r) => r.id !== tlProvider.selection);
+      if (other) {
+        await commands['claudeObservatory.reviewPrompt'](other.id);
+        assert.equal(tlProvider.selection, other.id, 'reviewing an ask selects it as well');
+        assert.equal(cmProvider.getPrompt(), other.id, '…on both surfaces');
+      }
+      cmProvider.setPrompt(null);
+      tlProvider.setSelection(null);
+    }
+
+    // A ×N run must survive the trip to the webview WITH OTHER FILES AROUND IT.
+    //
+    // The assertions further up drive a fixture whose whole feed is one run, so they cannot tell a
+    // serializer that keeps the run from one that serves a run's per-edit children in its place — with a
+    // single run either shape still yields "app.txt" rows. That is the exact failure a reader reports as
+    // "the same file is not combined together any more", so the mixed case is pinned here: two adjacent
+    // edits to one file, a third file's edit between them and the rest of the session, and the run's
+    // members must reach the panel only by EXPANDING it.
+    {
+      configValues['session'] = S;
+      const RUNF = path.join(ws, 'combined.txt'); // the file whose two edits must coalesce
+      const LONEF = path.join(ws, 'apart.txt'); // a different file, newer, so it sits above the run
+      // Newer than everything already in this store, so the three lead the newest-first feed in the order
+      // they are written here — the run's two edits ADJACENT, the loner above them.
+      const t0 = Date.now() + 60000;
+      const c0 = core.writeBlob(S, Buffer.from('one\n'));
+      const c1 = core.writeBlob(S, Buffer.from('one\ntwo\n'));
+      const c2 = core.writeBlob(S, Buffer.from('one\ntwo\nthree\n'));
+      const r1 = core.appendLog(S, { ts: t0, tool: 'Edit', file: RUNF, beforeBlob: c0, afterBlob: c1, status: 'pending' });
+      const r2 = core.appendLog(S, { ts: t0 + 1000, tool: 'Edit', file: RUNF, beforeBlob: c1, afterBlob: c2, status: 'pending' });
+      const lone = core.appendLog(S, { ts: t0 + 2000, tool: 'Edit', file: LONEF, beforeBlob: c0, afterBlob: c1, status: 'pending' });
+      tlProvider.observations.refresh();
+      // The view-model first: one run node for the pair, a plain edit node for the loner.
+      const feed = tlProvider.observations.getChildren();
+      const runNode = feed.find((n) => n.kind === 'tlrun' && n.file === RUNF);
+      assert.ok(runNode, 'the two adjacent same-file edits are ONE run node, with another file in the feed');
+      assert.deepEqual(runNode.edits.map((e) => e.id), [r2.id, r1.id], 'the run holds both of them, newest first');
+      assert.ok(feed.some((n) => n.kind === 'edit' && n.rec.id === lone.id), 'the other file stays a row of its own');
+      // …then the payload the webview draws. One row per node, in the same order: a serializer that
+      // flattened the level would post more rows than the provider produced.
+      const posts = [];
+      let tlMsg2 = null;
+      tlProvider.resolveWebviewView({
+        webview: {
+          options: {}, html: '',
+          postMessage: (m) => { posts.push(m); return Promise.resolve(true); },
+          onDidReceiveMessage: (f) => { tlMsg2 = f; return { dispose() {} }; },
+        },
+        onDidChangeVisibility: () => ({ dispose() {} }),
+        visible: false, // no subprocess spawn while hidden
+      });
+      tlMsg2({ type: 'view', tab: 'observations', grouped: false, shows: { prompts: false, observations: true, actions: false } });
+      const root = posts.find((m) => m.type === 'rows' && m.tab === 'observations' && m.parent === '');
+      assert.ok(root && !root.err, 'the Observations root is served');
+      assert.equal(root.rows.length, feed.length, 'the payload is one row per node — the level is never flattened');
+      const runRow2 = root.rows.find((r) => /combined\.txt\s+×2/.test(r.label));
+      assert.ok(runRow2, 'the run reaches the panel as ONE row carrying ×2');
+      assert.match(runRow2.desc, /^\+2 −0/, '…with the two edits’ deltas combined, not one edit’s');
+      assert.equal(runRow2.open, false, '…collapsed, so the file is on screen once');
+      // The members are reachable only THROUGH it. Keys are the host's own (`e<id>`), so a row that
+      // smuggled a run member up to the root level is caught by identity, not by counting labels.
+      assert.deepEqual(root.rows.filter((r) => r.key === 'e' + r1.id || r.key === 'e' + r2.id), [],
+        'neither member is also a root row — that is what "combined" means here');
+      assert.ok(root.rows.some((r) => r.key === 'e' + lone.id), 'the unrelated file is still its own root row');
+      assert.equal(root.rows.filter((r) => /combined\.txt/.test(r.label)).length, 1,
+        'and the run’s file appears exactly once in the feed');
+      // Expanding is what reveals them — and the badge counts the edits the run holds, not the row.
+      posts.length = 0;
+      tlMsg2({ type: 'children', tab: 'observations', key: runRow2.key });
+      const runKids = posts.find((m) => m.type === 'rows' && m.parent === runRow2.key);
+      assert.ok(runKids, 'the run serves its children when opened');
+      assert.deepEqual(runKids.rows.map((r) => r.label), ['#' + r2.id, '#' + r1.id],
+        'which are the per-edit rows, newest first');
+      assert.equal(root.count, core.readLog(S).length, 'the badge counts EDITS, so coalescing never hides any');
+    }
+
+    // A feed BIGGER THAN THE CAP: the bound is stated, the tail survives, and the badge is untouched.
+    //
+    // The ×N assertions above run on a two-edit fixture, so they would pass through any cap without
+    // noticing — including one that sliced the level's head and deleted the Context section and Next
+    // steps with it. This seeds past the cap deliberately. Written straight to the log (ids and uids
+    // assigned here) because appendLog re-reads the file per record to allocate the next id, which is
+    // quadratic at this size and would cost more than the case being tested.
+    {
+      configValues['session'] = S;
+      const CAP = 300; // EDIT_FEED_CAP in the extension — asserted against the row's own numbers below
+      const N = CAP + 120;
+      const t0 = Date.now() + 120000; // newest, so these lead the newest-first feed
+      const bb = core.writeBlob(S, Buffer.from('one\n'));
+      const ab = core.writeBlob(S, Buffer.from('one\ntwo\n'));
+      const before = core.readLog(S);
+      let id = before.reduce((m, r) => Math.max(m, r.id), 0);
+      const lines = [];
+      // Adjacent edits are to DIFFERENT files, so nothing coalesces and each one is a root row — the
+      // shape that makes the feed as long as the session. Three of the files are SOURCE files, which
+      // grows the Next-steps list past one row: a tail of exactly one suggestion could not tell a
+      // whole tail from a partly-delivered one.
+      for (let i = 0; i < N; i++) {
+        id++;
+        lines.push(JSON.stringify({ id, uid: 'big' + id, ts: t0 + i * 1000, tool: 'Edit',
+          file: path.join(ws, 'big', 'f' + (i % 40) + (i % 40 < 3 ? '.ts' : '.txt')), beforeBlob: bb, afterBlob: ab, status: 'pending' }));
+      }
+      fs.appendFileSync(core.logPath(S), lines.join('\n') + '\n');
+      const totalEdits = core.readLog(S).length;
+      assert.equal(totalEdits, before.length + N, 'the big fixture landed in the store');
+      const posts = [];
+      let msg = null;
+      const bigView = {
+        webview: { options: {}, html: '', postMessage: (m) => { posts.push(m); return Promise.resolve(true); },
+          onDidReceiveMessage: (f) => { msg = f; return { dispose() {} }; } },
+        onDidChangeVisibility: () => ({ dispose() {} }),
+        visible: false, // no subprocess spawn while hidden
+      };
+      tlProvider.resolveWebviewView(bigView);
+      const OFF = { prompts: false, observations: false, actions: false };
+      const ON = { prompts: false, observations: true, actions: false };
+      tlProvider.observations.refresh();
+      msg({ type: 'view', tab: 'observations', grouped: false, shows: OFF });
+      posts.length = 0;
+      msg({ type: 'view', tab: 'observations', grouped: false, shows: ON });
+      const big = posts.find((m) => m.type === 'rows' && m.tab === 'observations' && m.parent === '');
+      assert.ok(big && !big.err, 'the oversized Observations root is served');
+      // The provider still produces the WHOLE feed — the bound is on what crosses to the webview.
+      const feed = tlProvider.observations.getChildren();
+      const feedRows = feed.filter((n) => n.kind === 'edit' || n.kind === 'tlrun').length;
+      assert.ok(feedRows > CAP, `the fixture is bigger than the cap (${feedRows} edit rows)`);
+      const drawnEdits = big.rows.filter((r) => /^(e|run)\d/.test(r.key)).length;
+      assert.equal(drawnEdits, CAP, 'exactly the cap’s worth of edit rows is serialized');
+      assert.ok(big.rows.length < feed.length, 'the payload is shorter than the feed — something was left out');
+      // …and it SAYS so, with the real total, in the place the rows were dropped from. The total is
+      // EDITS, not rows, so the notice and the badge beside it are the same number rather than two
+      // different counts both called "edits" (a coalesced ×N run is one row holding N of them).
+      const grp = (n) => String(n).replace(/\B(?=(\d{3})+$)/g, ',');
+      const more = big.rows.find((r) => r.key === 'more');
+      assert.ok(more, 'a capped feed carries a row saying it is capped — a dropped row is never silent');
+      assert.equal(more.label, `showing ${grp(CAP)} of ${grp(totalEdits)} edits`,
+        'the row states how many are drawn and how many there are — the REAL total, the badge’s own number');
+      assert.equal(more.acts.length, 0, 'it offers no verbs (there is no node behind it)');
+      assert.equal(more.open, null, '…and nothing to expand');
+      assert.equal(big.rows.indexOf(more), CAP + 1, 'it sits right after the last edit row kept (the recap leads)');
+      // THE TAIL. These come after the edit run in the feed, so a head-N slice would have deleted them.
+      const tailKeys = big.rows.slice(big.rows.indexOf(more) + 1).map((r) => r.key);
+      assert.ok(tailKeys.includes('ctxhead'), 'the Context section survives the cap');
+      assert.ok(tailKeys.includes('steps'), 'the Next steps header survives the cap');
+      assert.ok(tailKeys.filter((k) => /^suggestion/.test(k)).length > 1, '…and so do its suggestion rows');
+      const lastEdit = feed.map((n) => n.kind === 'edit' || n.kind === 'tlrun').lastIndexOf(true);
+      assert.equal(tailKeys.length, feed.length - 1 - lastEdit,
+        'the tail is served WHOLE — every node after the edit run reaches the panel, none dropped with it');
+      // THE BADGE. Counted off the provider's kids, which the cap never touches: a reader who is shown
+      // 300 rows must still be told the session has thousands.
+      assert.equal(big.count, totalEdits, 'the badge counts every edit in the session, capped feed or not');
+      assert.ok(big.count > drawnEdits, 'which is more than the feed draws — that is the whole point of saying so');
+      // The cap is the OBSERVATIONS feed's, not a blanket row limit: Actions is category groups, and
+      // capping it would drop the audit sections that follow them.
+      posts.length = 0;
+      msg({ type: 'view', tab: 'observations', grouped: false, shows: OFF });
+      msg({ type: 'view', tab: 'actions', grouped: false, shows: { prompts: false, observations: false, actions: true } });
+      const actBig = posts.find((m) => m.type === 'rows' && m.tab === 'actions' && m.parent === '');
+      assert.equal(actBig.rows.length, tlProvider.actions.getChildren().length, 'the Actions root is never capped');
+      assert.ok(!actBig.rows.some((r) => r.key === 'more'), '…so it never carries the notice row');
+
+      // ---- the tree block's own throttle -------------------------------------------------------------
+      // Both feeds used to ride EVERY refresh, forced or not, on the reasoning that they cost no spawn.
+      // That was true of the trees, which VS Code virtualized; a webview pays a full build + post, and
+      // the store watcher fires one refresh per 150ms burst while Claude works.
+      const notABinBig = path.join(ws, 'not-a-binary-big');
+      fs.writeFileSync(notABinBig, 'this is not executable\n');
+      const wasBinBig = process.env.CLAUDE_OBSERVATORY_BIN;
+      process.env.CLAUDE_OBSERVATORY_BIN = notABinBig;
+      // `running`/`rerun` are driven DIRECTLY below (TS `private` is compile-time only, and the field
+      // names survive the bundle). A spawn's timing is not a thing a unit test can hold still, and
+      // "the tree block sits above the in-flight gate" is precisely a statement about that state —
+      // reproducing it by racing a real subprocess would test the race, not the invariant.
+      const wasRunning = tlProvider.running;
+      const wasRerun = tlProvider.rerun;
+      try {
+        msg({ type: 'view', tab: 'observations', grouped: false, shows: ON });
+        bigView.visible = true;
+        tlProvider.running = false;
+        tlProvider.refresh(true); // stamps both throttles
+        posts.length = 0;
+        tlProvider.running = false;
+        tlProvider.refresh(false); // the watcher's own tick, inside the window
+        assert.ok(!posts.some((m) => m.type === 'rows'),
+          'an unforced tick inside the window rebuilds no feed — the cost the trees never had');
+        posts.length = 0;
+        tlProvider.running = false;
+        tlProvider.refresh(true); // a review verb: it changed what the rows say, so it posts
+        assert.ok(posts.some((m) => m.type === 'rows' && m.tab === 'observations'),
+          'a forced refresh posts anyway — a Keep must repaint the row it resolved');
+        // The gate the tree block must stay ABOVE. `running` returns early after arming `rerun`, so a
+        // Keep landing mid-spawn would leave the feed on pre-Keep statuses until that spawn's callback
+        // re-ran the refresh — seconds later, or never if the spawn fails.
+        tlProvider.running = true;
+        tlProvider.rerun = false;
+        posts.length = 0;
+        tlProvider.refresh(true);
+        assert.ok(posts.some((m) => m.type === 'rows' && m.tab === 'observations'),
+          'a forced refresh during an in-flight spawn still posts the feed (the tree block is above the gate)');
+        assert.ok(!posts.some((m) => m.type === 'prompts'), '…and still leaves the spawn alone');
+        assert.equal(tlProvider.rerun, true, 'the spawn is re-run once the in-flight one lands');
+      } finally {
+        tlProvider.running = wasRunning;
+        tlProvider.rerun = wasRerun;
+        bigView.visible = false;
+        if (wasBinBig === undefined) delete process.env.CLAUDE_OBSERVATORY_BIN;
+        else process.env.CLAUDE_OBSERVATORY_BIN = wasBinBig;
+      }
+    }
   } finally {
     Module._load = origLoad;
   }

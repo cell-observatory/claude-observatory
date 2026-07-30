@@ -4318,6 +4318,8 @@ test('barrel: index.ts re-exports every new 0.8.0 public symbol (CLI-as-single-b
     'sessionVitals', 'parseCompactLine', 'compactLabel', 'outsideReads', 'outsideWrites', 'contextSources', 'friendlyModel',
     // 0.8.8 — prompts (prompts.ts), fast session listing (observe.ts), the tab join (tasks.ts)
     'sessionPrompts', 'promptEditIds', 'promptResponse', 'summarizePrompts', 'sessionMeta', 'fastSessionTitle', 'taskIdForSubject',
+    // 0.10.0 — the rewind boundary (prompts.ts) and the fleet-active predicate (fleet.ts)
+    'checkpointScope', 'isFleetActive',
   ];
   const missing = publicFns.filter((k) => typeof core[k] !== 'function');
   assert.deepEqual(missing, [], `barrel is missing public symbol(s): ${missing.join(', ')}`);
@@ -4778,7 +4780,7 @@ test('tour: demoTour is a complete, well-formed script for both editors', () => 
   const TABS = ['sessions', 'fleet', 'workflows', 'tasks', 'processes'];
   const ANCHORS = new Set([
     'nav-tabs', 'folders-strip', 'files-ledger', 'summary-bar', 'feed', 'nav-axes', 'accept-prompt',
-    'session-label', 'spotlight', 'prompts-list',
+    'session-label', 'spotlight', 'prompts-list', 'session-picker',
     'stats-model', 'stats-compaction', 'stats-tokens', 'stats-cache', 'stats-usage', 'stats-review',
   ]);
   assert.ok(steps.length >= 15, 'a tour of every surface is not a handful of steps');
@@ -4840,7 +4842,10 @@ test('tour: demoTour is a complete, well-formed script for both editors', () => 
   // the editors broadcast an anchor to every tour-aware panel, so a shared name would ring two things.
   const used = steps.filter((s) => s.anchor).map((s) => s.anchor);
   for (const a of ANCHORS) assert.ok(used.includes(a), `the ${a} anchor is named by a step`);
-  const panelOf = (a) => (a.startsWith('stats-') ? 'stats' : a === 'prompts-list' ? 'prompts' : 'overview');
+  // Which panel OWNS each anchor name. A Prompts anchor filed under 'overview' would not fail today (each
+  // name is used once, so the counts still agree) but it would quietly stop catching a future collision.
+  const panelOf = (a) =>
+    a.startsWith('stats-') ? 'stats' : a === 'prompts-list' || a === 'session-picker' ? 'prompts' : 'overview';
   const byName = new Map();
   for (const a of used) {
     const p = panelOf(a);
@@ -7286,6 +7291,57 @@ test('prompts: promptWindows owns edits by ask window, boundary to the NEWER ask
   const w2 = core.promptWindows(cwd, S);
   assert.deepEqual(w2[0].editIds, [mid], 'a kept edit is still owned by its ask');
   assert.equal(w2[0].pending, 0, 'and no longer pending');
+});
+
+test('prompts: checkpointScope is the rewind boundary — group-expanded, ts-bounded, two honest counts (0.10.0)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const cwd = fs.realpathSync(tmpWork());
+  const S = 'ckpt';
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const line = (ts, o) => JSON.stringify({ timestamp: new Date(ts).toISOString(), ...o });
+  // Three asks; seedEdit stamps ts = id*1000, so each ask lands between two edits.
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), [
+    line(1500, { type: 'user', message: { role: 'user', content: 'ask one' } }),
+    line(2500, { type: 'user', message: { role: 'user', content: 'ask two' } }),
+    line(3500, { type: 'user', message: { role: 'user', content: 'ask three' } }),
+  ].join('\n') + '\n');
+  const PRE = path.join(cwd, 'pre.txt'), CHAIN = path.join(cwd, 'chain.txt'), LATER = path.join(cwd, 'later.txt');
+  seedEdit(S, PRE, 'X\n', 'Y\n');                        // #1 ts1000 — before every ask
+  seedEdit(S, CHAIN, 'L1\nA\nL3\n', 'L1\nB\nL3\n');      // #2 ts2000 — window 1
+  seedEdit(S, CHAIN, 'L1\nB\nL3\n', 'L1\nC\nL3\n');      // #3 ts3000 — window 2, chains with #2
+  seedEdit(S, LATER, 'P\n', 'Q\n');                      // #4 ts4000 — window 3
+  const w = core.promptWindows(cwd, S);
+  assert.equal(w.length, 3, 'three asks, three windows');
+  // #2 and #3 are one same-code group, so the ROWS only ever show its representative (#3, in window 2).
+  assert.deepEqual(core.groupMembers(S, 3), [2, 3], 'the chain is one review unit');
+  assert.deepEqual(w[0].editIds, [], 'window 1 shows nothing — its edit was collapsed into the rep');
+  assert.deepEqual(w[1].editIds, [3], 'window 2 shows the representative');
+
+  const sc = core.checkpointScope(cwd, S, '2');
+  assert.deepEqual(sc.ids, [2, 3, 4], 'rewinding from ask 2 drags in #2 — the group member owned by an EARLIER window');
+  assert.equal(sc.pending, 3, 'three raw records would actually revert');
+  assert.equal(sc.units, 2, '…which the rows count as two review units (the chain plus #4)');
+  assert.equal(sc.units, w[1].pending + w[2].pending, 'and that unit count is exactly what those rows print');
+  assert.deepEqual(sc.files.map((f) => path.basename(f)).sort(), ['chain.txt', 'later.txt'], 'files come from the pending records');
+  assert.deepEqual(core.checkpointScope(cwd, S, w[1].id).ids, sc.ids, 'the stable hash id resolves the same window as the index');
+
+  // The boundary really is a boundary, and the pre-ask edit belongs to no rewind at all.
+  assert.deepEqual(core.checkpointScope(cwd, S, '3').ids, [4], 'rewinding from ask 3 leaves earlier windows alone');
+  assert.ok(!core.checkpointScope(cwd, S, '1').ids.includes(1), 'an edit older than the first ask precedes every boundary, so no rewind owns it');
+  // The unassigned guard's whole point: nothing at or after the boundary may be silently skipped.
+  const atOrAfter = core.reviewEdits(S).filter((r) => r.ts >= w[1].ts).map((r) => r.id);
+  assert.ok(atOrAfter.length > 0 && atOrAfter.every((id) => sc.ids.includes(id)), 'every display record at or after the boundary is in scope');
+  assert.deepEqual(core.checkpointScope(cwd, S, 'nope'), { ids: [], pending: 0, units: 0, files: [] }, 'an unknown prompt is an empty scope, not a throw');
+
+  // Resolving the chain removes it from the scope's COUNTS while its ids stay addressable for redo.
+  core.keepGroup(S, 3);
+  const after = core.checkpointScope(cwd, S, '2');
+  assert.deepEqual(after.ids, [2, 3, 4], 'kept ids are still in scope (redo --from-prompt needs them)');
+  assert.equal(after.pending, 1, 'but only the still-pending record would revert');
+  assert.equal(after.units, 1, 'and it is one unit');
+  assert.deepEqual(after.files.map((f) => path.basename(f)), ['later.txt'], 'the kept file drops out of the file list');
 });
 
 test('store: Windows drive-letter case — phantoms are healed, repaired, and undo-proofed (#43)', () => {

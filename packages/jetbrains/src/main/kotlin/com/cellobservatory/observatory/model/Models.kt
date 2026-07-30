@@ -22,8 +22,22 @@ data class UndoResult(val ok: Boolean, val status: String, val message: String) 
     val conflict get() = status == "conflict"
 }
 
-/** One edit's current line indices in the live buffer, from `locate --json`. */
-data class Placement(val id: Int, val lines: List<Int>)
+/** Lines an edit REMOVED, from `locate --json`. They no longer exist in the buffer, so [anchor] is the
+ *  surviving line they now follow (the last line, for a deletion at EOF) and [lines] is the removed text
+ *  ready to paint as ghost text. */
+data class Deletion(val anchor: Int, val lines: List<String>)
+
+/** An edit's line churn, from `locate --json` — what a lens prints as "+A −R". */
+data class Delta(val added: Int, val removed: Int)
+
+/** One edit's geometry in the live buffer, from `locate --json`. [removed] and [delta] are absent from a
+ *  pre-0.10 CLI (and [delta] from any placement that renders nothing), so both default to empty. */
+data class Placement(
+    val id: Int,
+    val lines: List<Int>,
+    val removed: List<Deletion> = emptyList(),
+    val delta: Delta? = null,
+)
 
 /** Compact relative time — port of core's relTime ("5s ago", "12m ago", "3h ago", "2d ago"). */
 fun relTime(ts: Long, now: Long = System.currentTimeMillis()): String {

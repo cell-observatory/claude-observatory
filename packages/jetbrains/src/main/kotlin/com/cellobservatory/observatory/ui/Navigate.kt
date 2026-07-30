@@ -21,6 +21,12 @@ import com.intellij.openapi.vfs.LocalFileSystem
  * Editor navigation anchored by the CLI's `locate` (positional diff mapping into the LIVE buffer —
  * the one read-only algorithm the plan says never to re-port). Locate runs on a background thread;
  * caret moves land back on the EDT.
+ *
+ * These two spawn `locate` DIRECTLY rather than going through PlacementsCache, and that is deliberate: the
+ * cache answers null while its 350 ms quiet window is open, and a jump has to land now or not at all —
+ * returning "not yet" to a keypress reads as the key doing nothing. A jump is a discrete user action, so
+ * one spawn per jump is bounded by how fast a person can press a key; the cache exists for the render path,
+ * which runs per keystroke and cannot afford one.
  */
 object Navigate {
 
@@ -37,7 +43,12 @@ object Navigate {
         ProgressManager.getInstance().run(object : Task.Backgroundable(project, "Locating edit #${rec.id}", false) {
             override fun run(indicator: ProgressIndicator) {
                 val line = ObservatoryCli.locate(session, rec.file, text, project.basePath)
-                    .find { it.id == rec.id }?.lines?.firstOrNull() ?: return
+                    .find { it.id == rec.id }
+                    // A PURE deletion added no lines, so there is nothing of it left to jump onto — land on
+                    // the surviving line its first removed hunk now follows, or the edit is unreachable and
+                    // the caret stays put (VS Code's anchorLines makes the same fallback).
+                    ?.let { p -> p.lines.firstOrNull() ?: p.removed.firstOrNull()?.anchor }
+                    ?: return
                 ApplicationManager.getApplication().invokeLater {
                     if (!editor.isDisposed && line < editor.document.lineCount) {
                         editor.caretModel.moveToLogicalPosition(LogicalPosition(line, 0))
@@ -61,7 +72,12 @@ object Navigate {
         ProgressManager.getInstance().run(object : Task.Backgroundable(project, "Resolving edit at cursor", false) {
             override fun run(indicator: ProgressIndicator) {
                 val hit = ObservatoryCli.locate(session, file, text, project.basePath)
-                    .find { caretLine in it.lines }
+                    // Same anchor rule as the overlay: the lines the edit added, or — for a pure deletion —
+                    // the surviving line its removed hunk now follows.
+                    .find { p ->
+                        if (p.lines.isNotEmpty()) caretLine in p.lines
+                        else p.removed.any { it.anchor == caretLine }
+                    }
                 val rec = pending.find { it.id == hit?.id }
                 ApplicationManager.getApplication().invokeLater { onFound(rec) }
             }

@@ -660,12 +660,12 @@ class TourController(private val project: Project) : com.intellij.openapi.Dispos
                     // for the majority of the tour. VS Code rings nothing in that case; so does this.
             }
             "prompts" -> {
-                // Prompts lives in the Observatory Timeline window (0.9.0) — raise IT and select its
-                // tab. The anchor chain keeps the ChangeMapPanel because a Prompts step can ring
-                // Accept Prompt, which lives in the Overview.
-                val tw = mgr.getToolWindow("Observatory Timeline")
-                tw?.show(null)
-                tw?.contentManager?.let { cm -> cm.contents.firstOrNull { it.displayName == "Prompts" }?.let { cm.setSelectedContent(it) } }
+                // Prompts lives in the Observatory Timeline window (0.9.0) — raise IT and bring the tab
+                // forward. Since 0.10.0 that tab is a component of TimelinePanel rather than a tool-window
+                // content, so the selection goes through the panel. The anchor chain keeps the
+                // ChangeMapPanel because a Prompts step can ring Accept Prompt, which lives in the Overview.
+                mgr.getToolWindow("Observatory Timeline")?.show(null)
+                com.cellobservatory.observatory.ui.TimelinePanel.of(project)?.selectMember("prompts")
                 com.cellobservatory.observatory.ui.PromptsPanel.of(project)?.tourAnchor(step.anchor)
                     ?: ChangeMapPanel.of(project)?.tourAnchor(step.anchor)
             }
@@ -675,14 +675,18 @@ class TourController(private val project: Project) : com.intellij.openapi.Dispos
                 val inTimeline = step.view == "actions" || step.view == "observations"
                 val tw = mgr.getToolWindow(if (inTimeline) "Observatory Timeline" else "Observatory Traces") ?: return null
                 tw.show(null)
+                if (inTimeline) {
+                    val panel = com.cellobservatory.observatory.ui.TimelinePanel.of(project)
+                    panel?.selectMember(step.view)
+                    // Only when the step actually names a control: an anchorless step brings the tab
+                    // forward and rings nothing, rather than outlining the whole pane.
+                    return if (step.anchor != null) panel else null
+                }
                 val name = when (step.view) {
-                    "edits" -> "Edits"; "diffs" -> "Diffs"; "fileHistory" -> "File History"
-                    "actions" -> "Actions"; else -> "Observations"
+                    "edits" -> "Edits"; "diffs" -> "Diffs"; else -> "File History"
                 }
                 val cm = tw.contentManager
                 cm.contents.firstOrNull { it.displayName == name }?.let { cm.setSelectedContent(it) }
-                // Only when the step actually names a control: an anchorless step brings the tree forward
-                // and rings nothing, rather than outlining the whole pane.
                 if (step.anchor != null) cm.selectedContent?.component else null
             }
             // The editor: open the newest pending edit so the inline overlay has something to show. The

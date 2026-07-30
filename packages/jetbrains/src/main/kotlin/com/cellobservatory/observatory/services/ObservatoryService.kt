@@ -127,6 +127,18 @@ class ObservatoryService(private val project: Project) : Disposable {
      *  the anchor for the editor banner's per-edit Keep/Undo. */
     fun currentPendingEdit(): EditRecord? = reviewCursorId?.let { id -> log().find { it.id == id && it.pending } }
 
+    /**
+     * Move the review cursor without navigating.
+     *
+     * The floating review bar's ‹/› and the auto-advance after a resolve both have to step from a KNOWN
+     * position, and both are outside this class. Giving them their own cursor is what produced the
+     * three-cursor drift VS Code documents; they park this one instead. A plain volatile write, so it is
+     * callable from a background action `update()`/`actionPerformed` as well as the EDT.
+     */
+    fun parkReviewCursor(id: Int?) {
+        reviewCursorId = id
+    }
+
     /** Next pending edit in the review loop, advancing the cursor. Returns null when none are pending. */
     fun nextPendingEdit(): EditRecord? = stepPendingEdit(1)
 
@@ -345,6 +357,16 @@ class ObservatoryService(private val project: Project) : Disposable {
     /** The shared `sessions --json` view (the Overview's Sessions tab). Keyed on the active session so
      *  switching re-marks which row is live. */
     fun sessions(force: Boolean = false): SessionsResult? = sessionsFetch.get(currentSession() ?: "", force)
+
+    /**
+     * The last `sessions --json` answer, or null when none has landed — and it NEVER spawns.
+     *
+     * For callers that run in an action `update()`, where a spawn is measured per toolbar tick. Nothing
+     * polls this view: [sessions] is its only fetcher and ChangeMapPanel is its only caller, so the slot
+     * stays null until the Dashboards window has been opened once. A caller must therefore render an
+     * unknown state rather than wait on it, and prime the fetch from `actionPerformed`.
+     */
+    fun peekSessions(): SessionsResult? = sessionsFetch.value
 
     /** True once a `sessions --json` fetch has completed — with [sessions] null, this separates "still
      *  reading" from "this CLI cannot answer for sessions" (an older one on PATH). */

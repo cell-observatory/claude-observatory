@@ -453,7 +453,7 @@
   <div class="wrap">
     <div class="stagger hero-lead">
       <h1 style="--i:1">Claude Observatory</h1>
-      <p class="lede" style="--i:2">Coding agents change code faster than anyone can read it, and a change accepted without being understood is a liability. The observatory is built for established and mission-critical codebases rather than throwaway prototypes: it records every edit a Claude Code session makes, through local hooks that cost no tokens. You review at the scope that fits the work, by several abstractions over what the agent changed for a given prompt. Every edit keeps its own diff and its own conflict-guarded undo, so reverting one leaves the others standing. When several agents work at once — subagents, workflow runs, sessions in parallel git worktrees — their work does not blur together: every edit is correlated back to the agent that made it. Everything stays local and git-free, and one store serves the terminal, VS Code, and JetBrains IDEs.</p>
+      <p class="lede" style="--i:2">Coding agents change code faster than anyone can read it, and a change accepted without being understood is a liability for you, not the agent's provider. The observatory is built for established and mission-critical codebases rather than throwaway prototypes: it records every edit a Claude Code session makes, through local hooks that cost no tokens. You review at the scope that fits the work, by several abstractions over what the agent changed for a given prompt. Every edit keeps its own diff and its own conflict-guarded undo, so reverting one leaves the others standing. When several agents work at once — subagents, workflow runs, sessions in parallel git worktrees — their work does not blur together: every edit is correlated back to the agent that made it. Everything stays local and git-free, and one store serves the terminal, VS Code, and JetBrains IDEs.</p>
       <div class="cta" style="--i:3">
         <a class="btn primary" href="#install">Get started</a>
         <a class="btn line" href="#demo">Full interactive demo →</a>
@@ -605,7 +605,7 @@
       <div class="tour-ui">
         <button class="tbtn" id="tprev" type="button" aria-label="Previous feature">‹</button>
         <div class="dots" id="tdots" role="tablist" aria-label="Choose a feature"></div>
-        <span class="tcount" id="tcount" aria-live="polite">01 / 22</span>
+        <span class="tcount" id="tcount" aria-live="polite">01 / 23</span>
         <button class="tbtn" id="tnext" type="button" aria-label="Next feature">›</button>
       </div>
       <div class="tour-view">
@@ -630,7 +630,7 @@
           <article class="slide" role="group" aria-roledescription="slide" aria-label="Sessions">
             <div class="slide-in">
               <div><span class="eyebrow">Sessions</span><h3>Every session in the workspace, newest conversation first</h3>
-                <p>The Sessions tab lists each Claude Code session recorded for this workspace, led by Claude's own title for it and ordered by when its conversation was last active. Selecting a row switches what every window reviews, so a session you left yesterday is one click away. The listing is built from directory stats and cached titles rather than from the sessions' edit logs, which is why it opens at once however many edits have accumulated.</p></div>
+                <p>The Sessions tab lists each Claude Code session recorded for this workspace, led by Claude's own title for it and ordered by when its conversation was last active. Selecting a row switches what every window reviews, so a session you left yesterday is one click away. The listing is built from directory stats and cached titles rather than from the sessions' edit logs, which is why it opens at once however many edits have accumulated. For moving between conversations that are <em>both still running</em>, the Timeline carries its own selector above the Prompts list, listing only the sessions still active plus the one under review; picking one switches the whole observatory, and this tab stays the full list. The Overview's left nav can also pair its related sections side by side — Sessions beside Fleet, Workflows beside Tasks and Processes — since which conversation and who is working in it are one question.</p></div>
               <div class="panel"><img src="media/sessions.png" loading="lazy" alt="The Sessions tab: one row per session in this workspace — the live session marked, each row showing Claude's title for the session and when its conversation was last active"></div>
             </div>
           </article>
@@ -638,8 +638,8 @@
           <article class="slide" role="group" aria-roledescription="slide" aria-label="Inline review">
             <div class="slide-in">
               <div><span class="eyebrow">Inline review</span><h3>Review directly in the editor</h3>
-                <p>Claude's pending edits appear in the editor itself: a tinted line, a gutter star, and Keep / Undo / Diff / Chat on hover.</p></div>
-              <div class="panel"><img src="media/inline-review.png" loading="lazy" alt="Inline review: a tinted pending edit with a ✨ marker and Keep/Undo actions"></div>
+                <p>Claude's pending edits appear in the editor itself: a tinted line, a gutter star, removed lines as ghost text in both editors, and a per-edit lens that names the edit, its churn and its position, then carries Keep, Undo, Chat, the diff, and the way through to the fuller review surface. Resolving one edit carries you to the next awaiting review, crossing into another file when that is where it is. A file with edits awaiting review carries their count as a badge in the editor's own project tree, and on the editor tab in VS Code.</p></div>
+              <div class="panel"><figure><img src="media/inline-review.png" loading="lazy" alt="Inline review: a tinted pending edit with a ✨ marker and Keep/Undo actions"></figure></div>
             </div>
           </article>
 
@@ -663,7 +663,7 @@
             <div class="slide-in">
               <div><span class="eyebrow">Observations</span><h3>A change feed with Claude's reasoning</h3>
                 <p>The session appears as a feed of files ordered by most-recent activity; adjacent edits to the same file coalesce into one ×N run. Each entry is paired with Claude's reasoning, parsed from the transcript it already wrote, at zero extra tokens. Above the feed, a Context section names what shaped the session — skills invoked, plans written, memory read, whether it resumed from a compaction — each row marked with whether the transcript proves it or the file is merely present where Claude Code loads it.</p></div>
-              <div class="panel"><img src="media/observations.png" loading="lazy" alt="Observations: files by recent activity with same-file edits coalesced into ×N runs, each with Claude's own reasoning"></div>
+              <div class="panel"><img src="media/observations.png" loading="lazy" alt="Observations: files by recent activity with adjacent same-file edits coalesced into ×N runs, each with Claude's own reasoning"></div>
             </div>
           </article>
 
@@ -781,12 +781,30 @@
           <article class="slide" role="group" aria-roledescription="slide" aria-label="Navigation bar">
             <div class="slide-in">
               <div><span class="eyebrow">Navigation bar</span><h3>Review controls on four surfaces</h3>
-                <p>One review bar appears on four surfaces: the status bar, the editor's title bar, a floating bubble over the live edit, and the Overview panel. On the Overview it opens as two rows. The top row holds the session controls: the name of the session under review — its title or first prompt, with the raw id in the tooltip, and a label rather than a control, since the Sessions tab is where the session changes — then the session-wide Accept All, Reject All, Clear Resolved, and Export actions, and, on the right, Search, Active only, Spotlight, and Refresh. The bottom row holds four review axes that step the pending edits at four granularities. The <b>Diff</b> axis steps the open file's edits and carries Keep, Undo, Chat, and View diff, which opens a real side-by-side diff editor. The <b>File</b> axis steps changed files with Accept File and Reject File; the <b>Folder</b> axis steps changed directories, acting on only that folder's edits. The <b>Prompt</b> axis steps your own prompts, showing each one's file and edit totals with Review, Accept Prompt, and Reject Prompt.</p></div>
+                <p>One review bar appears on four surfaces: the status bar, the editor's title bar, a floating bar over the live edit, and the Overview panel. On the Overview it opens as two rows. The top row holds the session controls: the name of the session under review — its title or first prompt, with the raw id in the tooltip, and a label rather than a control, since the Sessions tab is where the session changes — then the session-wide Accept All, Reject All, Clear Resolved, and Export actions, and, on the right, Search, Active only, Spotlight, and Refresh. The bottom row holds four review axes that step the pending edits at four granularities. The <b>Diff</b> axis steps the open file's edits and carries Keep, Undo, Chat, and View diff, which opens a real side-by-side diff editor. The <b>File</b> axis steps changed files with Accept File and Reject File; the <b>Folder</b> axis steps changed directories, acting on only that folder's edits. The <b>Prompt</b> axis steps your own prompts, showing each one's file and edit totals with Review, Accept Prompt, Reject Prompt, and Rewind — which reverts every unreviewed edit from that ask onward, not just its own.</p></div>
               <div class="panel"><div class="mock">
                 <div class="mh">Overview review bar · two rows</div>
                 <div><b>demo-session</b> <span class="d">·</span> Accept All · Reject All · Clear Resolved · Export <span class="d">·</span> Search · Active only · Spotlight · Refresh</div>
-                <div style="margin-top:6px">▲ Diff 1/2 ▼ <span class="d">·</span> ◀ File 1/3 ▶ <span class="d">·</span> ◀ Folder 1/2 ▶ <span class="d">·</span> ◀ Prompt 1/2 ▶</div>
-                <div class="d" style="margin-top:6px">Also on the status bar, editor title, and review bubble</div>
+                <div style="margin-top:6px">▲ Diff 1/2 ▼ <span class="d">·</span> ◀ File 1/3 ▶ <span class="d">·</span> ◀ Folder 1/2 ▶ <span class="d">·</span> ◀ Prompt 1/2 ▶ Rewind</div>
+                <div style="margin-top:6px" class="d">Below it, the left nav's tab strip: Sessions · Fleet · Workflows · Tasks · Processes, with <b>Group tabs</b> at its trailing edge</div>
+                <div class="d" style="margin-top:6px">Also on the status bar, the editor title, and the floating bar at the edit</div>
+              </div></div>
+            </div>
+          </article>
+
+          <article class="slide" role="group" aria-roledescription="slide" aria-label="The review bar in the editor">
+            <div class="slide-in">
+              <div><span class="eyebrow">In the editor</span><h3>The review bar where you are reading</h3>
+                <p>Each editor carries the controls into the file itself, in the form its API allows. JetBrains IDEs get a <b>floating toolbar</b> on the platform's own floating-toolbar layer while the open file has edits awaiting review — Keep, Undo, Chat, View diff, the Diff counter and its steppers, Accept and Reject File, Spotlight, and Clear Resolved — and a setting chooses the bar, the notification banner it replaces, both, or neither.</p>
+                <p>VS Code exposes no floating-widget API to extensions, and that has not changed: an extension cannot draw an overlay widget, and a comment thread is the only interactive surface that can float over code. What it now has is a <b>compact bar</b> built on exactly that surface — a single row of Keep, Undo, the edit and file steppers, Diff and Details, under a live title naming the edit, its churn and its position on both axes. The full <b>review bubble</b>, with Claude's reasoning and the diff in git's colors, is the same widget in its other form, one click away on Details and back again on Collapse. The setting is spelled the same in both editors and means the same thing where they overlap. Keeping or reverting one edit opens the next one still awaiting review, crossing into another file when that is where it is; bulk actions and redo never move you.</p></div>
+              <div class="panel"><div class="mock">
+                <div class="mh">The bar at the edit</div>
+                <div><span class="d">6</span> // redirect home to the activities page</div>
+                <div><span class="d">7</span> res.redirect('/activities');</div>
+                <div style="margin-top:8px" class="d">✦ Claude edit #12 · +8 −3 · Diff 2/5 · File 1/3</div>
+                <div style="margin-top:2px">✓ Keep <span class="d">·</span> ↩ Undo <span class="d">·</span> ⌃ ⌄ <span class="d">·</span> ‹ › <span class="d">·</span> ⧉ Diff <span class="d">·</span> ⋯ Details</div>
+                <div class="d" style="margin-top:6px">VS Code. In JetBrains the same row adds Chat, Accept and Reject File, Spotlight and Clear Resolved</div>
+                <div class="d" style="margin-top:2px">Resolving one carries you to the next — across files</div>
               </div></div>
             </div>
           </article>
@@ -867,7 +885,7 @@
   <div class="wrap">
     <span class="eyebrow">Run it for real</span>
     <h2>The same session, in your editor</h2>
-    <p class="lede" style="margin-inline:auto;">The bundled demo replays through the real capture pipeline, in your own editor, at zero tokens. It goes further than this page: three prompts, six tasks and nine edits, a second agent holding the same file, a workflow still running, and a <b>guided tour</b> that drives the panels for you — forty-one steps, or thirteen if you are short of time.</p>
+    <p class="lede" style="margin-inline:auto;">The bundled demo replays through the real capture pipeline, in your own editor, at zero tokens. It goes further than this page: three prompts, six tasks and nine edits, a second agent holding the same file, a workflow still running, and a <b>guided tour</b> that drives the panels for you — forty-two steps, or thirteen if you are short of time.</p>
     <div class="cmd"><span class="pr">VS&nbsp;Code</span><code>Claude Observatory: Start Demo Mode</code><button class="copy" data-copy="Claude Observatory: Start Demo Mode">Copy</button></div>
     <p class="cmd-note">…from the command palette, the ▶ on the Edits panel, or <b>Try the demo</b> in the empty panel.</p>
     <div class="cmd"><span class="pr">JetBrains</span><code>Claude Observatory: Start Demo Mode</code><button class="copy" data-copy="Claude Observatory: Start Demo Mode">Copy</button></div>
@@ -1222,14 +1240,14 @@
       var html='';
       lines.forEach(function(l,ix){
         if(lens&&ix===lens.e.lensAt){
-          html+='<div class="lens"><span class="sp">✨ #'+lens.e.id+' · +'+lens.e.plus+' −'+lens.e.minus+'</span>';
+          html+='<div class="lens"><span class="sp">🔬 #'+lens.e.id+' +'+lens.e.plus+' −'+lens.e.minus+'</span>';
           if(lens.gated&&!res[step]){
             // Only the scripted action is a live button — the rest stay inert display text.
             if(STEPS[step].gate==='keep') html+='<button id="lens-keep" class="hint">✓ Keep</button><span class="a">↩ Undo</span>';
             else html+='<span class="a">✓ Keep</span><button id="lens-undo" class="hint">↩ Undo</button>';
-            html+='<span class="a">Chat</span><span class="a">⧉ View diff</span>';
+            html+='<span class="a">💬 Chat</span><span class="a">⧉ Diff</span><span class="a">⋯ Details</span>';
           }else{
-            html+='<span class="a">✓ Keep</span><span class="a">↩ Undo</span><span class="a">Chat</span><span class="a">⧉ View diff</span>';
+            html+='<span class="a">✓ Keep</span><span class="a">↩ Undo</span><span class="a">💬 Chat</span><span class="a">⧉ Diff</span><span class="a">⋯ Details</span>';
           }
           html+='</div>';
         }

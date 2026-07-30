@@ -6,7 +6,7 @@ needs facts that run did not produce — from the bundled `claude-observatory de
 capture pipeline against a real transcript. Nothing is staged; the session id in each block's header says
 which run it came from.
 
-![The observatory layout — the sidebar "Observatory Traces" (Edits · Diffs · File History) plus the bottom panel "Observatory Dashboards" (Overview · Stats) and the "Observatory Timeline" panel (Prompts · Actions · Observations)](media/layout.png)
+![The observatory layout — the sidebar "Observatory Traces" (Edits · Diffs · File History), the bottom panel "Observatory Dashboards" (Overview · Stats), and the "Observatory Timeline" panel (Prompts · Observations · Actions)](media/layout.png)
 
 > The **[visual showcase](https://cell-observatory.github.io/claude-observatory/showcase.html)** presents
 > the same material in the browser (rendered from [showcase.html](showcase.html) via GitHub Pages).
@@ -57,14 +57,14 @@ once, which is what the test suite uses; `--no-fleet` leaves out the second agen
 
 ## The guided tour
 
-The tour walks **forty-one steps** covering every panel the product ships and every named feature —
+The tour walks **forty-two steps** covering every panel the product ships and every named feature —
 including the Diffs view, revision navigation, Spotlight, search, the chat handoff, export, the status
-bar, the Explorer badges, context sources and file memory. It lives in core, so the terminal and both
+bar, the Explorer badges, the Timeline's session selector, context sources and file memory. It lives in core, so the terminal and both
 editors show the same steps: a step added to a panel reaches every editor at once, and none of them can
 drift into its own wording.
 
 It opens with a choice of **two tracks**: **Essentials** (13 steps — the review model, the agents, the
-audits) or **Everything** (all 41). Finishing the short one offers the other 28 as its own track, in both
+audits) or **Everything** (all 42). Finishing the short one offers the other 29 as its own track, in both
 editors and in the terminal (`demo --tour --remainder`). The short track is a filter over the same list, in the same order, so
 the two can never tell different stories. In the terminal, `demo --tour --essentials` prints the short one.
 
@@ -328,21 +328,45 @@ in the others instantly. The layout is deliberately identical; only the host chr
 | Auto-update | daily background check → one-click **Update now** | add the [plugin repository](../packages/jetbrains/README.md#auto-updates) once → IDE-native updates |
 | **Edits · Diffs · File History** (the sidebar) | **Observatory Traces** — microscope in the Activity Bar, badged with the pending count | **Observatory Traces** tool window, left stripe |
 | **Overview · Stats** (the bottom panel) | **Observatory Dashboards** bottom panel, side by side (like Terminal/Problems). The Overview can also be docked as a full-height **editor tab** — palette: *Open Overview in Editor*, or set `claudeObservatory.overviewLocation`; whichever host holds it drives the refresh, never both | **Observatory Dashboards** tool window, bottom stripe |
-| **Prompts** | its own **Prompts** view (new installs start it in the bottom panel; drag it to the secondary sidebar if you like) — an existing profile keeps wherever you last dragged it, since VS Code remembers view placement per profile | the **Observatory Timeline** tool window, right stripe — Prompts · Actions · Observations as tabs |
-| Inline menu (**✨ #N · +A −R · view changes · Keep · Undo · Chat · View diff**) | CodeLens above each edit + ✨ gutter star + bold green/red highlight + coral ruler mark | lens above each edit + clickable ✨ gutter star + bold green/red highlight + coral stripe |
-| Click **view changes** | opens the **inline review bubble** at the edit — the diff in git's colors + reasoning + `+A −R`, Keep/Undo/Chat/Prev/Next on its toolbar (no tab) | opens the edit's unified **diff** (reasoning in title, Keep/Undo/Chat on toolbar) |
-| File spotlight | 📄 spotlight (tab-bar) | 📄 spotlight (editor banner) |
+| **Prompts · Observations · Actions** (the Timeline) | the **Observatory Timeline** panel — one webview whose tab strip carries all three (0.10.0 consolidated the former `claudeObservatory.prompts` / `.actions` / `.observations` views into it) | the **Observatory Timeline** tool window, right stripe — one content, the same three as tabs |
+| **Group tabs** (beside both tab strips) | a toggle beside the Overview's and the Timeline's tab strips: columns instead of tabs, each resizable by dragging the divider (double-click resets the pair) and foldable to a named rail that is itself the button back. Widths and folds ride the webview's own state | the same toggle, same groupings, on an `ActionToolbar` beside each tab strip; widths and folds persist in `claude-observatory.xml` |
+| Inline menu | `🔬 #N +A −R · n/m` │ ✓ Keep │ ↩ Undo │ 💬 Chat │ ⧉ Diff │ ⋯ Details — CodeLens above each edit + ✨ gutter star + bold green/red highlight + coral ruler mark | `✦ #N +A −R · edit n/m in file · file i/k  view changes` ✓ Keep ↩ Undo ❝ Chat ⧉ View diff — lens above each edit + clickable ✨ gutter star + bold green/red highlight + coral stripe |
+| Click the lens header | **⋯ Details** opens the review bubble at the edit — the diff in git's colors + reasoning + `+A −R`, with Pin/Prev/Next/Prev-File/Next-File/Keep/Undo/Accept-File/Reject-File/Chat/Clear/Spotlight/Search/Collapse on its toolbar (no tab); the `🔬` header opens the floating review bar | **view changes** opens the edit's unified **diff** (reasoning in title, Keep/Undo/Chat on toolbar) |
+| The in-editor **review bar** | a compact **floating bar** built on the one surface an extension can float over code — a comment thread with no body. `✦ Claude edit #12 · +8 −3 · Diff 2/5 · File 1/3` with Keep · Undo · ⌃⌄ · ‹› · Diff · Details. `editorReviewSurface` picks `floating` (default) / `bubble` / `none`. VS Code still exposes no floating-widget API; this is that constraint answered, not lifted | a true **floating toolbar** on the platform's floating-toolbar layer while the open file has unreviewed edits — Keep, Undo, Chat, View diff, `Diff n/m` and its steppers, Accept/Reject File, Spotlight, Clear Resolved. Replaces the notification banner by default; `editorReviewSurface` picks `floating` / `banner` / `both` / `none` |
+| **Pending badge** on files | count in the Explorer and on the editor tab | count in the Project tree, plus the tool-window stripe |
+| **Session selector** on the Timeline | a chip leading the window, above the tabs: the live sessions plus the one under review, then **All sessions…**, which reveals the Overview's Sessions tab. Also the **Switch to an active session** command | the same chip, an `ActionToolbar` inside the window content (it left the tool-window title bar in 0.10.0), with the same rows; its **All sessions…** row opens the plugin's every-session popup chooser rather than the Sessions tab |
+| Resolving one edit | opens the next unreviewed edit, crossing files (`revealNextOnResolve`, on) | same, via the settings checkbox **After keeping or reverting one edit, open the next edit still awaiting review** |
+| File spotlight | 📄 spotlight (tab-bar; also on the review bubble) | 📄 spotlight (status-bar nav bar / Overview title bar / the floating review bar; also on the editor banner when `editorReviewSurface` enables it) |
 | Scoreboard | status-bar `🔬 N` (amber while pending) + live bar in Stats | status-bar `🔬 N` + live bar in Stats |
 | Keyboard loop | `⌥⌘N` next · `⌥⌘Y` keep · `⌥⌘U` undo · `⌥⌘-`/`⌥⌘=` revisions (`Ctrl+Alt` on Win/Linux) | `⌥⌘N` next · `⌥⌘Y` keep · `⌥⌘U` undo · `⌥⌘[`/`⌥⌘]` revisions |
 
-The **sidebar** ("Observatory Traces") carries the three per-edit review panes — **Edits · Diffs · File History**; the timeline-shaped surfaces — **Prompts · Actions · Observations** — live together in the **Observatory Timeline** panel. (Timeline is gone as a standalone pane — its coalesced
-change-feed now leads **Observations**, which moved into the sidebar in 0.8.7 to make room for the
-**Prompts** window beside the Overview it scopes; **Actions** moved up there in 0.8.0; and the former
-multi-agent window folded into **Overview** as its **Fleet** tab.) Both front-ends drive the review
+The **sidebar** ("Observatory Traces") carries the three per-edit review panes — **Edits · Diffs · File
+History**. The timeline-shaped surfaces — **Prompts · Observations · Actions** — are tabs of one window,
+the **Observatory Timeline** panel. In 0.10.0 VS Code caught up to the shape JetBrains already had: the
+three separate views `claudeObservatory.prompts`, `.actions` and `.observations` were consolidated into a
+single `claudeObservatory.timeline` webview whose tab strip carries all three, so the two editors now
+describe the same window. (The old standalone Timeline pane is long gone — its coalesced change-feed leads
+**Observations**, which moved into the sidebar in 0.8.7 to make room for the **Prompts** window beside the
+Overview it scopes; **Actions** moved up there in 0.8.0; and the former multi-agent window folded into
+**Overview** as its **Fleet** tab.) Both front-ends drive the review
 surfaces from **icon-only tabs** (hover for the label), and JetBrains is at full **feature parity** with
 VS Code: the toggle-inline button, **Accept/Revert this file** on the Edits toolbar, revision-nav
-buttons, Overview bulk actions, Observations clear/switch/doctor, a 5th **⧉ View diff** lens segment,
-and a pending badge on the tool-window stripe.
+buttons, Overview bulk actions, the Observations panel's clear / switch-session / doctor actions, a 5th
+**⧉ View diff** lens segment,
+and a pending badge on the tool-window stripe. Two long-standing gaps closed in 0.10.0: JetBrains now
+renders **removed lines as ghost text** and the **`+A −R` churn** in its lens, both of which the shared
+`locate` payload had been carrying unread — which also makes a pure deletion navigable there, since the
+lens and the gutter star now anchor on the surviving line a deletion follows.
+
+Beside each tab strip — the Overview's and the Timeline's, in both editors — sits a **Group tabs** toggle.
+It replaces the tabs with side-by-side columns: all three in the Timeline, and in the Overview **Sessions ·
+Fleet** and **Workflows · Tasks · Processes**, which is why the pairing is what it is — which conversation
+and who is working in it, then what the work is doing. Off by default. A divider between two columns drags
+to trade width (double-click resets the pair), and each column has a fold button that collapses it to a
+narrow **rail** carrying its name and its badge sideways; the rail is itself the button that brings the
+column back at the width you set. The last expanded column will not fold, because a group with every
+column folded is an empty pane. Below a minimum width the columns stack instead of shrinking past
+legibility.
 
 The **status-bar microscope** shows the pending count in realtime — the moment Claude writes a
 change. Click it (or **Review next pending edit**) to jump straight to the oldest unreviewed edit;
@@ -373,17 +397,31 @@ whole-line highlight** over Claude's edited section — a **green** fill with a 
 on added lines, and a **red** fill with a **red change-bar** on deletions (the removed code shown as red
 ghost text) — plus a distinct **Claude-coral marker** on the overview ruler / scrollbar. The line fills
 were once a deliberately faint ~10% tint; they now sit near **30%**, so a Claude-edited section stands
-out at a glance instead of blending in. Above the edit sits the **inline menu**: **✨ #N · +A −R · view changes** then **✓
-Keep · ↩ Undo · Chat · ⧉ View diff** (the same edit as a full diff tab — its own tab, Prev/Next on the
-title bar cycling the file's edits in place). "Chat about this edit" copies a ready-made prompt (before/after included) for
-your Claude Code chat or terminal.
+out at a glance instead of blending in. In 0.10.0 the ghost text reached **PyCharm** too, along with the
+`+A −R` churn in its lens, so a deletion-only edit is finally navigable there. Above the edit sits the
+**inline menu**, shortened in 0.10.0 to what fits a lens row:
 
-**Click "view changes" → the changes, inline, in git's colors.** In **VS Code** it opens an **inline
-review bubble** right at the edit — no tab — with the diff in **git's own theme colors** (green/red text
+```text
+VS Code     🔬 #12  +8 −3 · 2/5 │ ✓ Keep │ ↩ Undo │ 💬 Chat │ ⧉ Diff │ ⋯ Details
+PyCharm     ✦ #12  +8 −3 · edit 2/5 in file · file 1/3  view changes    ✓ Keep    ↩ Undo    ❝ Chat    ⧉ View diff
+```
+
+A lens row can carry no background, no color of its own, and no size — so it leads with the one glyph
+that escapes the dim grey and hands everything that must be legible to the bar and the bubble below.
+"Chat about this edit" copies a ready-made prompt (before/after included) for your Claude Code chat or
+terminal; **⧉ Diff** / **⧉ View diff** opens the same edit as a full diff tab, with Prev/Next on the title
+bar cycling the file's edits in place.
+
+**Open the full changes, inline, in git's colors.** In **VS Code** the lens's **⋯ Details** opens the
+**review bubble** right at the edit — no tab — with the diff in **git's own theme colors** (green/red text
 over the diff editor's translucent line fills — the same theme variables the real diff editor uses),
-Claude's reasoning, and the `+A −R` counts, plus **Accept · Revert · Chat · Prev · Next** as real toolbar
-buttons (Prev/Next step through that file's edits). In **PyCharm**, the ✨ gutter star / lens opens the
-edit's before ⟷ after as a **unified diff** (reasoning in the title, Keep/Undo/Chat on its toolbar).
+Claude's reasoning, and the `+A −R` counts, plus **Pin · Prev · Next · Prev/Next file · Keep · Undo ·
+Accept File · Reject File · Chat · Clear Resolved · Spotlight · Search · Collapse** as real toolbar
+buttons. The
+`🔬` header opens the compact **floating review bar** at the same edit instead; **Collapse** and
+**Details** swap between the two at any time. In **PyCharm**, the ✨ gutter star / lens's **view changes**
+opens the edit's before ⟷ after as a **unified diff** (reasoning in the title, Keep/Undo/Chat on its
+toolbar).
 
 GitLens-style extras, in both editors: the **file spotlight** (📄) dims every unmodified line so Claude's
 edits pop; **revision navigation** (`⌥⌘-` / `⌥⌘=` in VS Code, `⌥⌘[` / `⌥⌘]` in PyCharm) steps a file's
@@ -394,10 +432,23 @@ edit history in a current-vs-revision diff.
 ### The review nav bar
 
 One combined review bar, mirrored across four surfaces so the surgical loop is always a click away: the
-**status bar** (both editors), the **editor tab bar** (VS Code's editor-title actions; a banner
-across the top of the editor in JetBrains), a single floating **review bubble** (VS Code's
-Comments API) parked over the current edit, and — new in 0.8.0 — the **Overview title bar**, where
-it rides alongside the name of the session under review and the bulk actions.
+**status bar** (both editors), the **editor tab bar** (VS Code's editor-title actions; the older editor
+banner in JetBrains, one `editorReviewSurface` setting away), a **floating review bar** parked over the
+current edit — since 0.10.0 in **both** editors, and the default surface in both — and — new in 0.8.0 —
+the **Overview title bar**, where it rides alongside the name of the session under review and the bulk
+actions.
+
+The two floating bars rest on different foundations. In JetBrains the bar is a real floating toolbar,
+registered on the platform's own `editorFloatingToolbarProvider` layer. VS Code exposes **no** floating-widget API to extensions — the workbench draws its own overlays on
+a private layer — so the extension uses the one interactive surface that *can* float over code, a comment
+thread, and gives it a bar form: no body, so the widget collapses to its header row, with a live title
+(`✦ Claude edit #12 · +8 −3 · Diff 2/5 · File 1/3`) and Keep · Undo · ⌃⌄ · ‹› · Diff · Details beside it.
+The result reads as a bar; the API limitation is unchanged. `editorReviewSurface` names the choice in both
+editors, with `floating` and `none` meaning the same thing in each: VS Code adds `bubble`, JetBrains adds
+`banner` and `both`. `claudeObservatory.pinnedPeek` governs the **bubble** only — VS Code's bar is a
+navigation bar, so it follows to the next pending edit whatever that setting says. JetBrains' bar follows
+on the shared **After keeping or reverting one edit…** setting instead, so turning that off leaves the bar
+where it is.
 
 ```text
 🔬 3  Search  ▲ Diff 1/2 ▼  ◀ File 1/3 ▶  ✓ Keep  ↩ Undo  ✓✓ Accept File  ✕ Reject File  Clear Resolved  Spotlight
@@ -435,7 +486,9 @@ steps the pending edits on **four review axes**, each a coarser grain than the l
 - **Folder** *(new)* — every changed folder; shows the directory and its file / edit totals, with
   **Accept Folder / Reject Folder**, which act on that folder's edits alone.
 - **Prompt** — your own asks, in order; shows what each one produced, with **Review · Accept Prompt ·
-  Reject Prompt**.
+  Reject Prompt · Rewind**. Rewind is the one that reaches past the ask it names: it reverts every
+  unreviewed edit from that ask onward, which is what "put the tree back to before I asked for this"
+  actually requires.
 
 Since 0.8.9 the axes row is **icons only** in both editors, each button naming its verb on hover. Every
 axis already labels itself in its own `n/m` counter — `Diff 1/2`, `File 3/126`, `Folder 1/23`,
@@ -466,7 +519,8 @@ and each action is correlated with its **result** (`ok` / `error`). File-edit ac
 their store record**, so you can jump from the trace into the review in one click.
 
 Since 0.9.0 **Actions** lives in the **Observatory Timeline** panel alongside Prompts and Observations
-(it used to sit in the bottom panel). It's **grouped by category** and — new — every group is
+(it used to sit in the bottom panel); since 0.10.0 it is a **tab** of that one window in both editors,
+rather than a view of its own in VS Code. It's **grouped by category** and — new — every group is
 **collapsed by default**, so you expand only the ones you care about:
 
 ```text
@@ -582,11 +636,14 @@ one's **change-map**. The left nav groups its rows under five tabs — **Fleet**
 [Processes](#processes--the-background-shells-still-running)) and **Sessions** (every Claude Code
 session for this workspace; see [Sessions](#sessions--every-session-in-this-workspace)) — each of which
 opens with a one-line description of what it lists; every tab and change-map section also carries a
-hover description. Selecting a row in the first four opens that thing's **feed** below the change-map
+hover description. A **Group tabs** toggle beside the tab strip puts the related ones side by side as
+columns instead — **Sessions · Fleet** and **Workflows · Tasks · Processes** — each resizable by dragging
+the divider between two of them and foldable to a named rail. Selecting a row in the first four opens that thing's **feed** below the change-map
 (see [Feed](#feed--what-one-thing-is-doing-right-now)); selecting a **Sessions** row pins what the whole
 observatory reviews. A **title bar** across the top carries a **session
-selector** (showing the session by its name), the combined **two-row review nav bar**, and the
-session-wide bulk actions. It answers two questions at once — *what is my whole fleet doing right now*
+label** (the session by its name — a label, not a control: the Sessions tab and the Timeline's selector
+are where the session changes), the combined **two-row review nav bar**, and the session-wide bulk
+actions. It answers two questions at once — *what is my whole fleet doing right now*
 and *where did the work land, what still needs my eyes*.
 
 ![Overview — the master-detail panel: a left nav listing the running agents, workflow runs, tasks and sessions, feeding the right-hand change-map detail (Folders strip, Files ledger, summary bar), under a two-row title bar with the review nav bar and bulk actions](media/overview-tabs.png)

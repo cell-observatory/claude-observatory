@@ -28,6 +28,9 @@ class LensRenderer(
     private val project: Project,
     private val session: String,
     private val rec: EditRecord,
+    /** This edit's line churn from `locate --json`. Absent from a pre-0.10 CLI, and from any placement
+     *  that renders nothing, so the lens simply omits the churn rather than printing a fabricated 0/0. */
+    private val delta: com.cellobservatory.observatory.model.Delta? = null,
 ) : EditorCustomElementRenderer {
 
     private class Seg(val text: String, val run: (() -> Unit)?) {
@@ -48,10 +51,14 @@ class LensRenderer(
         edit + file
     }
 
+    /** "+A −R" for this edit, in the VS Code lens's exact spacing (two spaces after the id). Empty when
+     *  the CLI did not report a delta. */
+    private val churn: String = delta?.let { "  +${it.added} −${it.removed}" } ?: ""
+
     private val segments: List<Seg> = buildList {
         // "✨ #N" opens the inline diff (mirrors the gutter star); then the spaced-out quick actions.
         // Reasoning is NOT shown here — it lives in the diff's title. Icons/spacing match VS Code.
-        add(Seg("✦ #${rec.id}$posLabel  view changes") { Diffs.show(project, session, rec) })
+        add(Seg("✦ #${rec.id}$churn$posLabel  view changes") { Diffs.show(project, session, rec) })
         add(Seg("      ", null))
         add(Seg("✓ Keep") { ReviewOps.keep(project, session, rec.id) })
         add(Seg("      ", null))
