@@ -324,7 +324,7 @@ in the others instantly. The layout is deliberately identical; only the host chr
 
 | Surface | VS Code | PyCharm / JetBrains |
 | --- | --- | --- |
-| Install | `code --install-extension claude-observatory.vsix` | `./scripts/install-jetbrains.sh` (or Install Plugin from Disk) |
+| Install | `claude-observatory install-extensions` installs into both families at once (or `code --install-extension claude-observatory.vsix`) | `claude-observatory install-extensions` (or `./scripts/install-jetbrains.sh`, or Install Plugin from Disk) |
 | Auto-update | daily background check → one-click **Update now** | add the [plugin repository](../packages/jetbrains/README.md#auto-updates) once → IDE-native updates |
 | **Edits · Diffs · File History** (the sidebar) | **Observatory Traces** — microscope in the Activity Bar, badged with the pending count | **Observatory Traces** tool window, left stripe |
 | **Overview · Stats** (the bottom panel) | **Observatory Dashboards** bottom panel, side by side (like Terminal/Problems). The Overview can also be docked as a full-height **editor tab** — palette: *Open Overview in Editor*, or set `claudeObservatory.overviewLocation`; whichever host holds it drives the refresh, never both | **Observatory Dashboards** tool window, bottom stripe |

@@ -97,8 +97,18 @@ tokens** — capture runs in local hooks, entirely outside the model loop.
 (requires Node.js 18+; no build toolchain, no accounts):
 
 ```bash
+# macOS / Linux (and Windows via Git Bash)
 curl -fsSL https://raw.githubusercontent.com/cell-observatory/claude-observatory/main/scripts/bootstrap.sh | bash
 ```
+
+```powershell
+# Windows — native, no bash needed
+irm https://raw.githubusercontent.com/cell-observatory/claude-observatory/main/install.ps1 | iex
+```
+
+Both install the CLI and then the extensions for whatever editors are on the machine — VS Code family
+and/or JetBrains. Add `--channel dev` (PowerShell: `-Channel dev`) for the rolling
+[pre-release channel](#keeping-up-to-date); the choice is remembered, so later updates follow it.
 
 **2 — Wire the capture hooks** — with **Claude Code closed** (it snapshots hooks at session start):
 
@@ -366,6 +376,7 @@ claude-observatory export          # the FULL session trace as one JSON document
 claude-observatory clean           # GC orphaned blobs + superseded cache files; --resolved [--under <path> | --ids <a,b,c>] | --completed [--stale <Nd>] [--dry-run] | --drop <id> | --older-than 30d | --all | --phantoms (Windows path-case pairs, #43)
 claude-observatory resolve         # finish a session in one step: accept every pending edit, then drop its records; --json
 claude-observatory warm            # pre-build the change-map caches for sessions active recently, so switching to one is instant (--since 24h); skips the session under review; --json
+claude-observatory install-extensions  # install the editor extensions into the editors on this machine (VS Code family + JetBrains); --check to only report
 claude-observatory update          # update the CLI + installed editor extensions + the bundled status line (when installed) to the latest release (--check to only report)
 claude-observatory uninstall       # remove the capture hooks (--all also reverts the bundled status line)
 claude-observatory version [--check]  # print the installed version; --check also shows the latest release
@@ -409,9 +420,13 @@ on). Beyond that, each surface can keep **itself** current:
   (pre-release channel: the same path under `releases/download/dev-latest/` instead of
   `releases/latest/download/`).
 
-**Platforms:** macOS and Linux work as-is. On **Windows**, the CLI, capture hooks, and both editor plugins
-run natively (npm's `.cmd` shims are handled) — but the installer and the bundled status line are bash, so
-run them from **Git Bash** (`jq` needed for the status line) or use WSL. Windows paths are canonicalized
+**Platforms:** macOS and Linux work as-is. On **Windows**, install with `install.ps1` (native PowerShell —
+no bash, no WSL); the CLI, capture hooks, editor extensions and `update` all run natively, and npm's
+`.cmd` shims are handled through one launcher (`packages/core/src/spawn.ts`). Piping the bash one-liner
+into PowerShell is the one thing to avoid: with WSL installed it silently installs everything *inside*
+WSL, where Claude Code on the Windows side cannot see it. The **bundled status line is the exception** —
+it is a bash script that parses its input with `jq` (and uses `python3` for the token estimates), so the
+Usage bars need Git Bash + `jq` (`winget install jqlang.jq`) on PATH; everything else works without them. Windows paths are canonicalized
 for drive-letter case everywhere (capture, lookups, both editors); a store written by v0.8.9 or earlier
 may hold phantom `+N −0` / `+0 −N` edit pairs from that bug — they heal on read, and
 `claude-observatory clean --phantoms` removes them for good (#43).
@@ -419,7 +434,8 @@ may hold phantom `+N −0` / `+0 −N` edit pairs from that bug — they heal on
 **Build from source (contributors):**
 
 ```bash
-./install.sh                 # deps → build → CLI on PATH → extension → status line → offer `init`
+./install.sh                 # deps → build → CLI on PATH → extensions → status line → offer `init`
+./install.sh --jetbrains     # also build + install the JetBrains plugin (needs JDK 21 + Gradle)
 ```
 
 Or step by step:

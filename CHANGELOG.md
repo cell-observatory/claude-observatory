@@ -10,6 +10,66 @@ Per-tag release artifacts and auto-generated notes are on the
 <!-- Every feature/fix PR into `dev` appends its line here; a promote renames this section to the
      release version and opens a fresh one. -->
 
+### Fixed
+- **Windows: `update` never updated the editor extension, and said the wrong thing about why**
+  ([#45](https://github.com/cell-observatory/claude-observatory/issues/45)). Reported as a Node
+  deprecation warning in the failure toast; the warning was not the bug, it was what got displayed
+  *instead* of the bug. Three separate defects, all in how child processes were spawned:
+  - `code --install-extension` (and the 0.8.6 publisher cleanup) were spawned **without a shell**, so
+    on Windows they could never run at all: libuv only extension-searches `.com`/`.exe`, and Node
+    refuses to launch a `.cmd`/`.bat` without one. The extension half of `update` had therefore never
+    worked on Windows. The same omission made **Setup check (doctor)** from the VS Code palette always
+    report "is the claude-observatory CLI installed?", and **Start Demo Mode** always warn "the CLI is
+    not on PATH" — both on perfectly good installs.
+  - `shell: true` with an args array concatenates the arguments **unquoted**, so `--root C:\Users\First
+    Last\repo` arrived as two arguments and the **Overview, Prompts and Stats panels silently returned
+    nothing** for anyone whose workspace path contains a space. Nobody had reported this; nothing
+    surfaces it.
+  - The failure message preferred `stderr` over `stdout`, and the CLI wrote its reason to stdout while
+    stderr held only the deprecation warning. Now `core.cliFailureMessage` drops runtime warning noise,
+    prefers the real reason, and falls back to the *tail* of stdout rather than the head of a progress
+    log — mirrored in the JetBrains plugin so both editors behave the same.
+
+  Every child process in the project now goes through one launcher
+  (`packages/core/src/spawn.ts`) that builds a single quoted command string for `cmd.exe` instead of
+  passing an args array alongside `shell: true` — which is both the DEP0190 deprecation and the
+  unquoted-concatenation bug. A test walks the source tree and fails if any file reaches
+  `child_process` directly. `node 24` joined the CI matrix because DEP0190 is not a runtime warning on
+  20 or 22, so no existing lane could have caught this.
+- **Windows: the bundled status line was invisible to `update`, and `uninstall --all` orphaned it.**
+  The installer is bash, so it wrote `bash /c/Users/…/statusline.sh`; detection compared that against a
+  native `C:\Users\…\statusline.sh`, which never matches. `update` silently never refreshed the status
+  line, and `uninstall --all` deleted the script while leaving `settings.json` pointing at it, so Claude
+  Code errored on every render. Drive prefixes are now folded for Git Bash, WSL and Cygwin, and the
+  script is only removed once nothing references it. The installer also **quotes** the path it writes —
+  unquoted, any config dir containing a space (every Windows box with a spaced username) produced a
+  command Claude Code ran as `bash` with two arguments, on every platform.
+
+### Added
+- **`claude-observatory install-extensions`** — installs the editor extensions into whatever editors are
+  on the machine (VS Code family and/or JetBrains), the counterpart to `update`, which refreshes only
+  what is already installed. `--check [--json]` reports without installing;
+  `--vsix`/`--jetbrains-zip` install local build outputs with no network; `--channel stable|dev` picks
+  and persists the release channel.
+- **A native Windows installer, `install.ps1`** — `irm …/install.ps1 | iex`. There was no bash-free
+  install path before: piping the bash one-liner into PowerShell fails, or with WSL present silently
+  installs everything *inside* WSL where Claude Code cannot see it. It verifies the CLI tarball's
+  sha256 before npm runs install scripts, and is explicit that the bundled status line still needs
+  Git Bash + `jq`.
+- **Channel choice at install time.** `scripts/bootstrap.sh --channel stable|dev` and
+  `install.ps1 -Channel dev`; the choice is persisted, so later updates follow it.
+
+### Changed
+- **Every installer now delegates to the CLI.** `scripts/bootstrap.sh` previously curled the `.vsix`
+  itself with no integrity check and, for JetBrains, only downloaded the zip and printed
+  "Settings → Plugins → Install Plugin from Disk" — so the one-command installer never actually
+  installed the JetBrains plugin. `install.sh` ignored JetBrains entirely (it now takes `--jetbrains`),
+  and `scripts/install-jetbrains.sh` reimplemented IDE detection in bash around `unzip`, which only
+  worked from Git Bash on Windows. All of it is one `install-extensions` call now, which also means the
+  release assets get the sha256 verification the bash downloads never had.
+- **`npm run build:vscode` builds core first.** The extension bundles core from `core/dist`, so editing
+  the launcher and running the natural rebuild shipped the previous one, silently.
+
 ## [0.9.1] — 2026-07-29
 
 ### Fixed

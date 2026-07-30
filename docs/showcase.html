@@ -843,6 +843,9 @@
     <h2>One-command install</h2>
     <p class="lede">Install once, run Claude Code, and every edit is captured for review.</p>
     <div class="cmd"><span class="pr">$</span><code>curl -fsSL https://raw.githubusercontent.com/cell-observatory/claude-observatory/main/scripts/bootstrap.sh | bash</code><button class="copy" data-copy="curl -fsSL https://raw.githubusercontent.com/cell-observatory/claude-observatory/main/scripts/bootstrap.sh | bash">Copy</button></div>
+    <p class="stay-current" style="margin-top:10px;margin-bottom:0">macOS and Linux — and Windows from Git&nbsp;Bash.</p>
+    <div class="cmd" style="margin-top:14px"><span class="pr">PS&gt;</span><code>irm https://raw.githubusercontent.com/cell-observatory/claude-observatory/main/install.ps1 | iex</code><button class="copy" data-copy="irm https://raw.githubusercontent.com/cell-observatory/claude-observatory/main/install.ps1 | iex">Copy</button></div>
+    <p class="stay-current" style="margin-top:10px">Windows, native PowerShell — no bash, no WSL. Either one installs the CLI and then the extensions for whatever editors are on the machine (VS&nbsp;Code family and/or JetBrains). Add <code>--channel dev</code> (PowerShell <code>-Channel dev</code>) to follow the rolling pre-release. On Windows the bundled status line is the one part that still needs Git&nbsp;Bash and <code>jq</code> — everything else runs natively.</p>
     <p class="stay-current" style="margin-top:22px">Then look around with no Claude session at all: <b>Claude Observatory: Start Demo Mode</b> from the VS&nbsp;Code command palette or JetBrains Find Action, or <code>claude-observatory demo</code> in the terminal. It replays a real session through the real capture pipeline and walks you through every panel; leaving removes every trace.</p>
     <div class="install-cta">
       <a class="btn primary" href="https://github.com/cell-observatory/claude-observatory#quickstart">Read the README</a>

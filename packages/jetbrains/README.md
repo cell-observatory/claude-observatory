@@ -21,18 +21,25 @@ JetBrains-specific.
 
 ## Install
 
-**From a GitHub Release:** download `claude-observatory-jetbrains-<ver>.zip` → Settings → Plugins →
-⚙ → **Install Plugin from Disk…** → restart.
+**With the CLI (any platform, no bash needed):**
+
+```bash
+claude-observatory install-extensions --jetbrains-only     # downloads + installs, then restart the IDE
+```
+
+**From a GitHub Release, by hand:** download `claude-observatory-jetbrains-<ver>.zip` → Settings →
+Plugins → ⚙ → **Install Plugin from Disk…** → restart.
 
 **From this repo:**
 
 ```bash
-./scripts/install-jetbrains.sh   # builds + installs into every JetBrains IDE it finds, then restart the IDE
+./scripts/install-jetbrains.sh   # builds, then installs via the CLI, then restart the IDE
 ```
 
-The script covers macOS (`~/Library/Application Support/JetBrains`), desktop Linux
-(`~/.local/share/JetBrains`), Windows via Git Bash (`%APPDATA%\JetBrains`), and JetBrains Remote
-Development backends (`~/.config/JetBrains/RemoteDev-*`), so it also works when run on an SSH host.
+IDE detection lives in the CLI, which covers macOS (`~/Library/Application Support/JetBrains`), desktop
+Linux (`~/.local/share/JetBrains`), Windows (`%APPDATA%\JetBrains` — natively, from PowerShell or cmd,
+not only Git Bash), and JetBrains Remote Development backends (`~/.config/JetBrains/RemoteDev-*`), so it
+also works when run on an SSH host.
 
 ## Auto-updates
 
