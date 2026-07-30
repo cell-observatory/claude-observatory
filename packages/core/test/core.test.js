@@ -8073,3 +8073,93 @@ test('statusline: the vendored installer keeps the fixes a sync would silently d
   assert.doesNotMatch(sh, /CMD="bash \$CLAUDE_DIR\/statusline\.sh"/, 'the unquoted upstream form must not come back');
   assert.match(sh, /winget install jqlang\.jq/, 'the jq error must name a Windows route');
 });
+
+test('install-extensions: detects an editor that does NOT yet have our extension (0.10.0)', () => {
+  // `update` refreshes only what is already installed — deliberately. This command is the other half,
+  // and the detection it needs is different: it must see a bare editor. Fake HOME, real dirs, no network.
+  const home = freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const env = { ...process.env, HOME: home, USERPROFILE: home, CLAUDE_OBSERVATORY_NO_UPDATE_CHECK: '1' };
+  const check = () => JSON.parse(cp.execFileSync('node', [CLI, 'install-extensions', '--check', '--json'], { env, encoding: 'utf8' }));
+
+  // A fake HOME isolates the extension DIRS but not PATH, so an editor whose CLI is genuinely on this
+  // machine still reports present — which is correct, and is the whole point of the `or` in
+  // editorPresent: installed-but-never-launched has a CLI and no extensions dir.
+  let d = check();
+  assert.deepEqual(d.jetbrains, [], 'no plugin dirs -> no JetBrains');
+  assert.ok(
+    d.vscode.every((r) => r.installed === null),
+    'under a fresh HOME nothing of ours is installed in any detected editor'
+  );
+
+  // An editor that has RUN but does not have our extension: the case `update` ignores and this acts on.
+  fs.mkdirSync(path.join(home, '.vscode', 'extensions'), { recursive: true });
+  d = check();
+  const vsc = () => d.vscode.find((r) => r.label === 'VS Code');
+  assert.ok(vsc(), 'an empty extensions dir is still a PRESENT editor');
+  assert.equal(vsc().present, true);
+  assert.equal(vsc().installed, null, 'and it reports our extension as not installed');
+
+  // Now give it our extension: same row, now with a version.
+  fs.mkdirSync(path.join(home, '.vscode', 'extensions', 'cell-observatory.claude-observatory-vscode-0.9.0'), { recursive: true });
+  d = check();
+  assert.equal(vsc().installed, '0.9.0', 'the installed version is read from the folder name');
+
+  // A JetBrains IDE with no plugin of ours — again, present and actionable.
+  const jb = path.join(home, 'Library', 'Application Support', 'JetBrains', 'PyCharm2026.1', 'plugins');
+  fs.mkdirSync(jb, { recursive: true });
+  d = check();
+  assert.equal(d.jetbrains.length, 1, 'a plugins dir is a present IDE even with no plugin of ours');
+  assert.equal(d.jetbrains[0].installed, null);
+
+  // The scope flags must agree with what a real run would do, or an installer acts on a wrong report.
+  const scoped = (flag) =>
+    JSON.parse(cp.execFileSync('node', [CLI, 'install-extensions', '--check', '--json', flag], { env, encoding: 'utf8' }));
+  assert.equal(scoped('--vscode-only').jetbrains.length, 0, '--vscode-only hides the JetBrains surface');
+  assert.equal(scoped('--jetbrains-only').vscode.length, 0, '--jetbrains-only hides the VS Code surface');
+
+  // Bad input fails loudly rather than installing something unintended.
+  for (const args of [['--vsix', path.join(home, 'nope.vsix')], ['--channel'], ['--channel', 'bogus']]) {
+    assert.throws(
+      () => cp.execFileSync('node', [CLI, 'install-extensions', ...args], { env, encoding: 'utf8', stdio: 'pipe' }),
+      /no such file|requires a value|unknown channel/,
+      `install-extensions ${args.join(' ')} must fail loudly`
+    );
+  }
+});
+
+test('install-extensions: installs a LOCAL artifact into a bare JetBrains IDE (0.10.0)', () => {
+  // The from-source path install.sh uses: --jetbrains-zip, no network, and it must install even though
+  // nothing of ours is there yet. Exercises zipToolReady + applyJetbrainsZip + the version sentinel.
+  const home = freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const env = { ...process.env, HOME: home, USERPROFILE: home, CLAUDE_OBSERVATORY_NO_UPDATE_CHECK: '1' };
+  const jb = path.join(home, 'Library', 'Application Support', 'JetBrains', 'PyCharm2026.1', 'plugins');
+  fs.mkdirSync(jb, { recursive: true });
+
+  // A plugin zip shaped like the real asset: claude-observatory-jetbrains/lib/<name>-<version>.jar
+  const stage = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-jbzip-'));
+  fs.mkdirSync(path.join(stage, 'claude-observatory-jetbrains', 'lib'), { recursive: true });
+  fs.writeFileSync(path.join(stage, 'claude-observatory-jetbrains', 'lib', 'claude-observatory-jetbrains-9.9.9.jar'), 'x');
+  const zip = path.join(stage, 'claude-observatory-jetbrains-v9.9.9.zip');
+  cp.execFileSync('zip', ['-qr', zip, 'claude-observatory-jetbrains'], { cwd: stage });
+
+  const out = cp.execFileSync('node', [CLI, 'install-extensions', '--jetbrains-only', '--jetbrains-zip', zip], {
+    env,
+    encoding: 'utf8',
+  });
+  assert.match(out, /JetBrains plugin →/, 'it reports the install');
+  const dir = path.join(jb, 'claude-observatory-jetbrains');
+  assert.ok(fs.existsSync(path.join(dir, 'lib', 'claude-observatory-jetbrains-9.9.9.jar')), 'the jar landed');
+  // A local artifact installs at the CLI's OWN version — no release is fetched in this mode at all,
+  // which is what makes install.sh's from-source path work offline.
+  // `--version` prints "claude-observatory <semver>", so take the semver out of it.
+  const cliVersion = /(\d+\.\d+\.\d+[^\s]*)/.exec(
+    cp.execFileSync('node', [CLI, '--version'], { env, encoding: 'utf8' })
+  )[1];
+  assert.equal(
+    fs.readFileSync(path.join(dir, '.observatory-version'), 'utf8').trim(),
+    cliVersion,
+    'the version sentinel is stamped, so a later `update` can tell what is installed'
+  );
+});

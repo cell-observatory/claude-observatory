@@ -2602,24 +2602,35 @@ function versionFromExtFolder(folderPath: string, folderName: string, id: string
   }
 }
 
-/** VS Code-family installs of our extension, detected by their extensions DIR (CLI-independent, like
- *  the JetBrains plugin dirs). `version` = the newest install folder for that editor (old or new id);
- *  `cli` = the resolved absolute CLI path to apply an update, or null if none was found; `hasOld` =
- *  an install under the pre-0.8.6 id is present and should be removed once the renamed one is in. */
-function vscodeInstalls(): { label: string; version: string; cli: string | null; extDirs: string[]; hasOld: boolean }[] {
+/** One row per VS Code-family editor, present on this machine or not. `version` = the newest install
+ *  folder of OUR extension for that editor (null when it does not have it yet — which is exactly the
+ *  case `install-extensions` acts on and `update` deliberately ignores); `extRoots` = its extension
+ *  dirs that actually exist; `cli` = the resolved CLI to drive an install, or null. */
+type EditorRow = {
+  label: string;
+  extDirs: string[];
+  extRoots: string[];
+  cli: string | null;
+  version: string | null;
+  hasOld: boolean;
+};
+
+function vscodeEditors(): EditorRow[] {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const fs = require('fs');
   const path = require('path');
   const os = require('os');
   const home = os.homedir();
-  const out: { label: string; version: string; cli: string | null; extDirs: string[]; hasOld: boolean }[] = [];
+  const out: EditorRow[] = [];
   for (const ed of VSCODE_EDITORS) {
     let best: string | null = null; // newest version across this editor's extension dirs
     let hasOld = false;
+    const extRoots: string[] = [];
     for (const rel of ed.extDirs) {
       const dir = path.join(home, rel);
       let entries: string[] = [];
       try { entries = fs.readdirSync(dir); } catch { continue; }
+      extRoots.push(dir); // readdir succeeded, so this editor has run here at least once
       for (const e of entries) {
         // VS Code names extension folders `<publisher>.<name>-<version>` (lowercased).
         const id = [VSCODE_EXT_ID, VSCODE_EXT_ID_OLD].find((i) => e.toLowerCase().startsWith(i + '-'));
@@ -2629,9 +2640,52 @@ function vscodeInstalls(): { label: string; version: string; cli: string | null;
         if (v && (best === null || core.isNewer(v, best))) best = v;
       }
     }
-    if (best !== null) out.push({ label: ed.label, version: best, cli: resolveEditorCli(ed.cli, ed.app, ed.winApp), extDirs: ed.extDirs, hasOld });
+    out.push({ label: ed.label, extDirs: ed.extDirs, extRoots, cli: resolveEditorCli(ed.cli, ed.app, ed.winApp), version: best, hasOld });
   }
   return out;
+}
+
+/** Is this editor on the machine at all? An extensions dir means it has RUN; a resolvable CLI means it
+ *  is installed but maybe never launched. Either counts — only the `cli !== null` subset is actionable. */
+function editorPresent(e: EditorRow): boolean {
+  return e.extRoots.length > 0 || e.cli !== null;
+}
+
+/** VS Code-family installs of OUR extension. Unchanged contract: `update` refreshes only editors that
+ *  already carry it, and never installs into one that does not. */
+function vscodeInstalls(): { label: string; version: string; cli: string | null; extDirs: string[]; hasOld: boolean }[] {
+  return vscodeEditors()
+    .filter((e) => e.version !== null)
+    .map((e) => ({ label: e.label, version: e.version as string, cli: e.cli, extDirs: e.extDirs, hasOld: e.hasOld }));
+}
+
+/** Install `vsixPath` into each target with `--install-extension --force`, handle the 0.8.6 publisher
+ *  cleanup, and report per editor. Returns how many succeeded. Shared by `update` (refresh what is
+ *  there) and `install-extensions` (put it where it is missing) so the two cannot drift. */
+function applyVsix(targets: EditorRow[], vsixPath: string, version: string): number {
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  let installed = 0;
+  for (const h of targets) {
+    // `h.cli` is `code`/`cursor`/… — a bare name on PATH, or an explicit `…\bin\code.cmd` on
+    // Windows. BOTH are unspawnable there without cmd.exe, which is why this never once worked
+    // on Windows before the launcher: libuv only extension-searches .com/.exe.
+    const r = core.spawnToolSync(h.cli as string, ['--install-extension', vsixPath, '--force'], { stdio: 'inherit' });
+    if (r.status === 0) {
+      process.stdout.write(c.green('✓ ') + `${h.label} extension ${h.version ?? '(new)'} → ${version}\n`);
+      installed++;
+      // Publisher change (0.8.6): drop the old-id install, but only once the renamed extension is
+      // confirmed on disk — a --force reinstall of a pre-rename .vsix must not uninstall itself.
+      if (h.hasOld && hasExtFolder(h.extDirs, VSCODE_EXT_ID)) {
+        const u = core.spawnToolSync(h.cli as string, ['--uninstall-extension', VSCODE_EXT_ID_OLD], { stdio: 'pipe' });
+        if (u.status === 0) process.stdout.write(c.dim(`  removed the old ${VSCODE_EXT_ID_OLD} install (publisher changed in 0.8.6).\n`));
+        else process.stdout.write(c.yellow(`  ⚠ ${h.label} still has the pre-0.8.6 install — uninstall the older "Claude Observatory" entry in its Extensions view.\n`));
+      }
+    } else {
+      process.stdout.write(c.yellow(`  ⚠ ${h.label} --install-extension failed — install the .vsix manually from the release\n`));
+    }
+  }
+  if (installed) process.stdout.write(c.dim('  fully quit the editor (⌘Q) once so the activity-bar icon refreshes.\n'));
+  return installed;
 }
 
 /** Whether any of an editor's extension dirs (home-relative) holds an install folder of `id`. */
@@ -2680,26 +2734,11 @@ async function refreshVscodeExtension(
       process.stdout.write(c.yellow(`  ⚠ release v${latest} has no .vsix asset — could not update the VS Code extension\n`));
     } else {
       const dest = await downloadAsset(vsix);
-      for (const h of actionable) {
-        // `h.cli` is `code`/`cursor`/… — a bare name on PATH, or an explicit `…\bin\code.cmd` on
-        // Windows. BOTH are unspawnable there without cmd.exe, which is why this never once worked
-        // on Windows before the launcher: libuv only extension-searches .com/.exe.
-        const r = core.spawnToolSync(h.cli as string, ['--install-extension', dest, '--force'], { stdio: 'inherit' });
-        if (r.status === 0) {
-          process.stdout.write(c.green('✓ ') + `${h.label} extension ${h.version} → ${latest}\n`);
-          installed++;
-          // Publisher change (0.8.6): drop the old-id install, but only once the renamed extension is
-          // confirmed on disk — a --force reinstall of a pre-rename .vsix must not uninstall itself.
-          if (h.hasOld && hasExtFolder(h.extDirs, VSCODE_EXT_ID)) {
-            const u = core.spawnToolSync(h.cli as string, ['--uninstall-extension', VSCODE_EXT_ID_OLD], { stdio: 'pipe' });
-            if (u.status === 0) process.stdout.write(c.dim(`  removed the old ${VSCODE_EXT_ID_OLD} install (publisher changed in 0.8.6).\n`));
-            else process.stdout.write(c.yellow(`  ⚠ ${h.label} still has the pre-0.8.6 install — uninstall the older "Claude Observatory" entry in its Extensions view.\n`));
-          }
-        } else {
-          process.stdout.write(c.yellow(`  ⚠ ${h.label} --install-extension failed — install the .vsix manually from the release\n`));
-        }
-      }
-      if (installed) process.stdout.write(c.dim('  fully quit the editor (⌘Q) once so the activity-bar icon refreshes.\n'));
+      installed = applyVsix(
+        actionable.map((h) => ({ label: h.label, extDirs: h.extDirs, extRoots: [], cli: h.cli, version: h.version, hasOld: h.hasOld })),
+        dest,
+        latest
+      );
     }
   }
   // 'blocked' when any stale install couldn't be applied (no CLI, no asset, or a failed install).
@@ -2826,24 +2865,38 @@ async function refreshJetbrainsPlugin(
     process.stdout.write(c.green('✓ ') + `JetBrains plugin up to date (${latest})\n`);
     return 'current';
   }
-  if (process.platform !== 'win32' && !onPath('unzip')) {
-    process.stdout.write(c.yellow(`  ⚠ JetBrains plugin is out of date but \`unzip\` was not found — can't update it (install unzip, then re-run)\n`));
-    return 'blocked';
-  }
+  if (!zipToolReady()) return 'blocked';
   const zip = assets.find((a) => /jetbrains.*\.zip$/i.test(a.name));
   if (!zip) {
     process.stdout.write(c.yellow(`  ⚠ release v${latest} has no JetBrains .zip asset — could not update the plugin\n`));
     return 'blocked';
   }
   const dest = await downloadAsset(zip);
+  const installed = applyJetbrainsZip(stale, dest, latest);
+  return installed === stale.length ? 'updated' : 'blocked'; // any dir that failed to extract → surface it
+}
+
+/** The precondition for unzipping into a plugin dir. Windows uses PowerShell's Expand-Archive, so only
+ *  POSIX needs `unzip`. Prints the fix when it is missing — never a silent skip. */
+function zipToolReady(): boolean {
+  if (process.platform === 'win32' || onPath('unzip')) return true;
+  process.stdout.write(c.yellow(`  ⚠ \`unzip\` was not found — can't install the JetBrains plugin (install unzip, then re-run)\n`));
+  return false;
+}
+
+/** Unzip `zipPath` into each IDE plugin dir, stamp the version sentinel, report per dir. Returns how
+ *  many succeeded. Shared by `update` and `install-extensions`. */
+function applyJetbrainsZip(dirs: string[], zipPath: string, version: string): number {
+  const fs = require('fs');
+  const path = require('path');
   let installed = 0;
-  for (const d of stale) {
+  for (const d of dirs) {
     const pluginDir = path.join(d, JB_PLUGIN_DIRNAME);
     try {
       fs.rmSync(pluginDir, { recursive: true, force: true }); // drop files gone from the new build
-      if (!extractZip(dest, d)) throw new Error('extract failed');
-      fs.writeFileSync(path.join(pluginDir, JB_VERSION_SENTINEL), latest);
-      process.stdout.write(c.green('✓ ') + `JetBrains plugin → ${latest} (${d})\n`);
+      if (!extractZip(zipPath, d)) throw new Error('extract failed');
+      fs.writeFileSync(path.join(pluginDir, JB_VERSION_SENTINEL), version);
+      process.stdout.write(c.green('✓ ') + `JetBrains plugin → ${version} (${d})\n`);
       installed++;
     } catch (e: any) {
       process.stdout.write(c.yellow(`  ⚠ could not install the JetBrains plugin into ${d}: ${e?.message || e}\n`));
@@ -2853,7 +2906,7 @@ async function refreshJetbrainsPlugin(
     process.stdout.write(c.dim('  fully restart the IDE (⌘Q → reopen) — a running JVM can’t hot-swap plugin classes.\n'));
     process.stdout.write(jetbrainsAutoUpdateHint());
   }
-  return installed === stale.length ? 'updated' : 'blocked'; // any dir that failed to extract → surface it
+  return installed;
 }
 
 /**
@@ -2876,6 +2929,159 @@ async function fetchReleases(): Promise<any[]> {
 }
 
 const CHANNEL_LABEL = { stable: 'stable', dev: 'pre-release (dev)' } as const;
+
+/**
+ * `install-extensions` — put the editor extensions ON this machine, into whatever editors are actually
+ * here. The counterpart to `update`, which deliberately refreshes only what is ALREADY installed and
+ * never adds a new install.
+ *
+ * It exists so the installers stop reimplementing editor detection in bash. `bootstrap.sh` used to
+ * curl the .vsix itself and, for JetBrains, only download the zip and print "Settings → Plugins →
+ * Install Plugin from Disk"; `install.sh` ignored JetBrains entirely; neither had a Windows path at
+ * all. All of that is one call to this command now, which means it also works on Windows and gets the
+ * release-asset sha256 verification (assertDigest) that the bash download never had.
+ *
+ * Two worlds:
+ *   • no artifact flags  → download from the release for `--channel` (bootstrap.sh, install.ps1)
+ *   • --vsix/--jetbrains-zip → use these local build outputs, no network (install.sh from source)
+ * A locally supplied artifact ALWAYS installs: you just built it, and reading a version out of a
+ * .vsix's inner package.json to compare would be work for no benefit.
+ */
+async function cmdInstallExtensions(args: string[]): Promise<void> {
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  const fs = require('fs');
+  const path = require('path');
+  const checkOnly = args.includes('--check');
+  const asJson = args.includes('--json');
+  const force = args.includes('--force');
+  // flagValue returns UNDEFINED when absent, so normalise: `!== null` on `string | undefined` is
+  // always true, which would have put every plain run into local-artifact mode with no file to use.
+  const vsixArg = flagValue(args, '--vsix') ?? null;
+  const zipArg = flagValue(args, '--jetbrains-zip') ?? null;
+  const only = args.includes('--vscode-only') ? 'vscode' : args.includes('--jetbrains-only') ? 'jetbrains' : 'both';
+  for (const [flag, v] of [['--vsix', vsixArg], ['--jetbrains-zip', zipArg]] as const) {
+    if (v !== null && !fs.existsSync(v)) fail(`${flag} ${v}: no such file`);
+  }
+
+  // --channel means the same thing it does on `update`: PERSIST the choice, so the next `update` follows
+  // the channel you installed from instead of silently pulling you back to stable.
+  const chI = args.indexOf('--channel');
+  const chRaw = flagValue(args, '--channel');
+  if (chI >= 0 && !chRaw) fail('`install-extensions --channel <stable|dev>` requires a value');
+  const requested = chRaw ? core.normalizeChannel(chRaw) : null;
+  if (chRaw && !requested) fail(`unknown channel "${chRaw}" — use stable or dev (pre-release)`);
+  const channel = requested ?? core.getUpdateChannel();
+
+  const editors = vscodeEditors().filter(editorPresent);
+  const jbDirs = jetbrainsPluginDirs();
+  const local = vsixArg !== null || zipArg !== null;
+
+  // Resolve the release only when we actually need to download something.
+  let latest = version();
+  let assets: ReleaseAsset[] = [];
+  const needRelease = !local && !(checkOnly && asJson);
+  if (needRelease || (checkOnly && !local)) {
+    const rel = core.resolveReleaseFromList(await fetchReleases(), channel);
+    const v = core.versionOfRelease(rel as any);
+    if (!v) fail(`no ${CHANNEL_LABEL[channel]} release found to install from.`);
+    latest = v;
+    assets = ((rel as any)?.assets ?? []) as ReleaseAsset[];
+  }
+
+  if (checkOnly) {
+    // --check honours the scope flags too, or `--check --vscode-only` would report a surface the real
+    // run is about to skip — the kind of mismatch an installer script would then act on.
+    const payload = {
+      version: latest,
+      channel,
+      vscode: only === 'jetbrains' ? [] : editors.map((e) => ({ label: e.label, present: true, cli: e.cli, installed: e.version, actionable: e.cli !== null })),
+      jetbrains: only === 'vscode' ? [] : jbDirs.map((d) => ({ dir: d, installed: jbInstalledVersion(path.join(d, JB_PLUGIN_DIRNAME)), actionable: true })),
+    };
+    if (asJson) return emitJson(payload);
+    process.stdout.write(`channel: ${CHANNEL_LABEL[channel]}   installing: ${latest}\n`);
+    if (only !== 'jetbrains' && !editors.length) process.stdout.write(c.dim('VS Code family: no editor detected\n'));
+    for (const e of only === 'jetbrains' ? [] : editors)
+      process.stdout.write(
+        (e.cli ? c.green('• ') : c.yellow('⚠ ')) +
+          `${e.label}: ${e.version ? `has ${e.version}` : 'extension not installed'}` +
+          (e.cli ? '' : " — no CLI found, can't install into it") +
+          '\n'
+      );
+    if (only !== 'vscode' && !jbDirs.length) process.stdout.write(c.dim('JetBrains: no IDE detected\n'));
+    for (const d of only === 'vscode' ? [] : jbDirs) {
+      const v = jbInstalledVersion(path.join(d, JB_PLUGIN_DIRNAME));
+      process.stdout.write(c.green('• ') + `JetBrains: ${v ? `has ${v}` : 'plugin not installed'} (${d})\n`);
+    }
+    return;
+  }
+
+  if (requested !== null && requested !== core.getUpdateChannel()) {
+    core.setUpdateChannel(requested);
+    process.stdout.write(c.green('✓ ') + `following the ${CHANNEL_LABEL[requested]} channel\n`);
+  }
+
+  let did = 0;
+  let blocked = 0;
+
+  if (only !== 'jetbrains') {
+    const actionable = editors.filter((e) => e.cli && (force || vsixArg !== null || e.version !== latest));
+    const noCli = editors.filter((e) => !e.cli);
+    for (const e of noCli) {
+      // Never a silent skip: the editor is here, we just cannot drive it.
+      process.stdout.write(
+        c.yellow('  ⚠ ') +
+          `${e.label} is installed but its CLI wasn't found — can't install into it.\n` +
+          c.dim(`    Fix: in ${e.label}, ⇧⌘P → "Shell Command: Install 'code' command in PATH", then re-run.\n`)
+      );
+      blocked++;
+    }
+    if (!actionable.length && !noCli.length) process.stdout.write(c.dim('VS Code family: no editor detected — skipped.\n'));
+    else if (!actionable.length) process.stdout.write(c.green('✓ ') + `VS Code family already at ${latest}\n`);
+    else {
+      let src = vsixArg;
+      if (src === null) {
+        const vsix = assets.find((a) => /\.vsix$/i.test(a.name));
+        if (!vsix) fail(`release v${latest} has no .vsix asset to install.`);
+        src = await downloadAsset(vsix!);
+      }
+      const n = applyVsix(actionable, src, latest);
+      did += n;
+      blocked += actionable.length - n;
+    }
+  }
+
+  if (only !== 'vscode') {
+    if (!jbDirs.length) process.stdout.write(c.dim('JetBrains: no IDE detected — skipped.\n'));
+    else if (!zipToolReady()) blocked++;
+    else {
+      const targets = jbDirs.filter((d) => {
+        if (force || zipArg !== null) return true;
+        return jbInstalledVersion(path.join(d, JB_PLUGIN_DIRNAME)) !== latest;
+      });
+      if (!targets.length) process.stdout.write(c.green('✓ ') + `JetBrains plugin already at ${latest}\n`);
+      else {
+        let src = zipArg;
+        if (src === null) {
+          const zip = assets.find((a) => /jetbrains.*\.zip$/i.test(a.name));
+          if (!zip) fail(`release v${latest} has no JetBrains .zip asset to install.`);
+          src = await downloadAsset(zip!);
+        }
+        const n = applyJetbrainsZip(targets, src, latest);
+        did += n;
+        blocked += targets.length - n;
+      }
+    }
+  }
+
+  if (blocked) {
+    // Same rule as `update`: a surface we could not do is a FAILURE, reported on stderr where an
+    // editor or a CI log will actually find it.
+    process.stderr.write(c.yellow('⚠ ') + `${blocked} surface(s) could not be installed — see the notes above.\n`);
+    process.exitCode = 1;
+    return;
+  }
+  if (!did) process.stdout.write(c.green('✓ ') + 'nothing to install — every detected editor is current.\n');
+}
 
 async function cmdUpdate(args: string[]): Promise<void> {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
@@ -3054,6 +3260,10 @@ function usage(): void {
       `  status               show hooks + hook-path health + session + edit counts\n` +
       `  doctor [--json]      diagnose setup (hooks, PATH, config dir, session, status line) with fixes;\n` +
       `                       --markdown (--md) emits the report as Markdown\n` +
+      `  install-extensions [--check] [--json] [--force] [--channel stable|dev]\n` +
+      `                       install the editor extensions into whatever editors are on this machine\n` +
+      `                       (VS Code family + JetBrains); --vsix/--jetbrains-zip use local build\n` +
+      `                       outputs instead of the release; --check reports without installing\n` +
       `  update [--check] [--cli-only] [--force] [--channel stable|dev]\n` +
       `                       update the CLI AND refresh the locally-installed editor extensions from\n` +
       `                       the followed release channel (VS Code via \`code --install-extension\`;\n` +
@@ -3441,6 +3651,9 @@ function main(): void {
       break;
     case 'update':
       cmdUpdate(rest).catch((e) => fail(String(e?.message || e)));
+      break;
+    case 'install-extensions':
+      cmdInstallExtensions(rest).catch((e) => fail(String(e?.message || e)));
       break;
     case '__update-check':
       // Internal, hidden: spawned detached by maybeCheckForUpdate to refresh the update cache.
