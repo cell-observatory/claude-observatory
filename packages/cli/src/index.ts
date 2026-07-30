@@ -156,6 +156,14 @@ function cmdUninstall(args: string[]): void {
     const sl = core.uninstallStatusline(target);
     if (sl.changed || sl.scriptRemoved) {
       process.stdout.write(c.green('✓ ') + `reverted the bundled status line${sl.changed ? ' (settings.json + script)' : ' (script)'}\n`);
+    } else if (sl.scriptKept) {
+      // Deliberately left, so say so: a settings entry still points at the script, and deleting it
+      // would leave Claude Code erroring on every render with nothing naming us.
+      process.stdout.write(
+        c.yellow('⚠ ') +
+          `left ${core.claudeConfigDir()}/statusline.sh in place — a statusLine in settings.json still points at it.\n` +
+          c.dim('  Remove that statusLine entry first, then re-run, or delete the script yourself.\n')
+      );
     }
   } catch {
     /* leave a custom/hand-edited statusLine alone */
@@ -2975,6 +2983,12 @@ async function cmdInstallExtensions(args: string[]): Promise<void> {
   const editors = vscodeEditors().filter(editorPresent);
   const jbDirs = jetbrainsPluginDirs();
   const local = vsixArg !== null || zipArg !== null;
+  // In LOCAL mode no release is fetched, so a family with no artifact has nothing to install FROM.
+  // Without this, `install-extensions --vsix build.vsix` on a box that also has a JetBrains IDE
+  // installed VS Code and then failed with "release v<cli version> has no JetBrains .zip asset" —
+  // naming a release it never requested. An explicit scope flag still wins.
+  const doVscode = only === 'vscode' || (only === 'both' && (!local || vsixArg !== null));
+  const doJetbrains = only === 'jetbrains' || (only === 'both' && (!local || zipArg !== null));
 
   // Resolve the release only when we actually need to download something.
   let latest = version();
@@ -3024,8 +3038,17 @@ async function cmdInstallExtensions(args: string[]): Promise<void> {
   let blocked = 0;
   let detected = 0; // surfaces that exist at all — distinguishes "nothing here" from "all current"
 
-  if (only !== 'jetbrains') {
-    const actionable = editors.filter((e) => e.cli && (force || vsixArg !== null || e.version !== latest));
+  if (doVscode) {
+    // isNewer, not `!==`: a string compare re-installed on every run and DOWNGRADED anything newer
+    // than the channel's release (install a dev build, then re-run plain). `update` has always used
+    // isNewer for the same decision. An explicit --channel is a SWITCH, so it installs that channel's
+    // newest in either direction — matching `update --channel`.
+    const stale = (installed: string | null) =>
+      force ||
+      vsixArg !== null ||
+      installed === null ||
+      (requested !== null ? installed !== latest : core.isNewer(latest, installed));
+    const actionable = editors.filter((e) => e.cli && stale(e.version));
     const noCli = editors.filter((e) => !e.cli);
     for (const e of noCli) {
       // Never a silent skip: the editor is here, we just cannot drive it.
@@ -3037,8 +3060,11 @@ async function cmdInstallExtensions(args: string[]): Promise<void> {
       blocked++;
     }
     detected += editors.length;
-    if (!actionable.length && !noCli.length) process.stdout.write(c.dim('VS Code family: no editor detected — skipped.\n'));
-    else if (!actionable.length) process.stdout.write(c.green('✓ ') + `VS Code family already at ${latest}\n`);
+    // Guard on whether an editor EXISTS, not on whether there is work: everything-already-current is
+    // the common case on a re-run (which is how the docs say to update), and it was reporting
+    // "no editor detected" — while the truthful line was reachable only on runs that also failed.
+    if (!editors.length) process.stdout.write(c.dim('VS Code family: no editor detected — skipped.\n'));
+    else if (!actionable.length && !noCli.length) process.stdout.write(c.green('✓ ') + `VS Code family already at ${latest}\n`);
     else {
       let src = vsixArg;
       if (src === null) {
@@ -3052,14 +3078,16 @@ async function cmdInstallExtensions(args: string[]): Promise<void> {
     }
   }
 
-  if (only !== 'vscode') {
+  if (doJetbrains) {
     detected += jbDirs.length;
     if (!jbDirs.length) process.stdout.write(c.dim('JetBrains: no IDE detected — skipped.\n'));
     else if (!zipToolReady()) blocked++;
     else {
       const targets = jbDirs.filter((d) => {
         if (force || zipArg !== null) return true;
-        return jbInstalledVersion(path.join(d, JB_PLUGIN_DIRNAME)) !== latest;
+        const v = jbInstalledVersion(path.join(d, JB_PLUGIN_DIRNAME));
+        if (v === null) return true;
+        return requested !== null ? v !== latest : core.isNewer(latest, v);
       });
       if (!targets.length) process.stdout.write(c.green('✓ ') + `JetBrains plugin already at ${latest}\n`);
       else {
@@ -3082,6 +3110,15 @@ async function cmdInstallExtensions(args: string[]): Promise<void> {
     process.stderr.write(c.yellow('⚠ ') + `${blocked} surface(s) could not be installed — see the notes above.\n`);
     process.exitCode = 1;
     return;
+  }
+  if (local) {
+    if (!doVscode && editors.length)
+      process.stdout.write(c.dim(`VS Code family: skipped — no --vsix given (${editors.length} editor(s) detected).\n`));
+    if (!doJetbrains && jbDirs.length)
+      process.stdout.write(
+        c.dim(`JetBrains: skipped — no --jetbrains-zip given (${jbDirs.length} IDE(s) detected).\n`) +
+          c.dim('  From a source checkout: ./install.sh --jetbrains\n')
+      );
   }
   if (!detected) {
     // An explicit scope is a statement of intent: you asked for THIS family, so finding none of it is a

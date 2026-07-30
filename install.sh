@@ -64,9 +64,12 @@ head "Installing the extensions into the editors on this machine"
 # installs into editors that do not have the extension yet (which `update` deliberately will not do).
 # Run this inside a Remote-SSH / devcontainer terminal and it targets the REMOTE host, which is exactly
 # where the extension has to live: it reads that host's ~/.claude.
+# No scope flag: in local-artifact mode the CLI acts only on families it was GIVEN an artifact for, and
+# names `./install.sh --jetbrains` for the one it skipped. Passing --vscode-only instead meant a
+# JetBrains-only machine got "no VS Code-family editor found" plus three lines of VS Code advice, and the
+# plugin it actually needed was never mentioned.
 INSTALL_ARGS=(--vsix "$VSIX")
 [ -n "$JB_ZIP" ] && INSTALL_ARGS+=(--jetbrains-zip "$JB_ZIP")
-[ "$WITH_JETBRAINS" = "1" ] || INSTALL_ARGS+=(--vscode-only)
 # Prefer this tree's freshly-built CLI: the global one was installed a moment ago, but if that step
 # failed (permissions) we should still be able to install the extensions.
 if [ -f "$PWD/packages/cli/dist/index.js" ]; then

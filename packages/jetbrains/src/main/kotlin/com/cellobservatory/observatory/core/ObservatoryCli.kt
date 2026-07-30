@@ -717,7 +717,7 @@ object ObservatoryCli {
             }
         }
         val r = run(args, workDir, timeoutMs = 300_000)
-        return r.ok to (if (r.ok) r.stdout else failureMessage(r.stdout, r.stderr, ""))
+        return r.ok to (if (r.ok) r.stdout else failureMessage(r.stdout, r.stderr, "the CLI exited ${r.exitCode} without saying why"))
     }
 
     /** Node's own chatter on stderr — `(node:123) [DEP0190] …` and the `(Use `node --trace…`)` hint
@@ -743,10 +743,13 @@ object ObservatoryCli {
      */
     fun failureMessage(stdout: String, stderr: String, fallback: String, maxLen: Int = 300): String {
         fun cap(s: String) = if (s.length > maxLen) s.take(maxLen - 1).trimEnd() + "…" else s
+        // trimEnd on every line, matching the TS: otherwise the two editors show the same failure with
+        // different trailing whitespace, and the parity this function exists for is only approximate.
         val realStderr =
-            stderr.lines().filter { it.isNotBlank() && !NODE_NOISE.containsMatchIn(it) }.joinToString("\n").trim()
+            stderr.lines().map { it.trimEnd() }.filter { it.isNotBlank() && !NODE_NOISE.containsMatchIn(it) }
+                .joinToString("\n").trim()
         if (realStderr.isNotEmpty()) return cap(realStderr)
-        val out = stdout.lines().filter { it.isNotBlank() }
+        val out = stdout.lines().map { it.trimEnd() }.filter { it.isNotBlank() }
         val flagged = out.filter { LOOKS_LIKE_TROUBLE.containsMatchIn(it) }
         if (flagged.isNotEmpty()) return cap(flagged.joinToString("\n").trim())
         if (out.isNotEmpty()) return cap(out.takeLast(3).joinToString("\n").trim())

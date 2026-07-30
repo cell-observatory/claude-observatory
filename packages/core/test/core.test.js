@@ -8016,6 +8016,8 @@ test('statusline(win32): OUR script is recognised through Git Bash / WSL / Cygwi
   assert.ok(ours('bash "/c/Users/First Last/.claude/statusline.sh"'), 'MSYS, quoted — what we now write');
   assert.ok(ours('bash /mnt/c/Users/First Last/.claude/statusline.sh'), 'WSL');
   assert.ok(ours('bash /cygdrive/c/Users/First Last/.claude/statusline.sh'), 'Cygwin');
+  assert.ok(ours('bash "/C/Users/First Last/.claude/statusline.sh"'), 'an UPPER-case MSYS drive folds too');
+  assert.ok(ours('bash /MNT/C/Users/First Last/.claude/statusline.sh'), 'and an upper-case WSL one');
   assert.ok(ours('bash "C:\\Users\\First Last\\.claude\\statusline.sh"'), 'native, quoted');
   assert.ok(ours('bash C:/Users/First Last/.claude/statusline.sh'), 'native with forward slashes');
   assert.ok(ours('bash c:\\users\\first last\\.claude\\statusline.sh'), 'NTFS is case-insensitive');
@@ -8047,14 +8049,27 @@ test('statusline: uninstall never orphans a statusLine that still points at the 
   const script = path.join(dir, 'statusline.sh');
   const sp = path.join(dir, 'settings.json');
 
-  // A statusLine that names statusline.sh but is NOT ours (a foreign path) — the shape that used to
-  // fall between the two gates.
+  // A foreign statusLine that merely SHARES the basename: leave their setting alone, but our script is
+  // still ours to remove. An earlier draft of this gate tested the bare basename and so kept our script
+  // alive forever here — a leak, and a silent one.
   fs.writeFileSync(script, '#!/bin/bash\necho x\n');
   fs.writeFileSync(sp, JSON.stringify({ statusLine: { type: 'command', command: 'bash /opt/theirs/statusline.sh' } }));
-  const r = core.uninstallStatusline(sp);
-  assert.equal(r.changed, false, "a foreign statusLine is left alone");
-  assert.equal(r.scriptRemoved, false, 'and the script it still references is NOT deleted');
-  assert.ok(fs.existsSync(script), 'the script survives, so nothing is orphaned');
+  let r = core.uninstallStatusline(sp);
+  assert.equal(r.changed, false, "a foreign statusLine's settings entry is left alone");
+  assert.equal(r.scriptRemoved, true, 'but OUR script is still removed — it is ours');
+  assert.equal(r.scriptKept, false);
+
+  // The reachable orphan case: a HAND-EDITED command that no path comparison can resolve. Deleting the
+  // script here leaves Claude Code erroring once a minute with nothing naming us, so it is kept AND
+  // reported (the CLI prints the reason; scriptKept is what it keys on).
+  for (const cmd of ['bash $HOME/.claude/statusline.sh', 'bash ~/.claude/statusline.sh']) {
+    fs.writeFileSync(script, '#!/bin/bash\necho x\n');
+    fs.writeFileSync(sp, JSON.stringify({ statusLine: { type: 'command', command: cmd } }));
+    r = core.uninstallStatusline(sp);
+    assert.equal(r.scriptRemoved, false, `${cmd}: not deleted out from under a live setting`);
+    assert.equal(r.scriptKept, true, `${cmd}: and the skip is reported, not silent`);
+    assert.ok(fs.existsSync(script));
+  }
 
   // And the normal case still works end to end: ours goes, settings and script both.
   fs.writeFileSync(sp, JSON.stringify({ statusLine: { type: 'command', command: `bash "${script}"` } }));
@@ -8079,7 +8094,15 @@ test('install-extensions: detects an editor that does NOT yet have our extension
   // and the detection it needs is different: it must see a bare editor. Fake HOME, real dirs, no network.
   const home = freshHome();
   delete process.env.CLAUDE_CONFIG_DIR;
-  const env = { ...process.env, HOME: home, USERPROFILE: home, CLAUDE_OBSERVATORY_NO_UPDATE_CHECK: '1' };
+  // APPDATA too: jetbrainsPluginDirs() scans %APPDATA%\JetBrains unconditionally, so without this a
+  // Windows contributor with PyCharm installed would see their REAL IDEs in this assertion.
+  const env = {
+    ...process.env,
+    HOME: home,
+    USERPROFILE: home,
+    APPDATA: path.join(home, 'AppData', 'Roaming'),
+    CLAUDE_OBSERVATORY_NO_UPDATE_CHECK: '1',
+  };
   const check = () => JSON.parse(cp.execFileSync('node', [CLI, 'install-extensions', '--check', '--json'], { env, encoding: 'utf8' }));
 
   // A fake HOME isolates the extension DIRS but not PATH, so an editor whose CLI is genuinely on this
@@ -8133,16 +8156,26 @@ test('install-extensions: installs a LOCAL artifact into a bare JetBrains IDE (0
   // nothing of ours is there yet. Exercises zipToolReady + applyJetbrainsZip + the version sentinel.
   const home = freshHome();
   delete process.env.CLAUDE_CONFIG_DIR;
-  const env = { ...process.env, HOME: home, USERPROFILE: home, CLAUDE_OBSERVATORY_NO_UPDATE_CHECK: '1' };
+  const env = {
+    ...process.env,
+    HOME: home,
+    USERPROFILE: home,
+    APPDATA: path.join(home, 'AppData', 'Roaming'),
+    CLAUDE_OBSERVATORY_NO_UPDATE_CHECK: '1',
+  };
   const jb = path.join(home, 'Library', 'Application Support', 'JetBrains', 'PyCharm2026.1', 'plugins');
   fs.mkdirSync(jb, { recursive: true });
 
-  // A plugin zip shaped like the real asset: claude-observatory-jetbrains/lib/<name>-<version>.jar
+  // A plugin zip shaped like the real asset: claude-observatory-jetbrains/lib/<name>-<version>.jar.
+  // Written by writeStoredZip rather than shelling out to `zip`: the product deliberately avoids
+  // zip/unzip on Windows (extractZip uses PowerShell's Expand-Archive), so demanding a `zip` binary
+  // would make this test need MORE of the environment than the code it tests — and windows-latest does
+  // not list one.
   const stage = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-jbzip-'));
-  fs.mkdirSync(path.join(stage, 'claude-observatory-jetbrains', 'lib'), { recursive: true });
-  fs.writeFileSync(path.join(stage, 'claude-observatory-jetbrains', 'lib', 'claude-observatory-jetbrains-9.9.9.jar'), 'x');
   const zip = path.join(stage, 'claude-observatory-jetbrains-v9.9.9.zip');
-  cp.execFileSync('zip', ['-qr', zip, 'claude-observatory-jetbrains'], { cwd: stage });
+  writeStoredZip(zip, [
+    ['claude-observatory-jetbrains/lib/claude-observatory-jetbrains-9.9.9.jar', Buffer.from('x')],
+  ]);
 
   const out = cp.execFileSync('node', [CLI, 'install-extensions', '--jetbrains-only', '--jetbrains-zip', zip], {
     env,
@@ -8220,3 +8253,72 @@ function hasPwsh() {
   const r = cp.spawnSync('pwsh', ['-NoProfile', '-Command', '$PSVersionTable.PSVersion.Major'], { encoding: 'utf8' });
   return r.status === 0;
 }
+
+/** Minimal STORED (uncompressed) zip writer — enough for a fixture, and it needs no external binary.
+ *  Deliberate: the product never shells out to `zip`, so neither should its tests. */
+function writeStoredZip(dest, entries) {
+  const zlib = require('zlib');
+  const chunks = [];
+  const central = [];
+  let offset = 0;
+  for (const [name, body] of entries) {
+    const nameBuf = Buffer.from(name, 'utf8');
+    const crc = zlib.crc32 ? zlib.crc32(body) : crc32(body);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0); // local file header
+    local.writeUInt16LE(20, 4); // version needed
+    local.writeUInt16LE(0, 6); // flags
+    local.writeUInt16LE(0, 8); // method 0 = stored
+    local.writeUInt16LE(0, 10); // time
+    local.writeUInt16LE(0x21, 12); // date (1980-01-01 is invalid; use a real one)
+    local.writeUInt32LE(crc, 14);
+    local.writeUInt32LE(body.length, 18);
+    local.writeUInt32LE(body.length, 22);
+    local.writeUInt16LE(nameBuf.length, 26);
+    local.writeUInt16LE(0, 28);
+    chunks.push(local, nameBuf, body);
+    const cd = Buffer.alloc(46);
+    cd.writeUInt32LE(0x02014b50, 0);
+    cd.writeUInt16LE(20, 4);
+    cd.writeUInt16LE(20, 6);
+    cd.writeUInt16LE(0, 8);
+    cd.writeUInt16LE(0, 10);
+    cd.writeUInt16LE(0, 12);
+    cd.writeUInt16LE(0x21, 14);
+    cd.writeUInt32LE(crc, 16);
+    cd.writeUInt32LE(body.length, 20);
+    cd.writeUInt32LE(body.length, 24);
+    cd.writeUInt16LE(nameBuf.length, 28);
+    cd.writeUInt32LE(offset, 42);
+    central.push(cd, nameBuf);
+    offset += local.length + nameBuf.length + body.length;
+  }
+  const cdBuf = Buffer.concat(central);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(entries.length, 8);
+  end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(cdBuf.length, 12);
+  end.writeUInt32LE(offset, 16);
+  fs.writeFileSync(dest, Buffer.concat([...chunks, cdBuf, end]));
+}
+
+function crc32(buf) {
+  let c = ~0;
+  for (const b of buf) {
+    c ^= b;
+    for (let k = 0; k < 8; k++) c = (c >>> 1) ^ (0xedb88320 & -(c & 1));
+  }
+  return (~c) >>> 0;
+}
+
+test('installers: every shell script parses (they are run via curl | bash)', () => {
+  // Four of the five installers are bash and nothing in the pipeline parses them — a typo ships and
+  // lands on whoever runs the documented one-liner. install.ps1 has its own parser test above.
+  const root = path.resolve(__dirname, '../../..');
+  const scripts = ['install.sh', 'scripts/bootstrap.sh', 'scripts/install-jetbrains.sh', 'scripts/sync-statusline.sh', 'packages/cli/statusline/install-statusline.sh'];
+  for (const rel of scripts) {
+    const r = cp.spawnSync('bash', ['-n', path.join(root, rel)], { encoding: 'utf8' });
+    assert.equal(r.status, 0, `${rel} has a bash syntax error:\n${r.stderr}`);
+  }
+});

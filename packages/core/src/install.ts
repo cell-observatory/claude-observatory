@@ -226,8 +226,8 @@ export function referencesOurStatusline(
       .replace(/\\/g, '/')
       .replace(/^\/(?:mnt|cygdrive)\/([a-z])\//i, '$1:/') // WSL / Cygwin
       .replace(/(^|[\s"'=])\/(?:mnt|cygdrive)\/([a-z])\//gi, '$1$2:/')
-      .replace(/^\/([a-z])\//, '$1:/') // MSYS / Git Bash
-      .replace(/(^|[\s"'=])\/([a-z])\//g, '$1$2:/')
+      .replace(/^\/([a-z])\//i, '$1:/') // MSYS / Git Bash
+      .replace(/(^|[\s"'=])\/([a-z])\//gi, '$1$2:/')
       .toLowerCase();
   return norm(cmd).includes(norm(ours));
 }
@@ -241,6 +241,8 @@ export function uninstallStatusline(file: string = settingsPath()): {
   changed: boolean;
   settingsPath: string;
   scriptRemoved: boolean;
+  /** True when the script was deliberately LEFT because a setting still points at it. */
+  scriptKept: boolean;
 } {
   const { path: p, exists, data } = readSettingsForWrite(file);
   const ourScript = path.join(claudeConfigDir(), 'statusline.sh');
@@ -253,12 +255,22 @@ export function uninstallStatusline(file: string = settingsPath()): {
     fs.writeFileSync(p + '.bak', fs.readFileSync(p));
     writeSettingsFile(p, data);
   }
-  // Deleting the script while a statusLine still POINTS at it is worse than leaving both: Claude Code
-  // then errors on every render, once a minute, with nothing naming us. So only remove the script when
-  // no surviving setting references it — either we just cleared it, or nothing pointed at it to start.
-  const stillReferenced = !!sl && !pointsAtOurs && String(sl.command ?? '').includes('statusline.sh');
+  // Deleting the script while a surviving setting still points AT OUR SCRIPT is worse than leaving
+  // both: Claude Code then errors on every render, once a minute, with nothing naming us. That is what
+  // happened on Windows, where the match always failed so the settings edit was skipped and the unlink
+  // was not. The gate uses OUR matcher — an earlier version tested for the bare name `statusline.sh`,
+  // which also kept our script alive whenever a user's own script merely shared the filename, leaking
+  // it forever and silently.
+  // `referencesOurStatusline` handles every shape the INSTALLER writes, but a hand-edited settings.json
+  // can hold an unexpanded one — `bash $HOME/.claude/statusline.sh`, `~/.claude/statusline.sh` — which no
+  // path comparison can resolve. Those must not be deleted out from under a live setting, so fall back to
+  // "names statusline.sh inside a directory called like our config dir". Deliberately NOT the bare
+  // basename: that also matched a user's own /opt/theirs/statusline.sh and leaked our script forever.
+  const cfgLeaf = path.basename(claudeConfigDir()).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const looksLikeOurs = new RegExp(`${cfgLeaf}[\\\\/]statusline\\.sh`).test(String(sl?.command ?? ''));
+  const stillOurs = !changed && looksLikeOurs;
   let scriptRemoved = false;
-  const removable = stillReferenced
+  const removable = stillOurs
     ? [path.join(claudeConfigDir(), 'statusline-last.json')]
     : [ourScript, path.join(claudeConfigDir(), 'statusline-last.json')];
   for (const f of removable) {
@@ -271,7 +283,9 @@ export function uninstallStatusline(file: string = settingsPath()): {
       /* best-effort */
     }
   }
-  return { changed, settingsPath: p, scriptRemoved };
+  // Surfaced, never silent: the caller prints only when something happened, so a skipped removal has
+  // to be its own signal.
+  return { changed, settingsPath: p, scriptRemoved, scriptKept: stillOurs && fs.existsSync(ourScript) };
 }
 
 /**

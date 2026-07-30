@@ -107,8 +107,16 @@ irm https://raw.githubusercontent.com/cell-observatory/claude-observatory/main/i
 ```
 
 Both install the CLI and then the extensions for whatever editors are on the machine — VS Code family
-and/or JetBrains. Add `--channel dev` (PowerShell: `-Channel dev`) for the rolling
-[pre-release channel](#keeping-up-to-date); the choice is remembered, so later updates follow it.
+and/or JetBrains. For the rolling [pre-release channel](#keeping-up-to-date) — the choice is remembered,
+so later updates follow it — a piped script needs its arguments passed through:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/cell-observatory/claude-observatory/main/scripts/bootstrap.sh | bash -s -- --channel dev
+```
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/cell-observatory/claude-observatory/main/install.ps1))) -Channel dev
+```
 
 **2 — Wire the capture hooks** — with **Claude Code closed** (it snapshots hooks at session start):
 
