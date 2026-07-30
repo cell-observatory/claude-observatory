@@ -219,7 +219,10 @@ export function referencesOurStatusline(
   platform: NodeJS.Platform = process.platform
 ): boolean {
   if (typeof cmd !== 'string' || !cmd) return false;
-  const ours = path.join(configDir, 'statusline.sh');
+  // Join with the TARGET platform's rules, not the host's. `path.join` follows whatever machine this
+  // runs on, so on a Windows host the posix branch built `/home/u/.claude\statusline.sh` and matched
+  // nothing — the `platform` parameter has to reach the path construction too, or it only half works.
+  const ours = (platform === 'win32' ? path.win32 : path.posix).join(configDir, 'statusline.sh');
   if (platform !== 'win32') return cmd.includes(ours);
   const norm = (s: string) =>
     s
