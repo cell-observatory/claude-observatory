@@ -18,10 +18,10 @@ import * as crypto from 'crypto';
 import { findTranscript } from './observe';
 import { parseActions } from './actions';
 import { parseWorkflows } from './workflows';
-import { reviewEdits } from './groups';
+import { groupMembers, reviewEdits } from './groups';
 import { lineDelta } from './format';
 import { cachedByFiles } from './fscache';
-import { logPath } from './store';
+import { EditRecord, logPath, readLog } from './store';
 import { taskIdForSubject, taskNamings } from './tasks';
 
 export interface SessionPrompt {
@@ -37,7 +37,8 @@ export interface SessionPrompt {
   text: string;
   /** First line, capped — what a row shows. */
   title: string;
-  /** Store edit ids committed in this window, in capture order. */
+  /** DISPLAY-unit edit ids committed in this window, capture order: attribution runs over `reviewEdits`,
+   *  so a same-code group appears once, as its representative. [checkpointScope] expands them. */
   editIds: number[];
   edits: number;
   added: number;
@@ -383,6 +384,93 @@ function sessionPromptsUncached(transcript: string, cwd: string, sessionId: stri
 export function promptEditIds(cwd: string, sessionId: string, promptId: string): number[] {
   const r = sessionPrompts(cwd, sessionId).find((x) => x.id === promptId || String(x.index) === promptId);
   return r ? r.editIds.slice() : [];
+}
+
+/** What a rewind to before one prompt would revert — [checkpointScope]'s answer. */
+export interface CheckpointScope {
+  /** Every RAW store id in scope, group-expanded and ascending. This is what `undo`/`redo` act on. */
+  ids: number[];
+  /** How many of [ids] are pending right now — the count an undo would actually revert. */
+  pending: number;
+  /** How many REVIEW UNITS those PENDING records collapse to (what the Prompts rows count). Computed over
+   *  the pending set because its job is making a rewind's confirmation honest; it is therefore meaningless
+   *  on the redo path, where the same records are already undone. */
+  units: number;
+  /** Distinct files among the pending records. Group expansion can never add one (groups are per-file). */
+  files: string[];
+}
+
+/**
+ * Everything a prompt and every prompt after it produced — the "rewind to before this ask" scope.
+ *
+ * Two properties are load-bearing and neither is obvious:
+ *
+ * 1. RAW ids, not display units. `promptWindows` (like `sessionPrompts`) attributes over `reviewEdits`,
+ *    so its `editIds` are same-code GROUP REPRESENTATIVES. `undoScope({ids})` is group-unaware and acts
+ *    on raw records, so a chain that straddles the boundary would half-revert — the rep undone, its
+ *    earlier members left pending at an intermediate state no other surface can name. Every id is
+ *    therefore expanded through [groupMembers] (once per group, not once per member).
+ * 2. Because of (1), the raw count and the count on screen DIVERGE whenever a targeted group has two or
+ *    more pending members. Both numbers are returned so one caller cannot print a different total than
+ *    another for the same destructive operation.
+ *
+ * Records whose `ts` precedes the first ask (or is missing) are deliberately excluded: they precede every
+ * possible boundary, so no rewind owns them. The "unassigned" loop below is provably empty for a
+ * well-formed session — `owner()` only declines a record for exactly that reason — but it is written and
+ * unit-tested anyway, so "an edit no window claims is never silently dropped" is enforced by code rather
+ * than by an argument about code.
+ *
+ * Returns an empty scope for an unknown prompt id, and for a real prompt with nothing left to revert;
+ * callers that must tell those apart check the prompt id themselves.
+ */
+export function checkpointScope(cwd: string, sessionId: string, promptId: string): CheckpointScope {
+  const empty: CheckpointScope = { ids: [], pending: 0, units: 0, files: [] };
+  const windows = promptWindows(cwd, sessionId);
+  const from = windows.find((w) => w.id === promptId || String(w.index) === promptId);
+  if (!from) return empty;
+
+  // This ask and every later one, by the same rule the Prompts rows display.
+  const units = new Set<number>();
+  const claimed = new Set<number>();
+  for (const w of windows) {
+    for (const id of w.editIds) {
+      claimed.add(id);
+      if (w.index >= from.index) units.add(id);
+    }
+  }
+  // No window claims it, yet it happened at or after the boundary ⇒ it still belongs to this rewind.
+  for (const rec of reviewEdits(sessionId)) {
+    if (!claimed.has(rec.id) && rec.ts >= from.ts) units.add(rec.id);
+  }
+
+  // Expand each review unit to its whole same-code group, visiting a group once however many of its
+  // members are in the set.
+  const ids: number[] = [];
+  const groups: number[][] = [];
+  const seen = new Set<number>();
+  for (const id of units) {
+    if (seen.has(id)) continue;
+    const members = groupMembers(sessionId, id);
+    groups.push(members);
+    for (const m of members) {
+      if (seen.has(m)) continue;
+      seen.add(m);
+      ids.push(m);
+    }
+  }
+  ids.sort((a, b) => a - b);
+  if (!ids.length) return empty;
+
+  const byId = new Map<number, EditRecord>();
+  for (const rec of readLog(sessionId)) byId.set(rec.id, rec);
+  const isPending = (id: number) => byId.get(id)?.status === 'pending';
+  const pending = ids.filter(isPending);
+  return {
+    ids,
+    pending: pending.length,
+    units: groups.filter((g) => g.some(isPending)).length,
+    files: [...new Set(pending.map((id) => byId.get(id)?.file ?? ''))].filter(Boolean),
+  };
 }
 
 /** Claude's own prose in reply to one ask — the assistant TEXT it wrote while answering, its tool calls

@@ -178,7 +178,9 @@ export interface ChangeMapPrompt {
   rollup: { edits: number; added: number; removed: number; pending: number; kept: number; undone: number };
   files: ChangeMapFile[]; // this ask's touched files, churn-desc (a per-prompt rollupFiles)
   modules: ChangeMapModule[]; // …and their folder buckets, so the strip needs no re-aggregation
-  /** Raw store edit ids this ask committed, capture order — the review scope of "accept this ask". */
+  /** This ask's DISPLAY-unit edit ids (same-code groups collapsed to their representative), capture
+   *  order — the review scope of "accept this ask". Reverting a straddling group needs the raw members,
+   *  which is what [checkpointScope] expands them to. */
   editIds: number[];
   /** Subagents spawned while answering (their own agentIds — what a fleet row is keyed by). */
   agentIds: string[];

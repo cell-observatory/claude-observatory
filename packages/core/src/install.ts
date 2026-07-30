@@ -196,6 +196,46 @@ export function uninstallHooks(file: string = settingsPath()): InstallResult {
 }
 
 /**
+ * Does `cmd` point at OUR `<configDir>/statusline.sh`?
+ *
+ * Not a substring test, because the two strings are written by different worlds. The installer is bash
+ * (`install-statusline.sh`), so under Git Bash it writes `bash /c/Users/me/.claude/statusline.sh` —
+ * MSYS-shaped, forward slashes, drive as a leading path segment. Node's `path.join(configDir, …)`
+ * produces `C:\Users\me\.claude\statusline.sh`. A raw `.includes()` between those is false forever,
+ * which meant that on Windows:
+ *
+ *   • `statuslineInstalled()` always said no, so `update` silently never refreshed the status line, and
+ *   • `uninstallStatusline()` skipped the settings edit but deleted the script anyway — leaving
+ *     settings.json pointing at a file that no longer exists, so every Claude Code render errored.
+ *
+ * Normalizing separators alone does NOT fix it: `/c/users/…` still is not `c:/users/…`. The drive
+ * prefix has to be folded too, in all three shapes a Windows box produces — MSYS/Git Bash `/c/`,
+ * Cygwin `/cygdrive/c/`, and WSL `/mnt/c/`. Matching stays CASE-INSENSITIVE on win32 only (NTFS is,
+ * POSIX is not — folding case on Linux would let `~/tools/StatusLine.sh` read as ours).
+ */
+export function referencesOurStatusline(
+  cmd: string,
+  configDir: string,
+  platform: NodeJS.Platform = process.platform
+): boolean {
+  if (typeof cmd !== 'string' || !cmd) return false;
+  // Join with the TARGET platform's rules, not the host's. `path.join` follows whatever machine this
+  // runs on, so on a Windows host the posix branch built `/home/u/.claude\statusline.sh` and matched
+  // nothing — the `platform` parameter has to reach the path construction too, or it only half works.
+  const ours = (platform === 'win32' ? path.win32 : path.posix).join(configDir, 'statusline.sh');
+  if (platform !== 'win32') return cmd.includes(ours);
+  const norm = (s: string) =>
+    s
+      .replace(/\\/g, '/')
+      .replace(/^\/(?:mnt|cygdrive)\/([a-z])\//i, '$1:/') // WSL / Cygwin
+      .replace(/(^|[\s"'=])\/(?:mnt|cygdrive)\/([a-z])\//gi, '$1$2:/')
+      .replace(/^\/([a-z])\//i, '$1:/') // MSYS / Git Bash
+      .replace(/(^|[\s"'=])\/([a-z])\//gi, '$1$2:/')
+      .toLowerCase();
+  return norm(cmd).includes(norm(ours));
+}
+
+/**
  * Revert the bundled status line — but ONLY if settings.json's `statusLine.command` still points at
  * OUR `<configDir>/statusline.sh` (never disturb a user's own custom statusLine). Also removes the
  * vendored script + its cache. Part of `uninstall --all`.
@@ -204,19 +244,39 @@ export function uninstallStatusline(file: string = settingsPath()): {
   changed: boolean;
   settingsPath: string;
   scriptRemoved: boolean;
+  /** True when the script was deliberately LEFT because a setting still points at it. */
+  scriptKept: boolean;
 } {
   const { path: p, exists, data } = readSettingsForWrite(file);
   const ourScript = path.join(claudeConfigDir(), 'statusline.sh');
   let changed = false;
   const sl = data.statusLine as { command?: string } | undefined;
-  if (exists && sl && typeof sl.command === 'string' && sl.command.includes(ourScript)) {
+  const pointsAtOurs = !!sl && referencesOurStatusline(sl.command ?? '', claudeConfigDir());
+  if (exists && pointsAtOurs) {
     delete data.statusLine;
     changed = true;
     fs.writeFileSync(p + '.bak', fs.readFileSync(p));
     writeSettingsFile(p, data);
   }
+  // Deleting the script while a surviving setting still points AT OUR SCRIPT is worse than leaving
+  // both: Claude Code then errors on every render, once a minute, with nothing naming us. That is what
+  // happened on Windows, where the match always failed so the settings edit was skipped and the unlink
+  // was not. The gate uses OUR matcher — an earlier version tested for the bare name `statusline.sh`,
+  // which also kept our script alive whenever a user's own script merely shared the filename, leaking
+  // it forever and silently.
+  // `referencesOurStatusline` handles every shape the INSTALLER writes, but a hand-edited settings.json
+  // can hold an unexpanded one — `bash $HOME/.claude/statusline.sh`, `~/.claude/statusline.sh` — which no
+  // path comparison can resolve. Those must not be deleted out from under a live setting, so fall back to
+  // "names statusline.sh inside a directory called like our config dir". Deliberately NOT the bare
+  // basename: that also matched a user's own /opt/theirs/statusline.sh and leaked our script forever.
+  const cfgLeaf = path.basename(claudeConfigDir()).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const looksLikeOurs = new RegExp(`${cfgLeaf}[\\\\/]statusline\\.sh`).test(String(sl?.command ?? ''));
+  const stillOurs = !changed && looksLikeOurs;
   let scriptRemoved = false;
-  for (const f of [ourScript, path.join(claudeConfigDir(), 'statusline-last.json')]) {
+  const removable = stillOurs
+    ? [path.join(claudeConfigDir(), 'statusline-last.json')]
+    : [ourScript, path.join(claudeConfigDir(), 'statusline-last.json')];
+  for (const f of removable) {
     try {
       if (fs.existsSync(f)) {
         fs.unlinkSync(f);
@@ -226,7 +286,9 @@ export function uninstallStatusline(file: string = settingsPath()): {
       /* best-effort */
     }
   }
-  return { changed, settingsPath: p, scriptRemoved };
+  // Surfaced, never silent: the caller prints only when something happened, so a skipped removal has
+  // to be its own signal.
+  return { changed, settingsPath: p, scriptRemoved, scriptKept: stillOurs && fs.existsSync(ourScript) };
 }
 
 /**
@@ -241,10 +303,10 @@ export function statuslineInstalled(): boolean {
     const cmd = settings?.statusLine?.command;
     // The FULL config-dir path, matching uninstallStatusline — a bare 'statusline.sh' substring also
     // matched a user's own ~/tools/my-statusline.sh, and `update` would then have overwritten a status
-    // line that was never ours.
-    const ourScript = path.join(dir, 'statusline.sh');
-    if (typeof cmd !== 'string' || !cmd.includes(ourScript)) return false;
-    return fs.existsSync(ourScript);
+    // line that was never ours. Via referencesOurStatusline, which knows the installer writes an
+    // MSYS-shaped path on Windows while path.join here writes a native one.
+    if (!referencesOurStatusline(typeof cmd === 'string' ? cmd : '', dir)) return false;
+    return fs.existsSync(path.join(dir, 'statusline.sh'));
   } catch {
     return false; // no settings, unreadable settings — nothing of ours to refresh
   }

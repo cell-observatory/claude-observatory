@@ -44,6 +44,35 @@ data class SessionRow(
 /** [active] is the auto-resolved session id for this workspace (null when the workspace has none). */
 data class SessionsResult(val active: String?, val sessions: List<SessionRow>)
 
+/** A session's conversation counts as LIVE within this long of its last transcript write. Mirrors core's
+ *  `FLEET_ACTIVE_MS` (fleet.ts) — the fleet's ● and this selector's ● must mean the same thing, or two
+ *  surfaces disagree about which sessions are running. */
+private const val ACTIVE_WINDOW_MS = 60_000L
+
+/**
+ * The rows the Timeline's session selector offers: the sessions still live in this workspace, plus the one
+ * being reviewed even when it has gone quiet.
+ *
+ * Current FIRST — it is the answer most of the time, and a selector that makes you find your own session
+ * in a recency list is a worse selector. Then the live ones, newest conversation first. The full browser
+ * stays in the Overview's Sessions tab; this list is deliberately short.
+ *
+ * The reviewed session is pinned in even when inactive because it is the thing every panel is showing: a
+ * list that omitted it would let a click land you somewhere else with no way back to where you were.
+ */
+fun activeSessionRows(rows: List<SessionRow>, currentId: String?, nowMs: Long): List<SessionRow> {
+    val current = currentId?.let { id -> rows.firstOrNull { it.id == id } }
+    val live = rows
+        .filter { it.id != currentId && nowMs - it.lastActiveMs <= ACTIVE_WINDOW_MS }
+        .sortedByDescending { it.lastActiveMs }
+    return listOfNotNull(current) + live
+}
+
+/** Whether a row's conversation is still live, by the same window [activeSessionRows] filters on — so the
+ *  selector's ● / ○ cannot disagree with the list it decorates. */
+fun isSessionActive(lastActiveMs: Long, nowMs: Long): Boolean =
+    lastActiveMs > 0 && nowMs - lastActiveMs <= ACTIVE_WINDOW_MS
+
 object SessionsParser {
     /**
      * Parse `sessions --json`, or null when the CLI on PATH predates 0.8.8.

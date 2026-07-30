@@ -8,7 +8,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import * as cp from 'child_process';
+import type * as cp from 'child_process'; // types only — every spawn goes through core/spawn
 import * as https from 'https';
 import * as os from 'os';
 import * as crypto from 'crypto';
@@ -205,10 +205,40 @@ function editItemUri(rec: core.EditRecord): vscode.Uri {
 class StatusDecorationProvider implements vscode.FileDecorationProvider {
   private readonly _e = new vscode.EventEmitter<undefined>();
   readonly onDidChangeFileDecorations = this._e.event;
+  /**
+   * The reviewed session for ONE decoration pass. VS Code calls `provideFileDecoration` per visible row,
+   * and resolving the session walks the project dir (~0.15 ms with 44 transcripts) — ~6 ms of blocking
+   * extension-host syscalls per 40 rows, on every invalidation, even when nothing is pending. Undefined
+   * means "not resolved this pass"; null means "resolved, and there is no session".
+   *
+   * Only the session id is cached. `pendingByFile` has its own log-stamp check, and caching THAT would
+   * bypass it and leave a stale count on screen. The JetBrains plugin memoizes the same call for the same
+   * reason ("currentSession() is hit per cell renderer").
+   */
+  private snapSession: string | null | undefined;
   refresh(): void {
+    this.snapSession = undefined;
     this._e.fire(undefined);
   }
   provideFileDecoration(uri: vscode.Uri): vscode.FileDecoration | undefined {
+    // Real workspace files: an amber count of edits still awaiting review, which VS Code draws in the
+    // Explorer AND on the editor tab. The JetBrains plugin has shown this ("●N") since 0.8.x, and the
+    // guided tour has always claimed it in both editors; here it was only ever true of the synthetic
+    // tree scheme below.
+    if (uri.scheme === 'file') {
+      if (this.snapSession === undefined) this.snapSession = currentSession() ?? null;
+      const session = this.snapSession;
+      if (!session) return undefined;
+      const n = pendingByFile(session).get(canonFsPath(uri))?.length ?? 0;
+      if (n === 0) return undefined;
+      return {
+        // VS Code renders at most two characters, so past 99 the count stops being the useful part.
+        badge: n > 99 ? '✦' : String(n),
+        tooltip: `${n} pending Claude edit${n === 1 ? '' : 's'}`,
+        color: new vscode.ThemeColor('claudeObservatory.pendingBadge'),
+        propagate: false, // files only — a folder badge would double-count the tree the Overview already maps
+      };
+    }
     if (uri.scheme !== 'claude-change') return undefined;
     const status = new URLSearchParams(uri.query).get('status');
     if (status === 'kept') return { color: new vscode.ThemeColor('disabledForeground'), tooltip: 'kept' };
@@ -436,90 +466,272 @@ function diffHtml(patch: string): string {
   return `<code>${html.join('<br>')}</code>`;
 }
 
-/** An inline review bubble at an edit, built on the Comment API (the built-in dirty-diff peek is a closed
- *  widget: no custom buttons, broken nav). The body carries the edit header + reasoning + the diff in
- *  git's colors (see diffHtml); Keep / Undo / Chat / Prev / Next are real toolbar buttons via the
- *  comments/commentThread/title menu. Prev/Next steps through the same file's pending edits. */
+/** The two review surfaces `EditPeek` renders, both as one comment thread on one controller.
+ *  `bar` is the compact floating nav bar (empty body → the header row alone); `detail` is the full
+ *  review bubble (diff + reasoning in the body). Only one thread is ever live, so the two can never be
+ *  on screen at once — that is the whole reason they share a class instead of having one each. */
+type PeekMode = 'bar' | 'detail';
+
+/** Which review chrome auto-appears in the editor. Deliberately the same setting NAME as the JetBrains
+ *  `editorReviewSurface`, and `floating`/`none` deliberately the same two spellings, so the words mean
+ *  the same thing in both editors; only the VS-Code-only bubble gets a word of its own.
+ *
+ *  An UNRECOGNIZED value reads as the default rather than as "nothing" — the same reading
+ *  `ObservatorySettings.floatingSurface` takes — because a hand-edited typo must not silently strip
+ *  every review control out of the editor with no way to notice. */
+function editorReviewSurface(): 'floating' | 'bubble' | 'none' {
+  const v = vscode.workspace.getConfiguration('claudeObservatory').get<string>('editorReviewSurface', 'floating');
+  return v === 'bubble' ? 'bubble' : v === 'none' ? 'none' : 'floating';
+}
+
+/** An inline review surface at an edit, built on the Comment API (the built-in dirty-diff peek is a closed
+ *  widget: no custom buttons, broken nav; and VS Code exposes NO floating-widget API to extensions, so a
+ *  comment thread is the only interactive surface that can float over code).
+ *
+ *  In `detail` mode it is the review bubble: the body carries the edit header + reasoning + the diff in
+ *  git's colors (see diffHtml), with Keep / Undo / Chat / Prev / Next as real toolbar buttons via the
+ *  comments/commentThread/title menu. In `bar` mode it is the compact floating review bar — an empty
+ *  body, so the widget collapses to its header row: a live "Claude edit #12 · +8 −3 · Diff 2/5 · File 1/3"
+ *  title with Keep / Undo / ⌃⌄ / ‹› / Diff / Details beside it, the VS Code answer to the PyCharm
+ *  `editorFloatingToolbarProvider` bar. Prev/Next steps through the same file's pending edits. */
 class EditPeek implements vscode.Disposable {
   private readonly controller = vscode.comments.createCommentController('claudeObservatory', 'Claude Observatory');
   private thread: vscode.CommentThread | undefined;
   private edit: { id: number; file: string } | undefined;
+  /** Which surface the live thread is. Survives `closeThread` on purpose: `afterResolve` follows in the
+   *  mode it was in, and a resolve is exactly when the thread is being torn down and rebuilt. */
+  private mode: PeekMode = 'detail';
+  /**
+   * How many `show()` calls are between their first `await` and their thread.
+   *
+   * `show()` awaits a document (and, when revealing, an editor), and the auto-show is re-entered on every
+   * refresh and every tab switch — including the tab switch that `showTextDocument` itself causes. So a
+   * Keep that carries the bar into another file can be racing an auto-sync that resolved its target from
+   * a review cursor the in-flight `show()` has not parked yet, and whichever resumes last wins: the bar
+   * lands on the wrong edit until the next refresh corrects it. An open in progress wins outright.
+   */
+  private showing = 0;
+
+  /**
+   * Injected by `activate` (the review loop is closure-scoped, this class is not): pick the next pending
+   * edit after `fromId`, session-wide and crossing files. Set only when the extension is fully wired.
+   */
+  pickNext: ((fromId: number) => core.EditRecord | undefined) | undefined;
+  /** Injected: park the shared review cursor, so the keyboard loop and the Prompt axis continue from
+   *  wherever the bubble is rather than from wherever they were left. */
+  onShown: ((id: number) => void) | undefined;
 
   constructor() {
     // No user "add comment" affordance — we only place review threads programmatically.
     this.controller.commentingRangeProvider = { provideCommentingRanges: () => [] };
   }
 
-  /** Open (or move) the bubble to edit `id`. */
-  async show(id: number): Promise<void> {
+  /** Pinned: the BUBBLE stays open after a resolve and carries itself to the next edit awaiting review.
+   *  Governs the bubble only — the bar is a nav bar and is therefore ALWAYS pinned (see `follows`). */
+  private get pinned(): boolean {
+    return vscode.workspace.getConfiguration('claudeObservatory').get<boolean>('pinnedPeek', false);
+  }
+
+  /** Whether the live surface carries itself to the next pending edit after a resolve. The bar always
+   *  does (a nav bar that vanished when you used it would be useless); the bubble does while pinned. */
+  private get follows(): boolean {
+    return this.mode === 'bar' || this.pinned;
+  }
+
+  /**
+   * THE ONE PLACE THAT DECIDES THE BAR'S BODY.
+   *
+   * The bar is a comment thread with NO comments: `CommentThreadWidget.display()` renders the header at a
+   * fixed one-row height, renders an empty body, and creates the reply form only when `canReply` — which
+   * this class sets false — so the whole widget collapses to about three editor lines. That is the
+   * premise of the design.
+   *
+   * If a VS Code build ever renders an empty body as visible empty-state chrome, the documented fallback
+   * is a ONE-LINE comment body, and this method is the only thing that changes:
+   *   `return [{ body: new vscode.MarkdownString(label), mode: vscode.CommentMode.Preview,
+   *              author: { name: 'Claude Observatory' } }];`
+   * Nothing else in this file — not the menus, not the counters, not the follow behaviour — depends on
+   * the body being empty.
+   */
+  private barBody(_label: string): vscode.Comment[] {
+    return [];
+  }
+
+  /**
+   * After a resolve: either follow to the next pending edit or close (the historical bubble behaviour).
+   * `resolvedId` is re-checked rather than assumed — a dirty-buffer refusal or a cancelled conflict leaves
+   * the edit pending, and following away from an edit the user did not actually resolve would be a lie.
+   */
+  private async afterResolve(session: string, resolvedId: number): Promise<void> {
+    const mode = this.mode; // closeThread() below leaves it set, but read it before anything can move it
+    if (!this.follows || core.findRecord(session, resolvedId)?.status === 'pending') {
+      this.closeThread();
+      return;
+    }
+    const next = this.pickNext?.(resolvedId);
+    if (!next) {
+      this.closeThread();
+      vscode.window.setStatusBarMessage('Claude Observatory: no pending edits to review 🎉', 3000);
+      return;
+    }
+    await this.show(next.id, { mode });
+  }
+
+  /**
+   * Open (or move) the review surface to edit `id`.
+   *
+   * `mode` defaults to `detail` so every existing caller keeps opening the bubble it always opened; the
+   * bar is only ever requested explicitly. `reveal: false` suppresses BOTH the `showTextDocument` and the
+   * `revealRange` — and with them the review-cursor park — because the auto-shown bar must not steal
+   * focus or scroll the file out from under someone typing in another editor.
+   */
+  async show(id: number, opts?: { reveal?: boolean; mode?: PeekMode }): Promise<void> {
+    this.showing++;
+    try {
+      await this.showInner(id, opts);
+    } finally {
+      this.showing--;
+    }
+  }
+
+  private async showInner(id: number, opts?: { reveal?: boolean; mode?: PeekMode }): Promise<void> {
+    const mode = opts?.mode ?? 'detail';
+    const reveal = opts?.reveal !== false;
     const session = currentSession();
     const rec = session ? core.findRecord(session, id) : null;
     if (!session || !rec) return;
     const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(rec.file));
-    const editor = await vscode.window.showTextDocument(doc);
+    const editor = reveal ? await vscode.window.showTextDocument(doc) : undefined;
     const p = cachedPlacements(session, doc).find((pl) => pl.rec.id === id);
     const line = p ? Math.min(anchorLines(p)[0] ?? 0, Math.max(0, doc.lineCount - 1)) : 0;
     const range = new vscode.Range(line, 0, line, 0);
     this.closeThread();
 
-    const cwd = workspaceRoot();
-    const why = cwd ? cachedTranscript(cwd, session).reasoning.get(id)?.trim() : undefined;
     const d = cachedDelta(session, rec);
-    // Nav-bar counters in the bubble header: position among this file's pending edits (Diff axis) and
-    // among all files with pending edits (File axis) — the same two axes the status-bar bar shows.
-    const filePending = cachedLog(session).filter((r) => r.file === rec.file && r.status === 'pending').sort((a, b) => a.id - b.id);
+    // Nav-bar counters in the header: position among this file's pending edits (Diff axis) and among all
+    // files with pending edits (File axis) — the same two axes the status-bar nav bar shows, off the same
+    // two helpers, so the bar, the bubble and the status bar can never disagree about where you are.
+    const filePending = pendingEditsInFile(session, rec.file);
     const diffIdx = filePending.findIndex((r) => r.id === id);
     const files = pendingFilesOf(session);
     const fileIdx = files.indexOf(rec.file);
     const diffPos = diffIdx >= 0 ? `Diff ${diffIdx + 1}/${filePending.length}` : '';
     const filePos = fileIdx >= 0 ? `File ${fileIdx + 1}/${files.length}` : '';
-    const md = new vscode.MarkdownString();
-    md.supportHtml = true; // the colored <span>s below survive the sanitizer only with this on
-    md.isTrusted = true;
-    md.appendMarkdown(
-      `**✦ Claude edit #${id}**  ·  \`+${d.added} −${d.removed}\`  ·  ${rec.tool}` +
-        (diffPos ? `  ·  ${diffPos}` : '') +
-        (filePos ? `  ·  ${filePos}` : '') +
-        `\n\n`
-    );
-    if (why) md.appendMarkdown(`💭 ${firstLine(why)}\n\n`);
-    let patch = '';
-    try {
-      patch = core.coloredDiff(session, rec, false);
-    } catch {
-      patch = '';
-    }
-    md.appendMarkdown(diffHtml(patch));
-
-    const comment: vscode.Comment = { body: md, mode: vscode.CommentMode.Preview, author: { name: 'Claude Observatory' } };
-    const thread = this.controller.createCommentThread(doc.uri, range, [comment]);
-    thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
-    thread.canReply = false;
-    thread.contextValue = 'claudeEdit';
     // Show BOTH axes in the title (Diff n/m · File i/k), like the status-bar nav bar — File only when
     // more than one file has pending edits.
-    thread.label =
+    const label =
       `Claude edit #${id}  ·  +${d.added} −${d.removed}` +
       (diffPos ? `  ·  ${diffPos}` : '') +
       (filePos && files.length > 1 ? `  ·  ${filePos}` : '');
+
+    let body: vscode.Comment[];
+    if (mode === 'bar') {
+      // The bar builds NO body — which also means it never reads the transcript or runs coloredDiff.
+      // That matters: this path runs on every tab switch and every store refresh, and the bubble's body
+      // is by far the expensive half of this method.
+      body = this.barBody(label);
+    } else {
+      const cwd = workspaceRoot();
+      const why = cwd ? cachedTranscript(cwd, session).reasoning.get(id)?.trim() : undefined;
+      const md = new vscode.MarkdownString();
+      md.supportHtml = true; // the colored <span>s below survive the sanitizer only with this on
+      md.isTrusted = true;
+      md.appendMarkdown(
+        `**✦ Claude edit #${id}**  ·  \`+${d.added} −${d.removed}\`  ·  ${rec.tool}` +
+          (diffPos ? `  ·  ${diffPos}` : '') +
+          (filePos ? `  ·  ${filePos}` : '') +
+          `\n\n`
+      );
+      if (why) md.appendMarkdown(`💭 ${firstLine(why)}\n\n`);
+      let patch = '';
+      try {
+        patch = core.coloredDiff(session, rec, false);
+      } catch {
+        patch = '';
+      }
+      md.appendMarkdown(diffHtml(patch));
+      body = [{ body: md, mode: vscode.CommentMode.Preview, author: { name: 'Claude Observatory' } }];
+    }
+
+    const thread = this.controller.createCommentThread(doc.uri, range, body);
+    thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
+    thread.canReply = false;
+    thread.contextValue = mode === 'bar' ? 'claudeNavBar' : 'claudeEdit';
+    // Unresolved paints the frame and the arrow in the theme's "needs attention" colour, so the bar reads
+    // as a band pointing AT the edit instead of a floating rectangle. The bubble carries its own header.
+    if (mode === 'bar') thread.state = vscode.CommentThreadState.Unresolved;
+    thread.label = mode === 'bar' ? `✦ ${label}` : label;
     this.thread = thread;
+    this.mode = mode;
     this.edit = { id, file: rec.file };
-    editor.revealRange(range, vscode.TextEditorRevealType.InCenter);
+    // The bar hides its steppers when there is nowhere to step, matching FloatingDiffStep.applies in
+    // JetBrains: a floating widget sits on top of code, so a dead button there covers text for nothing.
+    this.syncStepContext(filePending.length > 1, files.length > 1);
+    if (reveal) {
+      editor?.revealRange(range, vscode.TextEditorRevealType.InCenter);
+      this.onShown?.(id); // an auto-show is not a navigation the reader asked for — it parks nothing
+    }
   }
 
-  keep(): void {
+  /**
+   * Drive the AUTO-SHOWN editor surface: park it on `id`, or close it when the active file has nothing
+   * left to review (`id === undefined`). Which surface that is comes from `editorReviewSurface`.
+   *
+   * Re-entered on every refresh and every tab switch, so it is a no-op whenever the live thread is
+   * already parked on the right edit — rebuilding the thread each tick makes it flicker.
+   *
+   * WHATEVER IS ALREADY PARKED ON THE TARGET EDIT IS LEFT ALONE, in whichever mode it is in. That is
+   * what makes "⋯ Details" stick: the reader swapped the bar for the bubble at this edit, and the next
+   * refresh must not swap it back. It is deliberately keyed on the EDIT and not on the mode — a mode
+   * guard would strand a bubble the reader opened on an edit that has since been kept somewhere else,
+   * suppressing the bar everywhere with no way to dismiss it (a programmatic comment thread has no close
+   * button). Move to a different edit and the surface the setting names takes over again.
+   *
+   * Because there is exactly one `thread` field that every path funnels through, the bar and the bubble
+   * can never be open at once — by construction rather than by convention.
+   */
+  async syncSurface(id: number | undefined): Promise<void> {
+    if (this.showing > 0) return; // an open the reader triggered is in flight — see `showing`
+    const surface = editorReviewSurface();
+    if (surface === 'none') return; // nothing is the auto surface; explicit commands still work
+    const mode: PeekMode = surface === 'bubble' ? 'detail' : 'bar';
+    if (id === undefined) {
+      if (this.thread) this.closeThread();
+      return;
+    }
+    if (this.thread && this.edit?.id === id) return;
+    await this.show(id, { reveal: false, mode });
+  }
+
+  /** Swap the live surface to `mode` at the same edit — the bar's "⋯ Details" and the bubble's
+   *  "Collapse". Reveals, because this one IS a click the reader made. */
+  async swapTo(mode: PeekMode): Promise<void> {
+    const id = this.edit?.id;
+    if (id === undefined) return;
+    await this.show(id, { mode });
+  }
+
+  /** Drop whatever review chrome is on screen. Used when the reader changes `editorReviewSurface`: they
+   *  just said which surface they want, so the next refresh should build that one from scratch. */
+  resetSurface(): void {
+    this.closeThread();
+  }
+
+  async keep(): Promise<void> {
     const s = currentSession();
     if (this.edit && s) {
-      core.keepGroup(s, this.edit.id); // keep the whole same-code review unit
-      this.closeThread();
+      const id = this.edit.id;
+      core.keepGroup(s, id); // keep the whole same-code review unit
+      await this.afterResolve(s, id);
     }
   }
 
   async undo(): Promise<void> {
     const s = currentSession();
     if (this.edit && s) {
-      await undoOne(s, this.edit.id);
-      this.closeThread();
+      const id = this.edit.id;
+      await undoOne(s, id);
+      await this.afterResolve(s, id);
     }
   }
 
@@ -527,16 +739,23 @@ class EditPeek implements vscode.Disposable {
     if (this.edit) void vscode.commands.executeCommand('claudeObservatory.chatEdit', this.edit.id);
   }
 
+  /** Open THIS surface's edit as a full before ⟶ after diff tab. The bar has no diff in its body, so
+   *  this is its only way to the patch; it routes through the id-based command rather than reimplementing
+   *  `openDiff`, exactly as `chat()` does. */
+  viewDiff(): void {
+    if (this.edit) void vscode.commands.executeCommand('claudeObservatory.inlineDiff', this.edit.id);
+  }
+
   /** Step to the prev (-1) / next (+1) pending edit in the same file, wrapping at the ends (Diff axis). */
   step(dir: 1 | -1): Promise<void> {
     const s = currentSession();
     if (!this.edit || !s) return Promise.resolve();
     const file = this.edit.file;
-    const list = cachedLog(s).filter((r) => r.file === file && r.status === 'pending').sort((a, b) => a.id - b.id);
+    const list = pendingEditsInFile(s, file);
     if (list.length === 0) return Promise.resolve();
     const idx = list.findIndex((r) => r.id === this.edit!.id);
     const target = list[((idx < 0 ? 0 : idx) + dir + list.length) % list.length];
-    return this.show(target.id);
+    return this.show(target.id, { mode: this.mode }); // stepping must never change WHICH surface you are on
   }
 
   /** Step to the prev (-1) / next (+1) file with pending edits, opening its first pending edit (File axis). */
@@ -548,7 +767,7 @@ class EditPeek implements vscode.Disposable {
     const idx = files.indexOf(this.edit.file);
     const target = files[((idx < 0 ? 0 : idx) + dir + files.length) % files.length];
     const first = pendingEditsInFile(s, target)[0];
-    return first ? this.show(first.id) : Promise.resolve();
+    return first ? this.show(first.id, { mode: this.mode }) : Promise.resolve();
   }
 
   /** Accept every pending edit in the bubble's file, then close it (Accept File). */
@@ -569,10 +788,18 @@ class EditPeek implements vscode.Disposable {
     }
   }
 
+  /** Publish whether the bar's Diff-axis (⌃⌄) and File-axis (‹›) steppers have anywhere to go. The two
+   *  context keys are what the `claudeNavBar` menu block's when-clauses read. */
+  private syncStepContext(multiEdit: boolean, multiFile: boolean): void {
+    void vscode.commands.executeCommand('setContext', 'claudeObservatory.barMultiEdit', multiEdit);
+    void vscode.commands.executeCommand('setContext', 'claudeObservatory.barMultiFile', multiFile);
+  }
+
   private closeThread(): void {
     this.thread?.dispose();
     this.thread = undefined;
     this.edit = undefined;
+    this.syncStepContext(false, false);
   }
 
   dispose(): void {
@@ -1266,6 +1493,67 @@ async function undoPrompt(session: string, promptId: string): Promise<void> {
   );
 }
 
+/**
+ * Rewind — revert every PENDING edit from one ask ONWARD, not just the ask's own.
+ *
+ * The difference from Reject matters: Reject undoes what this prompt changed and leaves everything after
+ * it standing, which for a prompt in the middle of a session means reverting a base that later edits were
+ * built on. Rewind is the checkpoint semantic — put the tree back to before I asked for this — so it
+ * takes the whole tail.
+ *
+ * Both counts come from `core.checkpointScope` and both are shown, because they legitimately differ: the
+ * scope's ids are RAW records (a same-code group straddling the boundary is expanded whole, or it would
+ * half-revert) while the Prompts rows count review units. Printing only one number would make this dialog
+ * disagree with the row the reader clicked.
+ */
+async function rewindFromPrompt(session: string, promptId: string): Promise<void> {
+  const cwd = workspaceRoot();
+  if (!cwd) return;
+  const scope = core.checkpointScope(cwd, session, promptId);
+  // Name the ask in every message. Which ask a prompt-scoped action targets is resolved from either the
+  // reader's pick or the edit under the cursor, and the two can disagree — so the most destructive verb in
+  // the product states its target at the moment of commitment rather than leaving it inferable.
+  const ask = core.promptWindows(cwd, session).find((r) => r.id === promptId);
+  const label = ask ? `prompt #${ask.index}` : 'this prompt';
+  if (scope.pending === 0) {
+    vscode.window.showInformationMessage(`Nothing to rewind — no pending edits from ${label} onward.`);
+    return;
+  }
+  const dirty = scope.files.filter((f) =>
+    vscode.workspace.textDocuments.some((d) => canonFsPath(d.uri) === f && d.isDirty)
+  );
+  if (dirty.length) {
+    await vscode.window.showWarningMessage(
+      `Save or revert unsaved changes first: ${dirty.map((f) => path.basename(f)).join(', ')}.`,
+      { modal: true }
+    );
+    return;
+  }
+  const units = `${scope.units} review unit${scope.units === 1 ? '' : 's'}`;
+  const files = `${scope.files.length} file${scope.files.length === 1 ? '' : 's'}`;
+  const choice = await vscode.window.showWarningMessage(
+    `Rewind to before ${label}? This reverts ${scope.pending} pending edit(s) (${units}) across ${files} made from this ask onward — including asks after it — by rewriting those files on disk. Redo can restore them. Overlapping edits may conflict.`,
+    { modal: true },
+    'Rewind'
+  );
+  if (choice !== 'Rewind') return;
+  const res = core.undoScope(session, { ids: scope.ids });
+  const restore = res.ids.slice(); // exactly what moved — a blanket redo would re-apply unrelated edits
+  const action = await vscode.window.showInformationMessage(
+    `Rewound ${res.undone} edit(s)` +
+      (res.conflicts ? ` · ${res.conflicts} conflict(s) left (revert individually to force)` : '') +
+      (res.errors ? ` · ${res.errors} refused — ${res.firstError ?? ''}` : '') +
+      '.',
+    ...(restore.length ? ['Redo'] : [])
+  );
+  if (action === 'Redo') {
+    const back = core.redoScope(session, { ids: restore });
+    vscode.window.showInformationMessage(
+      `Restored ${back.redone} edit(s)` + (back.conflicts ? ` · ${back.conflicts} conflict(s)` : '') + '.'
+    );
+  }
+}
+
 /** Clear — drop the RESOLVED (kept/undone) edits one prompt produced. */
 function clearPrompt(session: string, promptId: string): void {
   const cwd = workspaceRoot();
@@ -1598,10 +1886,17 @@ function decorateEditor(editor: vscode.TextEditor): void {
   }
 }
 
-/** The inline menu above each pending edit: "✨ #N +A −R view changes" (opens the inline review bubble) ·
- *  ✓ Keep · ↩ Undo · 💬 Chat · ⧉ View diff (the same edit as a full diff tab). The CodeLens is the
- *  always-visible quick surface; the bubble (EditPeek) is the on-demand review widget (git-colored diff +
- *  reasoning, Keep/Undo/Chat/Prev/Next toolbar). */
+/** The inline menu above each pending edit: "🔬 #N +A −R · n/m" (opens the floating review bar) ·
+ *  ✓ Keep · ↩ Undo · 💬 Chat · ⧉ Diff (the same edit as a full diff tab) · ⋯ Details (the review bubble).
+ *
+ *  Deliberately terse. A CodeLens row can never carry a background and can never be sized: the only
+ *  registered colour id is `editorCodeLens.foreground` (a dim grey), `.codelens-decoration .codicon`
+ *  forces `color: currentColor !important` so a `$(codicon)` there is always that same grey, and the size
+ *  comes from the global `editor.codeLensFontSize` with no per-extension override. So the row leads with
+ *  an EMOJI — the one thing in a lens that escapes the dim foreground — and everything that needs to be
+ *  legible (the File axis, the reasoning, the diff) lives on the bar and the bubble instead, where the
+ *  font is the 13px workbench font. Each command carries a `tooltip`, which VS Code renders as a real
+ *  `title=` on the lens link, so the shortened words still explain themselves. */
 class InlineLensProvider implements vscode.CodeLensProvider {
   private readonly _c = new vscode.EventEmitter<void>();
   readonly onDidChangeCodeLenses = this._c.event;
@@ -1627,26 +1922,26 @@ class InlineLensProvider implements vscode.CodeLensProvider {
         byLine.set(line, { rec: p.rec, added: d.added, removed: d.removed });
       }
     }
-    // Position counters — the same Diff-axis / File-axis numbers the status-bar nav bar shows, but
-    // folded into the lens next to the edit (the editor title bar can't render live text). "edit n/m
-    // in file" mirrors the Diff axis; "file i/k" mirrors the File axis (shown only when >1 file pending).
+    // Position counter — the Diff-axis number the status-bar nav bar shows, folded into the lens next to
+    // the edit (the editor title bar can't render live text). The File axis moved to the review bar's
+    // label: it needs the words "file 2 of 3" to mean anything, and there is room for them at 13px.
     const filePending = pendingEditsInFile(session, canonFsPath(doc.uri));
-    const files = pendingFilesOf(session);
-    const fileIdx = files.indexOf(canonFsPath(doc.uri));
-    const filePos = fileIdx >= 0 && files.length > 1 ? `  ·  file ${fileIdx + 1}/${files.length}` : '';
     const lenses: vscode.CodeLens[] = [];
     for (const [line, g] of byLine) {
       const range = new vscode.Range(line, 0, line, 0);
       const id = g.rec.id;
       const editIdx = filePending.findIndex((r) => r.id === id);
-      const editPos = editIdx >= 0 ? `  ·  edit ${editIdx + 1}/${filePending.length} in file` : '';
-      // "view changes" opens the review bubble (reasoning rides there); per-edit keep/undo is also on
+      const editPos = editIdx >= 0 ? `  ·  ${editIdx + 1}/${filePending.length}` : '';
+      const where = editIdx >= 0 ? ` — edit ${editIdx + 1} of ${filePending.length} pending in this file` : '';
+      // The header opens the floating review BAR (the default review surface); "⋯ Details" opens the
+      // bubble, where the reasoning and the git-coloured diff live. Per-edit keep/undo is also on
       // ⌥⌘Y / ⌥⌘U and the Edits tree.
-      lenses.push(new vscode.CodeLens(range, { title: `✦ #${id}  +${g.added} −${g.removed}${editPos}${filePos}  view changes`, command: 'claudeObservatory.viewChanges', arguments: [id] }));
-      lenses.push(new vscode.CodeLens(range, { title: `✓ Keep`, command: 'claudeObservatory.inlineKeep', arguments: [id] }));
-      lenses.push(new vscode.CodeLens(range, { title: `↩ Undo`, command: 'claudeObservatory.inlineUndo', arguments: [id] }));
-      lenses.push(new vscode.CodeLens(range, { title: `$(comment-discussion) Chat`, command: 'claudeObservatory.chatEdit', arguments: [id] }));
-      lenses.push(new vscode.CodeLens(range, { title: `⧉ View diff`, command: 'claudeObservatory.openDiff', arguments: [{ kind: 'edit', rec: g.rec }] }));
+      lenses.push(new vscode.CodeLens(range, { title: `🔬 #${id}  +${g.added} −${g.removed}${editPos}`, command: 'claudeObservatory.showReviewBar', arguments: [id], tooltip: `Claude edit #${id}: +${g.added} −${g.removed}${where}. Show the review bar here.` }));
+      lenses.push(new vscode.CodeLens(range, { title: `✓ Keep`, command: 'claudeObservatory.inlineKeep', arguments: [id], tooltip: `Keep edit #${id} and move on to the next one awaiting review` }));
+      lenses.push(new vscode.CodeLens(range, { title: `↩ Undo`, command: 'claudeObservatory.inlineUndo', arguments: [id], tooltip: `Revert edit #${id} on disk and move on to the next one awaiting review` }));
+      lenses.push(new vscode.CodeLens(range, { title: `💬 Chat`, command: 'claudeObservatory.chatEdit', arguments: [id], tooltip: `Chat about edit #${id} — copies its context, opens your Claude` }));
+      lenses.push(new vscode.CodeLens(range, { title: `⧉ Diff`, command: 'claudeObservatory.openDiff', arguments: [{ kind: 'edit', rec: g.rec }], tooltip: `Open edit #${id} as a before ⟶ after diff tab` }));
+      lenses.push(new vscode.CodeLens(range, { title: `⋯ Details`, command: 'claudeObservatory.viewChanges', arguments: [id], tooltip: `Open the review bubble for edit #${id} — Claude's reasoning and the diff in git's colours` }));
     }
     return lenses;
   }
@@ -1685,11 +1980,14 @@ function firstLine(s: string): string {
   return l.length > 100 ? l.slice(0, 99) + '…' : l;
 }
 
-class ObservationsProvider implements vscode.TreeDataProvider<ObsNode> {
-  private readonly _c = new vscode.EventEmitter<void>();
-  readonly onDidChangeTreeData = this._c.event;
+// 0.10.0: no longer a TreeDataProvider. The Timeline webview renders these rows (a panel container has
+// no tab strip, so the three views became one window with tabs), and it renders them straight off the
+// getChildren / getTreeItem below — the view-model, the grouping, the folds and the empty rows all stay
+// exactly here.
+class ObservationsProvider {
+  /** Drop what is held for one render cycle. */
   refresh(): void {
-    this._c.fire();
+    this.memo.clear();
   }
   // Per-file review memory (cross-session), recomputed lazily each refresh cycle.
   private memo = new Map<string, core.FileMemory>();
@@ -1922,24 +2220,18 @@ function expandHome(p: string): string {
   return p.startsWith('~/') ? path.join(os.homedir(), p.slice(2)) : p;
 }
 
-class ActionsProvider implements vscode.TreeDataProvider<ActNode> {
-  private readonly _c = new vscode.EventEmitter<void>();
-  readonly onDidChangeTreeData = this._c.event;
-  view?: vscode.TreeView<ActNode>;
+// 0.10.0: no longer a TreeDataProvider — the Timeline webview renders these rows off getChildren /
+// getTreeItem. The aggregation, the per-cycle memo and the section order stay exactly here.
+class ActionsProvider {
   /** The root feed, computed at most once per REFRESH CYCLE. `fleetConflicts(listRepoSiblings(…))` walks
-   *  every sibling worktree's transcripts — ~100ms of SYNCHRONOUS extension-host work — and VS Code calls
-   *  getChildren() more than once per render (reveal, decoration, expansion), so the answer is held here
-   *  and dropped by refresh(). Deliberately NOT a stamp-keyed memo around listRepoSiblings: its `active`
-   *  flag is derived from "how long ago did this agent last write", so freezing it across refreshes would
-   *  keep reporting long-idle agents as live conflicts. */
+   *  every sibling worktree's transcripts — ~100ms of SYNCHRONOUS extension-host work — and the renderer
+   *  asks for the root more than once per render (the badge, the rows, a re-expand), so the answer is
+   *  held here and dropped by refresh(). Deliberately NOT a stamp-keyed memo around listRepoSiblings: its
+   *  `active` flag is derived from "how long ago did this agent last write", so freezing it across
+   *  refreshes would keep reporting long-idle agents as live conflicts. */
   private cycle?: { groups: core.ActionGroup[]; egress: core.EgressChannel[]; outside: core.OutsideWrite[]; collisions: core.FileCollision[] };
   refresh(): void {
     this.cycle = undefined; // a new cycle re-walks the fleet (its `active` flags are time-derived)
-    this._c.fire();
-    if (this.view) {
-      const session = currentSession();
-      this.view.description = session ? `session ${shortId(session)}` : undefined;
-    }
   }
   /** Curated groups (Subagents dropped — they're the Overview fleet) + the two audits (risk's
    *  out-of-workspace writes, egress) + the live cross-agent file conflicts (moved here from the
@@ -2566,7 +2858,7 @@ function changeMapShell(): string {
      JetBrains ReviewNavBar: keep/accept GREEN · undo/reject RED · nav chevrons BLUE · clear ORANGE ·
      search/spotlight PURPLE. Same glance-grouping as the mockups/screenshots. */
   #ov-navkeep .codicon, #ov-acceptfile .codicon, #ov-acceptfolder .codicon, #ov-keepall .codicon, #ov-acceptprompt .codicon { color: var(--mt-done); }
-  #ov-navundo .codicon, #ov-rejectfile .codicon, #ov-rejectfolder .codicon, #ov-undoall .codicon, #ov-rejectprompt .codicon { color: var(--mt-warn); }
+  #ov-navundo .codicon, #ov-rejectfile .codicon, #ov-rejectfolder .codicon, #ov-undoall .codicon, #ov-rejectprompt .codicon, #ov-rewindprompt .codicon { color: var(--mt-warn); }
   #ov-fileprev .codicon, #ov-filenext .codicon, #ov-diffprev .codicon, #ov-diffnext .codicon, #ov-folderprev .codicon, #ov-foldernext .codicon, #ov-promptprev .codicon, #ov-promptnext .codicon { color: var(--mt-working); }
   #ov-reviewprompt .codicon, #ov-chatedit .codicon, #ov-viewdiff .codicon { color: var(--cm-accent); }
   #ov-clearres .codicon { color: var(--mt-attn); }
@@ -2594,6 +2886,16 @@ function changeMapShell(): string {
     .ov-gutter { width:auto; height:7px; margin:-3px 0; cursor:row-resize; }
     .ov-gutter::after { top:3px; bottom:auto; left:0; right:0; width:auto; height:1px; }
     .ov-nav .ov-list { overflow-y:auto; }
+    /* Stacked, never shrunk: three 150px columns do not fit a side-bar width, and narrowing them would
+       clip the names they exist to show. Each column keeps its own scrolling list. */
+    .ov-group { flex-direction:column; }
+    /* Stacked, the reader's dragged widths mean nothing (they are widths), so every column takes an
+       equal share again and the dividers go away with them. */
+    .ov-groupcol { min-width:0; flex:1 1 0; }
+    .ov-cgutter { display:none; }
+    .ov-group .ov-groupcol.rail { flex:0 0 auto; }
+    .ov-groupcol.rail .ov-rail { writing-mode:horizontal-tb; height:auto; padding:4px 6px; }
+    .ov-groupcol + .ov-groupcol { border-left:none; padding-left:0; border-top:1px solid var(--cm-border); padding-top:6px; }
     .ov-tab { padding:3px 8px; }
     .ov-toolbar { gap:3px; padding:4px 6px; }
     .ov-tb, .ov-nb { padding:2px 7px; }
@@ -2621,6 +2923,12 @@ function changeMapShell(): string {
   /* …and a FIFTH (Prompts) makes it tighter still: the row is allowed to wrap onto as many lines as it
      needs, and each tab keeps its label whole rather than being squeezed into an ellipsis. */
   .ov-navtabs { display:flex; flex:none; flex-wrap:wrap; gap:4px; margin-bottom:6px; }
+  /* The tab strip and the control that REARRANGES it, on one row (user call 2026-07-30): "Group tabs"
+     was in the panel-wide toolbar, three rows away from the tabs it regroups. The tabs keep the row's
+     slack and wrap within it; the toggle never wraps away from them. */
+  .ov-navtabrow { display:flex; align-items:flex-start; gap:6px; flex:none; margin-bottom:6px; }
+  .ov-navtabrow .ov-navtabs { flex:1 1 auto; margin-bottom:0; min-width:0; }
+  .ov-navtabrow #ov-groupnav { flex:none; }
   /* Guided tour (0.8.9): the ring on the control a step names. An outline rather than a border so it
      costs no layout — a highlight that reflowed the panel it points at would move the very thing the
      reader is looking for. The step's TEXT lives in the tour window; repeating it in here as well was
@@ -2634,6 +2942,33 @@ function changeMapShell(): string {
   .ov-tn.hot { color: var(--mt-done); opacity:1; }
   .ov-ctl { display:flex; align-items:center; gap:8px; margin-bottom:5px; flex:none; flex-wrap:wrap; }
   .ov-pane { flex:1; min-height:0; display:flex; flex-direction:column; }
+  /* Grouped nav: one pane, its members side by side. min-width is the same 150px floor the nav itself
+     uses — below it a session name cannot be read, and this product wraps or tooltips rather than
+     truncating, so the narrow branch STACKS these columns instead of squeezing them.
+     --ov-cw is the column's share of the group, dragged on the divider and remembered in webview state;
+     the floor above is what the drag clamps against. */
+  .ov-group { flex-direction:row; gap:8px; }
+  .ov-groupcol { flex: var(--ov-cw, 1) 1 0; min-width:150px; min-height:0; display:flex; flex-direction:column; position:relative; }
+  .ov-groupcol + .ov-groupcol { border-left:1px solid var(--cm-border); padding-left:8px; }
+  /* The divider between two columns. An absolutely-positioned OVERLAY on the column's left edge rather
+     than a sibling element, so the adjacent-sibling rule above still sees the columns as adjacent — a
+     real element between them would silently drop every column's border and padding.
+     (No backticks in this file's style/script literals: they would close the TS template.) */
+  .ov-cgutter { position:absolute; left:-8px; top:0; bottom:0; width:9px; cursor:col-resize; z-index:3; touch-action:none; }
+  .ov-cgutter::after { content:''; position:absolute; top:0; bottom:0; left:4px; width:1px; background:transparent; }
+  .ov-cgutter:hover::after, .ov-cgutter.drag::after { background: var(--vscode-focusBorder, rgba(127,127,127,0.7)); }
+  /* A folded column keeps its NAME and its badge on a rail you can click to bring it back — a column
+     that vanished with no affordance is a bug the reader cannot even describe. Its remembered weight is
+     untouched while folded, so restoring gives back the width they set rather than an equal share. */
+  .ov-group .ov-groupcol.rail { flex:0 0 28px; min-width:28px; padding-left:0; overflow:hidden; }
+  .ov-groupcol .ov-rail { display:none; }
+  .ov-groupcol.rail .ov-rail { display:flex; align-items:center; justify-content:flex-start; gap:6px; width:100%; height:100%; background:transparent; border:0; color: var(--vscode-descriptionForeground); font:inherit; font-size:9px; letter-spacing:.6px; text-transform:uppercase; cursor:pointer; padding:6px 0; writing-mode:vertical-rl; }
+  .ov-groupcol.rail .ov-rail:hover { color: var(--vscode-foreground); background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.12)); }
+  .ov-groupcol.rail .ov-ghead, .ov-groupcol.rail .ov-list, .ov-groupcol.rail .ov-cgutter { display:none; }
+  .ov-cfold { margin-left:auto; flex:none; background:transparent; border:0; color: var(--vscode-descriptionForeground); font:inherit; line-height:1; padding:0 2px; cursor:pointer; }
+  .ov-cfold:hover { color: var(--vscode-foreground); }
+  .ov-cfold .codicon { font-size:12px; vertical-align:middle; }
+  .ov-ghead { flex:none; display:flex; align-items:center; gap:6px; font-size:9px; letter-spacing:.6px; text-transform:uppercase; color: var(--vscode-descriptionForeground); padding:0 2px 5px; margin-bottom:4px; border-bottom:1px solid var(--cm-border); }
   /* one-line description at the top of each nav pane (Fleet / Workflows / Tasks) — what the list shows */
   .ov-desc { flex:none; font-size:10px; line-height:1.4; color: var(--vscode-descriptionForeground); padding:0 2px 6px; margin-bottom:4px; border-bottom:1px solid var(--cm-border); }
   .ov-list { flex:1; overflow-y:auto; min-height:0; }
@@ -2907,6 +3242,7 @@ function changeMapShell(): string {
     `<button class="ov-nb" id="ov-reviewprompt" title="Review this prompt — step through the edits this ask produced, in order"><i class="codicon codicon-list-ordered"></i></button>` +
     `<button class="ov-nb" id="ov-acceptprompt" title="Accept every pending edit this prompt produced"><i class="codicon codicon-checklist"></i></button>` +
     `<button class="ov-nb" id="ov-rejectprompt" title="Reject (revert) every pending edit this prompt produced"><i class="codicon codicon-history"></i></button>` +
+    `<button class="ov-nb" id="ov-rewindprompt" title="Rewind to before this prompt — revert every pending edit from this ask ONWARD, not just its own (Redo can restore them)"><i class="codicon codicon-debug-step-back"></i></button>` +
     `</span>` +
     `</div>` + // end ROW 1 (the diff · file · folder · prompt axes)
     // ROW 2 — split: the SESSION axis (selector + session-wide bulk) pinned LEFT; view controls (Search ·
@@ -2928,6 +3264,8 @@ function changeMapShell(): string {
     // Active-only toggle — mirrors the left-nav checkbox: scopes the fleet/workflow nav AND the change-map
     // detail to work still awaiting review (pending edits / active agents / running workflows).
     `<button class="ov-tb ov-toggle" id="ov-activeonly" aria-pressed="false" title="Show only what's still active — agents/workflows running and edits awaiting review"><i class="codicon codicon-check"></i> Active only</button>` +
+    // (Group tabs used to sit here. It rearranges the left-nav TAB STRIP, so it now lives beside it —
+    // see #ov-groupnav below.)
     `<span class="ov-nbsep"></span>` +
     `<button class="ov-nb" id="ov-spotlight" title="Toggle spotlight — dim unedited lines to highlight Claude’s changes"><i class="codicon codicon-lightbulb"></i> Spotlight</button>` +
     `<button class="ov-tb" id="ov-refresh" title="Refresh the Overview"><i class="codicon codicon-refresh"></i> Refresh</button>` +
@@ -2940,7 +3278,12 @@ function changeMapShell(): string {
     `</div>` +
     `<div class="ov">` +
     `<div class="ov-nav">` +
+    // The tab strip, and BESIDE it the control that regroups it: the five tabs collapse to two, each
+    // showing its members as side-by-side columns the reader can resize and fold.
+    `<div class="ov-navtabrow">` +
     `<div class="ov-navtabs" id="ov-navtabs"></div>` +
+    `<button class="ov-tb ov-toggle" id="ov-groupnav" aria-pressed="false" title="Group related tabs side by side (Sessions · Fleet / Workflows · Tasks · Processes)"><i class="codicon codicon-split-horizontal"></i> Group tabs</button>` +
+    `</div>` +
     `<div class="ov-ctl">` +
     `<label class="mt-toggle" title="Show only active agents / running workflows"><input type="checkbox" id="mt-active"> Active only</label>` +
     `<button class="mt-clear" id="mt-clear" title="Hide completed agents &amp; finished workflows (observe-only — never deletes anything)">Clear completed</button>` +
@@ -2961,6 +3304,10 @@ function changeMapShell(): string {
     // (JetBrains parity); the pane itself says which state it is in when the CLI could not answer.
     `<div class="ov-pane" id="ov-pane-processes" style="display:none"><div class="ov-desc">Background shells this session launched (<code>run_in_background</code>) — state, runtime and output volume. Select one to follow its output.</div><div class="ov-list" id="ov-processes"></div></div>` +
     `<div class="ov-pane" id="ov-pane-sessions"><div class="ov-desc">This workspace’s sessions, newest conversation first. Unlike the other tabs, selecting a row SWITCHES the whole review to that session.</div><div class="ov-list" id="ov-sessions"></div></div>` +
+    // Grouped mode's two panes. Their COLUMNS are composed by the script (one per member, each carrying
+    // that member's own list node), so every list still has exactly one renderer whichever mode is on.
+    `<div class="ov-pane ov-group" id="ov-group-sf" style="display:none"></div>` +
+    `<div class="ov-pane ov-group" id="ov-group-wtp" style="display:none"></div>` +
     `</div>` +
     `<div class="ov-gutter" id="ov-gutter" title="Drag to resize the panes — double-click to reset"></div>` +
     `<div class="ov-detail">` +
@@ -3060,9 +3407,10 @@ function spawnCliJson(args: string[], cwd: string, cb: (data: unknown | null) =>
     cb(data);
   };
   try {
-    const bin = resolveObservatoryBin();
-    const winShell = process.platform === 'win32';
-    child = cp.spawn(winShell ? `"${bin}"` : bin, args, { cwd, stdio: ['ignore', 'pipe', 'ignore'], shell: winShell });
+    // `--root <cwd>` carries a workspace path. The old shape passed an args ARRAY with shell:true,
+    // which concatenates them UNQUOTED — so every panel here returned nothing on Windows for anyone
+    // whose workspace sat under a spaced path (C:\Users\First Last\…). core/spawn quotes it.
+    child = core.spawnTool(resolveObservatoryBin(), args, { cwd, stdio: ['ignore', 'pipe', 'ignore'] });
   } catch {
     once(null);
     return;
@@ -3363,7 +3711,181 @@ class DemoTourPanel {
   }
 }
 
-function promptsShell(): string {
+// --- Timeline: the tree providers' rows, flattened for a webview ------------------------------------
+
+/** One inline row action, mirroring what the tree carried in its `view/item/context` menu. */
+interface TlAct {
+  v: string; // the VERB — an index into TL_ROW_ACTS, never a command name from the webview
+  g: string;
+  t: string;
+  tone: string;
+}
+/** One tree row, serialized. Everything on it comes from the provider's own `getTreeItem`. */
+interface TlRow {
+  key: string;
+  label: string;
+  desc: string;
+  tip: string;
+  glyph: string;
+  tone: string;
+  /** null = a leaf; true/false = the node's default expanded state. */
+  open: boolean | null;
+  act: boolean;
+  acts: TlAct[];
+}
+/** What the Timeline needs of a tree provider — the two methods it renders from. */
+type TlTreeProvider = { getChildren(node?: unknown): unknown[]; getTreeItem(node: unknown): vscode.TreeItem };
+
+/**
+ * How many EDIT rows one Observations level serializes before it says how many it left out.
+ *
+ * The tree this window replaced was virtualized BY VS CODE: whatever the feed's length, only the ~40
+ * rows on screen were ever built, and none of them crossed a process boundary. A webview has neither
+ * property — every row is built (a delta, a transcript lookup, a file-memory probe, a tooltip), posted,
+ * and turned into DOM. Measured on a 3,000-edit session that is ~280ms of host thread and a 1.7MB
+ * payload, paid on every Keep and on every watcher tick while Claude works; at this cap the same
+ * session costs ~28ms and ~170KB, and a feed under the cap is untouched.
+ *
+ * 300 is ~6,000px of rows — far more than a sidebar shows at once, so the bound is invisible until a
+ * session is genuinely enormous, and then it is STATED rather than swallowed (see the row postTree
+ * inserts). Only edit rows are counted: the Context section and "Next steps" come after them.
+ */
+const EDIT_FEED_CAP = 300;
+
+/**
+ * ThemeIcon id → a text mark.
+ *
+ * The trees drew from VS Code's FULL built-in codicon set. A webview only has the subsetted font in
+ * `src/codicon.ts`, where an unlisted name renders as a silent blank glyph — so these rows use text
+ * marks, which is also what every other list in this window has always used. '?' is the deliberate
+ * sentinel for an icon nobody mapped: a test asserts no shipped row wears it, because the alternative
+ * is a missing icon that reports itself as nothing at all.
+ */
+const TL_GLYPH: Record<string, string> = {
+  // review status (statusIcon / aggregateIcon)
+  'circle-filled': '●', check: '✓', 'circle-slash': '⊘', warning: '⚠', error: '✗',
+  // Observations
+  compass: '◎', lightbulb: '✧', 'arrow-small-right': '›', book: '▤', library: '▤', checklist: '☑',
+  sparkle: '✦', 'fold-down': '⤓', file: '▪',
+  // Actions (ACTION_ICON + the audit sections)
+  edit: '✎', terminal: '❯', search: '⌕', globe: '◍', organization: '⑂', plug: '⌁', gear: '⚙',
+  'circle-small': '·', 'link-external': '↗', 'radio-tower': '⇢', files: '❐', 'file-symlink-file': '◧',
+};
+/** ThemeColor id → the tone class the shell styles. Anything unmapped renders in the row's own colour. */
+const TL_TONE: Record<string, string> = {
+  'charts.green': 'done', 'charts.yellow': 'pending', 'charts.orange': 'attn', 'charts.red': 'warn',
+  'charts.blue': 'accent', 'charts.purple': 'agent', descriptionForeground: 'muted',
+};
+/**
+ * The inline actions each tree `contextValue` offered, as webview buttons.
+ *
+ * A webview inherits no context menu, so dropping these would have quietly removed Keep / Undo / Redo /
+ * Chat / Open / Analyze from the Observations rows — a functional regression, not a rendering change.
+ * The webview posts the VERB; the host looks the row's node up in its own table and refuses a verb this
+ * row does not offer, so a command name never crosses the boundary.
+ */
+const TL_ROW_ACTS: Record<string, TlAct[]> = {
+  recap: [{ v: 'refreshRecap', g: '✦', t: 'Refresh the session recap with Claude', tone: 'agent' }],
+  edit: [
+    { v: 'keep', g: '✓', t: 'Keep this edit', tone: 'done' },
+    { v: 'undo', g: '↩', t: 'Undo this edit', tone: 'warn' },
+    { v: 'analyzeEdit', g: '✦', t: 'Analyze this edit with Claude', tone: 'agent' },
+    { v: 'chatEdit', g: '❝', t: 'Chat about this edit — copies its context, opens your Claude', tone: 'agent' },
+    { v: 'openFile', g: '⧉', t: 'Open the file', tone: 'accent' },
+  ],
+  editUndone: [
+    { v: 'redo', g: '↻', t: 'Redo this edit', tone: 'done' },
+    { v: 'chatEdit', g: '❝', t: 'Chat about this edit — copies its context, opens your Claude', tone: 'agent' },
+    { v: 'openFile', g: '⧉', t: 'Open the file', tone: 'accent' },
+  ],
+  file: [
+    { v: 'keepFile', g: '✓', t: 'Keep every edit in this file', tone: 'done' },
+    { v: 'undoFile', g: '↩', t: 'Undo every edit in this file', tone: 'warn' },
+    { v: 'openFile', g: '⧉', t: 'Open the file', tone: 'accent' },
+  ],
+};
+
+/**
+ * A row's key, stable across refreshes so the reader's expansions survive a repaint.
+ *
+ * EXPANDABLE nodes key on their own identity (a category label, an edit id); leaves key on their
+ * position, which is all a leaf needs. Every key is separator-free, because a child's key is its
+ * parent's plus '/' and a file path would otherwise split it.
+ */
+function tlNodeKey(node: unknown, i: number): string {
+  const n = node as { kind?: string; label?: string; rec?: { id: number }; edits?: { id: number }[] };
+  switch (n.kind) {
+    case 'recap': case 'steps': case 'ctxhead': case 'ogroup': case 'egroup': case 'cgroup':
+      return n.kind;
+    case 'agroup': return 'g' + String(n.label ?? '').replace(/[^A-Za-z0-9]/g, '');
+    case 'edit': return 'e' + (n.rec ? n.rec.id : i);
+    case 'tlrun': return 'run' + (n.edits && n.edits[0] ? n.edits[0].id : i);
+    default: return (n.kind ?? 'n') + i;
+  }
+}
+
+/** Thousands-separated, with the SEPARATOR fixed rather than the host's locale: this number is asserted
+ *  in a test and read beside plain counts everywhere else in the window. */
+function tlGroupNum(n: number): string {
+  return String(n).replace(/\B(?=(\d{3})+$)/g, ',');
+}
+
+/**
+ * The row a capped edit feed ends its run with.
+ *
+ * Not a tree node: no provider produced it, nothing opens it, and it carries no verbs — its whole job is
+ * to state the number the cap left out, in the position the rows were dropped from, so the feed can
+ * never read as the whole session. (Silently short lists are the defect this exists to prevent.)
+ */
+function tlMoreRow(key: string, shown: number, total: number): TlRow {
+  return {
+    key,
+    label: `showing ${tlGroupNum(shown)} of ${tlGroupNum(total)} edits`,
+    desc: 'the newest are listed — the Overview’s change map covers the whole session',
+    tip: `This session has ${tlGroupNum(total)} edits. The feed draws the newest ${tlGroupNum(shown)} of them — enough to scroll, not enough to stall the panel on every refresh.\n\nNothing is lost: the tab badge counts all ${tlGroupNum(total)}, the Overview’s change map covers every file, and the bulk verbs (Accept All, Reject All, a prompt’s Accept/Reject) act on the whole session, never on what is drawn here.`,
+    glyph: '…',
+    tone: 'muted',
+    open: null,
+    act: false,
+    acts: [],
+  };
+}
+
+/** One `vscode.TreeItem` as a row. Nothing here re-derives a label, a description or a tooltip. */
+function tlRowOf(key: string, item: vscode.TreeItem, acts: TlAct[]): TlRow {
+  const icon = item.iconPath as { id?: string; color?: { id?: string } } | undefined;
+  const tip = item.tooltip as string | vscode.MarkdownString | undefined;
+  const state = item.collapsibleState;
+  return {
+    key,
+    label: String(item.label ?? ''),
+    desc: item.description === true ? '' : String(item.description ?? ''),
+    tip: typeof tip === 'string' ? tip : tip ? String(tip.value ?? '') : '',
+    glyph: (icon && icon.id && TL_GLYPH[icon.id]) || (icon && icon.id ? '?' : ''),
+    tone: (icon && icon.color && TL_TONE[icon.color.id ?? '']) || '',
+    open: state === undefined || state === vscode.TreeItemCollapsibleState.None
+      ? null
+      : state === vscode.TreeItemCollapsibleState.Expanded,
+    act: !!item.command,
+    acts,
+  };
+}
+
+/**
+ * The Timeline window's shell (0.10.0): ONE webview carrying a real tab strip — Prompts · Actions ·
+ * Observations — over the session selector they all share.
+ *
+ * It replaces three stacked panel views. VS Code stacks views in a container under collapsible headers
+ * and has no tab strip of its own, so the tabs had to be drawn; they are modelled on the Overview's
+ * left-nav strip (.ov-navtabs), including its grouping toggle, its draggable column dividers and its
+ * fold-to-a-rail control, so the two windows behave the same way for the same reason.
+ *
+ * Actions and Observations still come from `ActionsProvider` and `ObservationsProvider` — the same core
+ * view-models, the same grouping, the same default folds, the same empty rows. Only the RENDERING moved,
+ * and it renders off their own `getTreeItem`, so labels, descriptions, tooltips and icons keep exactly
+ * one implementation between the tree they were and the rows they are now.
+ */
+function timelineShell(): string {
   const nonce = getNonce();
   const csp = `default-src 'none'; style-src 'unsafe-inline'; font-src data:; script-src 'nonce-${nonce}';`;
   const style = `<style>${CODICON_STYLE}
@@ -3375,12 +3897,30 @@ function promptsShell(): string {
     --cm-border: var(--vscode-widget-border, rgba(127,127,127,0.28));
     --cm-mono: var(--vscode-editor-font-family, monospace);
     --mt-working: var(--vscode-charts-blue, #4c8bf5);
+    --mt-agent: var(--vscode-charts-purple, #9a6ac2);
     --mt-attn: var(--vscode-charts-orange, #d9822b);
     --mt-warn: var(--vscode-charts-red, #e5534b);
     --mt-done: var(--vscode-charts-green, #3fb950);
   }
   * { box-sizing: border-box; }
   body { margin:0; padding:0; font-family: var(--vscode-font-family); font-size:11px; color: var(--vscode-foreground); height:100vh; display:flex; flex-direction:column; }
+  /* The session selector (P5): which conversation the whole observatory is reviewing. ● live · ○ quiet.
+     Opens an in-webview list of the sessions still ACTIVE, plus the reviewed one however old it is; the
+     full list stays in the Overview's Sessions tab, one row down. Names WRAP — a session title is content
+     text, and core has already capped it at 64 characters, so clipping it here would lose the only copy. */
+  .rq-sess { flex:none; padding:5px 9px; border-bottom:1px solid var(--cm-border); }
+  .rq-schip { display:flex; align-items:center; gap:6px; width:100%; text-align:left; background:transparent; border:1px solid var(--cm-border); border-radius:5px; color: var(--vscode-foreground); font:inherit; font-size:11px; padding:3px 8px; cursor:pointer; }
+  .rq-schip:hover { background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.12)); }
+  .rq-sdot { flex:none; font-size:10px; color: var(--vscode-descriptionForeground); }
+  .rq-sdot.live { color: var(--mt-done); }
+  .rq-sname { flex:1; min-width:0; overflow-wrap:anywhere; }
+  .rq-scar { flex:none; font-size:9px; color: var(--vscode-descriptionForeground); }
+  .rq-slist { margin-top:4px; border:1px solid var(--cm-border); border-radius:5px; overflow:hidden; }
+  .rq-srow { display:flex; align-items:center; gap:6px; width:100%; text-align:left; background:transparent; border:0; border-bottom:1px solid var(--cm-border); color: var(--vscode-foreground); font:inherit; font-size:11px; padding:4px 8px; cursor:pointer; }
+  .rq-srow:last-child { border-bottom:0; }
+  .rq-srow:hover { background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.12)); }
+  .rq-srow.on { background: var(--vscode-list-activeSelectionBackground, rgba(80,120,200,0.16)); }
+  .rq-sago { flex:none; font-family: var(--cm-mono); font-size:9px; color: var(--vscode-descriptionForeground); }
   .rq-head { flex:none; display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; padding:6px 9px 5px; border-bottom:1px solid var(--cm-border); }
   .rq-title { font-size:9px; letter-spacing:.6px; text-transform:uppercase; color: var(--vscode-descriptionForeground); }
   .rq-sum { font-family: var(--cm-mono); font-size:10px; color: var(--vscode-descriptionForeground); font-variant-numeric:tabular-nums; }
@@ -3417,21 +3957,150 @@ function promptsShell(): string {
   .rq-rload { font-size:10px; color: var(--vscode-descriptionForeground); font-style:italic; }
   .rq-empty { padding:12px 9px; color: var(--vscode-descriptionForeground); line-height:1.5; }
   .rq-empty b { color: var(--vscode-foreground); }
+  .rq-empty button { display:block; margin-top:7px; background:transparent; border:1px solid var(--cm-border); border-radius:5px; color: var(--cm-accent); font:inherit; font-size:11px; padding:3px 9px; cursor:pointer; }
+  .rq-empty button:hover { background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.12)); }
+  /* Guided tour: the ring on the control a step names. The script has always ADDED this class here; the
+     rule itself was missing, so a Prompts step rang nothing at all. */
+  .ring { outline:2px solid var(--vscode-charts-blue, #4c8bf5); outline-offset:2px; border-radius:3px; }
+
+  /* --- the tab strip -------------------------------------------------------------------------------
+     Modelled on the Overview's .ov-navtabs, for the same reason it exists there: the container stacks
+     views, so a window that holds three of them has to draw its own tabs. The GROUPING toggle sits on
+     this row, beside the tabs it rearranges — never in a toolbar. */
+  .tl-tabrow { flex:none; display:flex; align-items:flex-start; gap:6px; padding:5px 9px 0; }
+  .tl-tabs { display:flex; flex:1 1 auto; flex-wrap:wrap; gap:4px; min-width:0; }
+  .tl-tab { flex:none; display:flex; align-items:center; gap:6px; background:transparent; border:1px solid var(--cm-border); border-radius:5px 5px 0 0; border-bottom:2px solid transparent; color: var(--vscode-descriptionForeground); font:inherit; font-size:11px; padding:4px 12px; cursor:pointer; white-space:nowrap; }
+  .tl-tab:hover { background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.12)); }
+  .tl-tab.on { color: var(--vscode-foreground); border-bottom-color: var(--mt-working); background: var(--vscode-list-activeSelectionBackground, rgba(80,120,200,0.18)); }
+  .tl-tn { font-family: var(--cm-mono); font-size:9px; opacity:0.72; font-variant-numeric:tabular-nums; }
+  .tl-toggle { flex:none; display:inline-flex; align-items:center; gap:5px; background:transparent; border:1px solid var(--cm-border); border-radius:5px; color: var(--vscode-descriptionForeground); font:inherit; font-size:11px; padding:3px 9px; cursor:pointer; white-space:nowrap; }
+  .tl-toggle:hover { background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.12)); color: var(--vscode-foreground); }
+  .tl-toggle .codicon { font-size:14px; line-height:1; opacity:0.3; }
+  .tl-toggle.on { color: var(--vscode-foreground); border-color: var(--cm-accent); background: var(--vscode-list-activeSelectionBackground, rgba(80,120,200,0.14)); }
+  .tl-toggle.on .codicon { opacity:1; color: var(--cm-kept); }
+  .tl-body { flex:1; min-height:0; display:flex; border-top:1px solid var(--cm-border); }
+  .tl-pane { flex:1; min-width:0; min-height:0; display:flex; flex-direction:column; }
+  /* every member's content is rendered INTO its host, so the host moves between the solo pane and a
+     grouped column and the member keeps exactly one renderer */
+  .tl-host { flex:1; min-height:0; display:flex; flex-direction:column; }
+
+  /* --- grouped columns -----------------------------------------------------------------------------
+     Prompts beside Observations and Actions, all three at once. Same mechanics as the Overview's
+     grouped nav: --tl-cw is the column's dragged share, the floor is what a drag clamps against, and a
+     folded column becomes a rail that still names itself. */
+  .tl-group { flex-direction:row; gap:8px; padding:0 2px; }
+  .tl-groupcol { flex: var(--tl-cw, 1) 1 0; min-width:190px; min-height:0; display:flex; flex-direction:column; position:relative; }
+  .tl-groupcol + .tl-groupcol { border-left:1px solid var(--cm-border); }
+  .tl-cgutter { position:absolute; left:-8px; top:0; bottom:0; width:9px; cursor:col-resize; z-index:3; touch-action:none; }
+  .tl-cgutter::after { content:''; position:absolute; top:0; bottom:0; left:4px; width:1px; background:transparent; }
+  .tl-cgutter:hover::after, .tl-cgutter.drag::after { background: var(--vscode-focusBorder, rgba(127,127,127,0.7)); }
+  .tl-group .tl-groupcol.rail { flex:0 0 28px; min-width:28px; overflow:hidden; }
+  .tl-groupcol .tl-rail { display:none; }
+  .tl-groupcol.rail .tl-rail { display:flex; align-items:center; justify-content:flex-start; gap:6px; width:100%; height:100%; background:transparent; border:0; color: var(--vscode-descriptionForeground); font:inherit; font-size:9px; letter-spacing:.6px; text-transform:uppercase; cursor:pointer; padding:8px 0; writing-mode:vertical-rl; }
+  .tl-groupcol.rail .tl-rail:hover { color: var(--vscode-foreground); background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.12)); }
+  .tl-groupcol.rail .tl-ghead, .tl-groupcol.rail .tl-host, .tl-groupcol.rail .tl-cgutter { display:none; }
+  .tl-ghead { flex:none; display:flex; align-items:center; gap:6px; font-size:9px; letter-spacing:.6px; text-transform:uppercase; color: var(--vscode-descriptionForeground); padding:5px 8px 4px; border-bottom:1px solid var(--cm-border); }
+  .tl-cfold { margin-left:auto; flex:none; background:transparent; border:0; color: var(--vscode-descriptionForeground); font:inherit; line-height:1; padding:0 2px; cursor:pointer; }
+  .tl-cfold:hover { color: var(--vscode-foreground); }
+  .tl-cfold .codicon { font-size:12px; vertical-align:middle; }
+  /* Below the breakpoint the columns STACK rather than shrink — three 190px columns do not fit a side
+     bar, and squeezing them would clip names this product never truncates. The dragged widths are
+     widths, so they mean nothing stacked: every column takes an equal share and the dividers go. */
+  @media (max-width: 620px) {
+    .tl-group { flex-direction:column; }
+    .tl-groupcol { min-width:0; flex:1 1 0; }
+    .tl-groupcol + .tl-groupcol { border-left:none; border-top:1px solid var(--cm-border); }
+    .tl-cgutter { display:none; }
+    .tl-group .tl-groupcol.rail { flex:0 0 auto; }
+    .tl-groupcol.rail .tl-rail { writing-mode:horizontal-tb; height:auto; padding:4px 8px; }
+    .tl-tab { padding:3px 8px; }
+  }
+
+  /* --- a flattened tree row (Actions · Observations) -----------------------------------------------
+     The trees' own rows: a twisty where the node had a collapsible state, the icon as a text mark (the
+     webview font is a SUBSET — an unlisted codicon draws nothing at all), the label, the description,
+     and the inline actions the tree carried in its context menu. Everything WRAPS; the full tooltip
+     rides the row's title, as it did on the tree item. */
+  .tl-list { flex:1; overflow-y:auto; min-height:0; padding:5px 7px 10px; }
+  /* Deliberately NOT content-visibility:auto. It is the obvious answer to "these rows are not
+     virtualized", and measured in headless Chrome on 400 of these rows it reports a scrollHeight of
+     10,867px against a true 20,740px — the rows it has not rendered yet are counted at their
+     contain-intrinsic-size, not at the two lines they actually wrap to, so the scrollbar under-reports
+     the feed by half and grows under the reader's thumb as they scroll. The row COUNT is bounded
+     instead (EDIT_FEED_CAP), which costs nothing at render time and leaves the scrollbar honest. */
+  .tl-row { display:flex; align-items:baseline; gap:6px; padding:2px 3px; border-radius:3px; }
+  .tl-row:hover { background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.10)); }
+  .tl-row.act { cursor:pointer; }
+  .tl-tw { flex:none; width:13px; background:transparent; border:0; color: var(--vscode-descriptionForeground); font:inherit; font-size:9px; line-height:1.5; padding:0; cursor:pointer; text-align:left; }
+  .tl-gl { flex:none; width:13px; text-align:center; font-size:10px; color: var(--vscode-descriptionForeground); }
+  .tl-lb { flex:0 1 auto; min-width:0; font-size:11px; line-height:1.45; overflow-wrap:anywhere; }
+  .tl-de { flex:1 1 auto; min-width:0; font-size:9.5px; line-height:1.45; color: var(--vscode-descriptionForeground); overflow-wrap:anywhere; }
+  .tl-ops { flex:none; display:inline-flex; gap:2px; opacity:0; transition:opacity .1s; }
+  .tl-row:hover .tl-ops { opacity:1; }
+  .tl-op { background:transparent; border:1px solid var(--cm-border); border-radius:3px; color:inherit; font:inherit; font-size:10px; line-height:1; padding:1px 5px; cursor:pointer; }
+  .tl-op:hover { border-color: var(--cm-accent); }
+  .tl-load { font-size:9.5px; color: var(--vscode-descriptionForeground); font-style:italic; padding:1px 4px; }
+  .t-done { color: var(--mt-done); }
+  .t-warn { color: var(--mt-warn); }
+  .t-attn { color: var(--mt-attn); }
+  .t-pending { color: var(--cm-pending); }
+  .t-accent { color: var(--cm-accent); }
+  .t-agent { color: var(--mt-agent); }
+  .t-muted { color: var(--vscode-descriptionForeground); }
   </style>`;
   const body =
-    `<div class="rq-head"><span class="rq-title">Prompts</span><span class="rq-sum" id="rq-sum"></span>` +
-    `<button class="rq-clear" id="rq-clear" style="display:none" title="Clear the prompt scope — the Overview goes back to the whole session">clear scope</button></div>` +
-    `<div class="rq-desc">What you asked for, in order. Select one to scope the Overview beside it — its fleet, runs, tasks, shells and change map narrow to the work that ask caused.</div>` +
-    `<div class="rq-list" id="rq-list"></div>` +
-    `<script nonce="${nonce}">${REQUESTS_SCRIPT}</script>`;
+    // The selector leads the WINDOW, above the tabs: which session these belong to precedes every
+    // question any of the three tabs answers.
+    `<div class="rq-sess" id="rq-sess">` +
+    `<button class="rq-schip" id="rq-schip" title="The session the observatory is reviewing — click to switch to another active session"><span class="rq-sdot" id="rq-sdot">○</span><span class="rq-sname" id="rq-sname">session —</span><span class="rq-scar">▾</span></button>` +
+    `<div class="rq-slist" id="rq-slist" hidden></div>` +
+    `</div>` +
+    `<div class="tl-tabrow"><div class="tl-tabs" id="tl-tabs"></div>` +
+    `<button class="tl-toggle" id="tl-grouptabs" aria-pressed="false" title="Group these tabs side by side (Prompts · Observations · Actions)"><i class="codicon codicon-split-horizontal"></i> Group tabs</button>` +
+    `</div>` +
+    `<div class="tl-body">` +
+    `<div class="tl-pane" id="tl-pane-prompts" style="display:none"><div class="tl-host" id="tl-prompts"></div></div>` +
+    `<div class="tl-pane" id="tl-pane-observations" style="display:none"><div class="tl-host" id="tl-observations"></div></div>` +
+    `<div class="tl-pane" id="tl-pane-actions" style="display:none"><div class="tl-host" id="tl-actions"></div></div>` +
+    // Grouped mode's one pane. Its COLUMNS are composed by the script (one per member, each carrying
+    // that member's own host node), so every member still has exactly one renderer in either mode.
+    `<div class="tl-pane tl-group" id="tl-group" style="display:none"></div>` +
+    `</div>` +
+    `<script nonce="${nonce}">${TIMELINE_SCRIPT}</script>`;
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}">${style}</head><body>${body}</body></html>`;
 }
 
-const REQUESTS_SCRIPT = `
+const TIMELINE_SCRIPT = `
 (function(){
   "use strict";
   var vscode=acquireVsCodeApi();
   var RQ=null, SEL=null, SEEN=false;
+  // --- this window's own layout ---------------------------------------------------------------------
+  // Which tab is forward, whether the three sit side by side, which tree rows are expanded, and the
+  // grouped columns' widths + folded set. Every one of these is a LAYOUT choice belonging to this panel,
+  // so they ride the webview state object — the same call the Overview makes for its groupedNav — and
+  // never a workspace setting. Nothing here is ever recomputed from a payload: a badge arriving on a
+  // later tick must not reset a width or a fold the reader set seconds earlier.
+  var WVSTATE=(vscode.getState&&vscode.getState())||{};
+  var TABS=[['prompts','Prompts'],['observations','Observations'],['actions','Actions']];
+  function isTab(t){ for(var i=0;i<TABS.length;i++) if(TABS[i][0]===t) return true; return false; }
+  var TAB=isTab(WVSTATE.tab)? WVSTATE.tab : 'prompts';
+  var GROUPED=!!WVSTATE.groupedTabs;
+  var OPEN=(WVSTATE.open&&typeof WVSTATE.open==='object')?WVSTATE.open:{};
+  var COLW=(Array.isArray(WVSTATE.colW) && WVSTATE.colW.length===TABS.length)?WVSTATE.colW.slice():[1,1,1];
+  var COLC=(WVSTATE.colC&&typeof WVSTATE.colC==='object')?WVSTATE.colC:{};
+  var COL_MIN=190; // the floor a column drag clamps against — below it these rows would have to clip
+  function saveState(){ try{ vscode.setState({ tab:TAB, groupedTabs:GROUPED, open:OPEN, colW:COLW, colC:COLC }); }catch(e){} }
+  var TAB_TIP={
+    prompts:'Prompts — what you asked for, in order. Selecting one scopes the Overview beside it.',
+    observations:'Observations — why each change was made, in Claude’s own words, plus the session recap and the context it was working from.',
+    actions:'Actions — every tool call by category, then the two audits: what landed outside your workspace, and where the session reached.'
+  };
+  var TAB_DESC={
+    prompts:'What you asked for, in order. Select one to scope the Overview beside it — its fleet, runs, tasks, shells and change map narrow to the work that ask caused.',
+    observations:'Why each change was made, in Claude’s own words, lifted from the transcript rather than regenerated — with the session recap, the context it was working from, and what is still open.',
+    actions:'Every tool call this session made, by category and timestamped. Below them: the writes that landed outside your workspace, and where the session reached.'
+  };
   function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
   function fmtDur(ms){ ms=ms||0; var s=Math.round(ms/1000); if(s<60) return s+'s'; var m=Math.round(s/60); if(m<60) return m+'m'; return (m/60).toFixed(1)+'h'; }
   function fmtTok(n){ n=n||0; if(n>=1e6) return (n/1e6).toFixed(1)+'M'; if(n>=1e3) return Math.round(n/1e3)+'k'; return ''+n; }
@@ -3442,7 +4111,7 @@ const REQUESTS_SCRIPT = `
   // Toggle a prompt's response open/closed. Opening one it hasn't fetched asks the host for it.
   function toggleResp(id){ if(!id) return;
     if(EXP[id]){ delete EXP[id]; } else { EXP[id]=1; if(!RESP[id]) vscode.postMessage({type:'expand', id:id}); }
-    render();
+    renderPrompts();
   }
   // The response block for a row: the prose (wrapped, never clipped), a truncation note, or a loading /
   // "no prose" line — the three honest states of a lazily-fetched, possibly-empty response.
@@ -3477,38 +4146,294 @@ const REQUESTS_SCRIPT = `
     if(r.compactions) f.push('<span class="rq-cap" title="context compacted ×'+r.compactions+' while answering this prompt">⤺'+r.compactions+'</span>');
     return f.join('');
   }
-  function render(){
-    var host=document.getElementById('rq-list'), sum=document.getElementById('rq-sum'), clr=document.getElementById('rq-clear');
-    if(clr) clr.style.display = SEL? 'inline-block':'none';
-    // Three states kept apart, as everywhere else in this product: nothing read yet · the CLI answered
-    // nothing · this session genuinely has no recorded ask. Only the last is an observation.
-    if(!RQ){ if(sum) sum.textContent='';
-      host.innerHTML='<div class="rq-empty">'+(SEEN
-        ? 'No answer for <b>prompts</b> — the <b>claude-observatory</b> CLI on PATH didn’t return them (a CLI older than 0.8.8 has no <code>prompts</code> command).'
-        : 'Reading this session’s prompts…')+'</div>'; return; }
-    var rs=RQ.prompts||[], s=RQ.summary||{total:rs.length,withEdits:0,edits:0};
-    if(sum) sum.textContent = s.total+' ask'+(s.total===1?'':'s')+' · '+s.withEdits+' with edits · '+s.edits+' edit'+(s.edits===1?'':'s');
-    if(!rs.length){ host.innerHTML='<div class="rq-empty">No prompts recorded yet — this fills in with every prompt you send in this session.</div>'; return; }
-    // Newest ask FIRST: it is the one you are still thinking about. Each row keeps its own #index, so the
-    // chronological numbering a person counts by is never renumbered by the sort.
-    var h='';
-    for(var i=rs.length-1;i>=0;i--){ var r=rs[i]; var sel=(SEL===r.id); var open=!!EXP[r.id];
-      h+='<div class="rq-row'+(sel?' sel':'')+'" data-idx="'+i+'" data-id="'+esc(r.id)+'">'+
-        '<div class="rq-facts"><span class="rq-ix">#'+r.index+'</span>'+
-        (r.endTs?'':'<span class="rq-live" title="this is the ask still being answered">now</span>')+
-        facts(r)+
-        '<span class="rq-meta" title="'+(r.endTs?'from this ask to the next one':'still being answered — elapsed so far')+'">'+(r.endTs?'':'~')+fmtDur(r.durationMs)+'</span>'+
-        // The one row button: expand Claude's reply to this ask. Review actions live in the Overview's
-        // Prompt axis / bulk buttons once the ask is selected; this is purely "let me read the response".
-        '<button class="rq-exp'+(open?' on':'')+'" data-exp="'+esc(r.id)+'" title="'+(open?'Hide':'Read')+' Claude’s response to this prompt">'+(open?'▾':'▸')+' response</button>'+
-        '</div>'+
-        // The ask itself, whole and wrapped — never clipped.
-        '<div class="rq-ask">'+esc(r.text||r.title)+'</div>'+
-        (open?('<div class="rq-resp">'+respHtml(r)+'</div>'):'')+
+  // --- where a tab's content currently lives --------------------------------------------------------
+  // Grouped mode composes its own host per column, so this is the ONE thing that moves between layouts —
+  // every renderer below stays the single renderer for its tab rather than growing a second, grouped
+  // variant that could drift from it. (Same shape as the Overview's paneHost.)
+  function paneHost(k){ var g=GROUPED? document.getElementById('tl-g-'+k):null; return g||document.getElementById('tl-'+k); }
+  function colOpen(k){ return !COLC[k]; }
+  function openCols(){ var n=0; for(var i=0;i<TABS.length;i++) if(colOpen(TABS[i][0])) n++; return n; }
+  /** Whether a tab is ON SCREEN right now — the solo tab that is forward, or an unfolded grouped column. */
+  function shows(k){ return GROUPED? colOpen(k) : (TAB===k); }
+
+  // --- the flattened trees (Actions · Observations) --------------------------------------------------
+  // rows[''] is the root level; rows[key] is that row's children, fetched from the host the first time it
+  // is opened. A root payload drops the lot: the children it served belong to the payload before it, and
+  // an expanded group must never keep showing the previous tick's rows.
+  var TREE={ observations:{ rows:{}, req:{}, count:0, err:null, hooks:true, seen:false },
+             actions:{ rows:{}, req:{}, count:0, err:null, hooks:true, seen:false } };
+  function isOpen(tab,r){ var v=OPEN[tab+'/'+r.key]; return (v===undefined)? !!r.open : !!v; }
+  function needChildren(tab,key){ var st=TREE[tab];
+    if(st.rows[key]!==undefined || st.req[key]) return;
+    st.req[key]=1; vscode.postMessage({type:'children', tab:tab, key:key}); }
+  function findRow(tab,key){ var st=TREE[tab];
+    for(var p in st.rows){ var l=st.rows[p]; for(var i=0;i<l.length;i++) if(l[i].key===key) return l[i]; }
+    return null; }
+  function toggleRow(tab,key){
+    var r=findRow(tab,key), now=r? isOpen(tab,r):false;
+    OPEN[tab+'/'+key] = !now;
+    // Expansion is remembered across a hide/show, so bound it: a long-lived window that has walked a lot
+    // of sessions would otherwise carry every key it ever opened.
+    var ks=Object.keys(OPEN); if(ks.length>200) OPEN={};
+    if(!now) needChildren(tab,key);
+    saveState(); renderTree(tab);
+  }
+  function opsHtml(r){ var a=r.acts||[]; if(!a.length) return '';
+    var h='<span class="tl-ops">';
+    for(var i=0;i<a.length;i++) h+='<button class="tl-op'+(a[i].tone?' t-'+a[i].tone:'')+'" data-verb="'+esc(a[i].v)+'" title="'+esc(a[i].t)+'">'+esc(a[i].g)+'</button>';
+    return h+'</span>'; }
+  function rowsHtml(tab,parent,depth){
+    var st=TREE[tab], list=st.rows[parent]||[], h='';
+    for(var i=0;i<list.length;i++){ var r=list[i], open=(r.open!==null)&&isOpen(tab,r);
+      // Label, description and tooltip are the tree item's own — no second implementation of any of them.
+      // Both text columns WRAP; the whole tooltip rides the row's title, exactly as it did on the tree.
+      h+='<div class="tl-row'+(r.act?' act':'')+'" data-key="'+esc(r.key)+'" title="'+esc(r.tip)+'" style="padding-left:'+(3+depth*13)+'px">'+
+        (r.open===null? '<span class="tl-tw"></span>'
+                      : '<button class="tl-tw" data-tw="'+esc(r.key)+'" title="'+(open?'Collapse':'Expand')+'">'+(open?'▾':'▸')+'</button>')+
+        '<span class="tl-gl'+(r.tone?' t-'+r.tone:'')+'">'+esc(r.glyph)+'</span>'+
+        '<span class="tl-lb">'+esc(r.label)+'</span>'+
+        '<span class="tl-de">'+esc(r.desc||'')+'</span>'+
+        opsHtml(r)+
         '</div>';
+      if(open){
+        if(st.rows[r.key]===undefined){ needChildren(tab,r.key); h+='<div class="tl-load" style="padding-left:'+(16+depth*13)+'px">reading…</div>'; }
+        else h+=rowsHtml(tab,r.key,depth+1);
+      }
+    }
+    return h;
+  }
+  // The empty states the two removed views carried as viewsWelcome entries, moved here with them. The
+  // demo offer is a BUTTON that posts to the host — a webview never names a command itself.
+  function emptyHtml(tab){
+    if(tab==='actions')
+      return '<div class="rq-empty">No tool calls in this session yet.<br>Edits, commands, reads, searches, egress, and to-dos appear here as Claude works.</div>';
+    return '<div class="rq-empty">'+(TREE.observations.hooks
+      ? 'No edits in this session yet.'
+      : 'No tracked Claude edits in this workspace yet.')+
+      '<button data-demo="1">Try the demo — no Claude session needed</button></div>';
+  }
+  function sumText(tab){ var n=TREE[tab].count||0;
+    return tab==='actions'? (n+' tool call'+(n===1?'':'s')) : (n+' edit'+(n===1?'':'s')); }
+  function renderTree(tab){
+    var host=paneHost(tab); if(!host) return;
+    var st=TREE[tab], body;
+    // The same three states the Prompts tab keeps apart: nothing read yet · the read FAILED · this
+    // session genuinely has none. A feed that could not be built says so rather than reading as an
+    // empty session.
+    if(st.err) body='<div class="rq-empty">Could not read this session’s '+tab+' — <b>'+esc(st.err)+'</b></div>';
+    else if(!st.seen) body='<div class="rq-empty">Reading this session’s '+tab+'…</div>';
+    else if(!(st.rows['']||[]).length) body=emptyHtml(tab);
+    else body=rowsHtml(tab,'',0);
+    host.innerHTML=
+      '<div class="rq-head"><span class="rq-title">'+(tab==='actions'?'Actions':'Observations')+'</span>'+
+      '<span class="rq-sum">'+((st.seen&&!st.err)? esc(sumText(tab)) : '')+'</span></div>'+
+      '<div class="rq-desc">'+esc(TAB_DESC[tab])+'</div>'+
+      '<div class="tl-list">'+body+'</div>';
+    var rows=host.querySelectorAll('.tl-row');
+    for(var i=0;i<rows.length;i++) rows[i].addEventListener('click', function(ev){
+      var t=ev.target;
+      var tw=(t&&t.closest)? t.closest('.tl-tw') : null;
+      if(tw && tw.getAttribute('data-tw')){ ev.stopPropagation(); toggleRow(tab, tw.getAttribute('data-tw')); return; }
+      var op=(t&&t.closest)? t.closest('.tl-op') : null;
+      // A row button posts its VERB, never a command name: the host holds the node this row was built
+      // from and decides which claudeObservatory.* command that verb is allowed to reach.
+      if(op){ ev.stopPropagation(); vscode.postMessage({type:'rowAct', tab:tab, key:this.getAttribute('data-key'), verb:op.getAttribute('data-verb')}); return; }
+      vscode.postMessage({type:'row', tab:tab, key:this.getAttribute('data-key')});
+    });
+    var demo=host.querySelector('[data-demo]');
+    if(demo) demo.addEventListener('click', function(){ vscode.postMessage({type:'startDemo'}); });
+    // (No reTour() here: every anchor this window can ring — the prompts list and the session picker —
+    // lives outside these two panes, so nothing this render replaces could be carrying the ring.)
+  }
+
+  // --- the tab strip, and the grouped columns beside it ----------------------------------------------
+  var GROUP_BUILT=null; // 'on' once the grouped columns exist in the DOM; null while solo tabs are shown
+  function badgeOf(k){
+    if(k==='prompts') return (RQ&&RQ.summary)? String(RQ.summary.total) : '';
+    var st=TREE[k]; return (st.seen&&!st.err)? String(st.count) : ''; }
+  function renderTabs(){
+    var host=document.getElementById('tl-tabs'); if(!host) return;
+    var h='';
+    if(GROUPED){
+      // One tab, because all three are on screen. It still names them, in the order the columns run.
+      h+='<button class="tl-tab on" data-tab="g" title="All three side by side — each column has its own header; drag a divider to resize a pair, or fold a column to a rail.">'+
+        'Prompts · Observations · Actions</button>';
+    } else {
+      for(var i=0;i<TABS.length;i++){ var k=TABS[i][0], b=badgeOf(k);
+        h+='<button class="tl-tab'+(TAB===k?' on':'')+'" data-tab="'+k+'" title="'+esc(TAB_TIP[k])+'">'+TABS[i][1]+
+          (b!==''?('<span class="tl-tn">'+esc(b)+'</span>'):'')+'</button>'; }
     }
     host.innerHTML=h;
-    var rows=host.querySelectorAll('.rq-row');
+    var bs=host.querySelectorAll('.tl-tab');
+    for(var q=0;q<bs.length;q++) bs[q].addEventListener('click', function(){
+      var k=this.getAttribute('data-tab');
+      if(k==='g' || !isTab(k)) return; // the group tab already shows everything it names
+      TAB=k; saveState(); applyPanes(); renderTabs(); renderAll(); tellHost(); });
+    var tg=document.getElementById('tl-grouptabs');
+    if(tg){ tg.classList.toggle('on', GROUPED); tg.setAttribute('aria-pressed', GROUPED?'true':'false'); }
+  }
+  function applyPanes(){
+    for(var i=0;i<TABS.length;i++){ var el=document.getElementById('tl-pane-'+TABS[i][0]);
+      if(el) el.style.display=(!GROUPED && TAB===TABS[i][0])?'flex':'none'; }
+    var g=document.getElementById('tl-group'); if(g) g.style.display=GROUPED?'flex':'none';
+  }
+  /** Write each expanded column's share as its flex-grow weight. A rail is sized by CSS and exempt from
+   *  both this and the minimum width — it is not showing content to clip. */
+  function applyColWidths(){
+    for(var i=0;i<TABS.length;i++){ var el=document.getElementById('tl-gc-'+TABS[i][0]);
+      if(el&&el.style&&el.style.setProperty) el.style.setProperty('--tl-cw', String(COLW[i])); } }
+  function paintColBadges(){
+    for(var i=0;i<TABS.length;i++){ var el=document.getElementById('tl-gb-'+TABS[i][0]);
+      if(el) el.textContent=badgeOf(TABS[i][0]); } }
+  /**
+   * Fold a column to its rail, or bring it back.
+   *
+   * The LAST expanded column never folds: a group with every column folded is an empty pane, and the
+   * only affordance to undo it would be the rail the reader just lost track of. The button is not
+   * rendered in that case either — this guard is the second line, for a click that raced a repaint.
+   *
+   * The column's WEIGHT is deliberately untouched, so expanding restores the width the reader set rather
+   * than an equal share; while folded the rail is sized by CSS and the siblings divide the rest.
+   */
+  function toggleCol(k){
+    if(colOpen(k) && openCols()<=1) return;
+    if(colOpen(k)) COLC[k]=1; else delete COLC[k];
+    GROUP_BUILT=null; saveState(); renderTabs(); ensureGroup(); renderAll(); tellHost();
+  }
+  function renderGroupCols(){
+    var host=document.getElementById('tl-group'); if(!host) return;
+    var h='', n=openCols(), seenOpen=false;
+    for(var i=0;i<TABS.length;i++){ var k=TABS[i][0], nm=TABS[i][1];
+      if(!colOpen(k)){
+        // The rail still NAMES the column and carries its badge, and the whole thing is the button that
+        // brings it back — a column that vanished with no affordance is a bug nobody can describe.
+        h+='<div class="tl-groupcol rail" id="tl-gc-'+k+'">'+
+          '<button class="tl-rail" id="tl-cc-'+k+'" title="'+esc(nm+' — folded. Click to bring it back at the width you set.')+'">'+
+          '<i class="codicon codicon-chevron-right"></i><span>'+nm+'</span>'+
+          '<span class="tl-tn" id="tl-gb-'+k+'"></span></button></div>';
+        continue;
+      }
+      h+='<div class="tl-groupcol" id="tl-gc-'+k+'">'+
+        (seenOpen? '<div class="tl-cgutter" id="tl-cg-'+k+'" title="Drag to resize these columns — double-click to split them evenly"></div>':'')+
+        '<div class="tl-ghead" title="'+esc(TAB_TIP[k])+'">'+nm+'<span class="tl-tn" id="tl-gb-'+k+'"></span>'+
+        (n>1? '<button class="tl-cfold" id="tl-cc-'+k+'" title="Fold '+nm+' to a rail — the other columns take the space, and it comes back at the width you set"><i class="codicon codicon-chevron-left"></i></button>':'')+
+        '</div><div class="tl-host" id="tl-g-'+k+'"></div></div>';
+      seenOpen=true;
+    }
+    host.innerHTML=h;
+    wireGroupCols();
+    applyColWidths();
+  }
+  /** Wire the dividers and fold buttons. Called once per column build, like the columns themselves. */
+  function wireGroupCols(){
+    for(var m=0;m<TABS.length;m++) (function(m){
+      var k=TABS[m][0];
+      var fold=document.getElementById('tl-cc-'+k);
+      if(fold) fold.addEventListener('click', function(ev){ if(ev&&ev.stopPropagation) ev.stopPropagation(); toggleCol(k); });
+      var gut=document.getElementById('tl-cg-'+k);
+      if(!gut) return;
+      // The pair this divider sizes is (nearest EXPANDED column to its left, this one): a folded rail
+      // between them is skipped rather than dragged, and with nothing expanded to the left there is no pair.
+      var p=-1; for(var q=m-1;q>=0;q--) if(colOpen(TABS[q][0])){ p=q; break; }
+      if(p<0) return;
+      var a=document.getElementById('tl-gc-'+TABS[p][0]), b=document.getElementById('tl-gc-'+k);
+      if(!a||!b) return;
+      function setFrom(ev){
+        var ra=a.getBoundingClientRect(), rb=b.getBoundingClientRect();
+        var span=(rb.right-ra.left)||1, sum=COLW[p]+COLW[m];
+        // The floor, as a fraction of THIS pair. Capped at .45 so a pair too narrow to hold two floors
+        // still leaves a usable range instead of an impossible clamp (below the breakpoint the whole
+        // group stacks and the dividers are hidden anyway).
+        var floor=Math.min(0.45, COL_MIN/span);
+        var frac=(ev.clientX-ra.left)/span;
+        if(!isFinite(frac)) return;
+        frac=Math.max(floor, Math.min(1-floor, frac));
+        COLW[p]=sum*frac; COLW[m]=sum*(1-frac);
+        applyColWidths();
+      }
+      gut.addEventListener('pointerdown', function(ev){
+        if(ev&&ev.preventDefault) ev.preventDefault();
+        gut.classList.add('drag');
+        try{ gut.setPointerCapture(ev.pointerId); }catch(e){}
+        function move(e2){ setFrom(e2); }
+        function up(){
+          gut.classList.remove('drag');
+          try{ gut.releasePointerCapture(ev.pointerId); }catch(e){}
+          gut.removeEventListener('pointermove', move); gut.removeEventListener('pointerup', up); gut.removeEventListener('pointercancel', up);
+          saveState();
+        }
+        gut.addEventListener('pointermove', move); gut.addEventListener('pointerup', up); gut.addEventListener('pointercancel', up);
+      });
+      gut.addEventListener('dblclick', function(){ var s=COLW[p]+COLW[m]; COLW[p]=s/2; COLW[m]=s/2; applyColWidths(); saveState(); });
+    })(m);
+  }
+  /** Build the grouped columns once per mode, or re-assert the widths on a later tick. Leaving grouped
+   *  mode blanks the pane so ids inside it (the tour's #rq-list) never exist twice. */
+  function ensureGroup(){
+    var g=document.getElementById('tl-group');
+    if(!GROUPED){ GROUP_BUILT=null; if(g) g.innerHTML=''; return; }
+    if(GROUP_BUILT!=='on'){ renderGroupCols(); GROUP_BUILT='on'; }
+    else applyColWidths();
+    paintColBadges();
+  }
+  /** Render only what is on screen. */
+  function renderAll(){
+    if(shows('prompts')) renderPrompts();
+    if(shows('observations')) renderTree('observations');
+    if(shows('actions')) renderTree('actions');
+  }
+  /**
+   * Tell the host which tabs are on screen. It serves ONLY those: building the Actions root walks every
+   * sibling worktree for live conflicts (~100 ms of synchronous extension-host work), and paying for
+   * that while the reader is looking at Prompts is exactly what the tree's visible-only refresh avoided.
+   */
+  function tellHost(){ vscode.postMessage({type:'view', tab:TAB, grouped:GROUPED,
+    shows:{ prompts:shows('prompts'), observations:shows('observations'), actions:shows('actions') } }); }
+
+  // The Prompts tab draws its OWN heading, description and list into whatever host it currently occupies
+  // (the solo pane, or its column in grouped mode), so the tab has exactly one renderer in either layout
+  // and its summary + clear-scope button follow the list instead of being stranded in fixed chrome.
+  function renderPrompts(){
+    var host=paneHost('prompts'); if(!host) return;
+    var body='', sum='';
+    // Three states kept apart, as everywhere else in this product: nothing read yet · the CLI answered
+    // nothing · this session genuinely has no recorded ask. Only the last is an observation.
+    if(!RQ){
+      body='<div class="rq-empty">'+(SEEN
+        ? 'No answer for <b>prompts</b> — the <b>claude-observatory</b> CLI on PATH didn’t return them (a CLI older than 0.8.8 has no <code>prompts</code> command).'
+        : 'Reading this session’s prompts…')+'</div>';
+    } else {
+      var rs=RQ.prompts||[], s=RQ.summary||{total:rs.length,withEdits:0,edits:0};
+      sum = s.total+' ask'+(s.total===1?'':'s')+' · '+s.withEdits+' with edits · '+s.edits+' edit'+(s.edits===1?'':'s');
+      if(!rs.length) body='<div class="rq-empty">No prompts recorded yet — this fills in with every prompt you send in this session.</div>';
+      else {
+        // Newest ask FIRST: it is the one you are still thinking about. Each row keeps its own #index, so
+        // the chronological numbering a person counts by is never renumbered by the sort.
+        for(var i=rs.length-1;i>=0;i--){ var r=rs[i]; var sel=(SEL===r.id); var open=!!EXP[r.id];
+          body+='<div class="rq-row'+(sel?' sel':'')+'" data-idx="'+i+'" data-id="'+esc(r.id)+'">'+
+            '<div class="rq-facts"><span class="rq-ix">#'+r.index+'</span>'+
+            (r.endTs?'':'<span class="rq-live" title="this is the ask still being answered">now</span>')+
+            facts(r)+
+            '<span class="rq-meta" title="'+(r.endTs?'from this ask to the next one':'still being answered — elapsed so far')+'">'+(r.endTs?'':'~')+fmtDur(r.durationMs)+'</span>'+
+            // The one row button: expand Claude's reply to this ask. Review actions live in the Overview's
+            // Prompt axis / bulk buttons once the ask is selected; this is purely "let me read the response".
+            '<button class="rq-exp'+(open?' on':'')+'" data-exp="'+esc(r.id)+'" title="'+(open?'Hide':'Read')+' Claude’s response to this prompt">'+(open?'▾':'▸')+' response</button>'+
+            '</div>'+
+            // The ask itself, whole and wrapped — never clipped.
+            '<div class="rq-ask">'+esc(r.text||r.title)+'</div>'+
+            (open?('<div class="rq-resp">'+respHtml(r)+'</div>'):'')+
+            '</div>';
+        }
+      }
+    }
+    host.innerHTML=
+      '<div class="rq-head"><span class="rq-title">Prompts</span><span class="rq-sum" id="rq-sum">'+esc(sum)+'</span>'+
+      (SEL? '<button class="rq-clear" id="rq-clear" title="Clear the prompt scope — the Overview goes back to the whole session">clear scope</button>' : '')+
+      '</div>'+
+      '<div class="rq-desc">'+esc(TAB_DESC.prompts)+'</div>'+
+      '<div class="rq-list" id="rq-list">'+body+'</div>';
+    var list=host.querySelector('.rq-list');
+    var rows=list? list.querySelectorAll('.rq-row') : [];
     for(var q=0;q<rows.length;q++){
       rows[q].addEventListener('click', function(ev){
         // A click on the expand caret toggles the response, never the scope selection.
@@ -3516,46 +4441,184 @@ const REQUESTS_SCRIPT = `
         if(e){ ev.stopPropagation(); toggleResp(e.getAttribute('data-exp')); return; }
         var id=this.getAttribute('data-id');
         SEL = (SEL===id)? null : id;            // clicking the selected ask again clears the scope
-        render();
+        renderPrompts(); renderTabs();
         vscode.postMessage({type:'select', id:SEL});
       });
     }
+    var clr=host.querySelector('.rq-clear');
+    if(clr) clr.addEventListener('click', function(){ SEL=null; renderPrompts(); vscode.postMessage({type:'select', id:null}); });
+    reTour(); // this repaint just replaced the node a tour step may be ringing
   }
-  var clr=document.getElementById('rq-clear');
-  if(clr) clr.addEventListener('click', function(){ SEL=null; render(); vscode.postMessage({type:'select', id:null}); });
-  var TOUR_ANCHORS = { 'prompts-list':'#rq-list' };
+
+  // --- the session selector -------------------------------------------------------------------------
+  // SESSROWS are the rows the HOST chose: the sessions still being written, plus the reviewed one whatever
+  // its age, already in display order and already stamped active — the 60 s liveness rule is core's
+  // (FLEET_ACTIVE_MS) and is never re-derived here. Picking one switches the WHOLE observatory, not this
+  // window's scope, which is why it goes through a command rather than a local filter.
+  // (No backticks in this region: it is inside the TS template literal, which they would close.)
+  var SESSROWS=[], SESSCUR='', SESSOPEN=false, SESSSEEN=false;
+  function ago(ts){ if(!ts) return '—'; var s=Math.max(0, Math.round((Date.now()-ts)/1000));
+    if(s<60) return s+'s ago'; var m=Math.round(s/60); if(m<60) return m+'m ago'; var hr=Math.round(m/60); if(hr<48) return hr+'h ago'; return Math.round(hr/24)+'d ago'; }
+  function sessName(r){ return (r&&r.title)? r.title : ('session '+String((r&&r.id)||'').slice(0,8)); }
+  function sessCurRow(){ for(var i=0;i<SESSROWS.length;i++) if(String(SESSROWS[i].id)===String(SESSCUR)) return SESSROWS[i]; return null; }
+  function renderSess(){
+    var dot=document.getElementById('rq-sdot'), nm=document.getElementById('rq-sname'),
+        chip=document.getElementById('rq-schip'), list=document.getElementById('rq-slist');
+    if(!dot||!nm||!chip||!list) return;
+    var r=sessCurRow(), live=!!(r&&r.active);
+    dot.className='rq-sdot'+(live?' live':'');
+    dot.textContent=live?'●':'○';
+    // With no row for it (no listing yet, or a session pinned from another workspace) the chip still names
+    // the id it is reviewing — an unnamed selector over a session that IS being reviewed says nothing.
+    nm.textContent = SESSCUR? sessName(r||{id:SESSCUR}) : (SESSSEEN? 'no session selected' : 'session —');
+    // The whole tooltip: the title core gave us (already capped at 64 characters — this is not a fuller
+    // string), the full id, and when it was last written to.
+    chip.title=(r&&r.title? r.title+' — ':'')+'session '+(SESSCUR||'—')+
+      (r? ' · '+(live?'active · ':'')+ago(r.lastActiveMs):'')+' · click to switch to another active session';
+    if(!SESSOPEN){ list.hidden=true; list.innerHTML=''; return; }
+    var h='';
+    for(var i=0;i<SESSROWS.length;i++){ var s=SESSROWS[i], on=(String(s.id)===String(SESSCUR));
+      h+='<button class="rq-srow'+(on?' on':'')+'" data-sid="'+esc(s.id)+'" title="'+
+        esc(sessName(s)+' — session '+s.id+' · '+(s.active?'active · ':'')+ago(s.lastActiveMs))+'">'+
+        '<span class="rq-sdot'+(s.active?' live':'')+'">'+(s.active?'●':'○')+'</span>'+
+        '<span class="rq-sname">'+esc(sessName(s))+'</span>'+
+        '<span class="rq-sago">'+esc(ago(s.lastActiveMs))+(on?' · reviewing':'')+'</span></button>';
+    }
+    // The way out to everything this list deliberately leaves out.
+    h+='<button class="rq-srow" data-sall="1" title="Every session recorded for this workspace — the Overview’s Sessions tab is the full browser">'+
+      '<span class="rq-sdot">☰</span><span class="rq-sname">All sessions…</span></button>';
+    list.hidden=false; list.innerHTML=h;
+    var rs=list.querySelectorAll('[data-sid]');
+    for(var q=0;q<rs.length;q++) rs[q].addEventListener('click', function(){
+      SESSOPEN=false; renderSess(); vscode.postMessage({type:'pickSession', id:this.getAttribute('data-sid')}); });
+    var al=list.querySelector('[data-sall]');
+    if(al) al.addEventListener('click', function(){ SESSOPEN=false; renderSess(); vscode.postMessage({type:'allSessions'}); });
+  }
+  var schip=document.getElementById('rq-schip');
+  if(schip) schip.addEventListener('click', function(){ SESSOPEN=!SESSOPEN; renderSess(); });
+
+  var TOUR_ANCHORS = { 'prompts-list':'#rq-list', 'session-picker':'#rq-sess' };
+  /**
+   * The anchor a tour step is currently pointing at, HELD.
+   *
+   * Two reasons it cannot be a one-shot: the host broadcasts the anchor BEFORE it names the tab (a step
+   * naming the Prompts list arrives while the Actions tab may still be forward, so #rq-list does not
+   * exist yet), and every repaint rebuilds the node the ring was on. So each render re-applies it.
+   */
+  var TOUR_ANCHOR=null;
   function applyTour(anchor){
+    TOUR_ANCHOR = anchor;
+    reTour();
+  }
+  function reTour(){
     var prev=document.querySelectorAll('.ring');
     for(var i=0;i<prev.length;i++) prev[i].classList.remove('ring');
-    var sel = anchor ? TOUR_ANCHORS[anchor] : null;
+    var sel = TOUR_ANCHOR ? TOUR_ANCHORS[TOUR_ANCHOR] : null;
     var el = sel ? document.querySelector(sel) : null;
     if(el) el.classList.add('ring');
   }
+  var gtog=document.getElementById('tl-grouptabs');
+  if(gtog) gtog.addEventListener('click', function(){
+    GROUPED=!GROUPED; GROUP_BUILT=null; saveState(); renderTabs(); applyPanes(); ensureGroup(); renderAll(); tellHost(); });
+
   window.addEventListener('message', function(ev){ var m=ev.data||{};
     if(m.type==='tour'){ applyTour(m.anchor||null); return; }
-    if(m.type==='prompts'){ RQ=m.rq||null; SEEN=true; if(m.selected!==undefined) SEL=m.selected; render(); }
-    else if(m.type==='response'){ RESP[m.id]=m.response||{text:'',turns:0,truncated:0}; render(); }
-    else if(m.type==='error'){ RQ=null; SEEN=true; render(); }
+    if(m.type==='sessions'){ SESSROWS=m.rows||[]; SESSCUR=m.current||''; SESSSEEN=true; renderSess(); return; }
+    // A tour step (or a command) naming a tab brings it forward. Grouped, everything it could name is
+    // already on screen — except a column the reader folded, which is brought back rather than left
+    // pointing at nothing.
+    if(m.type==='tab' && isTab(m.tab)){
+      if(GROUPED){ if(!colOpen(m.tab)){ delete COLC[m.tab]; GROUP_BUILT=null; } }
+      TAB=m.tab; saveState(); renderTabs(); applyPanes(); ensureGroup(); renderAll(); tellHost(); return;
+    }
+    if(m.type==='rows'){ var st=TREE[m.tab]; if(!st) return;
+      if(!m.parent){
+        // A root payload replaces the whole tree: the children already held were built from the payload
+        // before it, and an open group must never keep showing the previous tick's rows.
+        //
+        // Keeping the children of groups that are still open was considered and cannot be done here: the
+        // HOST drops its whole node table for this tab on a root post, so a held child row's key no
+        // longer resolves to anything — its click and its Keep/Undo buttons would silently do nothing,
+        // which is worse than the re-fetch. Preserving them means the host re-serializing them anyway.
+        // What the re-fetch storm cost is paid for instead by the host's tree throttle, which bounds
+        // this whole exchange to once per 3s while Claude works.
+        st.rows={}; st.req={}; st.rows['']=m.rows||[];
+        st.count=m.count||0; st.err=m.err||null; st.seen=true;
+        if(typeof m.hooks==='boolean') st.hooks=m.hooks;
+      } else { st.rows[m.parent]=m.rows||[]; delete st.req[m.parent]; }
+      renderTabs(); paintColBadges(); renderTree(m.tab); return; }
+    if(m.type==='prompts'){ RQ=m.rq||null; SEEN=true; if(m.selected!==undefined) SEL=m.selected; renderPrompts(); renderTabs(); paintColBadges(); }
+    else if(m.type==='response'){ RESP[m.id]=m.response||{text:'',turns:0,truncated:0}; renderPrompts(); }
+    else if(m.type==='error'){ RQ=null; SEEN=true; renderPrompts(); renderTabs(); }
   });
-  render();
+  renderTabs();
+  applyPanes();
+  ensureGroup();
+  renderAll();
+  renderSess();
+  tellHost();
   vscode.postMessage({type:'ready'});
 })();
 `;
 
-/** Host side of the Prompts window: spawns `prompts --json`, keeps the selection, and hands it to the
- *  Overview (which scopes everything it draws to that ask). The selection lives HERE, not in either
- *  webview, so a panel that reloads — or one that was hidden while the pick was made — comes back to
- *  the same scope both windows agree on. */
-class PromptsViewProvider implements vscode.WebviewViewProvider {
+/**
+ * The Timeline selector's rows, in display order: the sessions still being written (core's own liveness
+ * rule, never a second copy of the 60 s constant) plus the one under review however old it is — reviewed
+ * first, then by conversation recency, which is the order `sessionMeta` already returns.
+ *
+ * A pinned session this workspace has no row for is SYNTHESIZED rather than dropped. The pin is honoured
+ * by every other surface, so a selector that cannot list it could name what it is reviewing but never
+ * switch away from it.
+ *
+ * Shared by the webview push and the QuickPick command, so both offer exactly the same set.
+ */
+function activeSessionRows(rows: core.SessionMetaRow[], current: string | null | undefined): core.SessionMetaRow[] {
+  const keep = rows.filter((r) => core.isFleetActive(r.lastActiveMs) || r.id === current);
+  if (current && !keep.some((r) => r.id === current))
+    keep.push({ id: current, title: null, lastActiveMs: 0, current: false, edits: 0, pending: 0, files: 0, added: 0, removed: 0, tokens: 0, durationMs: 0, model: '', effort: '' });
+  return [...keep.filter((r) => r.id === current), ...keep.filter((r) => r.id !== current)];
+}
+
+/**
+ * Host side of the Timeline window.
+ *
+ * Three jobs, one webview: the Prompts list (spawns `prompts --json`, owns the picked ask and hands it
+ * to the Overview), and the Actions + Observations feeds, served a level at a time straight off
+ * `ActionsProvider` / `ObservationsProvider` — the same view-models the trees used, kept in those
+ * classes rather than copied here.
+ *
+ * The prompt selection lives HERE, not in either webview, so a panel that reloads — or one that was
+ * hidden while the pick was made — comes back to the same scope both windows agree on.
+ */
+class TimelineViewProvider implements vscode.WebviewViewProvider {
+  constructor(
+    readonly observations: ObservationsProvider,
+    readonly actions: ActionsProvider
+  ) {}
   private view?: vscode.WebviewView;
   /** Guided tour: ring the control a step names, if this panel is the one that owns it. */
   setTour(anchor: string | null): void {
     this.view?.webview.postMessage({ type: 'tour', anchor });
   }
+  /** Bring one tab forward — the tour's `view: 'actions' | 'observations' | 'prompts'` steps, and the
+   *  palette commands that reveal a tab. Grouped, the webview un-folds the column instead. */
+  setTab(tab: 'prompts' | 'actions' | 'observations'): void {
+    this.view?.webview.postMessage({ type: 'tab', tab });
+  }
   private run = 0;
+  /** The tree block's OWN coalescing stamp — see `refresh`. */
+  private treeRun = 0;
   private running = false;
   private rerun = false;
   private everLoaded = false;
+  /** Which tabs are on screen, as the webview last reported. Serving a tab nobody is looking at would
+   *  put back the cost the trees' visible-only refresh removed — the Actions root alone walks every
+   *  sibling worktree. Both start true so the first refresh (before the webview has answered) still
+   *  fills whichever tab the persisted layout restores. */
+  private showing: Record<'observations' | 'actions', boolean> = { observations: true, actions: true };
+  /** The nodes behind the rows currently on screen, per tab, with the command and the verbs each row is
+   *  allowed to reach. A click posts a KEY; what it may run is decided here, never by the webview. */
+  private nodes = new Map<string, { node: unknown; cmd?: vscode.Command; acts: TlAct[] }>();
   /** Told the selection changed (the Overview is the listener). */
   onSelect?: (id: string | null) => void;
   /** The last payload that parsed — so a repaint forced from outside (a cleared scope) has rows to draw. */
@@ -3571,6 +4634,115 @@ class PromptsViewProvider implements vscode.WebviewViewProvider {
     this.onSelect?.(null);
     this.view?.webview.postMessage({ type: 'prompts', rq: this.last, selected: null });
   }
+  /**
+   * Push a selection made OUTSIDE this window — the nav bar's Prompt axis, Review prompt, Rewind — into
+   * the list, so the picked ask is highlighted in the same place the reader picks one by hand. Without
+   * this the two surfaces disagreed about which ask was chosen.
+   *
+   * Deliberately does NOT call `onSelect`: the caller is the one that scoped the Overview, and echoing
+   * it back would run select → notify → select. The webview does not answer a pushed selection either
+   * (it sets its own SEL and repaints), so the loop is closed at both ends.
+   */
+  setSelection(id: string | null): void {
+    if (this.selected === id) return;
+    this.selected = id;
+    this.view?.webview.postMessage({ type: 'prompts', rq: this.last, selected: id });
+  }
+  /**
+   * Serialize ONE level of a tree provider and hand it to the webview.
+   *
+   * Level at a time, like the tree it replaces: a big session's Actions feed is ~1000 rows across its
+   * categories, and every one of them carries a tooltip — building the lot on every refresh would post
+   * hundreds of kilobytes for rows nobody has opened. A root payload drops that tab's node table first:
+   * the rows the webview holds are about to be replaced, and a stale key must never resolve to a node
+   * from the previous payload.
+   *
+   * One level of Observations is still unbounded — one row per edit run — so the EDIT rows are capped
+   * at `EDIT_FEED_CAP` and the overflow is reported in a row of its own. Only the edit rows: this feed
+   * ends with the Context section and "Next steps", and a head-N slice over the whole level would
+   * delete both without a word. The cap decides what to SERIALIZE, before `getTreeItem` is called on a
+   * node, so a dropped row costs nothing — and `kids` stays whole, so the badge below still counts
+   * every edit the session made.
+   */
+  private postTree(tab: 'observations' | 'actions', parentKey: string): void {
+    const view = this.view;
+    if (!view) return;
+    const prov = (tab === 'actions' ? this.actions : this.observations) as unknown as TlTreeProvider;
+    if (!parentKey) for (const k of [...this.nodes.keys()]) if (k.startsWith(tab + '/')) this.nodes.delete(k);
+    let rows: TlRow[] = [];
+    let err: string | null = null;
+    let count = 0;
+    try {
+      const parent = parentKey ? this.nodes.get(tab + '/' + parentKey)?.node : undefined;
+      if (parentKey && parent === undefined) return; // the row went away with the last refresh
+      const kids = prov.getChildren(parent) ?? [];
+      const cap = tab === 'observations' ? EDIT_FEED_CAP : Infinity;
+      let editRows = 0; // edit ROWS serialized — the cap is on rows, and a coalesced run is one row
+      let editsKept = 0; // …and the EDITS those rows hold, which is what the notice and the badge count
+      let editsHidden = 0;
+      let noticeAt = -1; // where the "showing N of M" row goes — right after the last edit row kept
+      for (let i = 0; i < kids.length; i++) {
+        const node = kids[i];
+        const kind = (node as { kind?: string }).kind;
+        if (kind === 'edit' || kind === 'tlrun') {
+          const held = (node as { edits?: unknown[] }).edits?.length ?? 1;
+          if (editRows >= cap) {
+            if (noticeAt < 0) noticeAt = rows.length;
+            editsHidden += held;
+            continue;
+          }
+          editRows++;
+          editsKept += held;
+        }
+        const key = (parentKey ? parentKey + '/' : '') + tlNodeKey(node, i);
+        const item = prov.getTreeItem(node);
+        const acts = TL_ROW_ACTS[String(item.contextValue ?? '')] ?? [];
+        this.nodes.set(tab + '/' + key, { node, cmd: item.command, acts });
+        rows.push(tlRowOf(key, item, acts));
+      }
+      // A dropped row is SAID, never swallowed: the numbers are EDITS, so the total the notice states is
+      // the same one the badge shows rather than a second, smaller count of rows; and the sections that
+      // follow the feed are still below it.
+      if (editsHidden)
+        rows.splice(noticeAt, 0, tlMoreRow((parentKey ? parentKey + '/' : '') + 'more', editsKept, editsKept + editsHidden));
+      // The tab's badge, counted off the SAME roots that were just serialized — never a second parse.
+      // `kids`, not `rows`: the cap above changes how much is DRAWN, never what the session did.
+      if (!parentKey)
+        for (const k of kids) {
+          const n = k as { kind?: string; count?: number; edits?: unknown[] };
+          if (tab === 'actions') count += n.kind === 'agroup' ? n.count ?? 0 : 0;
+          else count += n.kind === 'edit' ? 1 : n.kind === 'tlrun' ? (n.edits ?? []).length : 0;
+        }
+    } catch (e) {
+      // Never a silent empty list: a feed that could not be built is SAID so, or the panel reads as a
+      // session that did nothing.
+      rows = [];
+      err = String((e as Error)?.message || e) || 'unreadable';
+    }
+    void view.webview.postMessage({
+      type: 'rows', tab, parent: parentKey, rows, count, err,
+      // Which empty state Observations shows — the two `viewsWelcome` variants the removed view carried.
+      hooks: core.hooksInstalled(),
+    });
+  }
+  /** Feed the selector row above the list. Built IN-PROCESS: `sessionMeta` is stat-bound and
+   *  sidecar-cached, so it costs no spawn and rides this window's existing visible-only refresh — the
+   *  selector adds no timer and no polling loop of its own. Liveness is stamped here, from core, so the
+   *  webview never carries a second copy of the 60 s rule. */
+  private postSessions(cwd: string, session: string | null | undefined): void {
+    let rows: Array<core.SessionMetaRow & { active: boolean }> = [];
+    try {
+      rows = activeSessionRows(core.sessionMeta(cwd, session).sessions, session).map((r) => ({
+        ...r,
+        active: core.isFleetActive(r.lastActiveMs),
+      }));
+    } catch {
+      // A listing we could not build is ABSENT, never invented: the chip falls back to naming the id and
+      // the list offers only the way out to the Overview's full browser.
+      rows = [];
+    }
+    this.view?.webview.postMessage({ type: 'sessions', rows, current: session ?? '' });
+  }
   /** Fetch Claude's prose reply to one ask and post it back to the row that asked to expand. */
   private fetchResponse(id: string): void {
     const cwd = workspaceRoot() ?? process.cwd();
@@ -3584,16 +4756,48 @@ class PromptsViewProvider implements vscode.WebviewViewProvider {
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
     view.webview.options = { enableScripts: true };
-    view.webview.html = promptsShell();
-    view.webview.onDidReceiveMessage((m: { type?: string; id?: string | null }) => {
+    view.webview.html = timelineShell();
+    view.webview.onDidReceiveMessage((m: { type?: string; id?: string | null; tab?: string; key?: string; verb?: string; shows?: Record<string, boolean> }) => {
       if (!m) return;
-      // Two jobs: pick the ask that scopes the Overview, and lazily fetch Claude's reply when a row is
-      // expanded (the response can be large, so it never rides the list payload).
+      const treeTab = m.tab === 'actions' || m.tab === 'observations' ? m.tab : null;
+      // Pick the ask that scopes the Overview; lazily fetch Claude's reply when a row is expanded (the
+      // response can be large, so it never rides the list payload); and serve the two trees a level at
+      // a time as the reader opens them.
       if (m.type === 'ready') this.refresh(true);
       else if (m.type === 'select') {
         this.selected = typeof m.id === 'string' && m.id ? m.id : null;
         this.onSelect?.(this.selected);
       } else if (m.type === 'expand' && typeof m.id === 'string') this.fetchResponse(m.id);
+      // Which tabs are on screen. A tab that has just come forward is served immediately — waiting for
+      // the next store change would leave it on "Reading…" for as long as nothing happened.
+      else if (m.type === 'view' && m.shows) {
+        for (const t of ['observations', 'actions'] as const) {
+          const on = !!m.shows[t];
+          const was = this.showing[t];
+          this.showing[t] = on;
+          if (on && !was) this.postTree(t, '');
+        }
+      } else if (m.type === 'children' && treeTab && typeof m.key === 'string') this.postTree(treeTab, m.key);
+      // A row's click command, taken from the host's OWN table — the webview posted only a key.
+      else if (m.type === 'row' && treeTab && typeof m.key === 'string') {
+        const hit = this.nodes.get(treeTab + '/' + m.key);
+        if (hit?.cmd) void vscode.commands.executeCommand(hit.cmd.command, ...(hit.cmd.arguments ?? []));
+      }
+      // …and a row action: the verb must be one this row actually offers, or it is refused. The node
+      // itself is what the command receives, exactly as the tree passed it.
+      else if (m.type === 'rowAct' && treeTab && typeof m.key === 'string' && typeof m.verb === 'string') {
+        const hit = this.nodes.get(treeTab + '/' + m.key);
+        const verb = m.verb;
+        if (hit && hit.acts.some((a) => a.v === verb))
+          void vscode.commands.executeCommand('claudeObservatory.' + verb, hit.node);
+      } else if (m.type === 'startDemo') void vscode.commands.executeCommand('claudeObservatory.startDemo');
+      // The selector switches the WHOLE observatory (the user's call), so it goes through pinSession —
+      // which is also what keeps a switch made mid-demo out of the user's settings.json.
+      else if (m.type === 'pickSession' && typeof m.id === 'string')
+        void vscode.commands.executeCommand('claudeObservatory.pinSession', m.id);
+      // The way out to the full browser is the Overview's Sessions tab — the deprecated QuickPick is no
+      // longer where this hands over to.
+      else if (m.type === 'allSessions') void vscode.commands.executeCommand('claudeObservatory.showSessions');
     });
     view.onDidChangeVisibility(() => {
       if (view.visible) this.refresh(true);
@@ -3602,6 +4806,24 @@ class PromptsViewProvider implements vscode.WebviewViewProvider {
   refresh(force = false): void {
     if (!this.view?.visible) return;
     const now = Date.now();
+    // The two in-process feeds, on their OWN 3s stamp. They used to ride every refresh unthrottled
+    // because they "cost no spawn" — true while they were VS Code TREES, which the platform virtualized
+    // down to the rows on screen and never serialized. Rendered by a webview they cost a full build +
+    // postMessage + repaint per tick, so an unforced tick that correctly decides no spawn is worth doing
+    // must not pay them either.
+    //
+    // A stamp of their own rather than moving them below the spawn throttle: that would also put them
+    // below the in-flight gate, which returns EARLY, so a Keep landing during a `prompts --json` spawn
+    // would leave the feed showing pre-Keep statuses until that spawn's callback re-ran the refresh.
+    // Forced refreshes (every review verb) still post immediately, in flight or not. Only the tabs on
+    // screen are built.
+    if (force || now - this.treeRun >= 3000) {
+      this.treeRun = now;
+      this.actions.refresh(); // a new cycle re-walks the fleet (its `active` flags are time-derived)
+      this.observations.refresh();
+      if (this.showing.observations) this.postTree('observations', '');
+      if (this.showing.actions) this.postTree('actions', '');
+    }
     // Same coalescing discipline the Overview uses: one spawn at a time, and a forced refresh that
     // arrives mid-flight re-runs once the current one lands (its payload predates the change).
     if (this.running) {
@@ -3612,6 +4834,7 @@ class PromptsViewProvider implements vscode.WebviewViewProvider {
     this.run = now;
     const cwd = workspaceRoot() ?? process.cwd();
     const session = currentSession();
+    this.postSessions(cwd, session);
     if (!session) {
       this.view.webview.postMessage({ type: 'prompts', rq: null, selected: this.selected });
       return;
@@ -3731,13 +4954,8 @@ class StatsUsageViewProvider implements vscode.WebviewViewProvider {
     if (session) args.push('--session', session);
     let child: cp.ChildProcess;
     try {
-      // Windows: npm installs the CLI as a .cmd shim, which spawn() can't exec without a shell.
-      const bin = resolveObservatoryBin();
-      const winShell = process.platform === 'win32';
-      child = cp.spawn(winShell ? `"${bin}"` : bin, args, {
-        stdio: ['ignore', 'pipe', 'ignore'],
-        shell: winShell,
-      });
+      // Windows: npm installs the CLI as a .cmd shim, which needs cmd.exe — see core/spawn.
+      child = core.spawnTool(resolveObservatoryBin(), args, { stdio: ['ignore', 'pipe', 'ignore'] });
     } catch {
       this.statsRunning = false;
       this.postStatsError();
@@ -3957,6 +5175,8 @@ class ChangeMapViewProvider implements vscode.WebviewViewProvider {
         void vscode.commands.executeCommand('claudeObservatory.promptKeep', m.promptId);
       else if (m.type === 'promptUndo' && typeof m.promptId === 'string')
         void vscode.commands.executeCommand('claudeObservatory.promptUndo', m.promptId);
+      else if (m.type === 'promptRewind' && typeof m.promptId === 'string')
+        void vscode.commands.executeCommand('claudeObservatory.promptRewind', m.promptId);
       else if (m.type === 'promptClear' && typeof m.promptId === 'string')
         void vscode.commands.executeCommand('claudeObservatory.promptClear', m.promptId);
       else if (m.type === 'reviewPrompt' && typeof m.promptId === 'string')
@@ -3997,6 +5217,7 @@ class ChangeMapViewProvider implements vscode.WebviewViewProvider {
       else if (m.type === 'acceptCurrentPrompt') void vscode.commands.executeCommand('claudeObservatory.acceptCurrentPrompt');
       else if (m.type === 'rejectCurrentPrompt') void vscode.commands.executeCommand('claudeObservatory.rejectCurrentPrompt');
       else if (m.type === 'reviewCurrentPrompt') void vscode.commands.executeCommand('claudeObservatory.reviewCurrentPrompt');
+      else if (m.type === 'rewindCurrentPrompt') void vscode.commands.executeCommand('claudeObservatory.rewindCurrentPrompt');
       else if (m.type === 'navKeep') void vscode.commands.executeCommand('claudeObservatory.navKeep');
       else if (m.type === 'navUndo') void vscode.commands.executeCommand('claudeObservatory.navUndo');
       else if (m.type === 'chatCurrentEdit') void vscode.commands.executeCommand('claudeObservatory.chatCurrentEdit');
@@ -4067,13 +5288,11 @@ class ChangeMapViewProvider implements vscode.WebviewViewProvider {
     if (now - this.warmedAt < 10 * 60_000) return; // at most once every ten minutes
     this.warmedAt = now;
     try {
-      const bin = resolveObservatoryBin();
-      const winShell = process.platform === 'win32';
-      const child = cp.spawn(winShell ? `"${bin}"` : bin, ['warm', '--root', cwd, '--since', '24h'], {
+      // Also `--root <cwd>`: same unquoted-concatenation defect as spawnCliJson above.
+      const child = core.spawnTool(resolveObservatoryBin(), ['warm', '--root', cwd, '--since', '24h'], {
         cwd,
         stdio: 'ignore',
         detached: true,
-        shell: winShell,
       });
       child.on('error', () => {
         /* no CLI on PATH — switching stays slow, which is the pre-0.9.0 behaviour, not a failure */
@@ -4402,22 +5621,40 @@ const OVERVIEW_SCRIPT = `
   // The pane split, as a percentage of the panel along each axis — one value for the side-by-side layout,
   // one for the stacked one, because a good height is not a good width.
   var NAV_W=(typeof WVSTATE.navW==='number')?WVSTATE.navW:25, NAV_H=(typeof WVSTATE.navH==='number')?WVSTATE.navH:45;
-  function saveState(){ try{ vscode.setState({ activeOnly:ACTIVE_ONLY, navW:NAV_W, navH:NAV_H }); }catch(e){} }
+  // Grouped mode is a LAYOUT preference of this panel, not a workspace setting — the same call navW/navH
+  // made. It needs its own remembered split, because two or three columns want more of the panel than one
+  // list does; both modes drive the SAME custom properties, so the reader's drag still works either way.
+  var GROUPNAV=!!WVSTATE.groupedNav;
+  var NAV_WG=(typeof WVSTATE.navWG==='number')?WVSTATE.navWG:45, NAV_HG=(typeof WVSTATE.navHG==='number')?WVSTATE.navHG:60;
+  // Grouped-mode column layout: one flex-grow weight per column per group (COLW), and the set of columns
+  // folded to a rail (COLC). Both are the reader's, and NOTHING recomputes them from a payload — the
+  // Processes column is always present and its BADGE arrives on a later tick, so re-deriving either on
+  // data arrival would throw away a drag or a fold made seconds earlier.
+  var COLW=(WVSTATE.colW&&typeof WVSTATE.colW==='object')?WVSTATE.colW:{};
+  var COLC=(WVSTATE.colC&&typeof WVSTATE.colC==='object')?WVSTATE.colC:{};
+  var COL_MIN=150; // the floor a drag clamps against — the same 150px below which a name cannot be read
+  function saveState(){ try{ vscode.setState({ activeOnly:ACTIVE_ONLY, navW:NAV_W, navH:NAV_H, groupedNav:GROUPNAV, navWG:NAV_WG, navHG:NAV_HG, colW:COLW, colC:COLC }); }catch(e){} }
   // --- the pane splitter -----------------------------------------------------------------------
   // A fixed 25% nav is wrong on a laptop: docked short and wide, the change map takes the panel and the
   // nav's own rows wrap a word at a time. The gutter drags, double-click restores the default, and the
   // size is remembered per axis across hide/show and reload.
+  // Assigned by the splitter IIFE below; the grouped-nav toggle re-applies the split when the mode flips,
+  // which is why it cannot stay private to that closure.
+  var applySplit=function(){};
   (function(){
     var g=document.getElementById('ov-gutter'), ov=document.querySelector('.ov'), root=document.documentElement;
     if(!g||!ov) return;
     function stacked(){ return window.matchMedia('(max-width: 640px)').matches; }
-    function applySplit(){ root.style.setProperty('--ov-nav', NAV_W+'%'); root.style.setProperty('--ov-navv', NAV_H+'%'); }
+    applySplit=function(){ root.style.setProperty('--ov-nav', (GROUPNAV?NAV_WG:NAV_W)+'%'); root.style.setProperty('--ov-navv', (GROUPNAV?NAV_HG:NAV_H)+'%'); };
     function clamp(p){ return Math.max(12, Math.min(80, p)); }
     function setFrom(ev){
       var r=ov.getBoundingClientRect();
       var pct = stacked() ? ((ev.clientY-r.top)/(r.height||1))*100 : ((ev.clientX-r.left)/(r.width||1))*100;
       if(!isFinite(pct)) return;
-      if(stacked()) NAV_H=clamp(pct); else NAV_W=clamp(pct);
+      // The drag writes the value for the mode that is on, so switching modes restores the size the
+      // reader chose FOR that mode rather than carrying a two-column width onto a one-list pane.
+      if(stacked()){ if(GROUPNAV) NAV_HG=clamp(pct); else NAV_H=clamp(pct); }
+      else { if(GROUPNAV) NAV_WG=clamp(pct); else NAV_W=clamp(pct); }
       applySplit();
     }
     applySplit();
@@ -4433,13 +5670,23 @@ const OVERVIEW_SCRIPT = `
       }
       g.addEventListener('pointermove', move); g.addEventListener('pointerup', up); g.addEventListener('pointercancel', up);
     });
-    g.addEventListener('dblclick', function(){ if(stacked()) NAV_H=45; else NAV_W=25; applySplit(); saveState(); });
+    g.addEventListener('dblclick', function(){
+      if(stacked()){ if(GROUPNAV) NAV_HG=60; else NAV_H=45; } else { if(GROUPNAV) NAV_WG=45; else NAV_W=25; }
+      applySplit(); saveState(); });
   })();
   var tip=document.getElementById('cm-tip');
   // The one DISPLAY filter (Active-only / Clear-completed), embedded VERBATIM from the host's exported
   // multitaskFilter so the UI runs the exact code the smoke test verifies. Pure over the MT payload.
   var MTFILTER = ${multitaskFilter.toString()};
   function fstate(){ return { activeOnly:ACTIVE_ONLY, dismissedAgents:DISMISS_AG, dismissedWorkflows:DISMISS_WF }; }
+  // Where a member's list currently lives. Grouped mode composes its own list node per column, so this is
+  // the ONE thing that moves between modes — every renderer below stays the single renderer for its member
+  // rather than growing a second, grouped variant that could drift from it. Falls back to the solo pane's
+  // node, so a renderer called before the columns exist still writes somewhere real.
+  function paneHost(k){ var g=GROUPNAV? document.getElementById('ov-g-'+k) : null; return g || document.getElementById('ov-'+k); }
+  // Blank a member's list without asserting anything about it — used where the payload went away and the
+  // rows on screen belong to a session/state that no longer exists.
+  function clearNavLists(keys){ for(var i=0;i<keys.length;i++){ var el=paneHost(keys[i]); if(el) el.innerHTML=''; } }
   function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
   function base(p){ if(!p) return ''; var s=String(p); var i=s.lastIndexOf('/'); return i>=0? s.slice(i+1): s; }
   function readPal(){ var cs=getComputedStyle(document.documentElement); function v(n,d){ return (cs.getPropertyValue(n)||'').trim()||d; }
@@ -4663,6 +5910,7 @@ const OVERVIEW_SCRIPT = `
   function syncToggles(){
     var cb=document.getElementById('mt-active'); if(cb) cb.checked=ACTIVE_ONLY;
     var tg=document.getElementById('ov-activeonly'); if(tg){ tg.classList.toggle('on', ACTIVE_ONLY); tg.setAttribute('aria-pressed', ACTIVE_ONLY?'true':'false'); }
+    var gn=document.getElementById('ov-groupnav'); if(gn){ gn.classList.toggle('on', GROUPNAV); gn.setAttribute('aria-pressed', GROUPNAV?'true':'false'); }
   }
   function syncControls(F){
     syncToggles();
@@ -4706,7 +5954,7 @@ const OVERVIEW_SCRIPT = `
     return '<span class="mt-cap"'+((rd||wr)?' data-attn="1"':'')+' title="'+esc(tips.join(' · ')+EXERCISED_NOTE)+'">'+esc(parts.join(' · '))+'</span>';
   }
   // --- Fleet: running agents (worktree-siblings) + nested subagents; click selects the DETAIL ---------
-  function renderFleet(){ var host=document.getElementById('ov-fleet');
+  function renderFleet(){ var host=paneHost('fleet'); if(!host) return;
     var F=MTFILTER(MT, fstate()); var vis=F.agents; syncControls(F);
     var h=filterBar('fleet', F);
     // Under an ask scope: only THIS window's session can own your request (a sibling worktree's session
@@ -4807,7 +6055,7 @@ const OVERVIEW_SCRIPT = `
       spark(a.sparkline)+
       '<span class="mt-diff sm"><span class="mt-add">+'+(a.added||0)+'</span> <span class="mt-rem">−'+(a.removed||0)+'</span></span>'+
       '<span class="mt-wmeta">'+(a.model?esc(a.model)+' · ':'')+fmtTok(a.tokens)+' tok · '+fmtDur(a.durationMs)+' · '+(a.edits||0)+' edit'+(a.edits===1?'':'s')+'</span></div>'; }
-  function renderWorkflows(){ var host=document.getElementById('ov-workflows');
+  function renderWorkflows(){ var host=paneHost('workflows'); if(!host) return;
     var all=(MT&&MT.workflows)||[];
     if(!all.length){ host.innerHTML='<div class="mt-none">No workflow runs in this session yet.</div>'; return; }
     var F=MTFILTER(MT, fstate()), wf=F.workflows;
@@ -4874,7 +6122,7 @@ const OVERVIEW_SCRIPT = `
 
   // --- Tasks: the session's numbered task list (TaskCreate/TaskUpdate), live from the task dir ------
   var TASKS_OPEN=false; // the "N done · show all" collapse — same dismiss pattern the fleet uses
-  function renderTasks(){ var host=document.getElementById('ov-tasks');
+  function renderTasks(){ var host=paneHost('tasks'); if(!host) return;
     var ts=(MT&&MT.tasks)||[];
     // The prompt scope does not filter tasks (a prompt's slice carries no task-id set); the scope
     // note below still says the list is session-wide while an ask is picked.
@@ -5008,7 +6256,7 @@ const OVERVIEW_SCRIPT = `
     el.textContent='🔬 '+(nm || ('session '+(s? String(s).slice(0,8) : '—')));
     el.title=(nm? nm+' — ' : '')+'session '+(s||'—')+' · switch in the Sessions tab'; }
 
-  function renderSessions(){ var host=document.getElementById('ov-sessions'); if(!host) return;
+  function renderSessions(){ var host=paneHost('sessions'); if(!host) return;
     var rows=(SESS&&SESS.sessions)||[];
     var under=SELF_KEY||'', seen=false;
     // The one thing a list of sessions cannot say by itself: follow whichever session is newest, rather
@@ -5098,7 +6346,7 @@ const OVERVIEW_SCRIPT = `
     if(oh) oh.addEventListener('click', function(){ SHOW_OLDSESS=!SHOW_OLDSESS; renderSessions(); });
   }
 
-  function renderProcesses(){ var host=document.getElementById('ov-processes'); if(!host) return;
+  function renderProcesses(){ var host=paneHost('processes'); if(!host) return;
     // Three genuinely different states, which must not share one sentence: nothing has been read yet ·
     // the CLI answered nothing · this session truly started no background shell. Only the last one is an
     // observation about the session; saying it in the other two would assert something never observed.
@@ -5259,8 +6507,98 @@ const OVERVIEW_SCRIPT = `
     // keep counting the whole list — a 0 over a pane listing every task is worse than no badge at all.
     return { fleet:fleet, workflows:runs, tasks:ts.length };
   }
+  // --- grouped nav (P6): five tabs, or two tabs of side-by-side members ------------------------------
+  // NAV always names a MEMBER, in both modes: the tour, the badges, the detail selection and applyPanes
+  // all speak member keys, and resolveTab is the only place that knows a member is currently reachable
+  // through a group tab. Membership is fixed — these are the pairs the panel already reads together.
+  var GROUP_BUILT=null; // 'on' once the grouped columns exist in the DOM; null while solo tabs are shown
+  var NAV_GROUPS=[['sf','Sessions · Fleet',['sessions','fleet']],
+                  ['wtp','Workflows · Tasks · Processes',['workflows','tasks','processes']]];
+  function groupOf(member){ for(var i=0;i<NAV_GROUPS.length;i++) if(NAV_GROUPS[i][2].indexOf(member)>=0) return NAV_GROUPS[i]; return null; }
+  function groupById(id){ for(var i=0;i<NAV_GROUPS.length;i++) if(NAV_GROUPS[i][0]===id) return NAV_GROUPS[i]; return null; }
+  // --- the grouped columns: widths the reader drags, and columns they can fold ----------------------
+  /** This group's per-column weights, defaulted to an equal share. Re-seeded only when the group's SHAPE
+   *  changes (a member added or removed), never when a payload arrives. */
+  function colWeights(gr){ var w=COLW[gr[0]];
+    if(!Array.isArray(w) || w.length!==gr[2].length){ w=[]; for(var i=0;i<gr[2].length;i++) w.push(1); COLW[gr[0]]=w; }
+    return w; }
+  function colOpen(k){ return !COLC[k]; }
+  function openCols(gr){ var n=0; for(var i=0;i<gr[2].length;i++) if(colOpen(gr[2][i])) n++; return n; }
+  /**
+   * Fold a column to its rail, or bring it back.
+   *
+   * The LAST expanded column in a group never folds: a group with every column folded is an empty pane,
+   * and the affordance to undo it would be the very rail the reader just lost track of. The button is
+   * not rendered in that case either — this guard is the second line, for a click that raced a repaint.
+   *
+   * The column's WEIGHT is deliberately untouched, so expanding restores the width the reader set rather
+   * than an equal share; while it is folded the rail is sized by CSS and the siblings divide the rest.
+   */
+  function toggleCol(k){
+    var gr=groupOf(k); if(!gr) return;
+    if(colOpen(k) && openCols(gr)<=1) return;
+    if(colOpen(k)) COLC[k]=1; else delete COLC[k];
+    GROUP_BUILT=null; saveState(); paint(); // the rail and the column are different markup, so rebuild
+  }
+  /** Write each expanded column's share as its flex-grow weight. A rail is sized by CSS and exempt from
+   *  both this and the minimum width — it is not showing content to clip. */
+  function applyColWidths(){
+    for(var g=0;g<NAV_GROUPS.length;g++){ var gr=NAV_GROUPS[g], w=colWeights(gr);
+      for(var i=0;i<gr[2].length;i++){ var el=document.getElementById('ov-gc-'+gr[2][i]);
+        if(el&&el.style&&el.style.setProperty) el.style.setProperty('--ov-cw', String(w[i])); } } }
+  /** Wire one group's dividers and fold buttons. Called once per column build, like the columns themselves. */
+  function wireGroupCols(gr){
+    var ks=gr[2];
+    for(var m=0;m<ks.length;m++) (function(m){
+      var k=ks[m];
+      var fold=document.getElementById('ov-cc-'+k);
+      if(fold) fold.addEventListener('click', function(ev){ if(ev&&ev.stopPropagation) ev.stopPropagation(); toggleCol(k); });
+      var gut=document.getElementById('ov-cg-'+k);
+      if(!gut) return;
+      // The pair this divider sizes is (nearest EXPANDED column to the left, this one) — a rail between
+      // them is skipped rather than dragged, and with nothing expanded to its left there is no pair.
+      var p=-1; for(var q=m-1;q>=0;q--) if(colOpen(ks[q])){ p=q; break; }
+      if(p<0) return;
+      var a=document.getElementById('ov-gc-'+ks[p]), b=document.getElementById('ov-gc-'+k);
+      if(!a||!b) return;
+      function setFrom(ev){
+        var ra=a.getBoundingClientRect(), rb=b.getBoundingClientRect();
+        var span=(rb.right-ra.left)||1;
+        var w=colWeights(gr), sum=w[p]+w[m];
+        // The 150px floor, expressed as a fraction of THIS pair. Capped at .45 so a pair too narrow to
+        // hold two floors still leaves a usable range instead of an impossible clamp (below 640px the
+        // whole group stacks anyway, and the dividers are hidden there).
+        var floor=Math.min(0.45, COL_MIN/span);
+        var frac=(ev.clientX-ra.left)/span;
+        if(!isFinite(frac)) return;
+        frac=Math.max(floor, Math.min(1-floor, frac));
+        w[p]=sum*frac; w[m]=sum*(1-frac);
+        applyColWidths();
+      }
+      gut.addEventListener('pointerdown', function(ev){
+        if(ev&&ev.preventDefault) ev.preventDefault();
+        gut.classList.add('drag');
+        try{ gut.setPointerCapture(ev.pointerId); }catch(e){}
+        function move(e2){ setFrom(e2); }
+        function up(){
+          gut.classList.remove('drag');
+          try{ gut.releasePointerCapture(ev.pointerId); }catch(e){}
+          gut.removeEventListener('pointermove', move); gut.removeEventListener('pointerup', up); gut.removeEventListener('pointercancel', up);
+          saveState();
+        }
+        gut.addEventListener('pointermove', move); gut.addEventListener('pointerup', up); gut.addEventListener('pointercancel', up);
+      });
+      gut.addEventListener('dblclick', function(){
+        var w=colWeights(gr), s=w[p]+w[m]; w[p]=s/2; w[m]=s/2; applyColWidths(); saveState(); });
+    })(m);
+  }
+  /** The tab key that is actually clickable for a member right now — itself, or the group holding it. */
+  function resolveTab(key){ if(!GROUPNAV) return key; var g=groupOf(key); return g? ('g:'+g[0]) : key; }
   function applyPanes(){ var ids=['sessions','fleet','workflows','tasks','processes'];
-    for(var i=0;i<ids.length;i++){ var el=document.getElementById('ov-pane-'+ids[i]); if(el) el.style.display=(NAV===ids[i])?'flex':'none'; } }
+    var cur=resolveTab(NAV);
+    for(var i=0;i<ids.length;i++){ var el=document.getElementById('ov-pane-'+ids[i]); if(el) el.style.display=(!GROUPNAV && NAV===ids[i])?'flex':'none'; }
+    for(var g=0;g<NAV_GROUPS.length;g++){ var ge=document.getElementById('ov-group-'+NAV_GROUPS[g][0]);
+      if(ge) ge.style.display=(GROUPNAV && cur===('g:'+NAV_GROUPS[g][0]))?'flex':'none'; } }
   // Guided tour: which DOM node each anchor name points at. Anything not listed here is unknown to this
   // build and simply does not ring — never an error, so core can name a control this build lacks.
   var TOUR_ANCHORS = { 'nav-tabs':'#ov-navtabs', 'folders-strip':'#cm-strip', 'files-ledger':'#cm-ledger',
@@ -5302,11 +6640,84 @@ const OVERVIEW_SCRIPT = `
         ? 'Processes — background shells are read for the session under review, never for a selected sibling agent, so no count is shown while one is selected. Open that session from the Sessions tab to see its shells.'
         : 'Processes — background shells the ACTIVE session launched with run_in_background: state, runtime and output volume (shell ids are the harness’s own; a transcript records no OS pid).',
       !otherAgent && !!(psum && psum.running>0)]);
-    var h=''; for(var i=0;i<defs.length;i++){ var d=defs[i];
-      h+='<button class="ov-tab'+(d[0]===NAV?' on':'')+'" data-nav="'+d[0]+'" title="'+esc(d[3])+'">'+d[1]+
-        (d[2]!==''?('<span class="ov-tn'+(d[4]?' hot':'')+'"'+(d[4]?' title="a background shell is still running"':'')+'>'+esc(d[2])+'</span>'):'')+'</button>'; }
+    var cur=resolveTab(NAV);
+    var h='';
+    if(GROUPNAV){
+      // Two tabs. The badge is the members' own badges in member order — the column headers repeat them
+      // beside the names, so the tab needs only to carry the counts while the group is closed.
+      for(var gi=0;gi<NAV_GROUPS.length;gi++){ var gr=NAV_GROUPS[gi], parts=[], hot=false;
+        for(var mi=0;mi<gr[2].length;mi++){ var dm=defByKey(defs, gr[2][mi]);
+          if(dm && dm[2]!=='') parts.push(dm[2]); if(dm && dm[4]) hot=true; }
+        h+='<button class="ov-tab'+(cur===('g:'+gr[0])?' on':'')+'" data-nav="g:'+gr[0]+'" title="'+
+          esc(gr[1]+' — these lists side by side, each column with its own badge and description in its header.')+'">'+gr[1]+
+          (parts.length?('<span class="ov-tn'+(hot?' hot':'')+'">'+esc(parts.join(' · '))+'</span>'):'')+'</button>'; }
+    } else {
+      for(var i=0;i<defs.length;i++){ var d=defs[i];
+        h+='<button class="ov-tab'+(d[0]===NAV?' on':'')+'" data-nav="'+d[0]+'" title="'+esc(d[3])+'">'+d[1]+
+          (d[2]!==''?('<span class="ov-tn'+(d[4]?' hot':'')+'"'+(d[4]?' title="a background shell is still running"':'')+'>'+esc(d[2])+'</span>'):'')+'</button>'; }
+    }
     var host=document.getElementById('ov-navtabs'); host.innerHTML=h;
-    var bs=host.querySelectorAll('.ov-tab'); for(var b=0;b<bs.length;b++) bs[b].addEventListener('click', function(){ NAV=this.getAttribute('data-nav'); renderNavTabs(); applyPanes(); }); }
+    var bs=host.querySelectorAll('.ov-tab'); for(var b=0;b<bs.length;b++) bs[b].addEventListener('click', function(){
+      var k=this.getAttribute('data-nav');
+      // A group tab resolves to its FIRST member, so NAV keeps naming a member and the detail selection,
+      // the tour and the badges all keep the one vocabulary they had before grouping existed.
+      if(k && k.indexOf('g:')===0){ var gr2=groupById(k.slice(2)); k=gr2? gr2[2][0] : NAV; }
+      NAV=k; renderNavTabs(); applyPanes(); });
+    // The columns are composed ONCE per mode, not per tick: rebuilding them would throw away the lists
+    // (and the reader's scroll) that the member renderers are about to fill in this same paint.
+    if(GROUPNAV){
+      if(GROUP_BUILT!=='on'){ renderGroupCols(defs); GROUP_BUILT='on'; }
+      // A later payload re-stamps only the badges, and then re-asserts the widths: the layout is the
+      // reader's and no arriving count may reset it (the Processes badge is the standing example).
+      else { paintGroupBadges(defs); applyColWidths(); }
+    }
+    else GROUP_BUILT=null; }
+
+  /** Which tab definition belongs to a member key. */
+  function defByKey(defs, k){ for(var i=0;i<defs.length;i++) if(defs[i][0]===k) return defs[i]; return null; }
+  /** Build each group pane's columns: one per member, each a header (name · badge) over that member's own
+   *  list node. The list ids are ov-g-<member>, which paneHost resolves to — so the member's single
+   *  renderer fills this column with no knowledge that grouping exists. */
+  function renderGroupCols(defs){
+    for(var g=0;g<NAV_GROUPS.length;g++){ var gr=NAV_GROUPS[g], host=document.getElementById('ov-group-'+gr[0]);
+      if(!host) continue;
+      var h='', nOpen=openCols(gr), seenOpen=false;
+      for(var m=0;m<gr[2].length;m++){ var k=gr[2][m], d=defByKey(defs,k), nm=d?d[1]:k;
+        if(!colOpen(k)){
+          // The rail: still NAMES the column and carries its badge, and the whole thing is the button
+          // that brings it back at the width the reader had set.
+          h+='<div class="ov-groupcol rail" id="ov-gc-'+k+'">'+
+            '<button class="ov-rail" id="ov-cc-'+k+'" title="'+esc(nm+' — folded. Click to bring it back at the width you set.')+'">'+
+            '<i class="codicon codicon-chevron-right"></i><span class="ov-railname">'+esc(nm)+'</span>'+
+            '<span class="ov-tn" id="ov-gb-'+k+'"></span></button></div>';
+          continue;
+        }
+        h+='<div class="ov-groupcol" id="ov-gc-'+k+'">'+
+          // A divider only where there is an expanded column to its left to size against.
+          (seenOpen? '<div class="ov-cgutter" id="ov-cg-'+k+'" title="Drag to resize these columns — double-click to split them evenly"></div>' : '')+
+          '<div class="ov-ghead" title="'+esc(d?d[3]:'')+'">'+esc(nm)+
+          '<span class="ov-tn" id="ov-gb-'+k+'"></span>'+
+          // Never offered on the last expanded column: folding it would leave an empty pane.
+          (nOpen>1? '<button class="ov-cfold" id="ov-cc-'+k+'" title="Fold '+esc(nm)+' to a rail — the other columns take the space, and it comes back at the width you set"><i class="codicon codicon-chevron-left"></i></button>' : '')+
+          '</div>'+
+          '<div class="ov-list" id="ov-g-'+k+'"></div></div>';
+        seenOpen=true;
+      }
+      host.innerHTML=h;
+      wireGroupCols(gr);
+    }
+    applyColWidths();
+    paintGroupBadges(defs);
+  }
+  /** Re-stamp the column badges on the panel's tick (the counts move; the columns do not). */
+  function paintGroupBadges(defs){
+    for(var i=0;i<defs.length;i++){ var d=defs[i], el=document.getElementById('ov-gb-'+d[0]);
+      if(!el) continue;
+      el.textContent=d[2];
+      el.className='ov-tn'+(d[4]?' hot':'');
+      el.title=d[4]? 'a background shell is still running' : '';
+    }
+  }
 
   function paint(){
     var empty=document.getElementById('ov-empty');
@@ -5315,7 +6726,7 @@ const OVERVIEW_SCRIPT = `
       renderNavTabs(); applyPanes();
       if(CLI_ERR){ empty.style.display='block'; empty.innerHTML=CLI_ERR_HTML; }
       else if(!CM){ empty.style.display='block'; empty.innerHTML='No agents yet. <span style="opacity:.75">This fills in as Claude works across your worktrees.</span>';
-        document.getElementById('ov-fleet').innerHTML=''; document.getElementById('ov-workflows').innerHTML=''; document.getElementById('ov-tasks').innerHTML=''; }
+        clearNavLists(['fleet','workflows','tasks']); }
       else empty.style.display='none';
     }
     syncToggles(); // the filter's controls state the setting, whatever has or hasn't been fetched
@@ -5420,7 +6831,7 @@ const OVERVIEW_SCRIPT = `
     else if(m.type==='error'){ CLI_ERR=true; CM=null; MT=null; PR=null; OV_SEEN=true; FEED=null; FEEDDATA=null; SESS=m.sessions||null; renderFeed(); renderNavTabs(); applyPanes(); renderProcesses(); renderSessions();
       var em=document.getElementById('ov-empty'); em.style.display='block';
       em.innerHTML=CLI_ERR_HTML;
-      document.getElementById('ov-fleet').innerHTML=''; document.getElementById('ov-workflows').innerHTML='';
+      clearNavLists(['fleet','workflows']);
       document.getElementById('cm-strip').innerHTML=''; document.getElementById('cm-ledger').innerHTML=''; document.getElementById('cm-detail-empty').style.display='none'; document.getElementById('cm-readout').innerHTML='';
       document.getElementById('cm-cap-folders').style.display='none'; document.getElementById('cm-cap-files').style.display='none'; document.getElementById('cm-summary').innerHTML=''; }
   });
@@ -5428,6 +6839,10 @@ const OVERVIEW_SCRIPT = `
   (function wireControls(){
     var cb=document.getElementById('mt-active'); if(cb) cb.addEventListener('change', function(){ ACTIVE_ONLY=!!cb.checked; saveState(); paint(); });
     var aotg=document.getElementById('ov-activeonly'); if(aotg) aotg.addEventListener('click', function(){ ACTIVE_ONLY=!ACTIVE_ONLY; saveState(); paint(); });
+    // Grouping changes the SHAPE of the nav, so the columns are dropped and the split re-applied for the
+    // mode being entered before the repaint rebuilds them.
+    var gntg=document.getElementById('ov-groupnav'); if(gntg) gntg.addEventListener('click', function(){
+      GROUPNAV=!GROUPNAV; GROUP_BUILT=null; saveState(); applySplit(); paint(); });
     var btn=document.getElementById('mt-clear'); if(btn) btn.addEventListener('click', function(){ clearCompleted(); });
     // top-navbar review actions — each posts to the host, which runs the matching command (zero-token).
     function tbtn(id, type){ var b=document.getElementById(id); if(b) b.addEventListener('click', function(){ vscode.postMessage({type:type}); }); }
@@ -5449,6 +6864,7 @@ const OVERVIEW_SCRIPT = `
     tbtn('ov-promptprev','navPromptPrev'); tbtn('ov-promptnext','navPromptNext');
     tbtn('ov-reviewprompt','reviewCurrentPrompt');
     tbtn('ov-acceptprompt','acceptCurrentPrompt'); tbtn('ov-rejectprompt','rejectCurrentPrompt');
+    tbtn('ov-rewindprompt','rewindCurrentPrompt');
     tbtn('ov-navkeep','navKeep'); tbtn('ov-navundo','navUndo');
     tbtn('ov-chatedit','chatCurrentEdit'); tbtn('ov-viewdiff','viewCurrentDiff');
     tbtn('ov-acceptfile','keepOpenFile'); tbtn('ov-rejectfile','undoOpenFile');
@@ -5527,20 +6943,21 @@ async function fetchLatestRelease(): Promise<any> {
 }
 
 /** Run the CLI's `update` (the one updater for every surface) with a progress notification, then
- *  offer a window reload. Windows: the CLI is an npm `.cmd` shim, which spawn() can't exec without a
- *  shell — quoted binary + `shell`, the same treatment every other CLI spawn in this file gets. */
+ *  offer a window reload. Windows: the CLI is an npm `.cmd` shim, which needs cmd.exe — core/spawn
+ *  handles that, and the quoting, for every CLI spawn in this file. */
 function runObservatoryUpdate(args: string[], title: string, doneMsg: string, upToDateMsg: string): Thenable<void> {
-  const winShell = process.platform === 'win32';
   const bin = resolveObservatoryBin();
   return vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title },
     () =>
       new Promise<void>((resolve) => {
-        cp.execFile(winShell ? `"${bin}"` : bin, args, { timeout: 300000, shell: winShell }, (err, stdout, stderr) => {
+        core.execFileTool(bin, args, { timeout: 300000 }, (err, stdout, stderr) => {
           versionInfoCache = null; // the chip must re-learn the world after an install
           if (err) {
+            // core.cliFailureMessage, not `stderr || stdout`: that ordering is what put a Node
+            // deprecation warning in this toast instead of the reason (#45).
             vscode.window.showErrorMessage(
-              `Claude Observatory: update failed — ${String(stderr || stdout || err.message).trim().slice(0, 300)}`
+              `Claude Observatory: update failed — ${core.cliFailureMessage(stdout, stderr, err.message)}`
             );
             resolve();
             return;
@@ -5767,13 +7184,11 @@ export function activate(context: vscode.ExtensionContext): void {
   // trees) can be folded to its top level in one click. Harmless on the flat File History list.
   const editsView = vscode.window.createTreeView('claudeObservatory.edits', { treeDataProvider: editsProvider, showCollapseAll: true });
   const diffsView = vscode.window.createTreeView('claudeObservatory.diffs', { treeDataProvider: diffsProvider, showCollapseAll: true });
-  // 0.8.0: Timeline folded into Observations (timeline-style runs). Round 3: the Observations panel is
-  // two tabs — Observations (reasoning feed) + Actions (the tool-call timeline, moved out of Multitasking).
+  // 0.10.0: Observations and Actions are no longer views of their own. VS Code stacks panel views under
+  // collapsible headers and offers no tab strip, so the three timeline surfaces became ONE webview with
+  // real tabs — these two providers still own the feeds it renders.
   const insightsProvider = new ObservationsProvider();
-  const insightsView = vscode.window.createTreeView('claudeObservatory.observations', { treeDataProvider: insightsProvider, showCollapseAll: true });
   const actionsProvider = new ActionsProvider();
-  const actionsView = vscode.window.createTreeView('claudeObservatory.actions', { treeDataProvider: actionsProvider, showCollapseAll: true });
-  actionsProvider.view = actionsView;
   const fileHistoryProvider = new FileHistoryProvider();
   const fileHistoryView = vscode.window.createTreeView('claudeObservatory.fileHistory', { treeDataProvider: fileHistoryProvider });
   fileHistoryProvider.view = fileHistoryView;
@@ -5784,11 +7199,23 @@ export function activate(context: vscode.ExtensionContext): void {
   // wheel back to when the tab is closed.
   if (vscode.workspace.getConfiguration('claudeObservatory').get<string>('overviewLocation') === 'editor')
     setTimeout(() => changeMapProvider.openInEditor(), 0);
-  // The Prompts window (dock, left of the Overview): picking an ask there scopes the Overview beside it.
-  const promptsProvider = new PromptsViewProvider();
+  // The Timeline window (Prompts · Actions · Observations, one webview with tabs): picking an ask on the
+  // Prompts tab scopes the Overview beside it.
+  const promptsProvider = new TimelineViewProvider(insightsProvider, actionsProvider);
   promptsProvider.onSelect = (id) => {
     changeMapProvider.setPrompt(id);
     updateStatusItem(); // the nav bar's Prompt counter must move with the click, not the next refresh
+  };
+  /**
+   * Pick an ask from OUTSIDE the Prompts list — the nav bar's Prompt axis, Review prompt, Rewind.
+   *
+   * Both surfaces have to move: scoping the Overview without selecting the row left the two disagreeing
+   * about which ask was picked, with the nav bar's counter naming one and the list highlighting another.
+   * The Timeline's own setter deliberately does not notify back, so this cannot start a select loop.
+   */
+  const pickPrompt = (id: string | null) => {
+    changeMapProvider.setPrompt(id);
+    promptsProvider.setSelection(id);
   };
   const tourPanel = new DemoTourPanel(context.globalState);
   editsProvider.view = editsView; // badge lives on the primary view
@@ -5987,13 +7414,19 @@ export function activate(context: vscode.ExtensionContext): void {
   // first beat, which unlocks Exit and Restart while the run is still writing the very files Exit would
   // delete — and Start has no re-entrancy guard of its own.
   let demoReplaying = false;
-  /** The tree views a tour step can bring forward. */
+  /** The tree views a tour step can bring forward. `actions` and `observations` are NOT here: they are
+   *  tabs of the Timeline webview now, brought forward by focusing it and naming the tab. */
   const TOUR_TREES: Record<string, unknown> = {
     edits: editsView,
     diffs: diffsView,
     fileHistory: fileHistoryView,
-    actions: actionsView,
-    observations: insightsView,
+  };
+  /** The tour views that are Timeline TABS. Core's anchor/view set is closed and not ours to extend —
+   *  these three names already exist there, and this is where they resolve now. */
+  const TOUR_TIMELINE_TABS: Record<string, 'prompts' | 'actions' | 'observations'> = {
+    prompts: 'prompts',
+    actions: 'actions',
+    observations: 'observations',
   };
   const clearTourTips = () => {
     changeMapProvider.setTour(null, null);
@@ -6031,7 +7464,12 @@ export function activate(context: vscode.ExtensionContext): void {
     if (step.view === 'overview') {
       await vscode.commands.executeCommand('claudeObservatory.changemap.focus');
       changeMapProvider.setTour(step.tab ?? null, anchor);
-    } else if (step.view === 'prompts' || step.view === 'stats') {
+    } else if (TOUR_TIMELINE_TABS[step.view]) {
+      // Prompts, Actions and Observations are one window now: reveal it, then bring the step's TAB
+      // forward instead of revealing a view that no longer exists.
+      await vscode.commands.executeCommand('claudeObservatory.timeline.focus');
+      promptsProvider.setTab(TOUR_TIMELINE_TABS[step.view]);
+    } else if (step.view === 'stats') {
       await vscode.commands.executeCommand(`claudeObservatory.${step.view}.focus`);
     } else if (step.view === 'editor') {
       // Open the newest pending edit that is actually openable: inside the workspace (the scenario's
@@ -6203,6 +7641,11 @@ export function activate(context: vscode.ExtensionContext): void {
   //     has pending edits (mirrors the per-file bar Void pins at the bottom of the editor).
   // navEditId is the pending edit the Diff axis is parked on within the open file.
   let navEditId: number | undefined;
+  // Review-loop cursor: id of the pending edit last opened, so ←/→ step backward/forward through every
+  // pending edit (wrapping at the ends) instead of always reopening the oldest. Declared HERE, well
+  // above the loop that owns it, because `updateStatusItem` — which runs once during activation, before
+  // that loop is reached — parks the auto-shown review bar on it.
+  let reviewCursorId: number | undefined;
   // Every action button carries its SHORT label beside the icon (the icon-only bar read as cryptic)
   // plus the nav bar's semantic tint (keep/accept green · undo/reject red · chevrons blue · clear
   // orange · search/spotlight purple — the Overview toolbar's palette). The four chevrons stay
@@ -6372,6 +7815,27 @@ export function activate(context: vscode.ExtensionContext): void {
     for (const b of activeFileBtns) activeHasPending ? b.show() : b.hide();
     void vscode.commands.executeCommand('setContext', 'claudeObservatory.hasPending', pending > 0);
     syncActiveFileContext();
+
+    // The floating review bar (or, per `editorReviewSurface`, the bubble): park it on the edit THIS file's
+    // review is currently about, and close it when the file has nothing left to review. Hung off
+    // updateStatusItem because that is the one function every path that can change the answer already
+    // calls — store changes, tab switches, every nav-bar step — so the bar cannot drift from the counters
+    // beside it. `syncSurface` is a no-op when it is already in the right place, which is the common case.
+    //
+    // The target is the same rule JetBrains' ReviewSelection.currentEditIn uses: the review cursor when it
+    // is parked in this file (so the bar agrees with ⌥⌘N, with the bar's own ‹/›, and with an auto-advance
+    // that just landed), else the file's oldest pending edit. `inFile` above is already that file's
+    // pending edits, so this costs no extra scan.
+    const barTarget =
+      !activeHasPending
+        ? undefined
+        : reviewCursorId !== undefined && inFile.some((r) => r.id === reviewCursorId)
+          ? reviewCursorId
+          : inFile[0].id;
+    void editPeek.syncSurface(barTarget).catch(() => {
+      /* the active document went away mid-refresh (deleted, or a demo folder reaped) — the next refresh
+         re-tries against whatever is open then, and every other surface has already been updated. */
+    });
   };
   // The per-file surfaces (editor tab-bar / editor banner) light up only when the ACTIVE file has a
   // pending edit — its own context key, refreshed on store changes and on tab switches.
@@ -6384,16 +7848,24 @@ export function activate(context: vscode.ExtensionContext): void {
   updateStatusItem(); // visible from activation, not just after the first store event
   context.subscriptions.push(...navCluster);
 
-  // Review-loop cursor: id of the pending edit last opened, so ←/→ step backward/forward through every
-  // pending edit (wrapping at the ends) instead of always reopening the oldest.
-  let reviewCursorId: number | undefined;
   // "Review this …" scope (cascaded edits): when set, the review loop walks only these edits — one
   // one PROMPT's, in capture order across files — until that scope is fully resolved.
   // Both axes narrow the same loop, so they share one cursor scope: entering either replaces the other.
   let reviewScopeIds: number[] | null = null;
 
-  // Step to the previous (dir -1) or next (dir +1) pending edit and open it, advancing the cursor.
-  const reviewStep = async (dir: 1 | -1) => {
+  /**
+   * Pick the previous (dir -1) or next (dir +1) pending edit relative to the review cursor, park the
+   * cursor on it, and return it — WITHOUT opening anything.
+   *
+   * Separated from `reviewStep` because three surfaces now need the same choice with different follow-up:
+   * the ⌥⌘N/⌥⌘P loop opens it, the pinned review bubble re-shows itself on it, and auto-advance reveals
+   * it after a resolve. Reimplementing this per caller is how the three cursors drifted apart before
+   * (see the comment on `openFileAtEdit`), so there is exactly one copy.
+   *
+   * `fromId` overrides the parked cursor — a resolve knows which edit it just settled, which is a better
+   * anchor than wherever the cursor happens to sit.
+   */
+  const pickNextPending = (dir: 1 | -1, fromId?: number): core.EditRecord | undefined => {
     const s = currentSession();
     let pending = s ? cachedLog(s).filter((r) => r.status === 'pending').sort((a, b) => a.id - b.id) : [];
     if (reviewScopeIds) {
@@ -6404,10 +7876,9 @@ export function activate(context: vscode.ExtensionContext): void {
     }
     if (pending.length === 0) {
       reviewCursorId = undefined;
-      vscode.window.setStatusBarMessage('Claude Observatory: no pending edits to review 🎉', 3000);
-      return;
+      return undefined;
     }
-    const cursor = reviewCursorId;
+    const cursor = fromId ?? reviewCursorId;
     const idx = cursor === undefined ? -1 : pending.findIndex((r) => r.id === cursor);
     let next: core.EditRecord;
     if (idx >= 0) {
@@ -6422,8 +7893,50 @@ export function activate(context: vscode.ExtensionContext): void {
           : [...pending].reverse().find((r) => r.id < cursor) ?? pending[pending.length - 1];
     }
     reviewCursorId = next.id;
+    return next;
+  };
+
+  // Step to the previous (dir -1) or next (dir +1) pending edit and open it, advancing the cursor.
+  const reviewStep = async (dir: 1 | -1) => {
+    const next = pickNextPending(dir);
+    if (!next) {
+      vscode.window.setStatusBarMessage('Claude Observatory: no pending edits to review 🎉', 3000);
+      return;
+    }
     await openFileAtEdit({ kind: 'edit', rec: next });
   };
+
+  /**
+   * After a SINGLE edit is kept or reverted, carry the reader to the next one still awaiting review —
+   * crossing into another file when that is where it is.
+   *
+   * Gated on the edit having actually left `pending`: a dirty-buffer refusal and a cancelled conflict
+   * both leave it pending, and jumping away from an edit the user did NOT resolve would lose their place
+   * for no reason. Bulk operations, `redo`, and the review bubble are deliberately excluded — a bulk op
+   * has no single "next", and the bubble owns its own follow behaviour when pinned.
+   */
+  const advanceAfterResolve = async (session: string, id: number): Promise<void> => {
+    if (!vscode.workspace.getConfiguration('claudeObservatory').get<boolean>('revealNextOnResolve', true)) return;
+    if (core.findRecord(session, id)?.status === 'pending') return;
+    const next = pickNextPending(1, id);
+    if (next) await openFileAtEdit({ kind: 'edit', rec: next });
+  };
+
+  // The review bubble is a module-level class but the loop is closure-scoped, so its two hooks are
+  // injected here: one lets a pinned bubble carry itself to the next edit, the other keeps the keyboard
+  // loop and the Prompt axis anchored wherever the bubble currently is.
+  editPeek.pickNext = (fromId: number) => pickNextPending(1, fromId);
+  editPeek.onShown = (id: number) => {
+    reviewCursorId = id;
+  };
+  // Drives which of pin/unpin the bubble's toolbar offers.
+  const syncPeekPinned = () =>
+    void vscode.commands.executeCommand(
+      'setContext',
+      'claudeObservatory.peekPinned',
+      vscode.workspace.getConfiguration('claudeObservatory').get<boolean>('pinnedPeek', false)
+    );
+  syncPeekPinned();
 
   // The review loop scoped to ONE of the user's asks: open the first pending edit that ask produced and
   // walk only its edits, in the order Claude made them, across files. "Show me everything from when I
@@ -6440,6 +7953,8 @@ export function activate(context: vscode.ExtensionContext): void {
       vscode.window.setStatusBarMessage('Claude Observatory: no pending edits from this prompt', 3000);
       return;
     }
+    // Reviewing an ask picks it: the Prompts list and the Overview both scope to the ask being walked.
+    if (req) pickPrompt(req.id);
     reviewScopeIds = pendingIds;
     reviewCursorId = pendingIds[0];
     const rec = core.findRecord(s, pendingIds[0]);
@@ -6471,7 +7986,9 @@ export function activate(context: vscode.ExtensionContext): void {
     let curIdx = picked ? reqs.findIndex((r) => r.id === picked) : -1;
     if (curIdx < 0 && anchor !== undefined) curIdx = reqs.findIndex((r) => r.editIds.includes(anchor));
     const target = reqs[((curIdx < 0 ? (dir === 1 ? -1 : 0) : curIdx) + dir + reqs.length) % reqs.length];
-    changeMapProvider.setPrompt(target.id); // the webview rescopes through the existing 'prompt' message
+    // Both surfaces move: the Overview rescopes through its existing 'prompt' message, and the Prompts
+    // list highlights the same ask — stepping the axis without it left the two naming different asks.
+    pickPrompt(target.id);
     const first = target.editIds.find((id) => byId.get(id)?.status === 'pending');
     if (first === undefined) return;
     navEditId = first;
@@ -6492,6 +8009,40 @@ export function activate(context: vscode.ExtensionContext): void {
     const anchor = navEditId ?? reviewCursorId;
     if (!s || anchor === undefined) return null;
     return core.promptWindows(workspaceRoot() ?? process.cwd(), s).find((r) => r.editIds.includes(anchor)) ?? null;
+  };
+
+  /**
+   * The ask a PROMPT-SCOPED action should target: the one the reader picked, else the one owning the edit
+   * the nav bar is parked on.
+   *
+   * `currentPrompt` above resolves only from the edit anchor, and `navEditId` is re-derived from the ACTIVE
+   * FILE every tick — so with ask #5 picked and a file open whose edits belong to ask #2, the counter beside
+   * these buttons reads #5 while the anchor says #2. For Accept and Reject that is a misaddressed action;
+   * for Rewind, which takes the picked ask AND EVERY ASK AFTER IT, resolving to an earlier one silently
+   * widens the blast radius past what the reader asked for. The picked ask therefore wins.
+   *
+   * That agrees with the Prompt-axis counter, `navPrompt` and the JetBrains nav bar for any ask that still
+   * has pending edits, which is every ask those three can be ON: all of them walk `pendingPrompts`, and a
+   * pick with nothing left to review falls THROUGH to the edit anchor there. This does not — it resolves
+   * the pick against every prompt window in the session — so for a FULLY REVIEWED pick the two editors
+   * diverge: JetBrains' Rewind shares `currentPrompt` with its axis, so it retargets to the anchor's
+   * pending ask (and is disabled outright when no ask has anything pending), while this one rewinds from
+   * the reviewed ask's boundary, taking every pending edit after it.
+   *
+   * That difference is deliberate and it is on Rewind's side: rewinding is the verb that reverts work
+   * already accepted, so "this ask has nothing pending" is not a reason to aim somewhere else — and
+   * falling through would move the boundary to whichever ask the cursor's file happens to belong to,
+   * silently reverting a different set than the one picked. The confirmation modal names the ask this
+   * resolved to (`rewindFromPrompt`), which is what keeps the wider scope honest.
+   */
+  const targetPrompt = (): core.PromptWindow | null => {
+    const s = currentSession();
+    const picked = changeMapProvider.getPrompt();
+    if (s && picked) {
+      const hit = core.promptWindows(workspaceRoot() ?? process.cwd(), s).find((r) => r.id === picked);
+      if (hit) return hit;
+    }
+    return currentPrompt();
   };
 
   /** Newest OTHER session with tracked edits — the switch target when this session is empty.
@@ -6562,6 +8113,9 @@ export function activate(context: vscode.ExtensionContext): void {
     updateEmptyStateContext();
     editsProvider.refresh();
     diffsProvider.refresh();
+    // The two feeds the Timeline window renders. Dropped HERE as well as in that window's own refresh:
+    // this is the one place that knows the store changed, and the Actions cycle carries time-derived
+    // "active" flags that must never survive a change. Both drops are free and idempotent.
     insightsProvider.refresh();
     actionsProvider.refresh();
     fileHistoryProvider.refresh();
@@ -6639,8 +8193,6 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     editsView,
     diffsView,
-    insightsView,
-    actionsView,
     fileHistoryView,
     statusItem,
     inlineDecoration,
@@ -6649,7 +8201,7 @@ export function activate(context: vscode.ExtensionContext): void {
     heatmapDecoration,
     vscode.languages.registerCodeLensProvider({ scheme: 'file' }, inlineLens),
     vscode.window.registerWebviewViewProvider('claudeObservatory.stats', statsProvider),
-    vscode.window.registerWebviewViewProvider('claudeObservatory.prompts', promptsProvider),
+    vscode.window.registerWebviewViewProvider('claudeObservatory.timeline', promptsProvider),
     vscode.window.registerWebviewViewProvider('claudeObservatory.changemap', changeMapProvider),
     vscode.window.registerFileDecorationProvider(statusDecorations),
     vscode.workspace.registerTextDocumentContentProvider(SCHEME, new BlobContentProvider()),
@@ -6667,7 +8219,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // Refresh on panel-visible / window-focus (covers new sessions the watcher may miss), on active
   // editor change, and on buffer edits (debounced) so decorations track the live buffer.
-  for (const v of [editsView, diffsView, insightsView, actionsView, fileHistoryView]) {
+  for (const v of [editsView, diffsView, fileHistoryView]) {
     v.onDidChangeVisibility((e) => e.visible && refreshAll());
   }
   let debounce: ReturnType<typeof setTimeout> | undefined;
@@ -6736,6 +8288,21 @@ export function activate(context: vscode.ExtensionContext): void {
       if (r) void vscode.commands.executeCommand('claudeObservatory.promptUndo', r.id);
       else vscode.window.setStatusBarMessage('Claude Observatory: open a Claude edit to reject its prompt', 2500);
     }),
+    // Rewind lives on the Prompt AXIS, not on a Prompts row: both editors' prompt lists deliberately
+    // carry no review actions ("the window's only job is picking the ask"), and this is a review action —
+    // the most destructive one on the axis.
+    vscode.commands.registerCommand('claudeObservatory.rewindCurrentPrompt', () => {
+      // targetPrompt, not currentPrompt: rewinding the ask under the CURSOR when the reader has picked a
+      // different one would revert from an earlier boundary than they chose — strictly more than they asked
+      // for. See targetPrompt for why the two can disagree.
+      const r = targetPrompt();
+      // Select what is about to be rewound, so the list shows the boundary the verb resolved to rather
+      // than leaving the reader to infer it from the counter.
+      if (r) {
+        pickPrompt(r.id);
+        void vscode.commands.executeCommand('claudeObservatory.promptRewind', r.id);
+      } else vscode.window.setStatusBarMessage('Claude Observatory: pick an ask, or open a Claude edit, to rewind to it', 2500);
+    }),
     vscode.commands.registerCommand('claudeObservatory.reviewCurrentPrompt', () => {
       const r = currentPrompt();
       if (r) void reviewPrompt(r.id);
@@ -6749,6 +8316,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand('claudeObservatory.promptKeep', (promptId: string) => withSession((s) => keepPrompt(s, promptId))()),
     vscode.commands.registerCommand('claudeObservatory.promptUndo', (promptId: string) => withSession((s) => undoPrompt(s, promptId))()),
+    vscode.commands.registerCommand('claudeObservatory.promptRewind', (promptId: string) => withSession((s) => rewindFromPrompt(s, promptId))()),
     vscode.commands.registerCommand('claudeObservatory.promptClear', (promptId: string) => withSession((s) => clearPrompt(s, promptId))()),
     vscode.commands.registerCommand('claudeObservatory.reviewPrompt', (promptId: string) => reviewPrompt(promptId)),
     vscode.commands.registerCommand('claudeObservatory.navFilePrev', () => navFile(-1)),
@@ -6795,17 +8363,19 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       void vscode.commands.executeCommand('claudeObservatory.chatAction', { editId: cur.rec.id });
     }),
-    vscode.commands.registerCommand('claudeObservatory.navKeep', () => {
+    vscode.commands.registerCommand('claudeObservatory.navKeep', async () => {
       const cur = navCurrentRec();
       if (!cur) return;
       core.keepGroup(cur.s, cur.rec.id);
       refreshAll();
+      await advanceAfterResolve(cur.s, cur.rec.id);
     }),
     vscode.commands.registerCommand('claudeObservatory.navUndo', async () => {
       const cur = navCurrentRec();
       if (!cur) return;
       await undoOne(cur.s, cur.rec.id);
       refreshAll();
+      await advanceAfterResolve(cur.s, cur.rec.id);
     }),
     // Revision navigation: step the active file's edit history in a current-vs-revision diff.
     vscode.commands.registerCommand('claudeObservatory.diffPrevRevision', () => diffRevisionStep(-1)),
@@ -6856,7 +8426,10 @@ export function activate(context: vscode.ExtensionContext): void {
     // Setup check: run `doctor` and open the diagnostics (hooks, PATH, config, session, status line) in a tab.
     vscode.commands.registerCommand('claudeObservatory.doctor', async () => {
       // spawnSync (not execFileSync) so we still capture stdout when doctor exits non-zero on failures.
-      const res = cp.spawnSync(resolveObservatoryBin(), ['doctor', '--markdown'], { encoding: 'utf8', cwd: workspaceRoot() });
+      // Through the launcher: this omitted `shell` while every sibling spawn had it, so on Windows
+      // it could never exec the .cmd shim — the one diagnostic a stuck user is told to run always
+      // reported "is the CLI installed?", on a perfectly good install.
+      const res = core.spawnToolSync(resolveObservatoryBin(), ['doctor', '--markdown'], { encoding: 'utf8', cwd: workspaceRoot() });
       if (res.error || typeof res.stdout !== 'string' || !res.stdout.trim()) {
         vscode.window.showErrorMessage('Claude Observatory: could not run doctor — is the claude-observatory CLI installed?');
         return;
@@ -6907,7 +8480,7 @@ export function activate(context: vscode.ExtensionContext): void {
       // PROBE it, never stat it: resolveBin returns the bare name as its PATH fallback, and statting that
       // against the extension host's cwd is false for every perfectly good install outside its fixed
       // candidate list. Spawning is the only check that answers the question actually being asked.
-      const probe = cp.spawnSync(resolveObservatoryBin(), ['--version'], { encoding: 'utf8', timeout: 5000 });
+      const probe = core.spawnToolSync(resolveObservatoryBin(), ['--version'], { encoding: 'utf8', timeout: 5000 });
       if (probe.error || probe.status !== 0) {
         const go = await vscode.window.showWarningMessage(
           'Claude Observatory: the claude-observatory CLI is not on PATH. The demo will replay and the sidebar will fill, but the Overview, Prompts and Stats panels read their data through the CLI and will stay empty.',
@@ -7128,6 +8701,51 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!pick) return;
       await vscode.commands.executeCommand('claudeObservatory.pinSession', pick.id);
     }),
+    /**
+     * The full session browser: the Overview's Sessions tab.
+     *
+     * Every "All sessions…" row points here now. It used to run the `switchSession` QuickPick, which the
+     * product deprecated as a browser — the Sessions tab lists the same sessions with their edits,
+     * tokens, model and recency, and selecting a row switches the whole review.
+     *
+     * Deliberately routed through the TOUR's own path (`setTour`, which the tour uses to bring a left-nav
+     * tab forward) rather than a second mechanism: one code path moves that tab strip, so a tour step and
+     * this command can never disagree about how it is done.
+     */
+    vscode.commands.registerCommand('claudeObservatory.showSessions', async () => {
+      await vscode.commands.executeCommand('claudeObservatory.changemap.focus');
+      changeMapProvider.setTour('sessions', null);
+    }),
+    // The Timeline's selector as a command, so the Prompts tab's chip and the palette drive one
+    // implementation. ACTIVE sessions only — switching between two live conversations is the thing this
+    // is for; the last row hands over to the full browser.
+    vscode.commands.registerCommand('claudeObservatory.switchActiveSession', async () => {
+      const root = workspaceRoot() ?? process.cwd();
+      const current = currentSession();
+      type Item = vscode.QuickPickItem & { id: string; all?: boolean };
+      const items: Item[] = activeSessionRows(core.sessionMeta(root, current).sessions, current).map((r) => ({
+        label: (core.isFleetActive(r.lastActiveMs) ? '● ' : '○ ') + (r.title || `session ${r.id.slice(0, 8)}`),
+        description: core.relTime(r.lastActiveMs) + (r.id === current ? ' · reviewing' : ''),
+        detail: r.id, // matchOnDetail below — pasting an id finds its row
+        id: r.id,
+      }));
+      // Never a dead end: an active-only list can be empty, or the one you want can be an hour old.
+      items.push({ label: '$(list-unordered) All sessions…', description: 'every session recorded for this workspace', id: '', all: true });
+      const pick = await vscode.window.showQuickPick(items, {
+        title: 'Claude Observatory — switch to an active session',
+        placeHolder: 'sessions still being written, plus the one under review · the full list is the last row',
+        matchOnDetail: true,
+      });
+      if (!pick) return;
+      if (pick.all) {
+        // The full browser is the Overview's Sessions TAB, not the deprecated QuickPick.
+        await vscode.commands.executeCommand('claudeObservatory.showSessions');
+        return;
+      }
+      // Through pinSession, so a switch made during a demo moves the in-memory override instead of
+      // writing the user's settings.json.
+      await vscode.commands.executeCommand('claudeObservatory.pinSession', pick.id);
+    }),
     // One-click escape from a fresh session's empty panel: pin the newest session that HAS edits.
     vscode.commands.registerCommand('claudeObservatory.switchToPreviousSession', async () => {
       const prior = previousSessionWithEdits(currentSession());
@@ -7146,7 +8764,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     // Keep / undo the pending edit under the cursor — the review loop never has to leave the keyboard.
     vscode.commands.registerCommand('claudeObservatory.keepAtCursor', () =>
-      withSession((s) => {
+      withSession(async (s) => {
         const rec = pendingAtCursor(s);
         if (!rec) {
           vscode.window.setStatusBarMessage('Claude Observatory: no pending edit under the cursor', 3000);
@@ -7154,6 +8772,7 @@ export function activate(context: vscode.ExtensionContext): void {
         }
         core.keepGroup(s, rec.id);
         vscode.window.setStatusBarMessage(`Claude Observatory: kept edit #${rec.id}`, 3000);
+        await advanceAfterResolve(s, rec.id);
       })()
     ),
     vscode.commands.registerCommand('claudeObservatory.undoAtCursor', () =>
@@ -7164,6 +8783,7 @@ export function activate(context: vscode.ExtensionContext): void {
           return;
         }
         await undoOne(s, rec.id);
+        await advanceAfterResolve(s, rec.id);
       })()
     ),
     vscode.commands.registerCommand('claudeObservatory.setup', showSetup),
@@ -7305,7 +8925,9 @@ export function activate(context: vscode.ExtensionContext): void {
             vscode.window.showErrorMessage(`Analyze failed: ${String((e as Error)?.message || e)}`);
             return;
           }
-          insightsProvider.refresh();
+          // Through the WINDOW that draws these rows: dropping the provider's memo alone repaints
+          // nothing now that Observations is a webview tab rather than a tree with its own event.
+          promptsProvider.refresh(true);
           await showObservationDoc(id);
         }
       );
@@ -7323,17 +8945,22 @@ export function activate(context: vscode.ExtensionContext): void {
             vscode.window.showErrorMessage(`Recap failed: ${String((e as Error)?.message || e)}`);
             return;
           }
-          insightsProvider.refresh();
+          promptsProvider.refresh(true); // see analyzeEdit above — the window is what repaints
+
         }
       );
     }),
     vscode.commands.registerCommand('claudeObservatory.keep', (n: EditNode) =>
-      withSession((s) => {
+      withSession(async (s) => {
         core.keepGroup(s, n.rec.id);
+        await advanceAfterResolve(s, n.rec.id);
       })()
     ),
     vscode.commands.registerCommand('claudeObservatory.undo', (n: EditNode) =>
-      withSession((s) => undoOne(s, n.rec.id))()
+      withSession(async (s) => {
+        await undoOne(s, n.rec.id);
+        await advanceAfterResolve(s, n.rec.id);
+      })()
     ),
     vscode.commands.registerCommand('claudeObservatory.redo', (n: EditNode) =>
       withSession((s) => redoOne(s, n.rec.id))()
@@ -7347,8 +8974,58 @@ export function activate(context: vscode.ExtensionContext): void {
     // "View changes" → the inline review bubble at the edit: the diff in git's colors + reasoning +
     // line counts, with Keep/Undo/Chat/Prev/Next as toolbar buttons (comments/commentThread/title).
     vscode.commands.registerCommand('claudeObservatory.viewChanges', (id: number) => editPeek.show(id)),
+    // The floating review bar at an edit: the compact nav surface over the code (Keep · Undo · ⌃⌄ · ‹› ·
+    // Diff · Details) with a live "Claude edit #12 · +8 −3 · Diff 2/5 · File 1/3" title. Takes an optional
+    // id (the CodeLens header passes its own edit); with none it opens at whatever the open file's review
+    // is currently about — which is what makes it a usable command-palette entry and the way back when
+    // `editorReviewSurface` is set to `none`.
+    vscode.commands.registerCommand('claudeObservatory.showReviewBar', async (id?: number) => {
+      const s = currentSession();
+      const file = activeEditorFile();
+      // navEditId is the Diff axis's own anchor and is always a pending edit in the OPEN file (or unset),
+      // so the bar and the status-bar counters open on the same edit.
+      const target = id ?? navEditId ?? (s && file ? pendingEditsInFile(s, file)[0]?.id : undefined);
+      if (target === undefined) {
+        vscode.window.setStatusBarMessage('Claude Observatory: open a file with pending edits to review it', 2500);
+        return;
+      }
+      await editPeek.show(target, { mode: 'bar' });
+    }),
+    // The two swaps between the review surfaces, at the SAME edit: the bar's "⋯ Details" opens the bubble
+    // (reasoning + the git-coloured diff), and the bubble's "Collapse" returns to the bar.
+    vscode.commands.registerCommand('claudeObservatory.barDetails', () => editPeek.swapTo('detail')),
+    vscode.commands.registerCommand('claudeObservatory.peekCollapse', () => editPeek.swapTo('bar')),
+    // The bar has no diff in its body — this is its way to the patch.
+    vscode.commands.registerCommand('claudeObservatory.peekViewDiff', () => editPeek.viewDiff()),
+    // Pin/unpin the review bubble. One setting, two commands, so the bubble's toolbar can show the
+    // action that is actually available rather than a checkbox nobody can see inside a comment thread.
+    vscode.commands.registerCommand('claudeObservatory.peekPin', async () => {
+      await vscode.workspace
+        .getConfiguration('claudeObservatory')
+        .update('pinnedPeek', true, vscode.ConfigurationTarget.Global);
+      syncPeekPinned();
+      vscode.window.setStatusBarMessage('Claude Observatory: review bubble pinned — Keep/Undo now carries it to the next edit', 4000);
+    }),
+    vscode.commands.registerCommand('claudeObservatory.peekUnpin', async () => {
+      await vscode.workspace
+        .getConfiguration('claudeObservatory')
+        .update('pinnedPeek', false, vscode.ConfigurationTarget.Global);
+      syncPeekPinned();
+      vscode.window.setStatusBarMessage('Claude Observatory: review bubble unpinned — it closes after Keep/Undo', 4000);
+    }),
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration('claudeObservatory.pinnedPeek')) syncPeekPinned();
+      // Which review chrome the editor shows just changed: drop what is on screen and let the refresh
+      // below build the surface that was actually asked for (or, for `none`, leave the editor clean).
+      if (e.affectsConfiguration('claudeObservatory.editorReviewSurface')) {
+        editPeek.resetSurface();
+        updateStatusItem();
+      }
+    }),
+    // Both RETURN their promise: keeping can now carry the bubble to the next edit, and a caller (VS Code
+    // itself, or a test) has to be able to wait for that to finish.
     vscode.commands.registerCommand('claudeObservatory.peekKeep', () => editPeek.keep()),
-    vscode.commands.registerCommand('claudeObservatory.peekUndo', () => void editPeek.undo()),
+    vscode.commands.registerCommand('claudeObservatory.peekUndo', () => editPeek.undo()),
     vscode.commands.registerCommand('claudeObservatory.peekChat', () => editPeek.chat()),
     vscode.commands.registerCommand('claudeObservatory.peekPrev', () => editPeek.step(-1)),
     vscode.commands.registerCommand('claudeObservatory.peekNext', () => editPeek.step(1)),
@@ -7361,23 +9038,30 @@ export function activate(context: vscode.ExtensionContext): void {
     // pending edits (wrapping). The command gets the diff's resource URI, which carries the edit id.
     vscode.commands.registerCommand('claudeObservatory.diffPrevEdit', (uri?: vscode.Uri) => stepDiffEdit(uri, -1)),
     vscode.commands.registerCommand('claudeObservatory.diffNextEdit', (uri?: vscode.Uri) => stepDiffEdit(uri, 1)),
-    vscode.commands.registerCommand('claudeObservatory.inlineKeep', (id: number) =>
-      withSession((s) => {
+    // `advance: false` is how the DIFF title bar opts out of auto-advance. Its buttons route here, and a
+    // diff tab is a viewer the reader opened on purpose: revealing the next edit would leave them staring
+    // at a text editor behind a diff of something else. In the editor itself, advancing is the point.
+    vscode.commands.registerCommand('claudeObservatory.inlineKeep', (id: number, opts?: { advance?: boolean }) =>
+      withSession(async (s) => {
         core.keepGroup(s, id);
+        if (opts?.advance !== false) await advanceAfterResolve(s, id);
       })()
     ),
-    vscode.commands.registerCommand('claudeObservatory.inlineUndo', (id: number) =>
-      withSession((s) => undoOne(s, id))()
+    vscode.commands.registerCommand('claudeObservatory.inlineUndo', (id: number, opts?: { advance?: boolean }) =>
+      withSession(async (s) => {
+        await undoOne(s, id);
+        if (opts?.advance !== false) await advanceAfterResolve(s, id);
+      })()
     ),
     // Diff title-bar actions: the editor/title command receives the diff's resource URI, which carries
     // the edit id in its query — resolve it, then reuse the id-based keep/undo/chat commands.
     vscode.commands.registerCommand('claudeObservatory.diffKeep', (uri?: vscode.Uri) => {
       const id = editIdFromUri(uri);
-      if (id != null) void vscode.commands.executeCommand('claudeObservatory.inlineKeep', id);
+      if (id != null) void vscode.commands.executeCommand('claudeObservatory.inlineKeep', id, { advance: false });
     }),
     vscode.commands.registerCommand('claudeObservatory.diffUndo', (uri?: vscode.Uri) => {
       const id = editIdFromUri(uri);
-      if (id != null) void vscode.commands.executeCommand('claudeObservatory.inlineUndo', id);
+      if (id != null) void vscode.commands.executeCommand('claudeObservatory.inlineUndo', id, { advance: false });
     }),
     vscode.commands.registerCommand('claudeObservatory.diffChat', (uri?: vscode.Uri) => {
       const id = editIdFromUri(uri);
@@ -7537,13 +9221,17 @@ export function activate(context: vscode.ExtensionContext): void {
     showSetup();
   }
 
-  // Reveal the Prompts window. VS Code auto-registers a `<viewId>.focus` command for every
-  // contributed view; running it un-collapses and focuses the pane. This command wraps it under a
-  // friendly palette title, and is what the first-run nudge below invokes.
+  // Reveal the Timeline window on one of its tabs. VS Code auto-registers a `<viewId>.focus` command for
+  // every contributed view; running it un-collapses and focuses the pane. These commands wrap it under
+  // friendly palette titles, and `showPrompts` is what the first-run nudge below invokes.
+  const showTimelineTab = async (tab: 'prompts' | 'actions' | 'observations') => {
+    await vscode.commands.executeCommand('claudeObservatory.timeline.focus');
+    promptsProvider.setTab(tab);
+  };
   context.subscriptions.push(
-    vscode.commands.registerCommand('claudeObservatory.showPrompts', () =>
-      vscode.commands.executeCommand('claudeObservatory.prompts.focus')
-    )
+    vscode.commands.registerCommand('claudeObservatory.showPrompts', () => showTimelineTab('prompts')),
+    vscode.commands.registerCommand('claudeObservatory.showActions', () => showTimelineTab('actions')),
+    vscode.commands.registerCommand('claudeObservatory.showObservations', () => showTimelineTab('observations'))
   );
   // When a view container's contents change on upgrade, VS Code keeps the pre-upgrade panel layout and
   // does NOT surface a newly-added view — so an existing user upgrading INTO 0.8.7 never sees the new

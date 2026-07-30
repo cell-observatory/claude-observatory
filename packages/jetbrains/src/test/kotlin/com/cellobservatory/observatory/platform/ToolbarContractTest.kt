@@ -71,6 +71,10 @@ class ToolbarContractTest : BasePlatformTestCase() {
         val panels = listOf<java.awt.Container>(
             com.cellobservatory.observatory.ui.ChangeMapPanel(project),
             com.cellobservatory.observatory.ui.PromptsPanel(project),
+            // The Timeline window's content, which since 0.10.0 carries two toolbars of its own — the
+            // session selector and the grouping toggle. Both are re-expanded on every tick of a window
+            // that is open all day, so an EDT-bound one there costs exactly what the Overview's did.
+            com.cellobservatory.observatory.ui.TimelinePanel(project),
         )
         // Non-vacuity first: with no toolbars found, the loop below examines nothing and passes,
         // which is how a contract test quietly stops testing its contract.
@@ -83,6 +87,206 @@ class ToolbarContractTest : BasePlatformTestCase() {
             }
         }
         assertEquals("these actions drag toolbar expansion onto the EDT: $offenders", 0, offenders.size)
+    }
+
+    /**
+     * The floating review bar's own contract, asserted EXPLICITLY.
+     *
+     * [toolbarsIn] walks ChangeMapPanel and PromptsPanel only, and the floating bar is not a descendant of
+     * either — the platform builds it around an editor, from an extension point. So the two assertions
+     * above cannot reach it, and adding it to that walk is not possible; without these methods a bar full
+     * of EDT-bound actions would sail through a green build.
+     */
+    fun testFloatingReviewBarActions() {
+        val group = com.cellobservatory.observatory.ui.editor.ObservatoryFloatingToolbarProvider().actionGroup
+        val children = group.getChildren(null)
+        assertTrue("the floating bar contributes buttons, or the EP renders an empty overlay", children.isNotEmpty())
+        val offenders = children.filter {
+            it.actionUpdateThread == com.intellij.openapi.actionSystem.ActionUpdateThread.EDT
+        }.map { it.javaClass.name }
+        assertEquals("these floating-bar actions drag toolbar expansion onto the EDT: $offenders", 0, offenders.size)
+    }
+
+    /**
+     * The bar's VERBS, in scope order: the per-edit ones, then the file-wide ones, then the session-wide
+     * ones. Asserted by name because the bar is the surface a reader uses without opening a tool window,
+     * and a verb quietly dropped from this group is a verb that simply stops existing for them — the
+     * counter and the two file buttons look no different with Chat and Spotlight missing.
+     */
+    fun testTheFloatingBarCarriesEveryReviewVerbInScopeOrder() {
+        val group = com.cellobservatory.observatory.ui.editor.ObservatoryFloatingToolbarProvider().actionGroup
+        val names = group.getChildren(null).map { it.templatePresentation.text ?: "" }
+        assertEquals(
+            listOf(
+                "Keep", "Undo", "Chat", "View diff", // this edit
+                "Previous Edit", "", "Next Edit",    // …and which edit that is (the counter has no static text)
+                "Accept File", "Reject File",        // this file
+                "Spotlight", "Clear Resolved",       // this session
+            ),
+            names,
+        )
+        // Spotlight is a TOGGLE — it has a state, and a plain button would make the reader click twice to
+        // learn what it is.
+        val spotlight = group.getChildren(null).first { it.templatePresentation.text == "Spotlight" }
+        assertTrue(
+            "Spotlight must show whether the dimming is on: was ${spotlight.javaClass.name}",
+            spotlight is com.intellij.openapi.actionSystem.ToggleAction,
+        )
+    }
+
+    /**
+     * …and the provider must actually SAY YES for an ordinary editor.
+     *
+     * Everything else about the bar is asserted from a provider this test constructs by hand, so an
+     * `isApplicable` that answers false for every editor — a narrowed kind check, an added condition, an
+     * inverted return — takes the bar off the screen with the whole suite still green. The DIFF half is
+     * the other side of the same rule (a review bar inside the diff OF the edit it acts on is one surface
+     * too many), and it doubles as the control: without it, a provider that answers true to everything
+     * would pass the first assertion.
+     */
+    fun testTheFloatingBarAppliesToAnOrdinaryEditorAndNotToADiff() {
+        val file = myFixture.configureByText("applies.txt", "hello").virtualFile
+        val doc = com.intellij.openapi.fileEditor.FileDocumentManager.getInstance().getDocument(file)!!
+        val provider = com.cellobservatory.observatory.ui.editor.ObservatoryFloatingToolbarProvider()
+        val factory = com.intellij.openapi.editor.EditorFactory.getInstance()
+        // The fixture's own editor is EditorKind.UNTYPED, so it cannot stand in for the main editor here.
+        val main = factory.createEditor(doc, project, file, false, com.intellij.openapi.editor.EditorKind.MAIN_EDITOR)
+        val diff = factory.createEditor(doc, project, file, true, com.intellij.openapi.editor.EditorKind.DIFF)
+        try {
+            assertTrue(
+                "the bar declines every main editor — it can never appear",
+                provider.isApplicable(contextFor(main)),
+            )
+            assertFalse(
+                "the bar floats inside diff panes too",
+                provider.isApplicable(contextFor(diff)),
+            )
+        } finally {
+            factory.releaseEditor(diff)
+            factory.releaseEditor(main)
+        }
+    }
+
+    private fun contextFor(editor: com.intellij.openapi.editor.Editor) =
+        com.intellij.openapi.actionSystem.impl.SimpleDataContext.builder()
+            .add(com.intellij.openapi.actionSystem.CommonDataKeys.PROJECT, project)
+            .add(com.intellij.openapi.actionSystem.CommonDataKeys.EDITOR, editor)
+            .build()
+
+    /** Records what the provider asked the platform to do with the overlay. [verdict] keeps "hide it" and
+     *  "never said anything" apart — a provider that stopped calling either would otherwise read as a hide. */
+    private class RecordingToolbar : com.intellij.openapi.editor.toolbar.floating.FloatingToolbarComponent {
+        private var shown = 0
+        private var hidden = 0
+        val verdict: String get() = if (shown > 0) "show" else if (hidden > 0) "hide" else "nothing at all"
+        override fun scheduleShow() { shown++ }
+        override fun scheduleHide() { hidden++ }
+        override fun hideImmediately() { hidden++ }
+        override var backgroundAlpha: Float = 0f
+        override var showingTime: Int = 0
+        override var hidingTime: Int = 0
+        override var retentionTime: Int = 0
+        override var autoHideable: Boolean = false
+    }
+
+    /**
+     * The bar is shown for a file with pending edits, and hidden for everything else — the one behaviour
+     * that decides whether anyone ever sees it, and the one no other test observes: `register()` is called
+     * by the platform, so an inverted `floatingSurface && hasPending` (or a settings spelling that stops
+     * meaning "show it") ships an editor with no review controls and no error anywhere.
+     *
+     * Seeds a store of its own rather than leaning on the ambient one, and puts it back afterwards, so the
+     * other methods in this class keep seeing whatever they saw before.
+     */
+    fun testTheFloatingBarShowsItselfExactlyWhereThereIsPendingWork() {
+        val session = "floating-bar-session"
+        val settings = com.cellobservatory.observatory.settings.ObservatorySettings.instance.state
+        val savedCfg = com.cellobservatory.observatory.core.ClaudePaths.configDirOverride
+        val savedSession = settings.session
+        val savedSurface = settings.editorReviewSurface
+        val cfg = java.nio.file.Files.createTempDirectory("co-floating-bar")
+        val factory = com.intellij.openapi.editor.EditorFactory.getInstance()
+        val provider = com.cellobservatory.observatory.ui.editor.ObservatoryFloatingToolbarProvider()
+        try {
+            com.cellobservatory.observatory.core.ClaudePaths.configDirOverride = cfg
+            settings.session = session // pinned: currentSession() then needs no transcript to resolve
+            java.nio.file.Files.createDirectories(com.cellobservatory.observatory.core.ClaudePaths.storeDir(session))
+            val dirty = myFixture.configureByText("has-pending.txt", "hello").virtualFile
+            val clean = myFixture.configureByText("nothing-pending.txt", "hello").virtualFile
+            java.nio.file.Files.writeString(
+                com.cellobservatory.observatory.core.ClaudePaths.logPath(session),
+                """{"id":1,"ts":1000,"tool":"Edit","file":"${dirty.path}",""" +
+                    """"beforeBlob":"aa","afterBlob":"bb","status":"pending"}""" + "\n",
+            )
+            // No refresh() needed either way: the service's log cache is keyed on the session name, and
+            // this one is used nowhere else.
+            settings.editorReviewSurface = com.cellobservatory.observatory.settings.ObservatorySettings.FLOATING
+            assertEquals(
+                "a file with a pending edit must get the bar",
+                "show",
+                register(provider, factory, dirty).verdict,
+            )
+            assertEquals(
+                "a file with nothing pending must not",
+                "hide",
+                register(provider, factory, clean).verdict,
+            )
+            settings.editorReviewSurface = com.cellobservatory.observatory.settings.ObservatorySettings.BANNER
+            assertEquals(
+                "`banner` means the banner INSTEAD of the bar, so the bar stays down over pending work",
+                "hide",
+                register(provider, factory, dirty).verdict,
+            )
+        } finally {
+            settings.editorReviewSurface = savedSurface
+            settings.session = savedSession
+            com.cellobservatory.observatory.core.ClaudePaths.configDirOverride = savedCfg
+            cfg.toFile().deleteRecursively()
+        }
+    }
+
+    /** Run the provider's own registration for [file] and hand back what it did with the overlay. */
+    private fun register(
+        provider: com.cellobservatory.observatory.ui.editor.ObservatoryFloatingToolbarProvider,
+        factory: com.intellij.openapi.editor.EditorFactory,
+        file: com.intellij.openapi.vfs.VirtualFile,
+    ): RecordingToolbar {
+        val doc = com.intellij.openapi.fileEditor.FileDocumentManager.getInstance().getDocument(file)!!
+        val editor = factory.createEditor(doc, project, file, false, com.intellij.openapi.editor.EditorKind.MAIN_EDITOR)
+        val component = RecordingToolbar()
+        // Its own Disposable per call: the provider registers a service listener, and leaving three of them
+        // hanging off the fixture's root would outlive the assertions that care about them.
+        val scope = com.intellij.openapi.util.Disposer.newDisposable()
+        try {
+            provider.register(contextFor(editor), component, scope)
+        } finally {
+            com.intellij.openapi.util.Disposer.dispose(scope)
+            factory.releaseEditor(editor)
+        }
+        return component
+    }
+
+    /** …and each of them must survive `update()` with only a project in context — which is the whole of
+     *  what it gets before any editor is resolved. A throw there kills the overlay's repaint. */
+    fun testFloatingReviewBarActionsSurviveUpdate() {
+        val group = com.cellobservatory.observatory.ui.editor.ObservatoryFloatingToolbarProvider().actionGroup
+        val children = group.getChildren(null)
+        assertTrue("there are floating-bar actions to exercise", children.isNotEmpty())
+        val ctx = com.intellij.openapi.actionSystem.impl.SimpleDataContext.getProjectContext(project)
+        for (a in children) {
+            val e = com.intellij.openapi.actionSystem.AnActionEvent.createFromDataContext(
+                ActionToolbar.ACTION_TOOLBAR_PROPERTY_KEY.toString(), null, ctx
+            )
+            try {
+                a.update(e)
+            } catch (t: Throwable) {
+                fail("${a.javaClass.name}.update() threw ${t.javaClass.simpleName}: ${t.message}")
+            }
+            assertFalse(
+                "${a.javaClass.name} shows itself with no file resolved — the bar would float over clean code",
+                e.presentation.isVisible,
+            )
+        }
     }
 
     /** Every action on those toolbars must survive `update()` without throwing. An exception there kills

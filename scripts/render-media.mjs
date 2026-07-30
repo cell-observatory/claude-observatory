@@ -52,6 +52,17 @@ const CSS = `
   .codelens { font-size:11px; color:var(--dim); padding:2px 0 0 60px; font-family:-apple-system,sans-serif; }
   .codelens a { color:var(--dim); text-decoration:none; margin-right:15px; }
   .codelens a.why { font-style:italic; color:var(--faint); }
+  /* the compact review BAR (0.10.0 default in-editor surface) — a comment thread with no body, so the
+     widget collapses to one row: the live title on the left, its buttons on the right. Unresolved paints
+     the frame + the arrow in the theme's needs-attention colour, so it reads as a band pointing AT the
+     edit it is anchored to (the line directly above it). */
+  .revbar { position:relative; display:flex; align-items:center; gap:16px; margin:5px 0 5px 44px; max-width:920px;
+            padding:6px 13px; background:#252526; border:1px solid var(--border2); border-left:3px solid var(--pending);
+            border-radius:5px; }
+  .revbar::before { content:''; position:absolute; top:-6px; left:26px; border-left:6px solid transparent;
+                    border-right:6px solid transparent; border-bottom:6px solid var(--pending); }
+  .revbar .rb-t { font-family:'SF Mono',Menlo,monospace; font-size:12px; color:var(--ink); white-space:nowrap; }
+  .revbar .rb-b { margin-left:auto; display:flex; align-items:center; gap:15px; font-size:13px; color:var(--dim); white-space:nowrap; }
   .tok-k{color:#569cd6} .tok-f{color:#dcdcaa} .tok-s{color:#ce9178} .tok-c{color:#6a9955} .tok-v{color:#9cdcfe}
   .gutstar { color:var(--coral); font-size:11px; margin-right:6px; }
   /* inline review bubble — the comment-thread widget "view changes" opens, diff in git's colors */
@@ -148,52 +159,61 @@ const editsTree = `
   <div class="trow" style="padding-left:58px"><span class="tw">▾</span><span class="ic" style="color:var(--orange)">◆</span>class Dataset<span class="meta">1 edit · 1 pending</span></div>
   <div class="trow mono" style="padding-left:76px"><span class="dot" style="background:var(--pending)"></span>&nbsp;#3&nbsp; +7 −0<span class="meta"><span class="pill p-pending">pending</span></span></div>`;
 
+// The inline lens row, verbatim from InlineLensProvider.provideCodeLenses: one lens per pending edit,
+// shortened in 0.10.0 to `🔬 #N +A −R · n/m` (the Diff-axis position) plus the five verbs that fit a lens.
+const lensRow = (id, add, rem, pos) =>
+  `<div class="codelens"><a>${microscope} #${id}  +${add} −${rem}  ·  ${pos}</a><a>✓ Keep</a><a>↩ Undo</a><a>💬 Chat</a><a>⧉ Diff</a><a>⋯ Details</a></div>`;
+// The compact review bar — `EditPeek` in `bar` mode: a comment thread with no comments, so the widget is
+// one row. Its title is `✦ ` + the same label the bubble carries; its buttons are the `claudeNavBar` menu
+// block, in group order (Keep · Undo · ↑↓ this file's edits · ←→ changed files · Diff · Details). The two
+// stepper pairs are gated on `barMultiEdit` / `barMultiFile`, so a lone edit in the file hides ↑↓ — the bar
+// floats over code, and a dead button there covers a line for nothing.
+const reviewBar = (title, { steps = true, files = true } = {}) => `
+  <div class="revbar">
+    <span class="rb-t">✦ ${title}</span>
+    <span class="rb-b">
+      <span style="color:#3fb950">✓</span><span style="color:#e5534b">↩</span>
+      ${steps ? `<span style="color:#4c8bf5">↑</span><span style="color:#4c8bf5">↓</span>` : ''}
+      ${files ? `<span style="color:#4c8bf5">←</span><span style="color:#4c8bf5">→</span>` : ''}
+      <span style="color:var(--accent)">⧉</span><span style="color:var(--accent)">⋯</span>
+    </span>
+  </div>`;
+
+// features.py with its one pending edit (#1 +6 −1 — the demo's `scale()`), as the editor draws it: the
+// lens row above the edit, the ✨ gutter star on its first line, every added/changed line tinted, and the
+// review bar auto-shown under the anchor line. Line numbers and text are the demo workspace's own file.
 const editorCode = () => `
   <div style="background:var(--bg);padding:10px 0 14px;">
-    <div class="codelens"><a>✦ #1 +6 −1 view changes</a><a>✓ Keep</a><a>↩ Undo</a><a>${icoChat} Chat</a><a>⧉ View diff</a></div>
-    <div class="codeline hl"><span class="ln">1</span><span><span class="tok-k">from</span> <span class="tok-v">statistics</span> <span class="tok-k">import</span> <span class="tok-v">mean</span>, <span class="tok-v">stdev</span></span></div>
+    ${lensRow(1, 6, 1, '1/1')}
+    <div class="codeline hl"><span class="ln">1</span><span class="gutstar">✦</span><span><span class="tok-k">from</span> <span class="tok-v">statistics</span> <span class="tok-k">import</span> <span class="tok-v">mean</span>, <span class="tok-v">stdev</span></span></div>
+    ${reviewBar('Claude edit #1  ·  +6 −1  ·  Diff 1/1  ·  File 1/3', { steps: false })}
     <div class="codeline"><span class="ln">2</span><span></span></div>
     <div class="codeline"><span class="ln">3</span><span></span></div>
     <div class="codeline"><span class="ln">4</span><span><span class="tok-k">def</span> <span class="tok-f">summarize</span>(<span class="tok-v">values</span>):</span></div>
     <div class="codeline"><span class="ln">5</span><span>    <span class="tok-k">return</span> {<span class="tok-s">"count"</span>: <span class="tok-f">len</span>(values), <span class="tok-s">"mean"</span>: <span class="tok-f">mean</span>(values)}</span></div>
-    <div class="codeline"><span class="ln">6</span><span></span></div>
+    <div class="codeline hl"><span class="ln">6</span><span></span></div>
     <div class="codeline hl"><span class="ln">7</span><span></span></div>
-    <div class="codeline hl"><span class="ln">8</span><span class="gutstar">✦</span><span><span class="tok-k">def</span> <span class="tok-f">scale</span>(<span class="tok-v">values</span>):</span></div>
+    <div class="codeline hl"><span class="ln">8</span><span><span class="tok-k">def</span> <span class="tok-f">scale</span>(<span class="tok-v">values</span>):</span></div>
     <div class="codeline hl"><span class="ln">9</span><span>    mu, sigma = <span class="tok-f">mean</span>(values), <span class="tok-f">stdev</span>(values)</span></div>
     <div class="codeline hl"><span class="ln">10</span><span>    <span class="tok-k">return</span> [(v - mu) / sigma <span class="tok-k">for</span> v <span class="tok-k">in</span> values]</span></div>
   </div>`;
 
-// inline frame showing a single edit that BOTH adds (green) and deletes (red rule) — feature closeup
+// train.py's one pending edit (#2 +3 −2 — the demo wiring `scale()` into the entrypoint), the closeup for
+// the inline-review figure. `locate` reports lines 1, 3 and 4 as this edit's changed lines and NO removed
+// hunk (its two removed lines were replaced in place, not deleted), so every one of them is tinted green
+// and there is no deletion ghost to draw here.
 const editorCodeCombined = () => `
   <div style="background:var(--bg);padding:10px 0 14px;">
-    <div class="codelens"><a>✦ #2 +3 −2 view changes</a><a>✓ Keep</a><a>↩ Undo</a><a>${icoChat} Chat</a><a>⧉ View diff</a></div>
+    ${lensRow(2, 3, 2, '1/1')}
     <div class="codeline hl"><span class="ln">1</span><span class="gutstar">✦</span><span><span class="tok-k">from</span> <span class="tok-v">features</span> <span class="tok-k">import</span> <span class="tok-v">summarize</span>, <span class="tok-v">scale</span></span></div>
+    ${reviewBar('Claude edit #2  ·  +3 −2  ·  Diff 1/1  ·  File 3/3', { steps: false })}
     <div class="codeline"><span class="ln">2</span><span></span></div>
     <div class="codeline hl"><span class="ln">3</span><span>features = <span class="tok-f">scale</span>([<span class="tok-v">1.0</span>, <span class="tok-v">2.0</span>, <span class="tok-v">3.0</span>])</span></div>
-    <div class="codeline del"><span class="ln">4</span><span><span class="tok-f">print</span>(<span class="tok-f">summarize</span>(features))<span class="delnote">− print(summarize([1.0, 2.0, 3.0]))</span></span></div>
+    <div class="codeline hl"><span class="ln">4</span><span><span class="tok-f">print</span>(<span class="tok-f">summarize</span>(features))</span></div>
   </div>`;
 
-// the inline review bubble that "view changes" opens at the edit (comment-thread widget): the diff in
-// git's own colors + reasoning + counts in the body, Keep/Undo/Chat/Prev/Next on its toolbar
+// the diff line used by the review bubble (bubble.png) and the standalone diff tab (diffs.png)
 const dl = (kind, text) => `<span class="dl ${kind}">${text}</span>`;
-const reviewBubble = () => `
-  <div class="bubble">
-    <div class="bb-head">
-      <span class="bb-title">✦ Claude edit <span class="bb-id">#2</span></span>
-      <span class="bb-id">+3 −2</span>
-      <span class="bb-why">💭 scaling the features in the training entrypoint before they reach the model</span>
-      <span class="bb-tools"><span>✓ Keep</span><span>↩ Undo</span><span>${icoChat} Chat</span><span>↑ Prev</span><span>↓ Next</span></span>
-    </div>
-    <div class="bb-diff">
-      ${dl('hunk', '@@ -1,3 +1,4 @@')}
-      ${dl('rem', '-from features import summarize')}
-      ${dl('add', '+from features import summarize, scale')}
-      ${dl('ctx', ' ')}
-      ${dl('rem', '-print(summarize([1.0, 2.0, 3.0]))')}
-      ${dl('add', '+features = scale([1.0, 2.0, 3.0])')}
-      ${dl('add', '+print(summarize(features))')}
-    </div>
-  </div>`;
 
 const observationsCol = `
   <div class="obsrow"><span>🧭</span><span class="id" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Pipeline: scaling, validation, tests</span><span class="r" style="flex:none">session recap</span></div>
@@ -329,15 +349,15 @@ const diffTabBody = () => `
 // file spotlight — unmodified lines dimmed so the edit is a spotlight (the Spotlight toggle)
 const spotlightEditor = () => `
   <div style="background:var(--bg);padding:10px 0 14px;">
-    <div class="codelens"><a>✦ #1 +6 −1 view changes</a><a>✓ Keep</a><a>↩ Undo</a><a>${icoChat} Chat</a><a>⧉ View diff</a></div>
-    <div class="codeline hl"><span class="ln">1</span><span><span class="tok-k">from</span> <span class="tok-v">statistics</span> <span class="tok-k">import</span> <span class="tok-v">mean</span>, <span class="tok-v">stdev</span></span></div>
+    ${lensRow(1, 6, 1, '1/1')}
+    <div class="codeline hl"><span class="ln">1</span><span class="gutstar">✦</span><span><span class="tok-k">from</span> <span class="tok-v">statistics</span> <span class="tok-k">import</span> <span class="tok-v">mean</span>, <span class="tok-v">stdev</span></span></div>
     <div class="codeline dim"><span class="ln">2</span><span></span></div>
     <div class="codeline dim"><span class="ln">3</span><span></span></div>
     <div class="codeline dim"><span class="ln">4</span><span><span class="tok-k">def</span> <span class="tok-f">summarize</span>(<span class="tok-v">values</span>):</span></div>
     <div class="codeline dim"><span class="ln">5</span><span>    <span class="tok-k">return</span> {<span class="tok-s">"count"</span>: <span class="tok-f">len</span>(values), <span class="tok-s">"mean"</span>: <span class="tok-f">mean</span>(values)}</span></div>
-    <div class="codeline dim"><span class="ln">6</span><span></span></div>
+    <div class="codeline hl"><span class="ln">6</span><span></span></div>
     <div class="codeline hl"><span class="ln">7</span><span></span></div>
-    <div class="codeline hl"><span class="ln">8</span><span class="gutstar">✦</span><span><span class="tok-k">def</span> <span class="tok-f">scale</span>(<span class="tok-v">values</span>):</span></div>
+    <div class="codeline hl"><span class="ln">8</span><span><span class="tok-k">def</span> <span class="tok-f">scale</span>(<span class="tok-v">values</span>):</span></div>
     <div class="codeline hl"><span class="ln">9</span><span>    mu, sigma = <span class="tok-f">mean</span>(values), <span class="tok-f">stdev</span>(values)</span></div>
     <div class="codeline hl"><span class="ln">10</span><span>    <span class="tok-k">return</span> [(v - mu) / sigma <span class="tok-k">for</span> v <span class="tok-k">in</span> values]</span></div>
   </div>`;
@@ -379,8 +399,60 @@ const icoChat = ico('<path d="M1.5 3h8.5v5.5H6L4 10.5V8.5H1.5z"/><path d="M12 6h
 const icoClear = ico('<path d="M2 3.5h11M2 7h7M2 10.5h5"/><path d="M10.5 9l4 4M14.5 9l-4 4"/>');
 const icoChecklist = ico('<path d="M2 4.2l1.3 1.3L5.6 3"/><path d="M2 9.2l1.3 1.3L5.6 8"/><path d="M8 5h6M8 10h6M4 13.5h10"/>');
 const icoHistory = ico('<path d="M2.5 8a5.5 5.5 0 1 1 1.6 3.9"/><path d="M2.5 8L1.2 6.5M2.5 8L4 6.8"/><path d="M8 5.2V8l2.2 1.6"/>');
+const icoSplit = ico('<rect x="1.6" y="3" width="12.8" height="10" rx="1.2"/><path d="M8 3v10"/>');
 const spark = (bars, color) => `<span style="display:inline-flex;align-items:flex-end;gap:1.5px;height:13px">${bars.map(h => `<span style="width:2.5px;height:${Math.max(2, Math.round(h * 13))}px;background:${color};border-radius:1px"></span>`).join('')}</span>`;
 const gADD = '#7ee787', gREM = '#ffa198';
+
+// ---------- 0.10.0: the Observatory Timeline panel ----------
+// ONE webview (`claudeObservatory.timeline`), whose own chrome is drawn below in the order `timelineShell`
+// builds it: the SESSION SELECTOR leads the window, then the tab strip — Prompts · Observations · Actions,
+// each with its badge — with the GROUP TABS toggle beside the strip it rearranges, then the forward tab's
+// heading, its description, and its list. Every count and every ask below is the bundled demo session's
+// own (`demo --fast`, then `prompts --json` / `observations` / `actions`): 3 asks · 8 review units, 9 edit
+// rows in Observations, and 39 tool calls in the Actions tree — the CLI's 41 less the `agent` category the
+// tree filters out and the uncurated `read` group, which contributes only its failures and had none.
+const tlTab = (name, badge, on) =>
+  `<span style="display:inline-flex;align-items:center;gap:6px;flex:none;border:1px solid var(--border2);border-bottom:2px solid ${on ? 'var(--blue)' : 'transparent'};border-radius:5px 5px 0 0;padding:4px 11px;font-size:11px;white-space:nowrap;color:var(--${on ? 'ink' : 'dim'});${on ? 'background:rgba(80,120,200,0.18);' : ''}">${name}<span class="mono" style="font-size:9px;opacity:.72">${badge}</span></span>`;
+// One ask, as `renderPrompts` writes it: the facts line (± lines · edits/files/folders/pending · tokens ·
+// what it produced · failures · compactions · how long), the response caret, then the ask itself WRAPPED.
+const tlPromptRow = (ix, live, delta, edits, meta, dur, ask) => `
+  <div style="border:1px solid var(--border2);border-radius:5px;margin-bottom:5px;padding:5px 8px">
+    <div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap">
+      <span class="mono" style="font-size:10px;color:var(--ink);flex:none">#${ix}</span>
+      ${live ? `<span style="font-size:8.5px;font-weight:600;color:#fff;background:var(--blue);border-radius:99px;padding:0 6px;flex:none">now</span>` : ''}
+      <span class="mono" style="font-size:9.5px;flex:none"><span style="color:${gADD}">${delta.split(' ')[0]}</span> <span style="color:${gREM}">${delta.split(' ')[1]}</span></span>
+      <span class="mono" style="font-size:9px;color:var(--faint);flex:none">${edits}</span>
+      <span class="mono" style="font-size:9px;color:var(--faint);flex:none">${meta}</span>
+      <span class="mono" style="font-size:9px;color:var(--faint);flex:none">${dur}</span>
+      <span style="margin-left:auto;flex:none;font-size:9px;border:1px solid var(--border2);border-radius:99px;padding:0 7px;color:var(--faint)">▸ response</span>
+    </div>
+    <div style="font-size:11.5px;line-height:1.4;color:var(--ink);margin-top:3px">${ask}</div>
+  </div>`;
+const timelinePanel = `
+  <div style="padding:10px 14px 6px;font-size:11px;color:var(--dim);letter-spacing:.06em;">OBSERVATORY TIMELINE</div>
+  <div style="padding:0 9px 5px;border-bottom:1px solid var(--border)">
+    <div style="display:flex;align-items:center;gap:6px;border:1px solid var(--border2);border-radius:5px;padding:3px 8px;font-size:11px">
+      <span style="color:var(--kept);font-size:10px;flex:none">●</span>
+      <span style="flex:1;min-width:0;color:var(--ink)">Pipeline: scaling, validation, tests</span>
+      <span style="color:var(--faint);font-size:9px;flex:none">▾</span>
+    </div>
+  </div>
+  <div style="display:flex;align-items:flex-start;gap:6px;padding:5px 9px 0">
+    <div style="display:flex;flex:1 1 auto;flex-wrap:wrap;gap:4px;min-width:0">
+      ${tlTab('Prompts', 3, true)}${tlTab('Observations', 9, false)}${tlTab('Actions', 39, false)}
+    </div>
+    <span style="flex:none;display:inline-flex;align-items:center;gap:5px;border:1px solid var(--border2);border-radius:5px;padding:3px 9px;font-size:11px;color:var(--dim);white-space:nowrap"><span style="opacity:.3">${icoSplit}</span> Group tabs</span>
+  </div>
+  <div style="border-top:1px solid var(--border);padding:6px 9px 5px;display:flex;align-items:baseline;gap:8px">
+    <span style="font-size:9px;letter-spacing:.6px;text-transform:uppercase;color:var(--dim)">Prompts</span>
+    <span class="mono" style="font-size:10px;color:var(--faint)">3 asks · 3 with edits · 8 edits</span>
+  </div>
+  <div style="font-size:10px;line-height:1.45;color:var(--faint);padding:0 9px 6px;border-bottom:1px solid var(--border)">What you asked for, in order. Select one to scope the Overview beside it — its fleet, runs, tasks, shells and change map narrow to the work that ask caused.</div>
+  <div style="padding:6px 9px 10px">
+    ${tlPromptRow(3, true, '+17 −0', '2 edits · 2f · 2fo · 2⧗', '1k tok · 2 tasks', '~4m', 'Profile it and leave me the report somewhere outside the tree.')}
+    ${tlPromptRow(2, false, '+24 −7', '3 edits · 3f · 3fo · 3⧗', '1k tok · 1 subagent · 1 workflow run · 3 tasks', '12m', 'Now the tests and the usage docs, and drop the legacy scaler.')}
+    ${tlPromptRow(1, false, '+18 −3', '3 edits · 3f · 2fo · 3⧗', '7k tok · 2 tasks · <span style="color:#e5534b">✗ 1</span> · ⤺1', '18m', 'Add feature scaling and dataset validation to the training pipeline.')}
+  </div>`;
 // A compact fleet row for the Overview's LEFT master rail: phase dot · worktree ⑂branch · sparkline.
 const cmFleetRow = (dot, name, branch, bars, sel) => `
   <div style="display:flex;align-items:center;gap:7px;font-size:11px;padding:3px 0${sel ? ';box-shadow:inset 2px 0 0 var(--accent);background:var(--hl)' : ''}">
@@ -414,7 +486,7 @@ const changeMapCol = `
       ${cmRow('var(--pending)', 'test_pipeline.py', 'tests', 96, '+12', '1⧗')}
       ${cmRow('var(--kept)', 'dataset.py', 'src/models', 58, '+7', '')}
       ${cmRow('var(--pending)', 'features.py', 'src', 55, '+6', '1⧗')}
-      ${cmSummary('#2 add feature scaling', 2, 3, 4, 3)}
+      ${cmSummary('#1 add feature scaling and dataset validation', 2, 3, 4, 3)}
     </div>
   </div>`;
 // One agent (worktree) row: badge · worktree ⑂branch · self tag · sparkline · ± · ⚠risk · ⇄collisions.
@@ -743,7 +815,7 @@ const scenes = {
         </div>
         <div style="flex:1;padding:12px 16px;">
           <div style="font-size:9.5px;font-weight:700;color:var(--coral);letter-spacing:.05em;margin-bottom:7px;">③ EDITOR</div>
-          <div style="font-size:12px;color:var(--dim);line-height:1.6;"><b style="color:var(--ink)">Inline review</b> — ✦ markers + tinted lines on Claude&rsquo;s edits, with a <b style="color:var(--ink)">CodeLens</b> per edit (Keep&nbsp;/&nbsp;Undo&nbsp;/&nbsp;Chat&nbsp;/&nbsp;diff, showing the Diff&nbsp;·&nbsp;File position).<br><br><b style="color:var(--ink)">Tab-bar toolbar</b> (on a file with pending edits): ◄►&nbsp;Diff · Keep · Undo · Clear&nbsp;Resolved · Spotlight · Search · ⇄&nbsp;Session.</div>
+          <div style="font-size:12px;color:var(--dim);line-height:1.6;"><b style="color:var(--ink)">Inline review</b> — ✦ markers + tinted lines on Claude&rsquo;s edits, with a <b style="color:var(--ink)">lens</b> per edit: <span class="mono">🔬&nbsp;#N&nbsp;&nbsp;+A&nbsp;−R&nbsp;&nbsp;·&nbsp;&nbsp;n/m</span>, then Keep&nbsp;/&nbsp;Undo&nbsp;/&nbsp;Chat&nbsp;/&nbsp;Diff&nbsp;/&nbsp;Details.<br><br><b style="color:var(--ink)">Floating review bar</b> — the default in-editor surface, parked over the current edit; its title names the edit, its churn and its position on <i>both</i> axes.<br><br><b style="color:var(--ink)">Tab-bar toolbar</b> (on a file with pending edits): ◄►&nbsp;Diff · ◄►&nbsp;File · Keep · Undo · Accept&nbsp;/&nbsp;Reject&nbsp;File · Clear&nbsp;Resolved · Spotlight · Search · ⇄&nbsp;Session.</div>
         </div>
       </div>
       <div style="border-top:1px solid var(--border);background:var(--panel);">
@@ -752,7 +824,7 @@ const scenes = {
           <div class="col" style="flex:1.5;border-right:1px solid var(--border);">
             <div class="colhead" style="color:var(--coral)">OVERVIEW</div>
             <div style="font-size:11px;color:var(--dim);padding:2px 16px;line-height:1.55;">Master–detail — a left nav drives the change-map:
-              <div style="margin-top:5px;"><b style="color:var(--blue)">ⓐ Fleet · Workflows · Tasks · Sessions</b> — agents / runs / the task list / this workspace&rsquo;s sessions</div>
+              <div style="margin-top:5px;"><b style="color:var(--blue)">ⓐ Sessions · Fleet · Workflows · Tasks · Processes</b> — this workspace&rsquo;s sessions / agents / runs / to-dos / background shells</div>
               <div><b style="color:var(--kept)">ⓑ Folders strip</b> — one tile per changed directory; click to filter</div>
               <div><b style="color:var(--pending)">ⓒ Files ledger</b> — every changed file, ranked by churn</div>
               <div style="margin-top:5px;color:var(--faint);">Can also be docked as a full-height editor tab.</div>
@@ -830,6 +902,9 @@ const scenes = {
           </div>
           ${editorCode()}
         </div>
+        <div style="width:400px;background:var(--side);border-left:1px solid var(--border);">
+          ${timelinePanel}
+        </div>
       </div>
       <div style="border-top:1px solid var(--border);background:var(--panel);">
         <div class="paneltabs"><span>PROBLEMS</span><span>OUTPUT</span><span>TERMINAL</span><span class="on">OBSERVATORY DASHBOARDS</span></div>
@@ -844,15 +919,15 @@ const scenes = {
       </div>
     </div>`),
 
-  // B. inline review closeup
+  // B. inline review closeup — the 0.10.0 default surfaces: the shortened lens row above the edit and the
+  //    compact review BAR under its anchor line (the bubble it replaced has its own annotated scene).
   'inline-review': scene(980, `
     <div class="window">
       <div style="display:flex;background:var(--side);border-bottom:1px solid var(--border);">
-        <div style="padding:8px 18px;background:var(--bg);border-right:1px solid var(--border);font-size:12.5px;">train.py</div>
+        <div style="padding:8px 18px;background:var(--bg);border-right:1px solid var(--border);font-size:12.5px;display:flex;align-items:center;gap:8px;">train.py<span style="font-size:10px;color:var(--pending)">1</span></div>
       </div>
       ${editorCodeCombined()}
-      ${reviewBubble()}
-      <div class="statusbar"><span class="sb-warn">${microscope} 3</span><span style="color:var(--faint)">⌥⌘N next · ⌥⌘Y keep · ⌥⌘U undo · ⌥⌘[ / ⌥⌘] revisions</span></div>
+      <div class="statusbar"><span class="sb-warn">${microscope} 3</span><span style="color:var(--faint)">⌥⌘N next · ⌥⌘Y keep · ⌥⌘U undo · ⌥⌘- / ⌥⌘= revisions</span></div>
     </div>`),
 
   // C. observations panel closeup
@@ -1044,7 +1119,7 @@ const scenes = {
 const SIZE = {
   layout: '1808,860', anatomy: '1808,700', map: '1808,722', bubble: '1248,368',
   'win-actions': '1248,300', 'win-observations': '1228,288', 'win-stats': '1168,420',
-  stats: '808,478', 'inline-review': '1028,440', observations: '1028,368',
+  stats: '808,478', 'inline-review': '1028,280', observations: '1028,368',
   cli: '948,540', conflict: '928,290', diffs: '1028,330', spotlight: '1028,400',
   'file-history': '768,130',
   multitasking: '868,218', 'overview-tabs': '908,266', prompts: '748,560',

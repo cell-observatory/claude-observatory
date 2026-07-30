@@ -56,6 +56,7 @@ export type DemoAnchor =
   | 'session-label' // which session the panels are showing
   | 'spotlight' // dim the unedited lines
   | 'prompts-list' // the Prompts window's list of asks
+  | 'session-picker' // the Timeline's active-session selector
   | 'stats-model' // the model + effort chip
   | 'stats-compaction' // the compaction readout
   | 'stats-tokens' // the input/output/cached split
@@ -281,6 +282,15 @@ function allSteps(): DemoStep[] {
       tryIt: 'Prompt 1 shows a failed tool call — the sanity run that raised before the fix landed.',
     },
     {
+      id: 'timeline-session',
+      title: 'Choosing which session the timeline shows',
+      body:
+        'The selector above the Prompts list names the session the observatory is reviewing and lists the sessions still active in this workspace, so switching between two live conversations is one click. Every other session stays in the Overview Sessions tab.',
+      view: 'prompts',
+      tip: 'Active sessions only — the full list lives in the Overview.',
+      anchor: 'session-picker',
+    },
+    {
       id: 'prompt-scope',
       essential: true,
       title: 'A prompt is also a review scope',
@@ -432,7 +442,7 @@ function allSteps(): DemoStep[] {
       id: 'nav-axes',
       title: 'Four axes to review along',
       body:
-        'The nav bar steps through the session by diff, by file, by folder, or by prompt, and each axis carries the bulk actions that make sense at its scope. The same bar appears in the status bar, on the editor tab, and in the inline review bubble, so review never depends on which surface you happen to be looking at.',
+        'The nav bar steps through the session by diff, by file, by folder, or by prompt, and each axis carries the bulk actions that make sense at its scope. The same bar appears in the status bar, on the editor tab, and floating over the code at the edit itself, so review never depends on which surface you happen to be looking at.',
       view: 'overview',
       tab: 'tasks',
       tip: 'Diff, File, Folder and Prompt — each with the bulk actions for its scope.',
@@ -445,7 +455,7 @@ function allSteps(): DemoStep[] {
         'The four axes and the review scoreboard also live in the status bar and on the editor\u2019s tab bar, so reviewing never depends on which panel happens to be open. The microscope shows how many edits are still pending, and clicking it jumps to the oldest one.',
       view: 'overview',
       tab: 'tasks',
-      tip: 'The bar follows you \u2014 status bar, editor tab, and the review bubble.',
+      tip: 'The bar follows you \u2014 status bar, editor tab, and floating at the edit.',
       anchor: 'nav-axes',
     },
     {
@@ -505,9 +515,9 @@ function allSteps(): DemoStep[] {
       essential: true,
       title: 'Review without leaving the file',
       body:
-        'Open a file Claude changed and the edits are in the margin: changed lines highlighted, a lens on each edit, and Keep or Undo under the cursor. Spotlight dims everything Claude did not touch, which on a large file is the difference between reading a diff and reading the file.',
+        'Open a file Claude changed and the edits are in the margin: changed lines highlighted, removed lines shown as ghost text, a lens on each edit, and Keep or Undo under the cursor. Resolving one carries you to the next edit still awaiting review, crossing into another file when that is where it is, and the review bar can stay pinned in the editor while you work. Spotlight dims everything Claude did not touch, which on a large file is the difference between reading a diff and reading the file.',
       view: 'editor',
-      tip: 'Keep or Undo at the cursor; Spotlight dims what Claude did not touch.',
+      tip: 'Keep or Undo at the cursor; resolving one moves you to the next.',
       anchor: 'spotlight',
       action: {
         mode: 'auto',

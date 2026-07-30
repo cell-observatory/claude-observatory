@@ -18,6 +18,8 @@ const glyphs = {
   'diff': 'eae1', // nav bar: open the current edit as a full diff tab
   'export': 'ebac', // nav bar: export a shareable review summary
   'cloud-download': 'eac2', // version dropdown: Update now
+  'debug-step-back': 'eb8f', // Prompt axis Rewind: revert this ask and everything after it
+  'split-horizontal': 'eb56', // left-nav toggle: pair related sections side by side
 };
 
 let rules = '';

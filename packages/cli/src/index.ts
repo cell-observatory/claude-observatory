@@ -156,6 +156,14 @@ function cmdUninstall(args: string[]): void {
     const sl = core.uninstallStatusline(target);
     if (sl.changed || sl.scriptRemoved) {
       process.stdout.write(c.green('✓ ') + `reverted the bundled status line${sl.changed ? ' (settings.json + script)' : ' (script)'}\n`);
+    } else if (sl.scriptKept) {
+      // Deliberately left, so say so: a settings entry still points at the script, and deleting it
+      // would leave Claude Code erroring on every render with nothing naming us.
+      process.stdout.write(
+        c.yellow('⚠ ') +
+          `left ${core.claudeConfigDir()}/statusline.sh in place — a statusLine in settings.json still points at it.\n` +
+          c.dim('  Remove that statusLine entry first, then re-run, or delete the script yourself.\n')
+      );
     }
   } catch {
     /* leave a custom/hand-edited statusLine alone */
@@ -242,14 +250,17 @@ function cmdStatus(args: string[] = []): void {
 
 /** Does `bin` resolve on PATH? Cross-platform; null if we couldn't determine it. */
 function onPath(bin: string): boolean | null {
-  const cp = require('child_process');
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   try {
+    // Named `where.exe`, not `where`, so the launcher keeps it direct: this function's whole answer is
+    // res.error ("couldn't determine") vs res.status ("not on PATH"), and a shell collapses the two.
+    // `direct` says that out loud at both call sites rather than relying on the .exe suffix rule.
     const res =
       process.platform === 'win32'
-        ? cp.spawnSync('where', [bin], { stdio: 'ignore' })
+        ? core.spawnToolSync('where.exe', [bin], { stdio: 'ignore', direct: true })
         // Pass `bin` as $1, never interpolated into the shell string — no injection even if a future
         // caller passes a config-derived value.
-        : cp.spawnSync('sh', ['-c', 'command -v "$1"', 'sh', bin], { stdio: 'ignore' });
+        : core.spawnToolSync('sh', ['-c', 'command -v "$1"', 'sh', bin], { stdio: 'ignore', direct: true });
     if (res.error) return null;
     return res.status === 0;
   } catch {
@@ -1187,7 +1198,7 @@ function flagValue(args: string[], name: string): string | undefined {
 }
 
 /** Flags that consume the token after them — so a numeric VALUE is never read as a positional id. */
-const VALUE_FLAGS = new Set(['--session', '--file', '--under', '--ids', '--root', '--filter', '--dir', '--channel']);
+const VALUE_FLAGS = new Set(['--session', '--file', '--under', '--ids', '--root', '--filter', '--dir', '--channel', '--from-prompt']);
 
 /**
  * The positional edit id if one was typed, else undefined — requireId's scan without the failure.
@@ -1220,11 +1231,44 @@ function refuseScopeWithId(args: string[], verb: string): void {
   );
 }
 
+/**
+ * Resolve `--from-prompt <id>` into the rewind scope: this ask and everything after it.
+ *
+ * Shared by `undo` and `redo` so one definition of the boundary serves both directions. Three failure
+ * modes are told apart deliberately, because "nothing happened" and "you named a prompt that does not
+ * exist" must not look alike to a caller about to revert someone's work:
+ *   - no transcript            → fail (the boundaries come from it)
+ *   - no such prompt           → fail, naming the valid range
+ *   - a real prompt, empty set → return it; the caller reports an honest zero and exits 0
+ *
+ * Must be called BEFORE `requireId`: that scan skips only `--session`, so it would otherwise read an
+ * all-digit prompt id (or a bare index) as a positional edit id.
+ */
+function checkpointArg(
+  core: typeof import('@claude-observatory/core'),
+  args: string[],
+  session: string,
+  verb: string
+): import('@claude-observatory/core').CheckpointScope {
+  const ref = flagValue(args, '--from-prompt');
+  if (!ref) fail(`\`${verb} --from-prompt <id>\` requires a prompt id — run \`claude-observatory prompts\` to list them`);
+  const cwd = process.cwd();
+  const windows = core.promptWindows(cwd, session);
+  if (!windows.length) fail('no transcript for this session — the prompt boundaries come from it');
+  if (!windows.some((w) => w.id === ref || String(w.index) === ref)) {
+    fail(`no prompt \`${ref}\` in this session — run \`claude-observatory prompts\` to list them (1..${windows.length})`);
+  }
+  return core.checkpointScope(cwd, session, ref as string);
+}
+
 function requireId(args: string[]): number {
   let raw: string | undefined;
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === '--session') {
-      i++; // skip the session VALUE so a numeric session id isn't mistaken for the edit id
+    // Skip every flag's VALUE, not just `--session`'s: any of them can be numeric, and reading one as the
+    // edit id silently acts on a DIFFERENT edit than the caller named. `keep --from-prompt 2` used to keep
+    // edit #2 — the wrong verb on the wrong record, reported as success.
+    if (VALUE_FLAGS.has(args[i])) {
+      i++;
       continue;
     }
     if (/^\d+$/.test(args[i])) {
@@ -1234,6 +1278,32 @@ function requireId(args: string[]): number {
   }
   if (!raw) fail('expected an edit id, e.g. `claude-observatory diff 3`');
   return parseInt(raw, 10);
+}
+
+/**
+ * `--dry-run` means "tell me, do not do it". Exactly two scopes implement it, so anywhere else the flag
+ * must REFUSE rather than be ignored: an ignored `--dry-run` performs the very mutation the caller was
+ * trying to preview, and reports it as success.
+ *
+ * `clean` is here because it is the most expensive place to get this wrong. `--dry-run` is real on
+ * `clean --completed`, which is reason enough for a reader to try it on a sibling scope — and
+ * `clean --all --dry-run` used to delete every session in the store and print `✓ dropped all N session(s)`.
+ */
+const DRY_RUN_SCOPES: Record<string, string> = {
+  undo: '--from-prompt', // the rewind preflight: count what it would revert
+  clean: '--completed', // list the sessions the reap would drop
+};
+
+function refuseUnsupportedDryRun(args: string[], verb: string): void {
+  if (!args.includes('--dry-run')) return;
+  const previewable = DRY_RUN_SCOPES[verb];
+  if (previewable && args.includes(previewable)) return;
+  fail(
+    `\`${verb} --dry-run\` is not supported.\n` +
+      '  Only `undo --from-prompt <id> --dry-run` and `clean --completed --dry-run` can preview;\n' +
+      '  every other scope would perform the change it was asked to describe.\n' +
+      `  Drop --dry-run to ${verb} for real.`
+  );
 }
 
 function cmdDiff(args: string[]): void {
@@ -1247,6 +1317,17 @@ function cmdDiff(args: string[]): void {
 }
 
 function cmdKeep(args: string[]): void {
+  refuseUnsupportedDryRun(args, 'keep');
+  // `keep` has no rewind scope: accepting "this ask and everything after it" is what `keep --all` or an
+  // explicit id set already say, and less ambiguously. Say so, rather than letting the generic "expected
+  // an edit id" leave the reader thinking they mistyped the id.
+  if (args.includes('--from-prompt')) {
+    fail(
+      '`keep --from-prompt <id>` is not supported — only `undo` and `redo` take a rewind scope.\n' +
+        '  For one ask\'s edits:   claude-observatory keep --ids <a,b,c>\n' +
+        '  For the whole session: claude-observatory keep --all'
+    );
+  }
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const session = getSessionId(args);
   const json = args.includes('--json');
@@ -1333,6 +1414,7 @@ function cmdKeep(args: string[]): void {
 }
 
 function cmdUndo(args: string[]): void {
+  refuseUnsupportedDryRun(args, 'undo');
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const session = getSessionId(args);
   // Bulk: --all (every pending in the session), --file <substr> (pending edits in matching files),
@@ -1344,27 +1426,66 @@ function cmdUndo(args: string[]): void {
   const fi = args.indexOf('--file');
   const ui = args.indexOf('--under');
   const idi = args.indexOf('--ids');
-  if (args.includes('--all') || fi >= 0 || ui >= 0 || idi >= 0) {
+  const fp = args.indexOf('--from-prompt');
+  if (args.includes('--all') || fi >= 0 || ui >= 0 || idi >= 0 || fp >= 0) {
     refuseScopeWithId(args, "undo");
+    // `--from-prompt` IS a scope — combining it with another one would silently pick a winner.
+    if (fp >= 0 && (args.includes('--all') || fi >= 0 || ui >= 0 || idi >= 0)) {
+      fail('`undo --from-prompt <id>` is a scope of its own — drop the other scope flag and re-run.');
+    }
     const fileSub = flagValue(args, "--file");
     if (fi >= 0 && !fileSub) fail('`undo --file <substr>` requires a value');
     const underRaw = flagValue(args, "--under");
     if (ui >= 0 && !underRaw) fail('`undo --under <path>` requires a value');
     const under = underRaw && canonUnder(underRaw); // #43: undoScope canonicalizes fileSub itself
     let ids: number[] | undefined;
+    let units: number | undefined;
     if (idi >= 0) {
       const raw = args[idi + 1];
       if (!raw) fail('`undo --ids <a,b,c>` requires a comma-separated id list');
       ids = raw.split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => Number.isInteger(n));
       if (!ids.length) fail('`undo --ids <a,b,c>` got no valid integer ids');
     }
+    if (fp >= 0) {
+      const scope = checkpointArg(core, args, session, 'undo');
+      ids = scope.ids; // group-expanded: a same-code chain straddling the boundary reverts whole
+      units = scope.units;
+      // PREFLIGHT. A rewind's confirmation has to state what it is about to rewrite, and only this scope
+      // can count it: the raw records, the review units they collapse to, and the files. An editor that
+      // shells out cannot get those any other way — every other exposure of this scope performs the
+      // revert — so without `--dry-run` one editor could show the numbers (by calling core in-process)
+      // and the other could not, which is the same feature behaving differently per editor.
+      if (args.includes('--dry-run')) {
+        if (args.includes('--json')) {
+          emitJson({ dryRun: true, pending: scope.pending, units: scope.units, files: scope.files, ids: scope.ids });
+          return;
+        }
+        process.stdout.write(
+          scope.pending === 0
+            ? c.dim('no pending edits to rewind from that prompt onward\n')
+            : `would revert ${scope.pending} pending edit(s) (${scope.units} review unit(s)) across ${scope.files.length} file(s)\n`
+        );
+        return;
+      }
+    }
     const res = core.undoScope(session, { under, fileSubstr: fileSub, ids });
     core.autoClearDemo(session); // a fully reviewed demo session leaves no residue
     if (args.includes('--json')) {
-      emitJson({ undone: res.undone, conflicts: res.conflicts, errors: res.errors, firstError: res.firstError ?? null, total: res.total });
+      // `ids` names WHICH edits reverted (the UndoScopeResult already carried them; dropping them left a
+      // caller unable to offer a precise Redo). `units` rides along only for the rewind scope, whose two
+      // counts differ: raw records vs the review units the Prompts rows print.
+      emitJson({
+        undone: res.undone,
+        conflicts: res.conflicts,
+        errors: res.errors,
+        firstError: res.firstError ?? null,
+        total: res.total,
+        ids: res.ids,
+        ...(units === undefined ? {} : { units }),
+      });
       return;
     }
-    const scope = fileSub ? ` in files matching "${fileSub}"` : under ? ` under ${relFile(under)}` : ids ? ` in ${ids.length} selected edit(s)` : '';
+    const scope = fileSub ? ` in files matching "${fileSub}"` : under ? ` under ${relFile(under)}` : fp >= 0 ? ` from prompt ${flagValue(args, '--from-prompt')} onward` : ids ? ` in ${ids.length} selected edit(s)` : '';
     if (res.total === 0) {
       // No pending edits matched the scope — an honest "nothing to do", never a green ✓ 0.
       process.stdout.write(c.dim(`no pending edits to revert${scope}\n`));
@@ -1402,6 +1523,7 @@ function cmdUndo(args: string[]): void {
 }
 
 function cmdRedo(args: string[]): void {
+  refuseUnsupportedDryRun(args, 'redo');
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const session = getSessionId(args);
   // Bulk: --all (every undone in the session) | --file <substr> | --under <path> | --ids <a,b,c> —
@@ -1409,8 +1531,12 @@ function cmdRedo(args: string[]): void {
   const fi = args.indexOf('--file');
   const ui = args.indexOf('--under');
   const idi = args.indexOf('--ids');
-  if (args.includes('--all') || fi >= 0 || ui >= 0 || idi >= 0) {
+  const fp = args.indexOf('--from-prompt');
+  if (args.includes('--all') || fi >= 0 || ui >= 0 || idi >= 0 || fp >= 0) {
     refuseScopeWithId(args, "redo");
+    if (fp >= 0 && (args.includes('--all') || fi >= 0 || ui >= 0 || idi >= 0)) {
+      fail('`redo --from-prompt <id>` is a scope of its own — drop the other scope flag and re-run.');
+    }
     const fileSub = flagValue(args, "--file");
     if (fi >= 0 && !fileSub) fail('`redo --file <substr>` requires a value');
     const underRaw = flagValue(args, "--under");
@@ -1423,12 +1549,27 @@ function cmdRedo(args: string[]): void {
       bulkIds = raw.split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => Number.isInteger(n));
       if (!bulkIds.length) fail('`redo --ids <a,b,c>` got no valid integer ids');
     }
+    if (fp >= 0) {
+      // The prompt's WINDOW, scoped the same way the rewind scopes it — narrower than `redo --all`, which
+      // would also re-apply edits this prompt never touched.
+      //
+      // It is NOT "exactly what the rewind reverted", and cannot be: `checkpointScope` answers with every
+      // record in the window whatever its status, so an edit undone BEFORE the rewind is undone-and-in-scope
+      // and comes back too. Only the ids a particular rewind moved can express that set, which is why both
+      // editors' Redo buttons pass `undo --from-prompt --json`'s `ids` to `--ids` instead of re-resolving
+      // the prompt. The help text says so out loud rather than leaving a reader to discover it.
+      //
+      // Deliberately no `units`: the scope's unit count is computed over the PENDING records (it exists to
+      // make a rewind's confirmation honest), and by the time anything is redone those records are undone,
+      // so the number would always be 0. Emitting a confident 0 is worse than emitting nothing.
+      bulkIds = checkpointArg(core, args, session, 'redo').ids;
+    }
     const bulk = core.redoScope(session, { under, fileSubstr: fileSub, ids: bulkIds });
     if (args.includes('--json')) {
-      emitJson({ redone: bulk.redone, conflicts: bulk.conflicts, total: bulk.total });
+      emitJson({ redone: bulk.redone, conflicts: bulk.conflicts, total: bulk.total, ids: bulk.ids });
       return;
     }
-    const scope = fileSub ? ` in files matching "${fileSub}"` : under ? ` under ${relFile(under)}` : bulkIds ? ` in ${bulkIds.length} selected edit(s)` : '';
+    const scope = fileSub ? ` in files matching "${fileSub}"` : under ? ` under ${relFile(under)}` : fp >= 0 ? ` from prompt ${flagValue(args, '--from-prompt')} onward` : bulkIds ? ` in ${bulkIds.length} selected edit(s)` : '';
     if (bulk.total === 0) {
       process.stdout.write(c.dim(`no undone edits to redo${scope}\n`));
       return;
@@ -1523,15 +1664,19 @@ function cmdTaskUndo(args: string[]): void {
   const res = core.undoTask(process.cwd(), session, taskId);
   core.autoClearDemo(session); // a fully reviewed demo session leaves no residue
   if (args.includes('--json')) {
-    emitJson({ undone: res.undone, conflicts: res.conflicts, total: res.total, ids: res.ids });
+    // Same UndoScopeResult as the bulk path, so it gets the same JSON shape: a refusal that reaches one
+    // caller and not the other is how a session that never empties gets no explanation.
+    emitJson({ undone: res.undone, conflicts: res.conflicts, errors: res.errors, firstError: res.firstError ?? null, total: res.total, ids: res.ids });
     return;
   }
   process.stdout.write(
-    (res.conflicts ? c.yellow('⚠ ') : c.green('✓ ')) +
+    (res.conflicts || res.errors ? c.yellow('⚠ ') : c.green('✓ ')) +
       `reverted ${res.undone} edit(s) in task ${taskId}` +
       (res.conflicts ? ` · ${res.conflicts} conflict(s) left (undo individually with --force)` : '') +
+      (res.errors ? ` · ${res.errors} refused` : '') +
       '\n'
   );
+  if (res.errors && res.firstError) process.stdout.write(c.yellow('  ↳ ') + res.firstError + '\n');
 }
 
 /** `task-clear` (§C) — drop the RESOLVED (kept/undone) edits of a task's STRICT edit set
@@ -1701,6 +1846,9 @@ function fmtBytes(b: number): string {
 }
 
 function cmdClean(args: string[]): void {
+  // Before ANY branch reads its flags: every other scope here deletes sessions outright, and this verb's
+  // sink is a recursive rm.
+  refuseUnsupportedDryRun(args, 'clean');
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const json = args.includes('--json'); // structured results for front-ends/scripts (sibling to keep/undo)
   // Drop resolved (kept/undone) edits in the active session, keep pending. --under <path> scopes it to
@@ -2084,7 +2232,17 @@ function cmdLocate(args: string[]): void {
   );
   // `removed` rides along for free now that one pass computes both — JetBrains renders no deletion
   // ghost text today only because this payload never carried it.
-  const placements = recs.map((r, i) => ({ id: r.id, lines: placed[i].lines, removed: placed[i].removed }));
+  //
+  // `delta` spares a renderer a second round trip for the "+A −R" a lens shows. It is NOT free: lineDelta
+  // is one whole-file diff per record, memoized only in-process, and JetBrains reaches locate by SPAWNING
+  // (once per file, after the buffer settles) so it always starts cold. Bound it to the placements that
+  // will actually render — a superseded edit in a long chain places nothing, so nothing reads its delta,
+  // and on a heavily-chained file that is most of them.
+  const placements = recs.map((r, i) => {
+    const p = placed[i];
+    const renders = p.lines.length > 0 || p.removed.length > 0;
+    return { id: r.id, lines: p.lines, removed: p.removed, ...(renders ? { delta: core.lineDelta(session, r) } : {}) };
+  });
   emitJson({ file: abs, placements });
 }
 
@@ -2381,12 +2539,14 @@ function statuslineActive(): boolean {
 /** Install/refresh the bundled status line (idempotent; honors CLAUDE_CONFIG_DIR; needs bash+jq). */
 function cmdStatusline(): void {
   const fs = require('fs');
-  const cp = require('child_process');
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const script = statuslineInstallerPath();
   if (!fs.existsSync(script)) {
     fail(`bundled installer missing (${script}) — install from https://github.com/cell-observatory/claude-statusline`);
   }
-  const res = cp.spawnSync('bash', [script], { stdio: 'inherit' });
+  // `direct`: bash is a real .exe that libuv resolves unaided, and the hint below is reachable ONLY
+  // through res.error — a shell would report a missing bash as exit 127 and kill that branch.
+  const res = core.spawnToolSync('bash', [script], { stdio: 'inherit', direct: true });
   if (res.error) {
     const winHint = process.platform === 'win32' ? ' — on Windows run this from Git Bash or WSL' : '';
     fail(`could not run bash: ${res.error.message} (the status line needs bash + jq${winHint})`);
@@ -2421,11 +2581,17 @@ const VSCODE_EXT_ID = 'cell-observatory.claude-observatory-vscode';
 const VSCODE_EXT_ID_OLD = 'claude-observatory.claude-observatory-vscode';
 // One row per VS Code-family editor: where it keeps installed extensions (relative to $HOME), the CLI
 // that drives `--install-extension`, and the macOS .app name used to locate that CLI when off PATH.
-const VSCODE_EDITORS: { label: string; extDirs: string[]; cli: string; app: string }[] = [
-  { label: 'VS Code', extDirs: ['.vscode/extensions', '.vscode-server/extensions'], cli: 'code', app: 'Visual Studio Code' },
-  { label: 'Cursor', extDirs: ['.cursor/extensions'], cli: 'cursor', app: 'Cursor' },
-  { label: 'VSCodium', extDirs: ['.vscodium/extensions'], cli: 'codium', app: 'VSCodium' },
-  { label: 'Windsurf', extDirs: ['.windsurf/extensions'], cli: 'windsurf', app: 'Windsurf' },
+// `app` is the macOS bundle name; `winApp` the Windows install FOLDER, which is not the same string —
+// VS Code ships as "Visual Studio Code.app" but installs to `Programs\Microsoft VS Code`, so the
+// win32 fallback below was looking somewhere that never exists and detection quietly rested on
+// `where code` alone. (VS Code's layout is from its own docs; the other three are best-effort, which
+// costs nothing — these are existsSync candidates, so a wrong guess is skipped, a missing one is a
+// real editor we fail to find.)
+const VSCODE_EDITORS: { label: string; extDirs: string[]; cli: string; app: string; winApp: string }[] = [
+  { label: 'VS Code', extDirs: ['.vscode/extensions', '.vscode-server/extensions'], cli: 'code', app: 'Visual Studio Code', winApp: 'Microsoft VS Code' },
+  { label: 'Cursor', extDirs: ['.cursor/extensions'], cli: 'cursor', app: 'Cursor', winApp: 'cursor' },
+  { label: 'VSCodium', extDirs: ['.vscodium/extensions'], cli: 'codium', app: 'VSCodium', winApp: 'VSCodium' },
+  { label: 'Windsurf', extDirs: ['.windsurf/extensions'], cli: 'windsurf', app: 'Windsurf', winApp: 'Windsurf' },
 ];
 // The JetBrains plugin unzips to this dir inside each IDE's plugins/ folder; we drop a version
 // sentinel beside it so a later `update` can tell whether the installed plugin is already current.
@@ -2508,14 +2674,13 @@ async function updateCliBinary(assets: ReleaseAsset[], latest: string, current: 
   const tgz = assets.find((a) => /\.tgz$/.test(a.name));
   if (!tgz) fail(`release v${latest} has no CLI tarball asset to install.`);
   const dest = await downloadAsset(tgz!);
-  const cp = require('child_process');
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   process.stdout.write(c.dim('installing globally (npm i -g) …\n'));
-  // npm is npm.cmd on Windows — a bare spawn can't exec it without a shell (same rule as the
-  // status-line respawn below).
-  const winShell = process.platform === 'win32';
-  // shell mode concatenates args UNQUOTED — a temp path with a space (spaced Windows usernames)
-  // would split; quote the one arg that carries a user-controlled path.
-  const r = cp.spawnSync(winShell ? 'npm.cmd' : 'npm', ['i', '-g', winShell ? `"${dest}"` : dest], { stdio: 'inherit', shell: winShell });
+  // npm is npm.cmd on Windows, which cannot be spawned without cmd.exe. The launcher also does the
+  // quoting `dest` needs (spaced Windows usernames put a space in every temp path).
+  const r = core.spawnToolSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['i', '-g', dest], {
+    stdio: 'inherit',
+  });
   if (r.status !== 0) fail(`npm install failed (exit ${r.status ?? '?'}). Try: npm i -g ${dest}`);
   process.stdout.write(c.green('✓ ') + `updated the CLI ${current} → ${latest}\n`);
   refreshInstalledStatusline();
@@ -2528,13 +2693,12 @@ async function updateCliBinary(assets: ReleaseAsset[], latest: string, current: 
 function refreshInstalledStatusline(): void {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   if (!core.statuslineInstalled()) return; // some other status line (or none) — never touch it
-  const cp = require('child_process');
   process.stdout.write(c.dim('refreshing the bundled status line…\n'));
-  const winShell = process.platform === 'win32';
-  const r = cp.spawnSync(winShell ? 'claude-observatory.cmd' : 'claude-observatory', ['statusline'], {
-    stdio: 'inherit',
-    shell: winShell,
-  });
+  const r = core.spawnToolSync(
+    process.platform === 'win32' ? 'claude-observatory.cmd' : 'claude-observatory',
+    ['statusline'],
+    { stdio: 'inherit' }
+  );
   if (r.status !== 0)
     process.stdout.write(
       c.dim(`status line refresh did not complete — run \`claude-observatory statusline\` yourself.\n`)
@@ -2547,8 +2711,8 @@ function refreshInstalledStatusline(): void {
  *  .app bundles, Windows Programs dirs, common Linux dirs). Returns null when not found — the extension
  *  is still DETECTED via its dir, so a null means "installed but we can't drive an update", which the
  *  caller must SURFACE, never swallow. Mirrors core.resolveBin (candidates → PATH fallback). */
-function resolveEditorCli(cli: string, app: string): string | null {
-  if (onPath(cli)) return cli; // bare name; spawnSync resolves it via PATH
+function resolveEditorCli(cli: string, app: string, winApp: string): string | null {
+  if (onPath(cli)) return cli; // bare name; the launcher routes it through cmd.exe on Windows
   const fs = require('fs');
   const path = require('path');
   const os = require('os');
@@ -2559,8 +2723,17 @@ function resolveEditorCli(cli: string, app: string): string | null {
       cands.push(path.join(root, `${app}.app`, 'Contents', 'Resources', 'app', 'bin', cli));
     }
   } else if (process.platform === 'win32') {
-    if (process.env.LOCALAPPDATA) cands.push(path.join(process.env.LOCALAPPDATA, 'Programs', app, 'bin', `${cli}.cmd`));
-    if (process.env.ProgramFiles) cands.push(path.join(process.env.ProgramFiles, app, 'bin', `${cli}.cmd`));
+    // Two roots (per-user "User Setup" and machine-wide "System Setup") × two layouts: most of the
+    // family keeps its CLI in `bin\`, Cursor buries it under `resources\app\bin\`.
+    for (const root of [
+      process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Programs', winApp) : null,
+      process.env.ProgramFiles ? path.join(process.env.ProgramFiles, winApp) : null,
+      process.env['ProgramFiles(x86)'] ? path.join(process.env['ProgramFiles(x86)'] as string, winApp) : null,
+    ]) {
+      if (!root) continue;
+      cands.push(path.join(root, 'bin', `${cli}.cmd`));
+      cands.push(path.join(root, 'resources', 'app', 'bin', `${cli}.cmd`));
+    }
   } else {
     cands.push(`/usr/share/${cli}/bin/${cli}`, `/usr/bin/${cli}`, `/snap/bin/${cli}`, path.join(home, '.local', 'bin', cli));
   }
@@ -2584,24 +2757,35 @@ function versionFromExtFolder(folderPath: string, folderName: string, id: string
   }
 }
 
-/** VS Code-family installs of our extension, detected by their extensions DIR (CLI-independent, like
- *  the JetBrains plugin dirs). `version` = the newest install folder for that editor (old or new id);
- *  `cli` = the resolved absolute CLI path to apply an update, or null if none was found; `hasOld` =
- *  an install under the pre-0.8.6 id is present and should be removed once the renamed one is in. */
-function vscodeInstalls(): { label: string; version: string; cli: string | null; extDirs: string[]; hasOld: boolean }[] {
+/** One row per VS Code-family editor, present on this machine or not. `version` = the newest install
+ *  folder of OUR extension for that editor (null when it does not have it yet — which is exactly the
+ *  case `install-extensions` acts on and `update` deliberately ignores); `extRoots` = its extension
+ *  dirs that actually exist; `cli` = the resolved CLI to drive an install, or null. */
+type EditorRow = {
+  label: string;
+  extDirs: string[];
+  extRoots: string[];
+  cli: string | null;
+  version: string | null;
+  hasOld: boolean;
+};
+
+function vscodeEditors(): EditorRow[] {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const fs = require('fs');
   const path = require('path');
   const os = require('os');
   const home = os.homedir();
-  const out: { label: string; version: string; cli: string | null; extDirs: string[]; hasOld: boolean }[] = [];
+  const out: EditorRow[] = [];
   for (const ed of VSCODE_EDITORS) {
     let best: string | null = null; // newest version across this editor's extension dirs
     let hasOld = false;
+    const extRoots: string[] = [];
     for (const rel of ed.extDirs) {
       const dir = path.join(home, rel);
       let entries: string[] = [];
       try { entries = fs.readdirSync(dir); } catch { continue; }
+      extRoots.push(dir); // readdir succeeded, so this editor has run here at least once
       for (const e of entries) {
         // VS Code names extension folders `<publisher>.<name>-<version>` (lowercased).
         const id = [VSCODE_EXT_ID, VSCODE_EXT_ID_OLD].find((i) => e.toLowerCase().startsWith(i + '-'));
@@ -2611,9 +2795,52 @@ function vscodeInstalls(): { label: string; version: string; cli: string | null;
         if (v && (best === null || core.isNewer(v, best))) best = v;
       }
     }
-    if (best !== null) out.push({ label: ed.label, version: best, cli: resolveEditorCli(ed.cli, ed.app), extDirs: ed.extDirs, hasOld });
+    out.push({ label: ed.label, extDirs: ed.extDirs, extRoots, cli: resolveEditorCli(ed.cli, ed.app, ed.winApp), version: best, hasOld });
   }
   return out;
+}
+
+/** Is this editor on the machine at all? An extensions dir means it has RUN; a resolvable CLI means it
+ *  is installed but maybe never launched. Either counts — only the `cli !== null` subset is actionable. */
+function editorPresent(e: EditorRow): boolean {
+  return e.extRoots.length > 0 || e.cli !== null;
+}
+
+/** VS Code-family installs of OUR extension. Unchanged contract: `update` refreshes only editors that
+ *  already carry it, and never installs into one that does not. */
+function vscodeInstalls(): { label: string; version: string; cli: string | null; extDirs: string[]; hasOld: boolean }[] {
+  return vscodeEditors()
+    .filter((e) => e.version !== null)
+    .map((e) => ({ label: e.label, version: e.version as string, cli: e.cli, extDirs: e.extDirs, hasOld: e.hasOld }));
+}
+
+/** Install `vsixPath` into each target with `--install-extension --force`, handle the 0.8.6 publisher
+ *  cleanup, and report per editor. Returns how many succeeded. Shared by `update` (refresh what is
+ *  there) and `install-extensions` (put it where it is missing) so the two cannot drift. */
+function applyVsix(targets: EditorRow[], vsixPath: string, version: string): number {
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  let installed = 0;
+  for (const h of targets) {
+    // `h.cli` is `code`/`cursor`/… — a bare name on PATH, or an explicit `…\bin\code.cmd` on
+    // Windows. BOTH are unspawnable there without cmd.exe, which is why this never once worked
+    // on Windows before the launcher: libuv only extension-searches .com/.exe.
+    const r = core.spawnToolSync(h.cli as string, ['--install-extension', vsixPath, '--force'], { stdio: 'inherit' });
+    if (r.status === 0) {
+      process.stdout.write(c.green('✓ ') + `${h.label} extension ${h.version ?? '(new)'} → ${version}\n`);
+      installed++;
+      // Publisher change (0.8.6): drop the old-id install, but only once the renamed extension is
+      // confirmed on disk — a --force reinstall of a pre-rename .vsix must not uninstall itself.
+      if (h.hasOld && hasExtFolder(h.extDirs, VSCODE_EXT_ID)) {
+        const u = core.spawnToolSync(h.cli as string, ['--uninstall-extension', VSCODE_EXT_ID_OLD], { stdio: 'pipe' });
+        if (u.status === 0) process.stdout.write(c.dim(`  removed the old ${VSCODE_EXT_ID_OLD} install (publisher changed in 0.8.6).\n`));
+        else process.stdout.write(c.yellow(`  ⚠ ${h.label} still has the pre-0.8.6 install — uninstall the older "Claude Observatory" entry in its Extensions view.\n`));
+      }
+    } else {
+      process.stdout.write(c.yellow(`  ⚠ ${h.label} --install-extension failed — install the .vsix manually from the release\n`));
+    }
+  }
+  if (installed) process.stdout.write(c.dim('  fully quit the editor (⌘Q) once so the activity-bar icon refreshes.\n'));
+  return installed;
 }
 
 /** Whether any of an editor's extension dirs (home-relative) holds an install folder of `id`. */
@@ -2661,25 +2888,12 @@ async function refreshVscodeExtension(
     if (!vsix) {
       process.stdout.write(c.yellow(`  ⚠ release v${latest} has no .vsix asset — could not update the VS Code extension\n`));
     } else {
-      const cp = require('child_process');
       const dest = await downloadAsset(vsix);
-      for (const h of actionable) {
-        const r = cp.spawnSync(h.cli as string, ['--install-extension', dest, '--force'], { stdio: 'inherit' });
-        if (r.status === 0) {
-          process.stdout.write(c.green('✓ ') + `${h.label} extension ${h.version} → ${latest}\n`);
-          installed++;
-          // Publisher change (0.8.6): drop the old-id install, but only once the renamed extension is
-          // confirmed on disk — a --force reinstall of a pre-rename .vsix must not uninstall itself.
-          if (h.hasOld && hasExtFolder(h.extDirs, VSCODE_EXT_ID)) {
-            const u = cp.spawnSync(h.cli as string, ['--uninstall-extension', VSCODE_EXT_ID_OLD], { stdio: 'pipe' });
-            if (u.status === 0) process.stdout.write(c.dim(`  removed the old ${VSCODE_EXT_ID_OLD} install (publisher changed in 0.8.6).\n`));
-            else process.stdout.write(c.yellow(`  ⚠ ${h.label} still has the pre-0.8.6 install — uninstall the older "Claude Observatory" entry in its Extensions view.\n`));
-          }
-        } else {
-          process.stdout.write(c.yellow(`  ⚠ ${h.label} --install-extension failed — install the .vsix manually from the release\n`));
-        }
-      }
-      if (installed) process.stdout.write(c.dim('  fully quit the editor (⌘Q) once so the activity-bar icon refreshes.\n'));
+      installed = applyVsix(
+        actionable.map((h) => ({ label: h.label, extDirs: h.extDirs, extRoots: [], cli: h.cli, version: h.version, hasOld: h.hasOld })),
+        dest,
+        latest
+      );
     }
   }
   // 'blocked' when any stale install couldn't be applied (no CLI, no asset, or a failed install).
@@ -2736,16 +2950,20 @@ function jetbrainsPluginDirs(): string[] {
 
 /** Extract a .zip into destDir (unzip on macOS/Linux; Expand-Archive on Windows). */
 function extractZip(zip: string, destDir: string): boolean {
-  const cp = require('child_process');
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   if (process.platform === 'win32') {
-    const r = cp.spawnSync(
-      'powershell',
-      ['-NoProfile', '-Command', `Expand-Archive -LiteralPath "${zip}" -DestinationPath "${destDir}" -Force`],
-      { stdio: 'ignore' }
+    // Both paths travel by ENVIRONMENT, never interpolated into the -Command string: a path holding
+    // a `"`, a `$` (PowerShell expands those inside double quotes) or a `'` would otherwise rewrite
+    // the command. `direct` because powershell.exe is a real image AND its -Command payload carries
+    // quotes of its own, which cmd.exe cannot round-trip.
+    const r = core.spawnToolSync(
+      'powershell.exe',
+      ['-NoProfile', '-Command', 'Expand-Archive -LiteralPath $env:CO_ZIP -DestinationPath $env:CO_DEST -Force'],
+      { stdio: 'ignore', direct: true, env: { ...process.env, CO_ZIP: zip, CO_DEST: destDir } }
     );
     return r.status === 0;
   }
-  return cp.spawnSync('unzip', ['-qo', zip, '-d', destDir], { stdio: 'ignore' }).status === 0;
+  return core.spawnToolSync('unzip', ['-qo', zip, '-d', destDir], { stdio: 'ignore', direct: true }).status === 0;
 }
 
 /** The installed JetBrains plugin version, read from its own jar (`lib/claude-observatory-jetbrains-
@@ -2802,24 +3020,38 @@ async function refreshJetbrainsPlugin(
     process.stdout.write(c.green('✓ ') + `JetBrains plugin up to date (${latest})\n`);
     return 'current';
   }
-  if (process.platform !== 'win32' && !onPath('unzip')) {
-    process.stdout.write(c.yellow(`  ⚠ JetBrains plugin is out of date but \`unzip\` was not found — can't update it (install unzip, then re-run)\n`));
-    return 'blocked';
-  }
+  if (!zipToolReady()) return 'blocked';
   const zip = assets.find((a) => /jetbrains.*\.zip$/i.test(a.name));
   if (!zip) {
     process.stdout.write(c.yellow(`  ⚠ release v${latest} has no JetBrains .zip asset — could not update the plugin\n`));
     return 'blocked';
   }
   const dest = await downloadAsset(zip);
+  const installed = applyJetbrainsZip(stale, dest, latest);
+  return installed === stale.length ? 'updated' : 'blocked'; // any dir that failed to extract → surface it
+}
+
+/** The precondition for unzipping into a plugin dir. Windows uses PowerShell's Expand-Archive, so only
+ *  POSIX needs `unzip`. Prints the fix when it is missing — never a silent skip. */
+function zipToolReady(): boolean {
+  if (process.platform === 'win32' || onPath('unzip')) return true;
+  process.stdout.write(c.yellow(`  ⚠ \`unzip\` was not found — can't install the JetBrains plugin (install unzip, then re-run)\n`));
+  return false;
+}
+
+/** Unzip `zipPath` into each IDE plugin dir, stamp the version sentinel, report per dir. Returns how
+ *  many succeeded. Shared by `update` and `install-extensions`. */
+function applyJetbrainsZip(dirs: string[], zipPath: string, version: string): number {
+  const fs = require('fs');
+  const path = require('path');
   let installed = 0;
-  for (const d of stale) {
+  for (const d of dirs) {
     const pluginDir = path.join(d, JB_PLUGIN_DIRNAME);
     try {
       fs.rmSync(pluginDir, { recursive: true, force: true }); // drop files gone from the new build
-      if (!extractZip(dest, d)) throw new Error('extract failed');
-      fs.writeFileSync(path.join(pluginDir, JB_VERSION_SENTINEL), latest);
-      process.stdout.write(c.green('✓ ') + `JetBrains plugin → ${latest} (${d})\n`);
+      if (!extractZip(zipPath, d)) throw new Error('extract failed');
+      fs.writeFileSync(path.join(pluginDir, JB_VERSION_SENTINEL), version);
+      process.stdout.write(c.green('✓ ') + `JetBrains plugin → ${version} (${d})\n`);
       installed++;
     } catch (e: any) {
       process.stdout.write(c.yellow(`  ⚠ could not install the JetBrains plugin into ${d}: ${e?.message || e}\n`));
@@ -2829,7 +3061,7 @@ async function refreshJetbrainsPlugin(
     process.stdout.write(c.dim('  fully restart the IDE (⌘Q → reopen) — a running JVM can’t hot-swap plugin classes.\n'));
     process.stdout.write(jetbrainsAutoUpdateHint());
   }
-  return installed === stale.length ? 'updated' : 'blocked'; // any dir that failed to extract → surface it
+  return installed;
 }
 
 /**
@@ -2842,16 +3074,235 @@ async function refreshJetbrainsPlugin(
 /** The releases LIST (newest first, drafts invisible anonymously) — ONE fetch answers both
  *  channels: the first regular release is what `releases/latest` serves, the first prerelease is
  *  the rolling dev build. Channel choice happens in core (`resolveReleaseFromList`), pure. */
-async function fetchReleases(): Promise<any[]> {
+async function fetchReleases(throwOnError = false): Promise<any[]> {
   try {
     const list = JSON.parse((await httpGet(`${RELEASES_API}/releases?per_page=100`)).toString('utf8'));
     return Array.isArray(list) ? list : [];
   } catch (e: any) {
-    fail(`could not check for updates (need network access to github.com): ${e?.message || e}`);
+    // `throwOnError` for callers that can degrade (install-extensions --check reports detection with
+    // no network); everything else keeps the process-exiting behaviour it has always had.
+    const msg = `could not check for updates (need network access to github.com): ${e?.message || e}`;
+    if (throwOnError) throw new Error(msg);
+    fail(msg);
   }
 }
 
 const CHANNEL_LABEL = { stable: 'stable', dev: 'pre-release (dev)' } as const;
+
+/**
+ * `install-extensions` — put the editor extensions ON this machine, into whatever editors are actually
+ * here. The counterpart to `update`, which deliberately refreshes only what is ALREADY installed and
+ * never adds a new install.
+ *
+ * It exists so the installers stop reimplementing editor detection in bash. `bootstrap.sh` used to
+ * curl the .vsix itself and, for JetBrains, only download the zip and print "Settings → Plugins →
+ * Install Plugin from Disk"; `install.sh` ignored JetBrains entirely; neither had a Windows path at
+ * all. All of that is one call to this command now, which means it also works on Windows and gets the
+ * release-asset sha256 verification (assertDigest) that the bash download never had.
+ *
+ * Two worlds:
+ *   • no artifact flags  → download from the release for `--channel` (bootstrap.sh, install.ps1)
+ *   • --vsix/--jetbrains-zip → use these local build outputs, no network (install.sh from source)
+ * A locally supplied artifact ALWAYS installs: you just built it, and reading a version out of a
+ * .vsix's inner package.json to compare would be work for no benefit.
+ */
+async function cmdInstallExtensions(args: string[]): Promise<void> {
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  const fs = require('fs');
+  const path = require('path');
+  const checkOnly = args.includes('--check');
+  const asJson = args.includes('--json');
+  const force = args.includes('--force');
+  // flagValue returns UNDEFINED when absent, so normalise: `!== null` on `string | undefined` is
+  // always true, which would have put every plain run into local-artifact mode with no file to use.
+  const vsixArg = flagValue(args, '--vsix') ?? null;
+  const zipArg = flagValue(args, '--jetbrains-zip') ?? null;
+  const only = args.includes('--vscode-only') ? 'vscode' : args.includes('--jetbrains-only') ? 'jetbrains' : 'both';
+  for (const [flag, v] of [['--vsix', vsixArg], ['--jetbrains-zip', zipArg]] as const) {
+    if (v !== null && !fs.existsSync(v)) fail(`${flag} ${v}: no such file`);
+  }
+
+  // --channel means the same thing it does on `update`: PERSIST the choice, so the next `update` follows
+  // the channel you installed from instead of silently pulling you back to stable.
+  const chI = args.indexOf('--channel');
+  const chRaw = flagValue(args, '--channel');
+  if (chI >= 0 && !chRaw) fail('`install-extensions --channel <stable|dev>` requires a value');
+  const requested = chRaw ? core.normalizeChannel(chRaw) : null;
+  if (chRaw && !requested) fail(`unknown channel "${chRaw}" — use stable or dev (pre-release)`);
+  const channel = requested ?? core.getUpdateChannel();
+
+  const editors = vscodeEditors().filter(editorPresent);
+  const jbDirs = jetbrainsPluginDirs();
+  const local = vsixArg !== null || zipArg !== null;
+  // In LOCAL mode no release is fetched, so a family with no artifact has nothing to install FROM.
+  // Without this, `install-extensions --vsix build.vsix` on a box that also has a JetBrains IDE
+  // installed VS Code and then failed with "release v<cli version> has no JetBrains .zip asset" —
+  // naming a release it never requested. An explicit scope flag still wins.
+  const doVscode = only === 'vscode' || (only === 'both' && (!local || vsixArg !== null));
+  const doJetbrains = only === 'jetbrains' || (only === 'both' && (!local || zipArg !== null));
+
+  // Resolve the release only when we actually need to download something.
+  let latest: string | null = local ? version() : null;
+  let assets: ReleaseAsset[] = [];
+  if (!local) {
+    // `--check` is a DETECTION report, and the thing it reports (which editors are here) needs no
+    // network at all. A rate-limited or offline GitHub used to abort the whole command — including on
+    // CI runners, where api.github.com answers 403 unauthenticated. So in check mode the lookup is
+    // best-effort and an unresolved version is reported as null; an INSTALL still has to fail, because
+    // it has nothing to install.
+    let list: any[] = [];
+    try {
+      list = await fetchReleases(true);
+    } catch (e: any) {
+      if (!checkOnly) throw e;
+      process.stderr.write(c.yellow('⚠ ') + `could not reach the release feed: ${e?.message || e}\n`);
+    }
+    const rel = core.resolveReleaseFromList(list, channel);
+    latest = core.versionOfRelease(rel as any);
+    assets = ((rel as any)?.assets ?? []) as ReleaseAsset[];
+    if (!latest && !checkOnly) fail(`no ${CHANNEL_LABEL[channel]} release found to install from.`);
+  }
+
+  if (checkOnly) {
+    // --check honours the scope flags too, or `--check --vscode-only` would report a surface the real
+    // run is about to skip — the kind of mismatch an installer script would then act on.
+    const payload = {
+      version: latest,
+      channel,
+      vscode: only === 'jetbrains' ? [] : editors.map((e) => ({ label: e.label, present: true, cli: e.cli, installed: e.version, actionable: e.cli !== null })),
+      jetbrains: only === 'vscode' ? [] : jbDirs.map((d) => ({ dir: d, installed: jbInstalledVersion(path.join(d, JB_PLUGIN_DIRNAME)), actionable: true })),
+    };
+    if (asJson) return emitJson(payload);
+    process.stdout.write(
+      `channel: ${CHANNEL_LABEL[channel]}   installing: ${latest ?? '(release feed unavailable)'}\n`
+    );
+    if (only !== 'jetbrains' && !editors.length) process.stdout.write(c.dim('VS Code family: no editor detected\n'));
+    for (const e of only === 'jetbrains' ? [] : editors)
+      process.stdout.write(
+        (e.cli ? c.green('• ') : c.yellow('⚠ ')) +
+          `${e.label}: ${e.version ? `has ${e.version}` : 'extension not installed'}` +
+          (e.cli ? '' : " — no CLI found, can't install into it") +
+          '\n'
+      );
+    if (only !== 'vscode' && !jbDirs.length) process.stdout.write(c.dim('JetBrains: no IDE detected\n'));
+    for (const d of only === 'vscode' ? [] : jbDirs) {
+      const v = jbInstalledVersion(path.join(d, JB_PLUGIN_DIRNAME));
+      process.stdout.write(c.green('• ') + `JetBrains: ${v ? `has ${v}` : 'plugin not installed'} (${d})\n`);
+    }
+    return;
+  }
+
+  // Past the --check return, an install needs a version. The `!latest && !checkOnly` fail above already
+  // guarantees one; this names it so the rest of the function is not littered with non-null assertions.
+  if (!latest) fail(`no ${CHANNEL_LABEL[channel]} release found to install from.`);
+  const target: string = latest;
+
+  if (requested !== null && requested !== core.getUpdateChannel()) {
+    core.setUpdateChannel(requested);
+    process.stdout.write(c.green('✓ ') + `following the ${CHANNEL_LABEL[requested]} channel\n`);
+  }
+
+  let did = 0;
+  let blocked = 0;
+  let detected = 0; // surfaces that exist at all — distinguishes "nothing here" from "all current"
+
+  if (doVscode) {
+    // isNewer, not `!==`: a string compare re-installed on every run and DOWNGRADED anything newer
+    // than the channel's release (install a dev build, then re-run plain). `update` has always used
+    // isNewer for the same decision. An explicit --channel is a SWITCH, so it installs that channel's
+    // newest in either direction — matching `update --channel`.
+    const stale = (installed: string | null) =>
+      force ||
+      vsixArg !== null ||
+      installed === null ||
+      (requested !== null ? installed !== target : core.isNewer(target, installed));
+    const actionable = editors.filter((e) => e.cli && stale(e.version));
+    const noCli = editors.filter((e) => !e.cli);
+    for (const e of noCli) {
+      // Never a silent skip: the editor is here, we just cannot drive it.
+      process.stdout.write(
+        c.yellow('  ⚠ ') +
+          `${e.label} is installed but its CLI wasn't found — can't install into it.\n` +
+          c.dim(`    Fix: in ${e.label}, ⇧⌘P → "Shell Command: Install 'code' command in PATH", then re-run.\n`)
+      );
+      blocked++;
+    }
+    detected += editors.length;
+    // Guard on whether an editor EXISTS, not on whether there is work: everything-already-current is
+    // the common case on a re-run (which is how the docs say to update), and it was reporting
+    // "no editor detected" — while the truthful line was reachable only on runs that also failed.
+    if (!editors.length) process.stdout.write(c.dim('VS Code family: no editor detected — skipped.\n'));
+    else if (!actionable.length && !noCli.length) process.stdout.write(c.green('✓ ') + `VS Code family already at ${target}\n`);
+    else {
+      let src = vsixArg;
+      if (src === null) {
+        const vsix = assets.find((a) => /\.vsix$/i.test(a.name));
+        if (!vsix) fail(`release v${target} has no .vsix asset to install.`);
+        src = await downloadAsset(vsix!);
+      }
+      const n = applyVsix(actionable, src, target);
+      did += n;
+      blocked += actionable.length - n;
+    }
+  }
+
+  if (doJetbrains) {
+    detected += jbDirs.length;
+    if (!jbDirs.length) process.stdout.write(c.dim('JetBrains: no IDE detected — skipped.\n'));
+    else if (!zipToolReady()) blocked++;
+    else {
+      const targets = jbDirs.filter((d) => {
+        if (force || zipArg !== null) return true;
+        const v = jbInstalledVersion(path.join(d, JB_PLUGIN_DIRNAME));
+        if (v === null) return true;
+        return requested !== null ? v !== target : core.isNewer(target, v);
+      });
+      if (!targets.length) process.stdout.write(c.green('✓ ') + `JetBrains plugin already at ${target}\n`);
+      else {
+        let src = zipArg;
+        if (src === null) {
+          const zip = assets.find((a) => /jetbrains.*\.zip$/i.test(a.name));
+          if (!zip) fail(`release v${target} has no JetBrains .zip asset to install.`);
+          src = await downloadAsset(zip!);
+        }
+        const n = applyJetbrainsZip(targets, src, target);
+        did += n;
+        blocked += targets.length - n;
+      }
+    }
+  }
+
+  if (blocked) {
+    // Same rule as `update`: a surface we could not do is a FAILURE, reported on stderr where an
+    // editor or a CI log will actually find it.
+    process.stderr.write(c.yellow('⚠ ') + `${blocked} surface(s) could not be installed — see the notes above.\n`);
+    process.exitCode = 1;
+    return;
+  }
+  if (local) {
+    if (!doVscode && editors.length)
+      process.stdout.write(c.dim(`VS Code family: skipped — no --vsix given (${editors.length} editor(s) detected).\n`));
+    if (!doJetbrains && jbDirs.length)
+      process.stdout.write(
+        c.dim(`JetBrains: skipped — no --jetbrains-zip given (${jbDirs.length} IDE(s) detected).\n`) +
+          c.dim('  From a source checkout: ./install.sh --jetbrains\n')
+      );
+  }
+  if (!detected) {
+    // An explicit scope is a statement of intent: you asked for THIS family, so finding none of it is a
+    // failed expectation, not a quiet success. Unscoped (what bootstrap.sh does) a terminal-only box is
+    // a perfectly good outcome, so that stays exit 0.
+    const what = only === 'vscode' ? 'VS Code-family editor' : only === 'jetbrains' ? 'JetBrains IDE' : 'editor';
+    if (only === 'both') {
+      process.stdout.write(c.dim(`no ${what} detected on this machine — nothing to install.\n`));
+      return;
+    }
+    process.stderr.write(c.yellow('⚠ ') + `no ${what} found on this machine — nothing was installed.\n`);
+    process.exitCode = 1;
+    return;
+  }
+  if (!did) process.stdout.write(c.green('✓ ') + 'nothing to install — every detected editor is already current.\n');
+}
 
 async function cmdUpdate(args: string[]): Promise<void> {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
@@ -2942,7 +3393,13 @@ async function cmdUpdate(args: string[]): Promise<void> {
   const jetbrains = await refreshJetbrainsPlugin(assets, latest, force || switching);
   if (vscode === 'blocked' || jetbrains === 'blocked') {
     // Something is installed but couldn't be updated — never let this pass as success/silence.
-    process.stdout.write(c.yellow('⚠ ') + 'an installed extension could not be updated (see the note above).\n');
+    // On STDERR, not stdout: this is the failure reason, and an editor surfacing this run reads
+    // stderr first. Reported as #45, where the only thing on stderr was a Node deprecation warning,
+    // so the toast showed the warning and the person never saw this line at all.
+    const which = [vscode === 'blocked' ? 'the VS Code extension' : null, jetbrains === 'blocked' ? 'the JetBrains plugin' : null]
+      .filter(Boolean)
+      .join(' and ');
+    process.stderr.write(c.yellow('⚠ ') + `could not update ${which} — see the notes above.\n`);
     process.exitCode = 1;
     return;
   }
@@ -3024,6 +3481,10 @@ function usage(): void {
       `  status               show hooks + hook-path health + session + edit counts\n` +
       `  doctor [--json]      diagnose setup (hooks, PATH, config dir, session, status line) with fixes;\n` +
       `                       --markdown (--md) emits the report as Markdown\n` +
+      `  install-extensions [--check] [--json] [--force] [--channel stable|dev]\n` +
+      `                       install the editor extensions into whatever editors are on this machine\n` +
+      `                       (VS Code family + JetBrains); --vsix/--jetbrains-zip use local build\n` +
+      `                       outputs instead of the release; --check reports without installing\n` +
       `  update [--check] [--cli-only] [--force] [--channel stable|dev]\n` +
       `                       update the CLI AND refresh the locally-installed editor extensions from\n` +
       `                       the followed release channel (VS Code via \`code --install-extension\`;\n` +
@@ -3063,9 +3524,14 @@ function usage(): void {
       `                       an id and a bulk flag are mutually exclusive (they mean different things)\n` +
       `  undo <id> [--force]  surgically undo an edit (--force = per-file restore);\n` +
       `                       bulk (pending only): --all | --file <substr> | --under <path> | --ids <a,b,c>\n` +
+      `                       --from-prompt <id> rewinds that ask and everything after it\n` +
+      `                       (add --dry-run to count what it would revert without touching disk)\n` +
       `                       an id and a bulk flag are mutually exclusive\n` +
       `  redo <id> [--force]  re-apply an undone edit;\n` +
       `                       bulk (undone only): --all | --file <substr> | --under <path> | --ids <a,b,c>\n` +
+      `                       --from-prompt <id> re-applies EVERY undone edit from that ask onward — including\n` +
+      `                       ones you had reverted before the rewind. To restore only what one rewind moved,\n` +
+      `                       pass that rewind's --json ids to --ids (what the editors' Redo button does)\n` +
       `                       an id and a bulk flag are mutually exclusive\n` +
       `  task-keep <taskId>   keep every pending edit in a task's strict in-progress span (--json)\n` +
       `  task-undo <taskId>   revert every pending edit in a task's strict in-progress span (--json)\n` +
@@ -3219,8 +3685,10 @@ function maybeCheckForUpdate(cmd: string | undefined, rest: string[]): void {
     // ate a dev-channel machine's known-update nudge until the next successful network refresh.
     writeUpdateCache({ checkedMs: Date.now(), latestTag: cache?.latestTag ?? null, latestDevTag: cache?.latestDevTag ?? null });
     try {
-      require('child_process')
-        .spawn(process.execPath, [__filename, '__update-check'], { detached: true, stdio: 'ignore' })
+      // process.execPath ends in .exe on Windows, so the launcher keeps this DIRECT — routing a
+      // detached spawn through cmd.exe would flash a console window once a day.
+      (require('@claude-observatory/core') as typeof import('@claude-observatory/core'))
+        .spawnTool(process.execPath, [__filename, '__update-check'], { detached: true, stdio: 'ignore' })
         .unref();
     } catch {
       /* couldn't spawn the background check — no nudge this cycle, no harm */
@@ -3409,6 +3877,9 @@ function main(): void {
       break;
     case 'update':
       cmdUpdate(rest).catch((e) => fail(String(e?.message || e)));
+      break;
+    case 'install-extensions':
+      cmdInstallExtensions(rest).catch((e) => fail(String(e?.message || e)));
       break;
     case '__update-check':
       // Internal, hidden: spawned detached by maybeCheckForUpdate to refresh the update cache.

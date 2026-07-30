@@ -166,7 +166,11 @@ class TourAnchorContractTest {
     /** The names each panel claims, mirroring their `tourAnchor` maps. */
     private val overview = setOf("nav-tabs", "folders-strip", "files-ledger", "summary-bar", "feed", "nav-axes", "accept-prompt", "session-label", "spotlight")
     private val stats = setOf("stats-model", "stats-compaction", "stats-tokens", "stats-cache", "stats-usage", "stats-review")
-    private val prompts = setOf("prompts-list")
+    // "session-picker" is claimed by PromptsPanel, which since 0.10.0 answers with a real component: the
+    // selector moved off the platform's tool-window header into the Timeline content, and PromptsPanel
+    // resolves it through its host (TimelineWindowTest asserts the two are the same component). The name
+    // stays claimed by exactly one panel so no other starts answering for it.
+    private val prompts = setOf("prompts-list", "session-picker")
 
     @Test
     fun `no anchor name is claimed by two panels`() {

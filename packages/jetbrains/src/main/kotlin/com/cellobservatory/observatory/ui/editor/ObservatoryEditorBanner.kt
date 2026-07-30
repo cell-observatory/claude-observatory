@@ -2,6 +2,7 @@ package com.cellobservatory.observatory.ui.editor
 
 import com.cellobservatory.observatory.core.ClaudePaths
 import com.cellobservatory.observatory.services.ObservatoryService
+import com.cellobservatory.observatory.settings.ObservatorySettings
 import com.cellobservatory.observatory.ui.Icons
 import com.cellobservatory.observatory.ui.NavTint
 import com.cellobservatory.observatory.ui.Navigate
@@ -29,6 +30,10 @@ class ObservatoryEditorBanner : EditorNotificationProvider, DumbAware {
         project: Project,
         file: VirtualFile,
     ): Function<in FileEditor, out JComponent?>? {
+        // Which in-editor review chrome the reader asked for. Since 0.10 the default is the floating bar
+        // over the code (ObservatoryFloatingToolbarProvider) — this banner AND that bar over one file is
+        // two rows of the same verbs. `banner` or `both` brings it back.
+        if (!ObservatorySettings.instance.state.bannerSurface) return null
         val service = ObservatoryService.getInstance(project)
         service.currentSession() ?: return null
         // Cheap: cached folded log + path filter, no `locate` subprocess — safe on the provider's BGT.
@@ -98,11 +103,9 @@ class ObservatoryEditorBanner : EditorNotificationProvider, DumbAware {
             toolTipText = "Next changed file"
         }
         // Per-edit pair — acts on the edit the review cursor is parked on when it sits in THIS file
-        // (the one Prev/Next Edit just landed on), else the file's first pending edit.
-        val bannerEdit = {
-            service.currentPendingEdit()?.takeIf { it.file == ClaudePaths.storeKey(file.path) }
-                ?: service.log().filter { it.pending && it.file == ClaudePaths.storeKey(file.path) }.minByOrNull { it.id }
-        }
+        // (the one Prev/Next Edit just landed on), else the file's first pending edit. The rule is shared
+        // with the floating review bar, which sits over the same file: see ReviewSelection.
+        val bannerEdit = { com.cellobservatory.observatory.ui.ReviewSelection.currentEditIn(project, file.path) }
         panel.createActionLabel("Keep") {
             service.currentSession()?.let { s -> bannerEdit()?.let { ReviewOps.keep(project, s, it.id) } }
         }.apply {

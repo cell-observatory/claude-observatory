@@ -15,6 +15,7 @@ if ! command -v jq >/dev/null 2>&1; then
   echo "  Debian/Ubuntu: sudo apt-get install -y jq" >&2
   echo "  RHEL/Fedora:   sudo dnf install -y jq" >&2
   echo "  macOS:         brew install jq" >&2
+  echo "  Windows:       winget install jqlang.jq   (or: choco install jq / scoop install jq)" >&2
   exit 1
 fi
 command -v git >/dev/null 2>&1 || echo "NOTE: 'git' not found — branch segment is just skipped (harmless)." >&2
@@ -344,7 +345,12 @@ chmod +x "$CLAUDE_DIR/statusline.sh"
 
 # --- merge statusLine into settings.json, preserving any existing settings ---
 SETTINGS="$CLAUDE_DIR/settings.json"
-CMD="bash $CLAUDE_DIR/statusline.sh"
+# QUOTE the path. Unquoted, a config dir with a space — the norm on Windows, where $HOME is
+# /c/Users/First Last — produced `bash /c/Users/First Last/.claude/statusline.sh`, which Claude Code
+# runs as bash with TWO arguments, so the status line simply never rendered. (Local fix: upstream
+# cell-observatory/claude-statusline carries the unquoted form, and scripts/sync-statusline.sh
+# overwrites this file wholesale — a test in packages/core/test/core.test.js fails if a sync drops it.)
+CMD="bash \"$CLAUDE_DIR/statusline.sh\""
 if [ -f "$SETTINGS" ]; then
   if ! jq -e . "$SETTINGS" >/dev/null 2>&1; then
     echo "ERROR: $SETTINGS is not valid JSON — leaving it untouched. Fix it and re-run." >&2

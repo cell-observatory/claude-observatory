@@ -35,16 +35,20 @@ class ObservatoryToolWindowFactory : ToolWindowFactory, DumbAware {
 }
 
 /** "Observatory Timeline" — the timeline-shaped surfaces, one window (VS Code's Observatory Timeline
- *  panel container, literally): Prompts · Actions · Observations as tabs, anchored right. 0.9.0 first
- *  grouped Actions + Observations into the Dashboards window "in its own shape"; the literal third
- *  window is what actually matches the product's three-surface layout. */
+ *  panel container, literally): Prompts · Observations · Actions, anchored right. 0.9.0 first grouped
+ *  Actions + Observations into the Dashboards window "in its own shape"; the literal third window is what
+ *  actually matches the product's three-surface layout.
+ *
+ *  0.10.0: ONE content, whose tabs, session selector and group toggle are all components of
+ *  [TimelinePanel]. The selector was a `setTitleActions` chip on the platform header and could be clipped
+ *  away there with nothing to show for it; the tabs had to move into the content with it, because a
+ *  selector above them is only "above them" when they share a panel. */
 class ObservatoryTimelineFactory : ToolWindowFactory, DumbAware {
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
-        val factory = ContentFactory.getInstance()
-        val cm = toolWindow.contentManager
-        cm.addContent(iconTab(factory, PromptsPanel(project), "Prompts", AllIcons.Actions.ListFiles))
-        cm.addContent(iconTab(factory, ActionsPanel(project), "Actions", AllIcons.Debugger.Console))
-        cm.addContent(iconTab(factory, ObservationsPanel(project), "Observations", AllIcons.Actions.IntentionBulb))
+        val content = ContentFactory.getInstance()
+            .createContent(TimelinePanel(project), "Timeline", false)
+            .apply { isCloseable = false }
+        toolWindow.contentManager.addContent(content)
     }
 }
 

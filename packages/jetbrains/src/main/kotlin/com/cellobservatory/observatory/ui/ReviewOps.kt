@@ -3,6 +3,7 @@ package com.cellobservatory.observatory.ui
 import com.cellobservatory.observatory.core.ChatRef
 import com.cellobservatory.observatory.core.ObservatoryCli
 import com.cellobservatory.observatory.model.EditRecord
+import com.cellobservatory.observatory.model.SessionPrompt
 import com.cellobservatory.observatory.model.SessionRow
 import com.cellobservatory.observatory.model.SessionsParser
 import com.cellobservatory.observatory.model.relTime
@@ -50,12 +51,57 @@ object ReviewOps {
     private fun refusedSuffix(res: ObservatoryCli.UndoScopeResult): String =
         if (res.errors > 0) " · ${res.errors} refused — ${res.firstError ?: ""}" else ""
 
-    fun keep(project: Project, session: String, id: Int) {
+    fun keep(project: Project, session: String, id: Int, advance: Boolean = true) {
         runBg(project, "Keeping edit #$id") {
             // Routine single-edit keep → transient status bar (no Event Log pile-up); failures stay balloons.
-            if (ObservatoryCli.keep(session, id, project.basePath)) doneQuiet(project, "Kept edit #$id")
-            else done(project, cliFailMsg("keep edit #$id"), NotificationType.ERROR)
+            if (ObservatoryCli.keep(session, id, project.basePath)) {
+                doneQuiet(project, "Kept edit #$id")
+                // Queued AFTER doneQuiet's refresh, so advanceAfterResolve reads the POST-keep log — its
+                // "did this record actually leave pending" gate is the whole point and a stale log would
+                // answer it wrong.
+                ApplicationManager.getApplication().invokeLater {
+                    advanceAfterResolve(project, session, id, redo = false, advance = advance)
+                }
+            } else {
+                done(project, cliFailMsg("keep edit #$id"), NotificationType.ERROR)
+            }
         }
+    }
+
+    /**
+     * After a SINGLE keep/undo, open the next edit still awaiting review — in another file when that is
+     * where it is (`revealNextOnResolve`, default on; VS Code parity). Call on the EDT.
+     *
+     * Three gates, each for a failure it prevents. The setting, because a cursor that jumps out of the
+     * file you were reading has to be refusable. [redo], because this is reached from the shared tail of
+     * undo AND redo, and a redo resolves nothing — VS Code advances on neither redo nor any bulk op, so
+     * an ungated hook would be a silent cross-editor divergence. And the record having actually left
+     * `pending`, so a CLI failure, a dirty-buffer block or a cancelled conflict never moves the cursor.
+     *
+     * Parking the cursor on the RESOLVED id first is what makes the step land "just past it":
+     * [ObservatoryService.nextPendingEdit] resumes from a cursor whose edit is gone rather than wrapping.
+     */
+    internal fun advanceAfterResolve(project: Project, session: String, id: Int, redo: Boolean, advance: Boolean = true) {
+        val next = nextAfterResolve(project, id, redo, advance) ?: return
+        Navigate.openFileAtEdit(project, session, next)
+    }
+
+    /** The cursor half of [advanceAfterResolve], split off so the three gates are testable without an
+     *  editor, a VFS refresh or a `locate` spawn: the edit to open, or null when this resolve must leave
+     *  the cursor alone. Moves the cursor only on the paths that return non-null. */
+    internal fun nextAfterResolve(project: Project, id: Int, redo: Boolean, advance: Boolean = true): EditRecord? {
+        // A surface that opts out is checked FIRST, so this stays callable in a test with no editor at all.
+        // The diff viewer opts out: it is a window the reader opened deliberately to read, and revealing a
+        // DIFFERENT file behind it (Navigate focuses the editor) throws them out of what they were doing.
+        // VS Code's diff title bar makes the same exception, so honouring it here is parity, not taste.
+        if (!advance) return null
+        if (redo) return null
+        if (!com.cellobservatory.observatory.settings.ObservatorySettings.instance.state.revealNextOnResolve) return null
+        if (project.isDisposed) return null
+        val service = ObservatoryService.getInstance(project)
+        if (service.log().any { it.id == id && it.pending }) return null // never left pending — nothing resolved
+        service.parkReviewCursor(id)
+        return service.nextPendingEdit() // null when all caught up; the toast already said so
     }
 
     fun keepAll(project: Project, session: String) {
@@ -86,19 +132,19 @@ object ReviewOps {
     }
 
     /** Undo (or redo) one edit. IJ-idiomatic dirty handling: offer Save & Continue, never clobber. */
-    fun undoOrRedo(project: Project, session: String, rec: EditRecord, redo: Boolean) {
+    fun undoOrRedo(project: Project, session: String, rec: EditRecord, redo: Boolean, advance: Boolean = true) {
         val verb = if (redo) "Redo" else "Undo"
         if (!ensureSaved(project, rec.file, verb)) return
         runBg(project, "$verb edit #${rec.id}") {
             val res = if (redo) ObservatoryCli.redo(session, rec.id, force = false, project.basePath)
             else ObservatoryCli.undo(session, rec.id, force = false, project.basePath)
             ApplicationManager.getApplication().invokeLater {
-                afterUndo(project, session, rec, res, redo)
+                afterUndo(project, session, rec, res, redo, advance)
             }
         }
     }
 
-    private fun afterUndo(project: Project, session: String, rec: EditRecord, res: UndoResult, redo: Boolean) {
+    private fun afterUndo(project: Project, session: String, rec: EditRecord, res: UndoResult, redo: Boolean, advance: Boolean = true) {
         if (res.conflict) {
             val force = Messages.showYesNoDialog(
                 project,
@@ -124,6 +170,10 @@ object ReviewOps {
         // Routine single-edit undo/redo confirmation → transient status bar (no Event Log pile-up);
         // failures stay as balloons. Parity with VS Code's setStatusBarMessage.
         if (res.ok) status(project, res.message) else notify(project, res.message, NotificationType.ERROR)
+        // This is the shared tail of undo AND redo (one call site, in undoOrRedo) — the `redo` flag is
+        // what keeps the auto-advance off the redo path. The refresh above already re-keyed the log, so
+        // the pending check inside reads post-mutation state.
+        advanceAfterResolve(project, session, rec.id, redo, advance)
     }
 
     /**
@@ -288,6 +338,189 @@ object ReviewOps {
                     if (res.errors > 0) NotificationType.WARNING else NotificationType.INFORMATION,
                 )
             }
+        }
+    }
+
+    /**
+     * Rewind to before one ask: revert every pending edit that ask and everything after it produced.
+     *
+     * The coarsest destructive verb in the product — Copilot's "Restore Checkpoint" — and the boundary is
+     * core's, not this plugin's: `undo --from-prompt <id>` resolves the window and expands every same-code
+     * group, so a chain straddling the boundary reverts whole instead of half.
+     *
+     * The three numbers in the confirmation are the CLI's, never this plugin's: `undo --from-prompt <id>
+     * --dry-run --json` counts the very scope the revert will act on ([ObservatoryCli.previewRewind],
+     * called below), so both editors state the same numbers at the point of commitment — VS Code reaches
+     * that same core scope in-process. Counting here instead is not an option: the revert acts on RAW
+     * store ids after group expansion, and the display units the Prompts rows show differ from the CLI's
+     * unit count whenever a group's representative is already resolved.
+     *
+     * The count-free sentence in [confirmRewind] is the FALLBACK, reached only when the preflight cannot
+     * answer — a pre-0.10 CLI that got past [ObservatoryCli.supportsFromPrompt] because its `--version`
+     * was unparseable, a spawn that failed, output this build cannot read. There it follows the rule
+     * [clearResolved]'s sibling-session path follows for the same reason: name the scope and let the CLI
+     * report what it did, because a destructive dialog stating a number the result then contradicts is
+     * worse than one that states none. Deleting the preflight would silently drop both editors back to
+     * that fallback.
+     */
+    fun rewindFromPrompt(project: Project, session: String, prompt: SessionPrompt) {
+        // The version preflight runs FIRST and off the EDT: `--from-prompt` is a 0.10 flag, and asking
+        // someone to confirm a destructive revert we then refuse is worse than not offering it. Never from
+        // an action `update()` — it spawns, and update() runs per toolbar tick. Memoized per work dir, so
+        // this costs one spawn per IDE session.
+        runBg(project, "Checking the rewind boundary…") {
+            val supported = ObservatoryCli.supportsFromPrompt(project.basePath)
+            // Both spawns in ONE background hop, so the dialog opens on the EDT with its numbers already in
+            // hand. Not memoized: the scope shrinks with every keep and undo, so a cached count would name
+            // work that is no longer pending.
+            val preview = if (supported) ObservatoryCli.previewRewind(session, prompt.id, project.basePath) else null
+            ApplicationManager.getApplication().invokeLater {
+                if (project.isDisposed) return@invokeLater
+                if (!supported) {
+                    notify(
+                        project,
+                        "Rewind needs claude-observatory 0.10 or newer — run `claude-observatory update`.",
+                        NotificationType.WARNING,
+                    )
+                } else {
+                    confirmRewind(project, session, prompt, preview)
+                }
+            }
+        }
+    }
+
+    private fun confirmRewind(
+        project: Project,
+        session: String,
+        prompt: SessionPrompt,
+        preview: ObservatoryCli.RewindPreview?,
+    ) {
+        val label = "#${prompt.index}" + prompt.title.takeIf { it.isNotBlank() }?.let { " “$it”" }.orEmpty()
+        // The preflight was meant to COUNT. A build that dropped the flag and reverted instead has already
+        // rewritten files with no confirmation, so say so loudly and stop — running the revert a second time
+        // would compound it, and staying quiet would leave the reader to discover it from the store.
+        if (preview != null && preview.performed) {
+            ObservatoryService.getInstance(project).refresh(force = true)
+            project.basePath?.let { refreshRecursive(it) }
+            notify(
+                project,
+                "The claude-observatory CLI on PATH ignored `--dry-run` and already reverted " +
+                    "${preview.pending} edit(s) from prompt $label onward, without confirming first. " +
+                    "Nothing further was done — run `claude-observatory update` before rewinding again.",
+                NotificationType.ERROR,
+            )
+            return
+        }
+        // A real prompt with nothing pending from it onward: say so instead of confirming a no-op.
+        if (preview != null && preview.pending == 0) {
+            return notify(project, "Nothing to rewind — no pending edits from prompt $label onward.")
+        }
+        // Every file in the workspace can be in scope, so save everything dirty rather than the per-file
+        // list the narrower verbs build — we do not know which files until the CLI answers. Before the
+        // confirm, matching undoAll/undoIds/redoAll: a refusal to save ends it without a second dialog.
+        val dirty = ObservatoryService.getInstance(project).log()
+            .filter { it.pending }.map { it.file }.distinct().filter { isDirty(it) }
+        if (dirty.isNotEmpty() && !confirmSaveAll(project, dirty)) return
+        // The same three numbers as VS Code and the same commitments (what is reverted, that redo restores
+        // it, that overlaps may conflict), in JetBrains-idiomatic wording: this dialog writes "(s)" where
+        // VS Code pluralizes, and adds the second paragraph below. Both resolve the same core scope, so the
+        // NUMBERS cannot drift. Indexed by #i rather than by title for that parity — the opening question
+        // is VS Code's word for word; the toast afterwards names the ask.
+        val scope = preview?.let { p ->
+            "This reverts ${p.pending} pending edit(s) (${p.units} review unit(s))" +
+                // A file count of 0 alongside pending work means the build did not report the list — drop
+                // the clause rather than print a zero.
+                (if (p.files > 0) " across ${p.files} file(s)" else "") +
+                " made from this ask onward — including asks after it — by rewriting those files on disk. " +
+                "Redo can restore them. Overlapping edits may conflict."
+        } ?: // No preflight (an old CLI, or a call that failed): name the scope, never a guessed number.
+            "This reverts every pending edit made from this ask onward — including asks after it — by " +
+                "rewriting those files on disk. Redo can restore them. Overlapping edits may conflict " +
+                "(revert those individually to force-restore)."
+        val ok = Messages.showYesNoDialog(
+            project,
+            "Rewind to before prompt #${prompt.index}?\n\n$scope\n\n" +
+                "Accepted edits are left alone, and edits captured before the session's first ask are " +
+                "outside every boundary and are never included.",
+            "Rewind Claude's Edits",
+            "Rewind", "Cancel", Messages.getWarningIcon(),
+        )
+        if (ok != Messages.YES) return
+        runBg(project, "Rewinding to before prompt #${prompt.index}") {
+            // The stable 12-hex id, never the index: an index is a position in a list that grows with
+            // every ask, so a panel one refresh out of date would rewind the wrong one.
+            val out = ObservatoryCli.undoFromPrompt(session, prompt.id, project.basePath)
+            project.basePath?.let { refreshRecursive(it) } // the scope can span the whole workspace
+            val res = out.result
+            if (res == null) {
+                done(project, "Could not rewind to before prompt $label — ${out.error ?: "the CLI gave no reason"}", NotificationType.ERROR)
+                return@runBg
+            }
+            // A real prompt whose scope holds nothing pending is a normal, successful zero — the CLI exits 0
+            // and says so. Reporting it as "Reverted 0 edit(s) across 0 file(s)" reads like a failure.
+            if (res.undone == 0 && res.conflicts == 0 && res.errors == 0) {
+                done(project, "Nothing to rewind — no pending edits from prompt $label onward.")
+                return@runBg
+            }
+            // Every number here is the CLI's own, mapped through the log only to name the files: `undone`
+            // is what actually reverted, `units` the review units those records collapse to (what the
+            // Prompts rows count), and the file count comes from the very ids the CLI reported. An older
+            // CLI reports no ids, and then the file clause is DROPPED rather than printed as zero.
+            val byId = ObservatoryService.getInstance(project).log().associateBy { it.id }
+            val files = res.ids.mapNotNull { byId[it]?.file }.distinct().size
+            val units = res.units?.let { " ($it review unit(s))" } ?: ""
+            val across = if (files > 0) " across $files file(s)" else ""
+            val msg = "Reverted ${res.undone} pending edit(s)$units$across from prompt $label onward" +
+                (if (res.conflicts > 0) " · ${res.conflicts} conflict(s) — revert those individually to force" else "") +
+                refusedSuffix(res)
+            ApplicationManager.getApplication().invokeLater {
+                if (project.isDisposed) return@invokeLater
+                ObservatoryService.getInstance(project).refresh(force = true)
+                val type = if (res.errors > 0 || res.conflicts > 0) NotificationType.WARNING else NotificationType.INFORMATION
+                val n = NotificationGroupManager.getInstance()
+                    .getNotificationGroup("Claude Observatory")
+                    .createNotification(msg, type)
+                // Redo is the promise the dialog made, so it is a BUTTON, not prose. It restores THESE ids —
+                // the ones this rewind actually moved — never the scope re-resolved, which would also
+                // re-apply an edit the reader had rejected before the rewind ran.
+                if (res.ids.isNotEmpty()) {
+                    n.addAction(
+                        com.intellij.notification.NotificationAction.createSimpleExpiring("Redo the rewind") {
+                            redoRewind(project, session, res.ids, label)
+                        },
+                    )
+                }
+                n.notify(project)
+            }
+        }
+    }
+
+    /**
+     * The Redo button on a rewind's toast: re-apply exactly the ids that rewind reverted.
+     *
+     * Keyed on the ids rather than on the prompt, because the prompt's scope includes every record in the
+     * window whatever its status — re-resolving it would resurrect an edit the reader had rejected before
+     * the rewind, and the toast would count it without naming it.
+     */
+    private fun redoRewind(project: Project, session: String, ids: List<Int>, label: String) {
+        runBg(project, "Restoring the edits rewound from prompt $label onward") {
+            val out = ObservatoryCli.redoScopeIds(session, ids, project.basePath)
+            project.basePath?.let { refreshRecursive(it) }
+            val res = out.result
+            if (res == null) {
+                done(project, "Could not restore prompt $label onward — ${out.error ?: "the CLI gave no reason"}", NotificationType.ERROR)
+                return@runBg
+            }
+            if (res.redone == 0 && res.conflicts == 0) {
+                done(project, "Nothing to restore — the rewound edits from prompt $label onward are no longer undone.")
+                return@runBg
+            }
+            done(
+                project,
+                "Re-applied ${res.redone} edit(s) from prompt $label onward" +
+                    if (res.conflicts > 0) " · ${res.conflicts} conflict(s) — redo those individually to force" else "",
+                if (res.conflicts > 0) NotificationType.WARNING else NotificationType.INFORMATION,
+            )
         }
     }
 

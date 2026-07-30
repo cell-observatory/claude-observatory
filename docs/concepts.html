@@ -121,7 +121,7 @@
 
 <nav class="nav" id="nav">
   <div class="wrap row">
-    <a class="brand" href="showcase.html"><span class="m">🔬</span> Claude Observatory <span class="brandver" data-co-version>v0.9.1</span></a>
+    <a class="brand" href="showcase.html"><span class="m">🔬</span> Claude Observatory <span class="brandver" data-co-version>v0.10.0</span></a>
     <div class="links">
       <a href="showcase.html">Home</a>
       <a href="showcase.html#install">Install</a>
@@ -183,7 +183,7 @@
     <p class="glede">A session's work can be grouped by what you asked for, or by what Claude planned. The observatory maintains both and keeps them separate, because they answer different questions and are known with different certainty.</p>
 
     <div class="term" id="prompt"><h3><a href="#prompt">Prompt</a></h3>
-      <p>A <b>prompt</b> is one turn you wrote, together with everything Claude produced while answering it. Its window runs from that prompt to the next one, and work belongs to the prompt that <b>started</b> it: a shell launched during prompt 4 remains prompt 4's even if it exits during prompt 7. Prompts are the only grouping ordered by your side of the conversation, and they are the scope the Prompts window sets over every other view.</p>
+      <p>A <b>prompt</b> is one turn you wrote, together with everything Claude produced while answering it. Its window runs from that prompt to the next one, and work belongs to the prompt that <b>started</b> it: a shell launched during prompt 4 remains prompt 4's even if it exits during prompt 7. Prompts are the only grouping ordered by your side of the conversation, and they are the scope the Prompts window sets over every other view. There is one prompt selection, not one per surface: picking an ask on the nav bar's Prompt axis selects it in the Prompts list and scrolls it into view, and picking one in the list moves the axis.</p>
       <figure class="cfig"><img src="media/prompts.png" loading="lazy" alt="The Prompts window: one row per prompt, newest first, each showing its edits, files, tokens, and duration above the prompt itself, shown in full; the selected row is outlined and its response expanded beneath it"><figcaption>One row per prompt, in the order you asked. Selecting one scopes the Overview beside it.</figcaption></figure></div>
 
     <div class="term" id="task"><h3><a href="#task">Task</a></h3>
@@ -211,7 +211,7 @@
       <figure class="cfig"><img src="media/win-actions.png" loading="lazy" alt="The Actions view: tool calls grouped by category and collapsed by default, with errors always surfaced and edit rows linking to their review; the egress audit rides the same timeline as its own group"><figcaption>Actions: every tool call, grouped, with the two audits at the end.</figcaption></figure></div>
 
     <div class="term" id="feed"><h3><a href="#feed">Feed and audit log</a></h3>
-      <p>A <b>feed</b> is the activity of one thing — the session, an agent, a workflow run, a task, or a process — read from the file that thing writes. While the source is still being written, the feed is <b>live</b>: it is polled, and its header states the age of the newest evidence rather than claiming real time. Once the source stops, the same view is an <b>audit log</b> — a record, not a stream — and polling stops. A capped feed states how many earlier entries it did not show.</p>
+      <p>A <b>feed</b> is the activity of one thing — the session, an agent, a workflow run, a task, or a process — read from the file that thing writes. While the source is still being written, the feed is <b>live</b>: it is polled, and its header states the age of the newest evidence rather than claiming real time. Once the source stops, the same view is an <b>audit log</b> — a record, not a stream — and polling stops. A capped feed states how many earlier entries it did not show — the Observations feed does the same, showing a stated count of the most recent edits and naming the total, so a long session's panel stays responsive without quietly hiding work.</p>
       <figure class="cfig"><img src="media/feed.png" loading="lazy" alt="The feed under the Overview's detail: one row per entry with its time, the call and its target, an error marker on the call that failed, headed by the selection it belongs to and how recently it was updated"><figcaption>The feed of whatever the nav selected — live while it runs, an audit log once it stops.</figcaption></figure></div>
 
     <div class="term" id="stats"><h3><a href="#stats">Stats and Metrics</a></h3>
@@ -221,6 +221,28 @@
     <div class="term" id="spotlight"><h3><a href="#spotlight">Spotlight</a></h3>
       <p><b>Spotlight</b> dims every line the agent did not change, so the changes read at full contrast in a heavily edited file.</p>
       <figure class="cfig"><img src="media/spotlight.png" loading="lazy" alt="Spotlight: a file with every unmodified line dimmed so the agent's changed lines read at full contrast"><figcaption>Spotlight, on a heavily edited file.</figcaption></figure></div>
+
+    <div class="term" id="review-bar"><h3><a href="#review-bar">The in-editor review bar</a></h3>
+      <p>Each editor carries the review controls into the file itself, in the form its API allows. In JetBrains IDEs a <b>floating toolbar</b> sits over the editor while the open file has edits awaiting review, drawn on the platform's own floating-toolbar layer: Keep, Undo, Chat, View diff, the Diff counter and its steppers, the file-wide accept and reject, Spotlight, and Clear Resolved.</p>
+      <p>VS Code still exposes no floating-widget API to extensions — an extension genuinely cannot draw an overlay widget, and a comment thread is the only interactive surface that can float over code. What it now has is a <b>compact bar</b> built on exactly that surface: a single row carrying Keep, Undo, the edit and file steppers, Diff and Details, under a live title naming the edit, its churn, and its position on both axes. The full <b>review bubble</b> — Claude's reasoning and the diff in git's colors — is the same widget in its other form, one click away on Details and back again on Collapse; only one is ever on screen. The status bar and the per-edit lens remain in both editors either way.</p>
+      <p>Which surface appears is a setting in both editors, spelled the same way and meaning the same thing where the two overlap: the floating bar (the default in both) or neither. VS Code adds the bubble; JetBrains adds the notification banner the bar replaced, and both at once.</p></div>
+
+    <div class="term" id="follow-on-resolve"><h3><a href="#follow-on-resolve">Following the review</a></h3>
+      <p>Keeping or reverting a single edit opens the next one still awaiting review, crossing into another file when that is where it is. Bulk operations do not move you, because they have no single next edit; neither does redo, nor the diff editor's own buttons, since a diff is something you opened deliberately to read. A resolve that did not happen — a refusal, a dirty buffer, a cancelled conflict — does not move you either. The behaviour is a setting in both editors, on by default, and in JetBrains it governs the floating toolbar too: turn it off and the bar stays on the file you are reading. In VS Code the bar follows regardless, because there a navigation bar that vanished when you used it would be useless; the review bubble beside it follows only while pinned.</p></div>
+
+    <div class="term" id="pending-badge"><h3><a href="#pending-badge">Pending badges</a></h3>
+      <p>A file with edits awaiting review carries their count in the editor's own project tree in both editors, and on the editor tab in VS Code — so work that has not been looked at is visible without opening any observatory panel. The badge counts <em>unreviewed</em> edits only: accepting or reverting them clears it.</p></div>
+
+    <div class="term" id="rewind"><h3><a href="#rewind">Rewind to before a prompt</a></h3>
+      <p><b>Rewind</b> reverts every unreviewed edit from one of your asks <em>onward</em> — not just the edits that ask produced. That distinction is the whole point: rejecting a prompt in the middle of a session undoes a base that later edits were built on, while rewinding puts the tree back to the state it had before you asked. The <b>Redo</b> offered on the result restores exactly what that rewind reverted, and nothing else — it is keyed to the edits that moved, so an edit you had rejected before the rewind stays rejected. The command-line <code>redo --from-prompt</code> is the wider verb: a prompt id names the whole window, so it re-applies every undone edit from that ask onward, including those earlier rejections.</p>
+      <p>Its confirmation states two counts, because they legitimately differ. Consecutive edits to the same lines collapse into one review unit for reading (see <a href="#edit">Edit</a>), but reverting has to act on the underlying records, and a unit that straddles the boundary is reverted whole rather than left half-applied. So the dialog names both the records it will revert and the units they collapse to — the same number the prompt rows show.</p></div>
+
+    <div class="term" id="grouped-nav"><h3><a href="#grouped-nav">Grouped navigation</a></h3>
+      <p>Both tabbed windows can show their tabs side by side as columns instead of one at a time, from a <b>Group tabs</b> toggle beside the tab strip. In the Overview that pairs <b>Sessions</b> with <b>Fleet</b>, and <b>Workflows</b> with <b>Tasks</b> and <b>Processes</b>: Sessions and Fleet answer one question together — which conversation, and who is working in it — and the other three describe work in flight. In the Timeline it puts all three of <b>Prompts</b>, <b>Observations</b> and <b>Actions</b> on screen at once. Grouping is off by default and is remembered per window.</p>
+      <p>Grouped columns are yours to size. Dragging the divider between two of them trades width, and double-clicking it resets that pair. Each column also folds away to a narrow <b>rail</b> that keeps its name and its badge, turned sideways; the rail is itself the button that brings the column back, at the width you had set. The last expanded column will not fold, because a group with every column folded would be an empty pane with nothing left to click. Below the width two columns need to stay legible, they stack rather than shrink.</p></div>
+
+    <div class="term" id="session-selector"><h3><a href="#session-selector">The timeline's session selector</a></h3>
+      <p>The Timeline names the session it is showing and lists the ones still active in the workspace — the same liveness the <a href="#fleet">Fleet</a> uses — so moving between two live conversations is one click. It leads the window, above the tabs, because which session these belong to precedes every question any of the tabs answers. Choosing one switches the whole observatory, not just the Timeline — there is a single reviewed session at any moment, and every panel agrees on it. The last row, <b>All sessions…</b>, hands over to the editor's full list — the Overview's Sessions tab in VS Code, a chooser over every recorded session in JetBrains — because the short list deliberately leaves out everything that is no longer running.</p></div>
   </div>
 </section>
 
@@ -324,7 +346,7 @@ work is attributed to the prompt that STARTED it — a shell launched here belon
 <footer class="foot" id="footer">
   <div class="wrap">
     <div class="row">
-      <span class="brand"><span class="m">🔬</span> Claude Observatory <span class="brandver" data-co-version>v0.9.1</span></span>
+      <span class="brand"><span class="m">🔬</span> Claude Observatory <span class="brandver" data-co-version>v0.10.0</span></span>
       <div class="flinks">
         <a href="concepts.html">Docs</a>
         <a href="releases.html">Releases</a>

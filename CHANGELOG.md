@@ -10,6 +10,198 @@ Per-tag release artifacts and auto-generated notes are on the
 <!-- Every feature/fix PR into `dev` appends its line here; a promote renames this section to the
      release version and opens a fresh one. -->
 
+### Added
+- **The review bar comes into the editor, in both editors.** In JetBrains IDEs a **floating toolbar** now
+  sits over the editor while the open file has edits awaiting review — Keep, Undo, Chat, View diff, the
+  `Diff n/m` counter and its steppers, Accept / Reject File, Spotlight, Clear Resolved — drawn on the
+  platform's own `editorFloatingToolbarProvider` layer. VS Code gets a **compact floating review bar**
+  carrying Keep · Undo · edit steppers · file steppers · Diff · Details under a live title
+  (`✦ Claude edit #12 · +8 −3 · Diff 2/5 · File 1/3`). It auto-shows while the active file has edits
+  awaiting review and never steals focus.
+
+  The API limitation people ask about is unchanged and worth stating plainly: **VS Code exposes no
+  floating-widget API to extensions** — the Copilot-style bar is drawn by the workbench itself, on the same
+  private layer as the Find widget ([microsoft/vscode#139374](https://github.com/microsoft/vscode/issues/139374)) —
+  so a comment thread is still the only interactive surface an extension can float over code. What is new
+  is that the extension now gives that surface a **bar** form: a thread with no body, which collapses to
+  its header row. It is not an overlay widget and does not pretend to be one; it is the same `EditPeek`
+  thread as the review bubble in a second mode, so the two can never be on screen at once.
+- **`claudeObservatory.editorReviewSurface` — one setting name in both editors.** VS Code takes
+  `floating` (the default — the bar), `bubble` (the full review bubble: Claude's reasoning and the diff in
+  git's colors, roughly 15–25 lines tall), or `none`. JetBrains takes `floating` (also the default),
+  `banner`, `both`, or `none`. `floating` and `none` are deliberately spelled the same and mean the same
+  thing in each; only the surface that genuinely exists in one editor and not the other gets a word of its
+  own. An unrecognized value reads as `floating` in both, rather than silently stripping every review
+  control out of the editor. **Details** and **Collapse** swap VS Code's two surfaces at any time, and
+  **Show the review bar at this edit** opens the bar on demand even under `none`.
+- **The inline lens row was shortened** to what a lens can actually carry. In VS Code it now reads
+  `🔬 #12  +8 −3 · 2/5 │ ✓ Keep │ ↩ Undo │ 💬 Chat │ ⧉ Diff │ ⋯ Details`; in JetBrains
+  `✦ #12  +8 −3 · edit 2/5 in file · file 1/3  view changes  ✓ Keep  ↩ Undo  ❝ Chat  ⧉ View diff`. A lens
+  row can carry no background, no color of its own and no size, so everything that has to be legible —
+  the File axis, the reasoning, the diff — moved to the bar and the bubble, where the font is the
+  workbench font rather than the lens's dim grey.
+- **Group tabs, beside both tab strips, in both editors.** A toggle beside the Overview's and the
+  Timeline's tab strips replaces the tabs with side-by-side columns: Prompts · Observations · Actions in
+  the Timeline, and in the Overview **Sessions · Fleet** and **Workflows · Tasks · Processes** — which
+  conversation and who is working in it, then what the work is doing. Off by default, remembered per
+  window.
+- **Grouped columns are resizable and collapsible.** Dragging the divider between two columns trades
+  width; double-clicking it resets that pair. Each column folds away to a narrow **rail** that keeps its
+  name and its badge, turned sideways, and the rail is itself the button that brings the column back at
+  the width you set. The last expanded column will not fold — a group with every column folded is an empty
+  pane whose only way out is the rail the reader just lost track of — and below the width two columns need
+  to stay legible they stack rather than shrink.
+- **Resolving an edit carries you to the next one.** Keeping or reverting a *single* edit opens the next
+  edit still awaiting review, crossing into another file when that is where it is
+  (`claudeObservatory.revealNextOnResolve` in VS Code; in JetBrains the settings checkbox "After keeping or
+  reverting one edit, open the next edit still awaiting review" — on by default in both). Bulk
+  actions and redo never move you — they have no single "next" — and neither do the diff editor's own
+  buttons, since a diff is something you opened deliberately to read.
+- **Pending badges on files, in both editors.** A file with edits awaiting review carries the count in the
+  editor's project tree in both editors, and on the editor tab in VS Code. JetBrains has shown the tree badge
+  since 0.8.x; in VS Code the decoration
+  only ever applied to the observatory's own tree rows, so the guided tour's "a badge in the editor's own
+  project tree" step is true in both editors for the first time.
+- **Rewind to before a prompt** (`undo --from-prompt <id>`, plus the Prompt axis's Rewind action in both
+  editors). Reverts every unreviewed edit from one ask **onward**, not just the edits that ask produced —
+  the difference between undoing a prompt and undoing the state it created, since rejecting a middle
+  prompt reverts a base that later edits were built on. The **Redo** offered beside a rewind's result
+  restores exactly the ids that rewind moved. The CLI's `redo --from-prompt <id>` is the wider verb — it
+  re-applies every undone edit from that ask onward, including any rejected before the rewind — because a
+  prompt id can only name the whole window; pass a rewind's `ids` to `redo --ids` for the button's scope.
+  The confirmation names two counts, because they genuinely differ: same-code edits collapse
+  into one review unit for reading, but reverting acts on the underlying records, and a unit straddling the
+  boundary is reverted whole rather than left half-applied.
+- **A session selector leading the Timeline window**, above the tabs, listing the sessions still active in
+  the workspace, so moving between two live conversations is one click. Picking one switches the whole
+  observatory, not just the Timeline — there is one reviewed session at a time and every panel agrees on
+  it. Its last row, **All sessions…**, hands over to that editor's full list: the Overview's Sessions tab
+  in VS Code, and the plugin's existing every-session popup chooser in JetBrains, which the selector falls
+  through to rather than growing a second browser of its own. In VS Code the same short list is also a
+  command, **Switch to an active session** (`claudeObservatory.switchActiveSession`), alongside **Show all
+  sessions** (`claudeObservatory.showSessions`), which reveals that Sessions tab.
+- **One prompt selection, shared by every surface.** Picking an ask on the nav bar's Prompt axis — or via
+  Review prompt, or Rewind — now selects it in the Prompts list and scrolls it into view, and picking one
+  in the list moves the axis. Before, the two could disagree about which ask was current.
+- **JetBrains renders removed lines as ghost text, and the `+A −R` churn in its lens** — two parity gaps
+  where the shared `locate` payload had been carrying data the plugin never read. A pure deletion is now
+  navigable there too.
+- `undo`/`redo` scope `--json` now report **`ids`** (which edits actually moved, so a caller can offer a
+  precise Redo instead of a blanket one), and `task-undo --json` reports `errors`/`firstError` like every
+  other path — one core result, one JSON shape. `locate --json` placements carry a **`delta`** for the
+  placements that render, sparing a renderer a second round trip for the lens's churn.
+- `undo --from-prompt <id> --dry-run --json` counts a rewind (`pending`, `units`, `files`) **without
+  touching disk**, so a confirmation can name what it is about to rewrite. It exists for parity rather than
+  convenience: every other exposure of that scope performs the revert, so an editor that shells out could
+  not otherwise state the numbers before the user commits — one editor would show them and the other
+  would not. Both now state the same three numbers at the point of commitment.
+
+- **The Observations feed states a bound instead of rendering a whole session.** Moving Observations and
+  Actions out of VS Code's native tree views lost the platform's virtualization — every row was serialized
+  and re-rendered on each refresh, measured at 237–258 ms per refresh on a 3,000-edit session and paid again
+  on every Keep. The feed now serves the most recent edits and names the total (`showing 300 of 3,007
+  edits`), which is 60–68 ms; the recap, context and next-step rows are never truncated, and the badge still
+  counts every edit.
+
+### Changed
+- **BREAKING (panel layout): VS Code's `claudeObservatory.actions` and `claudeObservatory.observations`
+  views no longer exist, and neither does `claudeObservatory.prompts`.** The three were consolidated into a
+  single `claudeObservatory.timeline` webview in the **Observatory Timeline** panel, whose tab strip
+  carries Prompts · Observations · Actions — the shape JetBrains already had. VS Code remembers view
+  placement per profile, so **anyone who had dragged those three views somewhere will get a reset panel
+  layout once**: the Timeline reappears in the Observatory Timeline panel and has to be dragged where you
+  want it again. Nothing else is lost — every row, action and payload is unchanged, and the palette
+  commands **Show the Timeline: Prompts / Actions / Observations** open the window on the tab they name.
+- **JetBrains: the Timeline's session selector moved out of the tool-window title bar into the window
+  content**, on its own row above the tabs, beside the line "Every tab below reads this session." A title
+  action is drawn by the platform in a strip the reader does not associate with the window's contents; the
+  session these tabs read is part of the contents.
+- **JetBrains: the Timeline is one tool-window content instead of three**, and its tab order is now
+  Prompts · Observations · Actions.
+- **JetBrains: the floating review bar replaces the editor notification banner by default.** The banner
+  and the bar over the same file is the one thing worse than neither; `editorReviewSurface` chooses the
+  bar, the banner, both, or neither, and the old behaviour is `banner`.
+- **`claudeObservatory.pinnedPeek` now governs the review bubble only.** VS Code's bar is a navigation bar
+  and therefore always follows — a nav bar that vanished the moment you used it would be useless — so
+  pinning is a question only the bubble has to answer. JetBrains' floating bar follows on
+  `revealNextOnResolve` like every other JetBrains surface, so turning that off leaves it in place.
+- `⌥⌘,` and `⌥⌘.` (freed when the Chapter axis went in 0.8.8) stay free. Nothing added here is a
+  high-frequency keyboard operation — pinning is a mode toggle, rewinding is destructive and confirmed, the
+  session selector is a pointer surface — and following-on-resolve reduces the pressure on the review keys
+  rather than adding a new one.
+
+### Fixed
+- **`clean --all --dry-run` deleted every session in the store and reported success.** `--dry-run` is real
+  on `clean --completed`, which is exactly why a reader tries it on a sibling scope; on every other scope
+  `clean` dropped the flag on the floor and performed the deletion it had been asked to describe. The same
+  guard this release gave `keep`, `undo` and `redo` now covers `clean`, permitting `--dry-run` only on
+  `--completed` and refusing it elsewhere with the two scopes that preview named in the message. Present
+  since `--dry-run` was introduced in 0.9.0.
+- **VS Code: a webview button whose host branch was never written.** The Overview's new Prompt-axis Rewind
+  button posted a message the host had no case for, so it did nothing at all — found by writing the test
+  that now guards it, not by using it. Worth recording because the class of bug is invisible by
+  construction: the webview cannot know whether anything is listening, so an unhandled message is silence
+  rather than an error.
+
+- **Windows: `update` never updated the editor extension, and said the wrong thing about why**
+  ([#45](https://github.com/cell-observatory/claude-observatory/issues/45)). Reported as a Node
+  deprecation warning in the failure toast; the warning was not the bug, it was what got displayed
+  *instead* of the bug. Three separate defects, all in how child processes were spawned:
+  - `code --install-extension` (and the 0.8.6 publisher cleanup) were spawned **without a shell**, so
+    on Windows they could never run at all: libuv only extension-searches `.com`/`.exe`, and Node
+    refuses to launch a `.cmd`/`.bat` without one. The extension half of `update` had therefore never
+    worked on Windows. The same omission made **Setup check (doctor)** from the VS Code palette always
+    report "is the claude-observatory CLI installed?", and **Start Demo Mode** always warn "the CLI is
+    not on PATH" — both on perfectly good installs.
+  - `shell: true` with an args array concatenates the arguments **unquoted**, so `--root C:\Users\First
+    Last\repo` arrived as two arguments and the **Overview, Prompts and Stats panels silently returned
+    nothing** for anyone whose workspace path contains a space. Nobody had reported this; nothing
+    surfaces it.
+  - The failure message preferred `stderr` over `stdout`, and the CLI wrote its reason to stdout while
+    stderr held only the deprecation warning. Now `core.cliFailureMessage` drops runtime warning noise,
+    prefers the real reason, and falls back to the *tail* of stdout rather than the head of a progress
+    log — mirrored in the JetBrains plugin so both editors behave the same.
+
+  Every child process in the project now goes through one launcher
+  (`packages/core/src/spawn.ts`) that builds a single quoted command string for `cmd.exe` instead of
+  passing an args array alongside `shell: true` — which is both the DEP0190 deprecation and the
+  unquoted-concatenation bug. A test walks the source tree and fails if any file reaches
+  `child_process` directly. `node 24` joined the CI matrix because DEP0190 is not a runtime warning on
+  20 or 22, so no existing lane could have caught this.
+- **Windows: the bundled status line was invisible to `update`, and `uninstall --all` orphaned it.**
+  The installer is bash, so it wrote `bash /c/Users/…/statusline.sh`; detection compared that against a
+  native `C:\Users\…\statusline.sh`, which never matches. `update` silently never refreshed the status
+  line, and `uninstall --all` deleted the script while leaving `settings.json` pointing at it, so Claude
+  Code errored on every render. Drive prefixes are now folded for Git Bash, WSL and Cygwin, and the
+  script is only removed once nothing references it. The installer also **quotes** the path it writes —
+  unquoted, any config dir containing a space (every Windows box with a spaced username) produced a
+  command Claude Code ran as `bash` with two arguments, on every platform.
+
+### Added
+- **`claude-observatory install-extensions`** — installs the editor extensions into whatever editors are
+  on the machine (VS Code family and/or JetBrains), the counterpart to `update`, which refreshes only
+  what is already installed. `--check [--json]` reports without installing;
+  `--vsix`/`--jetbrains-zip` install local build outputs with no network; `--channel stable|dev` picks
+  and persists the release channel.
+- **A native Windows installer, `install.ps1`** — `irm …/install.ps1 | iex`. There was no bash-free
+  install path before: piping the bash one-liner into PowerShell fails, or with WSL present silently
+  installs everything *inside* WSL where Claude Code cannot see it. It verifies the CLI tarball's
+  sha256 before npm runs install scripts, and is explicit that the bundled status line still needs
+  Git Bash + `jq`.
+- **Channel choice at install time.** `scripts/bootstrap.sh --channel stable|dev` and
+  `install.ps1 -Channel dev`; the choice is persisted, so later updates follow it.
+
+### Changed
+- **Every installer now delegates to the CLI.** `scripts/bootstrap.sh` previously curled the `.vsix`
+  itself with no integrity check and, for JetBrains, only downloaded the zip and printed
+  "Settings → Plugins → Install Plugin from Disk" — so the one-command installer never actually
+  installed the JetBrains plugin. `install.sh` ignored JetBrains entirely (it now takes `--jetbrains`),
+  and `scripts/install-jetbrains.sh` reimplemented IDE detection in bash around `unzip`, which only
+  worked from Git Bash on Windows. All of it is one `install-extensions` call now, which also means the
+  release assets get the sha256 verification the bash downloads never had.
+- **`npm run build:vscode` builds core first.** The extension bundles core from `core/dist`, so editing
+  the launcher and running the natural rebuild shipped the previous one, silently.
+
 ## [0.9.1] — 2026-07-29
 
 ### Fixed

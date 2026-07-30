@@ -4318,6 +4318,8 @@ test('barrel: index.ts re-exports every new 0.8.0 public symbol (CLI-as-single-b
     'sessionVitals', 'parseCompactLine', 'compactLabel', 'outsideReads', 'outsideWrites', 'contextSources', 'friendlyModel',
     // 0.8.8 — prompts (prompts.ts), fast session listing (observe.ts), the tab join (tasks.ts)
     'sessionPrompts', 'promptEditIds', 'promptResponse', 'summarizePrompts', 'sessionMeta', 'fastSessionTitle', 'taskIdForSubject',
+    // 0.10.0 — the rewind boundary (prompts.ts) and the fleet-active predicate (fleet.ts)
+    'checkpointScope', 'isFleetActive',
   ];
   const missing = publicFns.filter((k) => typeof core[k] !== 'function');
   assert.deepEqual(missing, [], `barrel is missing public symbol(s): ${missing.join(', ')}`);
@@ -4778,7 +4780,7 @@ test('tour: demoTour is a complete, well-formed script for both editors', () => 
   const TABS = ['sessions', 'fleet', 'workflows', 'tasks', 'processes'];
   const ANCHORS = new Set([
     'nav-tabs', 'folders-strip', 'files-ledger', 'summary-bar', 'feed', 'nav-axes', 'accept-prompt',
-    'session-label', 'spotlight', 'prompts-list',
+    'session-label', 'spotlight', 'prompts-list', 'session-picker',
     'stats-model', 'stats-compaction', 'stats-tokens', 'stats-cache', 'stats-usage', 'stats-review',
   ]);
   assert.ok(steps.length >= 15, 'a tour of every surface is not a handful of steps');
@@ -4840,7 +4842,10 @@ test('tour: demoTour is a complete, well-formed script for both editors', () => 
   // the editors broadcast an anchor to every tour-aware panel, so a shared name would ring two things.
   const used = steps.filter((s) => s.anchor).map((s) => s.anchor);
   for (const a of ANCHORS) assert.ok(used.includes(a), `the ${a} anchor is named by a step`);
-  const panelOf = (a) => (a.startsWith('stats-') ? 'stats' : a === 'prompts-list' ? 'prompts' : 'overview');
+  // Which panel OWNS each anchor name. A Prompts anchor filed under 'overview' would not fail today (each
+  // name is used once, so the counts still agree) but it would quietly stop catching a future collision.
+  const panelOf = (a) =>
+    a.startsWith('stats-') ? 'stats' : a === 'prompts-list' || a === 'session-picker' ? 'prompts' : 'overview';
   const byName = new Map();
   for (const a of used) {
     const p = panelOf(a);
@@ -7288,6 +7293,57 @@ test('prompts: promptWindows owns edits by ask window, boundary to the NEWER ask
   assert.equal(w2[0].pending, 0, 'and no longer pending');
 });
 
+test('prompts: checkpointScope is the rewind boundary — group-expanded, ts-bounded, two honest counts (0.10.0)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const cwd = fs.realpathSync(tmpWork());
+  const S = 'ckpt';
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const line = (ts, o) => JSON.stringify({ timestamp: new Date(ts).toISOString(), ...o });
+  // Three asks; seedEdit stamps ts = id*1000, so each ask lands between two edits.
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), [
+    line(1500, { type: 'user', message: { role: 'user', content: 'ask one' } }),
+    line(2500, { type: 'user', message: { role: 'user', content: 'ask two' } }),
+    line(3500, { type: 'user', message: { role: 'user', content: 'ask three' } }),
+  ].join('\n') + '\n');
+  const PRE = path.join(cwd, 'pre.txt'), CHAIN = path.join(cwd, 'chain.txt'), LATER = path.join(cwd, 'later.txt');
+  seedEdit(S, PRE, 'X\n', 'Y\n');                        // #1 ts1000 — before every ask
+  seedEdit(S, CHAIN, 'L1\nA\nL3\n', 'L1\nB\nL3\n');      // #2 ts2000 — window 1
+  seedEdit(S, CHAIN, 'L1\nB\nL3\n', 'L1\nC\nL3\n');      // #3 ts3000 — window 2, chains with #2
+  seedEdit(S, LATER, 'P\n', 'Q\n');                      // #4 ts4000 — window 3
+  const w = core.promptWindows(cwd, S);
+  assert.equal(w.length, 3, 'three asks, three windows');
+  // #2 and #3 are one same-code group, so the ROWS only ever show its representative (#3, in window 2).
+  assert.deepEqual(core.groupMembers(S, 3), [2, 3], 'the chain is one review unit');
+  assert.deepEqual(w[0].editIds, [], 'window 1 shows nothing — its edit was collapsed into the rep');
+  assert.deepEqual(w[1].editIds, [3], 'window 2 shows the representative');
+
+  const sc = core.checkpointScope(cwd, S, '2');
+  assert.deepEqual(sc.ids, [2, 3, 4], 'rewinding from ask 2 drags in #2 — the group member owned by an EARLIER window');
+  assert.equal(sc.pending, 3, 'three raw records would actually revert');
+  assert.equal(sc.units, 2, '…which the rows count as two review units (the chain plus #4)');
+  assert.equal(sc.units, w[1].pending + w[2].pending, 'and that unit count is exactly what those rows print');
+  assert.deepEqual(sc.files.map((f) => path.basename(f)).sort(), ['chain.txt', 'later.txt'], 'files come from the pending records');
+  assert.deepEqual(core.checkpointScope(cwd, S, w[1].id).ids, sc.ids, 'the stable hash id resolves the same window as the index');
+
+  // The boundary really is a boundary, and the pre-ask edit belongs to no rewind at all.
+  assert.deepEqual(core.checkpointScope(cwd, S, '3').ids, [4], 'rewinding from ask 3 leaves earlier windows alone');
+  assert.ok(!core.checkpointScope(cwd, S, '1').ids.includes(1), 'an edit older than the first ask precedes every boundary, so no rewind owns it');
+  // The unassigned guard's whole point: nothing at or after the boundary may be silently skipped.
+  const atOrAfter = core.reviewEdits(S).filter((r) => r.ts >= w[1].ts).map((r) => r.id);
+  assert.ok(atOrAfter.length > 0 && atOrAfter.every((id) => sc.ids.includes(id)), 'every display record at or after the boundary is in scope');
+  assert.deepEqual(core.checkpointScope(cwd, S, 'nope'), { ids: [], pending: 0, units: 0, files: [] }, 'an unknown prompt is an empty scope, not a throw');
+
+  // Resolving the chain removes it from the scope's COUNTS while its ids stay addressable for redo.
+  core.keepGroup(S, 3);
+  const after = core.checkpointScope(cwd, S, '2');
+  assert.deepEqual(after.ids, [2, 3, 4], 'kept ids are still in scope (redo --from-prompt needs them)');
+  assert.equal(after.pending, 1, 'but only the still-pending record would revert');
+  assert.equal(after.units, 1, 'and it is one unit');
+  assert.deepEqual(after.files.map((f) => path.basename(f)), ['later.txt'], 'the kept file drops out of the file list');
+});
+
 test('store: Windows drive-letter case — phantoms are healed, repaired, and undo-proofed (#43)', () => {
   freshHome();
   const S = 'caseSess';
@@ -7640,5 +7696,730 @@ test('cli: the update/switch mechanism WORKS end-to-end — mock releases API, r
     assert.equal(vj.updateAvailable, core.isNewer('9.9.9', vj.current), 'updateAvailable is the active-channel compare');
   } finally {
     srv.close();
+  }
+});
+
+// --- the one launcher for every child process (win32 shell rules + DEP0190) --------------------
+
+test('spawn: launchSpec builds a cmd.exe-safe command string on win32, and leaves posix untouched', () => {
+  // The win32 shape is asserted from macOS/Linux because launchSpec takes `platform` — that is the
+  // whole reason it does. Without it none of this would be testable off a Windows runner.
+  const win = (f, a) => core.launchSpec(f, a, { platform: 'win32' });
+
+  assert.deepEqual(
+    win('C:\\Program Files\\Microsoft VS Code\\bin\\code.cmd', [
+      '--install-extension',
+      'C:\\Users\\First Last\\AppData\\Local\\Temp\\co.vsix',
+      '--force',
+    ]),
+    {
+      file:
+        '"C:\\Program Files\\Microsoft VS Code\\bin\\code.cmd" --install-extension ' +
+        '"C:\\Users\\First Last\\AppData\\Local\\Temp\\co.vsix" --force',
+      args: [],
+      shell: true,
+    },
+    'a .cmd shim and a spaced temp path both get quoted into ONE command string'
+  );
+  assert.deepEqual(
+    win('npm.cmd', ['i', '-g', 'C:\\Temp\\co.tgz']),
+    { file: 'npm.cmd i -g C:\\Temp\\co.tgz', args: [], shell: true },
+    'clean tokens stay bare so the command still reads like a command'
+  );
+
+  // Every character cmd.exe reads as syntax must force quoting. These are all LEGAL in a Windows
+  // path (`C:\Users\me\R&D\repo`), so an unquoted one is both a broken command and an injection.
+  for (const ch of [' ', '&', '|', '<', '>', '^', '(', ')', '%', '!', ',', ';', '=', '"']) {
+    const q = core.quoteForCmd(`a${ch}b`);
+    assert.ok(q.startsWith('"') && q.endsWith('"'), `${JSON.stringify(ch)} must force quoting (got ${q})`);
+  }
+  assert.equal(core.quoteForCmd('--force'), '--force', 'a clean token is left bare');
+  assert.equal(core.quoteForCmd(''), '""', 'an empty argument must survive as an empty argument');
+  assert.equal(core.quoteForCmd('a"b'), '"ab"', 'an embedded quote is dropped — cmd cannot express one');
+  assert.equal(core.quoteForCmd('C:\\a b\\repo\\'), '"C:\\a b\\repo\\\\"', 'a trailing \\ is doubled');
+  assert.equal(core.quoteForCmd('C:\\a b\\repo\\\\'), '"C:\\a b\\repo\\\\\\\\"', 'a RUN of them, too');
+  assert.equal(core.quoteForCmd('\\\\server\\share\\x y'), '"\\\\server\\share\\x y"', 'a UNC path is untouched');
+
+  // The trailing-backslash rule was first written as `/(\\+)$/`, which backtracks quadratically on a
+  // long run of backslashes that ISN'T at the end — 508 ms at 32k inputs, and this function's input
+  // includes environment-derived paths. The bound is ~4 orders of magnitude above the real cost
+  // (~0.006 ms), so it flags the regression without flaking on a slow runner.
+  const pathological = '\\'.repeat(32000) + ' x';
+  const began = process.hrtime.bigint();
+  const quoted = core.quoteForCmd(pathological);
+  const ms = Number(process.hrtime.bigint() - began) / 1e6;
+  assert.ok(quoted.endsWith(' x"'), 'still correct on the pathological input');
+  assert.ok(ms < 100, `quoteForCmd must stay linear (took ${ms.toFixed(1)} ms — js/polynomial-redos)`);
+
+  // POSIX must be byte-for-byte what it was before this module existed.
+  assert.deepEqual(core.launchSpec('npm', ['i', '-g', '/tmp/co.tgz'], { platform: 'darwin' }), {
+    file: 'npm',
+    args: ['i', '-g', '/tmp/co.tgz'],
+    shell: false,
+  });
+  assert.deepEqual(core.launchSpec('sh', ['-c', 'command -v "$1"', 'sh', 'jq'], { platform: 'linux' }), {
+    file: 'sh',
+    args: ['-c', 'command -v "$1"', 'sh', 'jq'],
+    shell: false,
+  });
+
+  // A real executable image never needs the shell — the daily update check spawns process.execPath
+  // DETACHED, and cmd.exe there would flash a console window on the desktop once a day.
+  assert.equal(core.needsWinShell('C:\\Program Files\\nodejs\\node.exe'), false);
+  assert.equal(core.needsWinShell('C:\\x\\NODE.EXE'), false, 'the extension test is case-insensitive');
+  assert.equal(core.needsWinShell('C:\\x\\thing.com'), false, '.com counts too');
+  assert.equal(core.needsWinShell('C:\\x\\node.exe.cmd'), true, 'anchored at the END — this one IS a .cmd');
+  assert.equal(core.needsWinShell('code'), true, 'a bare name may be a .cmd shim, which libuv will never find');
+  assert.equal(win('powershell', ['-Command', 'x']).shell, true, 'bare names default to the shell');
+  assert.equal(
+    core.launchSpec('powershell', ['-Command', 'x'], { platform: 'win32', direct: true }).shell,
+    false,
+    '`direct` opts a caller out when its args cannot survive cmd quoting'
+  );
+
+  // THE invariant. DEP0190 fires on a POPULATED args array alongside shell:true, and shell mode
+  // concatenates such an array unquoted. Both failure modes are excluded by this one assertion, so
+  // it has to hold for every input — this is what the pre-fix code violated at all seven sites.
+  for (const [file, args] of [
+    ['npm.cmd', ['i', '-g', 'C:\\a b\\x.tgz']],
+    ['claude-observatory.cmd', ['changemap', '--json', '--root', 'C:\\Users\\First Last\\repo']],
+    ['code', []],
+    ['x.exe', ['a b']],
+  ]) {
+    const s = win(file, args);
+    if (s.shell) assert.equal(s.args.length, 0, `shell:true must carry an EMPTY args array (${file})`);
+  }
+});
+
+test('spawn: our launch shape does not trigger the DEP0190 deprecation', (t) => {
+  // Read the warning off a CHILD's stderr: Node latches each deprecation per process, so asking the
+  // test runner itself would answer only once and then lie forever after.
+  const warnedBy = (file, args) =>
+    cp.spawnSync(
+      process.execPath,
+      [
+        '-e',
+        `require('child_process').spawnSync(${JSON.stringify(file)}, ${JSON.stringify(args)}, ` +
+          `{ shell: true, stdio: 'ignore' })`,
+      ],
+      { encoding: 'utf8' }
+    ).stderr || '';
+
+  // ASK THE RUNTIME, never a version number. DEP0190 has moved between documentation-only, runtime,
+  // and "application code only" across releases, and a hardcoded `>= 22.15` gate asserted the control
+  // on node 22.23.1, which does NOT emit it — turning three green lanes red for the wrong reason.
+  const control = warnedBy('echo', ['hi']); // the shape being replaced
+  const s = core.launchSpec('echo', ['hi'], { platform: 'win32' }); // force the win32 shape anywhere
+
+  assert.doesNotMatch(warnedBy(s.file, s.args), /DEP0190|DeprecationWarning/, 'ours never warns');
+
+  if (/DEP0190/.test(control)) {
+    // The instrument demonstrably fires here, so the assertion above carries real weight.
+    t.diagnostic(`node ${process.versions.node} emits DEP0190 — the deprecated shape was proven to warn`);
+  } else {
+    // Honest about it: on this runtime the assertion above cannot fail, whatever the implementation.
+    // The shell:true-implies-empty-args invariant in the unit test is what guards the shape here.
+    t.diagnostic(`node ${process.versions.node} does not emit DEP0190 at runtime — assertion is vacuous on this lane`);
+  }
+});
+
+test('spawn: a launched command delivers the argv a bare spawn would, spaces and all', () => {
+  // The probe lives at a space-free path and only the --root VALUE carries a space: that is the real
+  // shape (`spawnCliJson(bin, [.., '--root', cwd])` with a workspace under C:\Users\First Last).
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-spawn-'));
+  const probe = path.join(dir, 'argv.js');
+  fs.writeFileSync(probe, 'console.log(JSON.stringify(process.argv.slice(2)))');
+  const args = ['changemap', '--json', '--root', path.join(dir, 'First Last', 'repo')];
+
+  // Whatever shape this platform's launchSpec chose, RUNNING it must reproduce the bare-spawn argv.
+  // (On Windows process.execPath ends in .exe so this takes the direct branch; off Windows it takes
+  // the shell branch. Asserting which one would just re-assert the unit test above — and asserting
+  // `shell === true` here is exactly the mistake that would turn the Windows lane red.)
+  const out = core.spawnToolSync(process.execPath, [probe, ...args], { encoding: 'utf8' });
+  assert.deepEqual(JSON.parse(out.stdout.trim()), args, 'the spaced --root value arrived as ONE argument');
+
+  // POSITIVE CONTROL — the shape this replaces DOES corrupt it. If this stops splitting, the
+  // assertion above has stopped proving anything. Run it in a GRANDCHILD: the deprecated form emits
+  // DEP0190, and a stray one on the runner's stderr would read in CI as the very bug being fixed.
+  const naive = cp
+    .spawnSync(
+      process.execPath,
+      [
+        '-e',
+        `const r = require('child_process').spawnSync(${JSON.stringify(process.execPath)}, ` +
+          `${JSON.stringify([probe, ...args])}, { shell: true, encoding: 'utf8' }); ` +
+          `process.stdout.write(r.stdout || '')`,
+      ],
+      { encoding: 'utf8' }
+    )
+    .stdout.trim();
+  const split = JSON.parse(naive);
+  assert.equal(split.length, args.length + 1, 'the one spaced --root value arrived as TWO arguments');
+  assert.ok(
+    split.some((a) => a.endsWith(`${path.sep}First`)) && split.includes(`Last${path.sep}repo`),
+    'and it broke exactly at the space'
+  );
+});
+
+test('spawn: the wrappers apply the spec and forward cwd/env/stdio', () => {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cc-wrap-')));
+  const probe = path.join(dir, 'probe.js');
+  fs.writeFileSync(
+    probe,
+    'console.log(JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd(), tag: process.env.CO_TAG }))'
+  );
+  const args = [probe, 'a b', 'R&D'];
+  const opts = { cwd: dir, env: { ...process.env, CO_TAG: 'forwarded' }, encoding: 'utf8' };
+
+  const sync = JSON.parse(core.spawnToolSync(process.execPath, args, opts).stdout.trim());
+  assert.deepEqual(sync.argv, ['a b', 'R&D'], 'spawnToolSync: argv survives spaces and cmd syntax');
+  assert.equal(fs.realpathSync(sync.cwd), dir, 'spawnToolSync: cwd is forwarded, not eaten by split()');
+  assert.equal(sync.tag, 'forwarded', 'spawnToolSync: env is forwarded');
+
+  // The wrappers must go THROUGH launchSpec, not around it. The discriminator is ENOENT fidelity:
+  // a shell reports a missing binary as exit 127, a direct spawn as error ENOENT / status null.
+  // A wrapper that ignored the spec would answer the direct way for both of these.
+  const missing = 'claude-observatory-definitely-not-a-real-binary';
+  const viaShell = core.spawnToolSync(missing, [], { platform: 'win32', stdio: 'ignore' });
+  assert.equal(viaShell.error, undefined, 'forced win32: went through a shell, so no spawn error');
+  assert.notEqual(viaShell.status, null, 'forced win32: the shell itself ran and reported a status');
+  const viaDirect = core.spawnToolSync(missing, [], { platform: 'win32', direct: true, stdio: 'ignore' });
+  assert.equal(viaDirect.error && viaDirect.error.code, 'ENOENT', '`direct` keeps the real spawn error');
+
+  // The same discriminator for the other two wrappers — each has its own code path to the spec.
+  const asyncErrCode = (o) =>
+    new Promise((resolve) => {
+      const c = core.spawnTool(missing, [], { ...o, stdio: 'ignore' });
+      c.on('error', (e) => resolve(e.code));
+      c.on('close', (code) => resolve(`exit:${code}`));
+    });
+  const execErrCode = (o) =>
+    new Promise((resolve) => core.execFileTool(missing, [], o, (err) => resolve(err && err.code)));
+
+  return Promise.all([
+    asyncErrCode({ platform: 'win32' }).then((c) =>
+      assert.notEqual(c, 'ENOENT', 'spawnTool: forced win32 went through a shell')
+    ),
+    asyncErrCode({ platform: 'win32', direct: true }).then((c) =>
+      assert.equal(c, 'ENOENT', 'spawnTool: `direct` keeps the real spawn error')
+    ),
+    execErrCode({ platform: 'win32' }).then((c) =>
+      assert.notEqual(c, 'ENOENT', 'execFileTool: forced win32 went through a shell')
+    ),
+    execErrCode({ platform: 'win32', direct: true }).then((c) =>
+      assert.equal(c, 'ENOENT', 'execFileTool: `direct` keeps the real spawn error')
+    ),
+    new Promise((resolve, reject) => {
+      core.execFileTool(process.execPath, args, opts, (err, stdout) => {
+        try {
+          assert.equal(err, null);
+          const r = JSON.parse(String(stdout).trim());
+          assert.deepEqual(r.argv, ['a b', 'R&D'], 'execFileTool: argv survives');
+          assert.equal(r.tag, 'forwarded', 'execFileTool: env is forwarded');
+          resolve();
+        } catch (e) {
+          reject(e);
+        }
+      });
+    }),
+    new Promise((resolve, reject) => {
+      const child = core.spawnTool(process.execPath, args, { ...opts, stdio: ['ignore', 'pipe', 'ignore'] });
+      let out = '';
+      child.stdout.on('data', (d) => (out += d));
+      child.on('close', () => {
+        try {
+          const r = JSON.parse(out.trim());
+          assert.deepEqual(r.argv, ['a b', 'R&D'], 'spawnTool: argv survives');
+          assert.equal(fs.realpathSync(r.cwd), dir, 'spawnTool: cwd is forwarded');
+          resolve();
+        } catch (e) {
+          reject(e);
+        }
+      });
+    }),
+  ]);
+});
+
+test('spawn(win32): a real .cmd shim round-trips through real cmd.exe', { skip: process.platform !== 'win32' }, () => {
+  // Everything above proves the SHAPE. Only the Windows runner can prove the shape is right, because
+  // only there does shell:true mean cmd.exe — elsewhere Node runs /bin/sh, whose quoting rules are
+  // not the ones this module encodes. This is also the case the whole module exists for: a .cmd
+  // shim, which libuv cannot launch and cannot even find.
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cc-cmd-')));
+  const probe = path.join(dir, 'probe.js');
+  fs.writeFileSync(probe, 'console.log(JSON.stringify(process.argv.slice(2)))');
+  const shim = path.join(dir, 'shim.cmd');
+  fs.writeFileSync(shim, `@echo off\r\n"${process.execPath}" "${probe}" %*\r\n`);
+
+  const spaced = path.join(dir, 'First Last', 'repo');
+  const args = ['changemap', '--json', '--root', spaced, '--session', 'a&b'];
+  const r = core.spawnToolSync(shim, args, { encoding: 'utf8' });
+  assert.equal(r.error, undefined, 'a .cmd is launchable through the launcher (it is not, without one)');
+  assert.equal(r.status, 0, `shim exited non-zero: ${r.stderr}`);
+  assert.deepEqual(JSON.parse(r.stdout.trim()), args, 'cmd.exe round-trips spaces AND & exactly');
+});
+
+test('spawn: no source file spawns a child process except through the launcher', () => {
+  // The Windows rules above are not knowledge a future edit will have. This is the tripwire: every
+  // spawn in the project must go through core/spawn, so there is exactly ONE place that can be wrong.
+  // It keys on the child_process IMPORT rather than on call names, because `.exec(` is also RegExp's.
+  //
+  // WALK the source dirs — do not list files. A hardcoded list misses the most likely future edit of
+  // all, which is a NEW file; and the specifier must tolerate the `node:` prefix (already house style
+  // in scripts/) and the dynamic form, or the guard is a stile with no fence beside it.
+  const roots = [
+    ['packages/core/src', path.resolve(__dirname, '../src')],
+    ['packages/cli/src', path.resolve(__dirname, '../../cli/src')],
+    ['packages/vscode/src', path.resolve(__dirname, '../../vscode/src')],
+  ];
+  const files = [];
+  const walk = (rel, abs) => {
+    for (const e of fs.readdirSync(abs, { withFileTypes: true })) {
+      if (e.isDirectory()) walk(`${rel}/${e.name}`, path.join(abs, e.name));
+      else if (/\.(ts|mts|cts|js|mjs|cjs)$/.test(e.name)) files.push([`${rel}/${e.name}`, path.join(abs, e.name)]);
+    }
+  };
+  for (const [rel, abs] of roots) walk(rel, abs);
+  const scanned = files.filter(([rel]) => rel !== 'packages/core/src/spawn.ts');
+  assert.ok(scanned.length > 20, `sanity: expected to walk the source tree, found ${scanned.length} files`);
+  assert.ok(
+    scanned.some(([rel]) => rel === 'packages/vscode/src/extension.ts') &&
+      scanned.some(([rel]) => rel === 'packages/cli/src/index.ts'),
+    'sanity: the walk must reach the two biggest offenders-by-history'
+  );
+
+  // `require('child_process')`, `from 'child_process'`, `import('child_process')` — with or without
+  // the `node:` prefix. `import type * as cp` is exempt: extension.ts needs cp.ChildProcess for a
+  // variable's type, and a type import cannot spawn anything.
+  const REACHES_CHILD_PROCESS = /(?:require|import)\s*\(\s*['"](?:node:)?child_process['"]\s*\)|\bfrom\s+['"](?:node:)?child_process['"]/;
+  const offenders = [];
+  for (const [rel, abs] of scanned) {
+    fs.readFileSync(abs, 'utf8')
+      .split('\n')
+      .forEach((line, i) => {
+        if (/^\s*import\s+type\b/.test(line)) return;
+        if (REACHES_CHILD_PROCESS.test(line)) offenders.push(`${rel}:${i + 1}  ${line.trim()}`);
+      });
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    'these reach child_process directly instead of core/spawn — see packages/core/src/spawn.ts:\n  ' + offenders.join('\n  ')
+  );
+});
+
+test('failure: a deprecation warning never outranks the real reason (#45)', () => {
+  // The exact pair of streams the reporter's machine produced: stdout carried the reason, stderr held
+  // only Node's warning, and the editors rendered `stderr || stdout`.
+  const dep =
+    '(node:326100) [DEP0190] DeprecationWarning: Passing args to a child process with shell option ' +
+    'true can lead to security vulnerabilities, as the arguments are not escaped, only concatenated.\n' +
+    '(Use `node --trace-deprecation ...` to show where the warning was created)\n';
+  const progress =
+    'channel: pre-release (dev)\ndownloading claude-observatory-cli-dev.tgz …\ninstalling globally (npm i -g) …\n' +
+    '✓ updated the CLI 0.9.0 → 0.9.1\n' +
+    "  ⚠ VS Code --install-extension failed — install the .vsix manually from the release\n";
+  const msg = core.cliFailureMessage(progress, dep, 'is the claude-observatory CLI installed?');
+  assert.match(msg, /--install-extension failed/, 'the reason wins');
+  assert.doesNotMatch(msg, /DEP0190|DeprecationWarning/, 'the warning is gone');
+  // POSITIVE CONTROL for the old rule: it would have returned the warning verbatim.
+  assert.match(String(dep || progress).trim().slice(0, 300), /DEP0190/, 'the pre-fix ordering did show the warning');
+
+  // A genuine stderr failure still wins — this is why "always prefer stdout" would be wrong. fail()
+  // writes here, and when it has, that IS the reason.
+  assert.match(
+    core.cliFailureMessage('downloading …\ninstalling globally …', 'claude-observatory: npm install failed (exit 1)', 'x'),
+    /npm install failed \(exit 1\)/
+  );
+  // Warning noise plus a real stderr line: keep the line, drop the noise.
+  assert.equal(core.cliFailureMessage('', dep + 'claude-observatory: release has no .vsix asset\n', 'x'),
+    'claude-observatory: release has no .vsix asset');
+  // Nothing classifiable → the TAIL of stdout, where a summary lives (not the head, which is progress).
+  assert.match(core.cliFailureMessage('step one\nstep two\nsummary line', '', 'x'), /summary line/);
+  // Nothing at all → the caller's fallback, never an empty toast.
+  assert.equal(core.cliFailureMessage('', dep, 'is the claude-observatory CLI installed?'),
+    'is the claude-observatory CLI installed?');
+  assert.equal(core.cliFailureMessage(null, undefined, 'fallback'), 'fallback', 'null/undefined are tolerated');
+  // The cap keeps a toast a toast.
+  assert.equal(core.cliFailureMessage('', 'x'.repeat(500), 'f').length, 300);
+});
+
+test('failure: the JetBrains plugin mirrors cliFailureMessage (cross-editor parity)', () => {
+  // Kotlin cannot import the TS. This pins the mirror: the rule must not silently exist in one editor
+  // and not the other, which is the shape of the bug it fixes.
+  const kt = fs.readFileSync(
+    path.resolve(__dirname, '../../jetbrains/src/main/kotlin/com/cellobservatory/observatory/core/ObservatoryCli.kt'),
+    'utf8'
+  );
+  assert.match(kt, /fun failureMessage\(/, 'ObservatoryCli.failureMessage must exist');
+  assert.match(kt, /NODE_NOISE/, 'and strip Node warning noise like the TS does');
+  assert.match(kt, /LOOKS_LIKE_TROUBLE/, 'and prefer the trouble lines of stdout');
+  assert.doesNotMatch(
+    kt,
+    /r\.stderr\.ifBlank \{ r\.stdout \}/,
+    'the old stderr-first rule must be gone, not merely shadowed'
+  );
+});
+
+test('statusline(win32): OUR script is recognised through Git Bash / WSL / Cygwin paths', () => {
+  // The installer is bash, so on Windows it writes an MSYS-shaped path; path.join() here writes a
+  // native one. A raw substring test between those is false forever, which is why `update` silently
+  // never refreshed the status line on Windows and `uninstall --all` orphaned it.
+  const dir = 'C:\\Users\\First Last\\.claude';
+  const ours = (cmd) => core.referencesOurStatusline(cmd, dir, 'win32');
+
+  assert.ok(ours('bash /c/Users/First Last/.claude/statusline.sh'), 'Git Bash / MSYS drive prefix');
+  assert.ok(ours('bash "/c/Users/First Last/.claude/statusline.sh"'), 'MSYS, quoted — what we now write');
+  assert.ok(ours('bash /mnt/c/Users/First Last/.claude/statusline.sh'), 'WSL');
+  assert.ok(ours('bash /cygdrive/c/Users/First Last/.claude/statusline.sh'), 'Cygwin');
+  assert.ok(ours('bash "/C/Users/First Last/.claude/statusline.sh"'), 'an UPPER-case MSYS drive folds too');
+  assert.ok(ours('bash /MNT/C/Users/First Last/.claude/statusline.sh'), 'and an upper-case WSL one');
+  assert.ok(ours('bash "C:\\Users\\First Last\\.claude\\statusline.sh"'), 'native, quoted');
+  assert.ok(ours('bash C:/Users/First Last/.claude/statusline.sh'), 'native with forward slashes');
+  assert.ok(ours('bash c:\\users\\first last\\.claude\\statusline.sh'), 'NTFS is case-insensitive');
+
+  // POSITIVE CONTROL for the trap: normalizing SEPARATORS alone passes the native cases above and
+  // fails every MSYS one — the exact half-fix that would look right and leave Windows broken.
+  const separatorsOnly = (cmd) =>
+    cmd.replace(/\\/g, '/').toLowerCase().includes(path.join(dir, 'statusline.sh').replace(/\\/g, '/').toLowerCase());
+  assert.ok(!separatorsOnly('bash /c/Users/First Last/.claude/statusline.sh'), 'the half-fix misses MSYS');
+  assert.ok(ours('bash /c/Users/First Last/.claude/statusline.sh'), 'the real fix does not');
+
+  // A FOREIGN status line must still be refused, or `update` would overwrite someone else's.
+  assert.ok(!ours('bash /c/Users/First Last/tools/statusline.sh'), 'same filename, foreign directory');
+  assert.ok(!ours('/usr/local/bin/starship init'), 'an unrelated status line');
+  assert.ok(!ours(''), 'empty');
+  // POSIX must stay case-SENSITIVE — folding case there would claim a user's own script as ours.
+  assert.ok(core.referencesOurStatusline('bash /home/u/.claude/statusline.sh', '/home/u/.claude', 'linux'));
+  assert.ok(!core.referencesOurStatusline('bash /home/u/.claude/StatusLine.sh', '/home/u/.claude', 'linux'));
+});
+
+test('statusline: uninstall never orphans a statusLine that still points at the script', () => {
+  // The settings edit was gated on the match but the unlink was NOT, so on Windows (where the match
+  // always failed) `uninstall --all` deleted the script and left settings.json pointing at it —
+  // Claude Code then errored on every render, once a minute, with nothing naming us.
+  const home = freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const dir = path.join(home, '.claude');
+  fs.mkdirSync(dir, { recursive: true });
+  const script = path.join(dir, 'statusline.sh');
+  const sp = path.join(dir, 'settings.json');
+
+  // A foreign statusLine that merely SHARES the basename: leave their setting alone, but our script is
+  // still ours to remove. An earlier draft of this gate tested the bare basename and so kept our script
+  // alive forever here — a leak, and a silent one.
+  fs.writeFileSync(script, '#!/bin/bash\necho x\n');
+  fs.writeFileSync(sp, JSON.stringify({ statusLine: { type: 'command', command: 'bash /opt/theirs/statusline.sh' } }));
+  let r = core.uninstallStatusline(sp);
+  assert.equal(r.changed, false, "a foreign statusLine's settings entry is left alone");
+  assert.equal(r.scriptRemoved, true, 'but OUR script is still removed — it is ours');
+  assert.equal(r.scriptKept, false);
+
+  // The reachable orphan case: a HAND-EDITED command that no path comparison can resolve. Deleting the
+  // script here leaves Claude Code erroring once a minute with nothing naming us, so it is kept AND
+  // reported (the CLI prints the reason; scriptKept is what it keys on).
+  for (const cmd of ['bash $HOME/.claude/statusline.sh', 'bash ~/.claude/statusline.sh']) {
+    fs.writeFileSync(script, '#!/bin/bash\necho x\n');
+    fs.writeFileSync(sp, JSON.stringify({ statusLine: { type: 'command', command: cmd } }));
+    r = core.uninstallStatusline(sp);
+    assert.equal(r.scriptRemoved, false, `${cmd}: not deleted out from under a live setting`);
+    assert.equal(r.scriptKept, true, `${cmd}: and the skip is reported, not silent`);
+    assert.ok(fs.existsSync(script));
+  }
+
+  // And the normal case still works end to end: ours goes, settings and script both.
+  fs.writeFileSync(sp, JSON.stringify({ statusLine: { type: 'command', command: `bash "${script}"` } }));
+  const r2 = core.uninstallStatusline(sp);
+  assert.equal(r2.changed, true, 'ours is reverted');
+  assert.equal(r2.scriptRemoved, true, 'and its script removed');
+  assert.equal(JSON.parse(fs.readFileSync(sp, 'utf8')).statusLine, undefined);
+  assert.ok(!fs.existsSync(script));
+});
+
+test('statusline: the vendored installer keeps the fixes a sync would silently drop', () => {
+  // scripts/sync-statusline.sh overwrites this file wholesale from upstream, which does not carry
+  // these. Without this test a sync would quietly re-break Windows and no one would know.
+  const sh = fs.readFileSync(path.resolve(__dirname, '../../cli/statusline/install-statusline.sh'), 'utf8');
+  assert.match(sh, /CMD="bash \\"\$CLAUDE_DIR\/statusline\.sh\\""/, 'the statusLine command must be QUOTED');
+  assert.doesNotMatch(sh, /CMD="bash \$CLAUDE_DIR\/statusline\.sh"/, 'the unquoted upstream form must not come back');
+  assert.match(sh, /winget install jqlang\.jq/, 'the jq error must name a Windows route');
+});
+
+test('install-extensions: detects an editor that does NOT yet have our extension (0.10.0)', async () => {
+  // `update` refreshes only what is already installed — deliberately. This command is the other half,
+  // and the detection it needs is different: it must see a bare editor. Fake HOME, real dirs.
+  const home = freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+
+  // The releases API is POINTED AT A LOCAL MOCK. The first version of this test let it reach
+  // api.github.com, which answers 403 to an unauthenticated CI runner — so it passed on Linux, failed on
+  // macOS and Windows, and would have been flaky forever.
+  const http = require('http');
+  const srv = http.createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(
+      JSON.stringify([
+        {
+          tag_name: 'v9.9.9',
+          prerelease: false,
+          draft: false,
+          assets: [
+            { name: 'claude-observatory-vscode-v9.9.9.vsix', browser_download_url: 'http://127.0.0.1:1/x.vsix' },
+          ],
+        },
+      ])
+    );
+  });
+  // await 'listening' (srv.address() is null before it), and unref so a failed assertion can never
+  // leave a listening handle holding the whole suite open.
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  srv.unref();
+
+  // APPDATA too: jetbrainsPluginDirs() scans %APPDATA%\JetBrains unconditionally, so without this a
+  // Windows contributor with PyCharm installed would see their REAL IDEs in these assertions.
+  const env = {
+    ...process.env,
+    HOME: home,
+    USERPROFILE: home,
+    APPDATA: path.join(home, 'AppData', 'Roaming'),
+    CLAUDE_OBSERVATORY_RELEASES_API: `http://127.0.0.1:${srv.address().port}`,
+    CLAUDE_OBSERVATORY_NO_UPDATE_CHECK: '1',
+  };
+
+  // ASYNC exec, not execFileSync: the mock server runs in THIS process, so a sync child would block the
+  // event loop that has to answer it — a 106-second timeout instead of a test.
+  const run = (args, envOverride) =>
+    new Promise((resolve, reject) => {
+      cp.execFile('node', [CLI, 'install-extensions', ...args], { env: envOverride || env, encoding: 'utf8' }, (err, stdout, stderr) => {
+        if (err) reject(new Error(`${args.join(' ')} failed: ${stderr || stdout || err.message}`));
+        else resolve(stdout);
+      });
+    });
+  const check = async (...extra) => JSON.parse(await run(['--check', '--json', ...extra]));
+
+  try {
+    // A fake HOME isolates the extension DIRS but not PATH, so an editor whose CLI is genuinely on this
+    // machine still reports present — which is correct, and is the whole point of the `or` in
+    // editorPresent: installed-but-never-launched has a CLI and no extensions dir.
+    let d = await check();
+    assert.deepEqual(d.jetbrains, [], 'no plugin dirs -> no JetBrains');
+    assert.equal(d.version, '9.9.9', 'the reported version comes from the resolved release');
+    assert.ok(
+      d.vscode.every((r) => r.installed === null),
+      'under a fresh HOME nothing of ours is installed in any detected editor'
+    );
+
+    // An editor that has RUN but does not have our extension: the case `update` ignores and this acts on.
+    fs.mkdirSync(path.join(home, '.vscode', 'extensions'), { recursive: true });
+    d = await check();
+    const vsc = () => d.vscode.find((r) => r.label === 'VS Code');
+    assert.ok(vsc(), 'an empty extensions dir is still a PRESENT editor');
+    assert.equal(vsc().present, true);
+    assert.equal(vsc().installed, null, 'and it reports our extension as not installed');
+
+    // Now give it our extension: same row, now with a version.
+    fs.mkdirSync(path.join(home, '.vscode', 'extensions', 'cell-observatory.claude-observatory-vscode-0.9.0'), {
+      recursive: true,
+    });
+    d = await check();
+    assert.equal(vsc().installed, '0.9.0', 'the installed version is read from the folder name');
+
+    // A JetBrains IDE with no plugin of ours — again, present and actionable.
+    const jb = path.join(home, 'Library', 'Application Support', 'JetBrains', 'PyCharm2026.1', 'plugins');
+    fs.mkdirSync(jb, { recursive: true });
+    d = await check();
+    assert.equal(d.jetbrains.length, 1, 'a plugins dir is a present IDE even with no plugin of ours');
+    assert.equal(d.jetbrains[0].installed, null);
+
+    // The scope flags must agree with what a real run would do, or an installer acts on a wrong report.
+    assert.equal((await check('--vscode-only')).jetbrains.length, 0, '--vscode-only hides the JetBrains surface');
+    assert.equal((await check('--jetbrains-only')).vscode.length, 0, '--jetbrains-only hides the VS Code surface');
+
+    // A DETECTION report must survive an unreachable feed — CI runners get 403 from api.github.com, and
+    // an installer asking "what is on this machine?" should not die of it.
+    const offline = JSON.parse(
+      await run(['--check', '--json'], { ...env, CLAUDE_OBSERVATORY_RELEASES_API: 'http://127.0.0.1:1/nope' })
+    );
+    assert.equal(offline.version, null, 'the version is honestly null rather than a guess');
+    assert.ok(offline.vscode.length >= 1, 'and detection still reports what is on the machine');
+
+    // Bad input fails loudly rather than installing something unintended.
+    for (const args of [['--vsix', path.join(home, 'nope.vsix')], ['--channel'], ['--channel', 'bogus']]) {
+      await assert.rejects(() => run(args), /no such file|requires a value|unknown channel/, `install-extensions ${args.join(' ')} must fail loudly`);
+    }
+  } finally {
+    srv.close();
+  }
+});
+
+test('install-extensions: installs a LOCAL artifact into a bare JetBrains IDE (0.10.0)', () => {
+  // The from-source path install.sh uses: --jetbrains-zip, no network, and it must install even though
+  // nothing of ours is there yet. Exercises zipToolReady + applyJetbrainsZip + the version sentinel.
+  const home = freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const env = {
+    ...process.env,
+    HOME: home,
+    USERPROFILE: home,
+    APPDATA: path.join(home, 'AppData', 'Roaming'),
+    CLAUDE_OBSERVATORY_NO_UPDATE_CHECK: '1',
+  };
+  const jb = path.join(home, 'Library', 'Application Support', 'JetBrains', 'PyCharm2026.1', 'plugins');
+  fs.mkdirSync(jb, { recursive: true });
+
+  // A plugin zip shaped like the real asset: claude-observatory-jetbrains/lib/<name>-<version>.jar.
+  // Written by writeStoredZip rather than shelling out to `zip`: the product deliberately avoids
+  // zip/unzip on Windows (extractZip uses PowerShell's Expand-Archive), so demanding a `zip` binary
+  // would make this test need MORE of the environment than the code it tests — and windows-latest does
+  // not list one.
+  const stage = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-jbzip-'));
+  const zip = path.join(stage, 'claude-observatory-jetbrains-v9.9.9.zip');
+  writeStoredZip(zip, [
+    ['claude-observatory-jetbrains/lib/claude-observatory-jetbrains-9.9.9.jar', Buffer.from('x')],
+  ]);
+
+  const out = cp.execFileSync('node', [CLI, 'install-extensions', '--jetbrains-only', '--jetbrains-zip', zip], {
+    env,
+    encoding: 'utf8',
+  });
+  assert.match(out, /JetBrains plugin →/, 'it reports the install');
+  const dir = path.join(jb, 'claude-observatory-jetbrains');
+  assert.ok(fs.existsSync(path.join(dir, 'lib', 'claude-observatory-jetbrains-9.9.9.jar')), 'the jar landed');
+  // A local artifact installs at the CLI's OWN version — no release is fetched in this mode at all,
+  // which is what makes install.sh's from-source path work offline.
+  // `--version` prints "claude-observatory <semver>", so take the semver out of it.
+  const cliVersion = /(\d+\.\d+\.\d+[^\s]*)/.exec(
+    cp.execFileSync('node', [CLI, '--version'], { env, encoding: 'utf8' })
+  )[1];
+  assert.equal(
+    fs.readFileSync(path.join(dir, '.observatory-version'), 'utf8').trim(),
+    cliVersion,
+    'the version sentinel is stamped, so a later `update` can tell what is installed'
+  );
+});
+
+test('installers: every install path goes through the CLI, and offers both channels (0.10.0)', () => {
+  // These scripts are not exercised by any test run (e2e is skipped on Windows and none of them run
+  // here), so their CONTENT is the only thing that can be pinned. Each assertion below corresponds to a
+  // defect that shipped: bash reimplementing editor detection, JetBrains only ever being downloaded and
+  // never installed, and no way at all to install the pre-release channel.
+  const read = (p) => fs.readFileSync(path.resolve(__dirname, '../../..', p), 'utf8');
+  // Assert about CODE, not prose: these files explain in comments what they used to do wrong, and a
+  // blunt doesNotMatch cannot tell the explanation from the mistake.
+  const code = (s) =>
+    s
+      .split('\n')
+      .filter((l) => !/^\s*(?:#|<#|\.[A-Z]|\s*$)/.test(l))
+      .join('\n');
+
+  const boot = read('scripts/bootstrap.sh');
+  assert.match(boot, /install-extensions --channel/, 'bootstrap delegates editor install to the CLI');
+  assert.match(boot, /--channel stable\|dev/, 'and documents the channel flag');
+  assert.match(boot, /dev-latest/, 'the dev channel resolves the rolling pre-release tag');
+  assert.doesNotMatch(code(boot), /Install Plugin from Disk/, 'it must INSTALL the JetBrains plugin, not print instructions');
+  assert.doesNotMatch(code(boot), /code --install-extension/, 'and must not hand-roll the VS Code install');
+
+  const inst = read('install.sh');
+  assert.match(inst, /install-extensions/, 'the from-source installer delegates too');
+  assert.match(inst, /--vsix/, 'passing the locally built .vsix rather than downloading one');
+  assert.match(inst, /--jetbrains/, 'and can build + install the JetBrains plugin');
+  assert.doesNotMatch(code(inst), /^\s*code --install-extension/m, 'no hand-rolled VS Code install');
+
+  const jb = read('scripts/install-jetbrains.sh');
+  assert.match(jb, /install-extensions --jetbrains-only --jetbrains-zip/, 'JetBrains install delegates to the CLI');
+  assert.match(jb, /--build-only/, 'and exposes the build-only mode install.sh uses');
+  assert.doesNotMatch(code(jb), /unzip -qo/, 'the bash unzip + dir-walk is gone (it never worked outside Git Bash)');
+
+  const ps1 = read('install.ps1');
+  assert.match(ps1, /install-extensions/, 'the Windows installer delegates too');
+  assert.match(ps1, /Get-FileHash/, 'and verifies the CLI tarball sha256 like downloadAsset does');
+  assert.match(ps1, /\$Channel/, 'and offers the channel choice');
+  assert.match(ps1, /jq/, 'and is honest about the bash+jq status line');
+});
+
+test('installers: install.ps1 parses as PowerShell', { skip: !hasPwsh() }, () => {
+  // A syntax error in this file is invisible until a Windows user pipes it into iex and it half-runs.
+  // pwsh ships on ubuntu-latest and windows-latest runners, so CI checks it even though a mac dev
+  // machine usually cannot.
+  const ps1 = path.resolve(__dirname, '../../../install.ps1');
+  const script =
+    "$e = $null; [void][System.Management.Automation.Language.Parser]::ParseFile('" +
+    ps1.replace(/'/g, "''") +
+    "', [ref]$null, [ref]$e); if ($e -and $e.Count -gt 0) { $e | ForEach-Object { Write-Output $_.Message }; exit 1 }";
+  const r = cp.spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', script], { encoding: 'utf8' });
+  assert.equal(r.status, 0, `install.ps1 has PowerShell syntax errors:\n${r.stdout}${r.stderr}`);
+});
+
+function hasPwsh() {
+  const r = cp.spawnSync('pwsh', ['-NoProfile', '-Command', '$PSVersionTable.PSVersion.Major'], { encoding: 'utf8' });
+  return r.status === 0;
+}
+
+/** Minimal STORED (uncompressed) zip writer — enough for a fixture, and it needs no external binary.
+ *  Deliberate: the product never shells out to `zip`, so neither should its tests. */
+function writeStoredZip(dest, entries) {
+  const zlib = require('zlib');
+  const chunks = [];
+  const central = [];
+  let offset = 0;
+  for (const [name, body] of entries) {
+    const nameBuf = Buffer.from(name, 'utf8');
+    const crc = zlib.crc32 ? zlib.crc32(body) : crc32(body);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0); // local file header
+    local.writeUInt16LE(20, 4); // version needed
+    local.writeUInt16LE(0, 6); // flags
+    local.writeUInt16LE(0, 8); // method 0 = stored
+    local.writeUInt16LE(0, 10); // time
+    local.writeUInt16LE(0x21, 12); // date (1980-01-01 is invalid; use a real one)
+    local.writeUInt32LE(crc, 14);
+    local.writeUInt32LE(body.length, 18);
+    local.writeUInt32LE(body.length, 22);
+    local.writeUInt16LE(nameBuf.length, 26);
+    local.writeUInt16LE(0, 28);
+    chunks.push(local, nameBuf, body);
+    const cd = Buffer.alloc(46);
+    cd.writeUInt32LE(0x02014b50, 0);
+    cd.writeUInt16LE(20, 4);
+    cd.writeUInt16LE(20, 6);
+    cd.writeUInt16LE(0, 8);
+    cd.writeUInt16LE(0, 10);
+    cd.writeUInt16LE(0, 12);
+    cd.writeUInt16LE(0x21, 14);
+    cd.writeUInt32LE(crc, 16);
+    cd.writeUInt32LE(body.length, 20);
+    cd.writeUInt32LE(body.length, 24);
+    cd.writeUInt16LE(nameBuf.length, 28);
+    cd.writeUInt32LE(offset, 42);
+    central.push(cd, nameBuf);
+    offset += local.length + nameBuf.length + body.length;
+  }
+  const cdBuf = Buffer.concat(central);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(entries.length, 8);
+  end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(cdBuf.length, 12);
+  end.writeUInt32LE(offset, 16);
+  fs.writeFileSync(dest, Buffer.concat([...chunks, cdBuf, end]));
+}
+
+function crc32(buf) {
+  let c = ~0;
+  for (const b of buf) {
+    c ^= b;
+    for (let k = 0; k < 8; k++) c = (c >>> 1) ^ (0xedb88320 & -(c & 1));
+  }
+  return (~c) >>> 0;
+}
+
+test('installers: every shell script parses (they are run via curl | bash)', () => {
+  // Four of the five installers are bash and nothing in the pipeline parses them — a typo ships and
+  // lands on whoever runs the documented one-liner. install.ps1 has its own parser test above.
+  const root = path.resolve(__dirname, '../../..');
+  const scripts = ['install.sh', 'scripts/bootstrap.sh', 'scripts/install-jetbrains.sh', 'scripts/sync-statusline.sh', 'packages/cli/statusline/install-statusline.sh'];
+  for (const rel of scripts) {
+    const r = cp.spawnSync('bash', ['-n', path.join(root, rel)], { encoding: 'utf8' });
+    assert.equal(r.status, 0, `${rel} has a bash syntax error:\n${r.stderr}`);
   }
 });

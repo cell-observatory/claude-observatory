@@ -123,19 +123,53 @@ private const val PROCESSES_DESC =
     "Background shells Claude launched with run_in_background and left running — state, runtime, and how much output each has produced."
 private const val PROCESSES_TIP =
     "The session's background shells — always THIS project's active session, never a selected sibling agent's. Identity is the harness's own shell id: the transcript records no OS pid, and inferring one from local processes would be wrong whenever the agent runs over SSH or in a container. Select one to follow its output."
+/** …and what that tooltip becomes while a SIBLING agent is selected: no count, and why. */
+private const val PROCESSES_UNSCOPED_TIP =
+    "Background shells are read for the session under review, never for a selected sibling agent, so no count is shown while one is selected. Open that session from the Sessions tab to see its shells."
 private const val SESSIONS_DESC =
     "This workspace’s recorded sessions, most recent conversation first — click one to review it instead of the live session."
 private const val SESSIONS_TIP =
     "This workspace's sessions, ordered by when each conversation was last active. Selecting a row PINS the review to that session (the same choice Switch Session makes) — unlike the other tabs, which only re-point the map and the feed."
-// Left-nav tab indices. Prompts is NOT among them since 0.8.7 — it is the WINDOW to the left, so the
-// list of asks and the view one of them scopes stay visible together. Processes is INSERTED at its index
-// by repaintProcesses once the CLI answers for it, which is why Sessions is addressed by component
-// rather than by a constant: it moves right by one the moment Processes appears.
-private const val SESSIONS_TAB = 0
-private const val FLEET_TAB = 1
-private const val WORKFLOWS_TAB = 2
-private const val TASKS_TAB = 3
-private const val PROCESSES_TAB = 4
+private const val FLEET_TIP =
+    "Running agents across every worktree — siblings + their subagents — with the live file-conflict strip below. Select one to map its changes."
+private const val WORKFLOWS_TIP =
+    "Claude Code Workflow runs — agents grouped by phase, with tokens/time/edits per run. Select one to map its changes."
+private const val TASKS_TIP =
+    "The session's task list (Claude's numbered TaskCreate/TaskUpdate tasks) — live statuses; completed tasks leave the list when the runtime archives them. Always THIS project's active session, never a selected sibling agent's."
+
+// The left nav has NO tab-index constants, deliberately. Prompts is not among its members since 0.8.7 —
+// it is the WINDOW to the left, so the list of asks and the view one of them scopes stay visible together.
+// Two things then move every index: Processes is mounted only once the CLI answers for it, and grouped
+// mode (0.10) renders two tabs instead of five. Every title, tooltip and selection therefore addresses a
+// MEMBER NAME through setTabBadge / setTabTip / showNavMember, which resolve to a tab index or a column
+// header for the mode in force. A single `setTitleAt(3, …)` left behind would relabel the group tab.
+private const val MEMBER_SESSIONS = com.cellobservatory.observatory.model.NavGrouping.SESSIONS
+private const val MEMBER_FLEET = com.cellobservatory.observatory.model.NavGrouping.FLEET
+private const val MEMBER_WORKFLOWS = com.cellobservatory.observatory.model.NavGrouping.WORKFLOWS
+private const val MEMBER_TASKS = com.cellobservatory.observatory.model.NavGrouping.TASKS
+private const val MEMBER_PROCESSES = com.cellobservatory.observatory.model.NavGrouping.PROCESSES
+
+/** A member's bare name — the tab title (ungrouped) or column header (grouped) before any badge. */
+private val MEMBER_TITLES = mapOf(
+    MEMBER_SESSIONS to "Sessions", MEMBER_FLEET to "Fleet", MEMBER_WORKFLOWS to "Workflows",
+    MEMBER_TASKS to "Tasks", MEMBER_PROCESSES to "Processes",
+)
+
+private val MEMBER_TIPS = mapOf(
+    MEMBER_SESSIONS to SESSIONS_TIP, MEMBER_FLEET to FLEET_TIP, MEMBER_WORKFLOWS to WORKFLOWS_TIP,
+    MEMBER_TASKS to TASKS_TIP, MEMBER_PROCESSES to PROCESSES_TIP,
+)
+/**
+ * The SHIPPED width of each grouped divider, by group, left to right — what a reader gets before they
+ * drag anything and what a double-click on that divider goes back to. Sessions · Fleet split evenly;
+ * Workflows keeps about a third and Tasks · Processes share the rest, because a workflow row is one line
+ * and a task list is many.
+ */
+private val GROUP_SPLIT_DEFAULTS = mapOf(
+    com.cellobservatory.observatory.model.NavGrouping.SESSIONS_FLEET to listOf(0.5f),
+    com.cellobservatory.observatory.model.NavGrouping.RUNS to listOf(0.34f, 0.5f),
+)
+
 /** Below this width the Overview stacks its master and detail instead of splitting them side by side. */
 private const val NARROW_PANEL_PX = 620
 
@@ -190,6 +224,15 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
 
         private val live = java.util.concurrent.ConcurrentHashMap<Project, ChangeMapPanel>()
         fun of(project: Project): ChangeMapPanel? = live[project]
+
+        /** Re-apply the nav grouping in every live panel. The Settings page can flip it from outside any one
+         *  window, and the tab STRUCTURE is not something a data refresh rebuilds — without this the change
+         *  would only appear on the next IDE start. Mirrors ObservatoryDashboardsFactory.applyPanes. */
+        fun applyNavGrouping() {
+            ApplicationManager.getApplication().invokeLater {
+                live.values.toList().forEach { if (!it.project.isDisposed) it.rebuildNavTabs() }
+            }
+        }
         internal fun remember(project: Project, panel: ChangeMapPanel) {
             live[project] = panel
             // Tied to the project, so a closed project drops its entry without the panel needing a
@@ -210,21 +253,91 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
      */
     fun selectNavTab(tab: String): javax.swing.JComponent? {
         if (!::navTabs.isInitialized) return null
-        val pane = when (tab) {
-            "sessions" -> sessionsPane
-            "fleet" -> fleetPane
-            "workflows" -> workflowsPane
-            "tasks" -> tasksPane
-            "processes" -> processesPane
-            else -> return null
-        }
-        val i = navTabs.indexOfComponent(pane)
-        if (i < 0) return null
+        if (memberPane(tab) == null) return null
         // Remember where the reader was before the tour's first step moved them (setShowAll puts it back).
-        if (tourFilter != null && tourNavTab == null && navTabs.selectedIndex != i) tourNavTab = navTabs.selectedIndex
-        navTabs.selectedIndex = i
+        // By MEMBER NAME, never by index: grouped mode has two tabs instead of five, so an index remembered
+        // in one mode names different content in the other.
+        val here = selectedNavMember()
+        if (tourFilter != null && tourNavTab == null && here != null && here != tab) tourNavTab = here
+        if (!showNavMember(tab)) return null
         return navTabs
     }
+
+    /** Each nav member's pane — the ONE place the five member names bind to components. */
+    private fun memberPane(member: String): JComponent? = when (member) {
+        MEMBER_SESSIONS -> sessionsPane
+        MEMBER_FLEET -> fleetPane
+        MEMBER_WORKFLOWS -> workflowsPane
+        MEMBER_TASKS -> tasksPane
+        MEMBER_PROCESSES -> processesPane
+        else -> null
+    }
+
+    /** The component that IS a tab for [member]: its own pane when ungrouped, its group's pane when grouped. */
+    private fun navHostFor(member: String): JComponent? =
+        if (!groupedNav) memberPane(member)
+        else groupPanes[com.cellobservatory.observatory.model.NavGrouping.groupOf(member, true)]
+
+    /** Bring the tab hosting [member] forward. False when that member is not mounted (Processes before the
+     *  CLI has answered), and the caller then leaves the nav where it is rather than guessing. */
+    private fun showNavMember(member: String): Boolean {
+        if (!::navTabs.isInitialized) return false
+        val host = navHostFor(member) ?: return false
+        val i = navTabs.indexOfComponent(host)
+        if (i < 0) return false
+        navTabs.selectedIndex = i
+        // Grouped, the tab is only half the answer: a member folded to a rail inside it is not "forward".
+        if (groupedNav) groupPaneOf(member)?.ensureShown(member)
+        return true
+    }
+
+    /** Which member the nav is showing: the selected tab's member ungrouped, the selected group's FIRST
+     *  member grouped. Named, not indexed, so a mode flip restores the same content. */
+    private fun selectedNavMember(): String? {
+        if (!::navTabs.isInitialized) return null
+        val i = navTabs.selectedIndex
+        if (i < 0 || i >= navTabs.tabCount) return null
+        val c = navTabs.getComponentAt(i)
+        if (!groupedNav) return TOUR_TABS.firstOrNull { memberPane(it) === c }
+        val group = groupPanes.entries.firstOrNull { it.value === c }?.key ?: return null
+        return com.cellobservatory.observatory.model.NavGrouping.GROUPS[group]?.firstOrNull()
+    }
+
+    /**
+     * Write a member's tab title (its name plus whatever badge the payload earns it) wherever that title
+     * currently lives: the tab strip when ungrouped, its column header when grouped.
+     *
+     * EVERY title write in this file goes through here. Grouped mode has two tabs, so one leftover
+     * `setTitleAt(TASKS_TAB, "Tasks 3/5")` would silently rename "Workflows · Tasks · Processes" on
+     * whichever repaint happened to run next.
+     */
+    private fun setTabBadge(member: String, text: String) {
+        if (!::navTabs.isInitialized) return
+        if (groupedNav) {
+            groupPaneOf(member)?.let {
+                it.header(member).text = text
+                it.syncRailText(member) // a folded column's rail carries the same badge, or it goes stale
+            }
+            return
+        }
+        val i = navTabs.indexOfComponent(memberPane(member) ?: return)
+        if (i >= 0) navTabs.setTitleAt(i, text)
+    }
+
+    /** The tooltip twin of [setTabBadge]. */
+    private fun setTabTip(member: String, tip: String) {
+        if (!::navTabs.isInitialized) return
+        if (groupedNav) {
+            groupPaneOf(member)?.header(member)?.toolTipText = tip
+            return
+        }
+        val i = navTabs.indexOfComponent(memberPane(member) ?: return)
+        if (i >= 0) navTabs.setToolTipTextAt(i, tip)
+    }
+
+    /** The grouped pane that owns [member]'s column, or null while ungrouped. */
+    private fun groupPaneOf(member: String): ColumnGroupPane? =
+        groupPanes[com.cellobservatory.observatory.model.NavGrouping.groupOf(member, true)]
 
     /**
      * The component a tour step's `anchor` names, so its tip can point at the control it is about rather
@@ -321,8 +434,9 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
     private var lastTasks: List<SessionTask> = emptyList()
     /** The reader's own Active-only value, parked while the guided tour runs. null = no tour is holding it. */
     private var tourFilter: Boolean? = null
-    /** The nav tab the reader was on before the tour moved them. null = no tour is holding it. */
-    private var tourNavTab: Int? = null
+    /** The nav MEMBER the reader was on before the tour moved them. null = no tour is holding it. A name
+     *  rather than an index, so the grouping toggle changing the tab count cannot strand the restore. */
+    private var tourNavTab: String? = null
     private val tasksModel = javax.swing.DefaultListModel<Any>()
     private val tasksList = JBList(tasksModel).apply {
         emptyText.text = "No tasks — this session plans with a task list only when Claude creates one"
@@ -401,40 +515,207 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
      *  panel never steals focus; afterwards a newly-appeared RUNNING run auto-focuses (user prompt). */
     private var seenWorkflows: HashSet<String>? = null
 
-    /** The left nav's Fleet · Workflows tabs — a field so a new workflow run can switch to Workflows. */
+    /** The left nav's tab strip — a field so a new workflow run can switch to Workflows. Its CONTENTS are
+     *  rebuilt by [rebuildNavTabs]: five member tabs, or two group tabs of side-by-side columns. */
     private lateinit var navTabs: JBTabbedPane
+
+    /** The master/detail splitter — a field so the grouping toggle can widen the nav when it flips. */
+    private lateinit var masterSplit: OnePixelSplitter
+
+    /** Grouped mode's group panes, by group key — what [navHostFor] resolves a member's tab to, and where
+     *  a member's header, badge, width and fold state live while the tab strip names the GROUP. */
+    private val groupPanes = HashMap<String, ColumnGroupPane>()
+
+    /** Whether the Processes member is mounted. It appears only once `processes --json` has ANSWERED — an
+     *  older CLI shows no tab at all rather than one that can never fill (VS Code parity) — and this is a
+     *  flag rather than a component lookup because grouped mode mounts it inside a splitter, where
+     *  `indexOfComponent` on the tab strip cannot see it. */
+    private var processesShown = false
+
+    private val cfg get() = com.cellobservatory.observatory.settings.ObservatorySettings.instance.state
+
+    /** Group the five nav tabs into two panes of side-by-side columns. Persisted, like every other layout
+     *  choice on this panel; no backing field, so the setting IS the storage. */
+    private var groupedNav: Boolean
+        get() = cfg.overviewGroupedNav
+        set(value) { cfg.overviewGroupedNav = value }
+
+    /**
+     * Where the master/detail divider sits for the CURRENT layout and nav mode.
+     *
+     * Four remembered values, not one: grouped columns need a far wider nav than five stacked tabs, and a
+     * divider that resets on every toggle is one the reader re-drags every time. This EXTENDS the existing
+     * per-orientation memory rather than competing with it.
+     */
+    private fun splitProp(): Float = with(cfg) {
+        val stacked = ::masterSplit.isInitialized && masterSplit.orientation
+        when {
+            stacked && overviewGroupedNav -> overviewSplitNarrowGrouped
+            stacked -> overviewSplitNarrow
+            overviewGroupedNav -> overviewSplitWideGrouped
+            else -> overviewSplitWide
+        }
+    }
+
+    private fun storeSplitProp() {
+        if (!::masterSplit.isInitialized) return
+        val p = masterSplit.proportion
+        with(cfg) {
+            val stacked = masterSplit.orientation
+            when {
+                stacked && overviewGroupedNav -> overviewSplitNarrowGrouped = p
+                stacked -> overviewSplitNarrow = p
+                overviewGroupedNav -> overviewSplitWideGrouped = p
+                else -> overviewSplitWide = p
+            }
+        }
+    }
+
+    /**
+     * Build the left nav for the current mode.
+     *
+     * UNGROUPED: five tabs, Sessions first — which session you are reviewing is the question that precedes
+     * every other tab, and answering it re-points the whole observatory rather than just this panel.
+     *
+     * GROUPED: two tabs, each rendering its members as columns. "Sessions · Fleet" keeps that same lead
+     * position. "Workflows · Tasks · Processes" nests its splitters so the Processes column can be appended
+     * later, exactly as its tab used to be.
+     *
+     * [restore] names the member to bring forward afterwards; when null the currently selected member is
+     * kept. A caller flipping the MODE must pass it, read before the flip — [selectedNavMember] answers for
+     * whichever mode is in force.
+     */
+    private fun rebuildNavTabs(restore: String? = null) {
+        if (!::navTabs.isInitialized) return
+        val keep = restore ?: selectedNavMember()
+        navTabs.removeAll()
+        groupPanes.values.forEach { it.detach() } // give the member panes back before anything adopts them
+        groupPanes.clear()
+        if (!groupedNav) {
+            for (m in TOUR_TABS) {
+                if (m == MEMBER_PROCESSES && !processesShown) continue // mounted by repaintProcesses
+                val pane = memberPane(m) ?: continue
+                navTabs.addTab(MEMBER_TITLES[m] ?: m, pane)
+                navTabs.setToolTipTextAt(navTabs.tabCount - 1, MEMBER_TIPS[m] ?: "")
+            }
+        } else {
+            for ((group, members) in com.cellobservatory.observatory.model.NavGrouping.GROUPS) {
+                val pane = ColumnGroupPane(
+                    group = group,
+                    members = members,
+                    title = { MEMBER_TITLES[it] ?: it },
+                    tip = { MEMBER_TIPS[it] },
+                    defaultProportion = { i -> GROUP_SPLIT_DEFAULTS[group]?.getOrNull(i) ?: 0.5f },
+                    // A fold changes which headers exist, and the badges live on them.
+                    onFoldChange = { rebadgeNav() },
+                )
+                for (m in members) {
+                    if (m == MEMBER_PROCESSES && !processesShown) continue // mounted by repaintProcesses
+                    memberPane(m)?.let { pane.mount(m, it) }
+                }
+                // The Processes tab header brings back shells Clear completed folded away; grouped mode has
+                // no such tab, so its COLUMN header inherits the gesture rather than losing it.
+                if (MEMBER_PROCESSES in members) pane.onHeaderClick(MEMBER_PROCESSES) { unhideProcesses() }
+                groupPanes[group] = pane
+                navTabs.addTab(com.cellobservatory.observatory.model.NavGrouping.GROUP_TITLES[group] ?: group, pane)
+                navTabs.setToolTipTextAt(
+                    navTabs.tabCount - 1,
+                    members.mapNotNull { MEMBER_TITLES[it] }.joinToString(" · ") +
+                        " side by side — drag a divider to trade width, double-click one to even them up, " +
+                        "and fold a column to a rail with the button beside its name.",
+                )
+            }
+        }
+        keep?.let { showNavMember(it) }
+        navTabs.revalidate()
+        navTabs.repaint()
+        rebadgeNav()
+    }
+
+    /** Re-write every badge from the payloads already in hand. A rebuild (or a fold) moves the titles to
+     *  new components, and without this the nav shows bare names until the next transcript tick. */
+    private fun rebadgeNav() {
+        repaintSessions(lastSessions)
+        repaintTasks(lastTasks)
+        repaintProcesses(lastProcesses)
+        repaintNavCounts()
+    }
+
+    /** Bring the Processes member on screen once the CLI has answered for it: a tab of its own when
+     *  ungrouped, the third column of the runs group when grouped.
+     *
+     *  Grouped, this is a MOUNT into the existing group pane rather than a rebuild of it: the divider
+     *  between Workflows and the rest keeps the width the reader dragged, and every column keeps whether
+     *  it was folded, because neither is re-derived here. */
+    private fun mountProcesses() {
+        if (!::navTabs.isInitialized) return
+        if (groupedNav) {
+            groupPanes[com.cellobservatory.observatory.model.NavGrouping.RUNS]?.mount(MEMBER_PROCESSES, processesPane)
+        } else if (navTabs.indexOfComponent(processesPane) < 0) {
+            navTabs.addTab(MEMBER_TITLES[MEMBER_PROCESSES] ?: MEMBER_PROCESSES, processesPane)
+            navTabs.setToolTipTextAt(navTabs.tabCount - 1, PROCESSES_TIP)
+        }
+    }
+
+    /** Bring back the shells Clear completed folded away — dismissed, never deleted. */
+    private fun unhideProcesses() {
+        if (dismissedProcesses.isEmpty()) return
+        dismissedProcesses.clear()
+        suppressSel = true
+        repaintProcesses(lastProcesses)
+        restoreSelection() // the refill wiped the highlight — put it back on the same shell
+        suppressSel = false
+    }
+
+    /** Flip the nav grouping: rebuild the tabs and give the nav the width that mode remembers. */
+    private fun applyGroupedNav(on: Boolean) {
+        if (groupedNav == on) return
+        val keep = selectedNavMember() // read in the OLD mode, before the flip changes what tabs mean
+        storeSplitProp() // park this mode's divider so flipping back finds it where the reader left it
+        groupedNav = on
+        rebuildNavTabs(keep)
+        if (::masterSplit.isInitialized) masterSplit.proportion = splitProp()
+        refreshOverviewToolbar()
+    }
 
     init {
         Registry.remember(project, this) // so the guided tour can bring a named tab forward
         // (Live conflicts moved to the Actions panel in 0.8.3 — the fleet tab is just the tree now.)
-        navTabs = JBTabbedPane().apply {
-            // Each pane leads with a one-line description (VS Code .ov-desc parity) above its tree/list.
-            // Sessions FIRST: which session you are reviewing is the question that precedes every other
-            // tab, and answering it re-points the whole observatory rather than just this panel.
-            addTab("Sessions", sessionsPane)
-            setToolTipTextAt(SESSIONS_TAB, SESSIONS_TIP)
-            addTab("Fleet", fleetPane)
-            setToolTipTextAt(FLEET_TAB, "Running agents across every worktree — siblings + their subagents — with the live file-conflict strip below. Select one to map its changes.")
-            addTab("Workflows", workflowsPane)
-            setToolTipTextAt(WORKFLOWS_TAB, "Claude Code Workflow runs — agents grouped by phase, with tokens/time/edits per run. Select one to map its changes.")
-            addTab("Tasks", tasksPane)
-            setToolTipTextAt(TASKS_TAB, "The session's task list (Claude's numbered TaskCreate/TaskUpdate tasks) — live statuses; completed tasks leave the list when the runtime archives them. Always THIS project's active session, never a selected sibling agent's.")
-            // No Processes tab here: it is APPENDED by repaintProcesses once `processes --json` answers,
-            // so an older CLI on PATH shows no tab at all instead of an empty one that can never fill
-            // (VS Code parity).
-        }
-        // Left nav (Fleet · Workflows · Tasks · Processes) = 25% of the panel; the change-map
-        // detail and the selection's feed share the remaining 75%.
+        // Each pane leads with a one-line description (VS Code .ov-desc parity) above its tree/list.
+        navTabs = JBTabbedPane()
+        rebuildNavTabs(MEMBER_SESSIONS)
+        // Left nav = 25% of the panel (45% grouped, whose columns need the width); the change-map
+        // detail and the selection's feed share the rest.
         // Master–detail SIDE BY SIDE while there is width for both, STACKED when there is not. This tool
         // window is usually wide (bottom dock) but can be dragged to a side stripe, where a 25% nav
         // column leaves neither half readable — the nav tabs wrap to three rows and the ledger's file
         // names are squeezed to a few characters. Below the threshold the same two components split
         // vertically instead, which costs height (a narrow window has it) and gives back width.
-        val settings = com.cellobservatory.observatory.settings.ObservatorySettings.instance
-        val split = OnePixelSplitter(false, settings.state.overviewSplitWide).apply {
-            firstComponent = navTabs
+        // The grouping toggle sits BESIDE the tab titles, pinned to the top of the strip's trailing edge
+        // (user rule 2026-07-30) — it is about the tabs, and it read as unrelated among the display
+        // controls on the toolbar two rows up. JBTabbedPane has no trailing-component slot of its own, so
+        // the toolbar is a sibling laid out level with the strip.
+        val navTabsToolbar = ActionManager.getInstance()
+            .createActionToolbar("ClaudeObservatoryOverviewTabs", DefaultActionGroup(groupedNavToggle()), true)
+            .apply {
+                targetComponent = this@ChangeMapPanel
+                component.isOpaque = false
+            }
+        val navHost = JPanel(BorderLayout()).apply {
+            add(navTabs, BorderLayout.CENTER)
+            add(
+                JPanel(BorderLayout()).apply {
+                    isOpaque = false
+                    add(navTabsToolbar.component, BorderLayout.NORTH)
+                },
+                BorderLayout.EAST,
+            )
+        }
+        masterSplit = OnePixelSplitter(false, splitProp()).apply {
+            firstComponent = navHost
             secondComponent = feedSplit
         }
+        val split = masterSplit
         split.addComponentListener(object : ComponentAdapter() {
             private var stacked: Boolean? = null
             override fun componentResized(e: ComponentEvent) {
@@ -442,20 +723,14 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
                 if (stacked == narrow) return // orientation changes reset the divider — only on a real flip
                 // Remember where the reader left THIS layout's divider before flipping to the other one,
                 // which then comes back where they left it rather than at a constant.
-                stacked?.let { was ->
-                    if (was) settings.state.overviewSplitNarrow = split.proportion
-                    else settings.state.overviewSplitWide = split.proportion
-                }
+                if (stacked != null) storeSplitProp()
                 stacked = narrow
                 split.orientation = narrow
-                split.proportion = if (narrow) settings.state.overviewSplitNarrow else settings.state.overviewSplitWide
+                split.proportion = splitProp()
             }
         })
         // A drag is only recorded when the divider settles — Splitter fires this on every pixel of one.
-        split.addPropertyChangeListener("proportion") {
-            if (split.orientation) settings.state.overviewSplitNarrow = split.proportion
-            else settings.state.overviewSplitWide = split.proportion
-        }
+        split.addPropertyChangeListener("proportion") { storeSplitProp() }
         // No prompt-scope banner here: the Prompts WINDOW beside this panel already shows the picked
         // ask (selected, with its full text and a clear action), so naming it again in the Overview was
         // duplication. The scope is still evident — the panes note what they hid, the bulk buttons read
@@ -502,6 +777,9 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             reviewNavBar.promptAxis().forEach(::add)
             add(reviewNavBar.reviewPromptAction(showText = false)); add(reviewNavBar.acceptPromptAction(showText = false))
             add(reviewNavBar.revertPromptAction(showText = false))
+            // Rewind widens Reject Prompt from "this ask" to "this ask and everything after it", so it sits
+            // beside it — the Prompts window deliberately carries no per-ask review verbs (see its comment).
+            add(reviewNavBar.rewindPromptAction(showText = false))
         }
 
         // --- TOP row LEFT cluster: session selector + session-wide bulk + Export. Bulk actions RETARGET to
@@ -544,6 +822,8 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         val rightGroup = DefaultActionGroup().apply {
             add(reviewNavBar.searchAction())
             add(activeOnlyToggle())
+            // Group Tabs is NOT here: it is about the tab strip, so it sits beside it (user rule
+            // 2026-07-30). See navHost below.
             add(clearCompletedAction())
             addSeparator()
             add(reviewNavBar.spotlightAction())
@@ -728,15 +1008,14 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             processesList.selectedValue?.let { p -> selectDetail(NavSel.Process(p.id)) }
         }
         // Clicking the Processes tab HEADER brings back the shells Clear completed folded away — they were
-        // dismissed, never deleted, and the header badge says how many are hidden.
+        // dismissed, never deleted, and the header badge says how many are hidden. Grouped mode has no
+        // Processes tab, so there the gesture lives on its column header instead (see columnPane).
         navTabs.addMouseListener(object : MouseAdapter() {
             override fun mouseClicked(e: MouseEvent) {
-                if (navTabs.indexAtLocation(e.x, e.y) != PROCESSES_TAB || dismissedProcesses.isEmpty()) return
-                dismissedProcesses.clear()
-                suppressSel = true
-                repaintProcesses(lastProcesses)
-                restoreSelection() // the refill wiped the highlight — put it back on the same shell
-                suppressSel = false
+                if (groupedNav) return
+                val i = navTabs.indexOfComponent(processesPane)
+                if (i < 0 || navTabs.indexAtLocation(e.x, e.y) != i) return
+                unhideProcesses()
             }
         })
         // Clicking a nav tree's "N hidden · show all" row does the same for its agents / workflow runs.
@@ -842,33 +1121,23 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             // `folded` is decided in core and shipped on the row — the fold rule lives in ONE place.
             .filter { !it.folded || it.self || it.session == scopedSession() }
         val other = otherAgentSelected()
-        if (navTabs.tabCount > FLEET_TAB) {
-            navTabs.setTitleAt(
-                FLEET_TAB,
-                when {
-                    agents.isEmpty() -> "Fleet"
-                    scopedSession() != null && agents.size > 1 -> "Fleet 1/${agents.size}"
-                    else -> "Fleet ${agents.size}"
-                },
-            )
-        }
-        if (navTabs.tabCount > WORKFLOWS_TAB) {
-            val runs = lastResult?.workflows?.size ?: 0
-            navTabs.setTitleAt(WORKFLOWS_TAB, if (other || runs == 0) "Workflows" else "Workflows $runs")
-        }
-        if (navTabs.tabCount > TASKS_TAB) {
-            val tasks = lastTasks
-            val done = tasks.count { it.status == "completed" }
-            navTabs.setTitleAt(TASKS_TAB, if (other || tasks.isEmpty()) "Tasks" else "Tasks $done/${tasks.size}")
-        }
+        setTabBadge(
+            MEMBER_FLEET,
+            when {
+                agents.isEmpty() -> "Fleet"
+                scopedSession() != null && agents.size > 1 -> "Fleet 1/${agents.size}"
+                else -> "Fleet ${agents.size}"
+            },
+        )
+        val runs = lastResult?.workflows?.size ?: 0
+        setTabBadge(MEMBER_WORKFLOWS, if (other || runs == 0) "Workflows" else "Workflows $runs")
+        val tasks = lastTasks
+        val done = tasks.count { it.status == "completed" }
+        setTabBadge(MEMBER_TASKS, if (other || tasks.isEmpty()) "Tasks" else "Tasks $done/${tasks.size}")
         // Shells cannot be scoped either; repaintProcesses owns the unscoped label, so only blank it here.
-        if (other && navTabs.tabCount > PROCESSES_TAB) {
-            navTabs.setTitleAt(PROCESSES_TAB, "Processes")
-            navTabs.setToolTipTextAt(
-                PROCESSES_TAB,
-                "Background shells are read for the session under review, never for a selected sibling agent, " +
-                    "so no count is shown while one is selected. Open that session from the Sessions tab to see its shells.",
-            )
+        if (other) {
+            setTabBadge(MEMBER_PROCESSES, "Processes")
+            setTabTip(MEMBER_PROCESSES, PROCESSES_UNSCOPED_TIP)
         }
     }
 
@@ -908,11 +1177,14 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             if (activeOnly) { activeOnly = false; repaintFiltered() }
         } else {
             // Hand the panel back the way the tour found it: the reader's own tab and their own filter.
-            tourNavTab?.let { if (::navTabs.isInitialized && it < navTabs.tabCount) navTabs.selectedIndex = it }
+            // Both are cleared BEFORE the restore, so selectNavTab does not re-record the position it is
+            // putting back.
+            val back = tourNavTab
+            val prev = tourFilter
             tourNavTab = null
-            val prev = tourFilter ?: return
             tourFilter = null
-            if (prev != activeOnly) { activeOnly = prev; repaintFiltered() }
+            back?.let { showNavMember(it) }
+            if (prev != null && prev != activeOnly) { activeOnly = prev; repaintFiltered() }
         }
     }
 
@@ -1104,7 +1376,7 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             for (w in wfs) if (seen.add(w.id) && w.running) fresh = w.id
             fresh?.let {
                 selected = NavSel.Workflow(it)
-                if (::navTabs.isInitialized) navTabs.selectedIndex = WORKFLOWS_TAB
+                showNavMember(MEMBER_WORKFLOWS) // grouped mode brings the runs group forward instead
             }
         }
 
@@ -1212,13 +1484,10 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             else -> processesEmptyText(res)
         }
         if (!::navTabs.isInitialized) return
-        // Presence is asked of the COMPONENT, never of the tab count: Sessions is always mounted, so a
-        // count-based test would report Processes present before it has ever been added.
-        val present = navTabs.indexOfComponent(processesPane) >= 0
-        if (res == null && !present) return // never answered — no tab to add or badge
-        if (!present) {
-            navTabs.addTab("Processes", processesPane)
-            navTabs.setToolTipTextAt(PROCESSES_TAB, PROCESSES_TIP)
+        if (res == null && !processesShown) return // never answered — nothing to mount or badge
+        if (!processesShown) {
+            processesShown = true
+            mountProcesses()
         }
         // The badge counts what the tab WILL SHOW: under an ask scope that is the shells this ask
         // launched, not the session's — a badge that contradicts the pane it labels is worse than none.
@@ -1229,14 +1498,9 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         // With another agent selected the honest badge is NO badge (0.9.0): the reviewed session's count
         // beside a pane the reader believes is scoped to their selection is worse than showing nothing.
         val otherAgent = scopedSession()?.let { it != service().currentSession() } ?: false
-        navTabs.setToolTipTextAt(
-            PROCESSES_TAB,
-            if (otherAgent) "Background shells are read for the session under review, never for a selected sibling agent, " +
-                "so no count is shown while one is selected. Open that session from the Sessions tab to see its shells."
-            else PROCESSES_TIP,
-        )
-        navTabs.setTitleAt(
-            PROCESSES_TAB,
+        setTabTip(MEMBER_PROCESSES, if (otherAgent) PROCESSES_UNSCOPED_TIP else PROCESSES_TIP)
+        setTabBadge(
+            MEMBER_PROCESSES,
             if (otherAgent || sum == null || sum.total == 0) "Processes"
             else "Processes ${sum.running}/${sum.total}" +
                 (if (sum.failed > 0) " · ${sum.failed} failed" else "") +
@@ -1278,9 +1542,7 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             tasksModel.addElement(DoneTasksToggle(done.size, tasksOpen))
             if (tasksOpen) done.forEach { tasksModel.addElement(TaskRow(it, rollBy[it.taskId])) }
         }
-        if (::navTabs.isInitialized && navTabs.tabCount > TASKS_TAB) {
-            navTabs.setTitleAt(TASKS_TAB, if (tasks.isEmpty()) "Tasks" else "Tasks ${done.size}/${tasks.size}")
-        }
+        setTabBadge(MEMBER_TASKS, if (tasks.isEmpty()) "Tasks" else "Tasks ${done.size}/${tasks.size}")
     }
 
     /** Paint the Sessions tab: this workspace's sessions, newest conversation first, with the live one
@@ -1315,8 +1577,7 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         // Say what is NOT on screen: a list that silently drops rows is indistinguishable from a store
         // that never had them, and this one drops the finished ones on purpose.
         if (settled > 0) sessionsModel.addElement(FilterInfo("$settled finished session(s) older than a day not shown — clear them from Clean Store"))
-        val tabIdx = navTabs.indexOfComponent(sessionsPane)
-        if (tabIdx >= 0) navTabs.setTitleAt(tabIdx, if (rows.isEmpty()) "Sessions" else "Sessions ${recent.size}/${rows.size}")
+        setTabBadge(MEMBER_SESSIONS, if (rows.isEmpty()) "Sessions" else "Sessions ${recent.size}/${rows.size}")
         // Mark which row the observatory is on now (the pinned one, else the live one) without firing the
         // selection listener — restoring a highlight must never re-pin anything.
         val pinnedId = com.cellobservatory.observatory.settings.ObservatorySettings.instance.state.session
@@ -1843,6 +2104,19 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             // The toggle scopes the DETAIL too (VS Code parity): one control, one meaning across the panel.
             renderDetail()
         }
+    }
+
+    /** Pair the related nav tabs into two panes of side-by-side columns, and back. Layout ONLY — nothing is
+     *  filtered and the change-map detail is untouched. It lives beside the tab strip it rearranges (see
+     *  navHost); icon-only there, because a label in that slot would push into the tabs themselves. */
+    private fun groupedNavToggle(): ToggleAction = object : ToggleAction(
+        "Group Tabs",
+        "Group related tabs side by side (Sessions · Fleet / Workflows · Tasks · Processes)",
+        AllIcons.Actions.SplitVertically,
+    ), DumbAware {
+        override fun getActionUpdateThread() = ActionUpdateThread.BGT // reads one flag
+        override fun isSelected(e: AnActionEvent) = groupedNav
+        override fun setSelected(e: AnActionEvent, state: Boolean) = applyGroupedNav(state)
     }
 
     /** Fold every SETTLED item out of the nav: done agents, finished workflow runs, and exited background

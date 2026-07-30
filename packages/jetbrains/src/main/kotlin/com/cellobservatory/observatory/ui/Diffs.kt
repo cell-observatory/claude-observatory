@@ -74,8 +74,8 @@ object Diffs {
                 prompt.putUserData(
                     DiffUserDataKeys.CONTEXT_ACTIONS,
                     listOf(
-                        action("Keep #${rec.id}", NavTint.KEEP) { ReviewOps.keep(project, session, rec.id) },
-                        action("Undo #${rec.id}", NavTint.UNDO) { ReviewOps.undoOrRedo(project, session, rec, redo = false) },
+                        action("Keep #${rec.id}", NavTint.KEEP) { ReviewOps.keep(project, session, rec.id, advance = false) },
+                        action("Undo #${rec.id}", NavTint.UNDO) { ReviewOps.undoOrRedo(project, session, rec, redo = false, advance = false) },
                         action("Chat About #${rec.id}", AllIcons.General.Balloon) { ReviewOps.chatAbout(project, session, rec.id) },
                         // Step to the previous / next edit in THIS file and reopen the diff (parity with VS
                         // Code's diff-title Previous/Next edit); reuses the same tinted chevrons as the nav bar.

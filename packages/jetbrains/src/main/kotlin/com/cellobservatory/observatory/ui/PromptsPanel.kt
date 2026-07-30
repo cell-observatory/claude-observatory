@@ -50,8 +50,39 @@ class PromptsPanel(private val project: Project) : JPanel(BorderLayout()) {
         }
     }
 
-    fun tourAnchor(anchor: String?): javax.swing.JComponent? = if (anchor == "prompts-list") list else null
+    fun tourAnchor(anchor: String?): javax.swing.JComponent? = when (anchor) {
+        "prompts-list" -> list
+        // The selector is one row up, in the Timeline content that hosts this tab (0.10.0 — it used to be
+        // a platform title action, which no component here could ring). The NAME stays claimed by this
+        // panel so exactly one panel answers for it; the component comes from the host.
+        "session-picker" -> TimelinePanel.of(project)?.sessionAnchor()
+        else -> null
+    }
     private fun service() = ObservatoryService.getInstance(project)
+
+    /**
+     * Show [id] as the picked ask: select its row and scroll it into view.
+     *
+     * Called when the pick was made SOMEWHERE ELSE — the nav bar's Prompt axis — so that the two surfaces
+     * never disagree about which ask is scoped. It writes only the list: the pick itself already went to
+     * the service, and re-writing it here through the selection listener is exactly the
+     * select → notify → select loop [syncing] exists to prevent.
+     */
+    fun selectPrompt(id: String?) {
+        val idx = (0 until model.size()).firstOrNull { model.get(it).id == id }
+        syncing = true
+        try {
+            if (idx != null) {
+                list.selectedIndex = idx
+                list.ensureIndexIsVisible(idx) // a selected row 40 asks down is a selection nobody can see
+            } else {
+                list.clearSelection()
+            }
+        } finally {
+            syncing = false
+        }
+        showResponse(list.selectedValue)
+    }
 
     private val model = DefaultListModel<SessionPrompt>()
     private val list = JBList(model).apply {
@@ -218,7 +249,12 @@ class PromptsPanel(private val project: Project) : JPanel(BorderLayout()) {
             // Re-select the scoped ask against the FRESH rows (and let it go if it vanished with a
             // session switch — a scope nothing can name must not keep filtering the Overview).
             val idx = (0 until model.size()).firstOrNull { model.get(it).id == keepId }
-            if (idx != null) list.selectedIndex = idx else list.clearSelection()
+            if (idx != null) {
+                list.selectedIndex = idx
+                list.ensureIndexIsVisible(idx)
+            } else {
+                list.clearSelection()
+            }
             if (idx == null && keepId != null) service().selectedPromptId = null
         } finally {
             syncing = false

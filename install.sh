@@ -1,13 +1,31 @@
 #!/usr/bin/env bash
-# Claude Observatory — one-shot installer for the CLI + VS Code extension from a clean checkout.
-# Safe to re-run. Does NOT commit anything. Usage:  ./install.sh
+# Claude Observatory — one-shot installer from a clean checkout: CLI + the editor extensions for
+# whatever editors are on this machine (VS Code family and/or JetBrains) + status line + hooks.
+# Everything is built from THIS tree; nothing is downloaded. Safe to re-run. Does NOT commit anything.
+#
+#   ./install.sh                 # skips the JetBrains plugin unless --jetbrains is given (slow build)
+#   ./install.sh --jetbrains     # also build + install the JetBrains plugin (needs JDK 21 + Gradle)
+#
+# For a release install with no toolchain, use scripts/bootstrap.sh (or install.ps1 on Windows), which
+# also takes --channel stable|dev.
 set -euo pipefail
 cd "$(dirname "$0")"
+
+WITH_JETBRAINS=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --jetbrains|--with-jetbrains) WITH_JETBRAINS=1; shift ;;
+    -h|--help)
+      printf 'usage: ./install.sh [--jetbrains]\n\n  --jetbrains  also build + install the JetBrains plugin (needs JDK 21 + Gradle)\n'
+      exit 0 ;;
+    *) printf 'unknown option: %s (try --help)\n' "$1" >&2; exit 1 ;;
+  esac
+done
 
 c_arrow=$'\033[1;36m▸\033[0m'; c_warn=$'\033[1;33m!\033[0m'; c_dim=$'\033[2m'; c_off=$'\033[0m'
 say()  { printf '%s %s\n' "$c_arrow" "$1"; }
 warn() { printf '%s %s\n' "$c_warn" "$1"; }
-step=0; total=5
+step=0; total=$((5 + WITH_JETBRAINS))
 head() { step=$((step+1)); printf '\n%s[%d/%d]%s %s\n' "$c_dim" "$step" "$total" "$c_off" "$1"; }
 
 command -v npm >/dev/null 2>&1 || { warn "npm not found — install Node.js 18+ first."; exit 1; }
@@ -29,21 +47,47 @@ npm run build:vscode --silent
 ( cd packages/vscode && npm run package --silent )
 VSIX="$PWD/packages/vscode/claude-observatory.vsix"
 say "Packaged: $VSIX"
-if command -v code >/dev/null 2>&1; then
-  # Run inside a Remote-SSH / devcontainer terminal and this installs into the REMOTE extension
-  # host — exactly where the extension must live (it reads the remote's ~/.claude). Run it locally
-  # and it installs locally. Either way it targets the host whose 'code' is on PATH.
-  code --install-extension "$VSIX" --force
-  say "Extension installed. Fully quit VS Code (⌘Q) once so its activity-bar icon refreshes."
+
+JB_ZIP=""
+if [ "$WITH_JETBRAINS" = "1" ]; then
+  head "Building the JetBrains plugin (JDK 21 + Gradle)"
+  if bash scripts/install-jetbrains.sh --build-only; then
+    JB_ZIP="$(ls -t packages/jetbrains/build/distributions/claude-observatory-jetbrains-*.zip 2>/dev/null | head -1 || true)"
+    [ -n "$JB_ZIP" ] && JB_ZIP="$PWD/${JB_ZIP#./}"
+  fi
+  # Never silently: if the build failed, say so — the install step below will simply skip JetBrains.
+  [ -n "$JB_ZIP" ] || warn "The JetBrains plugin did not build — skipping it (the rest still installs)."
+fi
+
+head "Installing the extensions into the editors on this machine"
+# One call covers the VS Code family AND JetBrains, from the artifacts just built — no network, and it
+# installs into editors that do not have the extension yet (which `update` deliberately will not do).
+# Run this inside a Remote-SSH / devcontainer terminal and it targets the REMOTE host, which is exactly
+# where the extension has to live: it reads that host's ~/.claude.
+# No scope flag: in local-artifact mode the CLI acts only on families it was GIVEN an artifact for, and
+# names `./install.sh --jetbrains` for the one it skipped. Passing --vscode-only instead meant a
+# JetBrains-only machine got "no VS Code-family editor found" plus three lines of VS Code advice, and the
+# plugin it actually needed was never mentioned.
+INSTALL_ARGS=(--vsix "$VSIX")
+[ -n "$JB_ZIP" ] && INSTALL_ARGS+=(--jetbrains-zip "$JB_ZIP")
+# Prefer this tree's freshly-built CLI: the global one was installed a moment ago, but if that step
+# failed (permissions) we should still be able to install the extensions.
+if [ -f "$PWD/packages/cli/dist/index.js" ]; then
+  CO=(node "$PWD/packages/cli/dist/index.js")
+elif [ -n "$CLI" ]; then
+  CO=(claude-observatory)
 else
-  warn "VS Code 'code' CLI not found — packaged the .vsix but did not install it."
-  printf '  %sInstall it yourself:%s\n' "$c_dim" "$c_off"
-  printf "    • Local VS Code:              code --install-extension %s\n" "$VSIX"
-  printf "    • Remote-SSH / devcontainer:  open the folder on the remote, then run that same command\n"
-  printf "      %sinside the remote window's terminal — VS Code injects 'code' into the remote PATH so it\n" "$c_dim"
-  printf "      installs on the remote host (where it belongs). Or: Extensions view → '…' → 'Install\n"
-  printf "      from VSIX…' and choose 'Install in SSH: <host>' / 'Install in Dev Container'.%s\n" "$c_off"
-  printf "    • No 'code' at all:           Cmd/Ctrl-Shift-P → \"Shell Command: Install 'code' command in PATH\".\n"
+  CO=()
+fi
+if [ ${#CO[@]} -gt 0 ]; then
+  "${CO[@]}" install-extensions "${INSTALL_ARGS[@]}" || {
+    warn "Some editor surfaces could not be installed — see the notes above."
+    printf "  %sManual fallback: code --install-extension %s%s\n" "$c_dim" "$VSIX" "$c_off"
+    printf "  %sNo 'code' on PATH? In VS Code: Cmd/Ctrl-Shift-P → \"Shell Command: Install 'code' command in PATH\".%s\n" "$c_dim" "$c_off"
+  }
+else
+  warn "The CLI is not on PATH, so the extensions were not installed."
+  printf "  %sOnce it is: claude-observatory install-extensions --vsix %s%s\n" "$c_dim" "$VSIX" "$c_off"
 fi
 
 head "Installing the bundled status line (powers the sidebar Usage bars)"

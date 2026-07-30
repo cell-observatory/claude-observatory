@@ -59,6 +59,9 @@ internal object NavTint {
     val UNDO: Icon = tint(AllIcons.Actions.Rollback, RED)
     val REJECT: Icon = tint(AllIcons.Actions.Cancel, RED)
     val REVERT_ALL: Icon = tint(AllIcons.Vcs.History, RED)
+    /** Rewind = stepping BACK through the conversation, so a rewind glyph rather than another rollback:
+     *  it sits next to Reject Prompt and the two must not read as the same operation at a glance. */
+    val REWIND: Icon = tint(AllIcons.Actions.Undo, RED)
     val CLEAR: Icon = tint(AllIcons.Actions.GC, ORANGE)
     val SEARCH: Icon = tint(AllIcons.Actions.Find, PURPLE)
     val SPOTLIGHT: Icon = tint(AllIcons.Actions.IntentionBulb, PURPLE)
@@ -440,6 +443,19 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
             }
         }
 
+    /**
+     * Prompt-axis Rewind — revert this ask AND every ask after it (Copilot's "Restore Checkpoint").
+     *
+     * It lives on this axis rather than in the Prompts window on purpose: that window's comment records
+     * that its only job is picking the ask that scopes the Overview, with the review verbs kept where the
+     * review happens. Rewind is a review verb over a prompt, so it belongs beside Accept Prompt and Reject
+     * Prompt — the two buttons whose scope it widens from "this ask" to "this ask onward".
+     */
+    fun rewindPromptAction(showText: Boolean = true): AnAction =
+        labelAct(showText, "Rewind", "Rewind to before this prompt — revert it and every prompt after it", NavTint.REWIND, ::hasCurrentPrompt) {
+            currentPrompt()?.let { r -> withSession { s -> ReviewOps.rewindFromPrompt(project, s, r) } }
+        }
+
     /** Prompt-axis counter ("Prompt i/n · N files · N edits"), or null when no prompt has pending work.
      *  The ask itself is the hover tooltip — a prompt is far too long to sit inline. */
     private fun promptCounterText(): String? {
@@ -486,6 +502,14 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
         val firstId = r.editIds.firstOrNull { id -> log.any { it.id == id && it.pending } } ?: return
         val rec = log.find { it.id == firstId } ?: return
         navEditId = firstId
+        // Revealing IS picking: the axis is now on this ask, so the pick that scopes every other surface
+        // says so too — set once, on the service, which is the one place a prompt choice lives.
+        service.selectedPromptId = promptId
+        // …and the Prompts window shows it selected. The service notification that follows is coalesced
+        // and lands a tick later, which is long enough for the two surfaces to disagree on screen; this
+        // writes the list directly and PromptsPanel mutes its own listener while it does, so the pick is
+        // never bounced back through the service.
+        PromptsPanel.of(project)?.selectPrompt(promptId)
         session()?.let { Navigate.openFileAtEdit(project, it, rec) }
         onNavChange()
     }
