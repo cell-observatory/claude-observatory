@@ -7951,3 +7951,56 @@ test('spawn: no source file spawns a child process except through the launcher',
     'these reach child_process directly instead of core/spawn — see packages/core/src/spawn.ts:\n  ' + offenders.join('\n  ')
   );
 });
+
+test('failure: a deprecation warning never outranks the real reason (#45)', () => {
+  // The exact pair of streams the reporter's machine produced: stdout carried the reason, stderr held
+  // only Node's warning, and the editors rendered `stderr || stdout`.
+  const dep =
+    '(node:326100) [DEP0190] DeprecationWarning: Passing args to a child process with shell option ' +
+    'true can lead to security vulnerabilities, as the arguments are not escaped, only concatenated.\n' +
+    '(Use `node --trace-deprecation ...` to show where the warning was created)\n';
+  const progress =
+    'channel: pre-release (dev)\ndownloading claude-observatory-cli-dev.tgz …\ninstalling globally (npm i -g) …\n' +
+    '✓ updated the CLI 0.9.0 → 0.9.1\n' +
+    "  ⚠ VS Code --install-extension failed — install the .vsix manually from the release\n";
+  const msg = core.cliFailureMessage(progress, dep, 'is the claude-observatory CLI installed?');
+  assert.match(msg, /--install-extension failed/, 'the reason wins');
+  assert.doesNotMatch(msg, /DEP0190|DeprecationWarning/, 'the warning is gone');
+  // POSITIVE CONTROL for the old rule: it would have returned the warning verbatim.
+  assert.match(String(dep || progress).trim().slice(0, 300), /DEP0190/, 'the pre-fix ordering did show the warning');
+
+  // A genuine stderr failure still wins — this is why "always prefer stdout" would be wrong. fail()
+  // writes here, and when it has, that IS the reason.
+  assert.match(
+    core.cliFailureMessage('downloading …\ninstalling globally …', 'claude-observatory: npm install failed (exit 1)', 'x'),
+    /npm install failed \(exit 1\)/
+  );
+  // Warning noise plus a real stderr line: keep the line, drop the noise.
+  assert.equal(core.cliFailureMessage('', dep + 'claude-observatory: release has no .vsix asset\n', 'x'),
+    'claude-observatory: release has no .vsix asset');
+  // Nothing classifiable → the TAIL of stdout, where a summary lives (not the head, which is progress).
+  assert.match(core.cliFailureMessage('step one\nstep two\nsummary line', '', 'x'), /summary line/);
+  // Nothing at all → the caller's fallback, never an empty toast.
+  assert.equal(core.cliFailureMessage('', dep, 'is the claude-observatory CLI installed?'),
+    'is the claude-observatory CLI installed?');
+  assert.equal(core.cliFailureMessage(null, undefined, 'fallback'), 'fallback', 'null/undefined are tolerated');
+  // The cap keeps a toast a toast.
+  assert.equal(core.cliFailureMessage('', 'x'.repeat(500), 'f').length, 300);
+});
+
+test('failure: the JetBrains plugin mirrors cliFailureMessage (cross-editor parity)', () => {
+  // Kotlin cannot import the TS. This pins the mirror: the rule must not silently exist in one editor
+  // and not the other, which is the shape of the bug it fixes.
+  const kt = fs.readFileSync(
+    path.resolve(__dirname, '../../jetbrains/src/main/kotlin/com/cellobservatory/observatory/core/ObservatoryCli.kt'),
+    'utf8'
+  );
+  assert.match(kt, /fun failureMessage\(/, 'ObservatoryCli.failureMessage must exist');
+  assert.match(kt, /NODE_NOISE/, 'and strip Node warning noise like the TS does');
+  assert.match(kt, /LOOKS_LIKE_TROUBLE/, 'and prefer the trouble lines of stdout');
+  assert.doesNotMatch(
+    kt,
+    /r\.stderr\.ifBlank \{ r\.stdout \}/,
+    'the old stderr-first rule must be gone, not merely shadowed'
+  );
+});

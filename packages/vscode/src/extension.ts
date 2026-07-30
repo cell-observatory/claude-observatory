@@ -5532,8 +5532,10 @@ function runObservatoryUpdate(args: string[], title: string, doneMsg: string, up
         core.execFileTool(bin, args, { timeout: 300000 }, (err, stdout, stderr) => {
           versionInfoCache = null; // the chip must re-learn the world after an install
           if (err) {
+            // core.cliFailureMessage, not `stderr || stdout`: that ordering is what put a Node
+            // deprecation warning in this toast instead of the reason (#45).
             vscode.window.showErrorMessage(
-              `Claude Observatory: update failed — ${String(stderr || stdout || err.message).trim().slice(0, 300)}`
+              `Claude Observatory: update failed — ${core.cliFailureMessage(stdout, stderr, err.message)}`
             );
             resolve();
             return;

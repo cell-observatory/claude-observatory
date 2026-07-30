@@ -717,9 +717,40 @@ object ObservatoryCli {
             }
         }
         val r = run(args, workDir, timeoutMs = 300_000)
-        // On failure the ERROR is on stderr (the CLI's fail() writes there) — stdout carries progress
-        // lines that would bury it in the toast.
-        return r.ok to (if (r.ok) r.stdout else r.stderr.ifBlank { r.stdout })
+        return r.ok to (if (r.ok) r.stdout else failureMessage(r.stdout, r.stderr, ""))
+    }
+
+    /** Node's own chatter on stderr — `(node:123) [DEP0190] …` and the `(Use `node --trace…`)` hint
+     *  that follows it. Never a failure reason. */
+    private val NODE_NOISE = Regex("""^\s*(?:\(node:\d+\)|\(Use `node )""")
+
+    /** Lines that read as a problem rather than as progress — used only when falling back to stdout. */
+    private val LOOKS_LIKE_TROUBLE = Regex(
+        """(?:^\s*[⚠✗✘✖!]|\b(?:fail(?:ed|ure)?|could not|couldn't|cannot|can't|unable|denied|refused|missing|not found|no such)\b)""",
+        RegexOption.IGNORE_CASE,
+    )
+
+    /**
+     * MIRROR of core/failure.ts `cliFailureMessage` — keep the two in step. A source assertion in
+     * packages/core/test/core.test.js fails if this function goes missing, because a silent
+     * divergence between the two editors is the very class of bug this fixes.
+     *
+     * The rule used to be `stderr.ifBlank { stdout }`, with a comment asserting the error is always on
+     * stderr. It is not: the CLI's "could not update the VS Code extension" path exits 1 while writing
+     * to stdout, and on Windows stderr held nothing but a Node DEP0190 deprecation warning — so the
+     * toast showed the warning and hid the reason (#45). Prefer stderr MINUS the noise; then the lines
+     * of stdout that read as trouble; then its tail, where a summary lives.
+     */
+    fun failureMessage(stdout: String, stderr: String, fallback: String, maxLen: Int = 300): String {
+        fun cap(s: String) = if (s.length > maxLen) s.take(maxLen - 1).trimEnd() + "…" else s
+        val realStderr =
+            stderr.lines().filter { it.isNotBlank() && !NODE_NOISE.containsMatchIn(it) }.joinToString("\n").trim()
+        if (realStderr.isNotEmpty()) return cap(realStderr)
+        val out = stdout.lines().filter { it.isNotBlank() }
+        val flagged = out.filter { LOOKS_LIKE_TROUBLE.containsMatchIn(it) }
+        if (flagged.isNotEmpty()) return cap(flagged.joinToString("\n").trim())
+        if (out.isNotEmpty()) return cap(out.takeLast(3).joinToString("\n").trim())
+        return fallback
     }
 
     /** Setup diagnostics as markdown. `doctor` exits 1 when there are failures but still prints, so

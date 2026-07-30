@@ -2966,7 +2966,13 @@ async function cmdUpdate(args: string[]): Promise<void> {
   const jetbrains = await refreshJetbrainsPlugin(assets, latest, force || switching);
   if (vscode === 'blocked' || jetbrains === 'blocked') {
     // Something is installed but couldn't be updated — never let this pass as success/silence.
-    process.stdout.write(c.yellow('⚠ ') + 'an installed extension could not be updated (see the note above).\n');
+    // On STDERR, not stdout: this is the failure reason, and an editor surfacing this run reads
+    // stderr first. Reported as #45, where the only thing on stderr was a Node deprecation warning,
+    // so the toast showed the warning and the person never saw this line at all.
+    const which = [vscode === 'blocked' ? 'the VS Code extension' : null, jetbrains === 'blocked' ? 'the JetBrains plugin' : null]
+      .filter(Boolean)
+      .join(' and ');
+    process.stderr.write(c.yellow('⚠ ') + `could not update ${which} — see the notes above.\n`);
     process.exitCode = 1;
     return;
   }
