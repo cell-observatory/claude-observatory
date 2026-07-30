@@ -2294,7 +2294,14 @@ test('extension: three views, click commands, inline annotations, chat, status s
     configValues['revealNextOnResolve'] = true;
     await commands['claudeObservatory.inlineKeep'](1);
     assert.equal(core.findRecord(RS, 1).status, 'kept', 'inlineKeep keeps the edit it was given');
-    assert.equal(opened?.uri?.fsPath, RB, 'and with revealNextOnResolve on, the next pending edit is revealed — across the file boundary');
+    // canonPath both sides: on Windows the extension canonicalizes the drive letter to uppercase (#43)
+    // while the temp path this fixture built keeps whatever case the OS handed back, so a raw compare
+    // passes on macOS and fails on Windows for a product that is behaving correctly.
+    assert.equal(
+      core.canonPath(opened?.uri?.fsPath ?? ''),
+      core.canonPath(RB),
+      'and with revealNextOnResolve on, the next pending edit is revealed — across the file boundary'
+    );
 
     // …and OFF, it resolves without moving the reader. This is the assertion the old mock could not make:
     // it returned the caller's default, so the "off" path was never actually exercised.
