@@ -8089,65 +8089,110 @@ test('statusline: the vendored installer keeps the fixes a sync would silently d
   assert.match(sh, /winget install jqlang\.jq/, 'the jq error must name a Windows route');
 });
 
-test('install-extensions: detects an editor that does NOT yet have our extension (0.10.0)', () => {
+test('install-extensions: detects an editor that does NOT yet have our extension (0.10.0)', async () => {
   // `update` refreshes only what is already installed — deliberately. This command is the other half,
-  // and the detection it needs is different: it must see a bare editor. Fake HOME, real dirs, no network.
+  // and the detection it needs is different: it must see a bare editor. Fake HOME, real dirs.
   const home = freshHome();
   delete process.env.CLAUDE_CONFIG_DIR;
+
+  // The releases API is POINTED AT A LOCAL MOCK. The first version of this test let it reach
+  // api.github.com, which answers 403 to an unauthenticated CI runner — so it passed on Linux, failed on
+  // macOS and Windows, and would have been flaky forever.
+  const http = require('http');
+  const srv = http.createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(
+      JSON.stringify([
+        {
+          tag_name: 'v9.9.9',
+          prerelease: false,
+          draft: false,
+          assets: [
+            { name: 'claude-observatory-vscode-v9.9.9.vsix', browser_download_url: 'http://127.0.0.1:1/x.vsix' },
+          ],
+        },
+      ])
+    );
+  });
+  // await 'listening' (srv.address() is null before it), and unref so a failed assertion can never
+  // leave a listening handle holding the whole suite open.
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  srv.unref();
+
   // APPDATA too: jetbrainsPluginDirs() scans %APPDATA%\JetBrains unconditionally, so without this a
-  // Windows contributor with PyCharm installed would see their REAL IDEs in this assertion.
+  // Windows contributor with PyCharm installed would see their REAL IDEs in these assertions.
   const env = {
     ...process.env,
     HOME: home,
     USERPROFILE: home,
     APPDATA: path.join(home, 'AppData', 'Roaming'),
+    CLAUDE_OBSERVATORY_RELEASES_API: `http://127.0.0.1:${srv.address().port}`,
     CLAUDE_OBSERVATORY_NO_UPDATE_CHECK: '1',
   };
-  const check = () => JSON.parse(cp.execFileSync('node', [CLI, 'install-extensions', '--check', '--json'], { env, encoding: 'utf8' }));
 
-  // A fake HOME isolates the extension DIRS but not PATH, so an editor whose CLI is genuinely on this
-  // machine still reports present — which is correct, and is the whole point of the `or` in
-  // editorPresent: installed-but-never-launched has a CLI and no extensions dir.
-  let d = check();
-  assert.deepEqual(d.jetbrains, [], 'no plugin dirs -> no JetBrains');
-  assert.ok(
-    d.vscode.every((r) => r.installed === null),
-    'under a fresh HOME nothing of ours is installed in any detected editor'
-  );
+  // ASYNC exec, not execFileSync: the mock server runs in THIS process, so a sync child would block the
+  // event loop that has to answer it — a 106-second timeout instead of a test.
+  const run = (args, envOverride) =>
+    new Promise((resolve, reject) => {
+      cp.execFile('node', [CLI, 'install-extensions', ...args], { env: envOverride || env, encoding: 'utf8' }, (err, stdout, stderr) => {
+        if (err) reject(new Error(`${args.join(' ')} failed: ${stderr || stdout || err.message}`));
+        else resolve(stdout);
+      });
+    });
+  const check = async (...extra) => JSON.parse(await run(['--check', '--json', ...extra]));
 
-  // An editor that has RUN but does not have our extension: the case `update` ignores and this acts on.
-  fs.mkdirSync(path.join(home, '.vscode', 'extensions'), { recursive: true });
-  d = check();
-  const vsc = () => d.vscode.find((r) => r.label === 'VS Code');
-  assert.ok(vsc(), 'an empty extensions dir is still a PRESENT editor');
-  assert.equal(vsc().present, true);
-  assert.equal(vsc().installed, null, 'and it reports our extension as not installed');
-
-  // Now give it our extension: same row, now with a version.
-  fs.mkdirSync(path.join(home, '.vscode', 'extensions', 'cell-observatory.claude-observatory-vscode-0.9.0'), { recursive: true });
-  d = check();
-  assert.equal(vsc().installed, '0.9.0', 'the installed version is read from the folder name');
-
-  // A JetBrains IDE with no plugin of ours — again, present and actionable.
-  const jb = path.join(home, 'Library', 'Application Support', 'JetBrains', 'PyCharm2026.1', 'plugins');
-  fs.mkdirSync(jb, { recursive: true });
-  d = check();
-  assert.equal(d.jetbrains.length, 1, 'a plugins dir is a present IDE even with no plugin of ours');
-  assert.equal(d.jetbrains[0].installed, null);
-
-  // The scope flags must agree with what a real run would do, or an installer acts on a wrong report.
-  const scoped = (flag) =>
-    JSON.parse(cp.execFileSync('node', [CLI, 'install-extensions', '--check', '--json', flag], { env, encoding: 'utf8' }));
-  assert.equal(scoped('--vscode-only').jetbrains.length, 0, '--vscode-only hides the JetBrains surface');
-  assert.equal(scoped('--jetbrains-only').vscode.length, 0, '--jetbrains-only hides the VS Code surface');
-
-  // Bad input fails loudly rather than installing something unintended.
-  for (const args of [['--vsix', path.join(home, 'nope.vsix')], ['--channel'], ['--channel', 'bogus']]) {
-    assert.throws(
-      () => cp.execFileSync('node', [CLI, 'install-extensions', ...args], { env, encoding: 'utf8', stdio: 'pipe' }),
-      /no such file|requires a value|unknown channel/,
-      `install-extensions ${args.join(' ')} must fail loudly`
+  try {
+    // A fake HOME isolates the extension DIRS but not PATH, so an editor whose CLI is genuinely on this
+    // machine still reports present — which is correct, and is the whole point of the `or` in
+    // editorPresent: installed-but-never-launched has a CLI and no extensions dir.
+    let d = await check();
+    assert.deepEqual(d.jetbrains, [], 'no plugin dirs -> no JetBrains');
+    assert.equal(d.version, '9.9.9', 'the reported version comes from the resolved release');
+    assert.ok(
+      d.vscode.every((r) => r.installed === null),
+      'under a fresh HOME nothing of ours is installed in any detected editor'
     );
+
+    // An editor that has RUN but does not have our extension: the case `update` ignores and this acts on.
+    fs.mkdirSync(path.join(home, '.vscode', 'extensions'), { recursive: true });
+    d = await check();
+    const vsc = () => d.vscode.find((r) => r.label === 'VS Code');
+    assert.ok(vsc(), 'an empty extensions dir is still a PRESENT editor');
+    assert.equal(vsc().present, true);
+    assert.equal(vsc().installed, null, 'and it reports our extension as not installed');
+
+    // Now give it our extension: same row, now with a version.
+    fs.mkdirSync(path.join(home, '.vscode', 'extensions', 'cell-observatory.claude-observatory-vscode-0.9.0'), {
+      recursive: true,
+    });
+    d = await check();
+    assert.equal(vsc().installed, '0.9.0', 'the installed version is read from the folder name');
+
+    // A JetBrains IDE with no plugin of ours — again, present and actionable.
+    const jb = path.join(home, 'Library', 'Application Support', 'JetBrains', 'PyCharm2026.1', 'plugins');
+    fs.mkdirSync(jb, { recursive: true });
+    d = await check();
+    assert.equal(d.jetbrains.length, 1, 'a plugins dir is a present IDE even with no plugin of ours');
+    assert.equal(d.jetbrains[0].installed, null);
+
+    // The scope flags must agree with what a real run would do, or an installer acts on a wrong report.
+    assert.equal((await check('--vscode-only')).jetbrains.length, 0, '--vscode-only hides the JetBrains surface');
+    assert.equal((await check('--jetbrains-only')).vscode.length, 0, '--jetbrains-only hides the VS Code surface');
+
+    // A DETECTION report must survive an unreachable feed — CI runners get 403 from api.github.com, and
+    // an installer asking "what is on this machine?" should not die of it.
+    const offline = JSON.parse(
+      await run(['--check', '--json'], { ...env, CLAUDE_OBSERVATORY_RELEASES_API: 'http://127.0.0.1:1/nope' })
+    );
+    assert.equal(offline.version, null, 'the version is honestly null rather than a guess');
+    assert.ok(offline.vscode.length >= 1, 'and detection still reports what is on the machine');
+
+    // Bad input fails loudly rather than installing something unintended.
+    for (const args of [['--vsix', path.join(home, 'nope.vsix')], ['--channel'], ['--channel', 'bogus']]) {
+      await assert.rejects(() => run(args), /no such file|requires a value|unknown channel/, `install-extensions ${args.join(' ')} must fail loudly`);
+    }
+  } finally {
+    srv.close();
   }
 });
 

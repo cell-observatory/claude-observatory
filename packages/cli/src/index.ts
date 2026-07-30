@@ -2927,12 +2927,16 @@ function applyJetbrainsZip(dirs: string[], zipPath: string, version: string): nu
 /** The releases LIST (newest first, drafts invisible anonymously) — ONE fetch answers both
  *  channels: the first regular release is what `releases/latest` serves, the first prerelease is
  *  the rolling dev build. Channel choice happens in core (`resolveReleaseFromList`), pure. */
-async function fetchReleases(): Promise<any[]> {
+async function fetchReleases(throwOnError = false): Promise<any[]> {
   try {
     const list = JSON.parse((await httpGet(`${RELEASES_API}/releases?per_page=100`)).toString('utf8'));
     return Array.isArray(list) ? list : [];
   } catch (e: any) {
-    fail(`could not check for updates (need network access to github.com): ${e?.message || e}`);
+    // `throwOnError` for callers that can degrade (install-extensions --check reports detection with
+    // no network); everything else keeps the process-exiting behaviour it has always had.
+    const msg = `could not check for updates (need network access to github.com): ${e?.message || e}`;
+    if (throwOnError) throw new Error(msg);
+    fail(msg);
   }
 }
 
@@ -2991,15 +2995,25 @@ async function cmdInstallExtensions(args: string[]): Promise<void> {
   const doJetbrains = only === 'jetbrains' || (only === 'both' && (!local || zipArg !== null));
 
   // Resolve the release only when we actually need to download something.
-  let latest = version();
+  let latest: string | null = local ? version() : null;
   let assets: ReleaseAsset[] = [];
-  const needRelease = !local && !(checkOnly && asJson);
-  if (needRelease || (checkOnly && !local)) {
-    const rel = core.resolveReleaseFromList(await fetchReleases(), channel);
-    const v = core.versionOfRelease(rel as any);
-    if (!v) fail(`no ${CHANNEL_LABEL[channel]} release found to install from.`);
-    latest = v;
+  if (!local) {
+    // `--check` is a DETECTION report, and the thing it reports (which editors are here) needs no
+    // network at all. A rate-limited or offline GitHub used to abort the whole command — including on
+    // CI runners, where api.github.com answers 403 unauthenticated. So in check mode the lookup is
+    // best-effort and an unresolved version is reported as null; an INSTALL still has to fail, because
+    // it has nothing to install.
+    let list: any[] = [];
+    try {
+      list = await fetchReleases(true);
+    } catch (e: any) {
+      if (!checkOnly) throw e;
+      process.stderr.write(c.yellow('⚠ ') + `could not reach the release feed: ${e?.message || e}\n`);
+    }
+    const rel = core.resolveReleaseFromList(list, channel);
+    latest = core.versionOfRelease(rel as any);
     assets = ((rel as any)?.assets ?? []) as ReleaseAsset[];
+    if (!latest && !checkOnly) fail(`no ${CHANNEL_LABEL[channel]} release found to install from.`);
   }
 
   if (checkOnly) {
@@ -3012,7 +3026,9 @@ async function cmdInstallExtensions(args: string[]): Promise<void> {
       jetbrains: only === 'vscode' ? [] : jbDirs.map((d) => ({ dir: d, installed: jbInstalledVersion(path.join(d, JB_PLUGIN_DIRNAME)), actionable: true })),
     };
     if (asJson) return emitJson(payload);
-    process.stdout.write(`channel: ${CHANNEL_LABEL[channel]}   installing: ${latest}\n`);
+    process.stdout.write(
+      `channel: ${CHANNEL_LABEL[channel]}   installing: ${latest ?? '(release feed unavailable)'}\n`
+    );
     if (only !== 'jetbrains' && !editors.length) process.stdout.write(c.dim('VS Code family: no editor detected\n'));
     for (const e of only === 'jetbrains' ? [] : editors)
       process.stdout.write(
@@ -3028,6 +3044,11 @@ async function cmdInstallExtensions(args: string[]): Promise<void> {
     }
     return;
   }
+
+  // Past the --check return, an install needs a version. The `!latest && !checkOnly` fail above already
+  // guarantees one; this names it so the rest of the function is not littered with non-null assertions.
+  if (!latest) fail(`no ${CHANNEL_LABEL[channel]} release found to install from.`);
+  const target: string = latest;
 
   if (requested !== null && requested !== core.getUpdateChannel()) {
     core.setUpdateChannel(requested);
@@ -3047,7 +3068,7 @@ async function cmdInstallExtensions(args: string[]): Promise<void> {
       force ||
       vsixArg !== null ||
       installed === null ||
-      (requested !== null ? installed !== latest : core.isNewer(latest, installed));
+      (requested !== null ? installed !== target : core.isNewer(target, installed));
     const actionable = editors.filter((e) => e.cli && stale(e.version));
     const noCli = editors.filter((e) => !e.cli);
     for (const e of noCli) {
@@ -3064,15 +3085,15 @@ async function cmdInstallExtensions(args: string[]): Promise<void> {
     // the common case on a re-run (which is how the docs say to update), and it was reporting
     // "no editor detected" — while the truthful line was reachable only on runs that also failed.
     if (!editors.length) process.stdout.write(c.dim('VS Code family: no editor detected — skipped.\n'));
-    else if (!actionable.length && !noCli.length) process.stdout.write(c.green('✓ ') + `VS Code family already at ${latest}\n`);
+    else if (!actionable.length && !noCli.length) process.stdout.write(c.green('✓ ') + `VS Code family already at ${target}\n`);
     else {
       let src = vsixArg;
       if (src === null) {
         const vsix = assets.find((a) => /\.vsix$/i.test(a.name));
-        if (!vsix) fail(`release v${latest} has no .vsix asset to install.`);
+        if (!vsix) fail(`release v${target} has no .vsix asset to install.`);
         src = await downloadAsset(vsix!);
       }
-      const n = applyVsix(actionable, src, latest);
+      const n = applyVsix(actionable, src, target);
       did += n;
       blocked += actionable.length - n;
     }
@@ -3087,17 +3108,17 @@ async function cmdInstallExtensions(args: string[]): Promise<void> {
         if (force || zipArg !== null) return true;
         const v = jbInstalledVersion(path.join(d, JB_PLUGIN_DIRNAME));
         if (v === null) return true;
-        return requested !== null ? v !== latest : core.isNewer(latest, v);
+        return requested !== null ? v !== target : core.isNewer(target, v);
       });
-      if (!targets.length) process.stdout.write(c.green('✓ ') + `JetBrains plugin already at ${latest}\n`);
+      if (!targets.length) process.stdout.write(c.green('✓ ') + `JetBrains plugin already at ${target}\n`);
       else {
         let src = zipArg;
         if (src === null) {
           const zip = assets.find((a) => /jetbrains.*\.zip$/i.test(a.name));
-          if (!zip) fail(`release v${latest} has no JetBrains .zip asset to install.`);
+          if (!zip) fail(`release v${target} has no JetBrains .zip asset to install.`);
           src = await downloadAsset(zip!);
         }
-        const n = applyJetbrainsZip(targets, src, latest);
+        const n = applyJetbrainsZip(targets, src, target);
         did += n;
         blocked += targets.length - n;
       }
