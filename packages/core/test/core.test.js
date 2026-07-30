@@ -8163,3 +8163,60 @@ test('install-extensions: installs a LOCAL artifact into a bare JetBrains IDE (0
     'the version sentinel is stamped, so a later `update` can tell what is installed'
   );
 });
+
+test('installers: every install path goes through the CLI, and offers both channels (0.10.0)', () => {
+  // These scripts are not exercised by any test run (e2e is skipped on Windows and none of them run
+  // here), so their CONTENT is the only thing that can be pinned. Each assertion below corresponds to a
+  // defect that shipped: bash reimplementing editor detection, JetBrains only ever being downloaded and
+  // never installed, and no way at all to install the pre-release channel.
+  const read = (p) => fs.readFileSync(path.resolve(__dirname, '../../..', p), 'utf8');
+  // Assert about CODE, not prose: these files explain in comments what they used to do wrong, and a
+  // blunt doesNotMatch cannot tell the explanation from the mistake.
+  const code = (s) =>
+    s
+      .split('\n')
+      .filter((l) => !/^\s*(?:#|<#|\.[A-Z]|\s*$)/.test(l))
+      .join('\n');
+
+  const boot = read('scripts/bootstrap.sh');
+  assert.match(boot, /install-extensions --channel/, 'bootstrap delegates editor install to the CLI');
+  assert.match(boot, /--channel stable\|dev/, 'and documents the channel flag');
+  assert.match(boot, /dev-latest/, 'the dev channel resolves the rolling pre-release tag');
+  assert.doesNotMatch(code(boot), /Install Plugin from Disk/, 'it must INSTALL the JetBrains plugin, not print instructions');
+  assert.doesNotMatch(code(boot), /code --install-extension/, 'and must not hand-roll the VS Code install');
+
+  const inst = read('install.sh');
+  assert.match(inst, /install-extensions/, 'the from-source installer delegates too');
+  assert.match(inst, /--vsix/, 'passing the locally built .vsix rather than downloading one');
+  assert.match(inst, /--jetbrains/, 'and can build + install the JetBrains plugin');
+  assert.doesNotMatch(code(inst), /^\s*code --install-extension/m, 'no hand-rolled VS Code install');
+
+  const jb = read('scripts/install-jetbrains.sh');
+  assert.match(jb, /install-extensions --jetbrains-only --jetbrains-zip/, 'JetBrains install delegates to the CLI');
+  assert.match(jb, /--build-only/, 'and exposes the build-only mode install.sh uses');
+  assert.doesNotMatch(code(jb), /unzip -qo/, 'the bash unzip + dir-walk is gone (it never worked outside Git Bash)');
+
+  const ps1 = read('install.ps1');
+  assert.match(ps1, /install-extensions/, 'the Windows installer delegates too');
+  assert.match(ps1, /Get-FileHash/, 'and verifies the CLI tarball sha256 like downloadAsset does');
+  assert.match(ps1, /\$Channel/, 'and offers the channel choice');
+  assert.match(ps1, /jq/, 'and is honest about the bash+jq status line');
+});
+
+test('installers: install.ps1 parses as PowerShell', { skip: !hasPwsh() }, () => {
+  // A syntax error in this file is invisible until a Windows user pipes it into iex and it half-runs.
+  // pwsh ships on ubuntu-latest and windows-latest runners, so CI checks it even though a mac dev
+  // machine usually cannot.
+  const ps1 = path.resolve(__dirname, '../../../install.ps1');
+  const script =
+    "$e = $null; [void][System.Management.Automation.Language.Parser]::ParseFile('" +
+    ps1.replace(/'/g, "''") +
+    "', [ref]$null, [ref]$e); if ($e -and $e.Count -gt 0) { $e | ForEach-Object { Write-Output $_.Message }; exit 1 }";
+  const r = cp.spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', script], { encoding: 'utf8' });
+  assert.equal(r.status, 0, `install.ps1 has PowerShell syntax errors:\n${r.stdout}${r.stderr}`);
+});
+
+function hasPwsh() {
+  const r = cp.spawnSync('pwsh', ['-NoProfile', '-Command', '$PSVersionTable.PSVersion.Major'], { encoding: 'utf8' });
+  return r.status === 0;
+}

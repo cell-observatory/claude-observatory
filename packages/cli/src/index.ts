@@ -3022,6 +3022,7 @@ async function cmdInstallExtensions(args: string[]): Promise<void> {
 
   let did = 0;
   let blocked = 0;
+  let detected = 0; // surfaces that exist at all — distinguishes "nothing here" from "all current"
 
   if (only !== 'jetbrains') {
     const actionable = editors.filter((e) => e.cli && (force || vsixArg !== null || e.version !== latest));
@@ -3035,6 +3036,7 @@ async function cmdInstallExtensions(args: string[]): Promise<void> {
       );
       blocked++;
     }
+    detected += editors.length;
     if (!actionable.length && !noCli.length) process.stdout.write(c.dim('VS Code family: no editor detected — skipped.\n'));
     else if (!actionable.length) process.stdout.write(c.green('✓ ') + `VS Code family already at ${latest}\n`);
     else {
@@ -3051,6 +3053,7 @@ async function cmdInstallExtensions(args: string[]): Promise<void> {
   }
 
   if (only !== 'vscode') {
+    detected += jbDirs.length;
     if (!jbDirs.length) process.stdout.write(c.dim('JetBrains: no IDE detected — skipped.\n'));
     else if (!zipToolReady()) blocked++;
     else {
@@ -3080,7 +3083,20 @@ async function cmdInstallExtensions(args: string[]): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  if (!did) process.stdout.write(c.green('✓ ') + 'nothing to install — every detected editor is current.\n');
+  if (!detected) {
+    // An explicit scope is a statement of intent: you asked for THIS family, so finding none of it is a
+    // failed expectation, not a quiet success. Unscoped (what bootstrap.sh does) a terminal-only box is
+    // a perfectly good outcome, so that stays exit 0.
+    const what = only === 'vscode' ? 'VS Code-family editor' : only === 'jetbrains' ? 'JetBrains IDE' : 'editor';
+    if (only === 'both') {
+      process.stdout.write(c.dim(`no ${what} detected on this machine — nothing to install.\n`));
+      return;
+    }
+    process.stderr.write(c.yellow('⚠ ') + `no ${what} found on this machine — nothing was installed.\n`);
+    process.exitCode = 1;
+    return;
+  }
+  if (!did) process.stdout.write(c.green('✓ ') + 'nothing to install — every detected editor is already current.\n');
 }
 
 async function cmdUpdate(args: string[]): Promise<void> {

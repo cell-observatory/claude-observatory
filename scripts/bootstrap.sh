@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # Claude Observatory — one-command install / update. No build toolchain, no registry account.
-# Downloads the latest GitHub Release and installs the CLI + editor extensions + status line + hooks.
+# Downloads a GitHub Release and installs the CLI + editor extensions + status line + hooks.
 #
 #   curl -fsSL https://raw.githubusercontent.com/cell-observatory/claude-observatory/main/scripts/bootstrap.sh | bash
 #
+# Pre-release channel (rolling build of the dev branch — newest features, less soak):
+#   curl -fsSL .../scripts/bootstrap.sh | bash -s -- --channel dev
+#
+# Windows: this is bash. Run it from Git Bash, or use install.ps1 (PowerShell, no bash needed).
 # Safe to re-run — re-running is how you update. Does NOT commit anything.
 set -euo pipefail
 
@@ -13,22 +17,51 @@ say()  { printf '%s %s\n' "$c_arrow" "$1"; }
 warn() { printf '%s %s\n' "$c_warn" "$1"; }
 ok()   { printf '%s %s\n' "$c_ok" "$1"; }
 
+CHANNEL="stable"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    # `shift 2` with nothing after --channel fails under `set -e` and the script exits SILENTLY, so
+    # require the value explicitly and say what is missing.
+    --channel)
+      [ $# -ge 2 ] || { warn "--channel needs a value: stable or dev"; exit 1; }
+      CHANNEL="$2"; shift 2 ;;
+    --channel=*) CHANNEL="${1#*=}"; shift ;;
+    --dev|--pre|--prerelease) CHANNEL="dev"; shift ;;
+    -h|--help)
+      printf 'usage: bootstrap.sh [--channel stable|dev]\n\n  stable  tagged releases (default)\n  dev     rolling pre-release built from the dev branch\n'
+      exit 0 ;;
+    *) warn "unknown option: $1  (try --help)"; exit 1 ;;
+  esac
+done
+case "$CHANNEL" in
+  stable|main|release) CHANNEL="stable" ;;
+  dev|pre|prerelease|pre-release) CHANNEL="dev" ;;
+  *) warn "unknown channel \"$CHANNEL\" — use stable or dev"; exit 1 ;;
+esac
+
 command -v npm  >/dev/null 2>&1 || { warn "npm not found — install Node.js 18+ first."; exit 1; }
 command -v curl >/dev/null 2>&1 || { warn "curl not found — install curl first."; exit 1; }
 
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 
-say "Finding the latest release…"
-JSON="$(curl -fsSL -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$REPO/releases/latest")"
-# Parse without jq (may be absent): pull the tag and asset download URLs out of the JSON.
+# The CLI tarball is the ONE thing this script has to fetch itself — it is what provides
+# `install-extensions`, which then does every editor from here on (detection, download, sha256
+# verification, Windows .cmd shims). `releases/latest` is the stable channel; the rolling pre-release
+# keeps a fixed `dev-latest` tag so its URLs never move.
+if [ "$CHANNEL" = "dev" ]; then
+  say "Finding the newest pre-release…"
+  REL_URL="https://api.github.com/repos/$REPO/releases/tags/dev-latest"
+else
+  say "Finding the latest release…"
+  REL_URL="https://api.github.com/repos/$REPO/releases/latest"
+fi
+JSON="$(curl -fsSL -H 'Accept: application/vnd.github+json' "$REL_URL")" || {
+  warn "Could not reach the release API for $REPO (channel: $CHANNEL)."; exit 1; }
+# Parse without jq (may be absent): the tag, and the CLI tarball's download URL.
 TAG="$(printf '%s\n' "$JSON" | grep -o '"tag_name":[^,]*' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')"
-[ -n "$TAG" ] || { warn "Could not find a published release for $REPO."; exit 1; }
-urls() { printf '%s\n' "$JSON" | grep -o '"browser_download_url": *"[^"]*"' | sed 's/.*"\(https[^"]*\)"/\1/'; }
-say "Latest release: $TAG"
-
-CLI_URL="$(urls | grep -E '\.tgz$'            | head -1 || true)"
-VSIX_URL="$(urls | grep -E '\.vsix$'          | head -1 || true)"
-ZIP_URL="$(urls | grep -E 'jetbrains.*\.zip$' | head -1 || true)"
+[ -n "$TAG" ] || { warn "Could not find a $CHANNEL release for $REPO."; exit 1; }
+CLI_URL="$(printf '%s\n' "$JSON" | grep -o '"browser_download_url": *"[^"]*"' | sed 's/.*"\(https[^"]*\)"/\1/' | grep -E '\.tgz$' | head -1 || true)"
+say "Release: $TAG  (channel: $CHANNEL)"
 
 # --- CLI (required) ---
 [ -n "$CLI_URL" ] || { warn "release $TAG has no CLI tarball."; exit 1; }
@@ -38,44 +71,26 @@ npm i -g "$TMP/cli.tgz" --silent || warn "Global install failed (permissions?). 
 CLI="$(command -v claude-observatory || true)"
 [ -n "$CLI" ] && ok "CLI ready: $CLI" || warn "claude-observatory not on PATH — check your npm global bin dir (npm prefix -g)."
 
-# --- VS Code extension (if the 'code' CLI is present) ---
-if [ -n "$VSIX_URL" ] && command -v code >/dev/null 2>&1; then
-  say "Installing the VS Code extension…"
-  curl -fsSL "$VSIX_URL" -o "$TMP/ext.vsix"
-  code --install-extension "$TMP/ext.vsix" --force \
-    && ok "VS Code extension installed — fully quit VS Code (⌘Q) once so the activity-bar icon refreshes."
-elif [ -n "$VSIX_URL" ]; then
-  warn "VS Code 'code' CLI not found — skipped the extension. Later: download the .vsix from the $TAG release and 'code --install-extension' it."
-fi
-
-# --- JetBrains plugin (only when a JetBrains IDE is present; install is one step in the IDE) ---
-# Detect an install the same way install-jetbrains.sh finds its plugin dirs, so terminal-only /
-# VS-Code-only setups don't get an unwanted download and three setup lines.
-jetbrains_present() {
-  [ -d "$HOME/Library/Application Support/JetBrains" ] && return 0            # macOS
-  [ -d "$HOME/.local/share/JetBrains" ] && return 0                          # desktop Linux
-  [ -n "${APPDATA:-}" ] && [ -d "${APPDATA//\\//}/JetBrains" ] && return 0    # Windows (Git Bash)
-  for d in "$HOME/.config/JetBrains/RemoteDev-"*; do [ -d "$d" ] && return 0; done  # remote-dev backend
-  return 1
-}
-if [ -n "$ZIP_URL" ] && jetbrains_present; then
-  DEST="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/claude-observatory-jetbrains.zip"
-  mkdir -p "$(dirname "$DEST")"
-  curl -fsSL "$ZIP_URL" -o "$DEST"
-  say "JetBrains plugin downloaded: $DEST"
-  printf '  %sInstall in any JetBrains IDE: Settings → Plugins → ⚙ → Install Plugin from Disk → pick that file → restart.%s\n' "$c_dim" "$c_off"
-  printf '  %sThen auto-update future releases (one time): Settings → Plugins → ⚙ → Manage Plugin Repositories → +%s\n' "$c_dim" "$c_off"
-  printf '  %s→ paste https://github.com/%s/releases/latest/download/updatePlugins.xml%s\n' "$c_dim" "$REPO" "$c_off"
-elif [ -n "$ZIP_URL" ]; then
-  say "No JetBrains IDE detected — skipped its plugin. Add it later from the $TAG release (claude-observatory-jetbrains-*.zip → Settings → Plugins → ⚙ → Install Plugin from Disk)."
+# --- editor extensions (whatever is on this machine) ---
+# One call for the VS Code family AND JetBrains. This used to be ~30 lines of bash that curled the
+# .vsix with no integrity check and, for JetBrains, only downloaded the zip and printed three lines of
+# "Settings → Plugins → Install Plugin from Disk" — so the one-liner never actually installed the
+# JetBrains plugin. The CLI detects both families, verifies each asset's sha256, and handles Windows.
+if [ -n "$CLI" ]; then
+  say "Installing the editor extensions…"
+  claude-observatory install-extensions --channel "$CHANNEL" || warn "Some editor surfaces could not be installed — see the notes above."
+else
+  warn "Skipped the editor extensions: the CLI is not on PATH. Once it is, run: claude-observatory install-extensions"
 fi
 
 # --- status line (usage bars) ---
-if command -v jq >/dev/null 2>&1; then
+if command -v jq >/dev/null 2>&1 && command -v bash >/dev/null 2>&1; then
   say "Installing the bundled status line…"
   claude-observatory statusline >/dev/null 2>&1 && ok "Status line installed." || warn "Status line install skipped."
 else
-  warn "jq not found — skipped the status line. Install jq, then: claude-observatory statusline"
+  warn "jq not found — skipped the status line (it is a bash script and parses its input with jq)."
+  printf '  %sDebian/Ubuntu: sudo apt-get install -y jq   ·   macOS: brew install jq   ·   Windows: winget install jqlang.jq%s\n' "$c_dim" "$c_off"
+  printf '  %sThen: claude-observatory statusline%s\n' "$c_dim" "$c_off"
 fi
 
 # --- capture hooks (with the closed-Claude guard) ---

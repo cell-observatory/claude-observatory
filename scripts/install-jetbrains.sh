@@ -1,11 +1,28 @@
 #!/usr/bin/env bash
 # Build + install the JetBrains plugin into your real IDE in one shot — no Settings→Plugins dance.
-# Usage:  ./scripts/install-jetbrains.sh [--no-build]
+#
+#   ./scripts/install-jetbrains.sh              # build, then install
+#   ./scripts/install-jetbrains.sh --no-build   # install the zip already in build/distributions
+#   ./scripts/install-jetbrains.sh --build-only # build only, print the zip path (used by install.sh)
+#
 # Then fully restart the IDE (⌘Q → reopen); a plugin's classes can't hot-swap in a running JVM.
+#
+# The INSTALL half is `claude-observatory install-extensions --jetbrains-zip`, so IDE detection lives in
+# one place (the CLI) instead of being reimplemented here in bash — which also means it works on Windows
+# from PowerShell/cmd, not only from Git Bash, and never needs `unzip` there.
 set -euo pipefail
-cd "$(dirname "$0")/../packages/jetbrains"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$REPO_ROOT/packages/jetbrains"
 
-if [ "${1:-}" != "--no-build" ]; then
+MODE="all"
+case "${1:-}" in
+  --no-build)   MODE="install-only" ;;
+  --build-only) MODE="build-only" ;;
+  "")           MODE="all" ;;
+  *) echo "unknown option: $1 (expected --no-build, --build-only, or nothing)" >&2; exit 1 ;;
+esac
+
+if [ "$MODE" != "install-only" ]; then
   echo "▸ Building the plugin…"
   if command -v gradle >/dev/null 2>&1; then GRADLE=gradle; else GRADLE=./gradlew; fi
   JAVA_HOME="${JAVA_HOME:-$([ -d /opt/homebrew/opt/openjdk@21 ] && echo /opt/homebrew/opt/openjdk@21 || echo "")}" \
@@ -13,44 +30,31 @@ if [ "${1:-}" != "--no-build" ]; then
 fi
 
 ZIP=$(ls -t build/distributions/claude-observatory-jetbrains-*.zip 2>/dev/null | head -1)
-[ -n "$ZIP" ] || { echo "no plugin zip found — build failed?"; exit 1; }
+[ -n "$ZIP" ] || { echo "no plugin zip found — build failed?" >&2; exit 1; }
+ZIP="$PWD/$ZIP"
 
-# Plugin dirs across platforms: macOS keeps them under <config>/plugins; desktop Linux puts them
-# straight in ~/.local/share/JetBrains/<Product>; JetBrains Remote Development (Gateway/Toolbox)
-# backends use per-project ~/.config/JetBrains/RemoteDev-*/<project>/plugins. Covering all three
-# means this script also works when run ON an SSH host that serves remote development.
-shopt -s nullglob
-PLUGIN_DIRS=()
-for DIR in "$HOME/Library/Application Support/JetBrains/"{PyCharm,IntelliJIdea,WebStorm,GoLand}*; do
-  [ -d "$DIR/plugins" ] && PLUGIN_DIRS+=("$DIR/plugins")
-done
-for DIR in "$HOME/.local/share/JetBrains/"{PyCharm,IntelliJIdea,WebStorm,GoLand}*; do
-  [ -d "$DIR" ] && PLUGIN_DIRS+=("$DIR")
-done
-for DIR in "$HOME/.config/JetBrains/RemoteDev-"*/*; do
-  [ -d "$DIR/plugins" ] && PLUGIN_DIRS+=("$DIR/plugins")
-done
-# Windows via Git Bash: plugins live under %APPDATA%\JetBrains\<Product><Version>\plugins.
-if [ -n "${APPDATA:-}" ]; then
-  for DIR in "${APPDATA//\\//}/JetBrains/"{PyCharm,IntelliJIdea,WebStorm,GoLand}*; do
-    [ -d "$DIR/plugins" ] && PLUGIN_DIRS+=("$DIR/plugins")
-  done
+if [ "$MODE" = "build-only" ]; then
+  echo "$ZIP"
+  exit 0
 fi
-INSTALLED=0
-# `${arr[@]}` on an EMPTY array is an unbound-variable error under `set -u`, so with no IDE installed
-# this died with a bash internal error at this line and the explanatory message below never printed —
-# the one case where it most needed to. The `+` form expands to nothing instead.
-for DEST in ${PLUGIN_DIRS[@]+"${PLUGIN_DIRS[@]}"}; do
-  rm -rf "$DEST/claude-observatory-jetbrains"
-  unzip -qo "$ZIP" -d "$DEST/"
-  echo "✓ installed $(basename "$ZIP") → $DEST/claude-observatory-jetbrains"
-  INSTALLED=1
-done
-[ "$INSTALLED" -eq 1 ] || {
-  echo "no JetBrains IDE plugin dirs found (looked in ~/Library/Application Support/JetBrains,"
-  echo "~/.local/share/JetBrains, ~/.config/JetBrains/RemoteDev-*, and %APPDATA%/JetBrains)"; exit 1; }
-echo
-echo "Now FULLY restart the IDE (⌘Q → reopen) — or the remote-dev backend — to load the new version."
-echo
-echo "▸ Auto-update future releases (one time): Settings → Plugins → ⚙ → Manage Plugin Repositories → +"
-echo "  → paste https://github.com/cell-observatory/claude-observatory/releases/latest/download/updatePlugins.xml"
+
+# Prefer THIS tree's built CLI over whatever is on PATH: a globally-installed older CLI has no
+# `install-extensions`, and the point of running from the repo is to use the repo.
+if [ -f "$REPO_ROOT/packages/cli/dist/index.js" ]; then
+  CO=(node "$REPO_ROOT/packages/cli/dist/index.js")
+elif command -v claude-observatory >/dev/null 2>&1; then
+  CO=(claude-observatory)
+else
+  echo "The plugin was built but not installed: no CLI to install it with." >&2
+  echo "  Build this tree (npm run build) or install the CLI (./install.sh), then re-run --no-build," >&2
+  echo "  or: Settings → Plugins → ⚙ → Install Plugin from Disk → $ZIP" >&2
+  exit 1
+fi
+
+# Detection, extraction (PowerShell Expand-Archive on Windows, unzip elsewhere), the version sentinel
+# and the restart/auto-update notes all come from the CLI.
+if ! "${CO[@]}" install-extensions --jetbrains-only --jetbrains-zip "$ZIP"; then
+  echo >&2
+  echo "Install it by hand instead: Settings → Plugins → ⚙ → Install Plugin from Disk → $ZIP" >&2
+  exit 1
+fi
