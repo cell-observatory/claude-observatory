@@ -10787,6 +10787,41 @@ test('ignore: `dist/` matches only a directory, `dist` matches a file too', () =
   assert.equal(ctxB.ignored(path.join(b, 'dist/x.js')), true, 'and it still excludes the subtree');
 });
 
+test('ignore: a path whose ancestor is a FILE does not throw, on any platform', () => {
+  // `fs.statSync(p, { throwIfNoEntry: false })` suppresses ENOENT and nothing else. When a component
+  // of the path is a file rather than a directory, Linux reports ENOTDIR and it throws — while macOS
+  // reports the same case as ENOENT and swallows it. So the product was macOS-correct and crashed on
+  // Linux, and the `dist/` test above is green on a Mac either way; CI is what caught it.
+  //
+  // This test makes the Linux behaviour reproducible EVERYWHERE by stubbing the errno, because a
+  // platform-dependent test is one that a Mac-only contributor cannot run before pushing.
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const real = fs.statSync;
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'obs-ign-notdir-'));
+  try {
+    fs.writeFileSync(path.join(root, '.observatoryignore'), 'dist\n');
+    fs.writeFileSync(path.join(root, 'dist'), 'a file named dist');
+    fs.statSync = (p, o) => {
+      if (String(p).includes(`${path.sep}dist${path.sep}`)) {
+        const e = new Error('ENOTDIR: not a directory');
+        e.code = 'ENOTDIR';
+        throw e;
+      }
+      return real(p, o);
+    };
+    const ctx = core.ignoreContext({ home: null });
+    // Both halves: it must not throw, AND it must still answer correctly. A guard that swallowed the
+    // error and then returned the wrong verdict would turn a crash into a file that quietly captures.
+    assert.equal(ctx.ignored(path.join(root, 'dist/x.js')), true,
+      'the subtree of a file-named-dist is still excluded, through an ENOTDIR on the way up');
+  } finally {
+    fs.statSync = real;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('ignore: a leading slash anchors to the file’s own directory', () => {
   const root = ignoreWork({ '.observatoryignore': '/build\n' });
   const ctx = core.ignoreContext({ home: null });

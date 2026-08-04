@@ -209,9 +209,25 @@ export function parseIgnoreFile(text: string, source: string, anywhere = false):
 const parseCache = new Map<string, { stamp: string; rules: IgnoreRule[] }>();
 
 function stampOf(p: string): string | null {
-  const st = fs.statSync(p, { throwIfNoEntry: false });
-  // `throwIfNoEntry: false` rather than try/catch: measured 4x faster across ~100 probes, and this
-  // runs once per directory on the path of every edited file.
+  // `throwIfNoEntry: false` rather than try/catch for the MISSING case: measured 4x faster across
+  // ~100 probes, and this runs once per directory on the path of every edited file. It is kept.
+  //
+  // The try/catch is for a different errno, and is not optional. `throwIfNoEntry` suppresses ENOENT
+  // and nothing else — so when a component of the path is a FILE rather than a directory, this throws
+  // ENOTDIR. That is not a hypothetical: walking up from `dist/x.js` where `dist` is a file stats
+  // `dist/.git/info/observatoryignore`, and the ignore rules have to answer for exactly that path in
+  // order to say whether `dist` matches as a file.
+  //
+  // It was invisible on macOS, which reports the case as ENOENT and therefore suppresses it, and
+  // failed on Linux, which reports ENOTDIR. The existing `dist/` test covers it and is green on a Mac
+  // either way; CI is what has to catch this, and did. Empty catch on purpose: every failure here
+  // means "no usable ignore file at this path", which is exactly what null says.
+  let st: fs.Stats | undefined;
+  try {
+    st = fs.statSync(p, { throwIfNoEntry: false });
+  } catch {
+    return null;
+  }
   return st && st.isFile() ? `${st.mtimeMs}:${st.size}` : null;
 }
 
