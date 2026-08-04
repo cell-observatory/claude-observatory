@@ -10661,6 +10661,11 @@ test('channel: a switch that cannot persist says so, and never reports success i
     //
     // A FRESH read-only directory, not a chmod of the one above: mode 500 on a directory still
     // permits writing a file that already exists, so re-using it would test nothing and pass.
+    //
+    // WINDOWS: chmod does not remove write access there, so this half's SETUP cannot be built — the
+    // directory would still accept the write, and the assertions below would be checking a condition
+    // that never happened. The positive control above runs everywhere.
+    if (process.platform !== 'win32') {
     const ro = fs.mkdtempSync(path.join(os.tmpdir(), 'obs-chan-ro-'));
     fs.chmodSync(ro, 0o500);
     process.env.CLAUDE_CONFIG_DIR = ro;
@@ -10673,6 +10678,7 @@ test('channel: a switch that cannot persist says so, and never reports success i
     assert.match(msg, /CLAUDE_CONFIG_DIR/, 'and names the override that fixes it');
     assert.match(msg, /obs-chan-ro-/, 'and the actual path that could not be written');
     assert.equal(core.getUpdateChannel(), 'dev', 'the old channel is untouched by a failed switch');
+    }
   } finally {
     try { fs.chmodSync(dir, 0o700); fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
     if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR;
@@ -10698,12 +10704,17 @@ test('doctor: "writable" and "the setting persists" are separate claims', () => 
 
     // Not writable: the shape a devcontainer usually has. This must be its OWN failure, not folded
     // into "config dir writable" — a switch can fail on a filesystem that accepts other writes.
-    fs.chmodSync(ro, 0o500);
-    process.env.CLAUDE_CONFIG_DIR = ro;
-    const bad = core.diagnose({ cwd: process.cwd() }).find((c) => c.id === 'channel-persist');
-    assert.equal(bad.level, 'fail', 'a config dir that refuses the write is reported');
-    assert.match(bad.fix, /CLAUDE_CONFIG_DIR/, 'and names the override');
-    assert.match(bad.detail, /switching channels will fail/, 'in the reader’s terms, not errno terms');
+    // WINDOWS: chmod cannot make a directory refuse a write there, so the condition under test does
+    // not exist and the probe correctly reports `ok`. Skipped rather than inverted — asserting `ok`
+    // here would pin the ABSENCE of the failure mode, which is not what this test is about.
+    if (process.platform !== 'win32') {
+      fs.chmodSync(ro, 0o500);
+      process.env.CLAUDE_CONFIG_DIR = ro;
+      const bad = core.diagnose({ cwd: process.cwd() }).find((c) => c.id === 'channel-persist');
+      assert.equal(bad.level, 'fail', 'a config dir that refuses the write is reported');
+      assert.match(bad.fix, /CLAUDE_CONFIG_DIR/, 'and names the override');
+      assert.match(bad.detail, /switching channels will fail/, 'in the reader’s terms, not errno terms');
+    }
   } finally {
     try { fs.chmodSync(ro, 0o700); } catch { /* best effort */ }
     for (const d of [ok, ro]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ } }
@@ -10900,12 +10911,59 @@ test('ignore: a file is re-read the moment it changes, and forgotten when delete
   const root = ignoreWork({ '.observatoryignore': '*.log\n' });
   const target = path.join(root, 'a.log');
   assert.equal(core.ignoreContext({ home: null }).ignored(target), true);
-  fs.writeFileSync(path.join(root, '.observatoryignore'), '*.tmp\n');
+  const ig = path.join(root, '.observatoryignore');
+  fs.writeFileSync(ig, '*.tmp\n');
+  // The cache stamp is (mtime, size), and this rewrite is the SAME SIZE as the original — so the only
+  // thing that can distinguish them is the clock. Windows timestamps are ~10ms-granular, so two writes
+  // in one tick share an mtime and the stamp genuinely cannot see the edit; on Linux and macOS the
+  // sub-millisecond resolution hides that. Push the mtime forward explicitly: this test is about the
+  // cache noticing a CHANGED file, not about how finely the host filesystem can tell the time.
+  const later = new Date(Date.now() + 2000);
+  fs.utimesSync(ig, later, later);
   assert.equal(core.ignoreContext({ home: null }).ignored(target), false, 'edited: picked up at once');
   fs.rmSync(path.join(root, '.observatoryignore'));
   const gone = core.ignoreContext({ home: null });
   assert.equal(gone.ignored(target), false);
   assert.deepEqual(gone.files, [], 'deleted: dropped from the cache-stamp inputs too');
+});
+
+test('ignore: a same-size rewrite at the same mtime is INVISIBLE — the stamp\'s known limit', () => {
+  // The parse cache is keyed on (mtime, size). Two consequences, and this pins both so neither is a
+  // surprise: the cache works, and there is exactly one shape it cannot see.
+  //
+  // This is not academic. It is what made the suite red on Windows and green here: NTFS timestamps
+  // through Node are ~10ms-granular, so the sibling test's two same-size writes landed on ONE mtime
+  // and the edit was genuinely missed — while Linux and macOS resolve finely enough to hide it. The
+  // condition is forced here rather than raced for, so the behaviour is the same on every platform.
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const FIXED = new Date(1_700_000_000_000);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'obs-ig-stamp-'));
+  const prev = process.env.CLAUDE_OBSERVATORY_ROOT;
+  try {
+    const ig = path.join(root, '.observatoryignore');
+    const target = path.join(root, 'a.log');
+    fs.writeFileSync(ig, '*.log\n');
+    fs.utimesSync(ig, FIXED, FIXED);
+    assert.equal(core.ignoreContext({ home: null }).ignored(target), true, 'the first read caches these rules');
+
+    // Same SIZE, same MTIME, different CONTENT — the one edit the stamp cannot distinguish.
+    fs.writeFileSync(ig, '*.tmp\n');
+    fs.utimesSync(ig, FIXED, FIXED);
+    assert.equal(core.ignoreContext({ home: null }).ignored(target), true,
+      'DOCUMENTED LIMIT: identical stamp means the cached parse is reused, so this edit is not seen');
+
+    // …and the moment either half of the stamp moves, it is seen. This is what makes the limit a
+    // narrow one rather than a broken cache, and it is the assertion that fails if the stamp changes.
+    const later = new Date(FIXED.getTime() + 2000);
+    fs.utimesSync(ig, later, later);
+    assert.equal(core.ignoreContext({ home: null }).ignored(target), false, 'a moved mtime is picked up');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    if (prev === undefined) delete process.env.CLAUDE_OBSERVATORY_ROOT;
+    else process.env.CLAUDE_OBSERVATORY_ROOT = prev;
+  }
 });
 
 test('ignore: parseIgnoreFile keeps blank lines and comments out of the rules', () => {
@@ -11209,13 +11267,17 @@ test('options: the editor row offers what this machine HAS, and steps through ex
   // flag. Everything here is injected, so the Windows branch — where `code` is `code.cmd` and an
   // extension-less probe finds nothing — is asserted from macOS.
   const bins = new Set(['/usr/bin/vim', '/opt/bin/code', '/opt/bin/nano']);
-  const found = core.detectEditors({ path: '/usr/bin:/opt/bin', isExec: (f) => bins.has(f) });
+  // `win: false` is injected as well, and has to be: without it `detectEditors` reads the HOST
+  // platform and splits this POSIX PATH on `;` when run on Windows, finding one directory called
+  // "/usr/bin:/opt/bin" and therefore no editors at all. The comment above claims everything is
+  // injected; this is what makes that true.
+  const found = core.detectEditors({ path: '/usr/bin:/opt/bin', win: false, isExec: (f) => bins.has(f) });
   assert.deepEqual(found.map((e) => e.command), ['vim', 'nano', 'code -w'],
     'declaration order, and the GUI one carries its wait flag');
   assert.equal(found.every((e) => e.label), true, 'each is named');
 
   // Absent binaries are never offered — a choice you cannot run is worse than no choice.
-  assert.deepEqual(core.detectEditors({ path: '/usr/bin', isExec: () => false }), []);
+  assert.deepEqual(core.detectEditors({ path: '/usr/bin', win: false, isExec: () => false }), []);
 
   // Windows: same PATH, extensions from PATHEXT. The probe is case-INSENSITIVE because the Windows
   // filesystem is: PATHEXT is conventionally upper-case while the shim on disk is `code.cmd`, and a
@@ -11603,9 +11665,13 @@ test('remote: the listing cache survives a process boundary, so a poll cannot ss
   assert.deepEqual(again.map((r) => r.id), first.map((r) => r.id), 'a FRESH process shape still gets the answer');
   assert.ok(again[0].error, 'including the reason the host failed');
   assert.equal(fs.statSync(path.join(cacheDir, files[0])).mtimeMs, stampBefore, 'and it was not rewritten');
-  // 0600 in a 0700 directory: these entries hold session titles from another machine.
-  assert.equal(fs.statSync(path.join(cacheDir, files[0])).mode & 0o777, 0o600, 'the entry is not world-readable');
-  assert.equal(fs.statSync(cacheDir).mode & 0o777, 0o700, 'nor is its directory');
+  // 0600 in a 0700 directory: these entries hold session titles from another machine. POSIX mode bits
+  // do not exist on Windows — `mode & 0o777` there reports a synthesized value that says nothing about
+  // who can read the file — so the claim is only meaningful where the bits are real.
+  if (process.platform !== 'win32') {
+    assert.equal(fs.statSync(path.join(cacheDir, files[0])).mode & 0o777, 0o600, 'the entry is not world-readable');
+    assert.equal(fs.statSync(cacheDir).mode & 0o777, 0o700, 'nor is its directory');
+  }
 
   // Past the TTL it asks again…
   core.remoteRows([host], { now: t0 + 61_000 });
