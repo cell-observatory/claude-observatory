@@ -15,7 +15,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { findTranscript } from './observe';
 import { sidecarMemo } from './store';
-import { cachedByFiles } from './fscache';
+import { cachedByFiles, readLines } from './fscache';
 import { parseTranscriptActions, ActionRecord, ActionSummary, summarizeActions, agentPhaseDetail, Phase, PhaseConfidence, attributeEditIds, EditAttributionAuthor } from './actions';
 import { sessionTaskRows, taskIdForSubject, SessionTaskRow } from './tasks';
 
@@ -101,7 +101,7 @@ export interface SubagentTodos {
 function todosFromTranscript(agentTranscriptPath: string): SubagentTodos {
   let lines: string[];
   try {
-    lines = fs.readFileSync(agentTranscriptPath, 'utf8').split('\n');
+    lines = readLines(agentTranscriptPath);
   } catch {
     return { todos: [], currentTask: null };
   }
@@ -177,7 +177,7 @@ function subagentMetaUncached(transcriptPath: string): Map<string, SubagentMeta>
   const out = new Map<string, SubagentMeta>();
   let lines: string[];
   try {
-    lines = fs.readFileSync(transcriptPath, 'utf8').split('\n');
+    lines = readLines(transcriptPath);
   } catch {
     return out;
   }

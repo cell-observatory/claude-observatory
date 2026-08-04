@@ -489,6 +489,12 @@ obhook PreToolUse Edit "$OBF"; node "$SETLINE" "$OBF" 0 "OBS2"; obhook PostToolU
 OBSV=$(cc observations --session "$OBSESS" 2>/dev/null)
 ok "observations --json carries recap/runs/nextSteps"    "printf '%s' \"\$OBSV\" | jq -e 'has(\"recap\") and has(\"runs\") and has(\"nextSteps\")' >/dev/null"
 ok "observations recap is the session title"             "printf '%s' \"\$OBSV\" | jq -e '.recap==\"Observations recap line\"' >/dev/null"
+# `observe` reads the recap through core's accessor instead of building the whole Observations model.
+# Nothing pinned that it produces the same STRING: replacing the line with a literal `null` left every
+# suite green. These two must agree by construction — that shared definition is the reason core owns it.
+OBSRV=$( cc observe --session "$OBSESS" --json )
+ok "observe --json carries the same recap"               "printf '%s' \"\$OBSRV\" | jq -e '.recap==\"Observations recap line\"' >/dev/null"
+ok "observe and observations agree on the recap"         "[ \"\$(printf '%s' \"\$OBSRV\" | jq -r .recap)\" = \"\$(printf '%s' \"\$OBSV\" | jq -r .recap)\" ]"
 ok "observations coalesces adjacent same-file edits ×N"  "printf '%s' \"\$OBSV\" | jq -e '[.runs[] | select((.file|endswith(\"obs.txt\")) and .count>=2)]|length==1' >/dev/null"
 ok "observations run carries combined delta + per-edit rows" "printf '%s' \"\$OBSV\" | jq -e '.runs[0] | has(\"added\") and has(\"removed\") and (.edits|length>=1) and .edits[0].status!=null' >/dev/null"
 ok "observations edit carries Claude's reasoning"        "printf '%s' \"\$OBSV\" | jq -e '[.runs[].edits[] | select(.reasoning!=null)]|length>=1' >/dev/null"
@@ -696,6 +702,15 @@ for v in changemap multitask prompts processes sessions observations risk egress
   ok "$v: the single command answers at all"                           "[ -n \"\$ONE\" ] && [ \"\$ONE\" != null ]"
   ok "views.$v is byte-identical to \`$v --json\`"                     "[ \"\$ONE\" = \"\$BAT\" ]"
 done
+# `feed` and `list` are batchable but NOT in the default set, so the loop above cannot cover them. They
+# were absent from the allow-list entirely: asking for either fell through to the unknown-view throw and
+# was swallowed into a null, so a caller batching them got a silently empty pane instead of an error.
+for v in feed list; do
+  ONE=$( cc $v --session "$SESSION" --root "$WS" --json | jq -cS . )
+  BAT=$( cc views --views $v --session "$SESSION" --root "$WS" --json | jq -cS ".$v" )
+  ok "$v: batchable, and not null"                                     "[ -n \"\$BAT\" ] && [ \"\$BAT\" != null ]"
+  ok "views.$v is byte-identical to \`$v --json\`"                     "[ \"\$ONE\" = \"\$BAT\" ]"
+done
 ok "views --views picks a subset, and only that subset"                "cc views --views prompts,sessions --session \"\$SESSION\" --root \"\$WS\" --json | jq -e 'keys==[\"prompts\",\"sessions\"]' >/dev/null"
 ok "an unknown view is null, never fatal to the batch"                 "cc views --views prompts,nope --session \"\$SESSION\" --root \"\$WS\" --json | jq -e '.nope==null and (.prompts|type)==\"object\"' >/dev/null"
 ok "views will not batch a MUTATING command"                           "cc views --views keep --session \"\$SESSION\" --root \"\$WS\" --json | jq -e '.keep==null' >/dev/null"
@@ -786,6 +801,126 @@ node -e '
 ' "$HOME/.claude/projects/$MANGLE" "$RC" "$RCT"
 ok "two chained edits collapse to ONE review unit"     "cc list --pending --session \"\$RC\" --json | jq -e '(.edits|length)==1' >/dev/null"
 ok "the rewind counts BOTH: 2 raw records, 1 unit"     "cc undo --from-prompt 1 --dry-run --session \"\$RC\" --json | jq -e '.pending==2 and .units==1' >/dev/null"
+
+echo "════════ E2E 25: tui renders headlessly ════════"
+# The only tui assertion CI can make. An Actions runner's stdout is not a TTY, so raw mode, the
+# alternate screen and the exit guard are UNTESTABLE here — a green job is not TTY coverage, and the
+# interactive path has to be exercised by hand. What this does pin is that the non-interactive path
+# produces a real frame instead of crashing on `columns === undefined`, and exits 0.
+DASH=$( cc tui --once --cols 96 --rows 14 --no-color --session "$SESSION" --root "$WS" )
+ok "tui --once exits 0 and prints exactly its height"  "[ \"\$(printf '%s\n' \"\$DASH\" | wc -l | tr -d ' ')\" = 14 ]"
+ok "tui --once emits no escapes under --no-color"      "! printf '%s' \"\$DASH\" | grep -q \$'\\033'"
+# Measured with the product's own display-width ruler, not awk's `length`: awk counts bytes, so a
+# 4-byte emoji occupying 2 columns reads as 4 and the check fails on a correct frame. That ruler is
+# itself pinned by unit tests against known widths, so this is not circular.
+ok "tui --once holds the column budget"                "printf '%s\n' \"\$DASH\" | node -e \"const c=require('\$REPO/packages/tui/dist/index.js');const ls=require('fs').readFileSync(0,'utf8').split('\\n');const bad=ls.filter(l=>c.displayWidth(l)>96);if(bad.length){console.error('over budget: '+bad.length);process.exit(1)}\""
+# The window bar names all four windows at EVERY size — a minimized window keeps its chip, its jump
+# key and its counter, so the reader can always see what exists and press a key for it.
+#
+# Checked against the BAR ROW, not the whole frame. Grepping the frame passed against a bar that had
+# dropped every chip, because the same words appear in the blocked-size status line underneath: the
+# check reported healthy for precisely the failure it existed to catch.
+BAR=$( printf '%s\n' "$DASH" | sed -n 1p )
+ok "tui names every window on its bar, at a size that cannot show them all" "printf '%s' \"\$BAR\" | grep -q 'F1 .Prompts' && printf '%s' \"\$BAR\" | grep -q 'F2 .Traces' && printf '%s' \"\$BAR\" | grep -q 'F3 .Map' && printf '%s' \"\$BAR\" | grep -q 'F4 .Diff' && printf '%s' \"\$BAR\" | grep -q 'F5 .Dashboards'"
+ok "and says what a window it cannot open would cost"  "printf '%s' \"\$DASH\" | grep -qE 'needs [0-9]+ (cols|body rows)'"
+# The keys row must not advertise a key the runtime does not answer. `j`/`k` are gone; arrows moved in.
+ok "the key row advertises arrows, not j/k"             "printf '%s\n' \"\$DASH\" | tail -1 | grep -q '↑↓' && ! printf '%s\n' \"\$DASH\" | tail -1 | grep -q 'j/k'"
+# The product's front door is the app: a bare invocation, or one carrying only flags, opens the
+# dashboard rather than printing help or erroring on a leading flag it would read as a command.
+ok "a bare invocation opens the app, not usage"         "cc --root \"\$WS\" --no-color | grep -q 'Traces'"
+ok "flags alone still open it"                          "cc --root \"\$WS\" --session \"\$SESSION\" --no-color | grep -q 'Dashboards'"
+# `diff --patch` is what the dashboard parses. The human trailer is not diff, and it rendered as a
+# context row at the foot of every edit until the flag existed.
+# `grep -qv` was a tautology: it exits 0 as soon as ANY line fails to match, so it passed for output
+# that was not a patch at all. Assert the output IS one — a hunk header — and that the human trailer is
+# absent, which are the two separate claims this check exists to make.
+ok "diff --patch emits a real patch"                    "cc diff 1 --patch --session \"\$SESSION\" | grep -qE '^@@ '"
+ok "…and nothing but the patch"                          "! cc diff 1 --patch --session \"\$SESSION\" | grep -q 'keep #1 · undo #1'"
+ok "…and plain diff still prints the trailer for a human" "cc diff 1 --session \"\$SESSION\" | grep -q 'keep #1 · undo #1'"
+# …but the two questions still answer for themselves, or every script and doc changes meaning.
+# The INTERACTIVE first frame. `--once` renders directly and never calls `paint`, so it cannot catch
+# an error thrown while drawing frame one — which is how a temporal-dead-zone crash reached a user.
+ok "the interactive path boots and paints"       "cd \"$WS\" && node \"$REPO/test/tty-boot.js\" \"$REPO/packages/cli/dist/index.js\""
+# …and then it is DRIVEN. `--once` never installs a key handler and tty-boot only proves frame one
+# does not throw, so neither presses a key — which is how five separate keys shipped bound to a string
+# the decoder never emits. This one sends real bytes and reads the frame that comes back.
+ok "the interactive path answers real keystrokes" "cd \"$WS\" && node \"$REPO/test/tty-drive.js\" \"$REPO/packages/cli/dist/index.js\""
+ok "--help still prints usage"                          "cc --help | grep -qi 'per-edit Keep/Undo'"
+ok "--version still prints a version"                   "cc --version | grep -qE '[0-9]+\\.[0-9]+\\.[0-9]+'"
+ok "a named verb still dispatches"                      "cc status | grep -qi 'capture hooks'"
+ok "an unknown verb still fails loudly"                 "! cc definitely-not-a-verb >/dev/null 2>&1"
+
+echo "════════ E2E 26: .observatoryignore ════════"
+# The whole feature end to end, through the real binary, in a scratch tree: a hide rule, a refuse
+# rule, and the gitignore gotcha that a negation cannot reach into an excluded directory.
+#
+# `cc` runs from $WS in its own subshell, so a `cd` in front of it does nothing — the first draft of
+# this block "passed" three checks that were really running in the wrong tree and reporting SHOWN for
+# everything. `ccin` takes the directory, because the whole feature is about the cwd's own files.
+ccin(){ ( cd "$1" && shift && node "$CLI" "$@" ); }
+IGW=$(mktemp -d); mkdir -p "$IGW/dist" "$IGW/src"
+printf 'package-lock.json\ndist/\n!dist/manifest.json\n\n# capture: off\n**/*.mp4\n' > "$IGW/.observatoryignore"
+ok "a rule reports IGNORED, naming its file and line"       "ccin \"\$IGW\" ignore --check package-lock.json | grep -q ignored && ccin \"\$IGW\" ignore --check package-lock.json | grep -q '.observatoryignore:1'"
+# '# capture: off' is an ordinary comment again — the pattern under it is ignored by its own rule, and
+# the comment decides nothing. One mode: everything a rule matches is simply never recorded.
+ok "a '# capture:' comment decides nothing on its own"      "ccin \"\$IGW\" ignore --check clip.mp4 | grep -q ignored"
+ok "…and warns that an ignored path has nothing to undo"    "ccin \"\$IGW\" ignore --check clip.mp4 | grep -q 'nothing to undo'"
+ok "an uncovered path reports SHOWN"                        "ccin \"\$IGW\" ignore --check src/app.ts | grep -q shown"
+# The famous gitignore gotcha, diagnosed rather than left as a mystery: `dist/` excludes the
+# directory, so the `!dist/manifest.json` below it can never take effect.
+ok "an excluded ANCESTOR is named as the cause"             "ccin \"\$IGW\" ignore --check dist/manifest.json | grep -q ANCESTOR"
+ok "…and the working form is suggested"                     "ccin \"\$IGW\" ignore --check dist/manifest.json | grep -q 'dist/\\*'"
+ok "--json carries the deciding rule and its source"        "ccin \"\$IGW\" ignore --check dist/manifest.json --json | jq -e '.paths[0].mode==\"ignored\" and .paths[0].rule.pattern==\"dist/\" and (.paths[0].rule.line|type)==\"number\"' >/dev/null"
+# The array shape is the point: the verb takes many paths, like git check-ignore, so one path is just
+# a list of one rather than a different response.
+ok "--json answers for EVERY path given, in order"          "ccin \"\$IGW\" ignore --check dist/bundle.js src/app.ts --json | jq -e '(.paths|length)==2 and .paths[0].mode==\"ignored\" and .paths[1].mode==\"shown\"' >/dev/null"
+# The negative, with a positive control beside it: no ignore file anywhere means nothing is hidden,
+# and the very same probe DOES fire once a file exists.
+IGN=$(mktemp -d)
+ok "with no ignore file, a path reports SHOWN"              "ccin \"\$IGN\" ignore --check any.ts | grep -q shown"
+ok "positive control: adding one changes that answer"       "printf 'any.ts\\n' > \"\$IGN/.observatoryignore\" && ccin \"\$IGN\" ignore --check any.ts | grep -q ignored"
+ok "the bare verb explains itself when nothing is in play"  "rm \"\$IGN/.observatoryignore\" && ccin \"\$IGN\" ignore --session \"\$SESSION\" | grep -q 'no .observatoryignore in play'"
+rm -rf "$IGW" "$IGN"
+
+echo "════════ E2E 27: .observatoryignore matches real git, pattern for pattern ════════"
+# A DIFFERENTIAL test against the actual `git check-ignore`, not against our own idea of what git
+# does. The matcher is hand-rolled (no glob dependency is allowed here), and hand-rolled gitignores
+# are exactly where the edge cases rot: `**` spanning segments, a negation that re-includes a
+# DIRECTORY, character classes, an escaped literal `!`. Writing the same rules into .gitignore and
+# .observatoryignore and diffing the two tools' verbose output pins every one of them at once.
+GITW=$(mktemp -d)
+( cd "$GITW" && git init -q . ) 2>/dev/null
+if [ -d "$GITW/.git" ]; then
+  mkdir -p "$GITW/dist" "$GITW/src" "$GITW/pkg/core/dist" "$GITW/pkg/web/dist" "$GITW/deep/nested" "$GITW/build/keep"
+  IGRULES='package-lock.json
+dist/
+!dist/manifest.json
+pkg/*/dist/
+!pkg/core/dist/
+*.log
+!keep.log
+build/**
+!build/keep/
+deep/**/*.tmp
+[abc].txt
+\!lit.txt'
+  printf '%s\n' "$IGRULES" > "$GITW/.gitignore"
+  printf '%s\n' "$IGRULES" > "$GITW/.observatoryignore"
+  ( cd "$GITW" && touch dist/manifest.json dist/bundle.js src/app.ts pkg/core/dist/i.js pkg/web/dist/i.js \
+      a.log keep.log package-lock.json deep/nested/x.tmp build/x.js build/keep/y.js a.txt d.txt '!lit.txt' )
+  IGPATHS="dist/manifest.json dist/bundle.js src/app.ts pkg/core/dist/i.js pkg/web/dist/i.js a.log keep.log package-lock.json deep/nested/x.tmp build/x.js build/keep/y.js a.txt d.txt !lit.txt"
+  # `-v -n` is git's machine format: <source>:<linenum>:<pattern><TAB><pathname>, with every field but
+  # the pathname empty for a non-match. Only the source FILENAME differs between the two tools.
+  ok "verbose output is byte-identical to git check-ignore -v -n" \
+     "diff <( cd \"\$GITW\" && git check-ignore -v -n \$(echo \$IGPATHS) ) <( cd \"\$GITW\" && node \"\$CLI\" ignore -v -n --check \$(echo \$IGPATHS) | sed 's/^\\.observatoryignore:/.gitignore:/' ) >/dev/null"
+  ok "exit 0 when a path is ignored (git's contract)"  "( cd \"\$GITW\" && node \"\$CLI\" ignore -q --check dist/bundle.js )"
+  ok "exit 1 when none are"                            "! ( cd \"\$GITW\" && node \"\$CLI\" ignore -q --check src/app.ts )"
+  ok "--stdin reads paths the way git does"            "( cd \"\$GITW\" && printf 'dist/bundle.js\\nsrc/app.ts\\n' | node \"\$CLI\" ignore --stdin -v -n --check | grep -q 'dist/bundle.js' )"
+  ok "-z separates with NULs, not colons and tabs"     "( cd \"\$GITW\" && node \"\$CLI\" ignore -v -z --check dist/bundle.js | tr '\\0' '~' | grep -q '\\.observatoryignore~2~dist/~dist/bundle.js~' )"
+else
+  echo "  ·  skipped — git could not create a scratch repo here"
+fi
+rm -rf "$GITW"
 
 echo "════════════════════════════════════════════════════════"
 echo "E2E RESULT: $pass passed, $fail failed"

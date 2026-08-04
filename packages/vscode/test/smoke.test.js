@@ -274,7 +274,10 @@ test('extension: three views, click commands, inline annotations, chat, status s
         commentController = {
           id, label, commentingRangeProvider: undefined,
           createCommentThread: (uri, range, comments) => {
-            const thread = { uri, range, comments, collapsibleState: undefined, canReply: undefined, contextValue: undefined, label: undefined, state: undefined, disposed: false, dispose() { thread.disposed = true; } };
+            // `bornWith` records the body the thread was CONSTRUCTED with, which the real platform reads
+            // once to pick the header's dismiss icon. The extension then empties `comments`, so without
+            // capturing it here the test could not tell a bar built correctly from one built bodyless.
+            const thread = { uri, range, comments, bornWith: comments, collapsibleState: undefined, canReply: undefined, contextValue: undefined, label: undefined, state: undefined, disposed: false, dispose() { thread.disposed = true; } };
             commentThreads.push(thread);
             return thread;
           },
@@ -347,6 +350,13 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.deepEqual(containerTitles,
       { claudeObservatory: 'Observatory Traces', claudeObservatoryDock: 'Observatory Dashboards', claudeObservatoryPrompts: 'Observatory Timeline' },
       'the three containers carry the 0.9.0 names');
+    // A container down to ONE visible view is "merged with the container": ViewPaneContainer.getTitle()
+    // then draws `${containerTitle}: ${paneTitle}` unless the two are equal. Timeline is permanently
+    // single-view, so an unequal name renders the header as "OBSERVATORY TIMELINE: TIMELINE" — the pane
+    // title is the manifest `name` verbatim (the provider never assigns webviewView.title), and
+    // singleViewPaneContainerTitle, the platform's escape hatch, is not in the `views` contribution schema.
+    assert.equal(timeline[0].name, containerTitles.claudeObservatoryPrompts,
+      'the one Timeline view is named for its container, so the header reads the container title alone');
     // 0.9.0: the Timeline container is a separate draggable unit rather than tabs wedged beside
     // Overview and Stats. VS Code offers no manifest option to place a view in the secondary side bar,
     // but a container of its own is what makes dragging it there stick cleanly. (Its one view is
@@ -938,6 +948,15 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.ok(/navW:NAV_W, navH:NAV_H/.test(cmView.webview.html) && /--ov-navv/.test(cmView.webview.html),
       '…and the split is remembered per axis (a nav WIDTH side by side, a nav HEIGHT stacked)');
     // LEFT NAV: the Fleet · Workflows sub-tabs + item list.
+    // EVERY class a webview's own script emits must have a rule in that webview's own stylesheet.
+    // These are two separate documents with two separate <style> blocks, so a rule declared in the
+    // wrong one reads perfectly in the source and paints nothing: the machine highlight shipped that
+    // way — `.mt-smc.away` sat in the Timeline shell while only the Overview emits `mt-smc`, and the
+    // Sessions tab painted every machine the same grey.
+    for (const cls of ['mt-smc', 'mt-smc.away', 'mt-smc.bridged', 'mt-smc.bad']) {
+      assert.ok(cmView.webview.html.includes('.' + cls + ' '),
+        `Overview stylesheet is missing a rule for .${cls} — the class it emits would paint nothing`);
+    }
     assert.match(cmView.webview.html, /id="ov-navtabs"/, 'Overview: left-nav sub-tab bar present (Fleet · Workflows)');
     assert.ok(/'Fleet'/.test(cmView.webview.html) && /'Workflows'/.test(cmView.webview.html), 'the left nav labels Fleet/Workflows');
     assert.ok(/renderNavTabs/.test(cmView.webview.html) && /function applyPanes/.test(cmView.webview.html), 'switching a nav tab toggles panes (renderNavTabs/applyPanes)');
@@ -1807,11 +1826,42 @@ test('extension: three views, click commands, inline annotations, chat, status s
     // Deliberately not driven here: reviewFirst moves the review cursor, which later assertions depend on.
     assert.ok(typeof stMsgHandler === 'function', 'the stats webview registered a message handler');
 
+    // BAR/BUBBLE PARITY, and parity with the JetBrains floating toolbar. The compact bar shipped
+    // without Chat and Spotlight while JetBrains' bar had both (FloatingChat, FloatingSpotlight), and
+    // JetBrains' bar shipped without the FILE axis while this one had it — each gap invisible from
+    // inside the editor that had the feature.
+    {
+      const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+      const bar = pkg.contributes.menus['comments/commentThread/title']
+        .filter((m) => /claudeNavBar/.test(m.when || ''))
+        .map((m) => m.command);
+      for (const need of ['claudeObservatory.peekKeep', 'claudeObservatory.peekUndo',
+        'claudeObservatory.peekPrev', 'claudeObservatory.peekNext',
+        'claudeObservatory.peekPrevFile', 'claudeObservatory.peekNextFile',
+        'claudeObservatory.peekViewDiff', 'claudeObservatory.peekChat',
+        'claudeObservatory.toggleHeatmap', 'claudeObservatory.barDetails']) {
+        assert.ok(bar.includes(need), `the compact review bar is missing ${need}`);
+      }
+    }
+
     // realtime observatory: status-bar microscope shows the pending count + the review scoreboard tooltip
     const microscope = statusBarItems.find((i) => /🔬/.test(i.text));
     assert.ok(microscope, 'status bar microscope present');
     assert.match(microscope.text, /2/, 'status bar shows 2 pending');
     assert.match(microscope.tooltip.value, /2 pending · 0 accepted · 0 reverted/, 'scoreboard lives in the microscope tooltip');
+    // ONE MEANING FOR "PENDING", across every surface. The status bar and the activity-bar badge
+    // counted RAW records while the Overview, the Sessions rows and the Stats scoreboard counted
+    // collapsed review units — so one session read 3,067 in one place and 2,052 two panels away.
+    // `keep`/`undo` resolve a whole same-code group, so the display units are the number of decisions.
+    {
+      const units = core.reviewEdits(S).filter((r) => r.status === 'pending').length;
+      // This pins the SOURCE, not the collapse: this fixture's raw and collapsed counts happen to be
+      // equal, so it cannot fail if the source regresses to the raw log. The collapse itself is
+      // asserted where a fixture can force the two apart — core.test.js, "counts: pending means
+      // DISPLAY units everywhere".
+      assert.equal(Number((microscope.text.match(/(\d+)/) || [])[1]), units,
+        'the status bar count agrees with the display units');
+    }
 
     // --- nav bar: the two-tier review toolbar (Diff axis + File axis + per-edit / per-file actions) ---
     for (const c of ['claudeObservatory.navDiffPrev', 'claudeObservatory.navDiffNext',
@@ -2420,7 +2470,20 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.equal(bar().uri.fsPath, toFsPath(BA), 'anchored in the file being reviewed');
     assert.equal(opened, undefined, 'the auto-shown bar never opens/focuses a document — it must not fight the cursor');
     assert.equal(bar().canReply, false, 'canReply:false — this is what suppresses the reply box and the whole comment form');
-    assert.deepEqual(bar().comments, [], 'and the body is EMPTY: an empty body is what collapses the widget to its header row');
+    // BORN WITH A BODY, THEN EMPTIED — and both halves are load-bearing, so both are asserted.
+    //
+    // What the bar must END as is comment-less: that is what CommentThreadWidget renders at its
+    // minimum — header only, no body, no reply form — which is what a review BAR is. But VS Code
+    // picks the header's dismiss glyph from that same condition, once, at widget construction:
+    //   function hOi(s){ return !!s && s.length > 0 }
+    //   let o = hOi(comments) ? chevron : trashcan;
+    // …so a thread CONSTRUCTED empty wears a trash can, on an action that deletes nothing and which
+    // an extension cannot restyle. Nothing ever re-evaluates that choice (updateCommentThread re-reads
+    // only the label), so the bar is constructed with one throwaway comment to win the chevron and
+    // emptied immediately after. Drop the first half and the bin returns; drop the second and the
+    // reader gets a permanent empty box about two editor lines tall under the header.
+    assert.equal(bar().bornWith.length, 1, 'the bar is CONSTRUCTED with a body — that is what wins the chevron over the trash can');
+    assert.equal(bar().comments.length, 0, 'and emptied right back out, so it renders at the one-row minimum');
     assert.equal(bar().state, vscode.CommentThreadState.Unresolved, 'Unresolved paints the frame + the arrow pointing at the edit');
     assert.equal(bar().collapsibleState, vscode.CommentThreadCollapsibleState.Expanded, 'and it opens expanded — a collapsed bar shows no toolbar at all');
 
@@ -2483,11 +2546,41 @@ test('extension: three views, click commands, inline annotations, chat, status s
     focusFile(BA);
     await settle();
     assert.equal(bar().contextValue, 'claudeNavBar', 'and coming back gives the bar, not the abandoned bubble');
+    // The two collapse gestures mean DIFFERENT things, which is the whole point of having both.
+    //
+    // The platform's own `^` steps the bubble DOWN to the bar. There is no Comment API event for it,
+    // but the collapse does reach us — the workbench pushes `{collapseState}` over
+    // $updateCommentThread and the extension host assigns it to our thread object — so the extension
+    // polls the value on the refresh it already runs. Driving it exactly that way here.
     await commands['claudeObservatory.barDetails']();
-    await commands['claudeObservatory.peekCollapse']();
-    assert.equal(liveThreads().length, 1, 'Collapse leaves exactly one surface live');
-    assert.equal(bar().contextValue, 'claudeNavBar', 'and it is the bar again');
+    assert.equal(bar().contextValue, 'claudeEdit', 'the bubble is up');
+    bar().collapsibleState = vscode.CommentThreadCollapsibleState.Collapsed; // ^ , as the platform sets it
+    await settle();
+    assert.equal(liveThreads().length, 1, '^ leaves exactly one surface live');
+    assert.equal(bar().contextValue, 'claudeNavBar', 'and it is the review bar — one step down, not gone');
     assert.match(bar().label, new RegExp(`Claude edit #${barId}\\b`), 'still at the same edit');
+    assert.equal(bar().collapsibleState, vscode.CommentThreadCollapsibleState.Expanded,
+      'the bar it lands on is expanded — a collapsed one shows no toolbar at all');
+
+    // …and on the BAR the same gesture hides it outright, because the bar is already the smallest
+    // surface — there is no next step down. It stays hidden: a refresh is one tick away, so a dismissal
+    // the next tick undoes is a button that does nothing.
+    bar().collapsibleState = vscode.CommentThreadCollapsibleState.Collapsed;
+    await settle();
+    assert.equal(liveThreads().length, 0, '^ on the bar closes the surface outright');
+    await settle();
+    assert.equal(liveThreads().length, 0, '…and the next refresh does not put it straight back');
+
+    // It is scoped to THAT edit, not to the session: move to another changed file and the surface
+    // returns. Without this a dismissal would suppress review chrome everywhere, with no way back —
+    // a programmatic comment thread has no close button to un-press.
+    focusFile(BB);
+    await settle();
+    assert.equal(liveThreads().length, 1, 'moving to another edit brings the surface back');
+    focusFile(BA);
+    await settle();
+    assert.equal(liveThreads().length, 1, '…and returning re-opens it here too');
+    assert.equal(bar().contextValue, 'claudeNavBar', 'as the bar, which is what the setting names');
 
     // Stepping the bar keeps it a BAR (a default-mode show() here would silently turn it into a bubble).
     await commands['claudeObservatory.peekNext']();
@@ -2564,22 +2657,34 @@ test('extension: three views, click commands, inline annotations, chat, status s
       'inline@4 claudeObservatory.peekPrevFile',
       'inline@5 claudeObservatory.peekNextFile',
       'inline@6 claudeObservatory.peekViewDiff',
-      'inline@7 claudeObservatory.barDetails',
-    ], 'the bar toolbar, in order: Keep · Undo · ⌃⌄ · ‹› · Diff · Details');
+      'inline@7 claudeObservatory.peekChat',
+      'inline@8 claudeObservatory.toggleHeatmap',
+      'inline@9 claudeObservatory.barDetails',
+    ], 'the bar toolbar, in order: Keep · Undo · ⌃⌄ · ‹› · Diff · Chat · Spotlight · ⌄ expand');
     assert.ok(barMenu.every((m) => /commentController == claudeObservatory/.test(m.when)),
       'every bar button is scoped to our controller — these menus are global to the workbench');
     assert.ok(!barMenu.some((m) => /commentThread == claudeEdit\b/.test(m.when)) && !bubbleMenu.some((m) => /commentThread == claudeNavBar\b/.test(m.when)),
       'the two toolbars are disjoint: neither block leaks into the other');
-    assert.ok(bubbleMenu.some((m) => m.command === 'claudeObservatory.peekCollapse'),
-      'and the bubble gained exactly one button — Collapse, the way back to the bar');
-    // Collapse is MINIMIZE, and it has to read that way at 16px with no label beside it. `$(fold-up)` is a
-    // real codicon — so the check below passes it — but its two stacked chevrons close into a lid over a
-    // body at toolbar size, which a reader reported as a trash can: the one meaning this button must never
-    // suggest. `$(chrome-minimize)` is the window-minimize bar, the literal "−", and its whole convention
-    // is "put this back where it came from". Pinned by NAME because the font check cannot see a legible id
-    // that means the wrong thing.
-    assert.equal(pkg.contributes.commands.find((c) => c.command === 'claudeObservatory.peekCollapse').icon, '$(chrome-minimize)',
-      'Collapse wears the minimize bar — not a chevron, which reads as a can with a lid');
+    // ONE COLLAPSE CONTROL PER SURFACE, and it is the platform's.
+    //
+    // VS Code appends its own collapse action after every contributed one (`setActionBarActions` does
+    // `push([...t, this._collapseAction])`), so nothing we contribute can sit after it and nothing can
+    // suppress or restyle it. A contributed "hide" button therefore always renders BESIDE the
+    // platform's, doing the same job twice — which is what the bar shipped with, and what this drops.
+    //
+    // What is left reads as one axis. The platform's `^` goes DOWN a step: bubble → bar, and from the
+    // bar (already the smallest surface) → gone, which followPlatformCollapse implements. Our one
+    // contributed control is its 180° flip, `⌄`, and goes UP: bar → bubble. Same glyph rotated, opposite
+    // direction, one meaning.
+    assert.ok(!JSON.stringify(pkg).includes('peekCollapse'),
+      'peekCollapse is gone entirely — a second hide button beside the platform’s own is duplication, not a feature');
+    assert.equal(barMenu[barMenu.length - 1].command, 'claudeObservatory.barDetails',
+      'the LAST button we contribute to the bar is the expander, so only the platform’s own control follows it');
+    assert.equal(pkg.contributes.commands.find((c) => c.command === 'claudeObservatory.barDetails').icon, '$(chevron-down)',
+      'and it is chevron-DOWN — the platform’s chevron-up rotated, not $(arrow-down), which is the Diff stepper');
+    assert.equal(pkg.contributes.commands.find((c) => c.command === 'claudeObservatory.peekNext').icon, '$(arrow-down)',
+      'the Diff stepper keeps the tailed arrow, so the two never read as the same button');
+
     // The steppers' when-clauses and the keys the extension actually publishes must be the same strings.
     for (const [cmd, key] of [['claudeObservatory.peekPrev', 'barMultiEdit'], ['claudeObservatory.peekNext', 'barMultiEdit'],
       ['claudeObservatory.peekPrevFile', 'barMultiFile'], ['claudeObservatory.peekNextFile', 'barMultiFile']]) {
@@ -2604,13 +2709,13 @@ test('extension: three views, click commands, inline annotations, chat, status s
     // Every command a menu names has to be DECLARED, or VS Code drops the entry silently.
     const declared = new Set(pkg.contributes.commands.map((c) => c.command));
     for (const m of [...barMenu, ...bubbleMenu]) assert.ok(declared.has(m.command), `${m.command} is declared in contributes.commands`);
-    for (const c of ['claudeObservatory.showReviewBar', 'claudeObservatory.barDetails', 'claudeObservatory.peekCollapse', 'claudeObservatory.peekViewDiff'])
+    for (const c of ['claudeObservatory.showReviewBar', 'claudeObservatory.barDetails', 'claudeObservatory.peekViewDiff'])
       assert.ok(typeof commands[c] === 'function' && declared.has(c), `${c} is both registered and declared`);
     // Toolbar-only commands are hidden from the palette (they act on whatever surface is live, so they
     // are meaningless typed into a picker); `showReviewBar` deliberately is NOT — it takes no argument
     // and is the way back when editorReviewSurface is `none`.
     const barPalette = new Map(pkg.contributes.menus.commandPalette.map((m) => [m.command, m.when]));
-    for (const c of ['claudeObservatory.barDetails', 'claudeObservatory.peekCollapse', 'claudeObservatory.peekViewDiff'])
+    for (const c of ['claudeObservatory.barDetails', 'claudeObservatory.peekViewDiff'])
       assert.equal(barPalette.get(c), 'false', `${c} is toolbar-only`);
     assert.ok(!barPalette.has('claudeObservatory.showReviewBar'), 'showReviewBar stays in the palette on purpose');
     const surfaceCfg = pkg.contributes.configuration.properties['claudeObservatory.editorReviewSurface'];

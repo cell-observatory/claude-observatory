@@ -20,7 +20,11 @@ const CSS = `
     --ink:#cccccc; --dim:#9d9d9d; --faint:#6e6e6e;
     --pending:#d9a441; --kept:#3fb950; --reverted:#8b949e;
     --blue:#4c8bf5; --purple:#9a6ac2; --orange:#c9713f; --accent:#4c8bf5; --coral:#cc785c;
-    --hl:rgba(63,185,80,0.09); --hlborder:#cc785c; --delborder:#f85149; --delhl:rgba(248,81,73,0.09);
+    /* The change bar is GREEN in the product and always has been — ADDED_BAR is rgba(88,166,100,0.9)
+       used as the decoration's borderColor, over an ADDED_LINE_BG of the same green at 0.30. This
+       said coral, so four published images (layout, inline-review, spotlight, map) advertised an
+       edge colour the editor has never drawn. Coral is the brand accent, not the change bar. */
+    --hl:rgba(88,166,100,0.30); --hlborder:#58a664; --delborder:#f85149; --delhl:rgba(248,81,73,0.09);
   }
   body { font-family:-apple-system,'Segoe UI',sans-serif; font-size:13px; color:var(--ink); background:#000; }
   .mono { font-family:'SF Mono',Menlo,monospace; }
@@ -283,9 +287,16 @@ const actionsCol = `
 
 // Change Map — two labeled sections (Folders strip · Files ledger) + a bottom summary
 const cmCap = (label) => `<div style="font-size:9px;letter-spacing:.6px;text-transform:uppercase;color:var(--faint);margin:0 0 3px 1px">${label}</div>`;
-const cmSummary = (name, pending, accepted, files, folders) => `
+// Mirrors renderSummary in the extension. Two shapes, and they differ in more than the name:
+//   prompt-scoped:  #<index> · N pending · N accepted [· N reverted] · N EDITS · N files · N folders
+//   folder/none:    [folder] · N pending · N accepted [· N reverted] · N files · N folders
+// The prompt-scoped form names the ask by its INDEX only — the ask's text lives in the element's
+// title attribute, because the scope bar above already spells it out. This mockup used to inline the
+// full prompt text AND omit the mandatory edits term, so layout.png (the README's lead image)
+// advertised a summary line the product cannot produce.
+const cmSummary = (name, pending, accepted, edits, files, folders) => `
   <div style="border-top:1px solid var(--border);margin-top:8px;padding-top:6px;font-family:'SF Mono',Menlo,monospace;font-size:10.5px;color:var(--dim)">
-${name ? `<b style="color:var(--accent)">${name}</b> · ` : ''}<b style="color:var(--pending)">${pending}</b> pending · <b style="color:var(--kept)">${accepted}</b> accepted · <b style="color:var(--ink)">${files}</b> files · <b style="color:var(--ink)">${folders}</b> folders</div>`;
+${name ? `<b style="color:var(--accent)">${name}</b> · ` : ''}<b style="color:var(--pending)">${pending}</b> pending · <b style="color:var(--kept)">${accepted}</b> accepted${edits == null ? '' : ` · <b style="color:var(--ink)">${edits}</b> edits`} · <b style="color:var(--ink)">${files}</b> files · <b style="color:var(--ink)">${folders}</b> folders</div>`;
 const cmSeg = (color, name) => `<span style="flex:1;min-width:0;background:${color};box-shadow:inset 1px 0 0 var(--panel);display:flex;align-items:center;justify-content:center;font-size:9px;color:rgba(0,0,0,.78);font-weight:600;overflow:hidden">${name}</span>`;
 const cmRow = (color, file, mod, barPct, num, pend) => `
   <div style="display:flex;align-items:center;gap:8px;font-size:11.5px;padding:2.5px 0">
@@ -486,7 +497,7 @@ const changeMapCol = `
       ${cmRow('var(--pending)', 'test_pipeline.py', 'tests', 96, '+12', '1⧗')}
       ${cmRow('var(--kept)', 'dataset.py', 'src/models', 58, '+7', '')}
       ${cmRow('var(--pending)', 'features.py', 'src', 55, '+6', '1⧗')}
-      ${cmSummary('#1 add feature scaling and dataset validation', 2, 3, 4, 3)}
+      ${cmSummary('#1', 2, 3, 5, 4, 3)}
     </div>
   </div>`;
 // One agent (worktree) row: badge · worktree ⑂branch · self tag · sparkline · ± · ⚠risk · ⇄collisions.
@@ -655,7 +666,7 @@ const overviewTabsBody = `
         ${cmRow('var(--pending)', 'test_pipeline.py', 'tests', 96, '+12', '1⧗')}
         ${cmRow('var(--kept)', 'dataset.py', 'src/models', 58, '+7', '')}
         ${cmRow('var(--kept)', 'features.py', 'src', 55, '+6', '')}
-        ${cmSummary('', 2, 3, 4, 4)}
+        ${cmSummary('', 2, 3, null, 4, 4)}
       </div>
     </div>
   </div>`;
@@ -665,19 +676,6 @@ const overviewTabsBody = `
 // row is color-coded ICONS only, each naming its verb on hover.
 const ovtGrp = (inner) => `<span style="display:flex;gap:9px;align-items:center;white-space:nowrap">${inner}</span>`;
 const ovtSep = `<span style="width:1px;align-self:stretch;background:var(--border2);margin:1px 2px"></span>`;
-const ovToolbar = `
-  <div style="display:flex;flex-direction:column;gap:6px;padding:7px 14px;border-bottom:1px solid var(--border);font-size:11px;color:var(--dim)">
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
-      ${ovtGrp(`<span class="mono" style="color:var(--ink)">${microscope} Debug /effort &amp; optimize</span><span style="color:#3fb950">${icoChecklist} Accept All</span><span style="color:#e5534b">${icoHistory} Reject All</span><span style="color:#d9822b">${icoClear} Clear Resolved</span><span style="color:#4c8bf5">↗ Export</span>`)}
-      ${ovtGrp(`<span style="color:#9a6ac2">${icoSearch} Search</span><span>✓ Active only</span>${ovtSep}<span style="color:#9a6ac2">${icoBulb} Spotlight</span><span>⟳ Refresh</span>`)}
-    </div>
-    <div style="display:flex;align-items:center;justify-content:center;gap:9px;flex-wrap:wrap">
-      ${ovtGrp(`<span style="color:#4c8bf5">⌃</span><span class="mono">Diff 1/2 · 5m</span><span style="color:#4c8bf5">⌄</span><span style="color:#3fb950">✓</span><span style="color:#e5534b">↩</span><span style="color:var(--accent)">${icoChat}</span><span style="color:var(--accent)">⧉</span>`)}${ovtSep}
-      ${ovtGrp(`<span style="color:#4c8bf5">‹</span><span class="mono">File 2/5 · dataset.py · 1 edit</span><span style="color:#4c8bf5">›</span><span style="color:#3fb950">✓✓</span><span style="color:#e5534b">✕</span>`)}${ovtSep}
-      ${ovtGrp(`<span style="color:#4c8bf5">‹</span><span class="mono">Folder 1/3 · src/models · 2 files · 7 edits</span><span style="color:#4c8bf5">›</span><span style="color:#3fb950">✓✓</span><span style="color:#e5534b">✕</span>`)}${ovtSep}
-      ${ovtGrp(`<span style="color:#4c8bf5">‹</span><span class="mono">Prompt 2/6 · 3 files · 9 edits</span><span style="color:#4c8bf5">›</span><span style="color:var(--accent)">≡</span><span style="color:#3fb950">${icoChecklist}</span><span style="color:#e5534b">${icoHistory}</span>`)}
-    </div>
-  </div>`;
 
 // The Overview's Workflows tab — one row per multi-agent workflow run (informative name, state,
 // per-phase progress groups, agents with tokens·time·edits) over a matching sparkline.
@@ -777,12 +775,6 @@ const scenes = {
     </div>`),
   // Anatomy — a labelled outline of every surface, so each section can be referred to by name.
   // Per-window diagrams — the real panel mockup + a numbered legend of its parts.
-  'win-overview': scene(1200, winDiag('OVERVIEW', ovToolbar + changeMapCol, [
-    note('1', 'Toolbar — two rows', 'Controls on top (session name · Accept&nbsp;All · Reject&nbsp;All · Clear&nbsp;Resolved · Export&nbsp;|&nbsp;Search · Active&nbsp;only · Spotlight · Refresh); the four review AXES below — <b style="color:var(--ink)">Diff · File · Folder · Prompt</b>. Color-coded icons, one per action, each naming its verb on hover.'),
-    note('2', 'Sessions · Fleet · Workflows · Tasks · Processes nav', 'The left rail — every session in this workspace, running agents across git worktrees, workflow runs, the session&rsquo;s numbered tasks, and the background shells it left running. Pick one to drive the detail; a Sessions row switches which session you are reviewing.'),
-    note('3', 'Folders · Files', 'Two labeled sections: the <b style="color:var(--ink)">Folders</b> strip (one tile per changed directory, colored by review status) and the churn-ranked <b style="color:var(--ink)">Files</b> ledger. Click a folder tile to filter the ledger and drive the Folder axis.'),
-    note('4', 'Summary bar', 'Pending / accepted / reverted edit counts plus file and folder totals for whatever is in scope — named for the picked prompt (or folder filter).'),
-  ].join(''))),
   'win-actions': scene(1200, winDiag('ACTIONS', actionsCol, [
     note('1', 'Category groups', 'A tab of the Observatory Timeline panel (beside Prompts and Observations), collapsed by default — Edits · Commands · Reads · Searches · To-dos. Curated; errors always surface.'),
     note('2', 'Egress', 'Everywhere the session reached off-machine — web · MCP · network shell.'),
@@ -1123,7 +1115,7 @@ const SIZE = {
   cli: '948,540', conflict: '928,290', diffs: '1028,330', spotlight: '1028,400',
   'file-history': '768,130',
   multitasking: '868,218', 'overview-tabs': '908,266', prompts: '748,560',
-  'overview-workflows': '868,196', 'overview-tasks': '868,168', 'win-overview': '1248,392',
+  'overview-workflows': '868,196', 'overview-tasks': '868,168',
   sessions: '768,232', feed: '868,212', processes: '868,205', chat: '908,440', demo: '928,556',
 };
 const tmp = join(tmpdir(), 'obs-media');

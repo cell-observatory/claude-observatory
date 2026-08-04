@@ -16,7 +16,7 @@
  *
  * The `capture` path lazy-loads only the zero-dep capture module (no `diff`) so the hook stays fast.
  */
-import type { EditRecord, FileMemory, InstallResult, StatMetrics } from '@claude-observatory/core';
+import type { EditRecord, InstallResult, StatMetrics } from '@claude-observatory/core';
 
 /** Version read from the package manifest at runtime — one source of truth, so it can never drift. */
 function version(): string {
@@ -372,13 +372,147 @@ function cmdWarm(args: string[]): void {
   process.stdout.write(c.green('✓ ') + `warmed ${warmed.length} session(s) active in the last ${spec ?? '24h'}\n`);
 }
 
+/**
+ * The machines this install looks for sessions on — list, add, remove, enable, disable.
+ *
+ * It exists so the feature is configurable everywhere it ships. `prefs.remotes` used to be reachable
+ * only from the terminal dashboard's options window, which made "browse a session on another machine"
+ * a terminal-only setting for a feature both editors render; they now drive this verb.
+ *
+ * Validation is `parseRemoteSpec`'s, not this file's. Both fields are interpolated into a shell that
+ * runs on ANOTHER computer, so there is one door and everything comes through it.
+ */
+/**
+ * WHERE THE OBSERVATORY KEEPS ITS DATA — show it, or move it.
+ *
+ * "Where does this thing put my files" had no answer anywhere in the product. The move is
+ * `core.moveStore`, shared with the terminal's options window and both editors, because a setting
+ * that changed where NEW data goes while leaving the old data behind would strand a session's
+ * history somewhere the product no longer looks.
+ */
+function cmdStore(args: string[]): void {
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  const path = require('path') as typeof import('path');
+  const flagAt = (f: string): string | undefined => {
+    const i = args.indexOf(f);
+    return i >= 0 ? args[i + 1] : undefined;
+  };
+  const to = flagAt('--move');
+  const toDefault = args.includes('--default');
+  if (to !== undefined || toDefault) {
+    const target = toDefault ? path.join(core.claudeConfigDir(), 'claude-observatory') : String(to);
+    const parsed = toDefault ? { dir: target } : core.parseStorePath(target);
+    if ('error' in parsed) fail(parsed.error);
+    else {
+      const res = core.moveStore(parsed.dir);
+      if ('error' in res) fail(res.error);
+      else {
+        const prefs = core.readPrefs();
+        if (toDefault) delete prefs.storeDir;
+        else prefs.storeDir = parsed.dir;
+        core.writePrefs(prefs);
+        process.stdout.write(`${c.green('moved')} ${res.from}\n   →   ${res.to}\n`);
+      }
+    }
+    return;
+  }
+  const dir = core.rootDir();
+  const moved = Boolean(core.readPrefs().storeDir);
+  if (args.includes('--json')) {
+    emitJson({ dir, moved, default: path.join(core.claudeConfigDir(), 'claude-observatory') });
+    return;
+  }
+  process.stdout.write(`${dir}${moved ? c.dim('   (moved)') : c.dim('   (default)')}\n`);
+  process.stdout.write(c.dim('  every session\u2019s edits, snapshots and derived caches live here\n'));
+  process.stdout.write(c.dim('  move it with: claude-observatory store --move <dir>   (--default puts it back)\n'));
+}
+
+function cmdRemotes(args: string[]): void {
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  const json = args.includes('--json');
+  const prefs = core.readPrefs();
+  const list = [...(prefs.remotes ?? [])];
+  const save = (next: typeof list): void => {
+    const p = { ...prefs };
+    if (next.length) p.remotes = next;
+    else delete p.remotes;
+    core.writePrefs(p);
+  };
+  const valueOf = (flag: string): string | undefined => {
+    const i = args.indexOf(flag);
+    return i >= 0 ? args[i + 1] : undefined;
+  };
+  const byName = (name: string): number => list.findIndex((r) => r.name === name || r.host === name);
+
+  const add = valueOf('--add');
+  if (add !== undefined) {
+    const r = core.parseRemoteSpec(add);
+    if ('error' in r) fail(r.error);
+    else {
+      // Same name twice is a REPLACE, not a duplicate: two rows with one name make every later
+      // --remove/--disable ambiguous, and the reader plainly meant to correct the one they had.
+      const at = byName(r.remote.name);
+      if (at >= 0) list[at] = { ...r.remote, enabled: list[at].enabled };
+      else list.push(r.remote);
+      save(list);
+      process.stdout.write(`${c.green('added')} ${r.remote.name} → ${r.remote.host}${r.remote.configDir ? `  (${r.remote.configDir})` : ''}\n`);
+    }
+    return;
+  }
+  for (const [flag, verb] of [['--remove', 'removed'], ['--enable', 'enabled'], ['--disable', 'disabled']] as const) {
+    const name = valueOf(flag);
+    if (name === undefined) continue;
+    const at = byName(name);
+    // Named-but-absent is an error, not a silent success: a typo'd host would otherwise report
+    // "disabled" and leave the machine being polled every time the picker opens.
+    if (at < 0) fail(`no configured machine called “${name}” — \`claude-observatory remotes\` lists them`);
+    if (flag === '--remove') list.splice(at, 1);
+    else list[at] = { ...list[at], enabled: flag === '--enable' };
+    save(list);
+    process.stdout.write(`${c.green(verb)} ${name}\n`);
+    return;
+  }
+
+  if (json) {
+    emitJson({ remotes: list.map((r) => ({ ...r, enabled: r.enabled !== false })) });
+    return;
+  }
+  if (!list.length) {
+    process.stdout.write('no machines configured — this install lists sessions on this computer only\n');
+    process.stdout.write(`  add one with: ${c.dim('claude-observatory remotes --add "name host"')}\n`);
+    process.stdout.write('  host is anything ssh accepts. Key auth only: the lookup runs with BatchMode,\n');
+    process.stdout.write('  so an unreachable machine fails fast instead of hanging on a password prompt.\n');
+    return;
+  }
+  const nameW = Math.max(...list.map((r) => r.name.length));
+  for (const r of list) {
+    const off = r.enabled === false;
+    process.stdout.write(
+      `${off ? c.dim('○') : c.green('●')} ${r.name.padEnd(nameW)}  ${r.host}` +
+        (r.configDir ? `  ${c.dim(r.configDir)}` : '') +
+        (off ? c.dim('   (off)') : '') +
+        '\n'
+    );
+  }
+  process.stdout.write(c.dim('\nread-only: sessions there can be browsed, never reverted from here\n'));
+}
+
 function cmdSessions(args: string[] = []): void {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
-  // This WORKSPACE's sessions by conversation recency, titled from a bounded sidecar-cached scan —
+  // EVERY workspace's sessions by conversation recency, titled from a bounded sidecar-cached scan —
   // no per-session log parse, no pending counts (recency + name is what the switch decision needs).
   // --session pins the listing to the session being reviewed, so a pinned conversation with no edits
   // yet still appears in it rather than looking like another workspace's.
   const meta = core.sessionMeta(process.cwd(), args.includes('--session') ? getSessionId(args) : null);
+  // `--remote` folds in every configured machine. OPT-IN, and only here: each host is an ssh, so a
+  // caller that just wants this machine's sessions must not pay for one — and the editors ask for it
+  // through their own async CLI spawn, which keeps the ssh off their UI thread entirely.
+  if (args.includes('--remote')) {
+    const prefs = core.readPrefs();
+    const rows = core.remoteRows((prefs.remotes ?? []).filter((r) => r.enabled !== false));
+    (meta.sessions as unknown as Record<string, unknown>[]).push(...(rows as unknown as Record<string, unknown>[]));
+    (meta.sessions as { lastActiveMs: number }[]).sort((a, b) => b.lastActiveMs - a.lastActiveMs);
+  }
   if (args.includes('--json')) {
     emitJson(meta);
     return;
@@ -387,15 +521,33 @@ function cmdSessions(args: string[] = []): void {
     process.stdout.write(c.dim('no sessions for this workspace yet.\n'));
     return;
   }
+  // Widest workspace label, so the column lines up instead of every row starting at its own column.
+  const wsW = Math.min(30, Math.max(0, ...meta.sessions.map((s) => (s.workspace || '').length)));
+  // …and the machine, in its own column beside it, for the same reason.
+  const mcW = Math.max(0, ...meta.sessions.map((s) => (s.machine || '').length));
   for (const s of meta.sessions) {
     const mark = s.current ? c.green('● ') : '  ';
+    const machine = c.dim((s.machine || '?').padEnd(mcW));
+    const ws = c.dim((s.workspace || '?').padEnd(wsW));
     const name = s.title ? `${c.bold(s.title)}  ${c.dim(s.id)}` : c.bold(s.id);
-    const did = s.edits
-      ? `${s.edits} edit(s)` + (s.files ? ` · ${s.files} file(s)` : '') + (s.pending ? ` · ${s.pending} pending` : ' · reviewed')
-      : 'no edits';
-    process.stdout.write(`${mark}${name}  ${c.dim(`${did} · ${core.relTime(s.lastActiveMs)}`)}\n`);
+    // A bridged session is not an empty one. Saying "no edits" about a conversation whose content is
+    // on Claude Code's bridge sends the reader to open something that is not there.
+    const did =
+      s.origin === 'bridged'
+        ? 'on the Claude Code bridge — not on this machine'
+        : s.edits
+          ? `${s.edits} edit(s)` + (s.files ? ` · ${s.files} file(s)` : '') + (s.pending ? ` · ${s.pending} pending` : ' · reviewed')
+          : 'no edits';
+    process.stdout.write(`${mark}${machine}  ${ws}  ${name}  ${c.dim(`${did} · ${core.relTime(s.lastActiveMs)}`)}\n`);
   }
-  process.stdout.write(c.dim('\n● = resolves for this directory · use `--session <id>` to target another\n'));
+  const bridged = meta.sessions.filter((s) => s.origin === 'bridged').length;
+  process.stdout.write(
+    c.dim(
+      `\n● = resolves for this directory · every workspace is listed, with the machine it is on` +
+        (bridged ? ` · ${bridged} bridged (content lives on the bridge)` : '') +
+        '\nuse `--session <id>` to target another\n'
+    )
+  );
 }
 
 // --- review commands ---
@@ -447,7 +599,11 @@ function cmdList(args: string[]): void {
       session,
       edits: log.map((r) => {
         const d = core.lineDelta(session, r);
-        return { id: r.id, ts: r.ts, tool: r.tool, file: r.file, status: r.status, added: d.added, removed: d.removed };
+        // `rel` is the workspace-relative path. Without it every renderer has to guess how to
+        // shorten an absolute path, and the terminal's guess kept only the last two segments — so
+        // packages/core/src/x.ts and packages/cli/src/x.ts both read as src/x.ts. Two different
+        // files, indistinguishable, in a tool for deciding whether to revert one of them.
+        return { id: r.id, ts: r.ts, tool: r.tool, file: r.file, rel: core.relPath(process.cwd(), r.file), status: r.status, added: d.added, removed: d.removed };
       }),
     });
     return;
@@ -497,7 +653,11 @@ function cmdTimeline(args: string[]): void {
         .reverse()
         .map((r) => {
           const d = core.lineDelta(session, r);
-          return { id: r.id, ts: r.ts, tool: r.tool, file: r.file, status: r.status, added: d.added, removed: d.removed };
+          // `rel` is the workspace-relative path. Without it every renderer has to guess how to
+        // shorten an absolute path, and the terminal's guess kept only the last two segments — so
+        // packages/core/src/x.ts and packages/cli/src/x.ts both read as src/x.ts. Two different
+        // files, indistinguishable, in a tool for deciding whether to revert one of them.
+        return { id: r.id, ts: r.ts, tool: r.tool, file: r.file, rel: core.relPath(process.cwd(), r.file), status: r.status, added: d.added, removed: d.removed };
         }),
     });
     return;
@@ -1313,7 +1473,10 @@ function cmdDiff(args: string[]): void {
   const rec = core.findRecord(session, id);
   if (!rec) fail(`no edit #${id} in session ${session}`);
   process.stdout.write(core.coloredDiff(session, rec as EditRecord, isTTY()) + '\n');
-  process.stdout.write(c.dim(`keep #${id} · undo #${id}\n`));
+  // `--patch` means "the patch and nothing else". The trailer below is a hint for a human at a
+  // prompt; to anything that PARSES this output it is one more line of diff, and the dashboard
+  // rendered it as a context row at the bottom of every edit it showed.
+  if (!args.includes('--patch')) process.stdout.write(c.dim(`keep #${id} · undo #${id}\n`));
 }
 
 function cmdKeep(args: string[]): void {
@@ -2204,6 +2367,238 @@ function cmdBlob(args: string[]): void {
   }
 }
 
+/**
+ * `ignore` — what `.observatoryignore` is doing, and why.
+ *
+ * With no arguments: the files in play and what they hide in this session. With `--check <path>`:
+ * the one rule that decided, named by file and line.
+ *
+ * This verb is the difference between a filter you can debug and a filter you have to guess at. A
+ * gitignore-shaped file has real gotchas — an excluded parent beats a later negation, `dist/` is not
+ * `dist` — and a reader who cannot see WHICH line hid their file has no way to tell a working rule
+ * from a typo.
+ */
+function cmdIgnore(args: string[]): void {
+  const core = require('@claude-observatory/core') as Core;
+  const fs = require('fs') as typeof import('fs');
+  const path = require('path') as typeof import('path');
+  const json = args.includes('--json');
+  const cwd = process.cwd();
+  const verbose = args.includes('-v') || args.includes('--verbose');
+  const nonMatching = args.includes('-n') || args.includes('--non-matching');
+  const quiet = args.includes('-q') || args.includes('--quiet');
+  const nulSep = args.includes('-z');
+  const stdin = args.includes('--stdin');
+
+  // Paths come from --check (repeatable), from --stdin, or as bare operands after --check.
+  const flags = new Set(['-v', '--verbose', '-n', '--non-matching', '-q', '--quiet', '-z', '--stdin', '--json']);
+  const targets: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--check') {
+      // Everything after --check that is not itself a flag is a path, so `--check a b c` works the
+      // way `git check-ignore a b c` does.
+      for (let j = i + 1; j < args.length && !args[j].startsWith('-'); j++) targets.push(args[j]);
+    } else if (args[i] === '--session') {
+      i++; // its value, never a path
+    }
+  }
+  if (stdin) {
+    let raw = '';
+    try {
+      raw = fs.readFileSync(0, 'utf8');
+    } catch {
+      fail('ignore --stdin could not read standard input');
+    }
+    for (const line of raw.split(nulSep ? '\0' : '\n')) if (line.trim()) targets.push(line.trim());
+  }
+  void flags;
+
+  if (targets.length) {
+    if (quiet && targets.length > 1) fail('`ignore -q` takes a single path (same rule as `git check-ignore -q`)');
+    const abs = targets.map((t) => path.resolve(cwd, t));
+    const ctx = core.ignoreContextFor(abs);
+    const rows = abs.map((a, i) => {
+      let isDir = false;
+      try {
+        isDir = fs.statSync(a).isDirectory();
+      } catch {
+        /* a path that does not exist yet is still a fair question — treat it as a file */
+      }
+      const d = ctx.decide(a, isDir);
+      return { given: targets[i], abs: a, d, mode: d.ignored ? 'ignored' : 'shown' };
+    });
+    const anyIgnored = rows.some((r) => r.d.ignored);
+
+    if (json) {
+      emitJson({
+        paths: rows.map((r) => ({
+          path: r.abs,
+          mode: r.mode,
+          rule: r.d.rule && {
+            pattern: r.d.rule.pattern,
+            source: r.d.rule.source,
+            line: r.d.rule.line,
+            negated: r.d.rule.negated,
+          },
+          matched: r.d.matched,
+        })),
+        files: ctx.files,
+      });
+      process.exit(anyIgnored ? 0 : 1);
+    }
+    if (quiet) process.exit(anyIgnored ? 0 : 1);
+
+    // `-v` is git's machine-readable shape, byte for byte: <source>:<linenum>:<pattern><TAB><pathname>,
+    // with every field but the pathname empty for a non-match, and NULs replacing the separators under
+    // `-z`. Anything that already parses `git check-ignore -v` parses this.
+    if (verbose) {
+      for (const r of rows) {
+        const matched = r.d.rule;
+        if (!matched && !nonMatching) continue;
+        const src = matched ? core.relPath(cwd, matched.source) : '';
+        const ln = matched ? String(matched.line) : '';
+        const pat = matched ? matched.pattern : '';
+        process.stdout.write(
+          nulSep
+            ? `${src}\0${ln}\0${pat}\0${r.given}\0`
+            : `${src}:${ln}:${pat}\t${r.given}\n`
+        );
+      }
+      process.exit(anyIgnored ? 0 : 1);
+    }
+
+    // More than one path: one line each, like git's default. The rich explanation below is for the
+    // single-path case, where there is room to say WHY.
+    if (rows.length > 1) {
+      for (const r of rows) {
+        if (!r.d.ignored && !nonMatching) continue;
+        const tag = r.d.ignored ? c.yellow('ignored') : c.green('shown  ');
+        process.stdout.write(`${tag} ${r.given}\n`);
+      }
+      process.exit(anyIgnored ? 0 : 1);
+    }
+
+    const r = rows[0];
+    for (const why of core.ignoreProblems()) process.stdout.write(`${c.red('!')} ${why}\n`);
+    const rel = core.relPath(cwd, r.abs);
+    if (!r.d.ignored) {
+      process.stdout.write(`${c.green('shown')}  ${rel}\n`);
+      // A negation that matched is worth naming even though the answer is "not ignored" — it is the
+      // rule doing the work, and git's `-v` reports it for the same reason.
+      if (r.d.rule?.negated) {
+        process.stdout.write(
+          `  re-included by  ${r.d.rule.pattern}   (${core.relPath(cwd, r.d.rule.source)}:${r.d.rule.line})\n`
+        );
+      } else {
+        process.stdout.write(
+          ctx.files.length
+            ? `  no rule in ${ctx.files.length} ignore file(s) matches it\n`
+            : `  no .observatoryignore governs it\n`
+        );
+      }
+      process.exit(1);
+    }
+    process.stdout.write(`${c.yellow('ignored')} ${rel}\n`);
+    process.stdout.write(
+      `  by  ${r.d.rule?.pattern}   (${core.relPath(cwd, r.d.rule?.source ?? '')}:${r.d.rule?.line})\n`
+    );
+    // The excluded-ANCESTOR case is the gotcha worth spelling out: the reader wrote a negation for
+    // this exact file and it did not take, because git's rule (which this follows) never descends
+    // into an excluded directory. Saying so beats leaving them to rediscover it.
+    if (r.d.matched && r.d.matched !== r.abs.replace(/\\/g, '/')) {
+      const dir = path.basename(r.d.matched);
+      process.stdout.write(
+        `  its ANCESTOR ${c.cyan(core.relPath(cwd, r.d.matched))} is excluded, and a later "!" rule\n` +
+          `  cannot re-include anything beneath an excluded directory (same as .gitignore).\n` +
+          `  Exclude the CONTENTS instead — "${dir}/*" — then negate.\n`
+      );
+    }
+    process.stdout.write(`  edits to it are never recorded — there is nothing to undo later\n`);
+    process.exit(0);
+  }
+
+  const session = getSessionId(args);
+  const edits = core.reviewEdits(session);
+  // Runs the sweep, rather than only reporting one. A rule normally takes effect at the next capture;
+  // a reader who has just written one and made no further edits would otherwise be told what the file
+  // says while the records it covers were still in the store. Doing it here is safe — this is a
+  // command someone typed, not a refresh — and it does nothing at all when nothing matches.
+  const swept = core.dropIgnored(session);
+  // The files governing the SESSION'S edits, plus the ones governing the directory the reader is
+  // standing in. Without the second, a fresh workspace with a brand-new .observatoryignore and no
+  // captured edits yet reported "no .observatoryignore in play" while the file sat in plain sight —
+  // the verb answered about the session when the reader was asking about the file.
+  const here = core.ignoreContextFor([path.join(cwd, 'x')]);
+  const mine = core.ignoreContextFor(edits.map((e: EditRecord) => e.file));
+  const sources = [...new Set([...mine.files, ...here.files])].sort();
+  const total = core.readSweep(session);
+  if (json) {
+    emitJson({
+      session,
+      files: sources,
+      recorded: core.reviewEdits(session).length,
+      droppedNow: swept.dropped,
+      droppedFiles: swept.files,
+      droppedTotal: total?.dropped ?? 0,
+    });
+    return;
+  }
+  if (!sources.length) {
+    process.stdout.write('no .observatoryignore in play\n');
+    process.stdout.write(`  create one beside your code, ${core.REPO_PRIVATE_IGNORE} for rules you do not want to commit,\n`);
+    process.stdout.write(`  or ${core.homeIgnorePath()} for personal rules that follow you everywhere.\n`);
+    process.stdout.write('  .gitignore syntax. Anything it matches is never recorded — not listed, not counted, not revertible.\n');
+    return;
+  }
+  process.stdout.write(`ignore files (nearest wins):\n`);
+  for (const f of sources) process.stdout.write(`  ${core.relPath(cwd, f)}\n`);
+  process.stdout.write(`\n${core.reviewEdits(session).length} edit(s) recorded in this session\n`);
+  process.stdout.write('  anything these rules match is never recorded — not listed, not counted, not revertible.\n');
+  process.stdout.write('  Use `--check <path>` to see which rule decides a path.\n');
+  // Said out loud, every time, because it is the one operation here that destroys data. A count that
+  // only ever appeared in a log nobody reads would make "I added a rule and my history vanished" a
+  // mystery rather than a fact the tool already told you.
+  if (swept.dropped) {
+    process.stdout.write(
+      `\n${c.yellow('dropped')} ${swept.dropped} already-recorded edit(s) across ${swept.files.length} file(s) that these rules now cover:\n`
+    );
+    for (const f of swept.files.slice(0, 10)) process.stdout.write(`  ${core.relPath(cwd, f)}\n`);
+    if (swept.files.length > 10) process.stdout.write(`  … and ${swept.files.length - 10} more\n`);
+  } else if (total?.dropped) {
+    process.stdout.write(`\n${total.dropped} edit(s) across ${total.files} file(s) have been dropped by these rules so far.\n`);
+  }
+  reportDeadRules(core, cwd, sources);
+  // A file that EXISTS but could not be read is not the same as no file. Under one mode it fails in
+  // the SAFE direction — its rules are not in force, so MORE is captured, not less — but a reader who
+  // thinks a path is excluded and finds it recorded deserves to be told which file went silent.
+  for (const why of core.ignoreProblems()) process.stdout.write(`\n${c.red('!')} ${why}\n`);
+}
+
+/**
+ * Rules that can never fire.
+ *
+ * `git check-ignore -v` names the rule that WON and never mentions that the line you actually wrote
+ * is dead code: given `dist/` then `!dist/manifest.json`, it reports `dist/` and says nothing about
+ * line 2. That specific confusion is one of the most-asked questions about this file format, and the
+ * matcher already knows the answer — so it says so unprompted rather than waiting to be asked about
+ * one path at a time.
+ */
+function reportDeadRules(core: Core, cwd: string, sources: readonly string[]): void {
+  if (!sources.length) return;
+  // A path INSIDE each ignore file's directory, which is what primes the layer that file contributes.
+  const probes = sources.map((f) => f.replace(/[^/\\]+$/, '') + 'x');
+  const dead = core.deadRules(core.ignoreContextFor(probes));
+  if (!dead.length) return;
+  process.stdout.write(`\n${c.yellow(String(dead.length))} rule(s) can never match:\n`);
+  for (const d of dead) {
+    process.stdout.write(
+      `  ${d.rule.pattern}   (${core.relPath(cwd, d.rule.source)}:${d.rule.line})\n` +
+        `    "${d.shadowedBy.pattern}" on line ${d.shadowedBy.line} excludes ${d.under}/, and nothing beneath an\n` +
+        `    excluded directory is ever consulted. Write "${d.fix}" there instead, then negate.\n`
+    );
+  }
+}
+
 /** Current line indices of every pending edit in a file, mapped into the LIVE buffer text supplied
  *  on stdin (which may be unsaved). Powers inline overlays; always emits JSON. */
 function cmdLocate(args: string[]): void {
@@ -2294,6 +2689,8 @@ function cmdViews(args: string[]): void {
   const rest = vi >= 0 ? args.filter((_, i) => i !== vi && i !== vi + 1) : args;
   const viewArgs = rest.includes('--json') ? rest : [...rest, '--json'];
   const out: Record<string, unknown> = {};
+  /** view -> why it is null. Emitted as `__problems` so a null can never pass for an empty answer. */
+  const problems: Record<string, string> = {};
   const realWrite = process.stdout.write.bind(process.stdout);
   const realExit = process.exit.bind(process);
   for (const name of names) {
@@ -2308,21 +2705,46 @@ function cmdViews(args: string[]): void {
     try {
       runView(name, viewArgs);
       out[name] = buf ? JSON.parse(buf) : null;
-    } catch {
+      if (out[name] === null) problems[name] = 'produced no output';
+    } catch (e) {
+      // A per-view failure used to become a bare `null`, indistinguishable from "this view is
+      // legitimately empty" — so an unreadable store (EACCES on log.jsonl, a mounted volume, a
+      // permissions repair) rendered as zeros with the status bar saying "ready". The view still
+      // resolves to null so one broken view cannot blank the other seven, but the REASON now rides
+      // alongside, and the dashboard raises it.
       out[name] = null;
+      problems[name] = String((e as Error)?.message || e);
     } finally {
       (process.stdout as unknown as { write: typeof realWrite }).write = realWrite;
       (process as unknown as { exit: typeof realExit }).exit = realExit;
     }
   }
+  if (Object.keys(problems).length) out.__problems = problems;
+  // An ignore file that exists but cannot be read stops applying — including its `# capture: off`
+  // rules — and the matcher that discovers this runs HERE, in the child. The dashboard read its own
+  // (always empty) copy, so the report was inert on the one surface most likely to see it.
+  const igProblems = (require('@claude-observatory/core') as Core).ignoreProblems();
+  if (igProblems.length) out.__ignoreProblems = igProblems;
   emitJson(out);
 }
 
-/** The views `views` may batch. An allow-list on purpose: nothing that MUTATES belongs in a poll. */
+/** The views `views` may batch. An allow-list on purpose: nothing that MUTATES belongs in a poll.
+ *
+ *  One caveat every caller inherits: `views` hands the SAME argument list to every view in the batch,
+ *  so a batch can carry only one `--kind`/`--id` between them. That is why `feed` is usable here at
+ *  all — a caller shows one feed subject at a time — and why a batch wanting two different feeds must
+ *  make two calls. */
 function runView(name: string, args: string[]): void {
   switch (name) {
     case 'changemap':
       return cmdChangeMap(args);
+    // Both read-only, and both were missing: asking for them fell through to the throw below, which
+    // `cmdViews` swallows into a null view. A caller following the "just batch it" advice therefore
+    // got a silently empty pane rather than an error.
+    case 'feed':
+      return cmdFeed(args);
+    case 'list':
+      return cmdList(args);
     case 'multitask':
       return cmdMultitask(args);
     case 'prompts':
@@ -2383,18 +2805,20 @@ function buildObserve(core: Core, session: string, cwd: string) {
   const reasoning = core.reasoningByEdit(cwd, session);
   const insights = core.transcriptInsights(cwd, session);
   // Core owns the recap definition now (analysis > auto-title > last summary, with its source), so the
-  // CLI and both editors can no longer disagree about what "recap" means.
-  const recap = core.buildObservations(process.cwd(), session).recap || null;
+  // CLI and both editors can no longer disagree about what "recap" means. Reading it through `recapOf`
+  // rather than building the whole Observations model keeps that single definition while skipping the
+  // per-edit reasoning/flags/memory walk the model also does — ~0.8 s of a 5.9 s `observe --json` on a
+  // 7.9k-record session, for one string. `insights` above is the parse it would otherwise repeat.
+  const recap = core.recapOf(session, insights).recap || null;
   const suggestions = [
     ...new Set([...core.transcriptSuggestions(cwd, session), ...core.heuristicSuggestions(session)]),
   ];
-  const memCache = new Map<string, FileMemory>(); // fileMemory scans all sessions — once per file
+  // One index for the whole file set. Caching per file was not enough: each MISS still revalidated the
+  // cross-session index against every session log, so a session touching 3,957 files spent 383,830
+  // stats proving an index that had not changed was still valid.
+  const memCache = core.fileMemories(new Set(log.map((r) => r.file)));
   const edits = [...log].reverse().map((r) => {
-    let mem = memCache.get(r.file);
-    if (!mem) {
-      mem = core.fileMemory(r.file);
-      memCache.set(r.file, mem);
-    }
+    const mem = memCache.get(r.file) ?? core.fileMemory(r.file);
     return {
       id: r.id,
       ts: r.ts,
@@ -3494,6 +3918,9 @@ function usage(): void {
       `                       --channel switches between stable and the rolling pre-release (dev)\n` +
       `                       and installs that channel's newest in the same run\n` +
       `  sessions             this workspace's sessions, newest conversation first (● = this directory's)\n` +
+      `  remotes [--json]     the machines to look for sessions on, over SSH; --add "name host [dir]",\n` +
+      `                       --remove|--enable|--disable <name>. Read-only: sessions there can be\n` +
+      `                       browsed, never reverted from here\n` +
       `  list [filters]       list edits (grouped by file); filters: --pending|--kept|--undone, --file <substr>\n` +
       `  timeline [--json]    edits newest-first as a chronological feed (time · id · Δ · file)\n` +
       `  actions [--json]     the full action timeline: EVERY tool call Claude made (reads, greps, bash,\n` +
@@ -3561,7 +3988,24 @@ function usage(): void {
       `  summary [--markdown] per-session review recap (kept/reverted per file); --markdown to export\n` +
       `  export [--out <f>]   the FULL session trace as JSON — every edit with its diff, skips, prompts,\n` +
       `                       actions, tasks, subagents, egress, outside writes, observations, usage\n` +
-      `  insights [--json]    Observations view: recap + per-edit reasoning/flags/file-memory + next steps\n\n` +
+      `  insights [--json]    Observations view: recap + per-edit reasoning/flags/file-memory + next steps\n` +
+      `  ignore [--json]      what .observatoryignore is hiding in this session, and which files set it\n` +
+      `  ignore --check <p>... [-v] [-n] [-z] [-q] [--stdin] [--json]   why each path is shown / hidden /\n` +
+      `                       refused — names the rule, its file and its line (and the excluded ancestor,\n` +
+      `                       when that is what decided). Takes git check-ignore's flags and its exit\n` +
+      `                       codes: 0 when a path is ignored, 1 when none are; -v prints git's\n` +
+      `                       <source>:<line>:<pattern><TAB><path> machine format\n` +
+      `  tui [--session <id>] [--root <d>] [--tick <s>] [--once] [--no-color] [--no-mouse]\n` +
+      `       [--cols N] [--rows N]\n` +
+      `                       the terminal app (TUI) — the same review actions as the editors:\n` +
+      `                       Prompts, Traces, Detail and Dashboards. Keys: F1-F5 focus a window\n` +
+      `                       (press twice to zoom) — they are the ONLY window keys; 0-9 then Enter\n` +
+      `                       names an EDIT id. Tab next, arrows move, [ ]\n` +
+      `                       tabs, m minimize, z zoom, = reset, a keep, u undo, A/U everything listed\n` +
+      `                       (with a counted confirm), R redo, e $EDITOR, s session, o options,\n` +
+      `                       / filter, ? keys, r refresh, q quit. Running the command with no verb\n` +
+      `                       opens this. --once prints ONE plain frame and exits, which is also what a\n` +
+      `                       pipe or a non-TTY gets\n\n` +
       `machine-readable (for front-ends/scripts; list/status/sessions/keep/undo/redo also take --json):\n` +
       `  blob <sha>           raw blob bytes to stdout\n` +
       `  tree [--root <d>] [--filter <q>]   folder→file→class→edit view-model as JSON (both editors)\n` +
@@ -3655,7 +4099,11 @@ function shouldCheckUpdates(cmd: string | undefined, rest: string[]): boolean {
   if (!process.stderr.isTTY) return false; // pipes, the JetBrains plugin, CI, cron — never nudged
   if (rest.includes('--json')) return false; // a machine-readable invocation
   // The capture hot path, self/redundant commands, and non-work invocations get no nudge.
-  const SKIP = new Set(['capture', '__update-check', 'update', 'demo', 'version', '--version', '-v', 'help', '--help', '-h']);
+  // `tui` is here for two reasons beyond the usual: the nudge registers a `process.on('exit')` printer
+  // that would fire INSIDE the alternate screen and be wiped with it, and the check `require`s core
+  // before the dispatch switch — on the one path whose first frame has to be immediate. The TUI surfaces
+  // the same information in its own status line instead.
+  const SKIP = new Set(['capture', '__update-check', 'update', 'demo', 'tui', 'version', '--version', '-v', 'help', '--help', '-h']);
   return cmd !== undefined && !SKIP.has(cmd);
 }
 
@@ -3696,6 +4144,14 @@ function maybeCheckForUpdate(cmd: string | undefined, rest: string[]): void {
   }
 }
 
+/** Every verb the dispatch below answers to, and the flags that take a VALUE — both used only
+ *  to tell a swallowed command apart from a flag's argument at the front door. Derived from
+ *  the same switch that runs them, so the two cannot drift. */
+const KNOWN_VERBS = new Set([
+  'actions', 'agents', 'analyze', 'blob', 'capabilities', 'capture', 'changemap', 'chat-context', 'clean', 'demo', 'diff', 'doctor', 'egress', 'export', 'feed', 'fleet', 'footprint', 'help', 'ignore', 'init', 'insights', 'install-extensions', 'keep', 'list', 'locate', 'metrics', 'multitask', 'observations', 'observe', 'processes', 'prompts', 'recap', 'remotes', 'store', 'redo', 'resolve', 'risk', 'sessions', 'siblings', 'stats', 'status', 'statusline', 'subagents', 'tui', 'suggest', 'summary', 'task-clear', 'task-keep', 'task-undo', 'tasklog', 'timeline', 'trace', 'tree', 'undo', 'uninstall', 'update', 'usage', 'version', 'views', 'warm',
+]);
+const FLAGS_WITH_VALUES = new Set(['--root', '--session', '--tick', '--cols', '--rows', '--out', '--under', '--ids', '--file', '--since', '--stale', '--drop', '--older-than', '--check', '--views', '--channel']);
+
 function main(): void {
   // Exit cleanly when output is piped to a consumer that closes early (`| head`, `| grep -q`, …)
   // instead of crashing with an unhandled EPIPE 'error' event.
@@ -3711,6 +4167,23 @@ function main(): void {
   // (e.g. `diff --help`, `task-keep --help`); do it before the nudge so a help invocation stays quiet.
   if (cmd !== undefined && (rest.includes('--help') || rest.includes('-h'))) {
     usage();
+    return;
+  }
+  // The product's front door is the app. A bare `claude-observatory`, or one carrying only flags
+  // (`--root`, `--session`, `--no-mouse`), opens the dashboard rather than erroring on a leading flag
+  // it would otherwise read as a command name. Named verbs still dispatch below, and `--help` and
+  // `--version` keep answering for themselves — those are questions, not a request to open anything.
+  const HELP_OR_VERSION = new Set(['-h', '--help', '-v', '--version']);
+  if (cmd === undefined || (cmd.startsWith('-') && !HELP_OR_VERSION.has(cmd))) {
+    // A VERB typed after a flag is not a request to open the dashboard. `claude-observatory --root x
+    // status` used to open the app and silently drop `status`, which reads as the flag being wrong.
+    // Flags take a value, so only a token that is a known verb AND not the value of the flag before
+    // it counts — otherwise `--session status` would be misread as the verb.
+    const verb = argv.find((a, i) => !a.startsWith('-') && !(i > 0 && argv[i - 1].startsWith('-') && FLAGS_WITH_VALUES.has(argv[i - 1])) && KNOWN_VERBS.has(a));
+    if (verb) {
+      fail(`\`${verb}\` is a command, so it goes first: \`claude-observatory ${verb} ${argv.filter((a) => a !== verb).join(' ')}\``);
+    }
+    require('@claude-observatory/tui').runTui(require('@claude-observatory/core'), argv, getSessionId);
     return;
   }
   maybeCheckForUpdate(cmd, rest); // register a once-a-day "update available" nudge (never blocks)
@@ -3743,6 +4216,12 @@ function main(): void {
       break;
     case 'sessions':
       cmdSessions(rest);
+      break;
+    case 'remotes':
+      cmdRemotes(rest);
+      break;
+    case 'store':
+      cmdStore(rest);
       break;
     // Deliberately NOT a `views` member: it WRITES caches, and that batch is read-only by contract.
     case 'resolve':
@@ -3842,6 +4321,9 @@ function main(): void {
     case 'blob':
       cmdBlob(rest);
       break;
+    case 'ignore':
+      cmdIgnore(rest);
+      break;
     case 'locate':
       cmdLocate(rest);
       break;
@@ -3850,6 +4332,9 @@ function main(): void {
       break;
     case 'views':
       cmdViews(rest);
+      break;
+    case 'tui':
+      require('@claude-observatory/tui').runTui(require('@claude-observatory/core'), rest, getSessionId);
       break;
     case 'changemap':
       cmdChangeMap(rest);
@@ -3895,7 +4380,6 @@ function main(): void {
     case 'version':
       cmdVersion(rest).catch((e) => fail(String(e?.message || e)));
       break;
-    case undefined:
     case '-h':
     case '--help':
     case 'help':

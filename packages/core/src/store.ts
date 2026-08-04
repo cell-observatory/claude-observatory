@@ -13,10 +13,12 @@
  * Pure local filesystem — no network, no model calls, zero tokens.
  */
 import * as fs from 'fs';
-import { cachedByFiles } from './fscache';
+import { cachedByFiles, readText } from './fscache';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { claudeConfigDir, canonPath } from './paths';
+import { ignoreContextFor, ignoreStamp } from './ignore';
+import { readPrefs, expandHome, prefsPath } from './prefs';
 
 /**
  * Loop-based min/max over a numeric array — the call-stack-safe replacement for `Math.min(...xs)` /
@@ -80,8 +82,122 @@ export interface StagingRecord {
   afterBlob?: string | null;
 }
 
+/**
+ * WHERE THE STORE LIVES — the one seam every other path derives from.
+ *
+ * `prefs.storeDir` wins, then the default beside the Claude config. Memoized for the life of the
+ * process: this is called on the capture hook's hot path and by every read, and re-reading prefs.json
+ * each time would put a file read in front of every store operation. `writePrefs` clears it, so a
+ * change made in-process (the options window) takes effect immediately; a different process picks it
+ * up when it starts, which is exactly when it reads its preferences anyway.
+ */
+let rootMemo: { under: string; dir: string } | null = null;
 export function rootDir(): string {
-  return path.join(claudeConfigDir(), 'claude-observatory');
+  // KEYED ON THE CONFIG DIR, not memoized outright. `CLAUDE_CONFIG_DIR` can change inside one
+  // process — the test suite does it between cases, and a caller may point the CLI elsewhere — and an
+  // unkeyed memo answered with the previous config dir's store for the rest of the process. The key
+  // costs an env read and a join, never a file read, so the hot path is unchanged.
+  const under = claudeConfigDir();
+  if (rootMemo && rootMemo.under === under) return rootMemo.dir;
+  let chosen = '';
+  try {
+    chosen = readPrefs(path.join(under, 'claude-observatory', 'prefs.json')).storeDir ?? '';
+  } catch {
+    /* an unreadable prefs file means "no preference", never a broken store */
+  }
+  const dir = chosen ? expandHome(chosen) : path.join(under, 'claude-observatory');
+  rootMemo = { under, dir };
+  return dir;
+}
+
+/** Forget the memoized root — `writePrefs` calls this, so a location set in-process takes effect at once. */
+export function clearRootMemo(): void {
+  rootMemo = null;
+}
+
+/**
+ * Move the store to `to`, and report what happened.
+ *
+ * A setting that changed where NEW data goes while leaving the old data behind would strand a
+ * session's history somewhere the product no longer looks — so the move is part of the setting, not
+ * a follow-up chore. Refuses rather than merges when the target already holds a store: two stores
+ * merged by filename would interleave two machines' sessions with no way to tell them apart.
+ */
+export function moveStore(to: string): { moved: true; from: string; to: string } | { error: string } {
+  const from = rootDir();
+  const dest = expandHome(to);
+  if (path.resolve(dest) === path.resolve(from)) return { error: 'the store is already there' };
+  // Never move a store INTO itself — `mv a a/b` is a filesystem no-op at best and a loop at worst.
+  if (path.resolve(dest).startsWith(path.resolve(from) + path.sep)) {
+    return { error: 'that is inside the current store — pick a directory outside it' };
+  }
+  try {
+    // `prefs.json` does not count as store data — see the note below. Ignoring it here is what makes
+    // "put it back where it was" work: the default location always holds the preferences file.
+    if (fs.existsSync(dest) && fs.readdirSync(dest).some((f) => f !== 'prefs.json')) {
+      return { error: `${dest} is not empty — pick an empty or new directory, so two stores are never merged` };
+    }
+  } catch (e) {
+    return { error: `cannot read ${dest}: ${String((e as Error)?.message || e)}` };
+  }
+  /**
+   * THE PREFERENCES ARE NOT STORE DATA, but they live in the same directory.
+   *
+   * `prefsPath()` is `<claude config>/claude-observatory/prefs.json` and the DEFAULT store root is
+   * that same directory — so moving the store renamed the preferences file away with it, and the
+   * `writePrefs` that recorded the new location then wrote a fresh file containing only `storeDir`.
+   * Every other setting — keybindings, colours, the configured machines — was silently destroyed by
+   * the act of choosing where to keep data. Reproduced before this was written: one configured
+   * machine went in, and `remotes` reported none afterwards.
+   *
+   * So the file is carried across by hand: read before, restored after, and the copy that travelled
+   * inside the store removed so there is never a second one to disagree with.
+   */
+  const prefsFile = prefsPath();
+  let carried: Buffer | null = null;
+  if (path.dirname(prefsFile) === path.resolve(from)) {
+    try {
+      carried = fs.readFileSync(prefsFile);
+    } catch {
+      /* no preferences yet — nothing to carry */
+    }
+  }
+  if (!fs.existsSync(from)) {
+    // Nothing to move: honour the setting and create the new home. Not an error — a fresh install
+    // choosing its location before capturing anything is the easiest case, not a failure.
+    try {
+      fs.mkdirSync(dest, { recursive: true });
+      return { moved: true, from, to: dest };
+    } catch (e) {
+      return { error: `cannot create ${dest}: ${String((e as Error)?.message || e)}` };
+    }
+  }
+  try {
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.renameSync(from, dest);
+  } catch {
+    // Across filesystems rename fails with EXDEV; copy, verify, then remove. The original is deleted
+    // only after the copy is on disk, so an interrupted move leaves the store readable at one end or
+    // the other — never half at each.
+    try {
+      fs.cpSync(from, dest, { recursive: true });
+      fs.rmSync(from, { recursive: true, force: true });
+    } catch (e) {
+      return { error: `could not move the store: ${String((e as Error)?.message || e)}` };
+    }
+  }
+  if (carried) {
+    try {
+      fs.mkdirSync(path.dirname(prefsFile), { recursive: true });
+      fs.writeFileSync(prefsFile, carried);
+      const travelled = path.join(dest, 'prefs.json');
+      if (path.resolve(travelled) !== path.resolve(prefsFile)) fs.rmSync(travelled, { force: true });
+    } catch {
+      /* best-effort: the store moved, and the settings are recoverable from the moved copy */
+    }
+  }
+  clearRootMemo();
+  return { moved: true, from, to: dest };
 }
 
 /**
@@ -229,6 +345,10 @@ export function pathKey(absFile: string): string {
 }
 
 /** Write bytes to a content-addressed blob (idempotent). Returns the sha256 hex. */
+/** The blob id of EMPTY content. Derived from the same hash `writeBlob` uses, so the two can never
+ *  drift apart into a constant that silently stops matching. */
+export const EMPTY_BLOB = crypto.createHash('sha256').update(Buffer.alloc(0)).digest('hex');
+
 export function writeBlob(sessionId: string, content: Buffer): string {
   const sha = crypto.createHash('sha256').update(content).digest('hex');
   const dest = path.join(blobsDir(sessionId), sha);
@@ -252,6 +372,18 @@ export function writeBlob(sessionId: string, content: Buffer): string {
 
 export function readBlob(sessionId: string, sha: string): Buffer {
   return fs.readFileSync(path.join(blobsDir(sessionId), sha));
+}
+
+/**
+ * A blob decoded as UTF-8 text, shared across callers.
+ *
+ * Four modules each had their own `blobText` helper doing `readBlob(...).toString('utf8')`, and the
+ * change-map path walks the same before/after pair through all four: 3,514 reads of 392 blobs for
+ * 39 MiB of unique bytes in one cold run. Text, not Buffer, deliberately — a shared Buffer is mutable
+ * and the undo/capture paths hand theirs straight to writers, so they keep the raw uncached read.
+ */
+export function blobText(sessionId: string, sha: string): string {
+  return readText(path.join(blobsDir(sessionId), sha));
 }
 
 // --- staging (transient before-snapshot) ---
@@ -641,7 +773,10 @@ export function sidecarMemo<T>(sessionId: string, field: string, stamp: string, 
   const p = path.join(rootDir(), 'session-meta', `${sessionId}.json`);
   let side: Record<string, unknown> = {};
   try {
-    side = JSON.parse(fs.readFileSync(p, 'utf8'));
+    // readText, not readFileSync: this file is re-read once per memoized FIELD (45 times for one
+    // session in a single Overview pass), and it is rewritten through tmp+rename — so the inode in
+    // the content stamp invalidates it the instant a write lands.
+    side = JSON.parse(readText(p));
     if (side && side[`${field}Stamp`] === stamp && side[field] !== undefined) return side[field] as T;
   } catch {
     /* absent or unreadable — compute */
@@ -906,6 +1041,208 @@ function dropRecords(sessionId: string, ids: number[]): void {
     fs.writeFileSync(tmp, kept.join('\n') + (kept.length ? '\n' : ''), { mode: 0o600 });
     fs.renameSync(tmp, p);
   });
+}
+
+/**
+ * What `.observatoryignore` has removed from this session, cumulatively.
+ *
+ * Written as a control op so it survives every later rewrite (see [retainedOpLines]) and so the
+ * capture hook can report it WITHOUT writing to stdout — a hard rule at the top of capture.ts,
+ * because anything that hook prints lands in the model's context.
+ */
+export interface SweptOp {
+  op: 'swept';
+  /** Records removed, across every sweep this session has had. */
+  dropped: number;
+  /** Distinct files those records covered. Summed the same way; a file can only be swept once,
+   *  because after the first sweep nothing under it is ever recorded again. */
+  files: number;
+  /** When the last sweep ran. */
+  ts: number;
+}
+
+/** The session's sweep record, or null when `.observatoryignore` has never removed anything here. */
+export function readSweep(sessionId: string): SweptOp | null {
+  const p = logPath(sessionId);
+  if (!fs.existsSync(p)) return null;
+  let out: SweptOp | null = null;
+  for (const line of fs.readFileSync(p, 'utf8').split('\n')) {
+    const t = line.trim();
+    if (!t || t.indexOf('"swept"') === -1) continue;
+    try {
+      const o = JSON.parse(t);
+      if (o && o.op === 'swept') out = o as SweptOp; // last wins: the op is rewritten, not appended to
+    } catch {
+      /* skip a partial line */
+    }
+  }
+  return out;
+}
+
+/**
+ * Remove every record `.observatoryignore` now covers. THIS DELETES REVIEW HISTORY.
+ *
+ * One mode: a matching path is never recorded. Records captured BEFORE a rule existed are the one
+ * case that rule cannot reach on its own, so they are swept here — automatically, which is the
+ * behaviour that was chosen over leaving them and offering a command. There is no undo: the blobs go
+ * with the records, so this is deliberately the only place in the product where the answer to "can I
+ * get it back" is no.
+ *
+ * Guardrails, in the order they matter:
+ *   - it NEVER runs from a read path. `readLog` is called dozens of times per refresh by several
+ *     processes at once, and a read that rewrites the store would race every other reader.
+ *   - it does nothing at all when nothing matches — no rewrite, no rename, no mtime move. That is
+ *     what lets a caller invoke it speculatively.
+ *   - it takes the same lock, temp-file and GC as `clearResolved`, so a concurrent capture append
+ *     cannot be clobbered by the rename.
+ *   - a `skip` marker for a now-ignored file goes too. Leaving it would keep reporting "1 change was
+ *     not captured" naming the very path the reader asked never to be recorded.
+ */
+export function dropIgnored(sessionId: string): { dropped: number; files: string[] } {
+  return withLock(sessionId, MAINT_LOCK_BUDGET_MS, () => {
+    const p = logPath(sessionId);
+    if (!fs.existsSync(p)) return { dropped: 0, files: [] };
+    const log = readLog(sessionId);
+    const skips = readSkips(sessionId);
+    if (!log.length && !skips.length) return { dropped: 0, files: [] };
+    // Primed over every path this session touched, so `decide` is memoized per file and each
+    // directory's ancestor chain is walked once.
+    const ctx = ignoreContextFor([...log.map((r) => r.file), ...skips.map((s) => s.file)]);
+    if (!ctx.active) return { dropped: 0, files: [] }; // no rules anywhere — nothing can match
+    const dead = log.filter((r) => ctx.ignored(r.file));
+    // A marker whose `file` is a short sentinel like '<bash-tree>' is not a path; `ignored` would
+    // resolve it against the cwd and could match by accident, so only real absolute paths are judged.
+    const deadSkips = skips.filter((s) => path.isAbsolute(s.file) && ctx.ignored(s.file));
+    if (!dead.length && !deadSkips.length) return { dropped: 0, files: [] };
+
+    const files = [...new Set(dead.map((r) => r.file))].sort();
+    const drop = new Set(dead.map((r) => r.id));
+    const keep = log.filter((r) => !drop.has(r.id));
+    const deadSkipSet = new Set(deadSkips.map((s) => `${s.ts}\u0000${s.file}`));
+    const prior = readSweep(sessionId);
+    const swept: SweptOp = {
+      op: 'swept',
+      dropped: (prior?.dropped ?? 0) + dead.length,
+      files: (prior?.files ?? 0) + files.length,
+      ts: Date.now(),
+    };
+    // Carried ops, minus the two kinds this sweep is replacing: the skips it just retired, and the
+    // previous `swept` line (one cumulative op, not one per sweep — otherwise a session that sweeps
+    // on every ignore-file edit grows a log entry each time and readSweep gets slower forever).
+    const ops = retainedOpLines(sessionId).filter((line) => {
+      try {
+        const o = JSON.parse(line);
+        if (o?.op === 'swept') return false;
+        if (o?.op === 'skip') return !deadSkipSet.has(`${o.ts}\u0000${o.file}`);
+      } catch {
+        /* an unparseable op line is carried, like everywhere else here */
+      }
+      return true;
+    });
+    const lines = [...ops, JSON.stringify(swept), ...keep.map((r) => JSON.stringify(r))];
+    const tmp = `${p}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, lines.join('\n') + '\n', { mode: 0o600 });
+    fs.renameSync(tmp, p);
+    gcSessionCore(sessionId); // the dropped records' blobs are now unreferenced (already locked)
+    return { dropped: dead.length, files };
+  });
+}
+
+/**
+ * The sweep's gate: has any rule that could govern this session changed since it last ran?
+ *
+ * `dirs` is the session's distinct edited directories, kept in the sidecar and grown by the capture
+ * hook. Stamping the ignore files reachable from ALL of them — not just the path being captured — is
+ * what closes the hole the cheap version has: a rule added in one directory the session edits must
+ * take effect on the next capture in ANY of them, not only in the one it was written for.
+ */
+export function ignoreSweepState(sessionId: string): { stamp: string; dirs: string[] } {
+  const f = sweepStatePath(sessionId);
+  try {
+    const d = JSON.parse(fs.readFileSync(f, 'utf8'));
+    return {
+      stamp: typeof d?.stamp === 'string' ? d.stamp : '',
+      dirs: Array.isArray(d?.dirs) ? d.dirs.filter((x: unknown) => typeof x === 'string') : [],
+    };
+  } catch {
+    return { stamp: '', dirs: [] }; // absent or corrupt — both mean "sweep, then record the truth"
+  }
+}
+
+function sweepStatePath(sessionId: string): string {
+  return path.join(storeDir(sessionId), 'ignore-sweep.json');
+}
+
+/**
+ * Only the DEEPEST directories. A shallower one's ancestor chain is a subset of a deeper one's, so
+ * stamping the deeper path already stats every ignore file the shallower path could see — and this
+ * list is walked on every capture, so carrying a redundant entry costs a stat per edit forever.
+ *
+ * Linear after the sort: in lexicographic order every path under `d` sorts immediately after it, so
+ * `d` is redundant exactly when its successor is beneath it.
+ */
+function prunedDirs(dirs: readonly string[]): string[] {
+  const sorted = [...new Set(dirs)].sort();
+  const out: string[] = [];
+  for (let i = 0; i < sorted.length; i++) {
+    const next = sorted[i + 1];
+    if (next !== undefined && next.startsWith(sorted[i] + path.sep)) continue;
+    out.push(sorted[i]);
+  }
+  return out;
+}
+
+/**
+ * Run the sweep IF the rules moved. Returns what it dropped, or null when there was nothing to do.
+ *
+ * Called from the capture hook after its append, with the directory of the file just captured.
+ *
+ * MEASURED, not reasoned about: 2.1 ms per capture on a synthetic 390-directory session (the shape of
+ * the largest real store on this machine), 2.7 ms with a rule file in play — two stats per distinct
+ * directory in the union of the ancestor chains. A median session's few dozen directories cost a
+ * fraction of that. The hook it sits on already reads the edited file, hashes it, writes a blob and
+ * takes a lock, and Claude's edits are seconds apart, so this is affordable where the correct answer
+ * is what matters: the cheap version — stamping only the captured path's own chain — silently misses
+ * a rule written for a directory the current edit is not under, which is the common case.
+ */
+export function sweepIgnoredIfChanged(
+  sessionId: string,
+  editedDirs: string | readonly string[]
+): { dropped: number; files: string[] } | null {
+  // One directory or many. Tolerating both is not politeness: the only caller is inside
+  // `handleHookPayload`'s blanket catch, so a TypeError here would disable the sweep with nothing
+  // said anywhere — and a sweep that silently stops running is invisible until history piles up.
+  const given = typeof editedDirs === 'string' ? [editedDirs] : editedDirs;
+  const prev = ignoreSweepState(sessionId);
+  // Every directory the capture actually touched, not just the one it was invoked from. A Bash walk
+  // records at any depth beneath cwd, and stamping cwd alone left the gate blind to a rule written
+  // BELOW it: the rule refused new captures at once while the records it covered stayed forever.
+  const fresh = given.map((d) => canonPath(d)).filter((d) => !prev.dirs.includes(d));
+  const dirs = fresh.length ? prunedDirs([...prev.dirs, ...fresh]) : prev.dirs;
+  // A probe path per directory: `ignoreContextFor` keys its work on each path's PARENT, so the
+  // trailing segment is never read and only has to be non-empty.
+  const ctx = ignoreContextFor(dirs.map((d) => path.join(d, 'probe')));
+  const stamp = ignoreStamp(ctx);
+  if (stamp === prev.stamp) {
+    if (dirs.length !== prev.dirs.length) writeSweepState(sessionId, { stamp, dirs });
+    return null;
+  }
+  const res = ctx.active ? dropIgnored(sessionId) : { dropped: 0, files: [] };
+  writeSweepState(sessionId, { stamp, dirs });
+  return res.dropped ? res : null;
+}
+
+function writeSweepState(sessionId: string, s: { stamp: string; dirs: string[] }): void {
+  try {
+    const f = sweepStatePath(sessionId);
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    const tmp = `${f}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(s), { mode: 0o600 });
+    fs.renameSync(tmp, f);
+  } catch {
+    // Best-effort. A sidecar that cannot be written means the sweep re-runs next time and finds
+    // nothing, which costs a stat sweep — never a wrong answer.
+  }
 }
 
 /** Remove an entire session directory from the store. */

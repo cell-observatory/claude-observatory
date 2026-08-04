@@ -27,8 +27,19 @@ let ok = 0; const fails = [];
 for (const n of names) {
   const body = literalFor(n);
   if (body == null) { fails.push(`${n}: could not locate its template literal`); continue; }
-  const js = body.replace(/\$\{[^{}]*(\{[^{}]*\}[^{}]*)*\}/g, '0'); // host-side interpolation → a literal
-  try { new Function(js); ok++; } catch (e) { fails.push(`${n} (${body.length}b): ${e.message}`); }
+  const neutral = body.replace(/\$\{[^{}]*(\{[^{}]*\}[^{}]*)*\}/g, '0'); // host-side interpolation → a literal
+  // EVALUATE the template literal before parsing it. The engine resolves its escapes first, so the
+  // text that ships is not the text in the source: `\'` here is a valid escape and reaches the browser
+  // as a bare apostrophe, which terminates the JS string it was sitting in. Parsing the raw source
+  // called that script healthy and it shipped broken — the exact failure this gate exists to catch.
+  let js;
+  try {
+    js = new Function('return `' + neutral.replace(/`/g, '\\`') + '`')();
+  } catch (e) {
+    fails.push(`${n}: its template literal does not even evaluate: ${e.message}`);
+    continue;
+  }
+  try { new Function(js); ok++; } catch (e) { fails.push(`${n} (${js.length}b): ${e.message}`); }
 }
 console.log(`  webview scripts: ${names.join(', ')}`);
 console.log(`  parsed: ${ok}   failed: ${fails.length}`);

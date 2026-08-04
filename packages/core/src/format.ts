@@ -3,7 +3,7 @@
  * Uses the `diff` package, so it is loaded only by review commands — never by the capture hook.
  */
 import { createPatch, diffLines } from 'diff';
-import { EditRecord, readBlob, hasBlob } from './store';
+import { EditRecord, blobText as storeBlobText, hasBlob } from './store';
 
 const RESET = '\x1b[0m';
 const GREEN = '\x1b[32m';
@@ -14,14 +14,19 @@ const DIM = '\x1b[2m';
 function blobText(sessionId: string, sha: string | null): string {
   if (sha === null) return '';
   try {
-    return readBlob(sessionId, sha).toString('utf8');
+    return storeBlobText(sessionId, sha);
   } catch {
     return ''; // a GC'd/deleted blob must not crash lineDelta/coloredDiff (matches groups.ts/tree.ts)
   }
 }
 
-/** Compact relative time, e.g. "5s ago", "12m ago", "3h ago", "2d ago", "3w ago", "2mo ago". */
+/** Compact relative time, e.g. "5s ago", "12m ago", "3h ago", "2d ago", "3w ago", "2mo ago".
+ *
+ *  A timestamp of 0 is "no time recorded", not the epoch: rows that carry one — a remote host that
+ *  could not be reached, a session whose transcript is gone — were rendering as "679mo ago", which
+ *  reads as a real and very old measurement rather than as an absent one. */
 export function relTime(ts: number, now: number = Date.now()): string {
+  if (!ts) return '—';
   const s = Math.max(0, Math.floor((now - ts) / 1000));
   if (s < 60) return `${s}s ago`;
   const m = Math.floor(s / 60);
@@ -100,4 +105,22 @@ export function coloredDiff(sessionId: string, rec: EditRecord, color = true): s
       return line;
     })
     .join('\n');
+}
+
+
+/**
+ * A path relative to the workspace, for display.
+ *
+ * Renderers must never shorten a path by guessing. The terminal's guess kept the last two segments
+ * at every width, so `packages/core/src/x.ts` and `packages/cli/src/x.ts` both read as `src/x.ts` —
+ * two different files, indistinguishable, in a tool for deciding whether to revert one of them.
+ * Outside the workspace the absolute path is returned UNCHANGED: it is genuinely elsewhere, and
+ * saying so is the point.
+ */
+export function relPath(cwd: string, file: string): string {
+  if (!file) return file;
+  const norm = (s: string) => s.replace(/\\/g, '/').replace(/\/+$/, '');
+  const root = norm(cwd);
+  const f = norm(file);
+  return f === root || f.startsWith(root + '/') ? f.slice(root.length + 1) || f : file;
 }

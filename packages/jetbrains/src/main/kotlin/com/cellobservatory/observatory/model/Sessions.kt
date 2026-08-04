@@ -36,6 +36,17 @@ data class SessionRow(
      *  the default differs by build and model. Older CLIs emit neither field and simply show nothing. */
     val model: String = "",
     val effort: String = "",
+    /** Which workspace this session belongs to. The listing spans EVERY workspace, so a row that does
+     *  not say where it came from is a row silently claiming to be this project's. */
+    val workspace: String = "",
+    /** `local` · `bridged` (content lives on Claude Code's bridge, not on this machine) · `remote`. */
+    val origin: String = "local",
+    /** The configured machine this row was enumerated from, when `origin` is `remote`. */
+    val host: String = "",
+    /** WHICH MACHINE this session lives on, ready to render — the reader's name for a configured
+     *  remote, "this machine", or "the bridge". Served by the CLI so all three clients say the same
+     *  thing; blank on a CLI too old to send it, which the renderer shows by omitting the chip. */
+    val machine: String = "",
 ) {
     /** What a row leads with: Claude's title, else a short id (never an empty label). */
     val displayName: String get() = title?.takeIf { it.isNotBlank() } ?: "session ${id.take(8)}"
@@ -103,6 +114,10 @@ object SessionsParser {
         edits = o.get("edits")?.takeIf { it.isJsonPrimitive }?.asInt ?: 0,
         pending = o.get("pending")?.takeIf { it.isJsonPrimitive }?.asInt ?: 0,
         files = o.get("files")?.takeIf { it.isJsonPrimitive }?.asInt ?: 0,
+        workspace = o.get("workspace")?.takeIf { it.isJsonPrimitive }?.asString ?: "",
+        origin = o.get("origin")?.takeIf { it.isJsonPrimitive }?.asString ?: "local",
+        host = o.get("host")?.takeIf { it.isJsonPrimitive }?.asString ?: "",
+        machine = o.get("machine")?.takeIf { it.isJsonPrimitive }?.asString ?: "",
         // 0.9.0 badge fields. Absent on an older CLI, and 0/"" is the honest reading of absent here —
         // unlike `lastActiveMs` above, a missing count says "this build does not report it", which the
         // renderer shows by omitting the badge rather than by drawing a zero.

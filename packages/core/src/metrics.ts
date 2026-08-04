@@ -15,7 +15,7 @@ import { lineDelta, friendlyModel } from './format';
 import { findTranscript } from './observe';
 import { parseActions, summarizeActions, parseCompactLine, CompactionEvent } from './actions';
 import { parseSubagents, summarizeSubagents, SubagentsSummary } from './subagents';
-import { cachedByFiles } from './fscache';
+import { cachedByFiles, readLines } from './fscache';
 
 export interface EditMetrics {
   count: number;
@@ -68,7 +68,25 @@ const num = (v: unknown): number => (typeof v === 'number' && isFinite(v) ? v : 
 
 /** Session-total token counters, split the way the API bills them (all from `message.usage`). */
 export interface SessionTokens {
-  /** input + output + cacheRead + cacheCreation — the blended figure the Fleet view shows. */
+  /**
+   * Tokens PROCESSED ONCE: `input` + `output` + `cacheCreation`. The headline every surface prints
+   * as "N tok".
+   *
+   * It excludes exactly one counter, `cacheRead` — the whole prompt read back on every turn, which
+   * makes the same context count once per turn. It was 98.8% of the old blended total, which
+   * reported 372.2M for a session whose real figure is single-digit millions.
+   *
+   * `cacheCreation` IS counted: those tokens were genuinely processed, just written to cache rather
+   * than re-sent. Dropping it under-reported an agent as 7.7k where Claude Code showed 127.8k.
+   *
+   * **This definition is chosen to AGREE with Claude Code's own display**, because two tools
+   * reporting different numbers for the same run is worse than either being slightly off — the
+   * reader has no way to tell which to trust. Verified against a live run: ours 114.3k/127.3k/133.1k
+   * vs Claude Code's 127.8k/137.3k/106.6k for the same agents.
+   *
+   * `cacheRead` and `cacheCreation` stay on this interface and the Stats panel breaks them out with
+   * `hitPct`, so the cache mechanics are still visible — just counted separately.
+   */
   total: number;
   /** Uncached `input_tokens` across the session's main-chain assistant turns. */
   input: number;
@@ -271,7 +289,11 @@ interface StoredCursor {
   compactions: CompactionEvent[];
 }
 
-const CURSOR_VERSION = 1; // bump to invalidate every persisted cursor after a shape/semantics change
+// 2: `total` stopped including the cache counters. This is a SEMANTICS change, not a shape change —
+// the persisted cursors carry a running `total`, so without this bump every existing install would
+// keep restoring the old blended figure from disk and never recompute it. The stale value is
+// indistinguishable from a correct one, which is exactly what this counter exists to prevent.
+const CURSOR_VERSION = 2;
 
 function loadCursor(transcript: string): UsageCursor | undefined {
   let raw: StoredCursor;
@@ -350,7 +372,7 @@ function usageSnapshot(cur: UsageCursor): SessionTokens & { durationMs: number }
   const { input, output, cacheRead, cacheCreation } = cur;
   const ctxSent = input + cacheRead + cacheCreation;
   return {
-    total: input + output + cacheRead + cacheCreation,
+    total: input + output + cacheCreation, // tokens processed ONCE — see SessionTokens.total
     input,
     output,
     cacheRead,
@@ -484,7 +506,7 @@ function peekTail(transcript: string, cur: UsageCursor, end: number, snap: Sessi
   snap.output += num(u.output_tokens);
   snap.cacheRead += num(u.cache_read_input_tokens);
   snap.cacheCreation += num(u.cache_creation_input_tokens);
-  snap.total = snap.input + snap.output + snap.cacheRead + snap.cacheCreation;
+  snap.total = snap.input + snap.output + snap.cacheCreation; // see SessionTokens.total
   const ctxSent = snap.input + snap.cacheRead + snap.cacheCreation;
   snap.hitPct = ctxSent > 0 ? (snap.cacheRead / ctxSent) * 100 : null;
 }
@@ -546,7 +568,7 @@ function toolLatencies(transcriptPath: string): number[] {
 function toolLatenciesUncached(transcriptPath: string): number[] {
   let lines: string[];
   try {
-    lines = fs.readFileSync(transcriptPath, 'utf8').split('\n');
+    lines = readLines(transcriptPath);
   } catch {
     return [];
   }

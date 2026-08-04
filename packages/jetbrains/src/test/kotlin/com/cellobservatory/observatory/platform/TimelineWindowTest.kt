@@ -3,12 +3,14 @@ package com.cellobservatory.observatory.platform
 import com.cellobservatory.observatory.settings.ObservatorySettings
 import com.cellobservatory.observatory.ui.ColumnGroupPane
 import com.cellobservatory.observatory.ui.PromptsPanel
+import com.cellobservatory.observatory.ui.ObservatoryTimelineFactory
 import com.cellobservatory.observatory.ui.TimelinePanel
 import com.intellij.openapi.actionSystem.ActionToolbar
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.ToggleAction
 import com.intellij.openapi.actionSystem.impl.ActionToolbarImpl
 import com.intellij.openapi.actionSystem.impl.SimpleDataContext
+import com.intellij.openapi.wm.ToolWindowManager
 import com.intellij.testFramework.fixtures.BasePlatformTestCase
 import java.awt.Component
 import java.awt.Container
@@ -65,6 +67,24 @@ class TimelineWindowTest : BasePlatformTestCase() {
         }
         walk(root)
         return out
+    }
+
+    /**
+     * The window holds ONE content, and it must not put a tab of its own on the header: the tabs a reader
+     * needs are [TimelinePanel]'s, drawn inside the content. TabContentLayout.isToDrawTabs() hides a lone
+     * content's tab only when Content.getToolwindowTitle() is blank — and that getter falls back to the
+     * display name, so "Timeline" alone would draw one, next to the window's own "Observatory Timeline".
+     */
+    fun testTheLoneContentPutsNoTabOnTheHeader() {
+        val tw = ToolWindowManager.getInstance(project).registerToolWindow("Observatory Timeline") {}
+        ObservatoryTimelineFactory().createToolWindowContent(project, tw)
+        val content = tw.contentManager.contents.single()
+        assertEquals("the content is still named, for the tab-overflow chooser", "Timeline", content.displayName)
+        assertTrue(
+            "toolwindowTitle is \"${content.toolwindowTitle}\" — the platform draws a tab for it, and the " +
+                "header reads the window name AND a redundant tab beside it",
+            content.toolwindowTitle.isNullOrBlank(),
+        )
     }
 
     fun testTheSessionSelectorIsAComponentOfTheContent() {

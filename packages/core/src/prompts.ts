@@ -12,7 +12,6 @@
  * even when it exits during #7, because #4 is what caused it. Attributing by completion would credit
  * whatever you happened to be typing when a job finished.
  */
-import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { findTranscript } from './observe';
@@ -20,7 +19,7 @@ import { parseActions } from './actions';
 import { parseWorkflows } from './workflows';
 import { groupMembers, reviewEdits } from './groups';
 import { lineDelta } from './format';
-import { cachedByFiles } from './fscache';
+import { cachedByFiles, readLines } from './fscache';
 import { EditRecord, logPath, readLog } from './store';
 import { taskIdForSubject, taskNamings } from './tasks';
 
@@ -199,7 +198,7 @@ function askScan(transcript: string): { asks: { ts: number; text: string }[]; to
   return cachedByFiles('promptAsks', [transcript], () => {
     let lines: string[];
     try {
-      lines = fs.readFileSync(transcript, 'utf8').split('\n');
+      lines = readLines(transcript);
     } catch {
       return { asks: [], tokenAt: [] };
     }
@@ -222,7 +221,12 @@ function askScan(transcript: string): { asks: { ts: number; text: string }[]; to
       if (msg && msg.role === 'assistant' && o.isSidechain !== true && msg.usage && typeof msg.id === 'string' && !seenMsg.has(msg.id)) {
         seenMsg.add(msg.id);
         const u = msg.usage;
-        const tk = num(u.input_tokens) + num(u.output_tokens) + num(u.cache_read_input_tokens) + num(u.cache_creation_input_tokens);
+        // NEW tokens only. Adding the cache counters made the same context count once per turn,
+        // so this row reported millions where Claude Code's own view reported ~128k for the very
+        // same agent. Two tools reporting different numbers for one run is worse than either being
+        // slightly off — the reader cannot tell which to trust. Cache traffic is surfaced
+        // separately (SessionTokens.cacheRead/cacheCreation), never folded in here.
+        const tk = num(u.input_tokens) + num(u.output_tokens) + num(u.cache_creation_input_tokens);
         const ts = toMs(o.timestamp ?? o.ts);
         if (ts && tk) tokenAt.push({ ts, tokens: tk });
       }
@@ -511,7 +515,7 @@ function buildResponse(transcript: string, r: SessionPrompt): PromptResponse {
   const end = r.endTs || Number.MAX_SAFE_INTEGER;
   let lines: string[];
   try {
-    lines = fs.readFileSync(transcript, 'utf8').split('\n');
+    lines = readLines(transcript);
   } catch {
     return { promptId: r.id, index: r.index, text: '', turns: 0, bytes: 0, truncated: 0 };
   }

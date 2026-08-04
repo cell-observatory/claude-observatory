@@ -166,6 +166,12 @@ export function diagnose(input: DiagnoseInput): Check[] {
         }
   );
 
+  // "The directory is writable" and "a setting persists" are different claims, and only the second
+  // one is what a channel switch depends on. A bind-mounted overlay or a network filesystem can
+  // accept a write and not keep it, which makes `update --channel dev` report success and change
+  // nothing — the exact shape that looks like a broken feature rather than a broken mount.
+  checks.push(channelRoundTrips(cfg));
+
   // A resolvable session with real capture activity is the proof the whole chain works end-to-end.
   const session = resolveSessionId(input.cwd);
   if (!session) {
@@ -249,4 +255,44 @@ export function diagnose(input: DiagnoseInput): Check[] {
   );
 
   return checks;
+}
+
+
+/** Write the channel marker, read it back, and restore it. Proves the setting SURVIVES, not merely
+ *  that the write returned without an error. */
+function channelRoundTrips(cfg: string): Check {
+  const file = path.join(cfg, 'channel');
+  let before: string | null = null;
+  try {
+    before = fs.readFileSync(file, 'utf8');
+  } catch {
+    before = null; // absent is fine — stable is the default
+  }
+  const probe = `${before && before.trim() === 'dev' ? 'stable' : 'dev'}\n`;
+  try {
+    fs.mkdirSync(cfg, { recursive: true });
+    fs.writeFileSync(file, probe);
+    const back = fs.readFileSync(file, 'utf8');
+    // Restore whatever was there before probing, including "absent".
+    if (before === null) fs.rmSync(file, { force: true });
+    else fs.writeFileSync(file, before);
+    if (back !== probe) {
+      return {
+        id: 'channel-persist',
+        label: 'update channel persists',
+        level: 'fail',
+        detail: `${file} accepted a write but did not keep it — \`update --channel\` will report success and change nothing.`,
+        fix: 'That filesystem is not keeping writes (common on a bind-mounted or network config dir). Point CLAUDE_CONFIG_DIR at a real local path.',
+      };
+    }
+    return { id: 'channel-persist', label: 'update channel persists', level: 'ok', detail: `${file} round-trips` };
+  } catch (e) {
+    return {
+      id: 'channel-persist',
+      label: 'update channel persists',
+      level: 'fail',
+      detail: `cannot write ${file} (${(e as NodeJS.ErrnoException).code ?? 'error'}) — switching channels will fail.`,
+      fix: 'Make the config dir writable by this user, or set CLAUDE_CONFIG_DIR to a writable path. In a devcontainer it is often bind-mounted read-only or owned by another uid.',
+    };
+  }
 }

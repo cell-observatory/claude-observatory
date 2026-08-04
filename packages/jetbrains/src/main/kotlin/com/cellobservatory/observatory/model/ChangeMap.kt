@@ -15,6 +15,10 @@ data class ChangeMapFile(
     val moduleLabel: String,
     val file: String,
     val churn: Int,
+    /** Lines added and removed, kept APART. `churn` is their sum, which hides direction: +900/−4 and
+     *  +4/−900 are the same churn and are not remotely the same change to review. */
+    val added: Int,
+    val removed: Int,
     val cnt: Int,
     val kept: Int,
     val pending: Int,
@@ -274,7 +278,7 @@ object ChangeMapParser {
 
     private fun file(o: JsonObject) = ChangeMapFile(
         str(o, "rel") ?: "", str(o, "module") ?: "", str(o, "moduleLabel") ?: "", str(o, "file") ?: "",
-        int(o, "churn"), int(o, "cnt"), int(o, "kept"), int(o, "pending"), int(o, "undone"),
+        int(o, "churn"), int(o, "added"), int(o, "removed"), int(o, "cnt"), int(o, "kept"), int(o, "pending"), int(o, "undone"),
         str(o, "status") ?: "kept", int(o, "maxId"),
         strings(o, "classes"),
         bool(o, "agent"), str(o, "risk"), str(o, "reason"),

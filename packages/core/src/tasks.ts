@@ -8,7 +8,7 @@
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
-import { cachedByFiles } from './fscache';
+import { cachedByFiles, readLines } from './fscache';
 import { findTranscript } from './observe';
 import { claudeConfigDir } from './paths';
 import { isSafeSessionId } from './store';
@@ -115,7 +115,7 @@ function mineTasks(transcriptPath: string): { snaps: TaskSnap[]; history: MinedT
 function mineTasksUncached(transcriptPath: string): { snaps: TaskSnap[]; history: MinedTask[] } {
   let lines: string[];
   try {
-    lines = fs.readFileSync(transcriptPath, 'utf8').split('\n');
+    lines = readLines(transcriptPath);
   } catch {
     return { snaps: [], history: [] };
   }
@@ -223,7 +223,7 @@ export function taskNamings(transcriptPath: string): TaskNaming[] {
 function taskNamingsUncached(transcriptPath: string): TaskNaming[] {
   let lines: string[];
   try {
-    lines = fs.readFileSync(transcriptPath, 'utf8').split('\n');
+    lines = readLines(transcriptPath);
   } catch {
     return [];
   }

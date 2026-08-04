@@ -6,12 +6,12 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { diffArrays } from 'diff';
-import { EditRecord, EditStatus, readLog, readBlob, logPath, maxOf, listSessions, SessionInfo, allStoreSessionIds, rootDir, isSafeSessionId, hasInflightCapture, hasBlob } from './store';
+import { EditRecord, EditStatus, readLog, blobText as storeBlobText, logPath, maxOf, listSessions, SessionInfo, allStoreSessionIds, rootDir, isSafeSessionId, hasInflightCapture, hasBlob } from './store';
 import { lineDelta } from './format';
-import { projectDir, resolveSessionId } from './session';
+import { projectDir, resolveSessionId, listWorkspaces, bridgeInfo } from './session';
 import { claudeConfigDir } from './paths';
 import { cachedAnalysis } from './analyze';
-import { cachedByFiles } from './fscache';
+import { cachedByFiles, readLines } from './fscache';
 import { reviewEdits } from './groups';
 // NOTE: metrics.ts imports `findTranscript` from this module, so this pair is CIRCULAR. It is safe only
 // because both directions are used at CALL time, never at module-init time — nothing here runs during
@@ -28,6 +28,43 @@ export function findTranscript(cwd: string, sessionId: string): string | null {
     if (parent === dir) return null;
     dir = parent;
   }
+}
+
+/**
+ * Every session id that has a TRANSCRIPT under this workspace, newest first.
+ *
+ * The store is not the census. A session gets a store directory the first time the capture hook fires,
+ * so a conversation that only asked, read and ran things never gets one — and every listing built from
+ * `listSessions()` alone simply could not see it. Measured on this repo: 50 transcripts, 31 store
+ * directories, so 19 real conversations were missing from the picker with nothing on screen to say so.
+ *
+ * THIS directory's project folder only — deliberately not `findTranscript`'s walk up the tree. That
+ * walk exists so a session started in a SUBDIRECTORY still resolves, and walking up from a workspace
+ * root reaches its ancestors, which are other people's workspaces: enumerating those took this repo's
+ * listing from 44 rows to 85, most of them conversations that have nothing to do with it.
+ */
+export function transcriptSessionIds(cwd: string): string[] {
+  const dir = projectDir(path.resolve(cwd));
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return []; // no transcripts for this workspace yet
+  }
+  const out: { id: string; ms: number }[] = [];
+  for (const n of names) {
+    if (!n.endsWith('.jsonl')) continue;
+    const id = n.slice(0, -6);
+    if (!isSafeSessionId(id)) continue;
+    let ms = 0;
+    try {
+      ms = fs.statSync(path.join(dir, n)).mtimeMs;
+    } catch {
+      /* unreadable — it still identifies a session, and sorts last */
+    }
+    out.push({ id, ms });
+  }
+  return out.sort((a, b) => b.ms - a.ms).map((x) => x.id);
 }
 
 /** The file-editing tools that appear as tool_uses in the transcript (parseToolUses queues these);
@@ -49,7 +86,7 @@ function parseToolUses(transcriptPath: string): ToolUse[] {
   const out: ToolUse[] = [];
   let lines: string[];
   try {
-    lines = fs.readFileSync(transcriptPath, 'utf8').split('\n');
+    lines = readLines(transcriptPath);
   } catch {
     return out;
   }
@@ -226,7 +263,25 @@ export function transcriptInsights(cwd: string, sessionId: string): TranscriptIn
  *  project's session) — renderers fall back to the id. Insights are memoized per (mtime,size), so
  *  re-opening a picker costs stats, not parses. */
 export function listSessionsWithTitles(cwd: string): (SessionInfo & { title: string | null })[] {
-  return listSessions().map((s) => {
+  const rows = listSessions();
+  const seen = new Set(rows.map((s) => s.id));
+  // Sessions with a transcript here but NO store directory. One is created the first time the capture
+  // hook fires, so a conversation that only asked, read and ran things never gets one — and listing
+  // the store alone dropped it silently. They carry zero counts, which is the truth: nothing was
+  // captured. Recency comes from the transcript, since there is no log to stat.
+  for (const id of transcriptSessionIds(cwd)) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    let lastMs = 0;
+    try {
+      lastMs = fs.statSync(findTranscript(cwd, id) ?? '').mtimeMs;
+    } catch {
+      /* unreadable — it still identifies a session, and sorts last */
+    }
+    rows.push({ id, edits: 0, pending: 0, lastMs });
+  }
+  rows.sort((a, b) => b.lastMs - a.lastMs);
+  return rows.map((s) => {
     let title: string | null = null;
     try {
       const ins = transcriptInsights(cwd, s.id);
@@ -240,7 +295,7 @@ export function listSessionsWithTitles(cwd: string): (SessionInfo & { title: str
 
 /** Keep list rows SHORT but informative: ai-titles already are, but the first-PROMPT fallback can be a
  *  whole pasted brief — take its first sentence, then hard-cap at 64. Hover surfaces show it uncapped. */
-function normalizeSessionTitle(raw: string): string | null {
+export function normalizeSessionTitle(raw: string): string | null {
   let title = raw.replace(/\s+/g, ' ').trim();
   if (!title) return null;
   const sentence = /^(.*?[.?!])(?:\s|$)/.exec(title);
@@ -251,8 +306,31 @@ function normalizeSessionTitle(raw: string): string | null {
 
 // --- fast session listing: the session selector + the Overview's Sessions tab ---
 
+/** What every picker calls the machine it is running on. One constant, so the terminal, VS Code and
+ *  JetBrains cannot each invent their own wording for the same fact. */
+export const THIS_MACHINE = 'this machine';
+/** …and what they call a conversation whose content lives on Claude Code's bridge rather than here. */
+export const BRIDGE_MACHINE = 'the bridge';
+
 export interface SessionMetaRow {
   id: string;
+  /** Which workspace this session belongs to, as a readable label (`~`, `Github-myrepo`). Sessions
+   *  from every workspace are offered, so the row has to SAY which one — the previous listing mixed
+   *  ancestor-directory sessions in with this repo's and named none of them. */
+  workspace: string;
+  /**
+   * Where the conversation actually lives.
+   *  · `local`   — a real transcript on this machine.
+   *  · `bridged` — a `bridge-session` pointer; the content is on Claude Code's bridge, not here.
+   *  · `remote`  — enumerated over SSH from a configured host (see `host`).
+   */
+  origin: 'local' | 'bridged' | 'remote';
+  /** The configured remote this row came from, when `origin` is `remote`. */
+  host?: string;
+  /** WHICH MACHINE this session lives on, ready to render: the reader's name for the configured
+   *  remote, or [THIS_MACHINE] for one that is here. Present on every row, in its own field, so no
+   *  picker has to infer it from `origin` and none of them can disagree about the answer. */
+  machine: string;
   /** Human-readable name (latest ai-title, else the first user prompt), normalized; null when neither
    *  could be found in the bounded scan — renderers fall back to the short id. */
   title: string | null;
@@ -272,9 +350,16 @@ export interface SessionMetaRow {
   /** Lines added / removed across the session's captured edits (sidecar-cached — see SessionCounts). */
   added: number;
   removed: number;
-  /** Total tokens the conversation consumed, and its wall-clock span. Both ride sessionUsage's persisted
-   *  byte cursor, so a finished session is a stat and the live one is a delta parse. */
+  /** NEW tokens the conversation produced — uncached input + generated output — and its wall-clock
+   *  span. Both ride sessionUsage's persisted byte cursor, so a finished session is a stat and the
+   *  live one is a delta parse. */
   tokens: number;
+  /** Cache traffic (cacheRead + cacheCreation), counted SEPARATELY and never folded into `tokens`.
+   *  `cacheRead` is the whole prompt re-read every turn, so adding it made the same context count
+   *  once per turn: it was 98.8% of the old blended figure, which reported 372.2M for a session that
+   *  produced 901k. The two reconcile — `tokens + cached` is exactly that old number — so this hides
+   *  nothing; it just stops one of them impersonating the other. */
+  cached: number;
   durationMs: number;
   /** The model serving the session's latest turn ('' when no turn exists yet) and the reasoning effort
    *  it declared ('' when it never declared one — unset is reported as unknown, never guessed, because
@@ -382,11 +467,36 @@ export function sessionMeta(cwd: string, reviewing?: string | null): SessionMeta
   })();
   const rows: SessionMetaRow[] = [];
   const seen = new Set<string>();
+  // Every workspace's transcripts, indexed by id, so a row can name where it came from. The listing
+  // used to gate on `findTranscript`, which WALKS UP the tree — so sessions belonging to `~` and other
+  // ancestors were offered as if they were this repo's, 13 of 63 on the repo that found this, with
+  // nothing on the row to say otherwise. Provenance is now shown rather than guessed at.
+  const byId = new Map<string, { file: string; workspace: string }>();
+  for (const w of listWorkspaces()) {
+    let names: string[] = [];
+    try {
+      names = fs.readdirSync(w.dir);
+    } catch {
+      continue;
+    }
+    for (const n of names) {
+      if (!n.endsWith('.jsonl')) continue;
+      const id = n.slice(0, -6);
+      if (!isSafeSessionId(id) || byId.has(id)) continue;
+      byId.set(id, { file: path.join(w.dir, n), workspace: w.label });
+    }
+  }
   const push = (id: string): void => {
     if (seen.has(id)) return;
     seen.add(id);
-    const transcript = findTranscript(cwd, id);
-    if (!transcript) return; // another workspace's session — not offered here
+    const found = byId.get(id);
+    const transcript = found?.file ?? findTranscript(cwd, id);
+    if (!transcript) return; // no transcript anywhere — nothing to open
+    const workspace = found?.workspace ?? '';
+    // A single-line `bridge-session` pointer is not an empty conversation, it is one that lives on
+    // Claude Code's bridge. Reported as such rather than as a local session with no edits, which is
+    // what a reader opening it would otherwise be left to work out for themselves.
+    const bridge = bridgeInfo(transcript);
     let lastActiveMs = 0;
     try {
       lastActiveMs = fs.statSync(transcript).mtimeMs;
@@ -402,11 +512,16 @@ export function sessionMeta(cwd: string, reviewing?: string | null): SessionMeta
     // both costs a single delta parse — and nothing at all for a session whose transcript has not moved.
     let tokens = 0;
     let durationMs = 0;
+    let cached = 0;
     let model = '';
     let effort = '';
     try {
       const u = sessionUsage(cwd, id);
       tokens = u.total;
+      // Cache traffic is COUNTED SEPARATELY, never folded into the headline. The two reconcile by
+      // construction — `tokens + cached` is exactly the old blended figure — so nothing is hidden,
+      // it is just no longer the case that 98.8% of "tokens" is the same context restated.
+      cached = u.cacheRead + u.cacheCreation;
       durationMs = u.durationMs;
       const v = sessionVitals(cwd, id);
       model = v.model?.label ?? ''; // the display label ('Opus 4.8'), so renderers stay thin
@@ -416,22 +531,30 @@ export function sessionMeta(cwd: string, reviewing?: string | null): SessionMeta
     }
     rows.push({
       id,
+      workspace,
+      origin: bridge ? 'bridged' : 'local',
+      // A bridged conversation is NOT on this machine, and saying so in one column while the row's
+      // own status line says the opposite is the kind of contradiction a reader stops trusting.
+      machine: bridge ? BRIDGE_MACHINE : THIS_MACHINE,
       title: fastSessionTitle(transcript, id),
       lastActiveMs,
       current: id === active,
       ...sessionCounts(id),
       tokens,
+      cached,
       durationMs,
       model,
       effort,
     });
   };
   for (const id of allStoreSessionIds()) push(id);
-  if (active) push(active); // the live conversation may have no store yet (no edits) — still listed
-  // …and the session the reader has PINNED, which may equally have no store: a conversation that only
-  // asked and read never triggers the capture hook. Provenance is still decided by `push` (a transcript
-  // that does not resolve under this cwd is dropped), so a genuinely foreign pin stays unlisted — but a
-  // local one is no longer reported as "recorded for another workspace" merely for having no edits.
+  // …and every session with a TRANSCRIPT here. A store directory appears the first time the capture
+  // hook fires, so a conversation that only asked, read and ran things has none — and listing the
+  // store alone hid it completely. This used to be patched for exactly two ids, the active one and
+  // the pinned one, which is the same hole with two exceptions cut in it. Provenance is still decided
+  // by `push`, which drops anything whose transcript does not resolve under this cwd.
+  for (const id of byId.keys()) push(id);
+  if (active) push(active);
   if (reviewing) push(reviewing);
   rows.sort((a, b) => b.lastActiveMs - a.lastActiveMs);
   return { active, sessions: rows };
@@ -714,7 +837,7 @@ function transcriptInsightsUncached(p: string): TranscriptInsights {
   const empty: TranscriptInsights = { todos: [], lastSummary: null, title: null, firstUserPrompt: null };
   let lines: string[];
   try {
-    lines = fs.readFileSync(p, 'utf8').split('\n');
+    lines = readLines(p);
   } catch {
     return empty;
   }
@@ -846,7 +969,7 @@ export function contextSources(cwd: string, sessionId: string): ContextSourcesRe
 function contextSourcesUncached(transcriptPath: string): ContextSource[] {
   let lines: string[];
   try {
-    lines = fs.readFileSync(transcriptPath, 'utf8').split('\n');
+    lines = readLines(transcriptPath);
   } catch {
     return [];
   }
@@ -988,7 +1111,7 @@ export function transcriptSuggestions(cwd: string, sessionId: string): string[] 
 function blobText(sessionId: string, sha: string | null): string | null {
   if (sha === null) return null;
   try {
-    return readBlob(sessionId, sha).toString('utf8');
+    return storeBlobText(sessionId, sha);
   } catch {
     return null; // a GC'd blob is a missing input, not a crash in the Observations tree
   }
@@ -1030,20 +1153,47 @@ export function summarize(sessionId: string, rec: EditRecord): string {
  *  caching because the change map calls flagsFor once per edit on every build, and each call ran two
  *  full array diffs — at ~1,100 edits that was the single largest cost in the build. Deliberately only
  *  the blob half: the "no test file changed" flag below depends on the session's FILE SET, which grows
- *  as the session runs, so caching the whole result would freeze a flag that is supposed to flip. */
-const flagBlobMemo = new Map<string, { addedText: string; removed: number } | null>();
+ *  as the session runs, so caching the whole result would freeze a flag that is supposed to flip.
+ *
+ *  What is cached is the VERDICTS, not the added text. Holding the text kept every distinct blob pair
+ *  of a session resident — 803 MB on a 7.9k-record session, inside the editor's extension host — while
+ *  both callers re-ran their regexes over it on every call, so even a fully warm memo cost 2.1 s per
+ *  pass. The scans read nothing but the immutable pair, so they belong on this side of the cache. */
+interface FlagInputs {
+  /** `TODO|FIXME|XXX|HACK` — the flag's set. */
+  todoFlag: boolean;
+  /** `TODO|FIXME` only. A STRICT SUBSET of todoFlag's pattern, which is why these cannot share one
+   *  boolean: an edit adding only `XXX` earns the flag, but must not earn a follow-up next step. */
+  todoStep: boolean;
+  debug: boolean;
+  secret: boolean;
+  removed: number;
+}
+const flagBlobMemo = new Map<string, FlagInputs | null>();
 const FLAG_MEMO_CAP = 20000;
 
-function flagInputs(sessionId: string, rec: EditRecord): { addedText: string; removed: number } | null {
+function flagInputs(sessionId: string, rec: EditRecord): FlagInputs | null {
   const key = `${rec.beforeBlob ?? ''}\u0000${rec.afterBlob ?? ''}`;
   const hit = flagBlobMemo.get(key);
   if (hit !== undefined) return hit;
   const before = blobText(sessionId, rec.beforeBlob);
   const after = blobText(sessionId, rec.afterBlob);
-  const value =
-    after === null
-      ? null // the file was deleted — the caller answers that without diffing
-      : { addedText: addedLines(before ?? '', after).join(''), removed: before !== null ? addedLines(after, before).length : 0 };
+  let value: FlagInputs | null = null; // null = the file was deleted; the caller answers that without diffing
+  if (after !== null) {
+    const addedText = addedLines(before ?? '', after).join('');
+    value = {
+      todoFlag: /\b(TODO|FIXME|XXX|HACK)\b/.test(addedText),
+      todoStep: /\b(TODO|FIXME)\b/.test(addedText),
+      // The trailing \b used to apply to every branch, which made two of them unreachable: `!` and `(`
+      // are non-word characters, so a boundary after them needs a WORD character next — and Rust's
+      // macro is always written `dbg!(…)`, while a no-argument `print()` ends the same way. `dbg!`
+      // could never match in any form. Boundaries now sit only where a branch ends in a word
+      // character, so `debuggerish` and `sprint(` are still correctly ignored.
+      debug: /\b(?:console\.log|debugger)\b|\bprint\(|\bdbg!/.test(addedText),
+      secret: /(api[_-]?key|secret|password|token)\s*[:=]\s*['"`]/i.test(addedText),
+      removed: before !== null ? addedLines(after, before).length : 0,
+    };
+  }
   if (flagBlobMemo.size >= FLAG_MEMO_CAP) flagBlobMemo.clear();
   flagBlobMemo.set(key, value);
   return value;
@@ -1072,12 +1222,9 @@ export function flagsFor(sessionId: string, rec: EditRecord, log?: EditRecord[])
   const flags: Flag[] = [];
   const blob = flagInputs(sessionId, rec);
   if (blob === null) return [{ level: 'warn', message: 'file deleted' }];
-  const addedText = blob.addedText;
-  if (/\b(TODO|FIXME|XXX|HACK)\b/.test(addedText)) flags.push({ level: 'info', message: 'adds a TODO/FIXME' });
-  if (/\b(console\.log|debugger|print\(|dbg!)\b/.test(addedText))
-    flags.push({ level: 'warn', message: 'adds a debug statement' });
-  if (/(api[_-]?key|secret|password|token)\s*[:=]\s*['"`]/i.test(addedText))
-    flags.push({ level: 'warn', message: 'possible hard-coded secret' });
+  if (blob.todoFlag) flags.push({ level: 'info', message: 'adds a TODO/FIXME' });
+  if (blob.debug) flags.push({ level: 'warn', message: 'adds a debug statement' });
+  if (blob.secret) flags.push({ level: 'warn', message: 'possible hard-coded secret' });
   const removed = blob.removed;
   if (removed > 30) flags.push({ level: 'warn', message: `large deletion (−${removed} lines)` });
   // source file with no test sibling touched anywhere in the session
@@ -1110,7 +1257,7 @@ export function heuristicSuggestions(sessionId: string): string[] {
   // record on every Observations render (O(edits) blob reads + line diffs for an already-memoized answer).
   const todoFiles = log.filter((r) => {
     const blob = flagInputs(sessionId, r);
-    return blob !== null && /\b(TODO|FIXME)\b/.test(blob.addedText);
+    return blob !== null && blob.todoStep;
   });
   for (const r of todoFiles) out.push(`Follow up on the TODO/FIXME added in ${path.basename(r.file)}.`);
   if (out.length === 0) out.push('No obvious follow-ups from these heuristics.');
@@ -1166,19 +1313,36 @@ function runStatus(edits: ObservationEdit[]): EditStatus {
  * most-recent activity. Assembled ONCE here so the CLI `observations --json` and both editors render
  * the same payload. `root` sets the display-relative paths (defaults to cwd).
  */
+/**
+ * The session recap and where it came from — ONE definition, shared by every surface.
+ *
+ * Core previously used `title ?? lastSummary` while the CLI and VS Code used
+ * `cachedAnalysis('recap') ?? title`, so the same session read "Plan mode is active…" in one editor
+ * and "No recap yet" in the other, and a generated recap survived a restart in only one of them.
+ *
+ * Takes `insights` already in hand rather than a cwd, so a caller that has them pays for the
+ * transcript parse once — and so a surface wanting only the recap need not build the whole
+ * Observations model, which also walks every edit for reasoning, flags and file memory (~0.8 s of a
+ * 5.9 s `observe --json` on a 7.9k-record session).
+ */
+export function recapOf(
+  sessionId: string,
+  insights: TranscriptInsights
+): { recap: string; recapSource: Observations['recapSource'] } {
+  const analysis = cachedAnalysis(sessionId, 'recap')?.text?.trim() || '';
+  return {
+    recap: analysis || insights.title || insights.lastSummary || '',
+    recapSource: analysis ? 'analysis' : insights.title ? 'title' : insights.lastSummary ? 'summary' : '',
+  };
+}
+
 export function buildObservations(cwd: string, sessionId: string, opts: { root?: string } = {}): Observations {
   const root = opts.root ?? cwd;
   const relOf = (file: string): string => path.relative(root, file).split(path.sep).join('/');
   const log = readLog(sessionId);
   const reasoning = reasoningByEdit(cwd, sessionId);
   const insights = transcriptInsights(cwd, sessionId);
-  // ONE definition of the recap, shared by every surface. Core previously used `title ?? lastSummary`
-  // while the CLI and VS Code used `cachedAnalysis('recap') ?? title` — so the same session read
-  // "Plan mode is active…" in one editor and "No recap yet" in the other, and a generated recap
-  // survived a restart in only one of them.
-  const analysis = cachedAnalysis(sessionId, 'recap')?.text?.trim() || '';
-  const recap = analysis || insights.title || insights.lastSummary || '';
-  const recapSource: Observations['recapSource'] = analysis ? 'analysis' : insights.title ? 'title' : insights.lastSummary ? 'summary' : '';
+  const { recap, recapSource } = recapOf(sessionId, insights);
   // Claude's OWN open to-dos come first and are never what gets cut — they were being sliced to 6
   // while the generated half ran unbounded (58 rows, 55 of them one template, one per source file).
   // The heuristic half is capped, and says how many it dropped rather than trailing off silently.

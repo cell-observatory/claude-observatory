@@ -583,6 +583,59 @@ object ReviewOps {
     // task's destructive scope — the unassigned bucket stays unassigned.
 
     /** Accept a task: keep every PENDING edit in its strict span (`task-keep`). Non-destructive. */
+    /**
+     * Accept every pending edit at or beneath one change-map row — a file or a folder.
+     *
+     * `--under <path>` is the CLI's own scope, shared with the terminal's change map and VS Code's
+     * ledger, so all three act on one rule rather than each deriving an id set the others could
+     * disagree with. No confirmation: accepting records a verdict and changes no file on disk.
+     */
+    fun keepUnder(project: Project, session: String, under: String, label: String, pending: Int) {
+        runBg(project, "Accepting $label") {
+            val kept = ObservatoryCli.keepUnder(session, under, project.basePath)
+            when {
+                kept == null -> done(project, cliFailMsg("accept $label"), NotificationType.ERROR)
+                kept == 0 -> done(project, "No pending edits to accept in $label")
+                else -> done(project, "Accepted $kept edit(s) in $label")
+            }
+        }
+    }
+
+    /** Reject every pending edit at or beneath one change-map row. WRITES TO DISK, so it confirms with
+     *  the real count first, saves dirty buffers, and refreshes the tree afterwards. */
+    fun undoUnder(project: Project, session: String, under: String, label: String, pending: Int) {
+        val ok = Messages.showYesNoDialog(
+            project,
+            "Reject $pending pending edit(s) in $label? This reverts them on disk. " +
+                "Unsaved changes to affected files are saved first; later-overlapping edits may conflict " +
+                "(revert those individually to force).",
+            "Claude Observatory", "Reject", "Cancel", Messages.getWarningIcon(),
+        )
+        if (ok != Messages.YES) return
+        FileDocumentManager.getInstance().saveAllDocuments()
+        runBg(project, "Rejecting $label") {
+            val res = ObservatoryCli.undoUnder(session, under, project.basePath)
+            project.basePath?.let { refreshRecursive(it) }
+            if (res == null) {
+                done(project, cliFailMsg("reject $label"), NotificationType.ERROR)
+            } else if (res.undone == 0 && res.conflicts == 0 && res.errors == 0) {
+                done(project, "No pending edits to reject in $label")
+            } else {
+                // A REFUSAL is neither a success nor "nothing to do". Without `errors` in this
+                // condition, a folder whose every pending edit the engine refused reported
+                // "No pending edits to reject" — false, and it hid the one message (`firstError`)
+                // that names the repair.
+                done(
+                    project,
+                    "Rejected ${res.undone} edit(s) in $label" +
+                        (if (res.conflicts > 0) " · ${res.conflicts} conflict(s) — revert those individually to force" else "") +
+                        (if (res.errors > 0) " · ${res.errors} refused${res.firstError?.let { " — " + it } ?: ""}" else ""),
+                    if (res.errors > 0) NotificationType.WARNING else NotificationType.INFORMATION,
+                )
+            }
+        }
+    }
+
     fun keepTask(project: Project, session: String, taskId: String, label: String) {
         runBg(project, "Accepting task “$label”") {
             val kept = ObservatoryCli.taskKeep(session, taskId, project.basePath)
@@ -939,6 +992,7 @@ object ReviewOps {
         val auto = project.basePath?.let { com.cellobservatory.observatory.core.SessionResolver.resolveSessionId(it) }
         val autoLabel = "Auto — newest for this workspace" + (auto?.let { " ($it)" } ?: "")
         val labelToId = LinkedHashMap<String, String?>()
+        val labelToRow = HashMap<String, SessionRow>()
         labelToId[autoLabel] = null
         var selected = autoLabel
         // Live session first (it is the answer most of the time), then everything else newest-first.
@@ -948,14 +1002,168 @@ object ReviewOps {
             val label = "$mark${s.displayName}  —  ${s.id.take(8)} · ${relTime(s.lastActiveMs)}" +
                 (if (s.current) " · active" else "")
             labelToId[label] = s.id
+            labelToRow[label] = s
             if (s.id == pinned) selected = label
         }
         return com.intellij.openapi.ui.popup.JBPopupFactory.getInstance()
             .createPopupChooserBuilder(labelToId.keys.toList())
             .setTitle("Review which session?")
             .setSelectedValue(selected, true)
-            .setItemChosenCallback { chosen -> applySessionChoice(project, labelToId[chosen]) }
+            .setItemChosenCallback { chosen ->
+                // Refused HERE too — this chooser lists every session, including an unreachable
+                // host's synthetic row, and picking one used to persist a pin that cannot be opened.
+                if (!refuseRemote(project, labelToRow[chosen])) applySessionChoice(project, labelToId[chosen])
+            }
             .createPopup()
+    }
+
+    /**
+     * The machines this install looks for sessions on, over SSH.
+     *
+     * Driven entirely through the `remotes` verb, which validates with the same `parseRemoteSpec` the
+     * terminal's options window uses — both fields are interpolated into a shell that runs on ANOTHER
+     * computer, so there is one door and this goes through it rather than writing prefs.json here.
+     *
+     * Before this, `prefs.remotes` was editable only from the terminal dashboard: a feature all three
+     * front ends RENDER was configurable in exactly one of them.
+     */
+    fun manageRemotes(project: Project, anchor: javax.swing.JComponent?) {
+        com.intellij.util.concurrency.AppExecutorUtil.getAppExecutorService().submit {
+            val rows = ObservatoryCli.remotes(project.basePath)
+            ApplicationManager.getApplication().invokeLater {
+                if (project.isDisposed) return@invokeLater
+                // A CLI that could not answer is NOT an empty list — saying "no machines configured"
+                // over a prefs.json holding several is the failure this branch exists to prevent.
+                if (rows == null) {
+                    notify(
+                        project,
+                        "Could not read the configured machines — `claude-observatory remotes` did not answer. " +
+                            "Check the CLI on PATH (Settings → Tools → Claude Observatory).",
+                        NotificationType.WARNING,
+                    )
+                    return@invokeLater
+                }
+                val add = "＋  Add a machine…"
+                val labels = LinkedHashMap<String, String?>()
+                labels[add] = null
+                for (r in rows) {
+                    val mark = if (r.enabled) "●" else "○"
+                    val dir = if (r.configDir.isNotBlank()) "  ${r.configDir}" else ""
+                    val off = if (r.enabled) "" else "   (off)"
+                    labels["$mark  ${r.name}  —  ${r.host}$dir$off"] = r.name
+                }
+                val popup = com.intellij.openapi.ui.popup.JBPopupFactory.getInstance()
+                    .createPopupChooserBuilder(labels.keys.toList())
+                    .setTitle("Machines — sessions there can be browsed, never reverted from here")
+                    .setItemChosenCallback { chosen ->
+                        val name = labels[chosen]
+                        if (name == null) promptAddRemote(project) else editRemote(project, name, rows.firstOrNull { it.name == name }?.enabled != false)
+                    }
+                    .createPopup()
+                if (anchor != null && anchor.isShowing) popup.showInCenterOf(anchor)
+                else popup.showCenteredInCurrentWindow(project)
+            }
+        }
+    }
+
+    /**
+     * Where the observatory keeps its data — shown, and changeable.
+     *
+     * Driven through the `store` verb, so the move itself is `core.moveStore`, shared with the
+     * terminal's options window and VS Code. A setting that changed where NEW data goes while
+     * leaving the old data behind would strand a session's history where nothing looks for it.
+     */
+    fun storeLocation(project: Project, anchor: javax.swing.JComponent?) {
+        com.intellij.util.concurrency.AppExecutorUtil.getAppExecutorService().submit {
+            val info = ObservatoryCli.store(project.basePath)
+            ApplicationManager.getApplication().invokeLater {
+                if (project.isDisposed) return@invokeLater
+                if (info == null) {
+                    notify(project, "Could not read the store location — `claude-observatory store` did not answer.", NotificationType.WARNING)
+                    return@invokeLater
+                }
+                val move = "Move it…"
+                val restore = "Restore the default location"
+                val here = "${info.dir}   (${if (info.moved) "moved" else "default"})"
+                val choices = buildList {
+                    add(here)
+                    add(move)
+                    if (info.moved) add(restore)
+                }
+                com.intellij.openapi.ui.popup.JBPopupFactory.getInstance()
+                    .createPopupChooserBuilder(choices)
+                    .setTitle("Where the observatory keeps its data")
+                    .setItemChosenCallback { chosen ->
+                        when (chosen) {
+                            here -> Unit // it is a fact, not a button
+                            move -> {
+                                val dir = com.intellij.openapi.fileChooser.FileChooser.chooseFile(
+                                    com.intellij.openapi.fileChooser.FileChooserDescriptorFactory.createSingleFolderDescriptor()
+                                        .withTitle("Move the store here"),
+                                    project, null,
+                                )?.path
+                                if (dir != null) applyStoreMove(project, dir)
+                            }
+                            restore -> applyStoreMove(project, null)
+                        }
+                    }
+                    .createPopup()
+                    .let { if (anchor != null && anchor.isShowing) it.showInCenterOf(anchor) else it.showCenteredInCurrentWindow(project) }
+            }
+        }
+    }
+
+    private fun applyStoreMove(project: Project, dir: String?) {
+        com.intellij.util.concurrency.AppExecutorUtil.getAppExecutorService().submit {
+            val res = ObservatoryCli.storeMove(project.basePath, dir)
+            ApplicationManager.getApplication().invokeLater {
+                if (project.isDisposed) return@invokeLater
+                // The verb's own refusal, verbatim — one rule, one message.
+                if (res.error != null) notify(project, "Store not moved — ${res.error}", NotificationType.WARNING)
+                else {
+                    // The Kotlin path layer caches the root; drop it BEFORE the refresh, or every
+                    // direct read in that refresh still resolves the location we just left.
+                    com.cellobservatory.observatory.core.ClaudePaths.forgetRoot()
+                    com.intellij.openapi.application.ApplicationManager.getApplication().getService(com.cellobservatory.observatory.core.StoreWatcher::class.java).restart()
+                    notify(project, if (dir == null) "Store restored to the default location" else "Store moved to $dir")
+                    ObservatoryService.getInstance(project).refresh(force = true)
+                }
+            }
+        }
+    }
+
+    private fun promptAddRemote(project: Project) {
+        val line = Messages.showInputDialog(
+            project,
+            "name host [configDir]\n\nA single word is read as the host. Host is anything ssh accepts.\nKey auth only — the lookup runs with BatchMode, so an unreachable\nmachine fails fast instead of hanging on a password prompt.",
+            "Add a machine", null, "", null,
+        )?.trim().orEmpty()
+        if (line.isEmpty()) return
+        com.intellij.util.concurrency.AppExecutorUtil.getAppExecutorService().submit {
+            val res = ObservatoryCli.remoteAdd(project.basePath, line)
+            ApplicationManager.getApplication().invokeLater {
+                if (project.isDisposed) return@invokeLater
+                // The verb's own refusal reason, verbatim. Inventing a friendlier one here would mean
+                // two messages for one rule, and the reader acting on the wrong one.
+                if (res.error != null) notify(project, res.error, NotificationType.WARNING)
+                else { notify(project, "Added $line"); ObservatoryService.getInstance(project).refresh() }
+            }
+        }
+    }
+
+    private fun editRemote(project: Project, name: String, on: Boolean) {
+        val choices = arrayOf(if (on) "Turn off" else "Turn on", "Remove", "Cancel")
+        val pick = Messages.showDialog(project, name, "Machine", choices, 0, null)
+        if (pick < 0 || pick == 2) return
+        val flag = if (pick == 1) "--remove" else if (on) "--disable" else "--enable"
+        com.intellij.util.concurrency.AppExecutorUtil.getAppExecutorService().submit {
+            val res = ObservatoryCli.remoteChange(project.basePath, flag, name)
+            ApplicationManager.getApplication().invokeLater {
+                if (project.isDisposed) return@invokeLater
+                if (res.error != null) notify(project, res.error, NotificationType.WARNING)
+                else { notify(project, "${choices[pick]} $name"); ObservatoryService.getInstance(project).refresh() }
+            }
+        }
     }
 
     // --- shared plumbing ---
@@ -1182,6 +1390,28 @@ object ReviewOps {
      * clears the override and deletes the session, leaving every panel pinned to a session that no
      * longer exists, which is the failure the override was introduced to avoid.
      */
+    /**
+     * Refuse a session this machine cannot review, and say which. Returns true when it was refused.
+     *
+     * ONE door for a rule that had three. The guard lived only in `ChangeMapPanel.pinSession`, while
+     * the Timeline popup and the "All sessions…" chooser both routed straight to
+     * [applySessionChoice] — so two of the three pickers persisted a pin to a session whose store and
+     * transcript are on another machine, blanking every panel and then explaining the emptiness
+     * wrongly. An unreachable host's synthetic row is worse still: its id starts with "!" and
+     * `storeDir` throws on it, so every later call fails.
+     */
+    fun refuseRemote(project: Project, row: SessionRow?): Boolean {
+        if (row == null || row.origin != "remote") return false
+        val where = row.machine.ifBlank { row.host.ifBlank { "another machine" } }
+        notify(
+            project,
+            if (row.id.startsWith("!")) "$where could not be reached — ${row.title ?: "no answer"}"
+            else "That session lives on $where. Sessions are reviewed where their files are.",
+            NotificationType.WARNING,
+        )
+        return true
+    }
+
     fun applySessionChoice(project: Project, id: String?) {
         val service = ObservatoryService.getInstance(project)
         if (service.demoSessionOverride != null) {
