@@ -11266,12 +11266,16 @@ test('options: the editor row offers what this machine HAS, and steps through ex
   // The row used to be free text only, so `e` was configured by remembering a command AND its wait
   // flag. Everything here is injected, so the Windows branch — where `code` is `code.cmd` and an
   // extension-less probe finds nothing — is asserted from macOS.
+  // Separator-agnostic, because `detectEditors` builds its candidates with `path.join` — which yields
+  // `\usr\bin\vim` on Windows and never matches a forward-slash fixture. The subject here is WHICH
+  // editors get offered, not how the host spells a separator, so the probe accepts either.
   const bins = new Set(['/usr/bin/vim', '/opt/bin/code', '/opt/bin/nano']);
+  const hasBin = (f) => bins.has(String(f).replace(/\\/g, '/'));
   // `win: false` is injected as well, and has to be: without it `detectEditors` reads the HOST
   // platform and splits this POSIX PATH on `;` when run on Windows, finding one directory called
   // "/usr/bin:/opt/bin" and therefore no editors at all. The comment above claims everything is
   // injected; this is what makes that true.
-  const found = core.detectEditors({ path: '/usr/bin:/opt/bin', win: false, isExec: (f) => bins.has(f) });
+  const found = core.detectEditors({ path: '/usr/bin:/opt/bin', win: false, isExec: hasBin });
   assert.deepEqual(found.map((e) => e.command), ['vim', 'nano', 'code -w'],
     'declaration order, and the GUI one carries its wait flag');
   assert.equal(found.every((e) => e.label), true, 'each is named');
