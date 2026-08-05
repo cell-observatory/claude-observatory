@@ -10,6 +10,8 @@ Per-tag release artifacts and auto-generated notes are on the
 <!-- Every feature/fix PR into `dev` appends its line here; a promote renames this section to the
      release version and opens a fresh one. -->
 
+## [0.9.3] — 2026-08-05
+
 ### Added
 - **`tui` — a terminal app with the editors' review actions.** **Four windows** over one
   session — **Prompts** across the top, **Traces** on the left, a centre **Detail** window and
