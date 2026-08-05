@@ -2674,10 +2674,18 @@ test('watch: a real write to a session log wakes exactly one refresh', async () 
   });
   try {
     seedEdit(S, path.join(tmpWork(), 'w.js'), null, 'x\n');
-    // Comfortably past the 150 ms store debounce; the debounce is what collapses a burst into one.
-    await new Promise((r) => setTimeout(r, 900));
+    // WAITED FOR, not slept at. A filesystem event has no deadline: the OS arms the watch and delivers
+    // when it delivers, and on a loaded CI runner 900ms was not always enough — this went red on macOS
+    // intermittently, on a different Node version each time, which is what a race looks like from the
+    // outside. Polling is also strictly faster in the normal case, where the event lands in a few ms.
+    const deadline = Date.now() + 10_000;
+    while (!seen.includes('store') && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
     assert.ok(seen.includes('store'), `a log append woke the store root (saw ${JSON.stringify(seen)})`);
-    assert.ok(seen.filter((k) => k === 'store').length <= 2, 'and did not fire once per byte written');
+
+    // …and the debounce still collapses the burst. This has to be measured AFTER the settle above, and
+    // over a window longer than the 150ms debounce, or it is asserting about a burst still in flight.
+    await new Promise((r) => setTimeout(r, 400));
+    assert.ok(seen.filter((k) => k === 'store').length <= 2, `and did not fire once per byte written (saw ${JSON.stringify(seen)})`);
   } finally {
     w.close();
   }

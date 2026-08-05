@@ -272,6 +272,20 @@ async function until(what, cond, ms = 8000) {
   throw new Error(`timed out waiting for ${what}`);
 }
 
+/**
+ * A check whose condition becomes true after a REPAINT — waited for, not slept at.
+ *
+ * The shape `send(k); await sleep(300); check(...)` assumes a paint lands inside a fixed window, and on
+ * a loaded CI runner it does not: two checks failed that way on macOS while every other lane passed,
+ * intermittently and on different Node versions, which is what a race looks like from the outside. This
+ * polls the same condition the check asserts, so it is faster than the sleep when the machine is quick
+ * and tolerant when it is not — and when it genuinely fails, it still fails, with the same message.
+ */
+const checkSoon = async (name, cond, detail, ms = 5000) => {
+  await until(name, cond, ms).catch(() => {});
+  check(name, cond(), typeof detail === 'function' ? detail() : detail);
+};
+
 async function main() {
   // The first payload is a spawned child reading a real store, and how long that takes depends on
   // the session. A fixed sleep raced it: every check then compared two frames of "building…" and
@@ -449,6 +463,11 @@ async function main() {
   const reset = async () => { send('='); await sleep(300); };
   if (SEED) {
     await reset();
+    // WAIT for the repaint rather than sleeping at it. The two checks below measure an ABSENCE, and an
+    // absence is trivially true of a frame that has not been drawn yet — so on a loaded CI runner the
+    // 300ms in `reset()` was not always enough and they passed against nothing. The positive control
+    // below is what caught that, which is exactly what it is for; this is the fix it was pointing at.
+    await until('the change map to repaint after the reset', () => frame().some((l) => /CHANGE MAP/.test(l)), 8000);
     check('the swept file is on no surface at all', !frame().some((l) => /bundle\.js/.test(l)));
     check('and no surface claims to be hiding anything',
       !frame().some((l) => /hidden by \.observatoryignore|\d+ hidden/.test(l)),
@@ -571,7 +590,9 @@ async function main() {
     // …and the dashboard is LIVE again rather than stuck behind a dismissed question.
     const before = raw(0, ROWS);
     send(KEY.down);
-    await sleep(300);
+    // Polled, not slept at: a keypress is answered on the next paint, and how long that takes is the
+    // runner's business rather than something this file can assume.
+    await until('the frame to answer a keypress', () => raw(0, ROWS) !== before, 5000).catch(() => {});
     check('…and the windows answer keys again', raw(0, ROWS) !== before,
       'the frame did not respond to an arrow after the confirm was dismissed');
   }
@@ -647,18 +668,18 @@ async function main() {
     // index, walk past the refusal above, and throw `cmd.args is not a function` out of the handler.
     send(':'); await sleep(200);
     for (const ch of 'constructor') { send(ch); await sleep(30); }
-    send(KEY.enter); await sleep(500);
-    check('a prototype key is refused like any other unknown command',
-      frame().some((l) => /no command/.test(l)),
+    send(KEY.enter);
+    await checkSoon('a prototype key is refused like any other unknown command',
+      () => frame().some((l) => /no command/.test(l)),
       JSON.stringify(frame().slice(-2).map((l) => l.trim().slice(0, 80))));
     send(KEY.esc); await sleep(200);
 
     // `:help` — the one word anyone types into a prompt first, and it answered "no command" until now.
     send(':'); await sleep(200);
     for (const ch of 'help') { send(ch); await sleep(40); }
-    send(KEY.enter); await sleep(900);
-    check(':help answers with the CLI’s own help, not “no command”',
-      !frame().some((l) => /no command/.test(l)) && frame().some((l) => /claude-observatory|Usage|verb/i.test(l)),
+    send(KEY.enter);
+    await checkSoon(':help answers with the CLI’s own help, not “no command”',
+      () => !frame().some((l) => /no command/.test(l)) && frame().some((l) => /claude-observatory|Usage|verb/i.test(l)),
       JSON.stringify(frame().slice(0, 4).map((l) => l.trim().slice(0, 70))));
     send(KEY.esc); await sleep(250);
 
@@ -666,9 +687,9 @@ async function main() {
     {
       send(KEY.f2); await sleep(250);
       send('g'); await sleep(200);
-      send('P'); await sleep(400);
-      check('P opens a go-to-file picker', /go to file/.test(frame().join('\n')),
-        JSON.stringify(frame().slice(0, 3).map((l) => l.trim().slice(0, 60))));
+      send('P');
+      await checkSoon('P opens a go-to-file picker', () => /go to file/.test(frame().join('\n')),
+        () => JSON.stringify(frame().slice(0, 3).map((l) => l.trim().slice(0, 60))));
       send(KEY.down); await sleep(200);
       send(KEY.enter); await sleep(400);
       check('…and choosing one selects it WITHOUT narrowing the list',
@@ -684,9 +705,9 @@ async function main() {
       const tracesRow = frame().findIndex((l) => /#\d+\s/.test(l));
       check('positive control: there is a Traces row to right-click', tracesRow > 0,
         JSON.stringify(frame().slice(0, 8).map((l) => l.trim().slice(0, 50))));
-      send(`\x1b[<2;6;${tracesRow + 1}M`); await sleep(400);
-      check('right-click opens the row menu',
-        /this row\s+—/.test(frame().join('\n')),
+      send(`\x1b[<2;6;${tracesRow + 1}M`);
+      await checkSoon('right-click opens the row menu',
+        () => /this row\s+—/.test(frame().join('\n')),
         JSON.stringify(frame().slice(0, 3).map((l) => l.trim().slice(0, 60))));
       check('…and it offers the verbs that apply, by their own keys',
         /Keep/.test(frame().join('\n')) && /Undo/.test(frame().join('\n')),
@@ -710,22 +731,22 @@ async function main() {
       // header, then its first edit.
       send('g'); await sleep(200);
       send(KEY.down); await sleep(250);
-      send("'"); await sleep(200);
-      check('’ opens the set-a-mark prompt', /set mark/.test(frame().join('\n')),
-        JSON.stringify(frame().slice(-1)[0]?.trim().slice(0, 60)));
-      send('q'); await sleep(300);   // `q` as a mark NAME must not quit — the prompt is a wall
-      check('…and the next key is a NAME, not a verb (q did not quit)',
-        /mark ‘q’ set/.test(frame().join('\n')),
+      send("'");
+      await checkSoon('’ opens the set-a-mark prompt', () => /set mark/.test(frame().join('\n')),
+        () => JSON.stringify(frame().slice(-1)[0]?.trim().slice(0, 60)));
+      send('q');   // `q` as a mark NAME must not quit — the prompt is a wall
+      await checkSoon('…and the next key is a NAME, not a verb (q did not quit)',
+        () => /mark ‘q’ set/.test(frame().join('\n')),
         `q ran as quit, or the mark was refused: ${JSON.stringify((frame().join('\n').match(/.*mark.*/i) || ['(no mark line)'])[0].trim().slice(0, 90))}`);
       send('G'); await sleep(300);   // walk away
       send('`'); await sleep(200);
-      send('q'); await sleep(350);
-      check('` returns to the marked edit', /mark ‘q’ — edit #/.test(frame().join('\n')),
-        JSON.stringify(frame().slice(-1)[0]?.trim().slice(0, 70)));
+      send('q');
+      await checkSoon('` returns to the marked edit', () => /mark ‘q’ — edit #/.test(frame().join('\n')),
+        () => JSON.stringify(frame().slice(-1)[0]?.trim().slice(0, 70)));
       send('`'); await sleep(200);
-      send('z'); await sleep(300);
-      check('…and an unset mark says so rather than doing nothing',
-        /no mark ‘z’/.test(frame().join('\n')),
+      send('z');
+      await checkSoon('…and an unset mark says so rather than doing nothing',
+        () => /no mark ‘z’/.test(frame().join('\n')),
         JSON.stringify(frame().slice(-1)[0]?.trim().slice(0, 70)));
     }
 
@@ -734,9 +755,9 @@ async function main() {
       send(KEY.f2); await sleep(250);
       send('g'); await sleep(200);       // back to the top: the marks block above moved the cursor
       send(KEY.down); await sleep(200);
-      send('x'); await sleep(250);
-      check('x marks the row and says how many are marked',
-        /marked/.test(frame().join('\n')),
+      send('x');
+      await checkSoon('x marks the row and says how many are marked',
+        () => /marked/.test(frame().join('\n')),
         JSON.stringify(frame().slice(-1)[0]?.trim().slice(0, 70)));
       send(KEY.down); await sleep(200);
       send('x'); await sleep(250);
@@ -748,9 +769,9 @@ async function main() {
         markedCount() > 1, `marked count read as ${markedCount()} :: ${JSON.stringify((frame().join('\n').match(/.*marked.*/) || [''])[0].trim().slice(0, 70))}`);
       // `a` on a marked set must ASK, and name the marked scope rather than "this selection" — the
       // count is the only thing telling the reader they are about to act on more than the cursor row.
-      send('a'); await sleep(350);
-      check('a on a marked set asks first, and says it is the marked ones',
-        /marked edit/.test(frame().join('\n')),
+      send('a');
+      await checkSoon('a on a marked set asks first, and says it is the marked ones',
+        () => /marked edit/.test(frame().join('\n')),
         JSON.stringify(frame().slice(-2).map((l) => l.trim().slice(0, 70))));
       send('n'); await sleep(250);   // decline: this check is about the SCOPE, not about mutating
       send(KEY.esc); await sleep(250);
@@ -798,9 +819,9 @@ async function main() {
     send(':'); await sleep(250);
     for (const ch of 'stat') { send(ch); await sleep(40); }
     send(KEY.esc); await sleep(300);
-    send('?'); await sleep(400);   // a harmless verb with an unmistakable effect
-    check('esc leaves command mode, and the next key is a KEY again',
-      /keys\s+—/.test(frame().join('\n')),
+    send('?');   // a harmless verb with an unmistakable effect
+    await checkSoon('esc leaves command mode, and the next key is a KEY again',
+      () => /keys\s+—/.test(frame().join('\n')),
       `? did not open the keys screen — the : prompt is still eating keys: ${JSON.stringify(frame().slice(-1)[0]?.trim().slice(0, 60))}`);
     send(KEY.esc); await sleep(250);
 
