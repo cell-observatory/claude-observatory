@@ -522,6 +522,15 @@ async function main() {
   check('every picker row names the machine it is on',
     frame().some((l) => /this machine/.test(l)),
     JSON.stringify(frame().slice(1, 6).map((l) => l.trim().slice(0, 80))));
+  // THE NAME LEADS. It is what a reader scans for; the machine and workspace are how they narrow.
+  // It used to sit last, past four columns of metadata, which is why the picker read as a wall of ids.
+  {
+    const row = frame().slice(1).find((l) => /this machine/.test(l)) ?? '';
+    const name = row.replace(/^[\s*>]+/, '').split(/\s{2,}/)[0] ?? '';
+    check('the session NAME is the first column, before the machine',
+      name.length > 0 && !/^this machine$/.test(name) && row.indexOf(name) < row.indexOf('this machine'),
+      JSON.stringify(row.trim().slice(0, 90)));
+  }
   // …and it is HIGHLIGHTED, not just printed. Read from the RAW rows, because the plain-text frame
   // cannot see a colour at all — the machine cell carries its own SGR, so the reader can tell at a
   // glance which sessions are reviewable here. Only asserted when this run has colour; a `--no-color`

@@ -11,6 +11,34 @@ Per-tag release artifacts and auto-generated notes are on the
      release version and opens a fresh one. -->
 
 ### Fixed
+- **The terminal read the wrong workspace, and three panes went quietly empty.** Fleet showed nothing,
+  Prompts showed nothing, and the session picker listed ids instead of names — with no error anywhere.
+  All three are transcript-derived, and a transcript is found under its session's *mangled launch cwd*;
+  the views were resolving that from `process.cwd()`, so a dashboard opened anywhere but inside the
+  workspace — or pointed at another workspace's session by the picker — had no transcript to read.
+  Traces kept working the whole time, because it reads the store by session id, which is what made it
+  look like missing data rather than a bug.
+
+  The terminal now asks for the session's own workspace (`core.sessionWorkspace`, taken from the first
+  line of its append-only transcript), and every view honours `--root`. Five did not: `prompts`,
+  `feed`, `risk`, `egress` and `processes` — and a shared `noTranscript()` guard ignored it for all of
+  them, short-circuiting before any caller's root could matter. An end-to-end test now asserts the
+  property rather than the instances: **the same query from a foreign directory must answer exactly
+  what it answers from inside the workspace**, for all nine views, with a control proving `--root` is
+  what does it. That test found two more (`changemap`, `sessions`) the by-hand audit had missed.
+
+- **Fleet showed a fraction of what the editors show.** No tokens, no runtime, no model or effort, and
+  no subagents — a flat list where the editors show a tree. Everything but model and effort was
+  already on the payload; the row just never read it. Subagents now nest under the agent that spawned
+  them, as continuation rows so the cursor still steps between agents, and the token/duration
+  formatters moved into core so the terminal cannot drift from what the editors print for the same
+  agent.
+
+- **The session picker leads with the NAME.** It sat last, past four columns of metadata. Titles come
+  from a session's first ask, so several genuinely share one — five rows here read the same thing —
+  and a repeated title now carries its short id, while unique ones stay clean. `b` also joined the key
+  row; it was reachable and documented in the keys screen, but the row never named it.
+
 - **The terminal's dashboards showed identifiers where names belong.** The Tasks pane listed rows of
   `a3f21c9de4b7…` and nothing else, because it read `content`/`title` — the spellings the plan
   harness used before tasks gained `subject`. Both editors were already right (VS Code reads

@@ -10197,6 +10197,49 @@ test('tui: `w` keeps long lines long and pans across them, and never hides conte
     'the far END of the line is reachable by panning — nothing is out of reach');
 });
 
+test('tui: Fleet shows what an agent COST, and nests the agents it spawned', () => {
+  // The terminal's Fleet showed phase, deltas, a sparkline and a branch — and stopped there, while the
+  // editors showed tokens, runtime, model, effort and the subagent tree. Everything but model/effort
+  // was already on the agent payload; the row simply did not read it.
+  const agents = [{
+    session: 'S1', gitBranch: 'feat/x', self: true, phase: 'working', sparkline: [1, 2, 3],
+    diff: { added: 10, removed: 2 }, tokens: 3_695_326, durationMs: 82_722_836,
+    subagents: [
+      { agentId: 'g1', agentType: 'Explore', description: 'Map the release machinery', phase: 'done', added: 3, removed: 1 },
+      { agentId: 'g2', agentType: 'Explore', phase: 'working' },
+    ],
+  }];
+  const views = { multitask: { agents }, sessions: { sessions: [{ id: 'S1', model: 'opus-5', effort: 'high' }] } };
+  const rows = tui.rowsFor(paneFixture({ screen: 'agents', views, panes: null }), 160);
+
+  const parent = rows[0].cells;
+  assert.match(parent, /3\.7M tok/, 'tokens, formatted the way the editors format them');
+  assert.match(parent, /23\.0h/, 'and the runtime');
+  // model and effort are per-SESSION, so this only appears if the agents→sessions join happens.
+  assert.match(parent, /opus-5/, 'the model, joined from the sessions view');
+  assert.match(parent, /high/, 'and the effort');
+
+  // The subagents NEST rather than sitting in a flat list where the parent is unknowable.
+  assert.equal(rows.length, 3, 'one agent row plus its two subagents');
+  assert.match(rows[1].cells, /Explore/, 'a subagent names its type');
+  assert.match(rows[1].cells, /Map the release machinery/, 'and what it was asked to do');
+  assert.equal(rows[1].cont, true, 'children are continuation rows, so the cursor steps between AGENTS');
+  assert.equal(rows[2].cont, true);
+  // An unnamed subagent still says what it is, rather than showing its id.
+  assert.doesNotMatch(rows[2].cells, /g2/, 'no bare agent id');
+
+  // The formatters are core's, and must agree with what the editors' inline copies produce — the
+  // webview script is a string and cannot import them, so the duplication is pinned here instead.
+  const fmtTok = (n) => { n = n || 0; if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M'; if (n >= 1e3) return Math.round(n / 1e3) + 'k'; return '' + n; };
+  const fmtDur = (ms) => { ms = ms || 0; const s = Math.round(ms / 1000); if (s < 60) return s + 's'; const m = Math.round(s / 60); if (m < 60) return m + 'm'; return (m / 60).toFixed(1) + 'h'; };
+  for (const n of [0, 1, 999, 1000, 1500, 999_999, 1e6, 3_695_326]) {
+    assert.equal(core.compactTokens(n), fmtTok(n), `compactTokens must match the editors at ${n}`);
+  }
+  for (const m of [0, 999, 60_000, 3_599_000, 82_722_836]) {
+    assert.equal(core.compactDuration(m), fmtDur(m), `compactDuration must match the editors at ${m}`);
+  }
+});
+
 test('tui: an empty pane names its TAB, and says when a view never arrived', () => {
   // "nothing on Dashboards" is the same sentence whether Fleet, Tasks or Processes is the empty one —
   // and a reader looking at Fleet wants to know about Fleet. Worse, it was also the same sentence when

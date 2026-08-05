@@ -922,6 +922,32 @@ else
 fi
 rm -rf "$GITW"
 
+echo "════════ E2E 28: every view answers for the SESSION's workspace, not the terminal's ════════"
+# The class of bug this exists for, in one sentence: a dashboard opened OUTSIDE the workspace showed an
+# empty Fleet, empty Prompts and untitled sessions, with no error anywhere — because those views are
+# transcript-derived, a transcript is found under the mangled LAUNCH cwd, and they read `process.cwd()`
+# instead of the `--root` they were given. `changemap`, `multitask` and `observations` honoured it;
+# `prompts`, `feed`, `risk`, `egress` and `processes` did not; and a shared `noTranscript()` guard
+# ignored it for all of them, short-circuiting before any caller's own root could matter.
+#
+# Asserted as an EQUIVALENCE — the same query from a foreign directory must answer exactly what it
+# answers from inside the workspace — because that is the property, and it holds for every view at once
+# rather than for the handful anyone remembers to re-check by hand.
+FOREIGN="$(mktemp -d)"
+for v in multitask prompts changemap observations processes risk egress feed sessions; do
+  inside="$( cd "$WS" && node "$CLI" views --views "$v" --json --session "$SESSION" 2>/dev/null )"
+  outside="$( cd "$FOREIGN" && node "$CLI" views --views "$v" --json --session "$SESSION" --root "$WS" 2>/dev/null )"
+  ok "views --root answers identically for \`$v\` from outside the workspace" \
+     "[ -n \"\$inside\" ] && [ \"\$inside\" = \"\$outside\" ]"
+done
+# …and the positive control: WITHOUT --root from the same foreign directory, the transcript-derived
+# views must differ. Without this the equivalence above would also pass if --root did nothing at all.
+bare="$( cd "$FOREIGN" && node "$CLI" views --views prompts --json --session "$SESSION" 2>/dev/null )"
+inside_prompts="$( cd "$WS" && node "$CLI" views --views prompts --json --session "$SESSION" 2>/dev/null )"
+ok "positive control: without --root the same query does NOT find the transcript" \
+   "[ \"\$bare\" != \"\$inside_prompts\" ]"
+rm -rf "$FOREIGN"
+
 echo "════════════════════════════════════════════════════════"
 echo "E2E RESULT: $pass passed, $fail failed"
 [ $fail -eq 0 ]

@@ -85,6 +85,43 @@ export interface WorkspaceDir {
   dir: string;
 }
 
+/**
+ * The workspace a session was launched in, found from the session id ALONE.
+ *
+ * `findTranscript` walks UP from a cwd, which answers "is this session mine?" and cannot answer "where
+ * does this session live?" — from anywhere outside the workspace it returns null. That gap is what
+ * emptied the terminal's Fleet, Prompts and session titles at once: all three are transcript-derived,
+ * so a dashboard opened outside the repo (or pointed at another workspace's session by the picker) had
+ * no transcript to read, while Traces kept working because it reads the store by id. One cause, three
+ * symptoms, and no error anywhere — the panes just rendered empty.
+ *
+ * Scans the project dirs, which is a readdir over a directory that already exists for the picker, and
+ * takes the cwd from the transcript's own first line: append-only, so it is a fact about the session
+ * rather than an inference. Null when nothing on this machine holds it — a remote session, or a
+ * transcript that has not been written yet — and every caller must treat that as "use the default".
+ */
+export function sessionWorkspace(sessionId: string): string | null {
+  if (!sessionId) return null;
+  const base = path.join(claudeConfigDir(), 'projects');
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(base);
+  } catch {
+    return null;
+  }
+  for (const slug of names) {
+    const p = path.join(base, slug, `${sessionId}.jsonl`);
+    try {
+      if (!fs.statSync(p).isFile()) continue;
+    } catch {
+      continue;
+    }
+    const first = firstCwdLine(p);
+    if (first?.cwd) return first.cwd;
+  }
+  return null;
+}
+
 export function listWorkspaces(): WorkspaceDir[] {
   const base = path.join(claudeConfigDir(), 'projects');
   let names: string[] = [];
