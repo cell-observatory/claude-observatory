@@ -54,6 +54,20 @@ jobs:
       #
       # Checked against what is actually PUBLISHED rather than against a constant, and with core's own
       # comparator — the one that already knows `0.10.0-dev.4 < 0.10.0` and is unit-tested for it.
+      - run: npm ci
+      - run: npm test
+      - run: bash test/e2e.sh
+      - run: npm run release
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+      - run: ./gradlew buildPlugin --console=plain
+        working-directory: packages/jetbrains
+      # Placed here, not beside the stamp: it uses core's own comparator, and core has to be BUILT
+      # first — the first version of this ran before `npm ci` and died on a missing dist. Late is fine:
+      # the only thing it has to beat is the publish below, and it fails CLOSED.
       - name: The rolling version must outrank the one already published
         run: |
           node -e '
@@ -78,17 +92,6 @@ jobs:
           '
         env:
           GH_TOKEN: ${{ github.token }}
-      - run: npm ci
-      - run: npm test
-      - run: bash test/e2e.sh
-      - run: npm run release
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: 21
-      - uses: gradle/actions/setup-gradle@v4
-      - run: ./gradlew buildPlugin --console=plain
-        working-directory: packages/jetbrains
       - name: Refresh the rolling pre-release
         env:
           GH_TOKEN: ${{ github.token }}

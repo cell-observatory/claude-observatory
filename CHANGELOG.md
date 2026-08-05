@@ -11,6 +11,60 @@ Per-tag release artifacts and auto-generated notes are on the
      release version and opens a fresh one. -->
 
 ### Fixed
+- **The terminal read the wrong workspace, and three panes went quietly empty.** Fleet showed nothing,
+  Prompts showed nothing, and the session picker listed ids instead of names — with no error anywhere.
+  All three are transcript-derived, and a transcript is found under its session's *mangled launch cwd*;
+  the views were resolving that from `process.cwd()`, so a dashboard opened anywhere but inside the
+  workspace — or pointed at another workspace's session by the picker — had no transcript to read.
+  Traces kept working the whole time, because it reads the store by session id, which is what made it
+  look like missing data rather than a bug.
+
+  The terminal now asks for the session's own workspace (`core.sessionWorkspace`, taken from the first
+  line of its append-only transcript), and every view honours `--root`. Five did not: `prompts`,
+  `feed`, `risk`, `egress` and `processes` — and a shared `noTranscript()` guard ignored it for all of
+  them, short-circuiting before any caller's root could matter. An end-to-end test now asserts the
+  property rather than the instances: **the same query from a foreign directory must answer exactly
+  what it answers from inside the workspace**, for all nine views, with a control proving `--root` is
+  what does it. That test found two more (`changemap`, `sessions`) the by-hand audit had missed.
+
+- **Fleet showed a fraction of what the editors show.** No tokens, no runtime, no model or effort, and
+  no subagents — a flat list where the editors show a tree. Everything but model and effort was
+  already on the payload; the row just never read it. Subagents now nest under the agent that spawned
+  them, as continuation rows so the cursor still steps between agents, and the token/duration
+  formatters moved into core so the terminal cannot drift from what the editors print for the same
+  agent.
+
+- **The session picker leads with the NAME, and carries what the session cost.** The name sat last,
+  past four columns of metadata. Titles come from a session's first ask, so several genuinely share
+  one — five rows here read the same thing — and a repeated title now carries its short id, while
+  unique ones stay clean. `b` also joined the key row; it was reachable and documented in the keys
+  screen, but the row never named it.
+
+  Each row now also shows `±lines`, `tokens · elapsed` and `model · effort`, the same fields the
+  editors' Sessions row shows. All of it was already on the payload and none of it was displayed, so
+  choosing a session to review meant choosing on a name and an age alone, with its size, spend and
+  model one keystroke out of reach.
+
+- **Every session was costed from the reader's directory, not its own.** The picker lists *every*
+  workspace's sessions, but `sessionMeta` re-resolved each transcript from the caller's cwd — and that
+  lookup only walks *up*. So from any directory that was not a session's own workspace, its tokens,
+  duration, model and effort all came back empty: on this machine, 82 of 107 rows. It already knew the
+  exact file (it scanned every workspace to build the list); it just did not pass it. This is core, so
+  it lands in both editors' Sessions tab as well as the terminal — and each row is now costed from the
+  same file its own workspace label names, which was not previously guaranteed.
+
+- **A wrapped row moved the selection highlight to a different row.** The overlay expands each logical
+  line into as many visual lines as it needs, then compared the cursor — an index into the *logical*
+  lines — against a position in the *expanded* ones. Every wrap above the cursor shifted the highlight
+  down by one. It was latent while picker rows fit on one line, which is why it survived; it now
+  tracks the row it belongs to, and marks every visual line of it.
+
+- **The picker drops whole columns on a narrow terminal instead of re-flowing.** A table is the one
+  thing the overlay must not wrap: a two-line row in a list you are arrowing through costs the
+  alignment that made it a table. Columns now go in the order a reader needs them least — workspace,
+  then ±lines, then model, then cost, then machine — with the name, review state and age never
+  dropped. Nothing is cut mid-word either way; a column is present in full or not at all.
+
 - **The terminal's dashboards showed identifiers where names belong.** The Tasks pane listed rows of
   `a3f21c9de4b7…` and nothing else, because it read `content`/`title` — the spellings the plan
   harness used before tasks gained `subject`. Both editors were already right (VS Code reads
@@ -19,9 +73,10 @@ Per-tag release artifacts and auto-generated notes are on the
   still filtered, still scrolled. It just stopped answering "what is this".
 
   Every dashboard now goes through one resolver, and its fallback names the KIND rather than printing
-  a digest — an unnamed task reads `task 3`, an unnamed workflow `workflow 0f1e2d3c`, an agent with
-  no branch or worktree `session deadbeef`. The older `content`/`title` spellings are still read, so
-  an archived session does not turn into a wall of hashes the moment it is opened.
+  a digest: an unnamed task reads `task 3`, an unnamed workflow is named as a workflow, and an agent
+  with no branch or worktree is named as a session rather than shown as a bare identifier. The older
+  `content`/`title` spellings are still read, so an archived session does not turn into a wall of
+  hashes the moment it is opened.
 
 ### Build / CI
 - **The rolling pre-release channel cannot go backwards any more.** `dev`'s committed version is the

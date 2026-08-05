@@ -9806,6 +9806,31 @@ test('dashframe: an overlay with a cursor is a picker, one without is a reader',
   assert.equal(picker.filter((l) => l.startsWith('>')).length, 1, 'a picker marks exactly one');
 });
 
+test('dashframe: a WRAPPED row does not move the selection to a different row', () => {
+  // The overlay expands each logical line into as many visual lines as it needs, then marked the
+  // cursor by comparing it against a position in that EXPANDED list — while `cursor` indexes the
+  // logical ones. Every wrap above the cursor shifted the highlight down by one, so the reader
+  // arrowed onto "three" and the frame highlighted "two". It stayed hidden while every row fit on one
+  // line, which is exactly what stopped being true when the session picker grew its cost columns.
+  const long = ` ${'wide '.repeat(20)}`; // comfortably past `cols`, so it wraps
+  const lines = [long, ' two', ' three'];
+  const at = (cursor) => {
+    const f = tui.renderDashFrame(dashFixture({ overlay: { title: 'menu', lines, scroll: 0, cursor } }),
+      { cols: 40, rows: 14, color: false });
+    return f.filter((l) => l.startsWith('>')).map((l) => l.slice(1).trim());
+  };
+  // Positive control: without a wrap the mapping was already right, so the fixture has to wrap at all.
+  const flat = tui.renderDashFrame(dashFixture({ overlay: { title: 'menu', lines, scroll: 0, cursor: 0 } }),
+    { cols: 40, rows: 14, color: false });
+  assert.ok(flat.filter((l) => l.trim()).length > lines.length + 1, 'the fixture must actually wrap');
+
+  assert.deepEqual(at(1), ['two'], 'the cursor lands on the row it indexes, not one displaced by the wrap');
+  assert.deepEqual(at(2), ['three'], 'and stays correct further down the list');
+  // The wrapped row itself is marked across ALL of its visual lines, so a selection reads as one block
+  // rather than as a highlighted fragment with an unhighlighted tail.
+  assert.ok(at(0).length > 1, `a wrapped selection marks every line it occupies, got ${at(0).length}`);
+});
+
 test('dashframe: an open filter is visible before a single character is typed', () => {
   // The keys row used to print the prompt only when the buffer was non-empty, so pressing `/` looked
   // identical to normal mode. An invisible mode that swallows keystrokes is indistinguishable from a
@@ -10195,6 +10220,126 @@ test('tui: `w` keeps long lines long and pans across them, and never hides conte
   // A pan that could not reach the end would be truncation dressed as a feature.
   assert.ok(further.includes('col390'),
     'the far END of the line is reachable by panning — nothing is out of reach');
+});
+
+test('sessionMeta costs each session from ITS OWN transcript, not the caller cwd', () => {
+  // The session picker lists EVERY workspace's sessions. Costing them re-resolved the transcript from
+  // the caller's cwd, and that lookup only walks UP — so from any directory that is not the session's
+  // own workspace, tokens/duration/model/effort all came back empty and the picker printed blanks.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'obs-meta-'));
+  const cfg = path.join(dir, 'cfg');
+  const ws = path.join(dir, 'a-workspace');           // where the session lives
+  const elsewhere = path.join(dir, 'somewhere-else'); // where the reader is standing
+  fs.mkdirSync(ws, { recursive: true });
+  fs.mkdirSync(elsewhere, { recursive: true });
+  // The product's OWN mangling rule, not a restatement of it. Hand-rolling `ws.replace(/[/\\.]/g,'-')`
+  // passed on macOS and Linux and could not pass on Windows: it leaves the drive-letter colon in place,
+  // and `C:-Users-…` is not a legal directory name there. A test that guesses at the rule it is
+  // exercising tests the guess.
+  const id = '11111111-2222-3333-4444-555555555555';
+  const prev = process.env.CLAUDE_CONFIG_DIR;
+  // Set INSIDE the try, or a throw in the fixture writes below leaks a config dir pointing at a
+  // deleted temp directory into every test that runs after this one.
+  try {
+    process.env.CLAUDE_CONFIG_DIR = cfg; // projectDir resolves the config dir at call time
+    const proj = core.projectDir(ws);
+    fs.mkdirSync(proj, { recursive: true });
+    fs.writeFileSync(path.join(proj, id + '.jsonl'),
+      [JSON.stringify({ type: 'user', cwd: ws, timestamp: '2026-01-01T00:00:00.000Z', message: { role: 'user', content: 'name me' } }),
+       JSON.stringify({ type: 'assistant', timestamp: '2026-01-01T00:10:00.000Z',
+         message: { role: 'assistant', model: 'claude-opus-4-5-20251101', usage: { input_tokens: 700, output_tokens: 300, cache_creation_input_tokens: 0, cache_read_input_tokens: 9000000 } } })].join('\n') + '\n');
+    const row = core.sessionMeta(elsewhere).sessions.find((r) => r.id === id);
+    assert.ok(row, 'the session was not listed at all from a foreign cwd');
+    // input+output only. cacheRead is 9M here precisely so a regression that folds it back in is loud.
+    assert.equal(row.tokens, 1000, 'tokens must be costed from the transcript of that session');
+    assert.equal(row.cached, 9000000, 'and cache traffic stays in its own column');
+    assert.equal(row.durationMs, 600000, 'duration must come from that transcript too');
+    assert.ok(/opus/i.test(row.model), 'model was ' + JSON.stringify(row.model));
+    assert.ok(row.workspace.endsWith(path.basename(ws)), 'workspace label was ' + JSON.stringify(row.workspace));
+  } finally {
+    if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prev;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('tui: Fleet shows what an agent COST, and nests the agents it spawned', () => {
+  // The terminal's Fleet showed phase, deltas, a sparkline and a branch — and stopped there, while the
+  // editors showed tokens, runtime, model, effort and the subagent tree. Everything but model/effort
+  // was already on the agent payload; the row simply did not read it.
+  const agents = [{
+    session: 'S1', gitBranch: 'feat/x', self: true, phase: 'working', sparkline: [1, 2, 3],
+    diff: { added: 10, removed: 2 }, tokens: 3_695_326, durationMs: 82_722_836,
+    subagents: [
+      { agentId: 'g1', agentType: 'Explore', description: 'Map the release machinery', phase: 'done', added: 3, removed: 1 },
+      { agentId: 'g2', agentType: 'Explore', phase: 'working' },
+    ],
+  }];
+  const views = { multitask: { agents }, sessions: { sessions: [{ id: 'S1', model: 'opus-5', effort: 'high' }] } };
+  const rows = tui.rowsFor(paneFixture({ screen: 'agents', views, panes: null }), 160);
+
+  const parent = rows[0].cells;
+  assert.match(parent, /3\.7M tok/, 'tokens, formatted the way the editors format them');
+  assert.match(parent, /23\.0h/, 'and the runtime');
+  // model and effort are per-SESSION, so this only appears if the agents→sessions join happens.
+  assert.match(parent, /opus-5/, 'the model, joined from the sessions view');
+  assert.match(parent, /high/, 'and the effort');
+
+  // The subagents NEST rather than sitting in a flat list where the parent is unknowable.
+  assert.equal(rows.length, 3, 'one agent row plus its two subagents');
+  assert.match(rows[1].cells, /Explore/, 'a subagent names its type');
+  assert.match(rows[1].cells, /Map the release machinery/, 'and what it was asked to do');
+  assert.equal(rows[1].cont, true, 'children are continuation rows, so the cursor steps between AGENTS');
+  assert.equal(rows[2].cont, true);
+  // An unnamed subagent still says what it is, rather than showing its id.
+  assert.doesNotMatch(rows[2].cells, /g2/, 'no bare agent id');
+
+  // The formatters are core's, and must agree with what the editors' inline copies produce — the
+  // webview script is a string and cannot import them, so the duplication is pinned here instead.
+  const fmtTok = (n) => { n = n || 0; if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M'; if (n >= 1e3) return Math.round(n / 1e3) + 'k'; return '' + n; };
+  const fmtDur = (ms) => { ms = ms || 0; const s = Math.round(ms / 1000); if (s < 60) return s + 's'; const m = Math.round(s / 60); if (m < 60) return m + 'm'; return (m / 60).toFixed(1) + 'h'; };
+  for (const n of [0, 1, 999, 1000, 1500, 999_999, 1e6, 3_695_326]) {
+    assert.equal(core.compactTokens(n), fmtTok(n), `compactTokens must match the editors at ${n}`);
+  }
+  // Garbage in must not reach a row. The session picker prints these beside a name someone is choosing
+  // from, and a payload with no transcript carries '' and undefined rather than zeroes.
+  for (const bad of [NaN, -5, undefined, null, Infinity]) {
+    assert.equal(core.compactTokens(bad), '0', `compactTokens of ${String(bad)}`);
+    assert.equal(core.compactDuration(bad), '0s', `compactDuration of ${String(bad)}`);
+  }
+  for (const m of [0, 999, 60_000, 3_599_000, 82_722_836]) {
+    assert.equal(core.compactDuration(m), fmtDur(m), `compactDuration must match the editors at ${m}`);
+  }
+});
+
+test('tui: an empty pane names its TAB, and says when a view never arrived', () => {
+  // "nothing on Dashboards" is the same sentence whether Fleet, Tasks or Processes is the empty one —
+  // and a reader looking at Fleet wants to know about Fleet. Worse, it was also the same sentence when
+  // the view had not been REQUESTED at all: app.ts's allow-list decides which views a screen asks for,
+  // and a screen missing from it renders an honest-looking nothing. That file's own comment calls that
+  // out as the failure this product forbids; this is the pane holding up its end.
+  const dash = (views, tab) => {
+    const st = paneFixture({
+      views, screen: 'edits',
+      panes: { minimized: new Set(), zoom: null, focus: 'dashboards', tab: { dashboards: tab }, cursor: {}, scroll: {} },
+    });
+    const f = tui.renderDashFrame(st, { cols: 130, rows: 34, color: false });
+    // The PANE HEADER, which carries the rule of dashes — not the window bar at row 0, which also says
+    // "F5 …Dashboards" and would have this reading the Prompts pane's message instead.
+    const at = f.findIndex((l) => /F5 Dashboards\s+-{5}/.test(l));
+    assert.ok(at >= 0, `the Dashboards pane header is on screen: ${JSON.stringify(f.slice(0, 3))}`);
+    return f.slice(at + 1).find((l) => /has no data|nothing on/.test(l))?.trim() ?? '';
+  };
+
+  // Tab 0 is Fleet, tab 2 is Tasks — the message must name the one being looked at.
+  assert.match(dash({ changemap: {}, multitask: { agents: [] } }, 0), /nothing on Fleet yet/,
+    'an empty Fleet says Fleet, not Dashboards');
+  assert.match(dash({ changemap: {}, multitask: { tasks: [] } }, 2), /nothing on Tasks yet/,
+    'and an empty Tasks says Tasks');
+
+  // …and "the view never arrived" is a DIFFERENT answer from "there is nothing in it".
+  const absent = dash({ changemap: {} }, 0);
+  assert.match(absent, /multitask/, 'a missing view is named, so the reader has a lead rather than a shrug');
+  assert.doesNotMatch(absent, /fills in as Claude works/, 'and is not dressed up as "nothing yet"');
 });
 
 test('tui: every dashboard names its rows, and never shows a bare id', () => {

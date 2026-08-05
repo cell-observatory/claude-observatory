@@ -503,7 +503,11 @@ function cmdSessions(args: string[] = []): void {
   // no per-session log parse, no pending counts (recency + name is what the switch decision needs).
   // --session pins the listing to the session being reviewed, so a pinned conversation with no edits
   // yet still appears in it rather than looking like another workspace's.
-  const meta = core.sessionMeta(process.cwd(), args.includes('--session') ? getSessionId(args) : null);
+  // `--root` for the same reason every other view honours it: the picker's TITLES come from
+  // transcripts, which live under the mangled launch cwd — so listed from outside the workspace the
+  // rows fell back to bare session ids, which is what "the selector shows the id instead of the name"
+  // was. The workspace is the session's, not the terminal's.
+  const meta = core.sessionMeta(flagValue(args, '--root') ?? process.cwd(), args.includes('--session') ? getSessionId(args) : null);
   // `--remote` folds in every configured machine. OPT-IN, and only here: each host is an ssh, so a
   // caller that just wants this machine's sessions must not pay for one — and the editors ask for it
   // through their own async CLI spawn, which keeps the ssh off their UI thread entirely.
@@ -736,22 +740,28 @@ function cmdActions(args: string[]): void {
 
 /** Command risk: the shell commands Claude ran that can destroy data / escalate / touch secrets. */
 function cmdRisk(args: string[]): void {
+  // `--root` scopes this to the SESSION's workspace, not the terminal's. Every view here is
+  // transcript-derived, and a transcript is found under the mangled launch cwd — so a dashboard
+  // opened outside the workspace, or pointed at another workspace's session, read no transcript
+  // and rendered empty with no error. `changemap`, `multitask` and `observations` already did
+  // this; these did not, and the split is what made the failure look like data rather than a bug.
+  const viewRoot = flagValue(args, '--root') ?? process.cwd();
   const core = require('@claude-observatory/core') as Core;
   const session = getSessionId(args);
   const rri = args.indexOf('--root'); // the workspace boundary for "outside", like changemap/footprint
-  const root = rri >= 0 && args[rri + 1] ? args[rri + 1] : process.cwd();
-  if (noTranscript(session, args.includes('--json'))) return;
+  const root = rri >= 0 && args[rri + 1] ? args[rri + 1] : viewRoot;
+  if (noTranscript(session, args.includes('--json'), flagValue(args, '--root') ?? undefined)) return;
   const risky = core
-    .parseActions(process.cwd(), session)
+    .parseActions(viewRoot, session)
     .filter((a) => a.risk)
     .map((a) => ({ ts: a.ts, tool: a.tool, target: a.target, level: a.risk!.level, reasons: a.risk!.reasons }));
   const high = risky.filter((r) => r.level === 'high').length;
   if (args.includes('--json')) {
     // The folded footprint's damaging half: edits that landed outside the workspace boundary.
-    emitJson({ session, count: risky.length, high, risky, outsideWrites: core.outsideWrites(core.parseActions(process.cwd(), session), root) });
+    emitJson({ session, count: risky.length, high, risky, outsideWrites: core.outsideWrites(core.parseActions(viewRoot, session), root) });
     return;
   }
-  if (risky.length === 0 && !core.outsideWrites(core.parseActions(process.cwd(), session), root).length) {
+  if (risky.length === 0 && !core.outsideWrites(core.parseActions(viewRoot, session), root).length) {
     process.stdout.write(c.dim(`no risky commands flagged (session ${session}).\n`));
     return;
   }
@@ -764,7 +774,7 @@ function cmdRisk(args: string[]): void {
   // Writes that left the workspace. Risk otherwise only inspects commands, but "it edited files outside
   // the directory you pointed it at" is the same class of fact, and the edits ledger cannot say it —
   // every path there is shown workspace-relative. Stated as an observation, not scored as a danger.
-  const outside = core.outsideWrites(core.parseActions(process.cwd(), session), root);
+  const outside = core.outsideWrites(core.parseActions(viewRoot, session), root);
   if (outside.length) {
     const total = outside.reduce((n, w) => n + w.count, 0);
     process.stdout.write('\n' + c.bold('Outside the workspace') + c.dim(`  ${total} edit(s) across ${outside.length} file(s)\n`));
@@ -778,12 +788,18 @@ function cmdRisk(args: string[]): void {
 
 /** Egress: what this session touched off-machine — web / MCP / network-shell destinations. */
 function cmdEgress(args: string[]): void {
+  // `--root` scopes this to the SESSION's workspace, not the terminal's. Every view here is
+  // transcript-derived, and a transcript is found under the mangled launch cwd — so a dashboard
+  // opened outside the workspace, or pointed at another workspace's session, read no transcript
+  // and rendered empty with no error. `changemap`, `multitask` and `observations` already did
+  // this; these did not, and the split is what made the failure look like data rather than a bug.
+  const viewRoot = flagValue(args, '--root') ?? process.cwd();
   const core = require('@claude-observatory/core') as Core;
   const session = getSessionId(args);
-  if (noTranscript(session, args.includes('--json'))) return;
+  if (noTranscript(session, args.includes('--json'), flagValue(args, '--root') ?? undefined)) return;
   const eri = args.indexOf('--root'); // the workspace boundary for the `file` channels below
-  const eroot = eri >= 0 && args[eri + 1] ? args[eri + 1] : process.cwd();
-  const acts = core.parseActions(process.cwd(), session);
+  const eroot = eri >= 0 && args[eri + 1] ? args[eri + 1] : viewRoot;
+  const acts = core.parseActions(viewRoot, session);
   // Reads that left the workspace are reach, exactly like a fetch — the same question this audit
   // already answers for the network, so they are channels of the same report rather than a second one.
   const channels = [...core.buildEgressReport(acts), ...core.outsideReads(acts, eroot)];
@@ -810,9 +826,14 @@ function cmdEgress(args: string[]): void {
 /** Every audit verb reads the transcript. When there ISN'T one (another project's session, a bad id),
  *  an empty result means "we couldn't look", not "nothing happened" — and printing the second is a false
  *  statement of absence. Returns true when the caller should stop. */
-function noTranscript(session: string, json: boolean): boolean {
+function noTranscript(session: string, json: boolean, root?: string): boolean {
   const core = require('@claude-observatory/core') as Core;
-  if (core.findTranscript(process.cwd(), session)) return false;
+  // `root`, not `process.cwd()`. This guard looked for the transcript under the TERMINAL's directory
+  // while its caller had already been told, via `--root`, which workspace the session belongs to — so
+  // every audit verb reported "no transcript" for a session whose transcript was sitting right where
+  // the caller said it was. It short-circuits BEFORE the caller's own root is used, which is why
+  // fixing the callers alone changed nothing.
+  if (core.findTranscript(root ?? process.cwd(), session)) return false;
   if (json) emitJson({ session, transcript: null, error: 'no transcript found for this session under this directory' });
   else process.stdout.write(c.dim(`no transcript found for session ${session} under this directory — nothing to audit.\n`));
   return true;
@@ -860,10 +881,16 @@ function cmdFootprint(args: string[]): void {
  *  no OS pid here on purpose — the transcript never records one, and guessing it from local processes
  *  would be wrong whenever the agent runs on another machine (SSH / devcontainer / another worktree). */
 function cmdProcesses(args: string[]): void {
+  // `--root` scopes this to the SESSION's workspace, not the terminal's. Every view here is
+  // transcript-derived, and a transcript is found under the mangled launch cwd — so a dashboard
+  // opened outside the workspace, or pointed at another workspace's session, read no transcript
+  // and rendered empty with no error. `changemap`, `multitask` and `observations` already did
+  // this; these did not, and the split is what made the failure look like data rather than a bug.
+  const viewRoot = flagValue(args, '--root') ?? process.cwd();
   const core = require('@claude-observatory/core') as Core;
   const session = getSessionId(args);
-  if (noTranscript(session, args.includes('--json'))) return;
-  const list = core.sessionProcesses(process.cwd(), session);
+  if (noTranscript(session, args.includes('--json'), flagValue(args, '--root') ?? undefined)) return;
+  const list = core.sessionProcesses(viewRoot, session);
   const sum = core.summarizeProcesses(list);
   // `--id <shell>` drills into ONE shell: the full command it is running, plus a tail of its output —
   // for a job that is still going, that tail is the only view of what it is actually doing.
@@ -913,6 +940,12 @@ function cmdProcesses(args: string[]): void {
  *  the session itself. A bounded tail of the file that thing writes as it works, so the editors can poll
  *  it on their existing watcher tick without re-reading whole transcripts. */
 function cmdFeed(args: string[]): void {
+  // `--root` scopes this to the SESSION's workspace, not the terminal's. Every view here is
+  // transcript-derived, and a transcript is found under the mangled launch cwd — so a dashboard
+  // opened outside the workspace, or pointed at another workspace's session, read no transcript
+  // and rendered empty with no error. `changemap`, `multitask` and `observations` already did
+  // this; these did not, and the split is what made the failure look like data rather than a bug.
+  const viewRoot = flagValue(args, '--root') ?? process.cwd();
   const core = require('@claude-observatory/core') as Core;
   const session = getSessionId(args);
   const kind = (flagValue(args, '--kind') || 'session') as 'session' | 'agent' | 'workflow' | 'task' | 'process';
@@ -921,7 +954,7 @@ function cmdFeed(args: string[]): void {
   if (kind !== 'session' && !id) fail(`--id <${kind} id> is required for --kind ${kind}.`);
   const limitRaw = flagValue(args, '--limit');
   const limit = limitRaw ? Math.max(1, Number(limitRaw) || 0) : undefined;
-  const res = core.liveFeed(process.cwd(), session, { kind, id }, limit ? { limit } : {});
+  const res = core.liveFeed(viewRoot, session, { kind, id }, limit ? { limit } : {});
   if (args.includes('--json')) {
     emitJson(res);
     return;
@@ -952,10 +985,16 @@ function cmdFeed(args: string[]): void {
  *  produced. Every other view organizes work the way the agent saw it (rollups by task, file or
  *  agent); this is the only one that answers "what happened when I asked for X". */
 function cmdPrompts(args: string[]): void {
+  // `--root` scopes this to the SESSION's workspace, not the terminal's. Every view here is
+  // transcript-derived, and a transcript is found under the mangled launch cwd — so a dashboard
+  // opened outside the workspace, or pointed at another workspace's session, read no transcript
+  // and rendered empty with no error. `changemap`, `multitask` and `observations` already did
+  // this; these did not, and the split is what made the failure look like data rather than a bug.
+  const viewRoot = flagValue(args, '--root') ?? process.cwd();
   const core = require('@claude-observatory/core') as Core;
   const session = getSessionId(args);
-  if (noTranscript(session, args.includes('--json'))) return;
-  const reqs = core.sessionPrompts(process.cwd(), session);
+  if (noTranscript(session, args.includes('--json'), flagValue(args, '--root') ?? undefined)) return;
+  const reqs = core.sessionPrompts(viewRoot, session);
   const want = flagValue(args, '--id');
   if (want) {
     const r = reqs.find((x) => x.id === want || String(x.index) === want);
@@ -963,7 +1002,7 @@ function cmdPrompts(args: string[]): void {
     // `--response`: Claude's own prose in reply to this ask (its tool calls stripped) — the log a
     // reviewer expands to read. Fetched lazily because it can be large.
     if (args.includes('--response')) {
-      const resp = core.promptResponse(process.cwd(), session, r!.id);
+      const resp = core.promptResponse(viewRoot, session, r!.id);
       if (args.includes('--json')) {
         emitJson({ session, response: resp });
         return;
@@ -2774,7 +2813,10 @@ function cmdChangeMap(args: string[]): void {
   // The composition lives in core (`overviewChangeMap`) so the VS Code extension — which bundles core
   // and calls it in-process everywhere else — can have this payload WITHOUT spawning a node process for
   // it. Two copies of fifty lines of sibling projection is how the front-ends stop agreeing.
-  emitJson(core.overviewChangeMap(process.cwd(), session, { root }));
+  // `root` for BOTH: it is already the resolved workspace, and passing `process.cwd()` here meant the
+  // transcript lookup used the terminal's directory while the "outside the workspace" boundary used
+  // the caller's — two different answers to "which workspace is this" inside one call.
+  emitJson(core.overviewChangeMap(root, session, { root }));
 }
 
 

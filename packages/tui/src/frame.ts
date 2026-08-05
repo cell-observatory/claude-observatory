@@ -16,7 +16,7 @@ import {
   resolveLayout, hitTest, PANE_SPECS, TAB_SCREEN, BAR_ENTRIES, CHROME_TOP, CHROME_BOTTOM,
   type Layout, type PaneBox, type PaneId,
 } from './layout';
-import { relTime } from '@claude-observatory/core';
+import { relTime, compactTokens, compactDuration } from '@claude-observatory/core';
 import { Glyphs, ColorDepth, StateKey, glyphs as defaultGlyphs, tint, sparkline, riskMark } from './glyphs';
 import { buildMapTree, mapRows, renderMapRow, mapHeader, mapColumnHeader, MapNode } from './changemap';
 import { renderRichDiff } from './richdiff';
@@ -62,7 +62,7 @@ export const KEY_BINDINGS: ReadonlySet<string> = new Set([
  * so every width from 96 to 100 silently cut the last keys and the row read "q qui".
  */
 export const KEY_HINTS: readonly string[] = [
-  'F1-F5 window (twice zooms) · 0-9 edit · Tab next · ↑↓ move · ←→ tab · space fold · x mark · a keep · u undo · y copy · e $EDITOR · s sort · : command · o options · ? keys · q quit',
+  'F1-F5 window (twice zooms) · 0-9 edit · Tab next · ↑↓ move · ←→ tab · space fold · x mark · a keep · u undo · y copy · e $EDITOR · s sort · b sessions · : command · o options · ? keys · q quit',
   'F1-F5 window · 0-9 edit · Tab · ↑↓ · ←→ · space fold · a/u · y · e · o · ? · q',
   'F1-F5 · 0-9 · Tab · ↑↓ · ←→ · a/u · e · o · ? · q',
   '? keys · q quit',
@@ -451,6 +451,10 @@ function rowsForUncached(state: DashState, cols = 100, g: Glyphs = defaultGlyphs
       });
     }
   } else if (state.screen === 'agents') {
+    // MODEL and EFFORT are not on the agent — they are per-session, and the editors join the two to
+    // show them. Same join here, so Fleet says the same thing in all three front ends.
+    const byId = new Map<string, Record<string, unknown>>();
+    for (const x of arr(view<{ sessions?: unknown[] }>(state, 'sessions')?.sessions)) byId.set(str(x.id), x);
     for (const a of arr(view<{ agents?: unknown[] }>(state, 'multitask')?.agents)) {
       const label = named([str(a.gitBranch), str(a.worktree)], 'session', str(a.session));
       if (!keep(label)) continue;
@@ -465,11 +469,38 @@ function rowsForUncached(state: DashState, cols = 100, g: Glyphs = defaultGlyphs
       const heur = str(a.phaseConfidence) === 'heuristic';
       const shown = depth === 'none' ? phase : `${heur ? '\x1b[2m' : ''}${tint(phase, pk, depth)}`;
       const delta = pad(`${tint(`+${num(d.added)}`, 'kept', depth)} ${tint(`−${num(d.removed)}`, 'risk', depth)}`, 14);
+      // What the editors put beside the sparkline: what it cost and how long it ran. Both are on the
+      // agent already; the terminal simply was not showing them.
+      const meta = byId.get(str(a.session)) ?? {};
+      const cost = [
+        num(a.tokens) ? `${compactTokens(num(a.tokens))} tok` : '',
+        num(a.durationMs) ? compactDuration(num(a.durationMs)) : '',
+        str(meta.model),
+        str(meta.effort),
+      ].filter(Boolean).join(' · ');
       rows.push({
         ids: [],
         key: `a${str(a.session)}`,
-        cells: `${a.self ? tint(g.closed, 'accent', depth) : ' '} ${shown}${' '.repeat(Math.max(0, 16 - displayWidth(phase)))} ${delta} ${tint(spark.padEnd(10), pk, depth)} ${tail(label)}`,
+        cells: `${a.self ? tint(g.closed, 'accent', depth) : ' '} ${shown}${' '.repeat(Math.max(0, 16 - displayWidth(phase)))} ${delta} ${tint(spark.padEnd(10), pk, depth)} ${tail(label)}${cost ? `  ${tint(cost, 'undone', depth)}` : ''}`,
       });
+      // SUBAGENTS NEST, as they do in the editors — an agent's work is not separable from the agents it
+      // spawned, and a flat list of forty rows hides which parent each belongs to. Indented and marked
+      // `cont` so the cursor steps between AGENTS, not into their children: `a`/`u` act on a selection,
+      // and a child row is not a separate unit of review.
+      for (const sub of arr(a.subagents)) {
+        const sp = str(sub.phase);
+        const sk: StateKey = sp === 'working' ? 'live' : sp === 'done' ? 'kept' : 'undone';
+        const what = named([str(sub.description), str(sub.currentTask), str(sub.agentType)], 'subagent', str(sub.agentId));
+        const sd = num(sub.added) || num(sub.removed)
+          ? `${tint(`+${num(sub.added)}`, 'kept', depth)} ${tint(`−${num(sub.removed)}`, 'risk', depth)}`
+          : '';
+        rows.push({
+          ids: [],
+          key: `a${str(a.session)}s${str(sub.agentId)}`,
+          cont: true,
+          cells: `     ${tint(g.wrap, sk, depth)} ${tint(sp.padEnd(10), sk, depth)} ${str(sub.agentType).padEnd(10)} ${what}${sd ? `  ${sd}` : ''}`,
+        });
+      }
     }
   } else if (state.screen === 'feed') {
     for (const en of arr(view<{ entries?: unknown[] }>(state, 'feed')?.entries)) {
@@ -944,10 +975,29 @@ export function paneVisible(
      * already draw "building…" while the first read is in flight. A third message for it would be
      * unreachable code that reads like a covered case.
      */
-    const title = PANE_SPECS.find((p) => p.id === box.id)!.title;
+    const spec = PANE_SPECS.find((p) => p.id === box.id)!;
+    // The TAB, not the pane. "nothing on Dashboards" is the same sentence whether Fleet is empty,
+    // Tasks is empty, or Processes is — and a reader looking at Fleet wants to know about Fleet.
+    const tabIdx = state.panes?.tab?.[box.id] ?? 0;
+    const title = spec.tabs.length ? (spec.tabs[tabIdx] ?? spec.title) : spec.title;
+    /**
+     * "EMPTY" AND "NEVER ASKED FOR" ARE DIFFERENT ANSWERS, and this pane used to give the same one to
+     * both. The allow-list in app.ts decides which views a screen requests; a screen missing from it
+     * gets a payload without its view and renders an honest-looking nothing — the failure that file's
+     * own comment calls out as forbidden. Naming the absent view turns a shrug into a lead.
+     */
+    const feeds: Record<string, string> = {
+      agents: 'multitask', workflows: 'multitask', tasks: 'multitask',
+      prompts: 'prompts', feed: 'feed', observations: 'observations',
+      processes: 'processes', edits: 'list', audit: 'risk',
+    };
+    const feed = feeds[screen];
+    const missing = feed !== undefined && view(state, feed) === null;
     const why = state.filter
       ? `nothing on ${title} matching /${state.filter} — esc clears the filter`
-      : `nothing on ${title} yet — it fills in as Claude works`;
+      : missing
+        ? `${title} has no data to draw: the “${feed}” view did not arrive in this refresh`
+        : `nothing on ${title} yet — it fills in as Claude works`;
     for (const part of wrapVisible(why, Math.max(1, inner - 2))) {
       out.push({ text: depth === 'none' ? `  ${part}` : `\x1b[2m  ${part}\x1b[0m`, row: -1 });
     }
@@ -1288,16 +1338,24 @@ export function renderDashFrame(state: DashState, opts: FrameOpts): string[] {
     // that reclaims the full width. Fitting it cut the tail off silently, and a diff you cannot read
     // to the end is a diff you cannot review. Only the visible window is expanded.
     const slice: string[] = [];
+    // Which LOGICAL row each visual line came from. The cursor indexes `o.lines`, but this array is
+    // the WRAPPED expansion of them — so comparing the cursor against a position in it drifts by one
+    // for every wrap above it, and the highlight lands on a row the reader did not select. It only
+    // ever bit pickers (the diff overlay has no cursor) and only when something wrapped, which is why
+    // it survived: a picker row that fits is its own visual line and the two indexes agree.
+    const owner: number[] = [];
     for (let r = o.scroll; r < o.lines.length && slice.length < bodyRows - 1; r++) {
       const raw = o.lines[r] ?? '';
-      if (displayWidth(raw) <= cols) { slice.push(raw); continue; }
+      if (displayWidth(raw) <= cols) { slice.push(raw); owner.push(r); continue; }
       const parts = wrapVisible(raw, Math.max(1, cols - 2));
       slice.push(parts[0] ?? '');
-      for (const part of parts.slice(1)) slice.push(`${g.wrap}${part}`);
+      owner.push(r);
+      for (const part of parts.slice(1)) { slice.push(`${g.wrap}${part}`); owner.push(r); }
     }
     for (let i = 0; i < bodyRows - 1; i++) {
       const line = slice[i] ?? '';
-      const picked = o.cursor !== undefined && o.scroll + i === o.cursor;
+      // Every visual line of the selected row is marked, so a wrapped selection reads as one block.
+      const picked = o.cursor !== undefined && owner[i] === o.cursor;
       // Without colour the cursor REPLACES the row's leading space rather than being prepended:
       // prepending shifts every column right by one and collides with the marker a picker row may
       // already carry (the current session's own '>'), so two different meanings share a glyph AND

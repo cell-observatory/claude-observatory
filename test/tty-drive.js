@@ -13,6 +13,10 @@
  * same lines a human would see.
  */
 const COLS = 120;
+// core's compactTokens/compactDuration, restated so a check cannot pass by importing the same bug it
+// is meant to catch. Pinned against core itself in packages/core/test/core.test.js.
+const fmtTok = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : `${n}`);
+const fmtDur = (ms) => { const s = Math.round(ms / 1000); if (s < 60) return `${s}s`; const m = Math.round(s / 60); return m < 60 ? `${m}m` : `${(m / 60).toFixed(1)}h`; };
 const ROWS = 34;
 
 process.stdin.isTTY = true;
@@ -161,7 +165,11 @@ function seedSession(core, nfs, npath, nos) {
       {
         type: 'assistant', sessionId: session, timestamp: iso(t0 + 500),
         message: {
-          role: 'assistant', id: 'msg_ttydrive_1', content: [{ type: 'text', text: 'done' }],
+          // A real assistant record always names the model that produced it, and the session picker
+          // and Fleet both print it beside the token count. Without it here the fixture was costed
+          // but anonymous, and the cost-column check below had nothing to assert against.
+          role: 'assistant', id: 'msg_ttydrive_1', model: 'claude-opus-4-5-20251101',
+          content: [{ type: 'text', text: 'done' }],
           usage: { input_tokens: 120, output_tokens: 40, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
         },
       },
@@ -460,14 +468,39 @@ async function main() {
   // "N hidden" notice for a filter that no longer exists.
   // '=' resets the layout (and any zoom) first: these checks used to inherit whatever the previous
   // group left on screen, measure a zoomed frame, and report the product empty.
-  const reset = async () => { send('='); await sleep(300); };
+  /**
+   * Back to the default layout AND to the change map.
+   *
+   * `=` resets the layout; it does not reset the SELECTION, and the centre window's face is `auto` —
+   * the map when nothing is picked, the diff when something is. Earlier groups here pick edits, so
+   * after a bare `=` the centre can legitimately still be showing a diff and the map never appears.
+   * That is what timed out on macOS: not a slow paint, a frame that was never going to say CHANGE MAP.
+   *
+   * `esc`, not F3. Both land on the map, but F3 also FOCUSES the centre window — and that leaked into
+   * a later check, where `↓` then moved a short map list already at its end and the frame did not
+   * change. `esc` is the product's own way of saying "nothing selected", which is precisely the state
+   * whose face is the map, and it leaves focus where it was.
+   */
+  const reset = async () => {
+    send('=');
+    await sleep(250);
+    if (!frame().some((l) => /CHANGE MAP/.test(l))) { send(KEY.esc); await sleep(250); }
+    await until('the change map', () => frame().some((l) => /CHANGE MAP/.test(l)), 6000).catch(() => {});
+  };
   if (SEED) {
+    // FORCE the state that broke CI before resetting: pick an edit, so the centre window's `auto` face
+    // is the DIFF and the change map is genuinely not on screen. Without this the reset is only ever
+    // exercised from a state where the map was already up, and the recovery it exists for is untested.
+    send(KEY.f2); await sleep(150); send(KEY.down); await sleep(150); send(KEY.f4); await sleep(300);
+    check('positive control: with an edit selected the map is NOT on screen',
+      !frame().some((l) => /CHANGE MAP/.test(l)),
+      JSON.stringify(frame().slice(0, 3).map((l) => l.trim().slice(0, 50))));
     await reset();
-    // WAIT for the repaint rather than sleeping at it. The two checks below measure an ABSENCE, and an
-    // absence is trivially true of a frame that has not been drawn yet — so on a loaded CI runner the
-    // 300ms in `reset()` was not always enough and they passed against nothing. The positive control
-    // below is what caught that, which is exactly what it is for; this is the fix it was pointing at.
-    await until('the change map to repaint after the reset', () => frame().some((l) => /CHANGE MAP/.test(l)), 8000);
+    // `reset()` now waits for the map itself, and does so WITHOUT throwing. A bare `until` here aborted
+    // the entire run on the first timeout, turning one unhappy check into "no results at all" — and the
+    // positive control below already reports this condition as a normal failure, with the frame in its
+    // detail. Two things must not be confused: the checks either side measure an ABSENCE, which is
+    // trivially true of a frame that was never drawn, so the control is what makes them mean anything.
     check('the swept file is on no surface at all', !frame().some((l) => /bundle\.js/.test(l)));
     check('and no surface claims to be hiding anything',
       !frame().some((l) => /hidden by \.observatoryignore|\d+ hidden/.test(l)),
@@ -497,6 +530,68 @@ async function main() {
   check('every picker row names the machine it is on',
     frame().some((l) => /this machine/.test(l)),
     JSON.stringify(frame().slice(1, 6).map((l) => l.trim().slice(0, 80))));
+  // THE NAME LEADS. It is what a reader scans for; the machine and workspace are how they narrow.
+  // It used to sit last, past four columns of metadata, which is why the picker read as a wall of ids.
+  {
+    const row = frame().slice(1).find((l) => /this machine/.test(l)) ?? '';
+    const name = row.replace(/^[\s*>]+/, '').split(/\s{2,}/)[0] ?? '';
+    check('the session NAME is the first column, before the machine',
+      name.length > 0 && !/^this machine$/.test(name) && row.indexOf(name) < row.indexOf('this machine'),
+      JSON.stringify(row.trim().slice(0, 90)));
+  }
+  // THE COST COLUMNS. The picker gained `tokens · duration` and `model · effort` so it carries what the
+  // VS Code Sessions tab carries. Those come straight off the payload, so the way this breaks is not a
+  // missing column — it is a MALFORMED one: a session with no transcript has no tokens, no duration, no
+  // model and no effort, and every one of those fields is `undefined`. Printing them unguarded puts
+  // "undefined" or "NaN tok" on a row someone is choosing a session from. This check always runs,
+  // because the empty-data case is the common one on a fresh machine and the whole point of the guard.
+  {
+    // Scoped to the PICKER'S OWN lines — everything after its title row. Scanning the whole frame
+    // swept in the status bar, which legitimately reads "·  0 high risk", and scanning only the lines
+    // that name a machine missed the case entirely: an over-long row WRAPS, so a malformed cell lands
+    // on a continuation line naming no machine.
+    //
+    // What actually breaks here is a DANGLING SEPARATOR. The payload gives absent fields as '', not
+    // undefined, so an unguarded join does not print "undefined" — it prints "Opus 4.5 ·  effort",
+    // a separator with nothing on one side of it. Both are checked; the separator is the one that
+    // mutation testing proved reachable.
+    const head = frame().findIndex((l) => /browse sessions/.test(l));
+    const rows = head < 0 ? [] : frame().slice(head + 1).filter((l) => l.trim());
+    const named = rows.filter((l) => /this machine|the bridge/.test(l));
+    const bad = rows.find((l) => /\b(NaN|undefined|null)\b/.test(l) || /·\s+effort/.test(l) || /·\s{2,}/.test(l) || /·\s*$/.test(l.trimEnd()));
+    check('no picker row prints a malformed cell for a session with fields missing',
+      named.length > 0 && !bad, bad ? JSON.stringify(bad.trim()) : 'the picker listed no sessions at all');
+  }
+  // …and when the data IS there, it is SHOWN. Driven off the payload rather than hard-coded, because a
+  // CI runner's sessions are edit-only — they have no transcript, so there is genuinely nothing to
+  // print. Skipping is announced rather than silent, so a run that never exercised this says so.
+  {
+    const rich = (() => {
+      try {
+        const out = require('child_process').execFileSync(process.execPath,
+          [target, 'views', '--views', 'sessions', '--json'], { encoding: 'utf8', maxBuffer: 1 << 26 });
+        return (JSON.parse(out).sessions?.sessions || []).filter((x) => +x.tokens > 0 && x.model);
+      } catch (e) { say(`  ·  the sessions payload could not be read: ${e && e.message}`); return null; }
+    })();
+    if (rich === null) {
+      check('the cost columns could be checked at all', false, 'the sessions payload did not parse — see above');
+    } else if (rich.length) {
+      const text = frame().join('\n');
+      // The EXACT strings the payload implies, composed the way the row composes them. Asserting
+      // "contains a model name somewhere" would pass against a row that dropped the token count, or
+      // that printed the effort without the word, or that joined the two with the wrong separator.
+      const x = rich[0];
+      const cost = [`${fmtTok(+x.tokens)} tok`, +x.durationMs ? fmtDur(+x.durationMs) : ''].filter(Boolean).join(' · ');
+      const brain = [String(x.model), x.effort ? `${x.effort} effort` : ''].filter(Boolean).join(' · ');
+      check('the picker shows what the session COST — tokens and elapsed time',
+        text.includes(cost), `expected ${JSON.stringify(cost)}; rows: ` +
+        JSON.stringify(frame().slice(2, 5).map((l) => l.trim())));
+      check('…and which model ran it', text.includes(brain),
+        `expected ${JSON.stringify(brain)}; rows: ` + JSON.stringify(frame().slice(2, 5).map((l) => l.trim())));
+    } else {
+      say('  ·  skipped the cost-column check — no session on this machine has a transcript to cost');
+    }
+  }
   // …and it is HIGHLIGHTED, not just printed. Read from the RAW rows, because the plain-text frame
   // cannot see a colour at all — the machine cell carries its own SGR, so the reader can tell at a
   // glance which sessions are reviewable here. Only asserted when this run has colour; a `--no-color`

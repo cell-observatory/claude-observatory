@@ -474,7 +474,32 @@ export function runTui(core: Core, args: string[], resolveSession: (a: string[])
     if (state.scroll < 0) state.scroll = 0;
   };
 
-  const ask = (): void => backend!.request(viewsForLayoutOf(core, layout()), state.session);
+  /**
+   * The workspace the SESSION belongs to — not the directory this terminal happens to be in.
+   *
+   * The fleet is derived by correlating the repo's git worktrees, and `views` resolves that from
+   * `--root`, defaulting to `process.cwd()`. So a dashboard launched anywhere but inside the
+   * workspace — or pointed at a session from a different one via the picker — showed an EMPTY Fleet
+   * while every other pane worked, because the rest read the store by session id and only this one
+   * reads the filesystem. Measured on one session: 40 agents from inside the repo, 0 from `/tmp`.
+   *
+   * The session's real cwd is recorded in the first line of its own transcript, which is append-only,
+   * so this is a fact about the session rather than a guess. Cached by core. When it cannot be
+   * resolved — a remote session, a transcript not on this machine — `--root` is omitted and the old
+   * cwd default applies, which is no worse than before.
+   */
+  const sessionRoot = (): string | null => {
+    try {
+      return core.sessionWorkspace(state.session);
+    } catch {
+      return null;
+    }
+  };
+
+  const ask = (): void => {
+    const root = sessionRoot();
+    backend!.request(viewsForLayoutOf(core, layout()), state.session, root ? ['--root', root] : []);
+  };
 
   /**
    * The screen the FOCUSED pane is showing, through the same resolver the renderer uses.
@@ -1597,6 +1622,48 @@ export function runTui(core: Core, args: string[], resolveSession: (a: string[])
     // and truncated to fit — and a truncated machine name answers the question no better than no
     // machine name at all. Sized from the data, like every other column here.
     const mcW = Math.max(1, ...list.map((x) => String(x.machine ?? '').length));
+    // How many rows share each title, so only the ambiguous ones get an id appended.
+    const titleCounts = new Map<string, number>();
+    for (const x of list) {
+      const t = String(x.title || '') || String(x.id).slice(0, 8);
+      titleCounts.set(t, (titleCounts.get(t) ?? 0) + 1);
+    }
+    // Padded from the DATA and capped: a single very long title must not push every other row's
+    // columns off to the right, and nothing is ever cut — a long one simply overflows its own row.
+    // Every column sized from the DATA, so nothing is cut and nothing is padded to a guess.
+    const dW = Math.max(1, ...list.map((x) => String(Math.max(Number(x.added) || 0, Number(x.removed) || 0)).length + 1));
+    const costW = Math.max(0, ...list.map((x) => {
+      const t = Number(x.tokens) ? `${core.compactTokens(Number(x.tokens))} tok` : '';
+      const d = Number(x.durationMs) ? core.compactDuration(Number(x.durationMs)) : '';
+      return [t, d].filter(Boolean).join(' · ').length;
+    }));
+    const brainW = Math.max(0, ...list.map((x) =>
+      [String(x.model || ''), String(x.effort || '') && `${x.effort} effort`].filter(Boolean).join(' · ').length));
+    const titleW = Math.min(46, Math.max(1, ...list.map((x) => {
+      const t = String(x.title || '') || String(x.id).slice(0, 8);
+      return t.length + ((titleCounts.get(t) ?? 0) > 1 ? 10 : 0);
+    })));
+    // WHAT FITS. Every optional column costs width, and a row wider than the terminal wraps — so the
+    // narrow-terminal answer is to drop whole columns, cheapest-to-the-reader first, rather than let
+    // the table re-flow. The order is what a reader chooses a session BY: the name and its age never
+    // go; the workspace is the longest and least discriminating, so it goes first.
+    const whenW = Math.max(1, ...list.map((x) => core.relTime(Number(x.lastActiveMs) || 0).length));
+    const keep = new Set(['machine', 'workspace', 'churn', 'cost', 'brain']);
+    const widthOf = (): number =>
+      1 + 1 + 1 + titleW +
+      (keep.has('machine') ? 2 + mcW : 0) +
+      (keep.has('workspace') ? 2 + wsW : 0) +
+      (keep.has('churn') ? 2 + dW * 2 + 1 : 0) +
+      2 + 13 +
+      (keep.has('cost') ? 2 + costW : 0) +
+      (keep.has('brain') ? 2 + brainW : 0) +
+      2 + whenW;
+    // One column is reserved: the selected row is drawn in reverse video across its full width, and a
+    // row sized to exactly the terminal leaves no cell for the cursor glyph in the `--no-color` path.
+    for (const drop of ['workspace', 'churn', 'brain', 'cost', 'machine']) {
+      if (widthOf() <= frameCols - 1) break;
+      keep.delete(drop);
+    }
     const lines = list.map((x) => {
       const cur = x.current ? '*' : ' '; // '*' = the session in effect; '>' is the picker's cursor
       const ws = String(x.workspace ?? '?').padEnd(wsW);
@@ -1616,8 +1683,42 @@ export function runTui(core: Core, args: string[], resolveSession: (a: string[])
               ? `${String(Number(x.pending) || 0).padStart(5)} pending`
               : '   no edits';
       const when = core.relTime(Number(x.lastActiveMs) || 0);
+      // THE NAME LEADS. It is what a reader is scanning for — the machine and workspace are how they
+      // narrow, not how they choose — and it used to sit last, past four columns of metadata.
+      //
+      // A title is derived from the session's first ask, so several sessions genuinely share one:
+      // five rows here read "Check Claude effort environment variable". They are not duplicates and
+      // must not be hidden, but they are indistinguishable, so a repeated title carries its short id.
+      // Only repeats pay for it — tagging every row would add noise to the ones that never needed it.
       const title = String(x.title || '') || String(x.id).slice(0, 8);
-      return ` ${cur} ${machine}  ${ws}  ${state_.padEnd(13)}  ${when.padEnd(8)}  ${title}`;
+      const shown = (titleCounts.get(title) ?? 0) > 1 ? `${title}  ${String(x.id).slice(0, 8)}` : title;
+      // WHAT THE SESSION COST, the way the editors' session row shows it. Every field here was already
+      // in this payload and none of it was displayed: choosing a session to review meant choosing on a
+      // name and an age alone, with its size, spend and model one keystroke out of reach.
+      //
+      // Padded before tinting — `padEnd` counts escape bytes, so tinting first leaves every coloured
+      // cell short by the length of its own escape sequence.
+      const churn = Number(x.added) || Number(x.removed)
+        ? `${tint(`+${Number(x.added) || 0}`.padStart(dW), 'kept', colorDepth)} ${tint(`−${Number(x.removed) || 0}`.padEnd(dW), 'risk', colorDepth)}`
+        : ' '.repeat(dW * 2 + 1);
+      const cost = [
+        Number(x.tokens) ? `${core.compactTokens(Number(x.tokens))} tok` : '',
+        Number(x.durationMs) ? core.compactDuration(Number(x.durationMs)) : '',
+      ].filter(Boolean).join(' · ');
+      const brain = [String(x.model || ''), String(x.effort || '') && `${x.effort} effort`].filter(Boolean).join(' · ');
+      // Assembled from the columns this width can afford, widest-to-narrowest in DROP order. A table
+      // is the one thing the overlay must not wrap: it re-flows a row onto a second visual line, and
+      // a two-line row in a list you are arrowing through costs the alignment that made it a table.
+      // Nothing is cut mid-word either way — a column is present in full or not at all.
+      const cells: string[] = [` ${cur} ${shown.padEnd(titleW)}`];
+      if (keep.has('machine')) cells.push(machine);
+      if (keep.has('workspace')) cells.push(ws);
+      if (keep.has('churn')) cells.push(churn);
+      cells.push(state_.padEnd(13));
+      if (keep.has('cost')) cells.push(tint(cost.padEnd(costW), 'undone', colorDepth));
+      if (keep.has('brain')) cells.push(tint(brain.padEnd(brainW), 'undone', colorDepth));
+      cells.push(when);
+      return cells.join('  ');
     });
     if (!lines.length) {
       lines.push(`  nothing matches “${pickerFilter}” — backspace to widen it`);

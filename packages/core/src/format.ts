@@ -39,6 +39,31 @@ export function relTime(ts: number, now: number = Date.now()): string {
   return `${Math.floor(d / 30.44)}mo ago`;
 }
 
+/**
+ * A token count at a glance: `3.7M`, `812k`, `947`.
+ *
+ * The same thresholds and rounding the editors' `fmtTok` already uses, moved here so the terminal
+ * cannot drift from what VS Code and JetBrains show for the same agent. (The webviews keep their own
+ * inline copy: their script is a string, so it cannot import this. That duplication is deliberate and
+ * pinned by a test rather than left to memory.)
+ */
+export function compactTokens(n: number): string {
+  const v = Number.isFinite(n) && n > 0 ? n : 0;
+  if (v >= 1e6) return `${(v / 1e6).toFixed(1)}M`;
+  if (v >= 1e3) return `${Math.round(v / 1e3)}k`;
+  return String(v);
+}
+
+/** A duration at a glance: `23.4h`, `47m`, `12s`. Same rules as the editors' `fmtDur`. */
+export function compactDuration(ms: number): string {
+  const v = Number.isFinite(ms) && ms > 0 ? ms : 0;
+  const s = Math.round(v / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m`;
+  return `${(m / 60).toFixed(1)}h`;
+}
+
 /** Added/removed line counts for an edit. New-file = all added; deletion = all removed. */
 /** Memo for `lineDelta`, keyed by the two BLOB HASHES.
  *
