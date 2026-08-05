@@ -82,21 +82,11 @@ export const MAX_WATCHERS = 512;
  * thousands of handles. This predicate is the exact complement of Node's own condition, which makes
  * the substitute unreachable rather than merely unlikely.
  *
- * WINDOWS IS EXCLUDED, and not for efficiency. libuv's Windows recursive watcher carries an
- * assertion — `!_wcsnicmp(filename, dir, dirlen)` in `src/win/fs-event.c` — that fires when a reported
- * filename does not share the watched directory's prefix, and an assertion in libuv is an `abort()`:
- * it takes the whole process down, with no exception to catch and nothing logged. CI caught it on
- * windows-latest/node 24, where the test run died mid-file; node 20 and 22 ship a libuv that does not
- * trip it, which is exactly what makes this the kind of failure that reaches a user before it reaches
- * anyone else. A crash on a review tool is the worst available outcome, so Windows takes the same
- * fan-out this uses for Linux — one non-recursive watch per directory that matters, which is a working,
- * exercised path rather than a new one.
- *
  * Exported so it can be asserted as a pure function: a runtime probe on a macOS CI machine cannot
  * catch a Linux-only trap, and this is the only instrument that can.
  */
 export function nativeRecursive(platform: NodeJS.Platform = process.platform): boolean {
-  return platform === 'darwin';
+  return platform === 'darwin' || platform === 'win32';
 }
 
 interface ArmedRoot {
@@ -263,7 +253,31 @@ export function createWatcher(o: WatcherOptions): { close(): void; stats(): Watc
     a.poll.unref?.();
   };
 
-  const watchDir = (a: ArmedRoot, dir: string, recursive: boolean): boolean => {
+  /**
+   * The directory `fs.watch` is actually handed, resolved to its NATIVE long form.
+   *
+   * On Windows a path can reach here in 8.3 short form — `C:\\Users\\RUNNER~1\\AppData\\Local\\Temp` is
+   * what `os.tmpdir()` returns on a GitHub runner — while the OS reports events using the long name.
+   * libuv computes the event's path relative to the watched directory and asserts that the two share
+   * a prefix (`!_wcsnicmp(filename, dir, dirlen)`, `src/win/fs-event.c`); a short-vs-long mismatch
+   * fails that compare, and a libuv assertion is an `abort()`. No exception, nothing logged, the
+   * process gone — in a tool people run to review edits before keeping them.
+   *
+   * `realpathSync.native` is what turns the short form into the long one. It is also the only variant
+   * that does: the JS `realpathSync` resolves symlinks but leaves 8.3 names alone. Falls back to the
+   * path as given, because a directory that cannot be resolved is one `fs.watch` is about to reject
+   * anyway, and its own error is the better message.
+   */
+  const nativeDir = (dir: string): string => {
+    try {
+      return fs.realpathSync.native(dir);
+    } catch {
+      return dir;
+    }
+  };
+
+  const watchDir = (a: ArmedRoot, dirIn: string, recursive: boolean): boolean => {
+    const dir = nativeDir(dirIn);
     const key = path.resolve(dir);
     if (a.watchers.has(key)) return true;
     if (a.watchers.size >= MAX_WATCHERS) {
