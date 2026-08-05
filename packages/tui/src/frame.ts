@@ -1338,16 +1338,24 @@ export function renderDashFrame(state: DashState, opts: FrameOpts): string[] {
     // that reclaims the full width. Fitting it cut the tail off silently, and a diff you cannot read
     // to the end is a diff you cannot review. Only the visible window is expanded.
     const slice: string[] = [];
+    // Which LOGICAL row each visual line came from. The cursor indexes `o.lines`, but this array is
+    // the WRAPPED expansion of them — so comparing the cursor against a position in it drifts by one
+    // for every wrap above it, and the highlight lands on a row the reader did not select. It only
+    // ever bit pickers (the diff overlay has no cursor) and only when something wrapped, which is why
+    // it survived: a picker row that fits is its own visual line and the two indexes agree.
+    const owner: number[] = [];
     for (let r = o.scroll; r < o.lines.length && slice.length < bodyRows - 1; r++) {
       const raw = o.lines[r] ?? '';
-      if (displayWidth(raw) <= cols) { slice.push(raw); continue; }
+      if (displayWidth(raw) <= cols) { slice.push(raw); owner.push(r); continue; }
       const parts = wrapVisible(raw, Math.max(1, cols - 2));
       slice.push(parts[0] ?? '');
-      for (const part of parts.slice(1)) slice.push(`${g.wrap}${part}`);
+      owner.push(r);
+      for (const part of parts.slice(1)) { slice.push(`${g.wrap}${part}`); owner.push(r); }
     }
     for (let i = 0; i < bodyRows - 1; i++) {
       const line = slice[i] ?? '';
-      const picked = o.cursor !== undefined && o.scroll + i === o.cursor;
+      // Every visual line of the selected row is marked, so a wrapped selection reads as one block.
+      const picked = o.cursor !== undefined && owner[i] === o.cursor;
       // Without colour the cursor REPLACES the row's leading space rather than being prepended:
       // prepending shifts every column right by one and collides with the marker a picker row may
       // already carry (the current session's own '>'), so two different meanings share a glyph AND

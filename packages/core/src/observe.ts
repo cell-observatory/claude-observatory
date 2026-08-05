@@ -516,14 +516,16 @@ export function sessionMeta(cwd: string, reviewing?: string | null): SessionMeta
     let model = '';
     let effort = '';
     try {
-      const u = sessionUsage(cwd, id);
+      // Cost this session from ITS OWN transcript, not from a lookup rooted at the caller's cwd —
+      // `transcript` above is the exact file, found by scanning every workspace.
+      const u = sessionUsage(cwd, id, transcript);
       tokens = u.total;
       // Cache traffic is COUNTED SEPARATELY, never folded into the headline. The two reconcile by
       // construction — `tokens + cached` is exactly the old blended figure — so nothing is hidden,
       // it is just no longer the case that 98.8% of "tokens" is the same context restated.
       cached = u.cacheRead + u.cacheCreation;
       durationMs = u.durationMs;
-      const v = sessionVitals(cwd, id);
+      const v = sessionVitals(cwd, id, transcript);
       model = v.model?.label ?? ''; // the display label ('Opus 4.8'), so renderers stay thin
       effort = v.effort?.level ?? '';
     } catch {

@@ -13,6 +13,10 @@
  * same lines a human would see.
  */
 const COLS = 120;
+// core's compactTokens/compactDuration, restated so a check cannot pass by importing the same bug it
+// is meant to catch. Pinned against core itself in packages/core/test/core.test.js.
+const fmtTok = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : `${n}`);
+const fmtDur = (ms) => { const s = Math.round(ms / 1000); if (s < 60) return `${s}s`; const m = Math.round(s / 60); return m < 60 ? `${m}m` : `${(m / 60).toFixed(1)}h`; };
 const ROWS = 34;
 
 process.stdin.isTTY = true;
@@ -161,7 +165,11 @@ function seedSession(core, nfs, npath, nos) {
       {
         type: 'assistant', sessionId: session, timestamp: iso(t0 + 500),
         message: {
-          role: 'assistant', id: 'msg_ttydrive_1', content: [{ type: 'text', text: 'done' }],
+          // A real assistant record always names the model that produced it, and the session picker
+          // and Fleet both print it beside the token count. Without it here the fixture was costed
+          // but anonymous, and the cost-column check below had nothing to assert against.
+          role: 'assistant', id: 'msg_ttydrive_1', model: 'claude-opus-4-5-20251101',
+          content: [{ type: 'text', text: 'done' }],
           usage: { input_tokens: 120, output_tokens: 40, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
         },
       },
@@ -530,6 +538,59 @@ async function main() {
     check('the session NAME is the first column, before the machine',
       name.length > 0 && !/^this machine$/.test(name) && row.indexOf(name) < row.indexOf('this machine'),
       JSON.stringify(row.trim().slice(0, 90)));
+  }
+  // THE COST COLUMNS. The picker gained `tokens · duration` and `model · effort` so it carries what the
+  // VS Code Sessions tab carries. Those come straight off the payload, so the way this breaks is not a
+  // missing column — it is a MALFORMED one: a session with no transcript has no tokens, no duration, no
+  // model and no effort, and every one of those fields is `undefined`. Printing them unguarded puts
+  // "undefined" or "NaN tok" on a row someone is choosing a session from. This check always runs,
+  // because the empty-data case is the common one on a fresh machine and the whole point of the guard.
+  {
+    // Scoped to the PICKER'S OWN lines — everything after its title row. Scanning the whole frame
+    // swept in the status bar, which legitimately reads "·  0 high risk", and scanning only the lines
+    // that name a machine missed the case entirely: an over-long row WRAPS, so a malformed cell lands
+    // on a continuation line naming no machine.
+    //
+    // What actually breaks here is a DANGLING SEPARATOR. The payload gives absent fields as '', not
+    // undefined, so an unguarded join does not print "undefined" — it prints "Opus 4.5 ·  effort",
+    // a separator with nothing on one side of it. Both are checked; the separator is the one that
+    // mutation testing proved reachable.
+    const head = frame().findIndex((l) => /browse sessions/.test(l));
+    const rows = head < 0 ? [] : frame().slice(head + 1).filter((l) => l.trim());
+    const named = rows.filter((l) => /this machine|the bridge/.test(l));
+    const bad = rows.find((l) => /\b(NaN|undefined|null)\b/.test(l) || /·\s+effort/.test(l) || /·\s{2,}/.test(l) || /·\s*$/.test(l.trimEnd()));
+    check('no picker row prints a malformed cell for a session with fields missing',
+      named.length > 0 && !bad, bad ? JSON.stringify(bad.trim()) : 'the picker listed no sessions at all');
+  }
+  // …and when the data IS there, it is SHOWN. Driven off the payload rather than hard-coded, because a
+  // CI runner's sessions are edit-only — they have no transcript, so there is genuinely nothing to
+  // print. Skipping is announced rather than silent, so a run that never exercised this says so.
+  {
+    const rich = (() => {
+      try {
+        const out = require('child_process').execFileSync(process.execPath,
+          [target, 'views', '--views', 'sessions', '--json'], { encoding: 'utf8', maxBuffer: 1 << 26 });
+        return (JSON.parse(out).sessions?.sessions || []).filter((x) => +x.tokens > 0 && x.model);
+      } catch (e) { say(`  ·  the sessions payload could not be read: ${e && e.message}`); return null; }
+    })();
+    if (rich === null) {
+      check('the cost columns could be checked at all', false, 'the sessions payload did not parse — see above');
+    } else if (rich.length) {
+      const text = frame().join('\n');
+      // The EXACT strings the payload implies, composed the way the row composes them. Asserting
+      // "contains a model name somewhere" would pass against a row that dropped the token count, or
+      // that printed the effort without the word, or that joined the two with the wrong separator.
+      const x = rich[0];
+      const cost = [`${fmtTok(+x.tokens)} tok`, +x.durationMs ? fmtDur(+x.durationMs) : ''].filter(Boolean).join(' · ');
+      const brain = [String(x.model), x.effort ? `${x.effort} effort` : ''].filter(Boolean).join(' · ');
+      check('the picker shows what the session COST — tokens and elapsed time',
+        text.includes(cost), `expected ${JSON.stringify(cost)}; rows: ` +
+        JSON.stringify(frame().slice(2, 5).map((l) => l.trim())));
+      check('…and which model ran it', text.includes(brain),
+        `expected ${JSON.stringify(brain)}; rows: ` + JSON.stringify(frame().slice(2, 5).map((l) => l.trim())));
+    } else {
+      say('  ·  skipped the cost-column check — no session on this machine has a transcript to cost');
+    }
   }
   // …and it is HIGHLIGHTED, not just printed. Read from the RAW rows, because the plain-text frame
   // cannot see a colour at all — the machine cell carries its own SGR, so the reader can tell at a

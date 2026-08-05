@@ -1630,10 +1630,40 @@ export function runTui(core: Core, args: string[], resolveSession: (a: string[])
     }
     // Padded from the DATA and capped: a single very long title must not push every other row's
     // columns off to the right, and nothing is ever cut — a long one simply overflows its own row.
+    // Every column sized from the DATA, so nothing is cut and nothing is padded to a guess.
+    const dW = Math.max(1, ...list.map((x) => String(Math.max(Number(x.added) || 0, Number(x.removed) || 0)).length + 1));
+    const costW = Math.max(0, ...list.map((x) => {
+      const t = Number(x.tokens) ? `${core.compactTokens(Number(x.tokens))} tok` : '';
+      const d = Number(x.durationMs) ? core.compactDuration(Number(x.durationMs)) : '';
+      return [t, d].filter(Boolean).join(' · ').length;
+    }));
+    const brainW = Math.max(0, ...list.map((x) =>
+      [String(x.model || ''), String(x.effort || '') && `${x.effort} effort`].filter(Boolean).join(' · ').length));
     const titleW = Math.min(46, Math.max(1, ...list.map((x) => {
       const t = String(x.title || '') || String(x.id).slice(0, 8);
       return t.length + ((titleCounts.get(t) ?? 0) > 1 ? 10 : 0);
     })));
+    // WHAT FITS. Every optional column costs width, and a row wider than the terminal wraps — so the
+    // narrow-terminal answer is to drop whole columns, cheapest-to-the-reader first, rather than let
+    // the table re-flow. The order is what a reader chooses a session BY: the name and its age never
+    // go; the workspace is the longest and least discriminating, so it goes first.
+    const whenW = Math.max(1, ...list.map((x) => core.relTime(Number(x.lastActiveMs) || 0).length));
+    const keep = new Set(['machine', 'workspace', 'churn', 'cost', 'brain']);
+    const widthOf = (): number =>
+      1 + 1 + 1 + titleW +
+      (keep.has('machine') ? 2 + mcW : 0) +
+      (keep.has('workspace') ? 2 + wsW : 0) +
+      (keep.has('churn') ? 2 + dW * 2 + 1 : 0) +
+      2 + 13 +
+      (keep.has('cost') ? 2 + costW : 0) +
+      (keep.has('brain') ? 2 + brainW : 0) +
+      2 + whenW;
+    // One column is reserved: the selected row is drawn in reverse video across its full width, and a
+    // row sized to exactly the terminal leaves no cell for the cursor glyph in the `--no-color` path.
+    for (const drop of ['workspace', 'churn', 'brain', 'cost', 'machine']) {
+      if (widthOf() <= frameCols - 1) break;
+      keep.delete(drop);
+    }
     const lines = list.map((x) => {
       const cur = x.current ? '*' : ' '; // '*' = the session in effect; '>' is the picker's cursor
       const ws = String(x.workspace ?? '?').padEnd(wsW);
@@ -1662,7 +1692,33 @@ export function runTui(core: Core, args: string[], resolveSession: (a: string[])
       // Only repeats pay for it — tagging every row would add noise to the ones that never needed it.
       const title = String(x.title || '') || String(x.id).slice(0, 8);
       const shown = (titleCounts.get(title) ?? 0) > 1 ? `${title}  ${String(x.id).slice(0, 8)}` : title;
-      return ` ${cur} ${shown.padEnd(titleW)}  ${machine}  ${ws}  ${state_.padEnd(13)}  ${when}`;
+      // WHAT THE SESSION COST, the way the editors' session row shows it. Every field here was already
+      // in this payload and none of it was displayed: choosing a session to review meant choosing on a
+      // name and an age alone, with its size, spend and model one keystroke out of reach.
+      //
+      // Padded before tinting — `padEnd` counts escape bytes, so tinting first leaves every coloured
+      // cell short by the length of its own escape sequence.
+      const churn = Number(x.added) || Number(x.removed)
+        ? `${tint(`+${Number(x.added) || 0}`.padStart(dW), 'kept', colorDepth)} ${tint(`−${Number(x.removed) || 0}`.padEnd(dW), 'risk', colorDepth)}`
+        : ' '.repeat(dW * 2 + 1);
+      const cost = [
+        Number(x.tokens) ? `${core.compactTokens(Number(x.tokens))} tok` : '',
+        Number(x.durationMs) ? core.compactDuration(Number(x.durationMs)) : '',
+      ].filter(Boolean).join(' · ');
+      const brain = [String(x.model || ''), String(x.effort || '') && `${x.effort} effort`].filter(Boolean).join(' · ');
+      // Assembled from the columns this width can afford, widest-to-narrowest in DROP order. A table
+      // is the one thing the overlay must not wrap: it re-flows a row onto a second visual line, and
+      // a two-line row in a list you are arrowing through costs the alignment that made it a table.
+      // Nothing is cut mid-word either way — a column is present in full or not at all.
+      const cells: string[] = [` ${cur} ${shown.padEnd(titleW)}`];
+      if (keep.has('machine')) cells.push(machine);
+      if (keep.has('workspace')) cells.push(ws);
+      if (keep.has('churn')) cells.push(churn);
+      cells.push(state_.padEnd(13));
+      if (keep.has('cost')) cells.push(tint(cost.padEnd(costW), 'undone', colorDepth));
+      if (keep.has('brain')) cells.push(tint(brain.padEnd(brainW), 'undone', colorDepth));
+      cells.push(when);
+      return cells.join('  ');
     });
     if (!lines.length) {
       lines.push(`  nothing matches “${pickerFilter}” — backspace to widen it`);

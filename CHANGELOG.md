@@ -34,10 +34,36 @@ Per-tag release artifacts and auto-generated notes are on the
   formatters moved into core so the terminal cannot drift from what the editors print for the same
   agent.
 
-- **The session picker leads with the NAME.** It sat last, past four columns of metadata. Titles come
-  from a session's first ask, so several genuinely share one — five rows here read the same thing —
-  and a repeated title now carries its short id, while unique ones stay clean. `b` also joined the key
-  row; it was reachable and documented in the keys screen, but the row never named it.
+- **The session picker leads with the NAME, and carries what the session cost.** The name sat last,
+  past four columns of metadata. Titles come from a session's first ask, so several genuinely share
+  one — five rows here read the same thing — and a repeated title now carries its short id, while
+  unique ones stay clean. `b` also joined the key row; it was reachable and documented in the keys
+  screen, but the row never named it.
+
+  Each row now also shows `±lines`, `tokens · elapsed` and `model · effort`, the same fields the
+  editors' Sessions row shows. All of it was already on the payload and none of it was displayed, so
+  choosing a session to review meant choosing on a name and an age alone, with its size, spend and
+  model one keystroke out of reach.
+
+- **Every session was costed from the reader's directory, not its own.** The picker lists *every*
+  workspace's sessions, but `sessionMeta` re-resolved each transcript from the caller's cwd — and that
+  lookup only walks *up*. So from any directory that was not a session's own workspace, its tokens,
+  duration, model and effort all came back empty: on this machine, 82 of 107 rows. It already knew the
+  exact file (it scanned every workspace to build the list); it just did not pass it. This is core, so
+  it lands in both editors' Sessions tab as well as the terminal — and each row is now costed from the
+  same file its own workspace label names, which was not previously guaranteed.
+
+- **A wrapped row moved the selection highlight to a different row.** The overlay expands each logical
+  line into as many visual lines as it needs, then compared the cursor — an index into the *logical*
+  lines — against a position in the *expanded* ones. Every wrap above the cursor shifted the highlight
+  down by one. It was latent while picker rows fit on one line, which is why it survived; it now
+  tracks the row it belongs to, and marks every visual line of it.
+
+- **The picker drops whole columns on a narrow terminal instead of re-flowing.** A table is the one
+  thing the overlay must not wrap: a two-line row in a list you are arrowing through costs the
+  alignment that made it a table. Columns now go in the order a reader needs them least — workspace,
+  then ±lines, then model, then cost, then machine — with the name, review state and age never
+  dropped. Nothing is cut mid-word either way; a column is present in full or not at all.
 
 - **The terminal's dashboards showed identifiers where names belong.** The Tasks pane listed rows of
   `a3f21c9de4b7…` and nothing else, because it read `content`/`title` — the spellings the plan

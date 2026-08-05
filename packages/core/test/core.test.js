@@ -9806,6 +9806,31 @@ test('dashframe: an overlay with a cursor is a picker, one without is a reader',
   assert.equal(picker.filter((l) => l.startsWith('>')).length, 1, 'a picker marks exactly one');
 });
 
+test('dashframe: a WRAPPED row does not move the selection to a different row', () => {
+  // The overlay expands each logical line into as many visual lines as it needs, then marked the
+  // cursor by comparing it against a position in that EXPANDED list — while `cursor` indexes the
+  // logical ones. Every wrap above the cursor shifted the highlight down by one, so the reader
+  // arrowed onto "three" and the frame highlighted "two". It stayed hidden while every row fit on one
+  // line, which is exactly what stopped being true when the session picker grew its cost columns.
+  const long = ` ${'wide '.repeat(20)}`; // comfortably past `cols`, so it wraps
+  const lines = [long, ' two', ' three'];
+  const at = (cursor) => {
+    const f = tui.renderDashFrame(dashFixture({ overlay: { title: 'menu', lines, scroll: 0, cursor } }),
+      { cols: 40, rows: 14, color: false });
+    return f.filter((l) => l.startsWith('>')).map((l) => l.slice(1).trim());
+  };
+  // Positive control: without a wrap the mapping was already right, so the fixture has to wrap at all.
+  const flat = tui.renderDashFrame(dashFixture({ overlay: { title: 'menu', lines, scroll: 0, cursor: 0 } }),
+    { cols: 40, rows: 14, color: false });
+  assert.ok(flat.filter((l) => l.trim()).length > lines.length + 1, 'the fixture must actually wrap');
+
+  assert.deepEqual(at(1), ['two'], 'the cursor lands on the row it indexes, not one displaced by the wrap');
+  assert.deepEqual(at(2), ['three'], 'and stays correct further down the list');
+  // The wrapped row itself is marked across ALL of its visual lines, so a selection reads as one block
+  // rather than as a highlighted fragment with an unhighlighted tail.
+  assert.ok(at(0).length > 1, `a wrapped selection marks every line it occupies, got ${at(0).length}`);
+});
+
 test('dashframe: an open filter is visible before a single character is typed', () => {
   // The keys row used to print the prompt only when the buffer was non-empty, so pressing `/` looked
   // identical to normal mode. An invisible mode that swallows keystrokes is indistinguishable from a
@@ -10197,6 +10222,40 @@ test('tui: `w` keeps long lines long and pans across them, and never hides conte
     'the far END of the line is reachable by panning — nothing is out of reach');
 });
 
+test('sessionMeta costs each session from ITS OWN transcript, not the caller cwd', () => {
+  // The session picker lists EVERY workspace's sessions. Costing them re-resolved the transcript from
+  // the caller's cwd, and that lookup only walks UP — so from any directory that is not the session's
+  // own workspace, tokens/duration/model/effort all came back empty and the picker printed blanks.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'obs-meta-'));
+  const cfg = path.join(dir, 'cfg');
+  const ws = path.join(dir, 'a-workspace');           // where the session lives
+  const elsewhere = path.join(dir, 'somewhere-else'); // where the reader is standing
+  fs.mkdirSync(ws, { recursive: true });
+  fs.mkdirSync(elsewhere, { recursive: true });
+  const proj = path.join(cfg, 'projects', ws.replace(/[/\\.]/g, '-'));
+  fs.mkdirSync(proj, { recursive: true });
+  const id = '11111111-2222-3333-4444-555555555555';
+  fs.writeFileSync(path.join(proj, id + '.jsonl'),
+    [JSON.stringify({ type: 'user', cwd: ws, timestamp: '2026-01-01T00:00:00.000Z', message: { role: 'user', content: 'name me' } }),
+     JSON.stringify({ type: 'assistant', timestamp: '2026-01-01T00:10:00.000Z',
+       message: { role: 'assistant', model: 'claude-opus-4-5-20251101', usage: { input_tokens: 700, output_tokens: 300, cache_creation_input_tokens: 0, cache_read_input_tokens: 9000000 } } })].join('\n') + '\n');
+  const prev = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = cfg;
+  try {
+    const row = core.sessionMeta(elsewhere).sessions.find((r) => r.id === id);
+    assert.ok(row, 'the session was not listed at all from a foreign cwd');
+    // input+output only. cacheRead is 9M here precisely so a regression that folds it back in is loud.
+    assert.equal(row.tokens, 1000, 'tokens must be costed from the transcript of that session');
+    assert.equal(row.cached, 9000000, 'and cache traffic stays in its own column');
+    assert.equal(row.durationMs, 600000, 'duration must come from that transcript too');
+    assert.ok(/opus/i.test(row.model), 'model was ' + JSON.stringify(row.model));
+    assert.ok(row.workspace.endsWith(path.basename(ws)), 'workspace label was ' + JSON.stringify(row.workspace));
+  } finally {
+    if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prev;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('tui: Fleet shows what an agent COST, and nests the agents it spawned', () => {
   // The terminal's Fleet showed phase, deltas, a sparkline and a branch — and stopped there, while the
   // editors showed tokens, runtime, model, effort and the subagent tree. Everything but model/effort
@@ -10234,6 +10293,12 @@ test('tui: Fleet shows what an agent COST, and nests the agents it spawned', () 
   const fmtDur = (ms) => { ms = ms || 0; const s = Math.round(ms / 1000); if (s < 60) return s + 's'; const m = Math.round(s / 60); if (m < 60) return m + 'm'; return (m / 60).toFixed(1) + 'h'; };
   for (const n of [0, 1, 999, 1000, 1500, 999_999, 1e6, 3_695_326]) {
     assert.equal(core.compactTokens(n), fmtTok(n), `compactTokens must match the editors at ${n}`);
+  }
+  // Garbage in must not reach a row. The session picker prints these beside a name someone is choosing
+  // from, and a payload with no transcript carries '' and undefined rather than zeroes.
+  for (const bad of [NaN, -5, undefined, null, Infinity]) {
+    assert.equal(core.compactTokens(bad), '0', `compactTokens of ${String(bad)}`);
+    assert.equal(core.compactDuration(bad), '0s', `compactDuration of ${String(bad)}`);
   }
   for (const m of [0, 999, 60_000, 3_599_000, 82_722_836]) {
     assert.equal(core.compactDuration(m), fmtDur(m), `compactDuration must match the editors at ${m}`);
