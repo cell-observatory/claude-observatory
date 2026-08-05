@@ -11927,6 +11927,44 @@ test('sweep: the swept op is cumulative, not one line per sweep', () => {
   assert.equal(core.readLog(S).length, 1, 'with the uncovered edit untouched');
 });
 
+test('remote: the config-dir check is linear, and accepts exactly what the regex did', () => {
+  // This guards a string that is interpolated into a shell on ANOTHER machine, and it used to be a
+  // regex whose `$VAR` head and path tail overlapped on letters, digits and underscore — so a long
+  // `$AAAA…` could be split between them many ways and the match was polynomial (CodeQL:
+  // js/polynomial-redos). Every regex repair for that also MOVED the accepted set, which is not a
+  // trade worth making on a shell-adjacent validator, so it became a one-pass scan.
+  //
+  // The risk of hand-writing it is drift, so the original regex is kept here as the oracle and the two
+  // are compared over every short string in a hostile alphabet plus a large random sample.
+  const ORIGINAL = /^(?:\$[A-Za-z_][A-Za-z0-9_]*|~|\/)[A-Za-z0-9._\-\/]*$/;
+  const alpha = ['$', '~', '/', 'a', 'Z', '0', '9', '_', '.', '-', ';', '`', '(', ')', ' ', '"', "'", '\\', '*', '\n'];
+  let compared = 0;
+  const walk = (str, depth) => {
+    if (str.length) {
+      compared++;
+      assert.equal(core.CONFIG_DIR_OK.test(str), ORIGINAL.test(str), `disagreed on ${JSON.stringify(str)}`);
+    }
+    if (!depth) return;
+    for (const c of alpha) walk(str + c, depth - 1);
+  };
+  walk('', 3); // every string up to length 3 over that alphabet
+  for (let i = 0; i < 20_000; i++) {
+    let str = '';
+    const len = 1 + (i % 12);
+    for (let k = 0; k < len; k++) str += alpha[(i * 7 + k * 13) % alpha.length];
+    compared++;
+    assert.equal(core.CONFIG_DIR_OK.test(str), ORIGINAL.test(str), `disagreed on ${JSON.stringify(str)}`);
+  }
+  assert.ok(compared > 25_000, `the comparison must actually run, did ${compared}`);
+
+  // …and the shape that made the old one quadratic is now trivial. Bounded by TIME rather than by a
+  // fixed threshold ratio: the original takes seconds on this input, the scan takes about a millisecond.
+  const hostile = '$' + 'A'.repeat(50_000) + '!';
+  const started = Date.now();
+  assert.equal(core.CONFIG_DIR_OK.test(hostile), false, 'still refused, for the right reason');
+  assert.ok(Date.now() - started < 250, `50k characters must not backtrack (took ${Date.now() - started}ms)`);
+});
+
 test('remote: a config dir cannot smuggle a command onto the other machine', () => {
   // The `$`-leading form is passed to the remote shell UNQUOTED on purpose, so `$HOME/.claude` and
   // `$CLAUDE_CONFIG_DIR` work. That is exactly why it cannot be a free string: in that position

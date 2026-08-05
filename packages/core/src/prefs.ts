@@ -111,12 +111,42 @@ export function prefsPath(dir = claudeConfigDir()): string {
 /** A remote config dir: an absolute or `~` path, or ONE leading shell variable, then plain path
  *  segments. It is interpolated into a remote shell, so `$(`, backticks, `;`, quotes and spaces are
  *  all refused rather than escaped — there is no legitimate config dir that needs them. */
-// Anchored with an explicit `[/]` between the head and the tail, so the two cannot both consume the
-// same run of path characters. The previous shape let `[A-Za-z0-9._\-\/]*` start immediately after a
-// `$VAR` whose own class overlaps it, which is the polynomial-backtracking case CodeQL flags — and this
-// string is typed by a reader and then interpolated into a shell on ANOTHER machine, so it is the last
-// place to leave a pathological input path open.
-export const CONFIG_DIR_OK = /^(?:\$[A-Za-z_][A-Za-z0-9_]*|~|\/)(?:[A-Za-z0-9._-]|\/)*$/;
+/**
+ * A remote config dir: an absolute or `~` path, or ONE leading shell variable, then plain path
+ * segments. Interpolated into a remote shell, so `$(`, backticks, `;`, quotes and spaces are refused
+ * rather than escaped — there is no legitimate config dir that needs them.
+ *
+ * A SCAN, not a regex. Every regex spelling of this rule has the same flaw: the `$VAR` head's
+ * `[A-Za-z0-9_]*` and the path tail's class overlap on letters, digits and underscore, so a long
+ * `$AAAA…` can be split between them in many ways and the match is polynomial. The obvious repairs —
+ * a lookahead forcing the variable to end at `/`, or requiring each later segment to begin with `/` —
+ * both change which strings are accepted, and this validator guards a string that ends up inside a
+ * shell command on someone else's machine. Widening or narrowing it as a side effect of a performance
+ * fix is not a trade worth making, so the rule is written out instead: one pass, no backtracking, and
+ * the accepted set asserted character-for-character against the regex it replaces.
+ */
+const PATH_CH = /[A-Za-z0-9._\-/]/;
+const VAR_HEAD = /[A-Za-z_]/;
+const VAR_CH = /[A-Za-z0-9_]/;
+
+export function configDirOk(v: string): boolean {
+  if (!v) return false;
+  let i = 0;
+  if (v[0] === '$') {
+    if (!VAR_HEAD.test(v[1] ?? '')) return false;
+    i = 2;
+    while (i < v.length && VAR_CH.test(v[i])) i++;
+  } else if (v[0] === '~' || v[0] === '/') {
+    i = 1;
+  } else {
+    return false; // must be absolute, `~`, or a single leading variable
+  }
+  for (; i < v.length; i++) if (!PATH_CH.test(v[i])) return false;
+  return true;
+}
+
+/** Kept as the published name; every caller goes through the scan above. */
+export const CONFIG_DIR_OK = { test: (v: string): boolean => configDirOk(v) };
 
 /** A machine to look for Claude Code sessions on, over SSH. */
 export interface Remote {
