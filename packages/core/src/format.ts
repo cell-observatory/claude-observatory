@@ -119,7 +119,14 @@ export function coloredDiff(sessionId: string, rec: EditRecord, color = true): s
  */
 export function relPath(cwd: string, file: string): string {
   if (!file) return file;
-  const norm = (s: string) => s.replace(/\\/g, '/').replace(/\/+$/, '');
+  // The trailing-slash strip is a backwards scan, not `/\/+$/`: that shape re-tries from every
+  // position, so a path ending in a long run of slashes is quadratic. This runs over transcript paths.
+  const norm = (s: string) => {
+    const f = s.replace(/\\/g, '/');
+    let end = f.length;
+    while (end > 0 && f[end - 1] === '/') end--;
+    return end === f.length ? f : f.slice(0, end);
+  };
   const root = norm(cwd);
   const f = norm(file);
   return f === root || f.startsWith(root + '/') ? f.slice(root.length + 1) || f : file;

@@ -111,7 +111,12 @@ export function prefsPath(dir = claudeConfigDir()): string {
 /** A remote config dir: an absolute or `~` path, or ONE leading shell variable, then plain path
  *  segments. It is interpolated into a remote shell, so `$(`, backticks, `;`, quotes and spaces are
  *  all refused rather than escaped — there is no legitimate config dir that needs them. */
-export const CONFIG_DIR_OK = /^(?:\$[A-Za-z_][A-Za-z0-9_]*|~|\/)[A-Za-z0-9._\-\/]*$/;
+// Anchored with an explicit `[/]` between the head and the tail, so the two cannot both consume the
+// same run of path characters. The previous shape let `[A-Za-z0-9._\-\/]*` start immediately after a
+// `$VAR` whose own class overlaps it, which is the polynomial-backtracking case CodeQL flags — and this
+// string is typed by a reader and then interpolated into a shell on ANOTHER machine, so it is the last
+// place to leave a pathological input path open.
+export const CONFIG_DIR_OK = /^(?:\$[A-Za-z_][A-Za-z0-9_]*|~|\/)(?:[A-Za-z0-9._-]|\/)*$/;
 
 /** A machine to look for Claude Code sessions on, over SSH. */
 export interface Remote {

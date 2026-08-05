@@ -86,11 +86,35 @@ function tintFg(s: string, rgb: string, c256: number, depth: ColorDepth): string
 }
 
 /** Syntax colour for ONE line's text, foreground only. Returns the text unchanged at depth 'none'. */
-export function highlight(text: string, depth: ColorDepth): string {
+export /**
+ * The first line-comment opener in `text`, at a word boundary, or null.
+ *
+ * Linear: each opener is found with `indexOf` and the boundary checked in place. The regex this
+ * replaces had an alternation in front of an unbounded tail, which CodeQL flags as polynomial and
+ * which runs here over whatever a diff line happens to contain.
+ */
+function firstCommentAt(text: string): { index: number } | null {
+  let best = -1;
+  for (const open of ['//', '#', '-- ']) {
+    for (let i = text.indexOf(open); i >= 0; i = text.indexOf(open, i + 1)) {
+      if (i > 0 && !/\s/.test(text[i - 1])) continue; // must start a token
+      if (open === '#' && text[i + 1] === '!') continue; // a shebang is not a comment here
+      if (best < 0 || i < best) best = i;
+      break;
+    }
+  }
+  return best < 0 ? null : { index: best };
+}
+
+function highlight(text: string, depth: ColorDepth): string {
   if (depth === 'none' || depth === '16') return text;
   // Comments win outright: everything after the marker is one span, so a `//` inside a string is the
   // only false positive and it is a cosmetic one.
-  const comment = text.match(/(^|\s)(\/\/|#(?!!)|--\s).*$/);
+  // Scanned rather than matched. `/(^|\s)(\/\/|#(?!!)|--\s).*$/` is the polynomial shape — a leading
+  // alternation before an unbounded tail, re-tried from every position — and this runs over diff text,
+  // which is whatever the edit contained. Finding the first opener with indexOf is linear and says the
+  // same thing.
+  const comment = firstCommentAt(text);
   if (comment && comment.index !== undefined) {
     const head = text.slice(0, comment.index);
     const tail = text.slice(comment.index);
@@ -98,9 +122,28 @@ export function highlight(text: string, depth: ColorDepth): string {
   }
   let out = '';
   let last = 0;
-  const strings = /(['"`])(?:\\.|(?!\1)[^\\])*\1/g;
-  let m: RegExpExecArray | null;
-  while ((m = strings.exec(text))) {
+  // Scanned character by character rather than matched. `(?:\\.|(?!\1)[^\\])*` is the textbook
+  // ambiguous alternation — two branches that can both consume the same character — so an unterminated
+  // quote in a diff line makes the engine explore exponentially many splits. The scan below is one
+  // pass with an explicit escape flag, and handles the unterminated case by simply running to the end.
+  let m: { index: number; 0: string } | null;
+  const nextString = (from: number): { index: number; 0: string } | null => {
+    for (let i = from; i < text.length; i++) {
+      const q = text[i];
+      if (q !== '"' && q !== "'" && q !== '`') continue;
+      let j = i + 1;
+      while (j < text.length) {
+        if (text[j] === '\\') { j += 2; continue; }
+        if (text[j] === q) { j += 1; break; }
+        j += 1;
+      }
+      return { index: i, 0: text.slice(i, Math.min(j, text.length)) };
+    }
+    return null;
+  };
+  let scanFrom = 0;
+  while ((m = nextString(scanFrom))) {
+    scanFrom = m.index + m[0].length;
     out += keywordsAndNumbers(text.slice(last, m.index), depth);
     out += tintFg(m[0], '196;138;110', 173, depth) + '\x1b[39m';
     last = m.index + m[0].length;

@@ -11,7 +11,7 @@
  * monospace font on macOS; and review states carried by SHAPE as well as colour, so accept and reject
  * never depend on hue.
  */
-import { displayWidth, fitVisible, fuzzyMatch, highlightVisible, sanitizeCell, wrapVisible } from './textwidth';
+import { displayWidth, fitVisible, fuzzyMatch, highlightVisible, sanitizeCell, trimTrailing, wrapVisible } from './textwidth';
 import {
   resolveLayout, hitTest, PANE_SPECS, TAB_SCREEN, BAR_ENTRIES, CHROME_TOP, CHROME_BOTTOM,
   type Layout, type PaneBox, type PaneId,
@@ -571,7 +571,9 @@ function sessionRow(state: DashState, cols: number, g: Glyphs, depth: ColorDepth
   // The counters get whatever the session name did not take, and choose their own tier inside it, so
   // a long session title shortens the labels rather than pushing a count off the end.
   const room = Math.max(0, cols - leftW - 2);
-  const right = attention(state, room, g, depth).replace(/\s+$/, '');
+  // A backwards scan, not `/\s+$/`: that shape re-tries the match from every position, so a long run
+  // of trailing spaces is quadratic — and this runs on a row rebuilt every keystroke.
+  const right = trimTrailing(attention(state, room, g, depth), (c: string) => c === ' ' || c === '\t');
   const gap = Math.max(1, cols - leftW - displayWidth(right) - 1);
   return fitVisible(`${left}${' '.repeat(gap)}${right}`, cols);
 }

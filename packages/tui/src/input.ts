@@ -196,11 +196,16 @@ export function createDecoder(): Decoder {
       }
 
       // Generic CSI: ESC [ params intermediates final. A final byte is 0x40-0x7e.
-      const csi = /^\x1b\[([\d;:?<>!]*)([ -\/]*)([@-~])/.exec(buf);
+      // `!` was in BOTH classes — it is 0x21, inside the 0x20-0x2F intermediate range — so the two
+      // adjacent stars could split a run of `!` in many ways and the match became polynomial on
+      // hostile input. This decoder exists precisely because bytes arriving on stdin are not input we
+      // choose. Per ECMA-48 `!` is an INTERMEDIATE byte, not a parameter byte, so dropping it from
+      // the parameter class is also the more correct reading.
+      const csi = /^\x1b\[([\d;:?<>]*)([ -\/]*)([@-~])/.exec(buf);
       if (!csi) {
         // Everything so far must still be a legal CSI body, or this is junk we drop one byte at a time
         // rather than re-interpreting as keys.
-        if (/^\x1b\[[\d;:?<>!]*[ -\/]*$/.test(buf)) return null;
+        if (/^\x1b\[[\d;:?<>]*[ -\/]*$/.test(buf)) return null;
         buf = buf.slice(1);
         return [];
       }

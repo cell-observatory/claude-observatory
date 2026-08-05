@@ -172,7 +172,7 @@ export function wrapVisible(s: string, cols: number): string[] {
     // A single word longer than the budget is hard-broken rather than left to wrap on its own.
     let rest = word;
     while (displayWidth(rest) > cols) {
-      const head = fitVisible(rest, cols).replace(/ +$/, '');
+      const head = trimTrailing(fitVisible(rest, cols), (c) => c === ' ');
       lines.push(head);
       rest = rest.slice(head.replace(/\x1b\[[0-9;:]*m/g, '').length);
     }
@@ -234,6 +234,20 @@ export function fuzzyMatch(haystack: string, needle: string): number[] | null {
  * Each run of text BETWEEN escapes is wrapped independently, so a reset in the middle of a match
  * cannot swallow the highlight for the rest of it.
  */
+/**
+ * Drop trailing characters matching `drop`, without a regex.
+ *
+ * `/ +$/` and friends look harmless and are the textbook polynomial-backtracking shape: the engine
+ * retries the match from every position, so a long run of the dropped character costs O(n²). These run
+ * over rendered rows and over transcript-derived text, which is not input this product chooses. A
+ * backwards scan is linear and says the same thing.
+ */
+export function trimTrailing(s: string, drop: (ch: string) => boolean): string {
+  let end = s.length;
+  while (end > 0 && drop(s[end - 1])) end--;
+  return end === s.length ? s : s.slice(0, end);
+}
+
 export function highlightVisible(s: string, needle: string): string {
   if (!needle) return s;
   const ESC = /\x1b\[[0-9;]*m/g;
