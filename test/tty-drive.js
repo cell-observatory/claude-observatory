@@ -460,14 +460,39 @@ async function main() {
   // "N hidden" notice for a filter that no longer exists.
   // '=' resets the layout (and any zoom) first: these checks used to inherit whatever the previous
   // group left on screen, measure a zoomed frame, and report the product empty.
-  const reset = async () => { send('='); await sleep(300); };
+  /**
+   * Back to the default layout AND to the change map.
+   *
+   * `=` resets the layout; it does not reset the SELECTION, and the centre window's face is `auto` —
+   * the map when nothing is picked, the diff when something is. Earlier groups here pick edits, so
+   * after a bare `=` the centre can legitimately still be showing a diff and the map never appears.
+   * That is what timed out on macOS: not a slow paint, a frame that was never going to say CHANGE MAP.
+   *
+   * `esc`, not F3. Both land on the map, but F3 also FOCUSES the centre window — and that leaked into
+   * a later check, where `↓` then moved a short map list already at its end and the frame did not
+   * change. `esc` is the product's own way of saying "nothing selected", which is precisely the state
+   * whose face is the map, and it leaves focus where it was.
+   */
+  const reset = async () => {
+    send('=');
+    await sleep(250);
+    if (!frame().some((l) => /CHANGE MAP/.test(l))) { send(KEY.esc); await sleep(250); }
+    await until('the change map', () => frame().some((l) => /CHANGE MAP/.test(l)), 6000).catch(() => {});
+  };
   if (SEED) {
+    // FORCE the state that broke CI before resetting: pick an edit, so the centre window's `auto` face
+    // is the DIFF and the change map is genuinely not on screen. Without this the reset is only ever
+    // exercised from a state where the map was already up, and the recovery it exists for is untested.
+    send(KEY.f2); await sleep(150); send(KEY.down); await sleep(150); send(KEY.f4); await sleep(300);
+    check('positive control: with an edit selected the map is NOT on screen',
+      !frame().some((l) => /CHANGE MAP/.test(l)),
+      JSON.stringify(frame().slice(0, 3).map((l) => l.trim().slice(0, 50))));
     await reset();
-    // WAIT for the repaint rather than sleeping at it. The two checks below measure an ABSENCE, and an
-    // absence is trivially true of a frame that has not been drawn yet — so on a loaded CI runner the
-    // 300ms in `reset()` was not always enough and they passed against nothing. The positive control
-    // below is what caught that, which is exactly what it is for; this is the fix it was pointing at.
-    await until('the change map to repaint after the reset', () => frame().some((l) => /CHANGE MAP/.test(l)), 8000);
+    // `reset()` now waits for the map itself, and does so WITHOUT throwing. A bare `until` here aborted
+    // the entire run on the first timeout, turning one unhappy check into "no results at all" — and the
+    // positive control below already reports this condition as a normal failure, with the frame in its
+    // detail. Two things must not be confused: the checks either side measure an ABSENCE, which is
+    // trivially true of a frame that was never drawn, so the control is what makes them mean anything.
     check('the swept file is on no surface at all', !frame().some((l) => /bundle\.js/.test(l)));
     check('and no surface claims to be hiding anything',
       !frame().some((l) => /hidden by \.observatoryignore|\d+ hidden/.test(l)),
