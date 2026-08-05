@@ -444,8 +444,8 @@
 
 <aside class="gutter" aria-hidden="true">
   <a href="#hero" data-spy="hero">01</a>
-  <a href="#demo" data-spy="demo">02</a>
-  <a href="#manifesto" data-spy="manifesto">03</a>
+  <a href="#manifesto" data-spy="manifesto">02</a>
+  <a href="#demo" data-spy="demo">03</a>
   <a href="#tour" data-spy="tour">04</a>
   <a href="#install" data-spy="install">05</a>
 </aside>
@@ -466,6 +466,33 @@
   </div>
 </header>
 
+
+
+<section class="essay" id="manifesto">
+  <div class="wrap rv">
+    <span class="eyebrow">The gap</span>
+    <h2>Interpretability at crunch time</h2>
+    <p>A backlog of changes reviewed at the end of an agent's session creates a bottleneck, moving the work of verifying and evaluating every change onto the reviewer at once, after the context that produced them is gone. Existing tools address parts of the problem: usage meters count tokens, log viewers replay a session, editor assistants and Claude Code's own <code>/rewind</code> roll back to a checkpoint, and orchestrators launch fleets of agents and present each branch as one diff to merge. A checkpoint is coarse — it reverts a whole turn rather than one edit, does not track the files a shell command changed, and clears when the session ends. The observatory records each edit instead, tracing each action back to the chain of thought the model recorded for it.</p>
+  </div>
+</section>
+
+<section class="essay" id="how">
+  <div class="wrap rv">
+    <span class="eyebrow">What sets it apart</span>
+    <h2>From one edit to the whole trace</h2>
+    <ul>
+      <li><b>The record is built outside the model loop.</b> Capture runs in local hooks: it costs no tokens and changes nothing about what the agent sees or the decisions it makes. The record builds itself as the agent works, so it exists before you need it rather than being reconstructed once the context is gone. Everything stays on your machine; nothing is sent anywhere.</li>
+      <li><b>Any edit can be reversed on its own.</b> A position-anchored merge removes one change while the edits around it stay in place. When a later edit genuinely overlaps, the undo is refused rather than applied blindly: no clean git state is required, and nothing is silently overwritten.</li>
+      <li><b>Review follows the unit of work.</b> The edits one prompt produced read as one sequence, in the order the agent made them, across files; the same review scales down to a single edit or up to a task or a workflow run. Single edits give precision; sequences give the shape of the work.</li>
+      <li><b>Every edit is recorded.</b> Each text change is saved the moment the agent makes it, including the files a shell command changed. When a named file cannot be snapshotted — a binary, or one past the size cap — the record marks it an explicit skip rather than dropping it quietly. The shell walk is bounded: it skips vendor and build directories and stops at a file-count cap, so changes beneath those are not captured at all.</li>
+      <li><b>Every surface reads one store.</b> VS Code, JetBrains IDEs, and the terminal share the same local record, so review does not depend on a particular editor or on an outside service.</li>
+      <li><b>Every tool call is explained.</b> The transcript the session already produced yields Claude's reasoning, a timeline of each tool call, flags on risky shell commands, and the two audits: the edits and reads that landed outside the workspace, and everywhere the session reached off the machine.</li>
+      <li><b>Many agents appear in one view.</b> When several agents run in parallel across git worktrees, the observatory unifies them: who is working, on what, and where their changes conflict.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- FEATURE TOUR: every surface, one slide at a time -->
 <section class="moment" id="demo">
   <div class="wrap">
     <span class="eyebrow">Interactive demo</span>
@@ -569,32 +596,6 @@
   </div>
 </section>
 
-
-<section class="essay" id="manifesto">
-  <div class="wrap rv">
-    <span class="eyebrow">The gap</span>
-    <h2>Interpretability at crunch time</h2>
-    <p>A backlog of changes reviewed at the end of an agent's session creates a bottleneck, moving the work of verifying and evaluating every change onto the reviewer at once, after the context that produced them is gone. Existing tools address parts of the problem: usage meters count tokens, log viewers replay a session, editor assistants and Claude Code's own <code>/rewind</code> roll back to a checkpoint, and orchestrators launch fleets of agents and present each branch as one diff to merge. A checkpoint is coarse — it reverts a whole turn rather than one edit, does not track the files a shell command changed, and clears when the session ends. The observatory records each edit instead, tracing each action back to the chain of thought the model recorded for it.</p>
-  </div>
-</section>
-
-<section class="essay" id="how">
-  <div class="wrap rv">
-    <span class="eyebrow">What sets it apart</span>
-    <h2>From one edit to the whole trace</h2>
-    <ul>
-      <li><b>The record is built outside the model loop.</b> Capture runs in local hooks: it costs no tokens and changes nothing about what the agent sees or the decisions it makes. The record builds itself as the agent works, so it exists before you need it rather than being reconstructed once the context is gone. Everything stays on your machine; nothing is sent anywhere.</li>
-      <li><b>Any edit can be reversed on its own.</b> A position-anchored merge removes one change while the edits around it stay in place. When a later edit genuinely overlaps, the undo is refused rather than applied blindly: no clean git state is required, and nothing is silently overwritten.</li>
-      <li><b>Review follows the unit of work.</b> The edits one prompt produced read as one sequence, in the order the agent made them, across files; the same review scales down to a single edit or up to a task or a workflow run. Single edits give precision; sequences give the shape of the work.</li>
-      <li><b>Every edit is recorded.</b> Each text change is saved the moment the agent makes it, including the files a shell command changed. When a named file cannot be snapshotted — a binary, or one past the size cap — the record marks it an explicit skip rather than dropping it quietly. The shell walk is bounded: it skips vendor and build directories and stops at a file-count cap, so changes beneath those are not captured at all.</li>
-      <li><b>Every surface reads one store.</b> VS Code, JetBrains IDEs, and the terminal share the same local record, so review does not depend on a particular editor or on an outside service.</li>
-      <li><b>Every tool call is explained.</b> The transcript the session already produced yields Claude's reasoning, a timeline of each tool call, flags on risky shell commands, and the two audits: the edits and reads that landed outside the workspace, and everywhere the session reached off the machine.</li>
-      <li><b>Many agents appear in one view.</b> When several agents run in parallel across git worktrees, the observatory unifies them: who is working, on what, and where their changes conflict.</li>
-    </ul>
-  </div>
-</section>
-
-<!-- FEATURE TOUR: every surface, one slide at a time -->
 <section class="moment" id="tour">
   <div class="wrap rv">
     <span class="eyebrow">Feature tour</span>
@@ -1033,7 +1034,7 @@
       links.forEach(function(a){a.classList.remove('is-active');});
       var a=map[e.target.id];if(a)a.classList.add('is-active');
     }});},{rootMargin:'-45% 0px -50% 0px'});
-    ['hero','demo','manifesto','tour','install'].forEach(function(id){var el=document.getElementById(id);if(el)io.observe(el);});
+    ['hero','manifesto','demo','tour','install'].forEach(function(id){var el=document.getElementById(id);if(el)io.observe(el);});
   })();
   (function(){
     var nav=document.getElementById('nav'),btn=document.getElementById('menu');
