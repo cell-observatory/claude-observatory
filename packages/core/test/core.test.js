@@ -10232,16 +10232,22 @@ test('sessionMeta costs each session from ITS OWN transcript, not the caller cwd
   const elsewhere = path.join(dir, 'somewhere-else'); // where the reader is standing
   fs.mkdirSync(ws, { recursive: true });
   fs.mkdirSync(elsewhere, { recursive: true });
-  const proj = path.join(cfg, 'projects', ws.replace(/[/\\.]/g, '-'));
-  fs.mkdirSync(proj, { recursive: true });
+  // The product's OWN mangling rule, not a restatement of it. Hand-rolling `ws.replace(/[/\\.]/g,'-')`
+  // passed on macOS and Linux and could not pass on Windows: it leaves the drive-letter colon in place,
+  // and `C:-Users-…` is not a legal directory name there. A test that guesses at the rule it is
+  // exercising tests the guess.
   const id = '11111111-2222-3333-4444-555555555555';
-  fs.writeFileSync(path.join(proj, id + '.jsonl'),
-    [JSON.stringify({ type: 'user', cwd: ws, timestamp: '2026-01-01T00:00:00.000Z', message: { role: 'user', content: 'name me' } }),
-     JSON.stringify({ type: 'assistant', timestamp: '2026-01-01T00:10:00.000Z',
-       message: { role: 'assistant', model: 'claude-opus-4-5-20251101', usage: { input_tokens: 700, output_tokens: 300, cache_creation_input_tokens: 0, cache_read_input_tokens: 9000000 } } })].join('\n') + '\n');
   const prev = process.env.CLAUDE_CONFIG_DIR;
-  process.env.CLAUDE_CONFIG_DIR = cfg;
+  // Set INSIDE the try, or a throw in the fixture writes below leaks a config dir pointing at a
+  // deleted temp directory into every test that runs after this one.
   try {
+    process.env.CLAUDE_CONFIG_DIR = cfg; // projectDir resolves the config dir at call time
+    const proj = core.projectDir(ws);
+    fs.mkdirSync(proj, { recursive: true });
+    fs.writeFileSync(path.join(proj, id + '.jsonl'),
+      [JSON.stringify({ type: 'user', cwd: ws, timestamp: '2026-01-01T00:00:00.000Z', message: { role: 'user', content: 'name me' } }),
+       JSON.stringify({ type: 'assistant', timestamp: '2026-01-01T00:10:00.000Z',
+         message: { role: 'assistant', model: 'claude-opus-4-5-20251101', usage: { input_tokens: 700, output_tokens: 300, cache_creation_input_tokens: 0, cache_read_input_tokens: 9000000 } } })].join('\n') + '\n');
     const row = core.sessionMeta(elsewhere).sessions.find((r) => r.id === id);
     assert.ok(row, 'the session was not listed at all from a foreign cwd');
     // input+output only. cacheRead is 9M here precisely so a regression that folds it back in is loud.
