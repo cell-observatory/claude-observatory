@@ -19,9 +19,10 @@ Per-tag release artifacts and auto-generated notes are on the
   still filtered, still scrolled. It just stopped answering "what is this".
 
   Every dashboard now goes through one resolver, and its fallback names the KIND rather than printing
-  a digest — an unnamed task reads `task 3`, an unnamed workflow `workflow 0f1e2d3c`, an agent with
-  no branch or worktree `session deadbeef`. The older `content`/`title` spellings are still read, so
-  an archived session does not turn into a wall of hashes the moment it is opened.
+  a digest: an unnamed task reads `task 3`, an unnamed workflow is named as a workflow, and an agent
+  with no branch or worktree is named as a session rather than shown as a bare identifier. The older
+  `content`/`title` spellings are still read, so an archived session does not turn into a wall of
+  hashes the moment it is opened.
 
 ### Build / CI
 - **The rolling pre-release channel cannot go backwards any more.** `dev`'s committed version is the

@@ -10197,6 +10197,37 @@ test('tui: `w` keeps long lines long and pans across them, and never hides conte
     'the far END of the line is reachable by panning — nothing is out of reach');
 });
 
+test('tui: an empty pane names its TAB, and says when a view never arrived', () => {
+  // "nothing on Dashboards" is the same sentence whether Fleet, Tasks or Processes is the empty one —
+  // and a reader looking at Fleet wants to know about Fleet. Worse, it was also the same sentence when
+  // the view had not been REQUESTED at all: app.ts's allow-list decides which views a screen asks for,
+  // and a screen missing from it renders an honest-looking nothing. That file's own comment calls that
+  // out as the failure this product forbids; this is the pane holding up its end.
+  const dash = (views, tab) => {
+    const st = paneFixture({
+      views, screen: 'edits',
+      panes: { minimized: new Set(), zoom: null, focus: 'dashboards', tab: { dashboards: tab }, cursor: {}, scroll: {} },
+    });
+    const f = tui.renderDashFrame(st, { cols: 130, rows: 34, color: false });
+    // The PANE HEADER, which carries the rule of dashes — not the window bar at row 0, which also says
+    // "F5 …Dashboards" and would have this reading the Prompts pane's message instead.
+    const at = f.findIndex((l) => /F5 Dashboards\s+-{5}/.test(l));
+    assert.ok(at >= 0, `the Dashboards pane header is on screen: ${JSON.stringify(f.slice(0, 3))}`);
+    return f.slice(at + 1).find((l) => /has no data|nothing on/.test(l))?.trim() ?? '';
+  };
+
+  // Tab 0 is Fleet, tab 2 is Tasks — the message must name the one being looked at.
+  assert.match(dash({ changemap: {}, multitask: { agents: [] } }, 0), /nothing on Fleet yet/,
+    'an empty Fleet says Fleet, not Dashboards');
+  assert.match(dash({ changemap: {}, multitask: { tasks: [] } }, 2), /nothing on Tasks yet/,
+    'and an empty Tasks says Tasks');
+
+  // …and "the view never arrived" is a DIFFERENT answer from "there is nothing in it".
+  const absent = dash({ changemap: {} }, 0);
+  assert.match(absent, /multitask/, 'a missing view is named, so the reader has a lead rather than a shrug');
+  assert.doesNotMatch(absent, /fills in as Claude works/, 'and is not dressed up as "nothing yet"');
+});
+
 test('tui: every dashboard names its rows, and never shows a bare id', () => {
   // The Tasks pane listed nineteen rows of `a3f21c9de4b7…` because it read `content`/`title` — the
   // spellings the plan harness used BEFORE tasks gained `subject`. The editors never had the bug:

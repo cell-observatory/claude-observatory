@@ -944,10 +944,29 @@ export function paneVisible(
      * already draw "building…" while the first read is in flight. A third message for it would be
      * unreachable code that reads like a covered case.
      */
-    const title = PANE_SPECS.find((p) => p.id === box.id)!.title;
+    const spec = PANE_SPECS.find((p) => p.id === box.id)!;
+    // The TAB, not the pane. "nothing on Dashboards" is the same sentence whether Fleet is empty,
+    // Tasks is empty, or Processes is — and a reader looking at Fleet wants to know about Fleet.
+    const tabIdx = state.panes?.tab?.[box.id] ?? 0;
+    const title = spec.tabs.length ? (spec.tabs[tabIdx] ?? spec.title) : spec.title;
+    /**
+     * "EMPTY" AND "NEVER ASKED FOR" ARE DIFFERENT ANSWERS, and this pane used to give the same one to
+     * both. The allow-list in app.ts decides which views a screen requests; a screen missing from it
+     * gets a payload without its view and renders an honest-looking nothing — the failure that file's
+     * own comment calls out as forbidden. Naming the absent view turns a shrug into a lead.
+     */
+    const feeds: Record<string, string> = {
+      agents: 'multitask', workflows: 'multitask', tasks: 'multitask',
+      prompts: 'prompts', feed: 'feed', observations: 'observations',
+      processes: 'processes', edits: 'list', audit: 'risk',
+    };
+    const feed = feeds[screen];
+    const missing = feed !== undefined && view(state, feed) === null;
     const why = state.filter
       ? `nothing on ${title} matching /${state.filter} — esc clears the filter`
-      : `nothing on ${title} yet — it fills in as Claude works`;
+      : missing
+        ? `${title} has no data to draw: the “${feed}” view did not arrive in this refresh`
+        : `nothing on ${title} yet — it fills in as Claude works`;
     for (const part of wrapVisible(why, Math.max(1, inner - 2))) {
       out.push({ text: depth === 'none' ? `  ${part}` : `\x1b[2m  ${part}\x1b[0m`, row: -1 });
     }
