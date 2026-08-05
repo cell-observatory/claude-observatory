@@ -125,6 +125,7 @@
       <a href="showcase.html">Home</a>
       <a href="showcase.html#install">Install</a>
       <a href="getting-started.html" aria-current="page">Getting started</a>
+      <a href="apps.html">Apps</a>
       <a href="concepts.html">Docs</a>
       <a href="releases.html">Releases</a>
       <a class="more" href="https://github.com/cell-observatory/claude-observatory">GitHub</a>
@@ -178,7 +179,7 @@
 
   <section class="feature">
     <div class="wrap grid">
-      <div class="copy"><div class="num">05</div><span class="eyebrow">Beyond the demo</span><h2>Working with real sessions</h2><p>Run <code>claude-observatory init</code> once, with Claude Code closed, and every later session is captured automatically — the same tasks, fleet, workflows, and review as the demo, in the 🔬 <b>Observatory Traces</b> sidebar and the Observatory Dashboards panel in both editors. Sessions running in several git worktrees are unified into one fleet in the Overview, live conflicts included (in the Actions view). <b>Active only</b>, on by default and remembered across restarts, hides finished agents, runs, and shells along with fully-reviewed work. The <b>Sessions</b> tab lists every session in this workspace by conversation recency, and selecting a row switches what the observatory reviews. The review nav bar steps the pending edits along four axes — Diff, File, Folder, and Prompt.</p></div>
+      <div class="copy"><div class="num">05</div><span class="eyebrow">Beyond the demo</span><h2>Working with real sessions</h2><p>Run <code>claude-observatory init</code> once, with Claude Code closed, and every later session is captured automatically — the same tasks, fleet, workflows, and review as the demo, in the 🔬 <b>Observatory Traces</b> sidebar and the Observatory Dashboards panel in both editors. Sessions running in several git worktrees are unified into one fleet in the Overview, live conflicts included (in the Actions view). <b>Active only</b>, on by default and remembered across restarts, hides finished agents, runs, and shells along with fully-reviewed work. The <b>Sessions</b> tab lists every session in this workspace by conversation recency, and selecting a row switches what the observatory reviews. The review nav bar steps the pending edits along four axes — Diff, File, Folder, and Prompt. On a real repo most captured edits are noise — lockfiles, <code>dist/</code>, generated clients — so a <a href="concepts.html#observatoryignore" style="color:var(--accent-ink);text-decoration:underline;text-underline-offset:3px"><code>.observatoryignore</code></a>, in ordinary <code>.gitignore</code> syntax, keeps them from being recorded at all.</p></div>
       <div class="panel rv"><div class="scroll"><div class="two-up">
         <figure><img src="media/layout.png" loading="lazy" alt="Claude Observatory in VS Code: the Observatory Traces sidebar and the Observatory Dashboards bottom panel"><figcaption>VS Code</figcaption></figure>
         <figure><img src="media/pyc-layout.png" loading="lazy" alt="Claude Observatory in PyCharm: the Observatory Traces and Observatory Dashboards tool windows with icon-only tabs"><figcaption>PyCharm / JetBrains</figcaption></figure>
@@ -199,6 +200,7 @@
           <div style="white-space:nowrap">claude-observatory diff &lt;id&gt;         <span style="color:var(--ink-faint)"># colored before/after for one edit</span></div>
           <div style="white-space:nowrap">claude-observatory keep &lt;id&gt;         <span style="color:var(--ink-faint)"># mark reviewed; no disk change</span></div>
           <div style="white-space:nowrap">claude-observatory undo &lt;id&gt;         <span style="color:var(--ink-faint)"># surgically undo one edit</span></div>
+          <div style="white-space:nowrap">claude-observatory ignore            <span style="color:var(--ink-faint)"># the .observatoryignore rules in play; --check &lt;path&gt; says which one decided</span></div>
           <div style="white-space:nowrap">claude-observatory task-keep &lt;id&gt;    <span style="color:var(--ink-faint)"># keep every pending edit in a task's strict in-progress span</span></div>
           <div style="white-space:nowrap">claude-observatory task-undo &lt;id&gt;    <span style="color:var(--ink-faint)"># revert every pending edit in that same strict span</span></div>
           <div style="white-space:nowrap">claude-observatory multitask --json  <span style="color:var(--ink-faint)"># every running agent across the repo's worktrees</span></div>
@@ -231,6 +233,7 @@
     <div class="row">
       <span class="brand"><span class="m">🔬</span> Claude Observatory <span class="brandver" data-co-version>v0.10.0</span></span>
       <div class="flinks">
+        <a href="apps.html">Apps</a>
         <a href="concepts.html">Docs</a>
         <a href="releases.html">Releases</a>
         <a href="https://github.com/cell-observatory/claude-observatory/blob/main/docs/DEMO.md">Demo</a>

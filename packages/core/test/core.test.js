@@ -8,6 +8,9 @@ const path = require('path');
 const cp = require('child_process');
 
 const core = require('../dist/index.js');
+// The terminal app is its own package now — a front end, like the two editor extensions —
+// so its frame, layout, glyphs, key decoder and options screen come from there, not from core.
+const tui = require('../../tui/dist/index.js');
 const CAPTURE = path.resolve(__dirname, '../../cli/dist/capture.js');
 const CLI = path.resolve(__dirname, '../../cli/dist/index.js');
 
@@ -1033,6 +1036,176 @@ test('observe: usageLine normalizes an epoch-seconds reset from the cache', () =
   );
   const u = core.usageLine(cwd, 'nosession');
   assert.equal(u.weekReset, 1783540800 * 1000, 'epoch seconds scaled to epoch ms');
+});
+
+test('sessions: a conversation that edited nothing is still a session', () => {
+  // The store is not the census. A session gets a store directory the first time the capture hook
+  // fires, so one that only asked, read and ran things never gets one — and every listing built from
+  // `listSessions()` alone could not see it at all. Measured on the repo that found this: 50
+  // transcripts, 31 store directories, 19 real conversations missing from the picker with nothing on
+  // screen to say so.
+  freshHome();
+  const cfg = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-sess-'));
+  process.env.CLAUDE_CONFIG_DIR = cfg;
+  try {
+    const cwd = path.resolve('/Users/x/proj');
+    const proj = core.projectDir(cwd);
+    fs.mkdirSync(proj, { recursive: true });
+    // Two transcripts here: one that also produced edits, one that produced none.
+    fs.writeFileSync(path.join(proj, 'withedits.jsonl'), '{}\n');
+    fs.writeFileSync(path.join(proj, 'noedits.jsonl'), '{}\n');
+    // …and one belonging to a DIFFERENT workspace, which must not appear.
+    const other = core.projectDir(path.resolve('/Users/x/elsewhere'));
+    fs.mkdirSync(other, { recursive: true });
+    fs.writeFileSync(path.join(other, 'foreign.jsonl'), '{}\n');
+    // Only the first gets a store: `capture` creates it, and nothing here captured for the second.
+    const store = path.join(core.rootDir(), 'withedits');
+    fs.mkdirSync(store, { recursive: true });
+    fs.writeFileSync(path.join(store, 'log.jsonl'), '');
+
+    const ids = core.transcriptSessionIds(cwd);
+    assert.deepEqual(ids.slice().sort(), ['noedits', 'withedits'], 'both of THIS workspace’s transcripts');
+    assert.ok(!ids.includes('foreign'), 'and not another workspace’s — the walk up the tree reaches ancestors, which are other people’s projects');
+
+    const listed = core.listSessionsWithTitles(cwd).map((s) => s.id);
+    assert.ok(listed.includes('withedits'), 'the session with edits is listed');
+    assert.ok(listed.includes('noedits'), 'and so is the one with none — that is the bug this pins');
+    // `listSessionsWithTitles` is the STORE-plus-this-workspace listing (the `sessions` verb's data
+    // is `sessionMeta`); its transcript top-up stays cwd-scoped, which `transcriptSessionIds` pins above.
+    assert.ok(!listed.includes('foreign'), 'the cwd-scoped top-up does not reach another workspace');
+    const zero = core.listSessionsWithTitles(cwd).find((s) => s.id === 'noedits');
+    assert.equal(zero.edits, 0, 'it reports zero edits, which is the truth — nothing was captured');
+    assert.equal(zero.pending, 0);
+
+    // Positive control: the store-only path really did miss it, so this test is measuring something.
+    assert.ok(!core.listSessions().some((s) => s.id === 'noedits'),
+      'the store enumerator alone still cannot see it — which is why the listing had to stop relying on it');
+
+    const meta = core.sessionMeta(cwd);
+    const metaIds = meta.sessions.map((s) => s.id);
+    assert.ok(metaIds.includes('noedits'), 'the fast picker path lists it too');
+    // `sessionMeta` deliberately spans EVERY workspace now, so the other one's session is offered —
+    // but the row has to say so. Hiding it was the old behaviour; hiding it *while showing ancestor
+    // directories' sessions unlabelled* was the bug.
+    const foreign = meta.sessions.find((r) => r.id === 'foreign');
+    assert.ok(foreign, 'another workspace’s session is offered');
+    const mine = meta.sessions.find((r) => r.id === 'withedits');
+    assert.notEqual(foreign.workspace, mine.workspace, 'and its row names a different workspace');
+    assert.ok(foreign.workspace && mine.workspace, 'both rows name one');
+  } finally {
+    delete process.env.CLAUDE_CONFIG_DIR;
+  }
+});
+
+test('sessions: every workspace is listed, each row saying which one, and a bridge stub says so', () => {
+  freshHome();
+  const cfg = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-ws-'));
+  process.env.CLAUDE_CONFIG_DIR = cfg;
+  try {
+    const here = path.resolve('/Users/x/proj');
+    const there = path.resolve('/Users/x/other');
+    for (const [cwd, id] of [[here, 'mine'], [there, 'theirs']]) {
+      const d = core.projectDir(cwd);
+      fs.mkdirSync(d, { recursive: true });
+      fs.writeFileSync(path.join(d, `${id}.jsonl`), '{"type":"user"}\n');
+    }
+    // A bridge POINTER: one line, no conversation. Claude Code writes these for sessions whose
+    // content lives on its bridge — they are not empty local sessions, and saying "no edits" about
+    // one sends the reader to open something that is not there.
+    fs.writeFileSync(
+      path.join(core.projectDir(here), 'bridged.jsonl'),
+      JSON.stringify({ type: 'bridge-session', sessionId: 'bridged', bridgeSessionId: 'cse_x', lastSequenceNum: 900 }) + '\n'
+    );
+
+    const rows = core.sessionMeta(here).sessions;
+    const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
+    assert.ok(byId.mine, 'this workspace’s session');
+    assert.ok(byId.theirs, 'AND another workspace’s — every workspace is offered now');
+    assert.notEqual(byId.mine.workspace, byId.theirs.workspace, 'each row names its own workspace');
+    assert.ok(byId.mine.workspace, 'and the name is not blank — the old listing named none of them');
+
+    assert.equal(byId.bridged.origin, 'bridged', 'a bridge pointer is reported as bridged');
+    assert.equal(byId.mine.origin, 'local', 'and a real transcript as local');
+    assert.deepEqual(
+      core.bridgeInfo(path.join(core.projectDir(here), 'bridged.jsonl')),
+      { bridgeSessionId: 'cse_x', lastSequenceNum: 900 },
+      'the pointer’s own fields are read, so a renderer can say where the content went'
+    );
+    assert.equal(core.bridgeInfo(path.join(core.projectDir(here), 'mine.jsonl')), null,
+      'and an ordinary transcript is NOT mistaken for one — this reads only the first line');
+
+    // Labels are display strings over a lossy slug, so they are bounded and MARKED when shortened —
+    // a hundred-character temp-dir slug wrapped the row it labelled and broke the whole list.
+    const deep = path.resolve('/private/tmp/a-very-long-scratch-directory-name-that-keeps-going-and-going/inner');
+    fs.mkdirSync(core.projectDir(deep), { recursive: true });
+    fs.writeFileSync(path.join(core.projectDir(deep), 'deep.jsonl'), '{"type":"user"}\n');
+    for (const w of core.listWorkspaces()) {
+      assert.ok(w.label.length <= 26, `${w.label} is bounded`);
+      if (w.label.length === 26) assert.ok(w.label.startsWith('…'), 'a shortened label says it was shortened');
+    }
+  } finally {
+    delete process.env.CLAUDE_CONFIG_DIR;
+  }
+});
+
+test('remote: a host is validated, a failure is REPORTED, and every label is bounded', () => {
+  // A shell metacharacter never reaches ssh. This is the one place a reader-supplied string would be
+  // interpolated into a remote command, so it is refused by shape before anything is spawned.
+  for (const bad of ['nova; rm -rf /', 'a b', '$(whoami)', '`id`', 'x|y', '']) {
+    const r = core.listRemoteSessions({ name: 'x', host: bad });
+    assert.ok(r.error, `“${bad}” is refused`);
+    assert.match(r.error, /not a usable ssh host name/);
+    assert.equal(r.reachable, false);
+    assert.deepEqual(r.sessions, []);
+  }
+
+  // A host that cannot be resolved reports WHY. An empty list standing in for a failure would tell a
+  // reader their machine has no sessions when in fact it was never reached.
+  const dead = core.listRemoteSessions({ name: 'dead', host: 'no-such-host-abc.invalid' }, 8000);
+  assert.equal(dead.reachable, false, 'not reachable');
+  assert.ok(dead.error && dead.error.length > 0, 'and it says so in words');
+  assert.deepEqual(dead.sessions, [], 'with no sessions invented');
+
+  // A failing host becomes a ROW, so it is visibly down rather than quietly absent.
+  core.clearRemoteCache();
+  const rows = core.remoteRows([{ name: 'dead', host: 'no-such-host-abc.invalid' }]);
+  assert.equal(rows.length, 1, 'one row for the host itself');
+  assert.equal(rows[0].origin, 'remote');
+  assert.ok(rows[0].error, 'carrying the reason');
+  core.clearRemoteCache();
+
+  // Labels are bounded and MARKED when shortened — an unbounded one wraps the row it labels and
+  // breaks the whole list, which is exactly what the composed `host:workspace` pair did at first.
+  const long = '-home-someone-a-very-long-project-directory-name-that-keeps-going';
+  assert.ok(core.remoteWorkspaceLabel(long).length <= 26);
+  assert.ok(core.remoteWorkspaceLabel(long).startsWith('…'), 'a shortened label says so');
+  assert.equal(core.remoteWorkspaceLabel('-home-thayer'), '~', 'the remote HOME is named, not spelled as a path');
+  assert.equal(core.remoteWorkspaceLabel('-Users-bob'), '~');
+  assert.equal(core.remoteWorkspaceLabel('-home-bob-Github-thing'), 'Github-thing', 'and the prefix is dropped');
+});
+
+test('remote: the scanner ships finished titles, and the shell fallback is told apart from it', () => {
+  // The remote emits one TSV row per session. Two producers can write it — the python scanner (a
+  // bridged FLAG and a finished title) and the shell fallback (the raw first line and a sample) —
+  // and the parser tells them apart by the fifth field. Getting that wrong means a title of "0".
+  const py = ['-home-bob-proj', 'abc', '1700000000', '4096', '0', 'Fix the widget alignment'].join('\t');
+  const pyBridge = ['-home-bob-proj', 'def', '1700000000', '146', '1', ''].join('\t');
+  const sh = ['-home-bob-proj', 'ghi', '1700000000', '4096', '{"type":"user","message":{"content":"hello there"}}', '{"type":"user","message":{"content":"hello there"}}'].join('\t');
+  const shBridge = ['-home-bob-proj', 'jkl', '1700000000', '146', '{"type":"bridge-session"}', ''].join('\t');
+  const parsed = core.__parseRemoteRows(['OK', py, pyBridge, sh, shBridge].join('\n'));
+  const by = Object.fromEntries(parsed.map((r) => [r.id, r]));
+  assert.equal(by.abc.title, 'Fix the widget alignment', 'a finished title crosses the wire intact');
+  assert.equal(by.abc.bridged, false);
+  assert.equal(by.def.bridged, true, 'the flag column is read as a flag, not as content');
+  assert.equal(by.def.title, null, 'and a bridge pointer has no title to show');
+  assert.equal(by.ghi.title, 'hello there', 'the fallback still extracts from its sample');
+  assert.equal(by.ghi.bridged, false);
+  assert.equal(by.jkl.bridged, true, 'and still detects a pointer from the raw first line');
+  // Titles are shortened the same way local ones are, so the two read alike for one conversation.
+  const long = ['-home-bob-proj', 'mno', '1700000000', '4096', '0', 'x'.repeat(200)].join('\t');
+  const one = core.__parseRemoteRows(['OK', long].join('\n'))[0];
+  assert.ok(one.title.length <= 64, 'capped');
+  assert.ok(one.title.endsWith('…'), 'and marked, never silently cut');
 });
 
 test('paths: CLAUDE_CONFIG_DIR relocates the store, sessions, hooks, and usage together', () => {
@@ -2082,6 +2255,573 @@ test('observe: flagsFor accepts a prefetched log (and uses it)', () => {
   assert.ok(!core.flagsFor(S, rec, withTest).some((f) => /no test file/.test(f.message)), 'passed-in log wins');
 });
 
+/** A hand-built state, so a frame assertion is not hostage to whatever a real store happens to hold.
+ *  The planted values are the hostile ones: a CJK path, an astral emoji, and an escape that would
+ *  clear the screen if it reached the terminal unsanitised. */
+function dashFixture(over = {}) {
+  return {
+    views: {
+      changemap: { summary: { title: 'fixture', pending: 2, kept: 3 }, files: [{ rel: '漢字/テスト.ts', cnt: 2, added: 9, removed: 1, status: 'pending' }] },
+      list: {
+        edits: [
+          { id: 1, ts: 1000, tool: 'Edit', file: 'src/a.ts', status: 'pending', added: 4, removed: 1 },
+          { id: 2, ts: 2000, tool: 'Edit', file: 'src/\x1b[2J\x1b[1;1Hevil.ts', status: 'kept', added: 1, removed: 0 },
+          { id: 3, ts: 3000, tool: 'Edit', file: 'src/🔬scope.ts', status: 'undone', added: 2, removed: 2 },
+        ],
+      },
+      prompts: { prompts: [{ id: 'p1', index: 1, ts: 1000, title: 'do the thing', editIds: [1, 3] }] },
+      multitask: { agents: [{ session: 's', phase: 'working', phaseConfidence: 'heuristic', diff: { added: 4, removed: 1 }, sparkline: '▁▂▅' }], summary: { active: 1, conflicts: 2 } },
+      feed: { entries: [{ ts: 1000, label: 'ran tests' }], mode: 'live' },
+      risk: { high: 1, count: 2, risky: [{ ts: 1, tool: 'Bash', target: 'rm -rf x', level: 'high', reasons: [] }], outsideWrites: [{ file: '/etc/hosts', count: 1 }] },
+      egress: { remote: 1, channels: [{ kind: 'web', target: 'example.com', scope: 'remote', count: 1 }] },
+    },
+    screen: 'edits',
+    cursor: 0,
+    scroll: 0,
+    session: 'fixture0',
+    sessionTitle: 'fixture',
+    filter: '',
+    status: 'ready',
+    error: null,
+    confirm: null,
+    now: 5_000_000,
+    watcherMode: 'native',
+    open: new Set(),
+    ...over,
+  };
+}
+
+/** Feed `chunks` through a fresh decoder and collect every event, including the flushed tail. */
+function decode(chunks) {
+  const d = tui.createDecoder();
+  const out = [];
+  for (const c of chunks) out.push(...d.push(c));
+  out.push(...d.flush());
+  return out;
+}
+const keysOf = (evs) => evs.filter((e) => e.t === 'key' && !e.ctrl && !e.alt).map((e) => e.key);
+
+test('tui/changemap: aggregates by path prefix, so nothing is dropped and every row fits', () => {
+  // A top-N ledger looks complete while hiding most of the churn — on a real session its top twenty
+  // rows covered 18.2%. A prefix tree instead guarantees that whatever is not on screen is still
+  // represented by a visible ancestor carrying its totals.
+  const files = [
+    { rel: 'packages/core/src/observe.ts', added: 90, removed: 10, cnt: 4, pending: 2, kept: 2, undone: 0, risk: 1 },
+    { rel: 'packages/core/src/memory.ts', added: 40, removed: 5, cnt: 2, pending: 0, kept: 2, undone: 0, risk: 0 },
+    { rel: 'packages/cli/src/index.ts', added: 20, removed: 2, cnt: 1, pending: 1, kept: 0, undone: 0, risk: 0 },
+    { rel: '../elsewhere/thing.md', added: 500, removed: 0, cnt: 9, pending: 0, kept: 9, undone: 0, risk: 0 },
+  ];
+  const tree = tui.buildMapTree(files);
+  assert.equal(tree.files, 4, 'every file is counted');
+  assert.equal(tree.churn, 667, 'and the root carries the whole session churn');
+
+  // A path outside the workspace is one row, not a synthetic deep tree — on a real session those are
+  // the agent's own harness directories and would otherwise bury the user's code entirely.
+  const top = tui.mapRows(tree, new Set());
+  const outside = top.find((r) => r.label === tui.OUTSIDE);
+  assert.ok(outside, 'files outside the workspace collapse into one named row');
+  assert.equal(outside.node.churn, 500, 'carrying their churn, so it is never silently dropped');
+
+  // Collapsed by default: a folded folder still reports its subtree's totals.
+  const pkgs = top.find((r) => r.label === 'packages');
+  assert.equal(pkgs.node.churn, 167, 'a folded folder reports its whole subtree');
+  assert.ok(pkgs.expandable, 'and says it can be opened');
+
+  const opened = tui.mapRows(tree, new Set(['packages']));
+  assert.ok(opened.length > top.length, 'opening it reveals children');
+
+  // Width is the invariant that actually breaks: an off-by-one in the column arithmetic puts every
+  // row one cell over its budget at every width, which no amount of reading catches — and the pane
+  // then wraps every single row onto a continuation line carrying nothing.
+  for (const tier of ['ascii', 'safe', 'block']) {
+    const g = tui.glyphs(tier);
+    for (let cols = 30; cols <= 200; cols++) {
+      for (const r of tui.mapRows(tree, new Set(['packages', 'packages/core']))) {
+        for (const line of tui.renderMapRow(r, cols, g, 'none')) {
+          assert.ok(tui.displayWidth(line) <= cols, `${tier}@${cols}: "${line}" is ${tui.displayWidth(line)} wide`);
+        }
+      }
+      assert.ok(tui.displayWidth(tui.mapHeader(tree, cols, g)) <= cols, `${tier}@${cols}: header fits`);
+    }
+  }
+});
+
+test('tui/changemap: every row states its lines and its review state, and offers the two actions', () => {
+  const files = [
+    { rel: 'packages/core/src/observe.ts', added: 90, removed: 10, cnt: 4, pending: 2, kept: 2, undone: 0, risk: 1 },
+    { rel: 'packages/core/src/memory.ts', added: 40, removed: 5, cnt: 2, pending: 0, kept: 2, undone: 0, risk: 0 },
+  ];
+  const tree = tui.buildMapTree(files);
+  // Added and removed are kept APART all the way up the tree: +900/−4 and +4/−900 are the same churn
+  // and are not the same change, and a folder row is what a reviewer decides a whole package on.
+  const pkgs = tui.mapRows(tree, new Set())[0];
+  assert.equal(pkgs.node.added, 130, 'a folder sums its subtree additions');
+  assert.equal(pkgs.node.removed, 15, 'and its deletions, separately');
+  assert.equal(pkgs.node.churn, pkgs.node.added + pkgs.node.removed, 'churn stays their sum');
+  assert.equal(pkgs.node.pending, 2, 'pending and kept roll up too');
+  assert.equal(pkgs.node.kept, 4);
+
+  const g = tui.glyphs('ascii');
+  const wide = tui.renderMapRow(pkgs, 120, g, 'none')[0];
+  assert.match(wide, /\+130/, 'the row states the lines added');
+  assert.match(wide, /−15/, 'and the lines removed');
+  assert.match(wide, new RegExp(`2\\${g.pending}`), 'and how many edits are still pending');
+  assert.match(wide, new RegExp(`4\\${g.kept}`), 'and how many are accepted');
+
+  // The actions are laid out ONCE and the row is drawn from that layout — a cell pressable somewhere
+  // other than where it is drawn reverts a folder the reader never pointed at.
+  const acts = tui.mapRowActions(pkgs, 120);
+  assert.deepEqual(acts.map((a) => a.action), ['keep', 'undo'], 'both actions at a wide size');
+  for (const a of acts) {
+    assert.equal(wide.slice(a.x, a.x + a.w), a.label, `${a.action} is drawn exactly at its own cells`);
+  }
+
+  // The headings are built from the SAME layout the cells are, so a label can never sit over the
+  // wrong number — which is the whole reason they exist.
+  const head = tui.mapColumnHeader(120, g);
+  for (const [label, cell] of [['added', '+130'], ['removed', '−15'], ['pend', `2${g.pending}`], ['kept', `4${g.kept}`]]) {
+    const at = head.indexOf(label);
+    assert.ok(at >= 0, `the heading names ${label}`);
+    const under = wide.slice(at, at + label.length + 1);
+    assert.ok(under.includes(cell.slice(0, 2)), `${label} sits over its own column (found ${JSON.stringify(under)})`);
+  }
+  // No meter. A proportional bar answered "which is biggest", which the churn-ranked ORDER already
+  // answers, and it spent up to 27 columns doing it beside numbers that say the same thing.
+  assert.ok(!/[#=─▇]{3}/.test(wide), `no bar in the row, got ${JSON.stringify(wide)}`);
+
+  // Narrow: columns drop WHOLE, cheapest first, and the actions outlive the numbers.
+  const seen = new Set();
+  for (let cols = 30; cols <= 140; cols++) seen.add(JSON.stringify(tui.mapColumns(cols, 0)));
+  assert.ok(seen.size >= 4, `the sweep must actually cross tiers, saw ${seen.size}`);
+  assert.equal(tui.mapColumns(34, 0).review, 0, 'the review counts go before the actions do');
+  assert.ok(tui.mapRowActions(pkgs, 46).length === 2, 'and the actions survive well past it');
+
+  // A node with nothing pending cannot be kept or undone, and must not look like it can.
+  const done = tui.buildMapTree([{ rel: 'a/b.ts', added: 1, removed: 0, cnt: 1, pending: 0, kept: 1, undone: 0, risk: 0 }]);
+  const row = tui.mapRows(done, new Set())[0];
+  const line = tui.renderMapRow(row, 120, g, 'none')[0];
+  const at = tui.mapRowActions(row, 120)[0];
+  assert.equal(line.slice(at.x, at.x + at.w).trim(), '', 'a resolved node draws blanks, not a promise it will refuse');
+});
+
+test('tui/glyphs: a meter never rounds a real class away, and colour is optional', () => {
+  const g = tui.glyphs('ascii');
+  // One pending edit in a large folder must still show: rounding it to zero cells would make the
+  // meter claim the folder is fully reviewed, which is the opposite of true.
+  const bar = tui.meter({ pending: 1, kept: 900, undone: 0 }, 20, g, 'none');
+  assert.equal(tui.displayWidth(bar), 20, 'the bar fills its track exactly');
+  assert.ok(bar.includes(g.fill.pending), 'and the single pending edit survives the rounding');
+  // Shape carries the state, so accept and reject are distinguishable without any colour at all —
+  // the answer to red/green colour blindness on this product's two most important states.
+  assert.notEqual(g.kept, g.undone);
+  assert.equal(tui.tint('x', 'risk', 'none'), 'x', 'NO_COLOR renders no escapes');
+  assert.ok(tui.tint('x', 'risk', '256').includes('\x1b['), 'and colour is applied when available');
+  assert.equal(tui.colorDepth({ NO_COLOR: '1', TERM: 'xterm-256color' }, true), 'none', 'NO_COLOR wins over TERM');
+  // A sparkline from the numeric series the payload actually carries — the previous renderer passed
+  // this array through a string coercion and drew nothing at all.
+  assert.equal(tui.sparkline([0, 1, 2, 3], g).length, 4);
+  assert.equal(tui.sparkline([], g), '');
+});
+
+test('tui/input: a non-keystroke sequence never reaches the keymap as a key', () => {
+  // Each of these was measured arriving as ordinary letters in a scanner-based decoder. In an
+  // application where a, u, A, U and R keep or revert real code, a terminal answering a capability
+  // query it was never asked to answer must not be able to revert a session.
+  const hostile = [
+    ['\x1b[<0;12;34M', 'an SGR mouse click'],
+    ['\x1b]11;rgb:1111/2222/3333\x07', 'a background-colour reply'],
+    ['\x1b[?2026;2$y', 'a synchronised-output reply'],
+    ['\x1b[?1;2c', 'a device-attributes reply'],
+    ['\x1bP>|xterm\x1b\\', 'a DCS version report'],
+  ];
+  for (const [seq, what] of hostile) {
+    const evs = decode([seq]);
+    assert.deepEqual(keysOf(evs), [], `${what} produces no keys`);
+  }
+  // Positive control: the instrument can see keys, so the emptiness above is real.
+  assert.deepEqual(keysOf(decode(['jkq'])), ['j', 'k', 'q'], 'ordinary characters still arrive');
+});
+
+test('tui/input: a sequence split across reads decodes identically to a whole one', () => {
+  // The terminal splits wherever it likes. A decoder that re-scans each chunk sees `["\x1b[", "A"]`
+  // as the letter A — which in this application is "keep everything".
+  const whole = [
+    '\x1b[A', '\x1bOB', '\x1b[1;5C', '\x1b[3~', '\x1b[<64;5;7M',
+    '\x1b[200~pasted U text\x1b[201~', '\x1b]11;rgb:0/0/0\x07', '\x1b[I', 'x',
+  ];
+  for (const seq of whole) {
+    const want = JSON.stringify(decode([seq]));
+    for (let i = 1; i < seq.length; i++) {
+      const split = [seq.slice(0, i), seq.slice(i)];
+      assert.equal(JSON.stringify(decode(split)), want, `${JSON.stringify(seq)} split at ${i} must decode the same`);
+    }
+  }
+});
+
+test('tui/input: a paste is one event, and its end marker can arrive late', () => {
+  // Two failures this pins. A paste decoded as keystrokes runs its content through the keymap —
+  // pasting a path containing U then y would bulk-undo the session. And losing a split end marker
+  // strands the decoder in paste mode, after which every keystroke is silently swallowed forever.
+  const one = decode(['\x1b[200~rm -rf U\x1b[201~']);
+  assert.deepEqual(keysOf(one), [], 'nothing inside a paste reaches the keymap');
+  assert.deepEqual(one.filter((e) => e.t === 'paste').map((e) => e.text), ['rm -rf U']);
+
+  const late = decode(['abc\x1b[200~xy\x1b[', '201~', 'jkq']);
+  assert.deepEqual(late.filter((e) => e.t === 'paste').map((e) => e.text), ['xy'], 'the paste body is exact');
+  assert.deepEqual(keysOf(late), ['a', 'b', 'c', 'j', 'k', 'q'], 'and the decoder is not stuck — later keys still arrive');
+});
+
+test('tui/input: mouse reports decode to zero-based cells, and a lone ESC needs the flush', () => {
+  const [m] = decode(['\x1b[<0;12;34M']);
+  assert.equal(m.t, 'mouse');
+  assert.deepEqual([m.kind, m.col, m.row], ['down', 11, 33], 'the wire is 1-based; callers get cells');
+  assert.equal(decode(['\x1b[<64;1;1M'])[0].kind, 'wheel-up');
+  // ESC alone is the Escape key only once nothing follows it — otherwise every arrow key would first
+  // fire an Escape.
+  const d = tui.createDecoder();
+  assert.deepEqual(d.push('\x1b'), [], 'held, not guessed');
+  assert.equal(d.pending(), '\x1b');
+  assert.deepEqual(d.flush().map((e) => e.key), ['escape']);
+});
+
+test('groups: an id set must be expanded, or a collapsed row half-resolves', () => {
+  // What a surface shows as ONE row is often several raw records — reviewEdits collapses a same-code
+  // chain into one unit and labels it with the most recent member's id. The `--ids` path is
+  // group-unaware by design (it acts on raw records), so a surface that sends the displayed id alone
+  // resolves one member and strands the others at an intermediate state no view can name. This pins
+  // the expansion every id-set caller owes, using the same helper the single-id verbs use.
+  freshHome();
+  const S = 'grpexp';
+  const F = path.join(tmpWork(), 'chain.js');
+  const a = seedEdit(S, F, 'a\n', 'a\nb\n');
+  const b = seedEdit(S, F, 'a\nb\n', 'a\n'); // net zero — collapses with the first
+
+  const units = core.reviewEdits(S);
+  assert.equal(units.length, 1, 'the chain is ONE review unit');
+  assert.equal(units[0].id, b, 'labelled with the most recent member');
+
+  const expanded = core.groupMembers(S, units[0].id);
+  assert.deepEqual([...expanded].sort((x, y) => x - y), [a, b], 'expansion recovers every member');
+
+  core.setStatusMany(S, expanded, 'kept');
+  assert.equal(core.readLog(S).filter((r) => r.status === 'pending').length, 0, 'so nothing is left behind');
+
+  // Positive control: without expansion the defect reappears, which is what makes the assertion above
+  // meaningful rather than a restatement of setStatusMany.
+  freshHome();
+  const S2 = 'grpexp2';
+  const F2 = path.join(tmpWork(), 'chain2.js');
+  seedEdit(S2, F2, 'a\n', 'a\nb\n');
+  const rep = seedEdit(S2, F2, 'a\nb\n', 'a\n');
+  core.setStatusMany(S2, [rep], 'kept');
+  assert.equal(core.readLog(S2).filter((r) => r.status === 'pending').length, 1, 'the unexpanded id strands a member');
+});
+
+test('dashframe: every screen fits its budget at every width', () => {
+  for (const screen of ['edits', 'map', 'prompts', 'tasks', 'workflows', 'agents', 'feed', 'audit']) {
+    for (const [cols, rows] of [[40, 24], [80, 30], [120, 40], [200, 50]]) {
+      const frame = tui.renderDashFrame(dashFixture({ screen }), { cols, rows, color: false });
+      assert.equal(frame.length, rows, `${screen} @${cols}x${rows}: a frame is exactly its height`);
+      for (const line of frame) {
+        // Measured by DISPLAY width, which is the only ruler that is right for CJK and colour. A line
+        // one column too wide wraps, and every subsequent row of the frame is then off by one.
+        assert.ok(tui.displayWidth(line) <= cols, `${screen} @${cols}: "${line.slice(0, 40)}…" overflows`);
+      }
+    }
+  }
+});
+
+test('dashframe: no width silently truncates the key hints', () => {
+  // A hand-written `cols >= 96` picked a hint measuring 100 columns and fit it to `cols - 1`, so
+  // widths 96..100 cut the last keys off ("q qui") — invisibly, because a fit never reports. Spot
+  // checks miss this; only a sweep finds a five-wide window. The renderer now picks by measurement.
+  const st = dashFixture();
+  const cut = [];
+  for (let cols = 40; cols <= 200; cols++) {
+    const frame = tui.renderDashFrame(st, { cols, rows: 24, color: false });
+    const hint = frame[frame.length - 1].replace(/\s+$/, '');
+    if (tui.displayWidth(hint) > cols - 1) cut.push({ cols, why: 'over budget' });
+    // A hint that ends mid-word is a hint that was cut. Every candidate ends in "q" or "quit".
+    else if (hint && !/(^\/|q$|quit$)/.test(hint)) cut.push({ cols, hint });
+  }
+  assert.deepEqual(cut, [], `widths whose hints were truncated: ${JSON.stringify(cut.slice(0, 6))}`);
+
+  // Positive control: the sweep must be able to catch a too-long hint, or its silence proves nothing.
+  const longHint = '1-8 screens · j/k move · enter open · a keep · u undo · A/U all · / filter · e $EDITOR · ? keys · q quit';
+  assert.ok(tui.displayWidth(longHint) > 99, 'the widest hint really does exceed the budget at cols=100');
+});
+
+test('dashframe: the session leads the frame, and the picker keeps its columns', () => {
+  // Everything below the top row is scoped to ONE session, so a reader who has not noticed which one
+  // is selected can misread the whole screen. It leads the frame, and says it can be changed.
+  const withSessions = dashFixture({
+    views: { ...dashFixture().views, sessions: { active: 'fixture0', sessions: [{ id: 'fixture0' }, { id: 'other1' }] } },
+  });
+  const top = tui.renderDashFrame(withSessions, { cols: 90, rows: 12, color: false })[0];
+  assert.match(top, /fixture/, 'the top row names the session in effect');
+  assert.match(top, /2 sessions/, 'and says there are others to switch to');
+
+  // A picker's cursor REPLACES the row's leading space. Prepending shifts every column right by one
+  // and collides with the marker a row may already carry — two meanings sharing one glyph.
+  const lines = [' * aaaaaaaa   1 pending  first', '   bbbbbbbb   2 pending  second'];
+  const picking = dashFixture({ overlay: { title: 'switch session', lines, scroll: 0, cursor: 1 } });
+  const frame = tui.renderDashFrame(picking, { cols: 60, rows: 9, color: false });
+  const rows = frame.slice(4, 6);
+  assert.ok(rows[1].startsWith('>  bbbbbbbb'), `cursor replaces the lead space: ${JSON.stringify(rows[1])}`);
+  assert.ok(rows[0].startsWith(' * aaaaaaaa'), 'and the current-session marker is a different glyph, unshifted');
+  assert.equal(tui.displayWidth(rows[0]), tui.displayWidth(rows[1]), 'so both rows stay the same width');
+});
+
+test('dashframe: hostile cell text cannot repaint the screen', () => {
+  // A tool argument reaches a frame raw. An unsanitised ESC[2J here would clear the dashboard and
+  // redraw over it — from data an agent wrote, not from anything the user typed.
+  const frame = tui.renderDashFrame(dashFixture(), { cols: 100, rows: 20, color: false });
+  const joined = frame.join('\n');
+  assert.ok(!joined.includes('\x1b[2J'), 'the planted erase never reaches the frame');
+  assert.ok(joined.includes('evil.ts'), 'while the surrounding filename is still shown');
+});
+
+test('dashframe: identical state renders identically, and time is injected', () => {
+  const a = tui.renderDashFrame(dashFixture(), { cols: 100, rows: 20, color: false });
+  const b = tui.renderDashFrame(dashFixture(), { cols: 100, rows: 20, color: false });
+  assert.deepEqual(a, b, 'a pure function of state — otherwise snapshots compare two different renders');
+  const later = tui.renderDashFrame(dashFixture({ now: 5_000_000 + 3600_000 }), { cols: 100, rows: 20, color: false });
+  assert.notDeepEqual(a, later, 'and `now` really is the clock the frame reads');
+});
+
+test('dashframe: color:false emits no escapes at all', () => {
+  // The CLI's own renderers decide colour from process.stdout.isTTY at call time, which is exactly
+  // what makes them untestable. This one takes it as an argument.
+  const frame = tui.renderDashFrame(dashFixture({ screen: 'audit' }), { cols: 90, rows: 20, color: false });
+  assert.ok(!frame.some((l) => l.includes('\x1b')), 'no escape survives when colour is off');
+  const colored = tui.renderDashFrame(dashFixture({ screen: 'audit' }), { cols: 90, rows: 20, color: true });
+  assert.ok(colored.some((l) => l.includes('\x1b')), 'and colour is actually applied when it is on');
+});
+
+test('dashframe: selection means something different on each screen, deliberately', () => {
+  // A key that means "one edit" on one screen and "every edit in the session" on another is how a
+  // reviewer destroys work they meant to keep. Each screen states its own answer.
+  assert.deepEqual(tui.selectionIds(dashFixture({ screen: 'edits', cursor: 0 }), 'one'), [1]);
+  assert.deepEqual(tui.selectionIds(dashFixture({ screen: 'edits' }), 'all'), [1, 2, 3]);
+  assert.deepEqual(tui.selectionIds(dashFixture({ screen: 'prompts', cursor: 0 }), 'one'), [1, 3], 'a prompt resolves to the edits it produced');
+  // Observation screens carry no edit set, and the runtime prints why rather than doing nothing.
+  for (const screen of ['audit', 'feed', 'agents', 'tasks', 'workflows']) {
+    assert.deepEqual(tui.selectionIds(dashFixture({ screen }), 'all'), [], `${screen} rows are observations, not edits`);
+  }
+  // The filter narrows "all" — accepting everything listed must mean what is on screen.
+  assert.deepEqual(tui.selectionIds(dashFixture({ screen: 'edits', filter: 'a.ts' }), 'all'), [1]);
+});
+
+test('watch: recursion is chosen by PLATFORM, never by try/catch', () => {
+  // The only instrument that can catch this. Node does not throw for a recursive watch on Linux — since
+  // v19.1 it silently substitutes a per-FILE watcher that opens one handle per file (11,401 measured on
+  // an 11k-file store) and emits a synthetic event for each during its walk. A try/catch waiting to
+  // select the poll fallback therefore never fires, and a runtime probe on a macOS CI machine cannot
+  // observe any of it. A pure predicate can.
+  assert.equal(core.nativeRecursive('linux'), false, 'Linux must NOT take the recursive path');
+  assert.equal(core.nativeRecursive('darwin'), true);
+  assert.equal(core.nativeRecursive('win32'), true);
+  assert.equal(core.nativeRecursive('freebsd'), false, 'anything without a native recursive watch fans out');
+});
+
+test('watch: the store filter accepts logs and rejects the read path own writes', () => {
+  freshHome();
+  const roots = core.observatoryRoots({ cwd: tmpWork(), session: 'wsess' });
+  const store = roots.find((r) => r.kind === 'store');
+  assert.ok(store, 'a store root exists');
+  const dir = store.dir;
+  // Both filename SHAPES reach this: a relative path under a native recursive watch, a bare name under
+  // a per-directory fanout. The obvious port of the editors' `name === 'log.jsonl'` matches only one.
+  assert.equal(store.relevant('s1/log.jsonl', dir), true, 'recursive shape: relative path');
+  assert.equal(store.relevant('log.jsonl', dir), true, 'fanout shape: bare name');
+  assert.equal(store.relevant('s1/blobs/deadbeef', dir), false, 'blobs are not review state');
+  // These four are written BY the views a refresh renders. Accepting them makes a live surface refresh
+  // because it refreshed.
+  for (const noise of ['changemap-cache/x/y.json', 'session-meta/s1.json', 'usage-cursors/a.json', 'stats-cache.json']) {
+    assert.equal(store.relevant(noise, dir), false, `${noise} must not wake a refresh`);
+  }
+});
+
+test('watch: a missing root degrades to polling and says so', async () => {
+  freshHome();
+  const gone = path.join(tmpWork(), 'no-such-dir');
+  const degrades = [];
+  const w = core.createWatcher({
+    roots: [{ dir: gone, kind: 'store', relevant: () => true }],
+    onChange: () => {},
+    onDegrade: (d, why) => degrades.push({ d, why }),
+  });
+  try {
+    // The store directory is created by capture, not by us, so a fresh machine genuinely has none.
+    // Failing silently here would mean a dashboard that never updates and never says why.
+    assert.equal(degrades.length, 1, 'the degradation is announced');
+    assert.equal(degrades[0].why, 'ENOENT');
+    assert.equal(w.stats()[0].mode, 'poll', 'and the root falls back to polling rather than going dark');
+  } finally {
+    w.close();
+  }
+});
+
+test('watch: a real write to a session log wakes exactly one refresh', async () => {
+  freshHome();
+  const S = 'wlive';
+  core.ensureStore(S);
+  const seen = [];
+  const w = core.createWatcher({
+    roots: core.observatoryRoots({ cwd: tmpWork(), session: S }),
+    onChange: (kind) => seen.push(kind),
+    onDegrade: () => {},
+  });
+  try {
+    seedEdit(S, path.join(tmpWork(), 'w.js'), null, 'x\n');
+    // Comfortably past the 150 ms store debounce; the debounce is what collapses a burst into one.
+    await new Promise((r) => setTimeout(r, 900));
+    assert.ok(seen.includes('store'), `a log append woke the store root (saw ${JSON.stringify(seen)})`);
+    assert.ok(seen.filter((k) => k === 'store').length <= 2, 'and did not fire once per byte written');
+  } finally {
+    w.close();
+  }
+});
+
+test('textwidth: measures display columns, not string length', () => {
+  // Each case is one whose string length is a WRONG answer — that gap is the whole reason this
+  // module exists, so the comparison against .length is stated rather than implied.
+  assert.equal(tui.displayWidth('\x1b[32m✓ ok\x1b[0m'), 4, 'SGR does not occupy columns (length is 13)');
+  assert.equal(tui.displayWidth('漢字テスト'), 10, 'East Asian wide chars are 2 columns (length is 5)');
+  assert.equal(tui.displayWidth('🔬'), 2, 'astral emoji is 2 columns (length is 2 UTF-16 units)');
+  assert.equal(tui.displayWidth('é'), 1, 'a combining mark adds no column (length is 2)');
+  assert.equal(tui.displayWidth('plain'), 5, 'plain ASCII still measures as itself');
+});
+
+test('textwidth: sanitizeCell disarms frame-hostile escapes and keeps colour', () => {
+  // Transcript-derived cells reach a frame raw, so a planted erase in a tool argument would repaint
+  // over the dashboard. Colour has to survive the same pass, or every rendered cell goes monochrome.
+  assert.equal(tui.sanitizeCell('src/\x1b[2J\x1b[1;1Hfake.ts'), 'src/fake.ts', 'erase + cursor-home removed');
+  assert.equal(tui.sanitizeCell('\x1b[32mkeep\x1b[0m'), '\x1b[32mkeep\x1b[0m', 'SGR passes through verbatim');
+  assert.equal(tui.sanitizeCell('a\x1b[2Mb'), 'ab', 'uppercase M is delete-lines, not colour');
+  assert.equal(tui.sanitizeCell('a\rb'), 'a b', 'CR becomes a space so the width does not shrink');
+  assert.ok(!tui.sanitizeCell('a\x1bb').includes('\x1b'), 'a bare ESC cannot survive to swallow the next char');
+});
+
+test('textwidth: fitVisible holds the column budget and never leaks an attribute', () => {
+  const padded = tui.fitVisible('\x1b[32mab\x1b[0m', 6);
+  assert.equal(tui.displayWidth(padded), 6, 'padded to exactly the budget');
+  assert.equal((padded.match(/\x1b\[0m/g) || []).length, 1, 'already-closed input is not double-reset');
+  const clipped = tui.fitVisible('\x1b[32mabcdef', 3);
+  assert.equal(tui.displayWidth(clipped), 3, 'clipped to exactly the budget');
+  // A colour opened and then clipped away would bleed into the rest of the row, and on the last row
+  // into the user's shell after dash exits.
+  assert.ok(clipped.endsWith('\x1b[0m'), 'an open attribute is closed when the text is cut');
+  assert.equal(tui.fitVisible('漢字', 3), '漢 ', 'a wide char that would straddle the edge is dropped whole');
+  // Wrap, never ellipsize — the standing rule for content text.
+  assert.deepEqual(tui.wrapVisible('one two three', 7), ['one two', 'three']);
+  assert.ok(tui.wrapVisible('aaaaaaaaaa', 4).every((l) => tui.displayWidth(l) <= 4), 'a long word is hard-broken');
+});
+
+test('memory: fileMemories agrees with fileMemory, and builds the index once', () => {
+  freshHome();
+  // Several sessions touching a shared file set, so the index has something to cross-reference and
+  // the per-file form has many logs to revalidate against.
+  const files = [];
+  for (let f = 0; f < 5; f++) files.push(path.join(tmpWork(), `m${f}.js`));
+  for (let s = 0; s < 3; s++) {
+    const S = `mem${s}`;
+    for (const f of files) {
+      const id = seedEdit(S, f, 'a\n', 'a\nb\n');
+      if (s === 0) core.setStatus(S, id, 'kept');
+      if (s === 1) core.setStatus(S, id, 'undone');
+    }
+  }
+  core.clearFsCache();
+
+  // Equivalence first: a faster wrong answer is not a fix. Deep-equal covers lastVerdict and notes,
+  // not just the counters.
+  const batch = core.fileMemories(files);
+  for (const f of files) assert.deepEqual(batch.get(f), core.fileMemory(f), `batch matches per-file for ${path.basename(f)}`);
+
+  // Then the budget. Counting SYSCALLS, not milliseconds: the defect is a syscall count, and a
+  // wall-clock assertion on this path is flaky on CI while this one is exact.
+  const fs2 = require('fs');
+  const counts = { stat: 0, exists: 0, readdir: 0 };
+  const orig = { statSync: fs2.statSync, existsSync: fs2.existsSync, readdirSync: fs2.readdirSync };
+  fs2.statSync = (...a) => (counts.stat++, orig.statSync(...a));
+  fs2.existsSync = (...a) => (counts.exists++, orig.existsSync(...a));
+  fs2.readdirSync = (...a) => (counts.readdir++, orig.readdirSync(...a));
+  let batched, perFile;
+  try {
+    core.clearFsCache();
+    core.fileMemories(files); // warm, so both forms are measured in steady state
+    counts.stat = counts.exists = counts.readdir = 0;
+    core.fileMemories(files);
+    batched = { ...counts };
+    counts.stat = counts.exists = counts.readdir = 0;
+    for (const f of files) core.fileMemory(f);
+    perFile = { ...counts };
+  } finally {
+    Object.assign(fs2, orig);
+  }
+  // The batch revalidates the index ONCE however many files it is asked about.
+  assert.ok(batched.readdir <= 1, `batched readdir ${batched.readdir} <= 1`);
+  assert.ok(batched.stat <= 2 * 3 + 2, `batched stat ${batched.stat} stays proportional to sessions, not files`);
+  // Positive control: the per-file form pays that cost per file, so if the counters were broken (or
+  // the batch silently fell back to per-file) this assertion fails and the budget above cannot pass
+  // vacuously.
+  assert.ok(perFile.stat >= batched.stat * files.length, `per-file stat ${perFile.stat} scales with files (batched ${batched.stat})`);
+});
+
+test('observe: every flag verdict fires, and only for its own trigger', () => {
+  // All five verdicts now live in one memoized record, so a mistyped field name or a swapped pattern
+  // silently disables a whole flag class rather than failing to compile. Two of these are the reason
+  // to care: "possible hard-coded secret" and "adds a debug statement" are what a reviewer scans for.
+  // Each alternation branch gets a case, because a regex that loses one branch still matches the rest.
+  freshHome();
+  const S = 'flagall';
+  const seed = (name, added) => seedEdit(S, path.join(tmpWork(), name), 'const z = 0\n', `const z = 0\n${added}\n`);
+  const msgs = (id) => core.flagsFor(S, core.findRecord(S, id)).map((f) => f.message).join(' | ');
+
+  for (const marker of ['TODO', 'FIXME', 'XXX', 'HACK']) {
+    assert.match(msgs(seed(`m_${marker}.txt`, `// ${marker} later`)), /TODO\/FIXME/, `${marker} raises the marker flag`);
+  }
+  for (const dbg of ['console.log(x)', 'debugger', 'print(x)', 'dbg!(x)']) {
+    assert.match(msgs(seed(`d_${dbg.replace(/\W/g, '')}.txt`, dbg)), /debug statement/, `${dbg} raises the debug flag`);
+  }
+  for (const secret of ['api_key = "abc"', "api-key: 'abc'", 'secret = "abc"', 'password = "abc"', 'token = "abc"']) {
+    assert.match(msgs(seed(`s_${secret.replace(/\W/g, '')}.txt`, secret)), /hard-coded secret/, `${secret} raises the secret flag`);
+  }
+  // The negative direction, which is what stops every assertion above passing on a flag that always
+  // fires: ordinary code raises none of the three.
+  const plain = msgs(seed('plain.txt', 'const total = a + b'));
+  assert.doesNotMatch(plain, /TODO\/FIXME|debug statement|hard-coded secret/, `ordinary code is unflagged (got: ${plain})`);
+  // And the count verdict, which shares the same record.
+  const big = seedEdit(S, path.join(tmpWork(), 'big.txt'), Array.from({ length: 40 }, (_, i) => `l${i}`).join('\n') + '\n', 'l0\n');
+  assert.match(msgs(big), /large deletion/, 'a large deletion is still counted from the same memo');
+});
+
+test('observe: an XXX-only edit earns the flag but not the follow-up step', () => {
+  // The flag matches TODO|FIXME|XXX|HACK; the next step matches TODO|FIXME only. Both verdicts are
+  // memoized off the same immutable blob pair, and collapsing them onto one boolean — the obvious
+  // simplification — silently puts "follow up on the TODO" on edits that never mention one. Measured
+  // against a real store, that was 38 invented follow-ups.
+  freshHome();
+  const S = 'flagsplit';
+  const marker = path.join(tmpWork(), 'marker.js');
+  const todo = path.join(tmpWork(), 'todo.js');
+  const xxxId = seedEdit(S, marker, null, 'const a = 1 // XXX revisit this\n');
+  const todoId = seedEdit(S, todo, null, 'const b = 2 // TODO revisit this\n');
+
+  const msgs = (id) => core.flagsFor(S, core.findRecord(S, id)).map((f) => f.message);
+  assert.ok(msgs(xxxId).some((m) => /TODO\/FIXME/.test(m)), 'XXX earns the flag');
+  assert.ok(msgs(todoId).some((m) => /TODO\/FIXME/.test(m)), 'TODO earns it as well');
+
+  // Filtered to the FOLLOW-UP step specifically: both files are test-less sources, so both also earn
+  // an "Add or update tests" step, and asserting on bare file mentions would fail for the wrong reason.
+  const followUps = core.heuristicSuggestions(S).filter((s) => s.startsWith('Follow up on the TODO/FIXME'));
+  // The positive half is what stops the negative half passing vacuously: if follow-ups ever stopped
+  // being generated at all, this fails rather than the marker check quietly succeeding.
+  assert.ok(followUps.some((s) => s.includes('todo.js')), 'the TODO edit earns a follow-up step');
+  assert.ok(!followUps.some((s) => s.includes('marker.js')), 'the XXX-only edit does not');
+});
+
 test('classes: CRLF files and python classes with trailing comments are detected', () => {
   // CRLF brace language
   const br = core.detectClasses('import x;\r\nexport class Foo {\r\n  m() { return 1 }\r\n}\r\nclass Bar {}\r\n');
@@ -2550,6 +3290,42 @@ test('subagents: parseSubagents mines each spawned subagent + metrics from subag
   assert.ok(core.parseActions(cwd, S).every((a) => a.tool !== 'Read'), "subagent's Read stays out of the main action timeline");
 });
 
+test('workflows: an agent row carries its EFFORT beside its model, and never guesses one', () => {
+  // The Workflows view showed "Opus 5 · 112k tok · 10m · 0 edits" — the model but not the reasoning
+  // effort, which is the other half of "what did this agent run on". The effort rides the RECORD
+  // (`o.effort`), not `o.message`, which is the same place metrics.ts reads it.
+  freshHome();
+  const S = 'wf-effort';
+  const cwd = tmpWork();
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), '');
+  const wfDir = path.join(proj, S, 'subagents', 'workflows', 'wf_eff');
+  fs.mkdirSync(wfDir, { recursive: true });
+  const t0 = Date.now() - 60_000;
+  const rec = (effort, i) => JSON.stringify({
+    timestamp: new Date(t0 + i * 1000).toISOString(),
+    type: 'assistant',
+    ...(effort ? { effort } : {}),
+    message: { role: 'assistant', id: 'm' + i, model: 'claude-opus-5', usage: { input_tokens: 10, output_tokens: 5 }, content: [] },
+  });
+  // Two agents at DIFFERENT efforts, and a third that never declares one.
+  fs.writeFileSync(path.join(wfDir, 'agent-aaa.jsonl'), [rec('max', 1), rec('max', 2)].join('\n') + '\n');
+  fs.writeFileSync(path.join(wfDir, 'agent-bbb.jsonl'), [rec('xhigh', 1)].join('\n') + '\n');
+  fs.writeFileSync(path.join(wfDir, 'agent-ccc.jsonl'), [rec(null, 1)].join('\n') + '\n');
+
+  const runs = core.parseWorkflows(cwd, S);
+  assert.equal(runs.length, 1, 'one run');
+  const efforts = runs[0].agents.map((a) => a.effort).sort();
+  assert.deepEqual(efforts, ['', 'max', 'xhigh'],
+    'each agent reports its OWN effort — not the run\'s, and not a default');
+  assert.ok(runs[0].agents.every((a) => a.model === 'Opus 5'), 'the model still resolves beside it');
+  // The absent one is EMPTY, never a guess: the default effort differs by build and by model, so a
+  // placeholder here would be fiction the renderer would present as fact.
+  assert.equal(runs[0].agents.find((a) => a.effort === '').model, 'Opus 5',
+    'an agent with no declared effort still reports its model');
+});
+
 test('workflows: parseWorkflows aggregates a run — name/phases from the script, per-agent + summed tokens/time/edits, running flag (0.8.0) [journal/script FALLBACK: no state file]', () => {
   freshHome();
   const S = 'wf';
@@ -2764,7 +3540,15 @@ test('metrics: sessionUsage sums main-chain tokens (deduped by message id, sidec
     ].map((o) => JSON.stringify(o)).join('\n')
   );
   const u = core.sessionUsage(cwd, S);
-  assert.equal(u.total, 49400, 'Σ = (100+40000+9000+200) + (50+50); dup id + sidechain excluded');
+  // `total` is tokens PROCESSED ONCE: input + output + cacheCreation. It excludes exactly one
+  // counter — `cacheRead`, the prompt read back every turn, which made the same context count once
+  // per turn (98.8% of the old blended figure). cacheCreation IS counted: those tokens were really
+  // processed, just written to cache. This definition is chosen to AGREE with Claude Code's own
+  // display for the same run, because two tools disagreeing about one number is worse than either
+  // being slightly off.
+  assert.equal(u.total, 9400, 'Σ = input(100+50) + output(200+50) + cacheCreation(9000)');
+  assert.ok(u.total < u.cacheRead, 'the headline is no longer dominated by re-read context');
+  assert.equal(u.total + u.cacheRead, 49400, 'and it still reconciles with the old blended figure');
   assert.equal(u.input, 150, 'uncached input split out (100 + 50)');
   assert.equal(u.output, 250, 'output split out (200 + 50)');
   assert.equal(u.cacheRead, 40000, 'cache reads split out');
@@ -4356,6 +5140,116 @@ test('fscache: a pure parse is memoized per (mtime,size) and invalidates when th
   assert.equal(core.parseTranscriptActions(p, { includeSidechain: true }).length, 2, 'still parses after an explicit clear');
 });
 
+test('fscache: one transcript is READ ONCE no matter how many derivations want it (read amplification)', () => {
+  // The defect this guards: `cachedByFiles` memoizes derived VALUES per kind, so every kind still
+  // missed once and each miss did its own `readFileSync(...).split('\n')` of the SAME transcript.
+  // Measured on a real cold `views changemap` before the shared raw-text layer existed: 5,458 whole-file
+  // reads over 2,085 paths, 1,739 MiB delivered for 482 MiB of unique bytes — 3.61x, with the biggest
+  // transcripts opened 6-9 times each. Amplification is invisible to every other test in this file
+  // because the OUTPUT is identical either way; only counting the reads can see it.
+  freshHome();
+  const cwd = tmpWork();
+  const S = 'amplify';
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const tp = path.join(proj, S + '.jsonl');
+  fs.writeFileSync(
+    tp,
+    [
+      asstToolUse('a1', 'Read', { file_path: '/a.ts' }),
+      asstToolUse('a2', 'TodoWrite', { todos: [{ content: 'ship it', status: 'in_progress' }] }),
+      asstToolUse('a3', 'Bash', { command: 'echo hi', run_in_background: true }),
+      asstToolUse('a4', 'Task', { description: 'go', subagent_type: 'general-purpose' }),
+    ]
+      .map((o) => JSON.stringify(o))
+      .join('\n') + '\n'
+  );
+
+  // Count only FULL reads of the transcript; the bounded tail/head peeks (title scan, cwd scan) go
+  // through openSync/readSync and are deliberately NOT routed through the shared layer.
+  const realRead = fs.readFileSync;
+  let reads = 0;
+  fs.readFileSync = function (f, ...rest) {
+    if (typeof f === 'string' && path.resolve(f) === path.resolve(tp)) reads++;
+    return realRead.call(fs, f, ...rest);
+  };
+  // Six independent derivations, each of which owns its own `cachedByFiles` kind and each of which
+  // used to open this file for itself. Run them through a helper so the positive control below drives
+  // exactly the same work.
+  const deriveAll = () => {
+    core.parseTranscriptActions(tp, { includeSidechain: true }); // actions
+    core.transcriptInsights(cwd, S); // insights + todos
+    core.taskSnaps(cwd, S); // mined tasks
+    core.parseSubagents(cwd, S); // subagent meta
+    core.sessionProcesses(cwd, S); // background shells
+    core.sessionPrompts(cwd, S); // asks + per-ask tokens
+  };
+  try {
+    core.clearFsCache();
+    deriveAll();
+    const shared = reads;
+
+    // POSITIVE CONTROL — the counter and the workload are real. Dropping the shared layer between
+    // derivations is exactly the pre-fix world, and it MUST push the same six derivations over the
+    // limit this test enforces; if it does not, the assertion below is vacuous and proves nothing.
+    reads = 0;
+    core.clearFsCache();
+    core.parseTranscriptActions(tp, { includeSidechain: true });
+    core.clearFsCache();
+    core.transcriptInsights(cwd, S);
+    core.clearFsCache();
+    core.taskSnaps(cwd, S);
+    core.clearFsCache();
+    core.parseSubagents(cwd, S);
+    core.clearFsCache();
+    core.sessionProcesses(cwd, S);
+    core.clearFsCache();
+    core.sessionPrompts(cwd, S);
+    const unshared = reads;
+
+    assert.ok(unshared > 1, `positive control: without the shared layer the file is read ${unshared}x (must be >1, or this test cannot fail)`);
+    assert.equal(shared, 1, `one process, ${unshared > 1 ? unshared : 'several'} derivations, ONE read of the transcript (got ${shared})`);
+  } finally {
+    fs.readFileSync = realRead;
+    core.clearFsCache();
+  }
+});
+
+test('fscache: the shared text layer serves current bytes to a derivation that has not run yet', () => {
+  // The layer keys raw text on (mtimeMs, size, ino) — `ino` because the store rewrites log.jsonl and
+  // every session-meta sidecar through tmp+rename, and a same-SIZE rewrite is invisible to a
+  // (mtime, size) key whenever the filesystem clock is coarser than the gap between the two writes.
+  //
+  // The probe has to reach the TEXT layer, so it drives two derivations with DIFFERENT memo kinds over
+  // one file: the second one's `cachedByFiles` entry does not exist, so it must compute — and what it
+  // computes from is exactly the shared text this test is about.
+  freshHome();
+  const dir = tmpWork();
+  const p = path.join(dir, 't.jsonl');
+  const line = (id) => JSON.stringify(asstToolUse(id, 'Read', { file_path: '/a.ts' })) + '\n';
+  fs.writeFileSync(p, line('aa1'));
+  const T = new Date(1_600_000_000_000); // a whole-second stamp utimes can restore EXACTLY
+  fs.utimesSync(p, T, T);
+  assert.equal(core.parseTranscriptActions(p, { includeSidechain: true })[0].toolUseId, 'aa1');
+
+  const st0 = fs.statSync(p);
+  const tmp = p + '.tmp';
+  fs.writeFileSync(tmp, line('bb1')); // SAME length — only the inode and the content differ
+  fs.renameSync(tmp, p);
+  fs.utimesSync(p, T, T); // …and the ORIGINAL timestamps back, so mtime+size say "unchanged"
+  const st1 = fs.statSync(p);
+  assert.equal(st1.mtimeMs, st0.mtimeMs, 'fixture precondition: the rewrite is mtime-invisible');
+  assert.equal(st1.size, st0.size, 'fixture precondition: the rewrite is size-invisible');
+  assert.notEqual(st1.ino, st0.ino, 'fixture precondition: rename DID move the inode');
+
+  assert.equal(
+    core.parseTranscriptActions(p, { includeSidechain: false })[0].toolUseId,
+    'bb1',
+    'a derivation computing for the first time reads the CURRENT bytes, not the cached snapshot'
+  );
+  core.clearFsCache();
+});
+
 test('subagents/fleet: phase CONFIDENCE is propagated — heuristic staleness never asserted as truth (0.8.0)', () => {
   freshHome();
   const cwd = tmpWork();
@@ -4985,6 +5879,105 @@ function bashHook(session, cwd, event) {
   core.handleHookPayload({ session_id: session, cwd, tool_name: 'Bash', tool_input: { command: 'x' }, hook_event_name: event });
 }
 const blobCount = (S) => fs.readdirSync(path.join(core.storeDir(S), 'blobs')).length;
+
+test('capture: a Bash command that creates ZERO-BYTE files records no "+0 −0" rows', () => {
+  // The shape observed in a real store: 2,241 of 2,446 records had an EMPTY after-blob — postgres
+  // relation stubs from `initdb`, plus .Xauthority, .tig_history, btmp. Every one rendered as
+  // "+0 −0" with nothing behind it, so 91.6% of the review list was rows with nothing to review.
+  freshHome();
+  const S = 'bash-empty';
+  const cwd = tmpWork();
+  fs.writeFileSync(path.join(cwd, 'kept.ts'), 'one\n');
+  bashHook(S, cwd, 'PreToolUse');
+  // What a build/install step leaves behind: a dozen empty stubs and one file with real content.
+  for (let i = 0; i < 12; i++) fs.writeFileSync(path.join(cwd, `stub${i}.dat`), '');
+  fs.writeFileSync(path.join(cwd, 'real.ts'), 'a\nb\nc\n');
+  fs.writeFileSync(path.join(cwd, 'kept.ts'), 'one\ntwo\n');
+  bashHook(S, cwd, 'PostToolUse');
+
+  const files = core.readLog(S).map((r) => path.basename(r.file)).sort();
+  assert.deepEqual(files, ['kept.ts', 'real.ts'],
+    'only the two files with content are recorded — the twelve empty stubs are not');
+  // Not swallowed: one marker per command, naming the count.
+  const marker = core.readSkips(S).find((k) => k.file === '<bash-empty>');
+  assert.ok(marker, 'silence is not an option — the command says what it dropped');
+  assert.match(marker.reason, /^12 zero-byte file/, 'and how many');
+
+  // An empty file that DISAPPEARS is the same non-event, and must not become a "+0 −0" deletion.
+  bashHook(S, cwd, 'PreToolUse');
+  for (let i = 0; i < 12; i++) fs.rmSync(path.join(cwd, `stub${i}.dat`));
+  fs.rmSync(path.join(cwd, 'real.ts'));
+  bashHook(S, cwd, 'PostToolUse');
+  const after = core.readLog(S).filter((r) => r.afterBlob === null).map((r) => path.basename(r.file));
+  assert.deepEqual(after, ['real.ts'], 'the file with content is a real deletion; the stubs are not');
+});
+
+test('capture: an Edit that creates an empty file IS recorded — the guard is Bash-only', () => {
+  // The positive control that keeps the fix honest. A zero-byte file Claude wrote ON PURPOSE is a
+  // real edit; only the Bash tree walk's INFERRED side effects are filtered.
+  freshHome();
+  const S = 'bash-empty-control';
+  const cwd = tmpWork();
+  const f = path.join(cwd, 'touched.txt');
+  core.handleHookPayload({ session_id: S, cwd, tool_name: 'Write', tool_input: { file_path: f }, hook_event_name: 'PreToolUse' });
+  fs.writeFileSync(f, '');
+  core.handleHookPayload({ session_id: S, cwd, tool_name: 'Write', tool_input: { file_path: f }, hook_event_name: 'PostToolUse' });
+  const log = core.readLog(S);
+  assert.equal(log.length, 1, 'a deliberate Write of an empty file is still an edit');
+  assert.equal(log[0].tool, 'Write');
+});
+
+test('capture: Bash in $HOME snapshots nothing, and SAYS it captured nothing', () => {
+  // The observed damage: a real session that ran `install neovim` from the home directory recorded
+  // 2,445 Bash "edits" — .Xauthority, .CFUserTextEncoding, .bash_history, shell state — against one
+  // real Write. None were changes the agent made. The review list was 99.8% noise and the store held
+  // a snapshot of the user's home directory.
+  freshHome();
+  const S = 'bash-home';
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'fakehome-'));
+  const realHome = os.homedir;
+  os.homedir = () => home;
+  try {
+    fs.writeFileSync(path.join(home, '.bash_history'), 'one\n');
+    bashHook(S, home, 'PreToolUse');
+    assert.equal(core.readBashManifest(S), null, 'no manifest — the tree was never walked');
+    fs.writeFileSync(path.join(home, '.bash_history'), 'one\ntwo\n');
+    bashHook(S, home, 'PostToolUse');
+    assert.equal(core.readLog(S).length, 0, 'and nothing under $HOME was recorded');
+    const skips = core.readSkips(S);
+    assert.equal(skips.length, 1, 'silence is not an option — one marker per command');
+    assert.match(skips[0].reason, /home directory/, 'and it says why');
+
+    // The stale-manifest trap: a command in a real project, THEN one in $HOME. If the guard returns
+    // without clearing the manifest, Post diffs the project's manifest against a walk of $HOME.
+    const proj = tmpWork();
+    fs.writeFileSync(path.join(proj, 'a.ts'), 'a\n');
+    bashHook(S, proj, 'PreToolUse');
+    assert.ok(core.readBashManifest(S), 'positive control: a project directory IS walked');
+    bashHook(S, home, 'PreToolUse');
+    assert.equal(core.readBashManifest(S), null, 'and the refused command clears the stale manifest');
+    bashHook(S, home, 'PostToolUse');
+    assert.equal(core.readLog(S).length, 0, 'so nothing from $HOME is diffed into the log');
+
+    // Positive control, end to end: the same hook pair over a project directory DOES capture.
+    bashHook(S, proj, 'PreToolUse');
+    fs.writeFileSync(path.join(proj, 'a.ts'), 'A\n');
+    bashHook(S, proj, 'PostToolUse');
+    assert.equal(core.readLog(S).length, 1, 'a project tree still captures — the probe works');
+    assert.equal(path.basename(core.readLog(S)[0].file), 'a.ts');
+  } finally {
+    os.homedir = realHome;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('capture: Bash at the filesystem root is refused for the same reason', () => {
+  freshHome();
+  const S = 'bash-root';
+  bashHook(S, path.parse(process.cwd()).root, 'PreToolUse');
+  assert.equal(core.readBashManifest(S), null, 'no manifest for /');
+  assert.match(core.readSkips(S)[0].reason, /filesystem root/);
+});
 
 test('capture: bash memo — steady-state Pre is stat-only (zero file reads, zero new blobs)', () => {
   freshHome();
@@ -6957,7 +7950,12 @@ test('prompts: the session splits by what the USER asked, and work belongs to th
   assert.equal(rs[0].files, 2, 'prompt #1 touched a.js and b.js');
   assert.equal(rs[0].folders, 1, '…both in the one folder');
   assert.equal(rs[1].files, 1, 'prompt #2 touched only c.js');
-  assert.equal(rs[0].tokens, 1350, 'tokens are summed from assistant usage and deduped by message id (counted once, not twice)');
+  // input(100) + output(50) + cacheCreation(200) = 350, deduped by message id (counted once, not
+  // twice). cacheRead(1000) is EXCLUDED: it is the prompt read back each turn, so counting it made
+  // the same context accumulate per turn — it was 98.8% of the old blended 1350-style figure and
+  // reported millions where Claude Code reported ~128k for the same agent. Matching Claude Code is
+  // the point: two tools disagreeing about one run is worse than either being slightly off.
+  assert.equal(rs[0].tokens, 350, 'tokens processed once: input + output + cacheCreation, deduped by message id');
   assert.equal(rs[1].tokens, 500, 'the second ask gets only the usage in its own window');
   assert.equal(
     rs[0].tasks,
@@ -7208,7 +8206,9 @@ test('cli: clean reaches the GC blind spots — ghost cache dirs, orphaned curso
   const cd = path.join(root, 'changemap-cache', 'ghostSess');
   fs.mkdirSync(cd, { recursive: true });
   fs.writeFileSync(path.join(cd, '0123456789abcdef.json'), JSON.stringify({ stamp: '1|old', map: {} }));
-  fs.writeFileSync(path.join(cd, 'aaaabbbbccccdddd.json'), JSON.stringify({ stamp: '3|live', map: {} }));
+  // The live version comes from the product, not a literal: hardcoding it made this test fail on
+  // the next legitimate MAP_CACHE_VERSION bump, which says nothing about whether clean works.
+  fs.writeFileSync(path.join(cd, 'aaaabbbbccccdddd.json'), JSON.stringify({ stamp: core.MAP_CACHE_VERSION + '|live', map: {} }));
   // 2. usage cursors: filename is a one-way hash of the transcript path, unreachable from any session id.
   const uc = path.join(root, 'usage-cursors');
   fs.mkdirSync(uc, { recursive: true });
@@ -8422,4 +9422,2616 @@ test('installers: every shell script parses (they are run via curl | bash)', () 
     const r = cp.spawnSync('bash', ['-n', path.join(root, rel)], { encoding: 'utf8' });
     assert.equal(r.status, 0, `${rel} has a bash syntax error:\n${r.stderr}`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Pane layout — pure, so every degradation is asserted rather than discovered.
+// ---------------------------------------------------------------------------
+
+const L = (cols, rows, over = {}) =>
+  tui.resolveLayout({ cols, rows, minimized: new Set(), focus: 'traces', ...over });
+
+test('layout: the computed thresholds are where the spec says they are', () => {
+  // These numbers are the whole degradation story, so they are pinned rather than described. Two
+  // columns now, not three: Traces (30) + Detail (36) + one seam.
+  assert.equal(L(67, 24).mode, 'wide', '67 columns is the exact minimum for both columns');
+  assert.equal(L(66, 24).mode, 'stack', 'and 66 is one short');
+  // The bottom dock opens once the column band still clears COL_FLOOR after the top band is carved.
+  // Derived, not hard-coded: a structural change should move this number, not break the test.
+  let opensAt = null;
+  for (let r = 10; r <= 60 && opensAt === null; r++) if (L(120, r).boxes.some((b) => b.id === 'dashboards')) opensAt = r;
+  assert.ok(opensAt !== null, 'the bottom dock opens at SOME height');
+  assert.ok(!L(120, opensAt - 1).boxes.some((b) => b.id === 'dashboards'), `and not one row below (${opensAt - 1})`);
+});
+
+test('layout: panes tile the width exactly, with one seam between neighbours', () => {
+  // An off-by-one here is invisible in a mockup and corrupts every frame, so it is checked by
+  // arithmetic over a sweep rather than by eye at one width.
+  for (let cols = 40; cols <= 200; cols += 1) {
+    for (const rows of [24, 30, 36]) {
+      const lay = L(cols, rows);
+      const band = lay.boxes.filter((b) => b.id !== 'dashboards' && b.id !== 'prompts').sort((a, b) => a.rect.x - b.rect.x);
+      if (!band.length) continue;
+      assert.equal(band[0].rect.x, 0, `${cols}x${rows}: band starts at 0`);
+      for (let i = 1; i < band.length; i++) {
+        const prev = band[i - 1].rect;
+        assert.equal(band[i].rect.x, prev.x + prev.w + 1, `${cols}x${rows}: exactly one seam column`);
+      }
+      const last = band[band.length - 1].rect;
+      assert.equal(last.x + last.w, cols, `${cols}x${rows}: the band ends flush at the right edge`);
+      for (const b of lay.boxes) assert.ok(b.rect.w > 0 && b.rect.h > 0, 'no zero-extent box');
+    }
+  }
+});
+
+test('layout: the latch — growing the terminal never shrinks a pane', () => {
+  // Without this, 27->28 rows takes Traces from 22 rows to 16: the panel lurches while the reader is
+  // still dragging the edge. The runtime folds `forced` into `minimized`; only the reader clears it.
+  // The sweep steps ONE row at a time because a real drag is continuous — a coarse sweep steps over
+  // the exact boundary where the dock opens and reports a clean bill of health it did not earn.
+  const sweep = (latch) => {
+    const minimized = new Set();
+    const seen = [];
+    for (let rows = 8; rows <= 50; rows++) {
+      const lay = tui.resolveLayout({ cols: 80, rows, minimized: latch ? minimized : new Set(), focus: 'traces' });
+      // The PRODUCT's latch, not a re-implementation: folding `forced` in with two lines here would
+      // keep passing against a runtime that had stopped latching altogether.
+      if (latch) for (const id of tui.latchMinimized(minimized, lay)) minimized.add(id);
+      const t = lay.boxes.find((b) => b.id === 'traces');
+      seen.push({ rows, h: t ? t.rect.h : 0 });
+    }
+    const shrank = [];
+    for (let i = 1; i < seen.length; i++) {
+      if (seen[i].h < seen[i - 1].h) shrank.push({ at: seen[i].rows, from: seen[i - 1].h, to: seen[i].h });
+    }
+    return shrank;
+  };
+
+  // Positive control FIRST: prove the sweep can see a lurch before trusting it to report none.
+  const unlatched = sweep(false);
+  assert.ok(
+    unlatched.length > 0,
+    `the un-latched control must lurch somewhere, or this test proves nothing: ${JSON.stringify(unlatched)}`
+  );
+
+  assert.deepEqual(sweep(true), [], 'with the latch, growing never shrinks Traces');
+});
+
+test('layout: zoom gives one full-extent pane, for every pane', () => {
+  for (const id of tui.PANE_SPECS.map((p) => p.id)) {
+    for (const [cols, rows] of [[80, 24], [120, 36], [100, 30], [60, 20], [200, 50]]) {
+      const lay = tui.resolveLayout({ cols, rows, minimized: new Set(), zoom: id, focus: id });
+      assert.equal(lay.boxes.length, 1, `zoom ${id} at ${cols}x${rows}: exactly one box`);
+      assert.equal(lay.boxes[0].id, id);
+      assert.equal(lay.boxes[0].rect.w, cols, 'full width');
+      assert.equal(lay.boxes[0].rect.h, lay.bodyH, 'full body height');
+    }
+  }
+});
+
+test('layout: a pane that will not fit says what it would take', () => {
+  const lay = L(60, 24);
+  assert.ok(!lay.boxes.some((b) => b.id === 'detail'), 'Detail does not fit beside Traces at 60 columns');
+  const b = lay.blocked.find((x) => x.pane === 'detail');
+  assert.ok(b && b.need === 67, `it names the 67 columns it needs, got ${JSON.stringify(b)}`);
+  const d = lay.blocked.find((x) => x.pane === 'dashboards');
+  assert.ok(d && d.needRows === 23, `and Dashboards names its 23 body rows, got ${JSON.stringify(d)}`);
+  // Every pane keeps its chip even when it has no box, so a minimized pane never loses its counter.
+  assert.equal(lay.bar.length, tui.BAR_ENTRIES.length, 'every chip stays on the window bar, open or not');
+});
+
+test('layout: the window bar leads the frame, in the order the reader was promised', () => {
+  const lay = L(140, 36);
+  // Order, keys and titles together: the bar is the frame's table of contents, and every one of the
+  // three is something a reader navigates by.
+  // FIVE chips over four panes: Detail's two faces get a key each, so "show me the map" and "show me
+  // this diff" are one keystroke apart rather than a keystroke and then a swap.
+  assert.deepEqual(
+    lay.bar.map((c) => `F${c.key} ${c.title}`),
+    ['F1 Prompts', 'F2 Traces', 'F3 Map', 'F4 Diff', 'F5 Dashboards'],
+    'left to right: what was asked, what it changed, the map of it, the diff, then everything else'
+  );
+  assert.deepEqual(lay.bar.map((c) => c.pane), ['prompts', 'traces', 'detail', 'detail', 'dashboards'],
+    'and the two middle chips are ONE window');
+  const f = tui.renderDashFrame(paneFixture(), { cols: 140, rows: 36, color: false });
+  assert.match(f[0], /F1 .?Prompts.*F2 .?Traces.*F3 .?Map.*F4 .?Diff.*F5 .?Dashboards/, 'and row 0 draws it');
+  assert.match(f[1], /fixture/, 'the session bar follows it, on row 1');
+  // The digits belong to EDITS now, so no chip may advertise a bare one.
+  assert.doesNotMatch(f[0], /(^|\s)[0-9]\s+.?(Prompts|Traces|Dashboards|Diff|Map)/, 'no chip claims a digit');
+
+  // Exactly one of Detail's two chips is ever current, or the bar stops answering "where am I".
+  for (const face of [0, 1]) {
+    const l = tui.resolveLayout({ cols: 140, rows: 36, minimized: new Set(), focus: 'detail', tab: {}, detailFace: face });
+    const lit = l.bar.filter((c) => c.focused);
+    assert.equal(lit.length, 1, `face ${face}: one chip is marked`);
+    assert.equal(lit[0].title, face === 1 ? 'Map' : 'Diff');
+  }
+});
+
+test('layout: hit-testing reads the geometry the renderer drew from', () => {
+  const lay = L(120, 36);
+  for (const b of lay.boxes) {
+    assert.deepEqual(tui.hitTest(lay, b.rect.x + 1, b.titleRow), { t: 'title', pane: b.id });
+    for (const s of b.tabSpans) {
+      const hit = tui.hitTest(lay, s.x, b.tabsRow);
+      assert.deepEqual(hit, { t: 'tab', pane: b.id, index: s.index }, `tab ${s.label} is clickable where it is drawn`);
+    }
+    const inBody = tui.hitTest(lay, b.body.x + 3, b.body.y + 1);
+    assert.equal(inBody && inBody.t, 'body');
+    assert.equal(inBody.pane, b.id);
+  }
+  // The window bar: the chip focuses, the twig cell toggles minimize. Two targets, one chip.
+  for (const chip of lay.bar) {
+    assert.deepEqual(tui.hitTest(lay, chip.twigX, 0), { t: 'windowbar', pane: chip.pane, part: 'twig', face: chip.face });
+    // A face chip carries WHICH face it selects, so a click on it can set the face rather than only
+    // focusing the window and leaving the reader to swap.
+    assert.deepEqual(tui.hitTest(lay, chip.x, 0), { t: 'windowbar', pane: chip.pane, part: 'chip', face: chip.face });
+  }
+  assert.equal(tui.hitTest(lay, 0, 1).part, 'session', 'row 1 is the session, sharing its line with the counts');
+  assert.equal(tui.hitTest(lay, 0, 35).part, 'keys');
+  assert.equal(lay.chrome.top, 2, 'two chrome rows above the body, not three');
+});
+
+test('layout: a pane with an action bar owns that row, and the mouse can reach every button', () => {
+  // THE defect this redesign exists for. `makeBox` gave a tab-less pane `body.y = y + 1` while the
+  // renderer drew Detail's navbar there, so `hitTest` called the button row body: every button was
+  // painted where nothing was clickable, each body click landed one row off, and the pane composed
+  // one line taller than its box — which the compositor dropped off the bottom.
+  const st = paneFixture({
+    diffPatch: '@@ -1,2 +1,3 @@\n keep\n-was\n+now\n',
+    diffMeta: { id: 5, path: '/w/a.ts', added: 1, removed: 1, verb: 'Write' },
+  });
+  for (const cols of [80, 100, 120, 150, 200]) {
+    const lay = tui.resolveLayout({ cols, rows: 36, minimized: new Set(), focus: 'detail', tab: {} });
+    const box = lay.boxes.find((b) => b.id === 'detail');
+    if (!box) continue;
+    assert.equal(box.navRow, box.titleRow + 1, `${cols}: the bar sits under the title`);
+    assert.equal(box.body.y, box.navRow + 1, `${cols}: and the body starts BELOW it`);
+    assert.equal(box.body.h, box.rect.h - 2, `${cols}: two chrome rows are accounted for`);
+    const btns = tui.detailNavButtons(box, st);
+    assert.ok(btns.length > 0, `${cols}: some buttons are drawn`);
+    for (const b of btns) {
+      // Every cell the button occupies, not just its first column.
+      for (const x of [b.x, b.x + b.w - 1]) {
+        assert.deepEqual(tui.hitTest(lay, x, box.navRow), { t: 'nav', pane: 'detail' }, `${cols}: ${b.action} at col ${x}`);
+      }
+    }
+  }
+  // Positive control: the OLD geometry must fail this. A hand-built box with the pre-fix body offset
+  // classifies the same row as body, which is exactly how the bug shipped through a green suite.
+  const lay = tui.resolveLayout({ cols: 150, rows: 36, minimized: new Set(), focus: 'detail', tab: {} });
+  const box = lay.boxes.find((b) => b.id === 'detail');
+  const old = {
+    ...lay,
+    boxes: lay.boxes.map((b) => (b.id === 'detail' ? { ...b, navRow: -1, body: { ...b.body, y: b.titleRow + 1, h: b.rect.h - 1 } } : b)),
+  };
+  assert.equal(tui.hitTest(old, box.rect.x + 3, box.titleRow + 1).t, 'body', 'the un-fixed geometry calls the bar row body');
+});
+
+test('layout: the tab strip drops whole tabs and names the count, never clipping a label', () => {
+  // Dashboards carries every "what else is going on" surface, so its strip is the long one; at narrow
+  // widths some tabs cannot be drawn. A clipped tab name is the same defect as a clipped path, so the
+  // strip drops whole tabs and SAYS how many it dropped.
+  const all = tui.PANE_SPECS.find((p) => p.id === 'dashboards').tabs;
+  let sawDrop = false;
+  for (let cols = 20; cols <= 140; cols++) {
+    for (const sel of [0, Math.floor(all.length / 2), all.length - 1]) {
+      const lay = tui.resolveLayout({ cols, rows: 36, minimized: new Set(), focus: 'dashboards', tab: { dashboards: sel } });
+      const d = lay.boxes.find((b) => b.id === 'dashboards');
+      if (!d) continue;
+      for (const s of d.tabSpans) {
+        assert.equal(s.label, all[s.index], `cols=${cols}: label intact`);
+      }
+      assert.ok(d.tabSpans.some((s) => s.selected), `cols=${cols} sel=${sel}: the selected tab is always drawn`);
+      // The "names the count" half, which no test ever asserted: what is hidden is REPORTED, and the
+      // number is the truth rather than a decoration.
+      const { pre, post } = d.tabMore;
+      const drawn = d.tabSpans.length;
+      const hidden = (pre ? pre.hidden : 0) + (post ? post.hidden : 0);
+      assert.equal(drawn + hidden, all.length, `cols=${cols} sel=${sel}: drawn + hidden accounts for every tab`);
+      if (pre) assert.equal(pre.hidden, d.tabSpans[0].index, 'the pre-count is how many precede the first drawn tab');
+      if (hidden) sawDrop = true;
+    }
+  }
+  assert.ok(sawDrop, 'the sweep must actually reach a width that drops tabs, or it proves nothing');
+});
+
+const paneFixture = (over = {}) => ({
+  ...dashFixture(),
+  panes: { minimized: new Set(), zoom: null, focus: 'traces', tab: {}, cursor: {}, scroll: {} },
+  ...over,
+});
+
+test('tui: the Traces list can be ordered by recency, path or churn — and defaults to recency', () => {
+  // A 546-file session is not read chronologically. `path` groups a package together and `churn`
+  // puts the biggest changes on top; `recent` stays the default, because that is the order the
+  // payload arrives in and the one the pane has always shown.
+  const edits = [
+    { id: 1, file: '/w/zebra.ts',  rel: 'zebra.ts',  status: 'pending', ts: 3000, added: 1,   removed: 0 },
+    { id: 2, file: '/w/alpha.ts',  rel: 'alpha.ts',  status: 'pending', ts: 2000, added: 900, removed: 5 },
+    { id: 3, file: '/w/middle.ts', rel: 'middle.ts', status: 'pending', ts: 1000, added: 10,  removed: 0 },
+  ];
+  const order = (sort) => {
+    const st = paneFixture({ views: { list: { edits } }, sort, panes: { minimized: new Set(), zoom: null, focus: 'traces', tab: {}, cursor: {}, scroll: {} } });
+    const frame = tui.renderDashFrame(st, { cols: 150, rows: 34, color: false });
+    // The FILE HEADERS, in the order they are drawn.
+    return frame.flatMap((l) => (l.match(/\b(zebra|alpha|middle)\.ts\b/) || []).slice(1));
+  };
+
+  assert.deepEqual(order(undefined), ['zebra', 'alpha', 'middle'], 'the default is the payload order');
+  assert.deepEqual(order('recent'), ['zebra', 'alpha', 'middle'], 'and `recent` says so explicitly');
+  assert.deepEqual(order('path'), ['alpha', 'middle', 'zebra'], 'by path');
+  assert.deepEqual(order('churn'), ['alpha', 'middle', 'zebra'], 'by churn — 905, 10, 1');
+  // …and the two are NOT the same ordering by accident: churn puts middle (10) above zebra (1),
+  // which alphabetical also does. Make the fixture discriminate.
+  const edits2 = [
+    { id: 1, file: '/w/aaa.ts', rel: 'aaa.ts', status: 'pending', ts: 3000, added: 1,   removed: 0 },
+    { id: 2, file: '/w/zzz.ts', rel: 'zzz.ts', status: 'pending', ts: 2000, added: 500, removed: 0 },
+  ];
+  const order2 = (sort) => {
+    const st = paneFixture({ views: { list: { edits: edits2 } }, sort, panes: { minimized: new Set(), zoom: null, focus: 'traces', tab: {}, cursor: {}, scroll: {} } });
+    return tui.renderDashFrame(st, { cols: 150, rows: 34, color: false })
+      .flatMap((l) => (l.match(/\b(aaa|zzz)\.ts\b/) || []).slice(1));
+  };
+  assert.deepEqual(order2('path'), ['aaa', 'zzz'], 'path is alphabetical');
+  assert.deepEqual(order2('churn'), ['zzz', 'aaa'], 'churn is not — the big change leads');
+});
+
+test('panes: every frame fills the terminal exactly, at every size', () => {
+  for (const cols of [60, 67, 80, 98, 100, 120, 160, 200]) {
+    for (const rows of [10, 20, 24, 27, 28, 36, 50]) {
+      for (const color of [false, true]) {
+        const f = tui.renderDashFrame(paneFixture(), { cols, rows, color });
+        assert.equal(f.length, rows, `${cols}x${rows} color=${color}: exactly ${rows} lines`);
+        const over = f.map((l, i) => ({ i, w: tui.displayWidth(l) })).filter((x) => x.w > cols);
+        assert.deepEqual(over, [], `${cols}x${rows} color=${color}: lines over budget ${JSON.stringify(over)}`);
+      }
+    }
+  }
+});
+
+test('panes: a wrapped row reassembles to its row text, character for character', () => {
+  // A row too wide for its pane wraps. If wrapping is lossy the reader sees a path that does not
+  // exist and cannot tell — strictly worse than truncation, which at least announces itself. Two
+  // real defects came out of this: a `join(' ')` that welded `handler.md` into `handle r.md`, and a
+  // check that hard-coded the pane width one column short and blamed the renderer for its own cut.
+  //
+  // The assertion deliberately does NOT normalise whitespace. Squashing spaces out before comparing
+  // makes `handle r.md` and `handler.md` identical — it would have passed the very bug that prompted
+  // this test. A path has no spaces, so it must come back with none injected.
+  const long = 'plans/there-s-a-very-long-directory-name/and-another-one/deeply-nested-file.ts';
+  const shown = 'and-another-one/deeply-nested-file.ts'; // rowsFor abbreviates to parent/basename
+  const st = paneFixture({
+    views: { list: { edits: [{ id: 7, file: long, added: 12, removed: 3, state: 'pending', ts: 0 }] } },
+  });
+  const reassemble = (f, box) =>
+    f
+      .slice(box.body.y, box.body.y + box.body.h)
+      .map((l) => l.slice(0, box.rect.w).replace(/\s+$/, ''))
+      .map((l) => l.slice(1)) // drop the cursor gutter column, which is chrome, not content
+      .map((l) => {
+        const m = l.match(/^\s*▸(.*)$/); // a continuation contributes only its own text
+        return m ? m[1] : l;
+      })
+      .join('');
+
+  for (const cols of [60, 70, 80, 100, 120]) {
+    const lay = tui.resolveLayout({ cols, rows: 30, minimized: new Set(), focus: 'traces' });
+    const box = lay.boxes.find((b) => b.id === 'traces');
+    if (!box) continue; // width from the LAYOUT, never a hand-written constant
+    const got = reassemble(tui.renderDashFrame(st, { cols, rows: 30, color: false }), box);
+    assert.ok(got.includes(shown), `cols=${cols}: the path must survive wrapping intact\n  want: ${shown}\n  got:  ${got}`);
+  }
+
+  // Positive control: the exact defect this guards against — rejoining hard-broken pieces with a
+  // space — must fail the same `includes` check, or the assertions above prove nothing.
+  const parts = tui.wrapVisible(shown, 20);
+  assert.ok(parts.length > 1, 'the fixture really does wrap');
+  assert.equal(parts.join(''), shown, 'wrapVisible itself is lossless for a space-free token');
+  assert.ok(!parts.join(' ').includes(shown), 'and a space-rejoin corrupts it, so the check can fail');
+});
+
+test('panes: the selection is said ONCE, and stays legible with no colour at all', () => {
+  // The row used to carry a `>` marker AND a colour band — one fact stated twice, on every list on
+  // screen. Colour now carries it alone, and the marker is what is left when there is no colour.
+  // The state glyph must survive either way: overwriting the row's first cell with the marker ate the
+  // pending/kept/undone mark, which is the one thing the reader is there to act on.
+  const st = paneFixture({ panes: { minimized: new Set(), zoom: null, focus: 'traces', tab: {}, cursor: { traces: 0 }, scroll: {} } });
+  const lay = tui.resolveLayout({ cols: 120, rows: 30, minimized: new Set(), focus: 'traces' });
+  const box = lay.boxes.find((b) => b.id === 'traces');
+
+  const plain = tui.renderDashFrame(st, { cols: 120, rows: 30, color: false })[box.body.y];
+  assert.match(plain, /^>[?+x✓✗]/, `no colour: marker then state glyph, got ${JSON.stringify(plain.slice(0, 6))}`);
+
+  const lit = tui.renderDashFrame(st, { cols: 120, rows: 30, color: 'truecolor' })[box.body.y];
+  assert.ok(/^\x1b\[7m/.test(lit), `with colour the focused row is a band, got ${JSON.stringify(lit.slice(0, 12))}`);
+  const visible = lit.replace(/\x1b\[[0-9;]*m/g, '');
+  assert.match(visible, /^ [?+x✓✗]/, `and the gutter is blank, not an arrow: ${JSON.stringify(visible.slice(0, 6))}`);
+
+  // An UNFOCUSED pane's cursor is marked too — differently, and not by dimming, which with the arrow
+  // gone would read as "disabled" rather than "selected".
+  const un = paneFixture({ panes: { minimized: new Set(), zoom: null, focus: 'detail', tab: {}, cursor: { traces: 0 }, scroll: {} } });
+  const other = tui.renderDashFrame(un, { cols: 120, rows: 30, color: 'truecolor' })[box.body.y];
+  assert.ok(/^\x1b\[48;2;/.test(other), `unfocused gets a band of its own, got ${JSON.stringify(other.slice(0, 14))}`);
+  assert.notEqual(other.slice(0, 8), lit.slice(0, 8), 'and it is not the focused one');
+});
+
+test('panes: a size that cannot hold a window says what it would take', () => {
+  const f = tui.renderDashFrame(paneFixture(), { cols: 60, rows: 24, color: false });
+  const status = f[f.length - 2];
+  assert.match(status, /Detail needs 67 cols/, 'the status row names the cost, rather than the window just being gone');
+  // And the window keeps its chip on the bar, so its jump key and counter never disappear.
+  assert.match(f[0], /F4 .?Diff/, 'Detail keeps both its chips when minimized');
+});
+
+test('panes: zoom announces itself, and names the edit it is showing', () => {
+  const st = paneFixture({
+    panes: { minimized: new Set(), zoom: 'detail', focus: 'detail', tab: {}, cursor: {}, scroll: {} },
+    diffPatch: '@@ -1,2 +1,3 @@\n keep\n-was\n+now\n',
+    diffMeta: { id: 5, path: '/w/pkg/src/a.ts', added: 1, removed: 1, verb: 'Write' },
+  });
+  const f = tui.renderDashFrame(st, { cols: 120, rows: 30, color: false });
+  assert.match(f[0], /ZOOM Detail/, 'a zoom that is not announced leaves "why can I only see one thing" unanswered');
+  // Full screen is where the surrounding list is GONE, so the status row becomes the edit's address.
+  assert.match(f[f.length - 2], /edit #5 · \/w\/pkg\/src\/a\.ts/, 'the status row names the edit and its whole path');
+  // And the path is never cut to fit: a narrow frame drops to a shorter form rather than a false one.
+  // Sweeping every width also proves the ladder never emits a path that was trimmed to fit.
+  for (let cols = 12; cols <= 60; cols++) {
+    const bar = tui.renderDashFrame(st, { cols, rows: 30, color: false })[28].trimEnd();
+    assert.ok(
+      /^edit #5( · (\/w\/pkg\/src\/a\.ts|pkg\/src\/a\.ts))?$/.test(bar) || bar === '',
+      `no truncated path at ${cols} cols, got ${JSON.stringify(bar)}`
+    );
+  }
+  // A zoom is the reader closing the other panes on purpose, so nothing may report what they "need".
+  assert.doesNotMatch(f[f.length - 2], /needs \d+ (cols|body rows)/, 'a zoom does not price the panes it hid');
+});
+
+test('dashframe: an overlay with a cursor is a picker, one without is a reader', () => {
+  // The runtime distinguishes the two by `cursor`, and dispatches Enter differently for each. If a
+  // reader-overlay ever grew a cursor it would silently become selectable, so the contract is pinned
+  // here: the rendered picker marks exactly one row, and the reader marks none.
+  const lines = [' one', ' two', ' three'];
+  const reader = tui.renderDashFrame(dashFixture({ overlay: { title: 'settings', lines, scroll: 0 } }), { cols: 60, rows: 10, color: false });
+  assert.equal(reader.filter((l) => l.startsWith('>')).length, 0, 'a reader overlay marks no row');
+  const picker = tui.renderDashFrame(dashFixture({ overlay: { title: 'menu', lines, scroll: 0, cursor: 1 } }), { cols: 60, rows: 10, color: false });
+  assert.equal(picker.filter((l) => l.startsWith('>')).length, 1, 'a picker marks exactly one');
+});
+
+test('dashframe: an open filter is visible before a single character is typed', () => {
+  // The keys row used to print the prompt only when the buffer was non-empty, so pressing `/` looked
+  // identical to normal mode. An invisible mode that swallows keystrokes is indistinguishable from a
+  // frozen dashboard — and in the runtime those keystrokes were reaching `a`(keep) and `u`(undo).
+  const keys = (over) => {
+    const f = tui.renderDashFrame(dashFixture(over), { cols: 100, rows: 20, color: false });
+    return f[f.length - 1].trim();
+  };
+  assert.equal(keys({ filterOpen: true }), '/_', 'the prompt appears the moment the mode opens');
+  assert.equal(keys({ filterOpen: true, filter: 'readme' }), '/readme_', 'and carries a caret while typing');
+  assert.equal(keys({ filterOpen: false, filter: 'readme' }), '/readme', 'a applied filter shows without the caret');
+  assert.notEqual(keys({}), keys({ filterOpen: true }), 'normal mode and filter mode never render the same');
+});
+
+test('dashframe: a pending confirmation states the verb, the real count, and the answer keys', () => {
+  const f = tui.renderDashFrame(
+    dashFixture({ confirm: { verb: 'undo', ids: [1, 2, 3], label: 'every row listed' } }),
+    { cols: 100, rows: 20, color: false }
+  );
+  const status = f[f.length - 2].trim();
+  assert.match(status, /undo 3 edit\(s\)/, 'the REAL count, so a bulk revert is never a surprise');
+  assert.match(status, /\[y\/n\]/, 'and the keys that answer it — which the runtime must actually bind');
+});
+
+test('fscache: the shared text layer sees an append, and never serves a stale transcript', () => {
+  // The whole point of this layer is that ten derivations read one transcript once instead of 46
+  // times. That is only safe if a GROWING file — the live-session case, which is the case the
+  // dashboard exists for — is never served from cache after it changes. The stamp is
+  // (mtimeMs:size:ino), and size moves on append, so this must hold.
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'obs-fscache-')), 't.jsonl');
+
+  fs.writeFileSync(f, 'one\ntwo\n');
+  const first = core.readLines(f);
+  assert.deepEqual(first, ['one', 'two', ''], 'reads the file');
+
+  // Positive control: a SECOND read with no change must come from the cache, or this test cannot
+  // distinguish "invalidated correctly" from "never cached at all".
+  assert.strictEqual(core.readText(f), core.readText(f), 'unchanged file is served from cache');
+
+  fs.appendFileSync(f, 'three\n');
+  const after = core.readLines(f);
+  assert.ok(after.includes('three'), `an append must be visible, got ${JSON.stringify(after)}`);
+  assert.equal(after.length, first.length + 1, 'exactly one line more');
+
+  // And a truncation/replacement (a GC'd or rewritten transcript) must not serve the longer text.
+  fs.writeFileSync(f, 'only\n');
+  assert.deepEqual(core.readLines(f), ['only', ''], 'a shrunken file is re-read, not served long');
+
+  fs.rmSync(path.dirname(f), { recursive: true, force: true });
+});
+
+test('dash: every advertised key is bound, under the name the decoder really emits', () => {
+  // Three keys shipped advertised and dead. `e` had no handler at all. `Tab` and `^D` were written in
+  // the runtime as the BYTES '\t' and '\x04' while the decoder hands over the names `tab` and
+  // `d`+ctrl, so those comparisons could never be true — a defect no amount of reading the switch
+  // would reveal, because both spellings look correct in isolation. So: run the decoder.
+  const bytes = {
+    // A lone ESC is the Escape KEY only once nothing follows it, so it resolves through `flush()` —
+    // which is exactly why the loop below concatenates the flush rather than trusting `push` alone.
+    tab: '\t', enter: '\r', escape: '\x1b', backspace: '\x7f',
+    up: '\x1b[A', down: '\x1b[B', right: '\x1b[C', left: '\x1b[D',
+    pgup: '\x1b[5~', pgdn: '\x1b[6~',
+    f1: '\x1bOP', f2: '\x1bOQ', f3: '\x1bOR', f4: '\x1bOS',
+  };
+  for (const [name, seq] of Object.entries(bytes)) {
+    const d = tui.createDecoder();
+    const got = d.push(seq).concat(d.flush()).filter((e) => e.t === 'key').map((e) => e.key);
+    assert.ok(got.includes(name), `${JSON.stringify(seq)} decodes to ${name}, got ${JSON.stringify(got)}`);
+    assert.ok(tui.KEY_BINDINGS.has(name), `…and ${name} is bound`);
+  }
+  // ^C and ^D arrive NAMED with ctrl set, never as the raw byte.
+  for (const [seq, name] of [['\x03', 'c'], ['\x04', 'd']]) {
+    const ev = tui.createDecoder().push(seq).find((e) => e.t === 'key');
+    assert.deepEqual({ key: ev.key, ctrl: ev.ctrl }, { key: name, ctrl: true }, `${JSON.stringify(seq)} is ctrl+${name}`);
+    assert.ok(tui.KEY_BINDINGS.has(name), `…and ${name} is bound`);
+  }
+  // F-keys have several encodings in the wild, and every one has to reach the same binding.
+  for (const seq of ['\x1bOP', '\x1b[11~', '\x1b[1P', '\x1b[P']) {
+    assert.equal(tui.createDecoder().push(seq).find((e) => e.t === 'key').key, 'f1', `${JSON.stringify(seq)} is F1`);
+  }
+
+  // And the other direction: every single-key token the frame ADVERTISES must be bound. This is the
+  // assertion that would have caught `e $EDITOR` sitting in the key row with no handler.
+  const advertised = new Set();
+  for (const hint of tui.KEY_HINTS) {
+    for (const tok of hint.split(' · ')) {
+      for (const m of tok.matchAll(/(?:^|[ /])(Tab|[a-zA-Z=+<>[\]/?])(?=[ /]|$)/g)) advertised.add(m[1]);
+    }
+  }
+  assert.ok(advertised.size >= 6, `the scrape must actually find keys, got ${JSON.stringify([...advertised])}`);
+  for (const k of advertised) {
+    const name = /^F[1-4]$/.test(k) ? k.toLowerCase() : k === 'Tab' ? 'tab' : k;
+    assert.ok(tui.KEY_BINDINGS.has(name), `the key row advertises ${k}, so something must handle it`);
+  }
+  // Nothing may advertise j/k any more — arrows are the only way to move.
+  for (const hint of tui.KEY_HINTS) assert.doesNotMatch(hint, /\bj\/k\b|\bj\b|\bk\b/, `no j/k in ${JSON.stringify(hint)}`);
+  assert.ok(!tui.KEY_BINDINGS.has('j') && !tui.KEY_BINDINGS.has('k'), 'and they are not bound either');
+});
+
+test('tui: the filter matches scattered letters, on every pane, and literals still win', () => {
+  // fzf's rule: `pcsi` finds `packages/core/src/index.ts`. `fuzzyMatch` had been written, exported and
+  // documented in the help screen — and never called: the pane predicate was still `includes`, so the
+  // whole feature was one unreferenced function. An export with no callers is what that looks like.
+  // Indices MEASURED, not guessed: the match is greedy left-to-right, so `c` lands on the `c` in
+  // "packages" rather than the one in "core". That is fzf's own behaviour and what a highlighter has
+  // to render.
+  assert.deepEqual(tui.fuzzyMatch('packages/core/src/index.ts', 'pcsi'), [0, 2, 7, 18],
+    'a scattered query matches, and reports WHERE, so a caller can highlight it');
+  assert.equal(tui.fuzzyMatch('packages/core/src/index.ts', 'zzz'), null, 'and a miss is a miss');
+  // Contiguous FIRST: a literal query must behave exactly as it did before the rule changed.
+  assert.deepEqual(tui.fuzzyMatch('a.ts', '.ts'), [1, 2, 3], 'a literal hit is the contiguous run, not a scattered one');
+
+  const edits = [
+    { id: 1, file: '/w/packages/core/src/index.ts', rel: 'packages/core/src/index.ts', status: 'pending', ts: 3000, added: 1, removed: 0 },
+    { id: 2, file: '/w/README.md', rel: 'README.md', status: 'pending', ts: 2000, added: 1, removed: 0 },
+  ];
+  const shown = (filter) => {
+    const st = paneFixture({ views: { list: { edits } }, filter, panes: { minimized: new Set(), zoom: null, focus: 'traces', tab: {}, cursor: {}, scroll: {} } });
+    return tui.renderDashFrame(st, { cols: 150, rows: 34, color: false }).join('\n');
+  };
+  // The PANE, not just the helper — this is the wire that was missing.
+  assert.ok(shown('pcsi').includes('index.ts') && !shown('pcsi').includes('README'),
+    'the pane narrows by the scattered rule, which is what the help screen promises');
+  assert.ok(shown('.ts').includes('index.ts') && !shown('.ts').includes('README'),
+    'and a literal still narrows the way it always did');
+});
+
+test('tui: syntax colour is opt-in, context-only, and never guesses', () => {
+  // The one feature whose cost is on a frame that re-renders per keystroke, so it ships OFF and is
+  // applied to the ~40 drawn rows rather than to the patch: measured at +0.04ms per keystroke on a
+  // 4,000-line patch, against 0.34ms plain.
+  const H = (l) => tui.highlightSource(l, 'truecolor');
+  assert.equal(tui.highlightSource('const x = 1;', 'none'), 'const x = 1;', 'at depth none it is a no-op');
+  assert.notEqual(H('const x = 1;'), 'const x = 1;', 'a keyword is coloured');
+  assert.equal(tui.stripSgr(H('const x = 1; // hi')), 'const x = 1; // hi', 'and the VISIBLE text is never altered');
+
+  // ORDERING is the whole correctness story: a comment swallows the rest of the line, so a keyword
+  // inside one must not be coloured as code.
+  const commented = H('// const x = 1');
+  assert.equal((commented.match(/\x1b\[38/g) || []).length, 1, 'a comment is ONE span — not a comment with a keyword inside it');
+  // …and the same for a string.
+  const stringy = H('const s = "const y";');
+  assert.ok(stringy.includes('"const y"'.slice(0, 1)), 'the string is present');
+  assert.equal(tui.stripSgr(stringy), 'const s = "const y";', 'and nothing was dropped colouring it');
+
+  // It must NOT guess: an identifier that merely contains a keyword is not a keyword.
+  assert.equal(H('constant = 1').indexOf('\x1b'), 'constant = '.length, 'only the NUMBER is coloured in `constant = 1`');
+  // A number glued to an identifier is part of the name.
+  assert.equal(tui.stripSgr(H('const x2 = 3')), 'const x2 = 3', 'x2 survives as one token');
+
+  // And the pane applies it only when asked, and only to context lines.
+  const patch = '--- a/x.ts\n+++ b/x.ts\n@@ -1,3 +1,3 @@\n const kept = 1;\n-const a = 1;\n+const a = 2;\n';
+  const st = (syntax) => paneFixture({
+    diffPatch: patch, diffMeta: { id: 1, path: '/w/x.ts', added: 1, removed: 1, verb: 'Edit' }, syntax,
+    panes: { minimized: new Set(), zoom: null, focus: 'detail', tab: { detail: 0 }, cursor: {}, scroll: {} },
+  });
+  const draw = (syntax) => tui.renderDashFrame(st(syntax), { cols: 100, rows: 30, color: true }).join('\n');
+  assert.equal(draw(false), draw(undefined), 'off is the default — a reader who never opens the setting sees no change');
+  assert.notEqual(draw(true), draw(false), 'and on, it changes what the context line looks like');
+});
+
+test('tui: find-in-diff MARKS its matches, and composes with the diff’s own colour', () => {
+  // Before this, `/` on the Diff face only scrolled: it put the match somewhere on screen and left the
+  // reader to find it by eye in a 341-line patch, which is the half of a find that matters.
+  //
+  // The hard part is that these lines are the rich diff's own output — banding plus a per-character
+  // intra-line pass — so they are dense with SGR. A naive indexOf marks bytes INSIDE an escape (a
+  // colour like `38;5;71m` contains both "m" and "5") and splits the sequence, which renders as
+  // garbage on the row rather than as a wrong colour.
+  assert.equal(tui.highlightVisible('const foo;', ''), 'const foo;', 'an empty needle changes nothing');
+  assert.equal(tui.highlightVisible('const foo;', 'zzz'), 'const foo;', 'and neither does a miss');
+
+  const coloured = '\x1b[38;5;71m+const \x1b[1mfoo\x1b[0m = 1;\x1b[0m';
+  const marked = tui.highlightVisible(coloured, 'foo');
+  assert.notEqual(marked, coloured, 'a hit is marked');
+  assert.equal(tui.stripSgr(marked), tui.stripSgr(coloured), 'and the VISIBLE text is untouched — only styling was added');
+  assert.ok(marked.includes('\x1b[7m'), 'marked with reverse video, which needs no colour to go back to');
+  // The one that catches a naive implementation: "5" appears inside `38;5;71m` and nowhere visible.
+  assert.equal(tui.highlightVisible('\x1b[38;5;71mx\x1b[0m', '5'), '\x1b[38;5;71mx\x1b[0m',
+    'a needle that occurs only INSIDE an escape sequence is not a match at all');
+  // LINEAR in the line, not quadratic in its matches. `spans.some(...)` per character measured 0.43ms
+  // for 200 matches and 39.9ms for 3,200 — and a one-character needle on a wide terminal is an
+  // ordinary thing to type, which at 45 drawn rows was ~19ms of a single keystroke. Asserted by SHAPE
+  // rather than by a wall-clock threshold, which would be a flaky test on shared CI: quadratic growth
+  // cannot keep a 4x input inside a 4x time budget, and linear growth comfortably does.
+  {
+    const line = (k) => Array.from({ length: k }, () => 'aa').join(' ');
+    const time = (k) => {
+      const l = line(k);
+      const t0 = process.hrtime.bigint();
+      for (let i = 0; i < 50; i++) tui.highlightVisible(l, 'aa');
+      return Number(process.hrtime.bigint() - t0);
+    };
+    time(400); // warm
+    const small = time(400);
+    const big = time(1600); // 4x the matches
+    assert.ok(big < small * 12, `4x the matches must not cost ~16x the time — was ${(big / small).toFixed(1)}x`);
+  }
+
+  // A reset in the middle of a match must not swallow the rest of the highlight.
+  const split = tui.highlightVisible('\x1b[1mfo\x1b[0mo', 'foo');
+  assert.equal((split.match(/\x1b\[7m/g) || []).length, 3, 'every character of the match is marked, across the reset');
+
+  // …and the pane actually uses it.
+  const patch = '--- a/x.ts\n+++ b/x.ts\n@@ -1 +1 @@\n-const alpha = 1;\n+const beta = 2;\n';
+  const st = (findNeedle) => paneFixture({
+    diffPatch: patch, diffMeta: { id: 1, path: '/w/x.ts', added: 1, removed: 1, verb: 'Edit' }, findNeedle,
+    panes: { minimized: new Set(), zoom: null, focus: 'detail', tab: { detail: 0 }, cursor: {}, scroll: {} },
+  });
+  const drawn = (n) => tui.renderDashFrame(st(n), { cols: 100, rows: 30, color: true }).join('\n');
+  assert.notEqual(drawn('beta'), drawn(undefined), 'a standing find changes what the Diff face draws');
+  assert.ok(drawn('beta').includes('\x1b[7m'), 'and what it adds is the mark');
+});
+
+test('tui: a long file keeps its path on screen while you scroll its edits', () => {
+  // Traces groups by file, so a file with forty edits scrolls its own header off the top — leaving the
+  // reader looking at "#231 +4 −1" rows with nothing saying which file they belong to, one keystroke
+  // away from reverting one of them. The path is exactly what you lose while scrolling.
+  const edits = Array.from({ length: 40 }, (_, i) => (
+    { id: i + 1, file: '/w/big.ts', rel: 'big.ts', status: 'pending', ts: 1000 + i, added: 1, removed: 0 }));
+  const draw = (scroll) => tui.renderDashFrame(paneFixture({
+    views: { list: { edits } },
+    panes: { minimized: new Set(), zoom: null, focus: 'traces', tab: {}, cursor: { traces: 0 }, scroll: { traces: scroll } },
+  }), { cols: 110, rows: 26, color: false }).join('\n');
+
+  assert.match(draw(0), /big\.ts/, 'unscrolled, the header is simply there');
+  // Scrolled past it, it must STILL be there — and the row it sits above must be a later edit, or the
+  // pane is not actually scrolled and the check proves nothing.
+  const deep = draw(12);
+  assert.match(deep, /big\.ts/, 'scrolled into the file, the header is pinned rather than gone');
+  assert.match(deep, /#12\b/, 'positive control: the pane really is scrolled past the first edits');
+  assert.doesNotMatch(deep, /#1\s+\d+mo ago/, 'and the rows above the scroll point are not being drawn');
+  // Drawn ONCE. A pinned copy plus the real row would read as two edits of the same file.
+  assert.equal((deep.match(/big\.ts\s+40 edits/g) || []).length, 1, 'the pinned header is not also drawn in the body');
+});
+
+test('tui: the theme setting actually changes the colours, and degrades safely', () => {
+  // Every tool in this class themes; this had eight hard-coded colours and no setting. The risk of a
+  // theme is a hand-edited or newer-version name reaching a build that does not have it, so the
+  // fallback is asserted beside the feature.
+  const t = (name) => { tui.setTheme(name); return tui.tint('ok', 'kept', 'truecolor'); };
+  const dflt = t('default');
+  assert.notEqual(t('colorblind'), dflt, 'colorblind is a DIFFERENT palette, not a relabelled default');
+  assert.notEqual(t('mono'), dflt, 'and so is mono');
+  assert.equal(t('nonesuch'), dflt, 'an unknown name falls back — it runs on the first paint, and must never blank the UI');
+  assert.equal(t(undefined), dflt, 'and so does "unset", which is what most readers have');
+  // The NAMES live in core, so the settings layer can validate without importing the renderer.
+  assert.deepEqual(core.THEME_NAMES, Object.keys(tui.THEMES), 'core validates against exactly what the renderer ships');
+  tui.setTheme(undefined); // module state: put it back, or every later render test inherits this one
+
+  // colorblind exists to separate the REVIEW VERDICT pair, which is the one most readers cannot.
+  tui.setTheme('colorblind');
+  const kept = tui.tint('x', 'kept', 'truecolor');
+  const risk = tui.tint('x', 'risk', 'truecolor');
+  assert.notEqual(kept, risk, 'kept and risk must not be the same colour — that pair carries the verdict');
+  tui.setTheme(undefined);
+});
+
+test('tui: the row memo is fast AND cannot serve a stale frame', () => {
+  // rowsFor enumerates every row of the session — 2,730 for a 546-file one — and a pane draws about
+  // 43. Measured at EIGHT calls per frame (paneVisible and paneRowCount, per pane), on a frame that
+  // re-renders per keystroke. Memoising it took a full frame from 2.50ms to 0.48ms.
+  //
+  // A memo is a correctness risk before it is a speed-up, so every input that changes a rendered row
+  // is asserted to invalidate it. The dangerous one is `now`: rows carry ages.
+  //
+  // THE PAYLOAD OBJECT IS SHARED between calls, deliberately. The memo compares `views` by identity,
+  // so a fixture that built a fresh one per call would miss on every lookup — the memo would never be
+  // exercised and every assertion below would pass against a key that contained nothing at all. That
+  // is exactly what the first version of this test did, and three mutations walked straight through it.
+  const views = { list: { edits: [
+    { id: 1, file: '/w/zzz.ts', rel: 'zzz.ts', status: 'kept', ts: 1_000_000, added: 900, removed: 0 },
+    { id: 2, file: '/w/aaa.ts', rel: 'aaa.ts', status: 'kept', ts: 1_000_000, added: 1, removed: 0 },
+  ] } };
+  const open = new Set();
+  const st = (over) => paneFixture({ views, open, promptScope: null, now: 1_005_000, panes: null, ...over });
+  const cells = (over = {}, g) => tui.rowsFor(st(over), 120, g ?? tui.glyphs('block'), 'none').map((r) => r.cells).join('|');
+
+  // The memo HITS: same everything, twice, must be the identical array contents.
+  assert.equal(cells(), cells(), 'a repeated call with nothing changed is stable');
+
+  // AGES still tick. A memo that ignored `now` would freeze every timestamp on screen — a correctness
+  // bug wearing a speed-up's clothes — and this is the one input that changes on its own.
+  assert.match(cells({ now: 1_005_000 }), /5s ago/, 'five seconds after the edit reads as five seconds');
+  assert.match(cells({ now: 1_065_000 }), /1m ago/, 'and a minute later it says so, through the memo');
+
+  // A NEW PAYLOAD invalidates, even at the same instant and with every other key component equal.
+  const grown = { list: { edits: [...views.list.edits, { id: 3, file: '/w/b.ts', rel: 'b.ts', status: 'kept', ts: 1_000_000, added: 1, removed: 0 }] } };
+  assert.notEqual(cells({ views: grown }), cells(), 'a new payload rebuilds rather than reusing the old rows');
+
+  // …and so does every other input the rows are drawn FROM.
+  assert.notEqual(cells({}, tui.glyphs('ascii')), cells({}, tui.glyphs('block')),
+    'the glyph set is part of the key — asserted on KEPT edits, because a pending one is “?” in both sets');
+  assert.notEqual(cells({ filter: 'zzz' }), cells(), 'the filter is part of the key');
+  assert.notEqual(cells({ sort: 'path' }), cells({ sort: 'churn' }),
+    'and so is the sort — two files ordered oppositely by path and by churn, or this cannot tell');
+});
+
+test('tui: marked rows are visible, and a/u act on the whole marked set', () => {
+  // Reviewing is "read six files, then accept them together", and until now that meant six keeps and
+  // six confirmations. The risk a mark set carries is the opposite of the one it removes: a selection
+  // the reader cannot SEE is one they act on by accident, so the marker is asserted on the row.
+  const edits = [
+    { id: 1, file: '/w/a.ts', rel: 'a.ts', status: 'pending', ts: 3000, added: 1, removed: 0 },
+    { id: 2, file: '/w/b.ts', rel: 'b.ts', status: 'pending', ts: 2000, added: 1, removed: 0 },
+  ];
+  const st = (marked) => paneFixture({ views: { list: { edits } }, marked, panes: { minimized: new Set(), zoom: null, focus: 'traces', tab: {}, cursor: {}, scroll: {} } });
+  const draw = (marked) => tui.renderDashFrame(st(marked), { cols: 120, rows: 34, color: false }).join('\n');
+
+  assert.notEqual(draw(new Set([1])), draw(new Set()), 'a marked row LOOKS different — an invisible selection is a footgun');
+
+  // …and the mark is the SCOPE `a`/`u` use. selectionIds is the cursor rule; the marked set overrides
+  // it for the single-row scope, which is what makes "mark six, accept once" a thing at all.
+  assert.deepEqual(tui.selectionIds(st(new Set([1, 2])), 'one'), [1],
+    'selectionIds itself is unchanged — it is the CURSOR rule, and the mark set is applied above it');
+  assert.deepEqual(tui.selectionIds(st(new Set()), 'all'), [1, 2], 'and `all` still means every row listed');
+});
+
+test('tui: the frame never hard-codes a key it advertises', () => {
+  // The session bar read "s to switch" and went on reading it after `s` became sort — and would have
+  // lied to anyone who rebound the key in any case. Same lesson the keys screen already learned: a
+  // hard-coded letter is a letter that lies to exactly the reader who customised it.
+  const st = (keys) => paneFixture({ views: { sessions: { sessions: [1, 2, 3] } }, keys, panes: null });
+  const bar = (keys) => tui.renderDashFrame(st(keys), { cols: 100, rows: 20, color: false }).find((l) => /sessions ·/.test(l));
+  assert.match(bar(core.keymap({})), /\bb to switch\b/, 'it names the DEFAULT session key, which is b');
+  assert.match(bar(core.keymap({ keys: { session: 'X' } })), /\bX to switch\b/, 'and follows a rebind');
+  assert.doesNotMatch(bar(core.keymap({ keys: { session: 'X' } })), /\bs to switch\b/, 'without still claiming the old one');
+});
+
+test('tui: an empty pane says what to do next, not only that it is empty', () => {
+  // "nothing on Traces" is true and useless: it reads the same whether Claude has not edited anything
+  // yet, or a filter is hiding every row, or the first payload has not landed. Three different next
+  // actions, and the pane is the only place anyone is looking.
+  const draw = (extra) => tui.renderDashFrame(
+    paneFixture({ views: { list: { edits: [] } }, panes: { minimized: new Set(), zoom: null, focus: 'traces', tab: {}, cursor: {}, scroll: {} }, ...extra }),
+    { cols: 120, rows: 34, color: false }).join('\n');
+
+  assert.match(draw({}), /nothing on \w+ yet — it fills in as Claude works/,
+    'empty and unfiltered: say it will fill in, so the reader waits instead of hunting for a bug');
+  assert.match(draw({ filter: 'zzz' }), /nothing on \w+ matching \/zzz — esc clears the filter/,
+    'empty BECAUSE of a filter: name the filter and the key that clears it');
+  // The PRE-payload case is already answered upstream, and differently — the panes say "building…"
+  // while the first read is in flight. Asserted here so a future "empty pane" message cannot quietly
+  // take that case over and start claiming there is nothing when nobody has looked yet.
+  assert.match(draw({ views: null }), /building…/,
+    'before the first payload the panes say they are building, not that there is nothing');
+});
+
+test('tui: `w` keeps long lines long and pans across them, and never hides content', () => {
+  // `w` had NO test at all — not here, not in tty-drive — which is how it came to be a key that
+  // toggled a flag nothing read. The flag was in the state, the renderer supported panning, and the
+  // wire between them was missing, so the whole feature was one boolean that changed nothing.
+  // The line NAMES its own columns — `col000|col010|col020…` — so a check can tell which part of it is
+  // on screen. A line of 400 identical characters renders the same at every offset, so a pan test over
+  // one passes whether the offset is honoured or thrown away, which is the bug this is for.
+  const wide = Array.from({ length: 40 }, (_, i) => `col${String(i * 10).padStart(3, '0')}`).join('|');
+  const patch = `--- a/w.ts\n+++ b/w.ts\n@@ -1 +1 @@\n-const x = 1;\n+const y = ${wide};\n`;
+  const base = {
+    diffPatch: patch,
+    diffMeta: { id: 1, path: '/w/w.ts', added: 1, removed: 1, verb: 'Edit' },
+    panes: { minimized: new Set(), zoom: null, focus: 'detail', tab: { detail: 0 }, cursor: {}, scroll: {} },
+  };
+  const draw = (extra) => tui.renderDashFrame(paneFixture({ ...base, ...extra }), { cols: 100, rows: 34, color: false }).join('\n');
+
+  // WRAPPING is the default, and it is what keeps the whole line reachable without moving: the 279-column
+  // line comes back over several rows, first token to last, with nothing cut off.
+  const wrapped = draw({});
+  assert.ok(wrapped.includes('col000') && wrapped.includes('col390'),
+    'wrapped, the whole line is on screen — this product does not truncate content');
+
+  // Panning is a DIFFERENT rendering, not the same one re-labelled. (Offsets below are measured against
+  // this fixture, not guessed: at 100 columns, panX 120 shows col160..col220 and 240 shows col330..col390.)
+  const panned = draw({ noWrap: true, panX: 120 });
+  assert.notEqual(panned, wrapped, '`w` must change what is drawn — a flag nothing reads is not a feature');
+  assert.ok(panned.includes('col160') && !panned.includes('col000'),
+    'panning moved the viewport along the line rather than re-wrapping it');
+
+  // …and panning FURTHER moves it further. This is the assertion that fails if panX is accepted and then
+  // dropped on the floor, which is what the wiring did before.
+  const further = draw({ noWrap: true, panX: 240 });
+  assert.notEqual(further, panned, 'panning further shows a different part of the line');
+
+  // NOTHING IS OUT OF REACH: panned to the far right, the LAST token of a 279-column line is on screen.
+  // A pan that could not reach the end would be truncation dressed as a feature.
+  assert.ok(further.includes('col390'),
+    'the far END of the line is reachable by panning — nothing is out of reach');
+});
+
+test('release: the version stamper knows about every workspace', () => {
+  // `packages/tui` was a declared workspace that `scripts/version.mjs` had never heard of — absent
+  // from its package list, from the core-pin list and from the lockfile keys. Nothing caught it:
+  // `version:check` only compares the files it already knows, so it reported "all versions
+  // consistent" while tui sat at a different version with a pin to a core build that no longer
+  // existed. The failure surfaces two steps later, in CI, as `npm ci` resolving that pin from the
+  // registry — where `@claude-observatory/core` has never been published — and 404ing.
+  //
+  // Asserted over the WORKSPACE LIST rather than by naming tui, because the next package added will
+  // have exactly the same problem and nobody will remember this.
+  const fs = require('fs');
+  const path = require('path');
+  const root = path.resolve(__dirname, '../../..');
+  const workspaces = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).workspaces;
+  const stamper = fs.readFileSync(path.join(root, 'scripts/version.mjs'), 'utf8');
+  assert.ok(workspaces.length >= 3, `the workspace list must be real, got ${JSON.stringify(workspaces)}`);
+
+  // Each list is sliced out and searched SEPARATELY. Searching the whole file passes as soon as the
+  // path appears anywhere in it — so dropping a workspace from PKGS while it is still in
+  // CORE_PIN_FILES read as covered, which is precisely the half-configured state this is for.
+  const listBetween = (from, to) => stamper.slice(stamper.indexOf(from), stamper.indexOf(to));
+  const pkgList = listBetween('const PKGS = [', 'const GRADLE');
+  const keyList = listBetween('const WORKSPACE_KEYS = [', 'const read =');
+  assert.ok(pkgList.includes('package.json') && keyList.includes('packages/'), 'the slices found real lists');
+
+  for (const ws of workspaces) {
+    assert.ok(pkgList.includes(`'${ws}/package.json'`),
+      `${ws} is a workspace but scripts/version.mjs never stamps its version`);
+    assert.ok(keyList.includes(`'${ws}'`),
+      `${ws} is a workspace but is not among the stamper's lockfile keys`);
+  }
+
+  // …and any workspace that PINS core has to be in the pin list, or the pin outlives the version it
+  // points at. Read from the manifests rather than assumed, so a package that starts depending on
+  // core later is covered without anyone editing this test.
+  const pinList = stamper.slice(stamper.indexOf('const CORE_PIN_FILES'), stamper.indexOf('const corePinRe'));
+  for (const ws of workspaces) {
+    const manifest = JSON.parse(fs.readFileSync(path.join(root, ws, 'package.json'), 'utf8'));
+    const pins = { ...manifest.dependencies, ...manifest.devDependencies }['@claude-observatory/core'];
+    if (!pins) continue;
+    assert.ok(pinList.includes(`'${ws}/package.json'`),
+      `${ws} pins @claude-observatory/core, so version.mjs must lockstep that pin`);
+  }
+});
+
+test('keymap: every verb has a DOOR, and no two differ only by case', () => {
+  // The existing scrape above runs one direction — advertised ⊆ bound — which is why `sort` and `wrap`
+  // could ship bound to keys that no surface in the product named. `S` cycled the sort and `w` swapped
+  // wrapping, and neither appeared in the key row, in the help screen, or (for sort, the only persisted
+  // preference without one) in the options window. The only way to find either was to press it.
+  //
+  // This is the other direction: bound ⊆ documented.
+  //
+  // The KEYS section of the options window is deliberately NOT a door. It lists every REBINDABLE action
+  // by construction, so counting it would make this assertion pass for anything — it tells a reader who
+  // already knows a verb exists how to move it, not that it exists.
+  const helpText = tui.helpLines({}).join('\n');
+  const hintText = tui.KEY_HINTS.join('\n');
+  const undocumented = core.REBINDABLE.filter((r) => {
+    // Named either by its key (the hard-coded literals, e.g. `m  minimize or restore`) or by the label
+    // of a boundRows entry, which renders the reader's own key followed by the description.
+    const byKey = new RegExp(`(^|[\\s(/])${r.fallback.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([\\s)/]|$)`, 'm');
+    return !byKey.test(helpText) && !byKey.test(hintText);
+  });
+  assert.deepEqual(undocumented.map((r) => r.action), [],
+    'every rebindable verb must be named in the key row or the keys screen — the options window’s KEYS list does not count');
+
+  // …and no two verbs may differ only by CASE. `a`/`A` and `u`/`U` are the exception and stay: those
+  // teach one rule — lowercase acts on the selection, uppercase on everything the window lists — which
+  // is learnable. `r`/`R` (refresh / redo) and `s`/`S` (session / sort) taught nothing; they were two
+  // unrelated verbs a shift key apart, which is the mistake the `o`-not-`M` note in prefs.ts already
+  // called out and which the table beneath it then repeated four times.
+  const PAIRS = new Set(['keep|keepAll', 'undo|undoAll']);
+  const byLower = new Map();
+  for (const r of core.REBINDABLE) {
+    const k = r.fallback.toLowerCase();
+    byLower.set(k, [...(byLower.get(k) ?? []), r]);
+  }
+  for (const [k, group] of byLower) {
+    if (group.length < 2) continue;
+    const name = group.map((r) => r.action).sort().join('|');
+    assert.ok(PAIRS.has(name),
+      `${group.map((r) => `${r.fallback} ${r.action}`).join(' and ')} differ only by case on “${k}” — one letter, two unrelated verbs`);
+  }
+});
+
+test('options: every preference that PERSISTS has a row to change it', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'obs-rows-'));
+  const file = path.join(dir, 'prefs.json');
+
+  // The persisted set is taken from `writePrefs` itself rather than from a hand-kept list here — a
+  // list in the test is a list that goes stale in exactly the case this is for, which is somebody
+  // adding a preference and no surface to change it. `sort` was that case: it had a Prefs field, a
+  // reader in readPrefs, a writer in writePrefs and a key that cycled it, and it was the only
+  // persisted preference the options window did not show.
+  core.writePrefs({
+    editor: 'code -w', color: 'never', glyphs: 'ascii', mouse: false, refreshSeconds: 9,
+    startFocus: 'detail', startFace: 'diff', sort: 'churn', storeDir: '/tmp/obs-store',
+    keys: { keep: 'K' }, remotes: [{ name: 'box', host: 'h', enabled: true }],
+  }, file);
+  const persisted = Object.keys(JSON.parse(fs.readFileSync(file, 'utf8')));
+  assert.ok(persisted.length >= 10, `the fixture must actually persist something, got ${JSON.stringify(persisted)}`);
+
+  // `store` is passed because that row is shown only when the caller knows the resolved root.
+  const rows = tui.optionRows({}, { store: '/tmp/obs-store', file });
+  const missing = persisted.filter((k) => !rows.some((r) =>
+    r.id === k || r.id.startsWith(`${k}:`) || r.id.startsWith(`${k.replace(/s$/, '')}:`)));
+  assert.deepEqual(missing, [],
+    'a preference that survives a restart must be changeable from the options window, not only from an undocumented key');
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('command mode is an allow-list on VERBS and on ARGUMENTS', () => {
+  // `:` is a text field that spawns a process, inside an app whose other keys revert files. Three of
+  // its entries used to splat the rest of the line into the CLI, so `:store --move /tmp/x` moved every
+  // session's edits, snapshots and caches and rewrote prefs — no confirmation, from a prompt whose own
+  // documentation called it "an allow-list of read-only verbs".
+  for (const [name, cmd] of Object.entries(tui.COMMANDS)) {
+    assert.equal(cmd.args.length, 0, `:${name} must take no parameters — an arguments channel is how this becomes a shell`);
+    assert.deepEqual(cmd.args(), [name === '?' ? 'help' : name], `:${name} runs exactly its own bare verb`);
+    assert.ok(cmd.what, `:${name} says what it is for`);
+  }
+  // The one word anyone types into a prompt first, and the key the frame advertises for help elsewhere.
+  assert.ok(tui.COMMANDS.help, '`:help` exists');
+  assert.ok(tui.COMMANDS['?'], 'and `:?` is the same thing, because that is the help key everywhere else');
+  // Prototype keys are not commands. A bare `COMMANDS[name]` found these and threw out of the handler.
+  for (const evil of ['constructor', 'toString', 'valueOf', 'hasOwnProperty', '__proto__']) {
+    assert.ok(!Object.hasOwn(tui.COMMANDS, evil), `:${evil} must not resolve to a command`);
+  }
+});
+
+test('prefs: a hand-edited file degrades to defaults rather than breaking the dashboard', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'obs-prefs-'));
+  const file = path.join(dir, 'prefs.json');
+
+  assert.deepEqual(core.readPrefs(file), {}, 'an absent file is "no preferences", not an error');
+  fs.writeFileSync(file, '{ this is not json');
+  assert.deepEqual(core.readPrefs(file), {}, 'and neither is a truncated one — this runs on the first paint');
+
+  // Every field is validated. A settings file can be older than the build reading it, newer, or typed
+  // by hand, so an unusable value must read as "unset" rather than reach the renderer.
+  fs.writeFileSync(file, JSON.stringify({
+    editor: '  code -w  ',
+    color: 'chartreuse',        // not a colour this build knows
+    glyphs: 'block',
+    mouse: 'yes',               // not a boolean
+    refreshSeconds: 0,          // would spin: each refresh spawns a child process
+    keys: { keep: 'K', undo: 'toolong', nosuchaction: 'x' },
+  }));
+  const p = core.readPrefs(file);
+  assert.equal(p.editor, 'code -w', 'trimmed, and arguments survive');
+  assert.equal(p.color, undefined, 'an unknown colour is dropped, not passed through');
+  assert.equal(p.glyphs, 'block');
+  assert.equal(p.mouse, undefined, 'a non-boolean is dropped');
+  assert.equal(p.refreshSeconds, 1, 'and a zero interval is floored, never honoured');
+  assert.deepEqual(p.keys, { keep: 'K' }, 'a multi-character bind and an unknown action are both dropped');
+
+  // Writing keeps only what DIFFERS from the default: a file full of today's defaults would freeze
+  // them into every future version, and the reader never asked for that.
+  core.writePrefs({ color: 'auto', glyphs: 'ascii', mouse: true, refreshSeconds: 3, keys: { keep: 'a', undo: 'Z' } }, file);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { glyphs: 'ascii', keys: { undo: 'Z' } });
+
+  // A rebind onto a key another action already owns is REPORTED, not silently swallowed.
+  const clash = { keys: { keep: 'u' } };
+  const conflicts = core.keyConflicts(clash);
+  assert.equal(conflicts.length, 1, `one conflict, got ${JSON.stringify(conflicts)}`);
+  assert.equal(conflicts[0].action, 'undo', 'and it names the action that LOSES its key');
+  assert.equal(core.keymap(clash).get('u'), 'keep', 'the rebind wins the key');
+  assert.deepEqual(core.keyConflicts({}), [], 'and the defaults collide with nothing');
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('options: every row is reachable, changeable, and says what it costs', () => {
+  const rows = tui.optionRows({});
+  const sel = tui.selectableRows(rows);
+  assert.ok(sel.length >= core.REBINDABLE.length + 5, 'editor, display, every key, and the reset');
+  for (const i of sel) assert.notEqual(rows[i].kind, 'heading', 'the cursor never lands on a heading');
+  for (const r of rows) {
+    if (r.kind === 'heading') continue;
+    assert.ok(r.id, `${r.label} has a stable id to dispatch on`);
+    assert.ok(r.help || r.kind === 'action', `${r.label} says what it does`);
+  }
+
+  // Choices CYCLE, in both directions, and come back to where they started.
+  let p = {};
+  const colourRow = rows.find((r) => r.id === 'color');
+  const seen = [];
+  for (let i = 0; i < 5; i++) { seen.push(tui.optionRows(p).find((r) => r.id === 'color').value); p = tui.applyOption(p, 'color', 1); }
+  assert.deepEqual(seen, ['auto', 'truecolor', '256', '16', 'none'], 'forward through every colour');
+  assert.equal(tui.optionRows(p).find((r) => r.id === 'color').value, 'auto', 'and back round to the start');
+  assert.equal(tui.optionRows(tui.applyOption({}, 'color', -1)).find((r) => r.id === 'color').value, 'none', 'backwards wraps too');
+  assert.equal(colourRow.kind, 'choice');
+
+  // The refresh interval cannot be stepped to a value that would spin the CPU.
+  let fast = { refreshSeconds: 1 };
+  for (let i = 0; i < 5; i++) fast = tui.applyOption(fast, 'refreshSeconds', -1);
+  assert.equal(fast.refreshSeconds, 1, 'stepping down stops at one second');
+
+  // A captured key is applied; rebinding back to the default REMOVES the override rather than
+  // persisting a value identical to it.
+  const bound = tui.setOption({}, 'key:keep', 'K');
+  assert.equal(bound.keys.keep, 'K');
+  assert.equal(tui.setOption(bound, 'key:keep', 'a').keys, undefined, 'back to the default clears the entry');
+  assert.deepEqual(tui.setOption({}, 'key:keep', 'nope'), {}, 'a non-single-key capture changes nothing');
+
+  // A conflict reaches the ROW, so the reader sees it where they made it.
+  const clashRow = tui.optionRows({ keys: { keep: 'u' } }).find((r) => r.id === 'key:undo');
+  assert.match(clashRow.problem, /also bound to keep/);
+
+  // And the window renders within its budget at every width, like every other surface here.
+  for (const cols of [40, 60, 80, 120, 200]) {
+    const out = tui.renderOptions(rows, sel[1], cols, 0, 12, tui.glyphs('ascii'), 'none');
+    assert.equal(out.length, 12, `${cols}: exactly the height asked for`);
+    for (const l of out) assert.ok(tui.displayWidth(l) <= cols, `${cols}: "${l}" is over budget`);
+  }
+});
+
+test('panes: an overlay is a layer over the windows, not a different product', () => {
+  // The top row used to repaint as the retired eight-screen nav the moment an overlay opened, so
+  // pressing `s` or `?` told the reader their windows had vanished.
+  const st = paneFixture({ overlay: { title: 'switch session', lines: [' a', ' b'], scroll: 0, cursor: 0 } });
+  const f = tui.renderDashFrame(st, { cols: 120, rows: 20, color: false });
+  assert.match(f[0], /F2 .?Traces/, 'the window bar survives an overlay');
+  assert.doesNotMatch(f[0], /\b[5-8]\s+(Feed|Audit|Map)\b/, 'and the retired screen nav does not come back');
+  assert.doesNotMatch(f[f.length - 1], /1-8 screens|j\/k/, 'nor does its key row');
+});
+
+test('panes: a zoomed Detail wraps a diff line rather than losing its tail', () => {
+  // This used to be the separate full-screen overlay, which re-printed the `diff` verb's piped text.
+  // Opening an edit zooms Detail now, so the wrap it has to survive is the rich diff's own.
+  const long = 'const veryLongIdentifier = someOtherIdentifier.withAProperty(andAnArgument, andAnother);';
+  const st = paneFixture({
+    panes: { minimized: new Set(), zoom: 'detail', focus: 'detail', tab: {}, cursor: {}, scroll: {} },
+    diffPatch: `@@ -1,1 +1,2 @@\n ctx\n+${long}\n`,
+    diffMeta: { id: 7, path: '/w/x.ts', added: 1, removed: 0, verb: 'Edit' },
+  });
+  const cols = 60;
+  const f = tui.renderDashFrame(st, { cols, rows: 16, color: false });
+  const joined = f.join('').replace(/\s+/g, '');
+  assert.ok(joined.includes('andAnother'), `the tail must survive; got ${JSON.stringify(f.slice(5, 12))}`);
+  for (const l of f) assert.ok(tui.displayWidth(l) <= cols, 'and every line still fits the budget');
+});
+
+test('panes: the zoomed edit is COLOURED — bands, and markers when colour is gone', () => {
+  // The full-screen reader this replaces showed the `diff` verb's piped output, which carries no
+  // escapes at all: full screen was the one place a diff lost its add/remove shape.
+  const st = paneFixture({
+    panes: { minimized: new Set(), zoom: 'detail', focus: 'detail', tab: {}, cursor: {}, scroll: {} },
+    diffPatch: '@@ -1,2 +1,2 @@\n ctx\n-was here\n+now here\n',
+    diffMeta: { id: 7, path: '/w/x.ts', added: 1, removed: 1, verb: 'Edit' },
+  });
+  const lit = tui.renderDashFrame(st, { cols: 100, rows: 16, color: 'truecolor' });
+  assert.ok(lit.some((l) => /\x1b\[48;2;18;46;24m/.test(l)), 'an added line carries the full-width green band');
+  assert.ok(lit.some((l) => /\x1b\[48;2;58;22;22m/.test(l)), 'and a removed line the red one');
+  // Positive control: the same state with colour off must NOT match, or the assertion above is free.
+  const plain = tui.renderDashFrame(st, { cols: 100, rows: 16, color: false });
+  assert.ok(!plain.some((l) => /\x1b\[48;2;/.test(l)), 'colour off means no bands at all');
+  assert.ok(plain.some((l) => /^\s*\d*\s*\+now here/.test(l)), 'and the +/- markers carry the meaning instead');
+  // The headline uses the tool the agent really ran, not one hard-coded verb.
+  assert.ok(plain.some((l) => l.includes('● Edit(/w/x.ts)')), `headline names the verb and the whole path: ${JSON.stringify(plain.slice(3, 6))}`);
+});
+
+test('panes: Detail scrolls its diff, and stops at the last full screen', () => {
+  // `paneRowCount` resolved Detail through the tab table while the renderer resolved it from the
+  // selection, and returned a field nothing ever assigned — so it reported 0 rows for a face that was
+  // drawing correctly, and the runtime pinned scroll at the top forever.
+  const body = Array.from({ length: 80 }, (_, i) => `+line ${i}`).join('\n');
+  const st = paneFixture({
+    panes: { minimized: new Set(), zoom: 'detail', focus: 'detail', tab: {}, cursor: {}, scroll: {} },
+    diffPatch: `@@ -0,0 +1,80 @@\n${body}\n`,
+    diffMeta: { id: 9, path: '/w/x.ts', added: 80, removed: 0, verb: 'Write' },
+  });
+  const lay = tui.resolveLayout({ cols: 100, rows: 30, minimized: new Set(), zoom: 'detail', focus: 'detail', tab: {} });
+  const box = lay.boxes.find((b) => b.id === 'detail');
+  const n = tui.paneRowCount(st, box);
+  assert.ok(n > box.body.h, `the diff is longer than the pane (${n} lines vs ${box.body.h} rows)`);
+  assert.equal(n, tui.renderRichDiff(st.diffPatch, {
+    cols: box.rect.w - 1, color: 'none', verb: 'Write', path: '/w/x.ts', added: 80, removed: 0,
+  }).length, 'and the count IS the rendered line count');
+
+  const at = (k) => {
+    const s = { ...st, panes: { ...st.panes, scroll: { detail: k } } };
+    return tui.paneVisible(s, box, undefined, 'none').map((v) => v.text);
+  };
+  assert.notDeepEqual(at(0), at(5), 'scrolling moves the window');
+  assert.ok(at(5)[0].includes('line 2'), `scroll 5 starts five lines in, got ${JSON.stringify(at(5)[0])}`);
+  // Diff lines are tagged -1: a diff is read, not picked from, so no cursor band lands on one.
+  assert.deepEqual([...new Set(tui.paneVisible(st, box, undefined, 'none').map((v) => v.row))], [-1]);
+
+  // The count must not depend on colour — the memo shares one entry between the renderer and the
+  // counter on that promise, and would silently halve the cache if it were false.
+  tui.paneVisible(st, box, undefined, 'truecolor');
+  assert.equal(tui.paneRowCount(st, box), n, 'the line count is the same at every depth');
+});
+
+// ---------------------------------------------------------------------------
+// The rich diff — the edit rendered the way the agent's own tools render it.
+// ---------------------------------------------------------------------------
+
+const PATCH = require('diff').createPatch(
+  'x.ts',
+  'function keys(cols) {\n  return cols >= 96\n    ? LONG\n    : SHORT;\n}\n',
+  'function keys(cols) {\n  // pick by measurement\n  const budget = cols - 1;\n  return CANDIDATES.find((s) => w(s) <= budget) ?? "?";\n}\n'
+);
+
+test('richdiff: a styling pass never re-styles the escapes it just wrote', () => {
+  // Tinting keywords and then numbers in two `.replace` passes let the number regex match the digits
+  // INSIDE `\x1b[38;2;150;130;220m` — 38, 2, 150, 130, 220 are all number literals — and the line
+  // came out as shredded escapes. Any pass over already-styled text must consume each char once.
+  for (const depth of ['truecolor', '256']) {
+    const out = tui.renderRichDiff(PATCH, { cols: 88, color: depth, path: 'x.ts', added: 3, removed: 3 });
+    for (const line of out) {
+      assert.doesNotMatch(line, /\x1b(?!\[[0-9;]*m)/, `${depth}: every ESC must open a well-formed CSI: ${JSON.stringify(line)}`);
+      // A colour code must never contain a nested escape — the signature of the original defect.
+      assert.doesNotMatch(line, /\x1b\[[0-9;]*\x1b/, `${depth}: nested escape inside a colour code`);
+    }
+  }
+  // Positive control: the naive two-pass version really does corrupt, so this test can fail.
+  const naive = 'return 96'.replace(/\breturn\b/, '\x1b[38;2;150;130;220mreturn\x1b[39m').replace(/\b\d+\b/g, (n) => `<${n}>`);
+  assert.match(naive, /<150>/, 'the two-pass approach mangles its own escape codes');
+});
+
+test('richdiff: the band runs the full width, and the marker survives losing colour', () => {
+  const cols = 70;
+  const colored = tui.renderRichDiff(PATCH, { cols, color: 'truecolor', path: 'x.ts', added: 3, removed: 3 });
+  for (const l of colored) assert.ok(tui.displayWidth(l) <= cols, 'within budget');
+  const banded = colored.filter((l) => /\x1b\[48;2;/.test(l));
+  assert.ok(banded.length >= 2, 'added and removed lines carry a background band');
+  for (const l of banded) {
+    assert.equal(tui.displayWidth(l), cols, 'the band reaches the right edge — a ragged margin reads as noise');
+  }
+  // Monochrome loses the shape and keeps the meaning: the +/- marker is always there.
+  const plain = tui.renderRichDiff(PATCH, { cols, color: 'none', path: 'x.ts', added: 3, removed: 3 });
+  assert.ok(plain.every((l) => !/\x1b/.test(l)), 'no escapes at depth none');
+  assert.ok(plain.some((l) => /^\s*\d*\s\+/.test(l)), 'additions still marked with +');
+  assert.ok(plain.some((l) => /^\s*\s-/.test(l)), 'removals still marked with -');
+});
+
+test('richdiff: line numbers track the file AFTER the edit, and content never gets cut', () => {
+  const rows = tui.parsePatch(PATCH);
+  const adds = rows.filter((r) => r.kind === 'add');
+  assert.ok(adds.length >= 3, 'the fixture really adds lines');
+  assert.ok(adds.every((r) => typeof r.n === 'number'), 'added lines carry a post-edit line number');
+  assert.ok(rows.filter((r) => r.kind === 'del').every((r) => r.n === null), 'removed lines have none — they are not in the new file');
+
+  // A line wider than the pane wraps onto a continuation rather than losing its tail.
+  const wide = require('diff').createPatch('x.ts', 'a\n', 'const someVeryLongIdentifierName = anotherLongCallExpression(withArguments, andMore, andYetMore);\n');
+  const out = tui.renderRichDiff(wide, { cols: 40, color: 'none', path: 'x.ts' });
+  const joined = out.join('').replace(/\s+/g, '');
+  assert.ok(joined.includes('andYetMore'), `the tail must survive wrapping; got ${JSON.stringify(out)}`);
+});
+
+test('layout: a dragged seam resizes, and can never starve a pane below its minimum', () => {
+  // Draggable borders are load-bearing: without them the docked model is not worth its cost and the
+  // design should be separate windows instead. So the drag has to be safe at EVERY width a pointer
+  // can reach, not just the sensible ones — a reader can drag to column 1 and will.
+  const base = tui.resolveLayout({ cols: 140, rows: 40, minimized: new Set(), focus: 'traces' });
+  const wide = tui.resolveLayout({ cols: 140, rows: 40, minimized: new Set(), focus: 'traces', sizes: { traces: 70 } });
+  const w = (l) => l.boxes.find((b) => b.id === 'traces').rect.w;
+  assert.ok(w(wide) > w(base), 'a reader-set width actually widens the pane');
+
+  const mins = Object.fromEntries(tui.PANE_SPECS.map((p) => [p.id, p.min]));
+  const bad = [];
+  for (let want = 1; want <= 200; want++) {
+    const l = tui.resolveLayout({ cols: 120, rows: 36, minimized: new Set(), focus: 'traces', sizes: { traces: want } });
+    for (const b of l.boxes) {
+      if (b.id !== 'dashboards' && b.rect.w < mins[b.id]) bad.push({ want, pane: b.id, w: b.rect.w, min: mins[b.id] });
+    }
+    const band = l.boxes.filter((b) => b.id !== 'dashboards' && b.id !== 'prompts').sort((a, b) => a.rect.x - b.rect.x);
+    const last = band[band.length - 1];
+    if (last && last.rect.x + last.rect.w !== 120) bad.push({ want, err: 'band stopped tiling' });
+  }
+  assert.deepEqual(bad, [], `drag produced an illegal layout: ${JSON.stringify(bad.slice(0, 3))}`);
+});
+
+test('layout: every seam is grabbable, on both axes, and resizes a pane that honours it', () => {
+  const lay = tui.resolveLayout({ cols: 140, rows: 40, minimized: new Set(), focus: 'traces' });
+  assert.ok(lay.seams.length >= 3, 'columns and both docks all get a boundary');
+  const bandTop = lay.chrome.top + (lay.boxes.find((b) => b.id === 'prompts')?.rect.h ?? 0);
+  const ids = new Set(lay.boxes.map((b) => b.id));
+
+  for (const sm of lay.seams) {
+    assert.ok(ids.has(sm.left) && ids.has(sm.right), `seam joins real panes: ${sm.left}/${sm.right}`);
+    if (sm.axis === 'v') {
+      assert.ok(sm.x >= 0 && sm.x < lay.cols, `on screen (x=${sm.x})`);
+      // A one-column target is unhittable, so the grab spans ±1 — but not ±2, or a row click drags.
+      for (const d of [-1, 0, 1]) assert.equal(tui.hitTest(lay, sm.x + d, bandTop + 1)?.t, 'seam', `x${d} grabs`);
+      for (const d of [-2, 2]) assert.notEqual(tui.hitTest(lay, sm.x + d, bandTop + 1)?.t, 'seam', `x${d} is a row`);
+    } else {
+      assert.ok(sm.y > lay.chrome.top && sm.y < lay.rows, `on screen (y=${sm.y})`);
+      assert.equal(tui.hitTest(lay, 10, sm.y)?.t, 'seam', 'the horizontal seam grabs across the width');
+    }
+
+    // The decisive property: dragging must move a pane that ACTUALLY honours a size. Detail is the
+    // flex centre and discards one, so its seam has to target the neighbour instead.
+    const box = lay.boxes.find((b) => b.id === sm.target);
+    const before = sm.axis === 'v' ? box.rect.w : box.rect.h;
+    const after = tui.resolveLayout({
+      cols: 140, rows: 40, minimized: new Set(), focus: 'traces', sizes: { [sm.target]: before + 5 },
+    }).boxes.find((b) => b.id === sm.target);
+    const got = sm.axis === 'v' ? after.rect.w : after.rect.h;
+    assert.ok(got > before, `dragging the ${sm.left}|${sm.right} seam must resize ${sm.target} (${before} -> ${got})`);
+  }
+});
+
+test('richdiff: a wrapped code line reproduces its bytes, indentation included', () => {
+  // Word-wrapping split on spaces and silently ate leading indentation: `  return x` rendered as
+  // `return x`. In code that misrepresents the source; in Python it changes what the code MEANS.
+  // A diff must break wherever the width runs out and reproduce every byte either side of the break.
+  const src = '  return CANDIDATES.find((s) => displayWidth(s) <= budget) ?? "?";';
+  const patch = require('diff').createPatch('x.ts', 'a\n', `${src}\n`);
+  for (const cols of [30, 38, 44, 60]) {
+    const out = tui.renderRichDiff(patch, { cols, color: 'none', path: 'x.ts' });
+    const body = out.filter((l) => /^\s*\d+\s\+/.test(l) || /^\s+\S/.test(l.slice(0, 40)) === false ? false : true);
+    // Rebuild from the rendered rows: strip the gutter+marker from the first, the gutter from the rest.
+    const rows = out.slice(out.findIndex((l) => /^\s*\d+\s\+/.test(l)));
+    const gut = rows[0].indexOf('+');
+    const joined = rows
+      .map((l, i) => (i === 0 ? l.slice(gut + 1) : l.slice(gut + 1)))
+      .join('')
+      .replace(/\s+$/, '');
+    assert.equal(joined, src, `cols=${cols}: every byte, including the two leading spaces`);
+    for (const l of out) assert.ok(tui.displayWidth(l) <= cols, `cols=${cols}: within budget`);
+  }
+  // Positive control: word wrapping really does lose the indentation, so this test can fail.
+  assert.notEqual(tui.wrapVisible(src, 30).join(''), src, 'word-wrap is lossy for indented code');
+});
+
+test('richdiff: intra-line highlighting marks what changed, and refuses to guess', () => {
+  const { createPatch } = require('diff');
+  // The point of a review diff: `cols - 1` -> `cols - 2` should show the 1 and the 2, not two
+  // full-width stripes the reader has to compare by eye.
+  const marked = tui.markIntraline(tui.parsePatch(createPatch('x.ts',
+    'const budget = cols - 1;\nconst label = "the quick brown fox";\n',
+    'const budget = cols - 2;\nconst label = "the quick red fox";\n')));
+  const spans = marked.filter((l) => l.spans && l.spans.length);
+  assert.equal(spans.length, 4, 'both replaced lines are marked, on each side');
+  const words = spans.map((l) => l.spans.map(([a, b]) => l.text.slice(a, b)).join('')).sort();
+  assert.deepEqual(words, ['1', '2', 'brown', 'red'], `exactly the changed words, got ${JSON.stringify(words)}`);
+
+  // A 3-removed / 1-added hunk has no honest pairing. Inventing one would highlight spans that never
+  // corresponded — worse than none, because the reader would believe it.
+  const uneven = tui.markIntraline(tui.parsePatch(createPatch('y.ts', 'a\nb\nc\n', 'z\n')));
+  assert.ok(!uneven.some((l) => l.spans), 'unequal runs are left unmarked');
+
+  // And the brighter tone actually reaches the frame, on both sides.
+  const out = tui.renderRichDiff(createPatch('x.ts', 'const b = 1;\n', 'const b = 2;\n'),
+    { cols: 52, color: 'truecolor', path: 'x.ts' });
+  assert.equal(out.filter((l) => /48;2;106;30;30|48;2;26;86;38/.test(l)).length, 2, 'one marked del, one marked add');
+  for (const l of out) assert.ok(tui.displayWidth(l) <= 52, 'still within budget');
+});
+
+test('panes: the Detail navbar is clickable exactly where it is drawn', () => {
+  const { createPatch } = require('diff');
+  const st = paneFixture({
+    views: { list: { edits: [{ id: 12, file: 'a.ts', added: 8, removed: 3, state: 'pending', ts: 0 }] } },
+    panes: { minimized: new Set(), zoom: null, focus: 'detail', tab: {}, cursor: {}, scroll: {}, sizes: {} },
+    diffPatch: createPatch('a.ts', 'x\n', 'y\n'),
+    diffMeta: { id: 12, path: 'a.ts', added: 8, removed: 3 },
+  });
+  const lay = tui.resolveLayout({ cols: 150, rows: 34, minimized: new Set(), focus: 'detail' });
+  const box = lay.boxes.find((b) => b.id === 'detail');
+  const line = tui.renderDashFrame(st, { cols: 150, rows: 34, color: false })[box.navRow];
+
+  const btns = tui.detailNavButtons(box, st);
+  assert.deepEqual(btns.map((b) => b.action), ['keep', 'undo', 'prev', 'next'], 'all four at a wide size');
+  for (const b of btns) {
+    // The renderer draws from these spans; if it ever recomputed them instead, a button would be
+    // drawn in one place and clickable in another with nothing on screen to reveal the drift.
+    const at = line.slice(b.x, b.x + b.w);
+    assert.match(at, /Keep|Undo|prev|next/, `${b.action} is drawn at its own x (got ${JSON.stringify(at)})`);
+    // …and DRAWN is not enough. The click has to resolve to this row, which is the half no test made:
+    // the button row was hit-tested as body, so every one of these was dead to the mouse.
+    assert.deepEqual(tui.hitTest(lay, b.x, box.navRow), { t: 'nav', pane: 'detail' }, `${b.action} is clickable there too`);
+  }
+
+  // Narrow: buttons drop WHOLE, never clipped to a stub that still looks pressable. Keep/Undo last.
+  const narrow = tui.resolveLayout({ cols: 85, rows: 34, minimized: new Set(), focus: 'detail' });
+  const nbox = narrow.boxes.find((b) => b.id === 'detail');
+  const few = tui.detailNavButtons(nbox, st).map((b) => b.action);
+  assert.ok(few.length < 4 && few.includes('keep') && few.includes('undo'), `the destructive pair survives longest, got ${JSON.stringify(few)}`);
+  for (const b of tui.detailNavButtons(nbox, st)) {
+    assert.ok(b.x >= nbox.rect.x && b.x + b.w <= nbox.rect.x + nbox.rect.w, `${b.action} stays inside the pane`);
+  }
+
+  // With nothing selected, Keep/Undo are ABSENT rather than drawn-but-dim: without colour a dim
+  // button renders identically to a live one, and one that looks pressable but refuses is worse than
+  // one never offered. prev/next remain, because they still move the review on.
+  const empty = paneFixture({ panes: { minimized: new Set(), zoom: null, focus: 'detail', tab: {}, cursor: {}, scroll: {}, sizes: {} } });
+  const none = tui.detailNavButtons(box, empty).map((b) => b.action);
+  assert.deepEqual(none, ['prev', 'next'], `nothing to act on means no act buttons, got ${JSON.stringify(none)}`);
+});
+
+test('channel: a switch that cannot persist says so, and never reports success it did not achieve', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const prev = process.env.CLAUDE_CONFIG_DIR;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'obs-chan-'));
+  try {
+    process.env.CLAUDE_CONFIG_DIR = dir;
+    core.setUpdateChannel('dev');
+    assert.equal(core.getUpdateChannel(), 'dev', 'a writable dir round-trips — the positive control');
+
+    // Not writable: the common devcontainer shape, where the config dir is bind-mounted read-only or
+    // owned by another uid. The raw failure is an EACCES trace naming a path the reader never chose.
+    //
+    // A FRESH read-only directory, not a chmod of the one above: mode 500 on a directory still
+    // permits writing a file that already exists, so re-using it would test nothing and pass.
+    //
+    // WINDOWS: chmod does not remove write access there, so this half's SETUP cannot be built — the
+    // directory would still accept the write, and the assertions below would be checking a condition
+    // that never happened. The positive control above runs everywhere.
+    if (process.platform !== 'win32') {
+    const ro = fs.mkdtempSync(path.join(os.tmpdir(), 'obs-chan-ro-'));
+    fs.chmodSync(ro, 0o500);
+    process.env.CLAUDE_CONFIG_DIR = ro;
+    let msg = '';
+    try { core.setUpdateChannel('stable'); } catch (e) { msg = e.message; }
+    try { fs.chmodSync(ro, 0o700); fs.rmSync(ro, { recursive: true, force: true }); } catch { /* best effort */ }
+    process.env.CLAUDE_CONFIG_DIR = dir;
+    assert.ok(msg, 'it throws rather than silently leaving the reader on the old channel');
+    assert.match(msg, /could not save the update channel/, 'says what failed');
+    assert.match(msg, /CLAUDE_CONFIG_DIR/, 'and names the override that fixes it');
+    assert.match(msg, /obs-chan-ro-/, 'and the actual path that could not be written');
+    assert.equal(core.getUpdateChannel(), 'dev', 'the old channel is untouched by a failed switch');
+    }
+  } finally {
+    try { fs.chmodSync(dir, 0o700); fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+    if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = prev;
+  }
+});
+
+test('doctor: "writable" and "the setting persists" are separate claims', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const prev = process.env.CLAUDE_CONFIG_DIR;
+  const ok = fs.mkdtempSync(path.join(os.tmpdir(), 'obs-doc-'));
+  const ro = fs.mkdtempSync(path.join(os.tmpdir(), 'obs-doc-ro-'));
+  try {
+    // Writable: the check passes AND leaves the reader's own channel untouched — a diagnostic that
+    // changes the thing it measures is worse than none.
+    process.env.CLAUDE_CONFIG_DIR = ok;
+    core.setUpdateChannel('dev');
+    const good = core.diagnose({ cwd: process.cwd() }).find((c) => c.id === 'channel-persist');
+    assert.equal(good.level, 'ok', 'a real local dir round-trips');
+    assert.equal(core.getUpdateChannel(), 'dev', 'and the probe restored what was there');
+
+    // Not writable: the shape a devcontainer usually has. This must be its OWN failure, not folded
+    // into "config dir writable" — a switch can fail on a filesystem that accepts other writes.
+    // WINDOWS: chmod cannot make a directory refuse a write there, so the condition under test does
+    // not exist and the probe correctly reports `ok`. Skipped rather than inverted — asserting `ok`
+    // here would pin the ABSENCE of the failure mode, which is not what this test is about.
+    if (process.platform !== 'win32') {
+      fs.chmodSync(ro, 0o500);
+      process.env.CLAUDE_CONFIG_DIR = ro;
+      const bad = core.diagnose({ cwd: process.cwd() }).find((c) => c.id === 'channel-persist');
+      assert.equal(bad.level, 'fail', 'a config dir that refuses the write is reported');
+      assert.match(bad.fix, /CLAUDE_CONFIG_DIR/, 'and names the override');
+      assert.match(bad.detail, /switching channels will fail/, 'in the reader’s terms, not errno terms');
+    }
+  } finally {
+    try { fs.chmodSync(ro, 0o700); } catch { /* best effort */ }
+    for (const d of [ok, ro]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ } }
+    if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = prev;
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+// .observatoryignore — the matcher
+// ---------------------------------------------------------------------------------------------
+//
+// A hand-rolled gitignore is where this kind of feature usually breaks, so these assert the cases
+// that actually bite rather than the ones that are easy. `home: null` isolates each from the
+// reader's own personal layer; one test below covers that layer on purpose.
+
+function ignoreWork(files) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-ign-'));
+  for (const [rel, body] of Object.entries(files)) {
+    const p = path.join(root, rel);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, body);
+  }
+  return root;
+}
+
+test('ignore: one mode — a match is never recorded, and the rule that decided is named', () => {
+  const root = ignoreWork({ '.observatoryignore': 'package-lock.json\n' });
+  const ctx = core.ignoreContext({ home: null });
+  const d = ctx.decide(path.join(root, 'package-lock.json'));
+  assert.equal(d.ignored, true);
+  assert.equal(d.rule.pattern, 'package-lock.json');
+  assert.equal(d.rule.line, 1, 'the line number is what makes a misfire diagnosable');
+  assert.equal(ctx.ignored(path.join(root, 'package.json')), false, 'and nothing else is touched');
+});
+
+test('ignore: "# capture:" is an ordinary comment again, in every position', () => {
+  // It used to switch later patterns from hiding to refusing. With one mode there is nothing for it
+  // to switch, and a line git treats as a comment must not quietly mean something here — a file
+  // copied from a .gitignore has to behave the same in both.
+  const root = ignoreWork({
+    '.observatoryignore': 'notes.md\n# capture: off\n*.mp4\n# capture: on\n*.tmp\n',
+  });
+  const ctx = core.ignoreContext({ home: null });
+  for (const f of ['notes.md', 'clip.mp4', 'a.tmp']) {
+    assert.equal(ctx.ignored(path.join(root, f)), true, f + ' is ignored by its own pattern');
+  }
+  assert.equal(ctx.ignored(path.join(root, 'keep.txt')), false, 'and the comments matched nothing');
+  const rules = ctx.layers.flatMap((l) => l.rules);
+  assert.equal(rules.length, 3, 'three patterns, no directives');
+  assert.equal(rules.some((r) => 'refuse' in r), false, 'and no mode flag survives on a rule');
+});
+
+test('ignore: git’s excluded-parent rule — a negation cannot reach into an ignored directory', () => {
+  // The single most famous gitignore gotcha. Matching git here is deliberate: deviating would
+  // surprise everyone who knows the format, so instead the decision names the ANCESTOR that ended
+  // the descent, which is what makes it diagnosable.
+  const root = ignoreWork({ '.observatoryignore': 'dist/\n!dist/manifest.json\n' });
+  const ctx = core.ignoreContext({ home: null });
+  const d = ctx.decide(path.join(root, 'dist/manifest.json'));
+  assert.equal(d.ignored, true, 'still ignored, exactly as git would');
+  assert.equal(d.matched, path.join(root, 'dist').replace(/\\/g, '/'), 'and the DIRECTORY is named as the cause');
+  assert.equal(d.rule.pattern, 'dist/');
+});
+
+test('ignore: `dist/*` + `!dist/manifest.json` — the form that does work', () => {
+  const root = ignoreWork({ '.observatoryignore': 'dist/*\n!dist/manifest.json\n' });
+  const ctx = core.ignoreContext({ home: null });
+  assert.equal(ctx.ignored(path.join(root, 'dist/bundle.js')), true);
+  assert.equal(ctx.ignored(path.join(root, 'dist/manifest.json')), false, 're-included: no ancestor was excluded');
+});
+
+test('ignore: `dist/` matches only a directory, `dist` matches a file too', () => {
+  const a = ignoreWork({ '.observatoryignore': 'dist/\n', 'dist': 'a file named dist' });
+  const ctxA = core.ignoreContext({ home: null });
+  assert.equal(ctxA.ignored(path.join(a, 'dist')), false, 'trailing slash means directories only');
+
+  const b = ignoreWork({ '.observatoryignore': 'dist\n', 'dist': 'a file named dist' });
+  const ctxB = core.ignoreContext({ home: null });
+  assert.equal(ctxB.ignored(path.join(b, 'dist')), true, 'without it, a file of that name matches');
+  assert.equal(ctxB.ignored(path.join(b, 'dist/x.js')), true, 'and it still excludes the subtree');
+});
+
+test('ignore: a path whose ancestor is a FILE does not throw, on any platform', () => {
+  // `fs.statSync(p, { throwIfNoEntry: false })` suppresses ENOENT and nothing else. When a component
+  // of the path is a file rather than a directory, Linux reports ENOTDIR and it throws — while macOS
+  // reports the same case as ENOENT and swallows it. So the product was macOS-correct and crashed on
+  // Linux, and the `dist/` test above is green on a Mac either way; CI is what caught it.
+  //
+  // This test makes the Linux behaviour reproducible EVERYWHERE by stubbing the errno, because a
+  // platform-dependent test is one that a Mac-only contributor cannot run before pushing.
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const real = fs.statSync;
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'obs-ign-notdir-'));
+  try {
+    fs.writeFileSync(path.join(root, '.observatoryignore'), 'dist\n');
+    fs.writeFileSync(path.join(root, 'dist'), 'a file named dist');
+    fs.statSync = (p, o) => {
+      if (String(p).includes(`${path.sep}dist${path.sep}`)) {
+        const e = new Error('ENOTDIR: not a directory');
+        e.code = 'ENOTDIR';
+        throw e;
+      }
+      return real(p, o);
+    };
+    const ctx = core.ignoreContext({ home: null });
+    // Both halves: it must not throw, AND it must still answer correctly. A guard that swallowed the
+    // error and then returned the wrong verdict would turn a crash into a file that quietly captures.
+    assert.equal(ctx.ignored(path.join(root, 'dist/x.js')), true,
+      'the subtree of a file-named-dist is still excluded, through an ENOTDIR on the way up');
+  } finally {
+    fs.statSync = real;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('ignore: a leading slash anchors to the file’s own directory', () => {
+  const root = ignoreWork({ '.observatoryignore': '/build\n' });
+  const ctx = core.ignoreContext({ home: null });
+  assert.equal(ctx.ignored(path.join(root, 'build/out.js')), true, 'at the top: anchored and matched');
+  assert.equal(ctx.ignored(path.join(root, 'pkg/build/out.js')), false, 'deeper: the anchor holds it out');
+});
+
+test('ignore: `*` stops at a separator, `**` spans them', () => {
+  const root = ignoreWork({ '.observatoryignore': 'src/*.log\nfixtures/**/*.bin\n' });
+  const ctx = core.ignoreContext({ home: null });
+  assert.equal(ctx.ignored(path.join(root, 'src/a.log')), true);
+  assert.equal(ctx.ignored(path.join(root, 'src/deep/a.log')), false, '`*` never crosses a slash');
+  assert.equal(ctx.ignored(path.join(root, 'fixtures/a.bin')), true, '`**/` also matches zero directories');
+  assert.equal(ctx.ignored(path.join(root, 'fixtures/x/y/a.bin')), true);
+});
+
+test('ignore: a deeper file overrides a shallower one', () => {
+  const root = ignoreWork({
+    '.observatoryignore': '*.log\n',
+    'keep/.observatoryignore': '!*.log\n',
+  });
+  const ctx = core.ignoreContext({ home: null });
+  assert.equal(ctx.ignored(path.join(root, 'a.log')), true, 'the shallow rule still applies elsewhere');
+  assert.equal(ctx.ignored(path.join(root, 'keep/a.log')), false, 'nearest wins');
+});
+
+test('ignore: a pattern that matches nothing leaves every edit visible', () => {
+  // The whole reason hiding is the default: a typo must be harmless.
+  const root = ignoreWork({ '.observatoryignore': 'pakcage-lock.json\nsrc/**/[\n' });
+  const ctx = core.ignoreContext({ home: null });
+  assert.equal(ctx.ignored(path.join(root, 'package-lock.json')), false);
+  assert.equal(ctx.ignored(path.join(root, 'src/a.ts')), false, 'and a malformed pattern is inert, not fatal');
+});
+
+test('ignore: `files` reports exactly what was read, for cache stamping', () => {
+  const root = ignoreWork({
+    '.observatoryignore': '*.log\n',
+    'sub/.observatoryignore': '*.tmp\n',
+    'other/.observatoryignore': '*.bak\n',
+  });
+  const ctx = core.ignoreContextFor([path.join(root, 'sub/a.ts')]);
+  const rel = ctx.files.map((f) => path.relative(root, f).replace(/\\/g, '/'));
+  assert.deepEqual(rel, ['.observatoryignore', 'sub/.observatoryignore'],
+    'the governing files, and not the one on a branch nobody asked about');
+  assert.equal(ctx.active, true);
+});
+
+test('ignore: with no ignore file anywhere, nothing is active and nothing is hidden', () => {
+  // The negative, proven with a positive control below it: an instrument that always says "clean"
+  // is indistinguishable from a broken one.
+  const root = ignoreWork({ 'a.ts': 'x' });
+  const quiet = core.ignoreContext({ home: null });
+  assert.equal(quiet.ignored(path.join(root, 'a.ts')), false);
+  assert.equal(quiet.active, false);
+  assert.deepEqual(quiet.files, []);
+  fs.writeFileSync(path.join(root, '.observatoryignore'), 'a.ts\n');
+  const loud = core.ignoreContext({ home: null });
+  assert.equal(loud.ignored(path.join(root, 'a.ts')), true, 'positive control: the same probe DOES fire');
+  assert.equal(loud.active, true);
+});
+
+test('ignore: the personal ~/.claude layer matches at any depth, and is the weakest', () => {
+  const home = freshHome();
+  fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+  fs.writeFileSync(path.join(home, '.claude', '.observatoryignore'), '*.log\nscratch/\n');
+  const root = ignoreWork({ 'keep/.observatoryignore': '!*.log\n' });
+  const ctx = core.ignoreContext();
+  assert.equal(ctx.ignored(path.join(root, 'deep/nested/a.log')), true, 'unanchored: it applies anywhere');
+  assert.equal(ctx.ignored(path.join(root, 'x/scratch/note.md')), true, 'including its directory rule');
+  assert.equal(ctx.ignored(path.join(root, 'keep/a.log')), false, 'a repo file overrides the personal one');
+});
+
+test('ignore: a file is re-read the moment it changes, and forgotten when deleted', () => {
+  // The stale-cache failure this feature would otherwise have: the parse is memoized, so an edit
+  // that changed nothing on screen would look exactly like a pattern that does not work.
+  const root = ignoreWork({ '.observatoryignore': '*.log\n' });
+  const target = path.join(root, 'a.log');
+  assert.equal(core.ignoreContext({ home: null }).ignored(target), true);
+  const ig = path.join(root, '.observatoryignore');
+  fs.writeFileSync(ig, '*.tmp\n');
+  // The cache stamp is (mtime, size), and this rewrite is the SAME SIZE as the original — so the only
+  // thing that can distinguish them is the clock. Windows timestamps are ~10ms-granular, so two writes
+  // in one tick share an mtime and the stamp genuinely cannot see the edit; on Linux and macOS the
+  // sub-millisecond resolution hides that. Push the mtime forward explicitly: this test is about the
+  // cache noticing a CHANGED file, not about how finely the host filesystem can tell the time.
+  const later = new Date(Date.now() + 2000);
+  fs.utimesSync(ig, later, later);
+  assert.equal(core.ignoreContext({ home: null }).ignored(target), false, 'edited: picked up at once');
+  fs.rmSync(path.join(root, '.observatoryignore'));
+  const gone = core.ignoreContext({ home: null });
+  assert.equal(gone.ignored(target), false);
+  assert.deepEqual(gone.files, [], 'deleted: dropped from the cache-stamp inputs too');
+});
+
+test('ignore: a same-size rewrite at the same mtime is INVISIBLE — the stamp\'s known limit', () => {
+  // The parse cache is keyed on (mtime, size). Two consequences, and this pins both so neither is a
+  // surprise: the cache works, and there is exactly one shape it cannot see.
+  //
+  // This is not academic. It is what made the suite red on Windows and green here: NTFS timestamps
+  // through Node are ~10ms-granular, so the sibling test's two same-size writes landed on ONE mtime
+  // and the edit was genuinely missed — while Linux and macOS resolve finely enough to hide it. The
+  // condition is forced here rather than raced for, so the behaviour is the same on every platform.
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const FIXED = new Date(1_700_000_000_000);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'obs-ig-stamp-'));
+  const prev = process.env.CLAUDE_OBSERVATORY_ROOT;
+  try {
+    const ig = path.join(root, '.observatoryignore');
+    const target = path.join(root, 'a.log');
+    fs.writeFileSync(ig, '*.log\n');
+    fs.utimesSync(ig, FIXED, FIXED);
+    assert.equal(core.ignoreContext({ home: null }).ignored(target), true, 'the first read caches these rules');
+
+    // Same SIZE, same MTIME, different CONTENT — the one edit the stamp cannot distinguish.
+    fs.writeFileSync(ig, '*.tmp\n');
+    fs.utimesSync(ig, FIXED, FIXED);
+    assert.equal(core.ignoreContext({ home: null }).ignored(target), true,
+      'DOCUMENTED LIMIT: identical stamp means the cached parse is reused, so this edit is not seen');
+
+    // …and the moment either half of the stamp moves, it is seen. This is what makes the limit a
+    // narrow one rather than a broken cache, and it is the assertion that fails if the stamp changes.
+    const later = new Date(FIXED.getTime() + 2000);
+    fs.utimesSync(ig, later, later);
+    assert.equal(core.ignoreContext({ home: null }).ignored(target), false, 'a moved mtime is picked up');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    if (prev === undefined) delete process.env.CLAUDE_OBSERVATORY_ROOT;
+    else process.env.CLAUDE_OBSERVATORY_ROOT = prev;
+  }
+});
+
+test('ignore: parseIgnoreFile keeps blank lines and comments out of the rules', () => {
+  const rules = core.parseIgnoreFile('\n# a comment\n\n  spaced.txt  \n!keep.txt\n', '/x/.observatoryignore');
+  assert.equal(rules.length, 2);
+  assert.equal(rules[0].pattern, 'spaced.txt');
+  assert.equal(rules[0].negated, false);
+  assert.equal(rules[1].negated, true);
+  assert.equal(rules[1].line, 5, 'line numbers count the skipped lines');
+});
+
+// ---------------------------------------------------------------------------------------------
+// .observatoryignore — what it does to capture, to the lists, and to undo
+// ---------------------------------------------------------------------------------------------
+
+/** Drive the real capture hook for one Edit, Pre then Post, exactly as Claude Code would. */
+function editHook(session, cwd, file, before, after) {
+  if (before === null) { try { fs.rmSync(file); } catch { /* absent is the point */ } }
+  else fs.writeFileSync(file, before);
+  const p = { session_id: session, cwd, tool_name: 'Edit', tool_input: { file_path: file } };
+  core.handleHookPayload({ ...p, hook_event_name: 'PreToolUse' });
+  fs.writeFileSync(file, after);
+  core.handleHookPayload({ ...p, hook_event_name: 'PostToolUse' });
+}
+
+test('ignore: a match records NOTHING — not the edit, and not a skip marker either', () => {
+  // The trap this avoids: refusing in PreToolUse alone leaves Post with no staging record, so it
+  // takes the appendSkip branch and writes "edit not captured — no before-snapshot" for a file the
+  // reader explicitly asked us to leave alone. Refusing in the shared funnel means neither happens.
+  freshHome();
+  const S = 'ign-capture';
+  const cwd = tmpWork();
+  fs.writeFileSync(path.join(cwd, '.observatoryignore'), '*.gen.ts\n');
+  editHook(S, cwd, path.join(cwd, 'app.gen.ts'), 'a\n', 'b\n');
+  assert.equal(core.readLog(S).length, 0, 'no edit record');
+  assert.equal(core.readSkips(S).length, 0, 'and no skip marker — silence, as asked');
+
+  // Positive control: the identical hook on a file the pattern does not cover IS captured, so the
+  // assertion above is measuring the rule and not a broken harness.
+  editHook(S, cwd, path.join(cwd, 'app.ts'), 'a\n', 'b\n');
+  assert.equal(core.readLog(S).length, 1, 'positive control: an uncovered file still records');
+});
+
+test('ignore: there is no id to reach — an ignored file leaves nothing behind to undo', () => {
+  // The other half of one mode. Under the old two-mode design this edit was captured and merely
+  // hidden, so `undo <id>` could still revert it; now there is no record, which is the whole point
+  // and also the reason a typo here costs data rather than visibility.
+  freshHome();
+  const S = 'ign-none';
+  const cwd = tmpWork();
+  fs.writeFileSync(path.join(cwd, '.observatoryignore'), 'generated/\n');
+  const gen = path.join(cwd, 'generated', 'client.ts');
+  fs.mkdirSync(path.dirname(gen), { recursive: true });
+  editHook(S, cwd, gen, 'old\n', 'new\n');
+  editHook(S, cwd, path.join(cwd, 'app.ts'), 'x\n', 'y\n');
+
+  assert.equal(core.readLog(S).length, 1, 'only the uncovered file was captured');
+  assert.deepEqual(core.reviewEdits(S).map((r) => path.basename(r.file)), ['app.ts']);
+  assert.equal(core.readLog(S).some((r) => r.file.includes('generated')), false, 'no record for it');
+  assert.equal(fs.readFileSync(gen, 'utf8'), 'new\n', 'and the file on disk is untouched by us');
+});
+
+test('ignore: the list, the change map, the counts and the raw log all agree', () => {
+  // Under one mode they agree for a simpler reason than they used to: there is nothing to filter,
+  // so a surface CANNOT show a different number by forgetting to. This test now guards the other
+  // direction — that `rawEdits` counts the store and not a leftover pre-filter figure.
+  freshHome();
+  const S = 'ign-agree';
+  const cwd = tmpWork();
+  fs.writeFileSync(path.join(cwd, '.observatoryignore'), '*.lock\n');
+  editHook(S, cwd, path.join(cwd, 'a.ts'), 'a\n', 'A\n');
+  editHook(S, cwd, path.join(cwd, 'b.ts'), 'b\n', 'B\n');
+  editHook(S, cwd, path.join(cwd, 'deps.lock'), '1\n', '2\n');
+
+  const map = core.buildChangeMap(cwd, S, { root: cwd });
+  assert.equal(core.reviewEdits(S).length, 2, 'the list');
+  assert.equal(map.summary.units, 2, 'the change map');
+  assert.equal(core.sessionCounts(S).pending, 2, 'the counts');
+  assert.equal(core.readLog(S).length, 2, 'the raw log — the lock file was never written');
+  assert.equal(map.files.length, 2, 'and the map’s file rows');
+  assert.ok(!map.files.some((f) => f.rel.endsWith('.lock')), 'the ignored file is on none of them');
+  assert.equal(map.summary.rawEdits, 2, 'rawEdits counts the store, and the store never held it');
+  assert.equal('hidden' in map.summary, false, 'and no hidden counter survives the summary');
+});
+
+test('ignore: "revert everything" cannot reach an ignored file, because nothing recorded it', () => {
+  freshHome();
+  const S = 'ign-scope';
+  const cwd = tmpWork();
+  fs.writeFileSync(path.join(cwd, '.observatoryignore'), 'vendor/\n');
+  const vend = path.join(cwd, 'vendor', 'lib.js');
+  fs.mkdirSync(path.dirname(vend), { recursive: true });
+  editHook(S, cwd, vend, 'v1\n', 'v2\n');
+  editHook(S, cwd, path.join(cwd, 'src.ts'), 's1\n', 's2\n');
+
+  const all = core.undoScope(S);
+  assert.equal(all.undone, 1, 'the one recorded edit');
+  assert.equal(fs.readFileSync(vend, 'utf8'), 'v2\n', 'the ignored file is untouched');
+  assert.equal(core.readLog(S).some((r) => r.file.includes('vendor')), false, 'and has no id to name');
+});
+
+test('sweep: the on-disk map cache follows the sweep, not the ignore file', () => {
+  // Under one mode an ignore file cannot retroactively change what a map shows — the records are
+  // already there, and only the sweep removes them. That is the behaviour to pin: the earlier version
+  // of this test asserted the OPPOSITE (writing the file changed the count), which two-mode filtering
+  // made true and one mode makes false.
+  //
+  // This drives cachedChangeMap, NOT buildChangeMap. Reaching the disk cache is what makes it an
+  // instrument: an earlier version called the uncached builder and passed with the stamp removed.
+  freshHome();
+  const S = 'ign-cache';
+  const cwd = tmpWork();
+  editHook(S, cwd, path.join(cwd, 'a.ts'), 'a\n', 'A\n');
+  editHook(S, cwd, path.join(cwd, 'b.ts'), 'b\n', 'B\n');
+  const ig = path.join(cwd, '.observatoryignore');
+  const units = () => {
+    core.clearFsCache(); // the in-process memo would answer before the disk cache is ever consulted
+    return core.cachedChangeMap(cwd, S, { root: cwd, prompts: true }).summary.units;
+  };
+
+  assert.equal(units(), 2, 'both, to start');
+  assert.equal(units(), 2, 'and again — this second call is the one served FROM the cache');
+  fs.writeFileSync(ig, 'b.ts\n');
+  assert.equal(units(), 2, 'the rule alone changes nothing that is already recorded');
+
+  assert.equal(core.dropIgnored(S).dropped, 1, 'the sweep is what removes it');
+  assert.equal(units(), 1, 'and the cached map follows, because the sweep rewrote the log it keys on');
+  assert.equal(core.reviewEdits(S)[0].file, path.join(cwd, 'a.ts'), 'to the OTHER file, not a stale answer');
+});
+
+test('ignore: the dash renders no ignore counters, because there are none to render', () => {
+  // The two-mode design put "42 hidden by .observatoryignore" on the change-map header and the
+  // Traces title. Under one mode those numbers do not exist; this asserts the notices went with
+  // them rather than rendering as a permanent zero.
+  const base = paneFixture();
+  const opts = { cols: 150, rows: 34, color: false };
+  const mapFrame = tui.renderDashFrame({ ...base, panes: { ...base.panes, tab: { detail: 1 } } }, opts);
+  assert.ok(!mapFrame.some((l) => /observatoryignore/.test(l)), 'no notice on the change-map header');
+  const listFrame = tui.renderDashFrame(base, opts);
+  const title = listFrame.find((l) => /F2 Traces/.test(l));
+  assert.ok(title, 'positive control: the Traces title IS in the frame');
+  assert.ok(!/hidden/.test(title), 'and it carries no hidden count');
+});
+
+test('ignore: taskEditIds cannot contain an ignored file, because no record exists for one', () => {
+  // `keepTask`/`undoTask` build their id set from `taskEditIds`. It used to filter; now the store
+  // simply never holds a matching record, so this drives the capture hook and asserts the id set is
+  // short by exactly the ignored file.
+  freshHome();
+  const S = 'ign-taskids';
+  const cwd = tmpWork();
+  fs.writeFileSync(path.join(cwd, '.observatoryignore'), '*.snap\n');
+  const t0 = Date.now() - 60_000;
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const iso = (ms) => new Date(ms).toISOString();
+  const todo = (status, ts) => ({
+    type: 'assistant', sessionId: S, timestamp: iso(ts),
+    message: {
+      role: 'assistant', id: `todo-${status}`,
+      content: [{ type: 'tool_use', name: 'TodoWrite', input: { todos: [{ content: 'do the work', status, activeForm: 'doing the work' }] } }],
+    },
+  });
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), [
+    { type: 'user', sessionId: S, cwd, timestamp: iso(t0 - 2000), message: { role: 'user', content: 'go' } },
+    todo('in_progress', t0 - 1000),
+    { type: 'assistant', sessionId: S, timestamp: iso(t0 + 500),
+      message: { role: 'assistant', id: 'm1', content: [{ type: 'text', text: 'ok' }],
+        usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } },
+    todo('completed', t0 + 10_000),
+  ].map((o) => JSON.stringify(o)).join('\n') + '\n');
+
+  core.ensureStore(S);
+  const add = (rel, ts) => {
+    const abs = path.join(cwd, rel);
+    fs.writeFileSync(abs, 'after\n');
+    const id = core.nextId(S);
+    core.appendLog(S, { id, ts, tool: 'Edit', file: abs,
+      beforeBlob: core.writeBlob(S, Buffer.from('before\n')), afterBlob: core.writeBlob(S, Buffer.from('after\n')),
+      status: 'pending' });
+    return id;
+  };
+  const visibleId = add('a.ts', t0 + 1000);
+  // Appended DIRECTLY, bypassing the hook, to model a record captured before the rule existed —
+  // then swept. Without the sweep this id would still be in the task set.
+  const staleId = add('ui.snap', t0 + 2000);
+
+  const taskId = core.taskIdForSubject('do the work');
+  if (!taskId) assert.fail('the fixture produced no task span — this test would otherwise assert nothing');
+  assert.ok(core.taskEditIds(cwd, S, taskId).includes(staleId), 'before the sweep it IS in the set');
+
+  const res = core.dropIgnored(S);
+  assert.equal(res.dropped, 1, 'the sweep removed exactly the ignored record');
+  const ids = core.taskEditIds(cwd, S, taskId);
+  assert.ok(ids.includes(visibleId), 'the recorded edit is still in the task set');
+  assert.ok(!ids.includes(staleId), 'and the swept one is gone from it');
+});
+
+test('ignore: a later rule can re-include a whole DIRECTORY, not just a file', () => {
+  // Directory-level negation. `packages/*/dist/` excludes every package's build output, and the rule
+  // under it puts one back — last matching pattern wins, as in git. Nothing else covered this: the
+  // file-level negation tests all pass even if the DIRECTORY test drops its negation check, which
+  // would silently re-exclude everything a rule like this was written to rescue.
+  const root = ignoreWork({ '.observatoryignore': 'packages/*/dist/\n!packages/core/dist/\n' });
+  const ctx = core.ignoreContext({ home: null });
+  assert.equal(ctx.ignored(path.join(root, 'packages/web/dist/bundle.js')), true, 'the broad rule still excludes');
+  assert.equal(ctx.ignored(path.join(root, 'packages/core/dist/index.js')), false, 're-included by the later rule');
+  assert.equal(ctx.ignored(path.join(root, 'packages/core/dist'), true), false, 'and the directory itself is not excluded');
+});
+
+test('ignore: three tiers, in git’s precedence order', () => {
+  // git documents three, and they are three different intentions: shared and committed, private to
+  // this checkout, and personal across every repo. Without the middle one the only way to hide
+  // something in one checkout is to commit that decision into a repo other people work in.
+  const home = freshHome();
+  fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+  fs.writeFileSync(path.join(home, '.claude', '.observatoryignore'), '*.personal\n');
+  const root = ignoreWork({
+    '.observatoryignore': '*.shared\n',
+    '.git/info/observatoryignore': '*.private\n!override.shared\n',
+  });
+  const ctx = core.ignoreContext();
+  assert.equal(ctx.ignored(path.join(root, 'a.shared')), true, 'the committed file');
+  assert.equal(ctx.ignored(path.join(root, 'a.private')), true, 'the per-checkout file');
+  assert.equal(ctx.ignored(path.join(root, 'a.personal')), true, 'the personal file');
+  // Precedence: the tracked .observatoryignore OVERRIDES the private one, exactly as a per-directory
+  // .gitignore overrides $GIT_DIR/info/exclude.
+  assert.equal(ctx.ignored(path.join(root, 'override.shared')), true,
+    'the shared file wins over the private file’s negation');
+  assert.ok(ctx.files.some((f) => f.endsWith('.git/info/observatoryignore')),
+    'and the private file is a cache-stamp input like any other');
+});
+
+test('panes: a review verb on a window that is not open says so, instead of crashing', () => {
+  // `m` then `a` used to kill the dashboard: mutateScope looked up the focused pane's box with a
+  // non-null assertion, and a MINIMIZED window has no box — nor does one the current size cannot
+  // fit, which at any height under ~24 rows is Prompts and Dashboards by default. This pins the
+  // geometry fact the runtime guard depends on, so a future layout change that reintroduces the
+  // undefined is caught here rather than by a user pressing a key that reverts code.
+  const focusMinimized = tui.resolveLayout({ cols: 150, rows: 40, minimized: new Set(['traces']), focus: 'traces' });
+  assert.equal(focusMinimized.boxes.find((b) => b.id === 'traces'), undefined,
+    'a minimized window genuinely has no box — the guard is not hypothetical');
+  // …and it keeps its chip on the window bar, so the reader can always press its key to bring it back.
+  const bar = tui.renderDashFrame(
+    paneFixture({ panes: { minimized: new Set(['traces']), zoom: null, focus: 'traces', tab: {}, cursor: {}, scroll: {}, sizes: {} } }),
+    { cols: 150, rows: 40, color: false },
+  )[0];
+  assert.match(bar, /F2 .Traces/, 'the minimized window is still named and still reachable');
+
+  // The sizes where a pane folds by default are the ones a reader actually runs at.
+  for (const [cols, rows] of [[120, 20], [100, 16], [80, 14]]) {
+    const lay = tui.resolveLayout({ cols, rows, minimized: tui.defaultMinimized(cols, rows), focus: 'dashboards' });
+    assert.equal(lay.boxes.find((b) => b.id === 'dashboards'), undefined,
+      `${cols}x${rows}: Dashboards folds by default, so focusing it yields no box`);
+  }
+});
+
+test('ignore: a rule that can never fire is reported as dead — the diagnostic git lacks', () => {
+  // `git check-ignore -v` names the rule that WON and never mentions that the line the reader wrote
+  // is unreachable: for `dist/` + `!dist/manifest.json` it reports `dist/` and says nothing about
+  // line 2. Every verdict below was diffed against real git in test/e2e.sh (E2E 27); this pins the
+  // classification itself, including the false positives an earlier draft produced.
+  const root = ignoreWork({
+    '.observatoryignore': [
+      'dist/', '!dist/manifest.json',        // dead: an excluded ancestor
+      'logs/', '!logs/keep/important.log',   // dead: excluded ancestor, deeper
+      'pkg/*/dist/', '!pkg/a/dist/keep.js',  // dead: the ancestor rule has a wildcard
+      '*.tmp', '!build.tmp',                 // ALIVE: file-level negation, no ancestor involved
+      'src/*.log', '!src/keep.log',          // ALIVE: src/ itself is never excluded
+    ].join('\n') + '\n',
+  });
+  const ctx = core.ignoreContextFor([path.join(root, 'x')], { home: null });
+  const dead = core.deadRules(ctx);
+  assert.deepEqual(dead.map((d) => d.rule.pattern).sort(),
+    ['!dist/manifest.json', '!logs/keep/important.log', '!pkg/a/dist/keep.js'].sort());
+  const manifest = dead.find((d) => d.rule.pattern === '!dist/manifest.json');
+  assert.equal(manifest.shadowedBy.pattern, 'dist/', 'it names the rule that shadows it');
+  assert.equal(manifest.shadowedBy.line, 1, 'and that rule’s line');
+  assert.equal(manifest.fix, 'dist/*', 'and the form that works instead');
+
+  // A file whose negation genuinely works must never be flagged: telling someone to rewrite a
+  // working rule is worse than saying nothing.
+  assert.ok(!dead.some((d) => /build\.tmp|src\/keep\.log/.test(d.rule.pattern)));
+  // …and the classification agrees with the matcher it is describing.
+  assert.equal(ctx.ignored(path.join(root, 'dist/manifest.json')), true, 'flagged rule really is dead');
+  assert.equal(ctx.ignored(path.join(root, 'build.tmp')), false, 'unflagged negation really works');
+  assert.equal(ctx.ignored(path.join(root, 'src/keep.log')), false);
+});
+
+test('ignore: a file with no negations at all reports nothing dead', () => {
+  // The negative, with its control: a linter that always finds something is noise.
+  const root = ignoreWork({ '.observatoryignore': 'dist/\n*.log\npackage-lock.json\n' });
+  assert.deepEqual(core.deadRules(core.ignoreContextFor([path.join(root, 'x')], { home: null })), []);
+  fs.writeFileSync(path.join(root, '.observatoryignore'), 'dist/\n!dist/keep.js\n');
+  assert.equal(core.deadRules(core.ignoreContextFor([path.join(root, 'x')], { home: null })).length, 1,
+    'positive control: the same probe DOES fire when a dead rule exists');
+});
+
+test('options: the editor row offers what this machine HAS, and steps through exactly that', () => {
+  // The row used to be free text only, so `e` was configured by remembering a command AND its wait
+  // flag. Everything here is injected, so the Windows branch — where `code` is `code.cmd` and an
+  // extension-less probe finds nothing — is asserted from macOS.
+  // Separator-agnostic, because `detectEditors` builds its candidates with `path.join` — which yields
+  // `\usr\bin\vim` on Windows and never matches a forward-slash fixture. The subject here is WHICH
+  // editors get offered, not how the host spells a separator, so the probe accepts either.
+  const bins = new Set(['/usr/bin/vim', '/opt/bin/code', '/opt/bin/nano']);
+  const hasBin = (f) => bins.has(String(f).replace(/\\/g, '/'));
+  // `win: false` is injected as well, and has to be: without it `detectEditors` reads the HOST
+  // platform and splits this POSIX PATH on `;` when run on Windows, finding one directory called
+  // "/usr/bin:/opt/bin" and therefore no editors at all. The comment above claims everything is
+  // injected; this is what makes that true.
+  const found = core.detectEditors({ path: '/usr/bin:/opt/bin', win: false, isExec: hasBin });
+  assert.deepEqual(found.map((e) => e.command), ['vim', 'nano', 'code -w'],
+    'declaration order, and the GUI one carries its wait flag');
+  assert.equal(found.every((e) => e.label), true, 'each is named');
+
+  // Absent binaries are never offered — a choice you cannot run is worse than no choice.
+  assert.deepEqual(core.detectEditors({ path: '/usr/bin', win: false, isExec: () => false }), []);
+
+  // Windows: same PATH, extensions from PATHEXT. The probe is case-INSENSITIVE because the Windows
+  // filesystem is: PATHEXT is conventionally upper-case while the shim on disk is `code.cmd`, and a
+  // case-sensitive stand-in would fail a check that succeeds on the real platform.
+  const winShim = path.join('C:\\tools', 'code.cmd').toLowerCase();
+  assert.deepEqual(
+    core.detectEditors({
+      path: 'C:\\tools', win: true, pathext: '.EXE;.CMD',
+      isExec: (f) => f.toLowerCase() === winShim,
+    }).map((e) => e.command),
+    ['code -w'],
+    'the .cmd shim is found; probing the bare name would find nothing at all');
+
+  // The row and the stepper read ONE list, so what you step through is what you see.
+  const env = { editors: found };
+  const rows = tui.optionRows({}, env);
+  const row = rows.find((r) => r.id === 'editor');
+  assert.deepEqual(row.choices, ['', 'vim', 'nano', 'code -w'], '"" is a real member: follow $EDITOR');
+  assert.deepEqual(tui.editorChoices({}, env), row.choices, 'and the stepper walks the same list');
+
+  let p = tui.applyOption({}, 'editor', 1, env);
+  assert.equal(p.editor, 'vim', 'right steps forward from "not set"');
+  p = tui.applyOption(p, 'editor', 1, env);
+  assert.equal(p.editor, 'nano');
+  p = tui.applyOption(p, 'editor', -1, env);
+  assert.equal(p.editor, 'vim', 'and left steps back');
+  p = tui.applyOption(p, 'editor', -1, env);
+  assert.equal('editor' in p, false, 'stepping back onto "" DELETES the key — that is what unset means');
+
+  // A hand-typed command is kept in the cycle rather than dropped, so stepping off it can return.
+  const custom = tui.setOption({}, 'editor', 'emacsclient -nw');
+  assert.equal(custom.editor, 'emacsclient -nw');
+  assert.ok(tui.editorChoices(custom, env).includes('emacsclient -nw'), 'the typed value joins the list');
+  const stepped = tui.applyOption(custom, 'editor', 1, env);
+  assert.equal(stepped.editor, undefined, 'it sits last, so forward wraps to "not set"…');
+  assert.equal(tui.applyOption(custom, 'editor', -1, env).editor, 'code -w', '…and back reaches the detected ones');
+
+  // With nothing detected the row still exists and stepping is a safe no-op, not a crash on %0.
+  const bare = tui.optionRows({}, {}).find((r) => r.id === 'editor');
+  assert.deepEqual(bare.choices, ['']);
+  assert.equal('editor' in tui.applyOption({}, 'editor', 1, {}), false,
+    'a one-member cycle steps to itself rather than dividing by zero');
+});
+
+test('tui: colour and glyphs degrade sensibly on Linux, macOS, WSL and Windows', () => {
+  // WINDOWS SETS NO `TERM`, and the detector ended with `env.TERM ? '16' : 'none'` — so every native
+  // Windows terminal rendered the whole app in no colour at all, while WSL (which does set TERM) was
+  // fine. Nobody on this project runs Windows daily, which is exactly why it needs a test rather than
+  // a look. Both functions take env AND platform so every row here is real, not simulated.
+  const row = (env, platform) => [tui.colorDepth(env, true, platform), tui.glyphTier(env, platform)];
+
+  assert.deepEqual(row({ TERM: 'xterm-256color', COLORTERM: 'truecolor', LANG: 'en_US.UTF-8' }, 'darwin'),
+    ['truecolor', 'block'], 'macOS, a modern terminal');
+  assert.deepEqual(row({ TERM: 'xterm-256color', COLORTERM: 'truecolor', LANG: 'en_US.UTF-8' }, 'linux'),
+    ['truecolor', 'block'], 'Linux, a modern terminal');
+  assert.deepEqual(row({ TERM: 'xterm' }, 'linux'), ['16', 'block'], 'Linux, a plain TERM');
+  assert.deepEqual(row({ TERM: 'xterm-256color', LANG: 'C' }, 'linux'), ['256', 'ascii'],
+    'a C locale cannot be trusted with box drawing, whatever the colour');
+
+  // WSL is Linux as far as node is concerned — it sets TERM, so it always worked.
+  assert.deepEqual(row({ TERM: 'xterm-256color', COLORTERM: 'truecolor', WT_SESSION: 'a', LANG: 'C.UTF-8' }, 'linux'),
+    ['truecolor', 'block'], 'WSL under Windows Terminal');
+
+  // …and native Windows, which is what was broken.
+  assert.deepEqual(row({ WT_SESSION: '3f2a' }, 'win32'), ['truecolor', 'block'],
+    'Windows Terminal advertises itself with WT_SESSION and does truecolor');
+  assert.deepEqual(row({}, 'win32'), ['16', 'safe'],
+    'ConHost understands VT and 16 colours; its raster fonts cannot draw the shading blocks');
+  assert.deepEqual(row({ ConEmuANSI: 'ON' }, 'win32'), ['256', 'safe'], 'ConEmu');
+
+  // The overrides still win everywhere, on every platform.
+  for (const plat of ['darwin', 'linux', 'win32']) {
+    assert.equal(tui.colorDepth({ TERM: 'xterm-256color', NO_COLOR: '1' }, true, plat), 'none',
+      `NO_COLOR is an instruction from the environment (${plat})`);
+    assert.equal(tui.colorDepth({ WT_SESSION: 'a', TERM: 'xterm-256color' }, false, plat), 'none',
+      `a non-TTY gets no escapes (${plat})`);
+    assert.equal(tui.glyphTier({ OBSERVATORY_GLYPHS: 'ascii' }, plat), 'ascii', `the override wins (${plat})`);
+  }
+});
+
+test('counts: "pending" means DISPLAY units everywhere — the raw record count is a different number', () => {
+  // The bug this pins: the VS Code status bar and its activity-bar badge counted RAW records while
+  // the Overview, the Sessions rows and the Stats scoreboard counted collapsed review units. One
+  // session read 3,067 in one place and 2,052 two panels away. `keep`/`undo` resolve a whole
+  // same-code group, so the display units are the number of decisions anyone actually has to make.
+  freshHome();
+  const S = 'count-units';
+  const cwd = tmpWork();
+  core.ensureStore(S);
+  const blob = (t) => core.writeBlob(S, Buffer.from(t));
+  const add = (rel, before, after) => {
+    const abs = path.join(cwd, rel);
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, after);
+    core.appendLog(S, { id: core.nextId(S), ts: Date.now(), tool: 'Edit', file: abs, beforeBlob: blob(before), afterBlob: blob(after), status: 'pending' });
+  };
+  // A CHAINED pair on one file — the second picks up where the first left off, which is exactly what
+  // collapses into a single review unit.
+  add('a.ts', 'v1\n', 'v2\n');
+  add('a.ts', 'v2\n', 'v3\n');
+  add('b.ts', 'x\n', 'y\n');
+
+  const raw = core.readLog(S).filter((r) => r.status === 'pending').length;
+  const units = core.reviewEdits(S).filter((r) => r.status === 'pending').length;
+  assert.equal(raw, 3, 'three records on disk');
+  assert.equal(units, 2, 'but two decisions — the chained pair is one review unit');
+  assert.notEqual(raw, units, 'the fixture MUST make the two differ, or this test asserts nothing');
+
+  // Every surface-facing count reads the units.
+  assert.equal(core.sessionCounts(S).pending, units, 'sessionCounts (status bar, Sessions rows)');
+  assert.equal(core.buildChangeMap(cwd, S, { root: cwd }).summary.pending, units, 'the change map summary');
+  assert.equal(core.reviewEdits(S).filter((r) => r.status === 'pending').length, units, 'and the list itself');
+});
+
+test('store: the location is shown, movable, and the move takes the history AND the settings', () => {
+  freshHome();
+  const S = 'store-move';
+  const cwd = tmpWork();
+  editHook(S, cwd, path.join(cwd, 'a.ts'), 'one\n', 'two\n');
+  assert.equal(core.readLog(S).length, 1, 'one record to move');
+  // A real preference, so the move has something to lose. This is the bug the fix exists for:
+  // prefs.json lives INSIDE the default store directory, so moving the store renamed the settings
+  // away with it and the write that recorded the new location left a file holding only `storeDir`.
+  core.writePrefs({ ...core.readPrefs(), remotes: [{ name: 'build-box', host: 'buildhost.internal', enabled: true }] });
+
+  const before = core.rootDir();
+  const dest = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'store-dest-')), 'observatory');
+  const res = core.moveStore(dest);
+  assert.ok(res.moved, `move failed: ${JSON.stringify(res)}`);
+  core.writePrefs({ ...core.readPrefs(), storeDir: dest });
+
+  assert.equal(core.rootDir(), dest, 'rootDir follows the setting');
+  assert.equal(core.readLog(S).length, 1, 'the history came with it');
+  assert.equal(core.readPrefs().remotes?.[0]?.name, 'build-box',
+    'and so did every OTHER setting — moving the store must not destroy the preferences');
+  assert.ok(!fs.existsSync(path.join(dest, 'prefs.json')),
+    'with exactly one preferences file, not a second one inside the store to disagree with it');
+  assert.ok(!fs.existsSync(path.join(before, S)), 'the old location no longer holds the session');
+
+  // …and back again. The default location always holds prefs.json, so a naive "is it empty?" guard
+  // makes the return trip impossible — which it did, until prefs.json stopped counting as store data.
+  const back = core.moveStore(before);
+  assert.ok(back.moved, `move back failed: ${JSON.stringify(back)}`);
+  const p = core.readPrefs();
+  delete p.storeDir;
+  core.writePrefs(p);
+  assert.equal(core.rootDir(), before, 'back to the default');
+  assert.equal(core.readLog(S).length, 1, 'still one record');
+  assert.equal(core.readPrefs().remotes?.[0]?.name, 'build-box', 'settings survived the return trip too');
+
+  // Refusals, each with its own reason.
+  assert.match(core.moveStore(core.rootDir()).error, /already there/);
+  assert.match(core.moveStore(path.join(core.rootDir(), 'inner')).error, /inside the current store/);
+  const busy = fs.mkdtempSync(path.join(os.tmpdir(), 'store-busy-'));
+  fs.writeFileSync(path.join(busy, 'something.txt'), 'x');
+  assert.match(core.moveStore(busy).error, /not empty/);
+  // A relative path would resolve against whatever directory the caller started in.
+  assert.match(core.parseStorePath('relative/path').error, /relative/);
+  assert.equal(core.parseStorePath('/abs/path').dir, '/abs/path');
+  assert.match(core.parseStorePath('   ').error, /nothing to set/);
+});
+
+test('remotes: one parser guards every surface that can add a machine', () => {
+  // Both fields are interpolated into a shell that runs on ANOTHER computer, so there is exactly one
+  // door — `parseRemoteSpec` — and the options window, the `remotes` verb and both editors all come
+  // through it. A second copy of this guard is a second chance to get it wrong.
+  const ok = core.parseRemoteSpec('build-box buildhost.internal');
+  assert.deepEqual(ok.remote, { name: 'build-box', host: 'buildhost.internal', configDir: undefined, enabled: true });
+
+  // One token is the host, and the name defaults to it — the common case where the two are the same.
+  assert.deepEqual(core.parseRemoteSpec('lab.example.com').remote,
+    { name: 'lab.example.com', host: 'lab.example.com', configDir: undefined, enabled: true });
+
+  // A $VARIABLE-leading config dir is allowed on purpose, so $HOME/.claude works…
+  assert.equal(core.parseRemoteSpec('lab lab.example.com $HOME/.claude').remote.configDir, '$HOME/.claude');
+  // …which is exactly why it cannot be a free string: $(...) in that position is command substitution,
+  // executed on the other machine. REFUSED AT WRITE TIME now — `readPrefs` already dropped it on read,
+  // which kept it out of the shell but made the reader's setting vanish with nothing said.
+  for (const bad of ['x host.example $(whoami)', 'x host.example `id`', 'x host.example a;b', 'x host.example "q"']) {
+    const r = core.parseRemoteSpec(bad);
+    assert.ok('error' in r, `should refuse: ${bad}`);
+    assert.match(r.error, /config dir/);
+  }
+  // …and a host ssh could not accept.
+  for (const bad of ['evil "; rm -rf /', 'a host with spaces extra bits!!']) {
+    assert.ok('error' in core.parseRemoteSpec(bad), `should refuse: ${bad}`);
+  }
+  assert.match(core.parseRemoteSpec('  ').error, /nothing to add/);
+  // The NAME is the handle every later operation uses (`remotes --remove <name>`), so one shaped like
+  // a flag makes its own removal unparseable. `remotes --add "--json evil"` stored a machine called
+  // `--json`; it is refused now. The name never reaches ssh — only host and configDir do — so this is
+  // a broken identifier rather than an injection, and the message says so.
+  assert.match(core.parseRemoteSpec('--json evil').error, /cannot start with/);
+  assert.match(core.parseRemoteSpec('-x host.example').error, /cannot start with/);
+
+  // The options window routes through it, so its refusals are the same strings.
+  const rejected = tui.setOption({}, 'remote:new', 'x host.example $(whoami)');
+  assert.match(String(rejected.__reject), /config dir/, 'the settings row shows the same reason');
+  assert.equal(rejected.remotes, undefined, 'and stores nothing');
+  const added = tui.setOption({}, 'remote:new', 'build-box buildhost.internal');
+  assert.deepEqual(added.remotes.map((r) => r.host), ['buildhost.internal']);
+
+  // Editing a row must not silently re-enable a machine the reader turned off.
+  const off = { remotes: [{ name: 'a', host: 'a.example', enabled: false }] };
+  assert.equal(tui.setOption(off, 'remote:0', 'a a2.example').remotes[0].enabled, false,
+    'an edit keeps the on/off state — turning a host back on is a separate gesture');
+  // …and blanking the line removes it, the one deletion gesture this screen has.
+  assert.equal(tui.setOption(off, 'remote:0', '   ').remotes, undefined);
+});
+
+test('options: the new settings round-trip, and a refused host says why', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-opt-'));
+  const file = path.join(dir, 'prefs.json');
+  let p = {};
+  // Start focus and start face cycle and persist.
+  p = tui.applyOption(p, 'startFocus', 1);
+  assert.equal(p.startFocus, 'prompts', 'cycles forward from the default');
+  p = tui.applyOption(p, 'startFace', 1);
+  assert.equal(p.startFace, 'map');
+  p = tui.applyOption(p, 'startFace', -1);
+  assert.equal(p.startFace, 'auto', 'and backward');
+  core.writePrefs(p, file);
+  assert.deepEqual(core.readPrefs(file), { startFocus: 'prompts' },
+    'only non-defaults are stored, and they read back');
+
+  // A host ssh could not accept is REFUSED with a reason, not silently dropped — and the previous
+  // remotes are left exactly as they were.
+  const withHost = tui.setOption({ remotes: [{ name: 'a', host: 'good-host', enabled: true }] }, 'remote:new', 'bad name@@!! host');
+  assert.match(String(withHost.__reject), /not a usable ssh host name/);
+  assert.equal(withHost.remotes.length, 1, 'the good one is untouched');
+  // …and the marker never reaches disk.
+  core.writePrefs(withHost, file);
+  assert.equal(core.readPrefs(file).__reject, undefined, 'a rejection is a message, not a setting');
+
+  // A GOOD host still stores.
+  const ok = tui.setOption({}, 'remote:new', 'nova nova.example.com');
+  assert.equal(ok.__reject, undefined);
+  assert.deepEqual(ok.remotes, [{ name: 'nova', host: 'nova.example.com', configDir: undefined, enabled: true }]);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('ignore: no display override exists — the matcher the hook uses is the only one', () => {
+  // The two-mode design had a "show ignored edits" setting, and the bug it shipped with was that the
+  // env check sat inside `ignoreContext` — the function the CAPTURE HOOK calls — so turning the
+  // display setting on silently disabled refusal. Under one mode the setting is gone entirely, and
+  // this asserts it cannot come back through the environment.
+  const root = ignoreWork({ '.observatoryignore': 'gone.ts\n' });
+  const prev = process.env.CLAUDE_OBSERVATORY_SHOW_HIDDEN;
+  const probe = path.join(root, 'gone.ts');
+  try {
+    process.env.CLAUDE_OBSERVATORY_SHOW_HIDDEN = '1';
+    assert.equal(core.ignoreContext({ home: null }).ignored(probe), true,
+      'no environment variable can make the matcher record what the file excludes');
+    assert.equal(core.ignoreContextFor([probe], { home: null }).ignored(probe), true);
+  } finally {
+    if (prev === undefined) delete process.env.CLAUDE_OBSERVATORY_SHOW_HIDDEN;
+    else process.env.CLAUDE_OBSERVATORY_SHOW_HIDDEN = prev;
+  }
+  assert.equal(typeof core.sessionIgnoreContext, 'undefined', 'and the display matcher is gone');
+  assert.equal(typeof core.readLogVisible, 'undefined');
+  assert.equal(typeof core.reviewEditsFiltered, 'undefined');
+});
+
+test('ignore: `resolve` cannot reach an ignored file, because the store never held one', () => {
+  // `resolve` is accept-everything-then-CLEAR, the one bulk verb whose mistake cannot be undone: the
+  // verdict is written and the record dropped. Under one mode it is safe by construction here —
+  // there is no ignored record for it to sweep up.
+  freshHome();
+  const S = 'ign-resolve';
+  const cwd = tmpWork();
+  fs.writeFileSync(path.join(cwd, '.observatoryignore'), 'vendor/\n');
+  const vend = path.join(cwd, 'vendor', 'lib.js');
+  fs.mkdirSync(path.dirname(vend), { recursive: true });
+  editHook(S, cwd, vend, 'v1\n', 'v2\n');
+  editHook(S, cwd, path.join(cwd, 'src.ts'), 's1\n', 's2\n');
+
+  const res = core.resolveSession(S);
+  assert.equal(res.accepted, 1, 'the one recorded edit');
+  assert.equal(core.readLog(S).length, 0, 'and resolve cleared it');
+  assert.equal(fs.readFileSync(vend, 'utf8'), 'v2\n', 'the ignored file was never touched');
+});
+
+test('ignore: a session whose edits are ALL ignored renders as empty, and says nothing false', () => {
+  // An over-broad rule (a stray `*`, `src/` where `dist/` was meant) means nothing is recorded at
+  // all. Under one mode the pane is genuinely empty and there is no count to state — so the thing to
+  // assert is that it does not invent one, and that the empty-state text is the ordinary one.
+  const base = paneFixture();
+  const empty = { ...base, views: { ...base.views, list: { edits: [] } } };
+  const frame = tui.renderDashFrame(empty, { cols: 150, rows: 34, color: false });
+  assert.ok(frame.find((l) => /F2 Traces/.test(l)), 'positive control: the pane is rendered');
+  assert.ok(!frame.some((l) => /observatoryignore/.test(l)),
+    'no ignore notice — nothing was filtered, so there is nothing to explain');
+});
+
+test('ignore: the sweep moves every derived surface, because it rewrites the log they key on', () => {
+  // The two-mode design needed three cache stamps to mention the ignore files, and a missed one was
+  // invisible: it looked like the feature worked and then served a stale answer forever. One mode
+  // deletes that whole class of bug — the sweep rewrites log.jsonl, and every derived cache already
+  // keys on it. This asserts that property rather than trusting it.
+  freshHome();
+  const S = 'ign-stamps';
+  const cwd = tmpWork();
+  editHook(S, cwd, path.join(cwd, 'a.ts'), 'a\n', 'A\n');
+  editHook(S, cwd, path.join(cwd, 'keep.ts'), 'k\n', 'K\n');
+  const ig = path.join(cwd, '.observatoryignore');
+
+  assert.equal(core.sessionCounts(S).edits, 2, 'both, to start');
+  assert.equal(core.cachedChangeMap(cwd, S, { root: cwd, prompts: true }).summary.units, 2);
+  const idsBefore = core.promptWindows(cwd, S).flatMap((w) => w.editIds ?? []);
+
+  fs.writeFileSync(ig, 'a.ts\n');
+  // The rule alone changes nothing about what is already recorded — that is the point of the sweep,
+  // and asserting it here is what proves the numbers below come from the sweep and not from a filter
+  // that quietly survived.
+  assert.equal(core.sessionCounts(S).edits, 2, 'a new rule does not retroactively hide anything');
+
+  const res = core.dropIgnored(S);
+  assert.equal(res.dropped, 1, 'the sweep removed the now-covered record');
+  core.clearFsCache(); // the in-process memo would answer before any disk cache is consulted
+  assert.equal(core.sessionCounts(S).edits, 1, 'the counts follow');
+  assert.equal(core.cachedChangeMap(cwd, S, { root: cwd, prompts: true }).summary.units, 1, 'and the on-disk map cache');
+  const idsAfter = core.promptWindows(cwd, S).flatMap((w) => w.editIds ?? []);
+  assert.ok(idsAfter.length < idsBefore.length || idsBefore.length === 0,
+    'and the rewind id set, which must never revert a record that no longer exists');
+  assert.equal(core.readSweep(S).dropped, 1, 'and the session records what was destroyed');
+});
+
+test('remote: the shell fallback actually lists sessions — it is RUN, not just generated', () => {
+  // The python scanner covers most hosts, so a fault in the fallback stayed invisible until someone
+  // hit a host without python3. One was there: `~` was passed to `sh` inside single quotes, which no
+  // shell expands, so `[ -d "$d" ]` failed, the script printed NOPROJECTS, and every such host
+  // reported "reachable, no sessions". Nothing had ever executed this script.
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'rem-home-'));
+  const proj = path.join(home, '.claude', 'projects', '-tmp-work');
+  fs.mkdirSync(proj, { recursive: true });
+  fs.writeFileSync(path.join(proj, 'sess-a.jsonl'),
+    JSON.stringify({ type: 'user', message: { role: 'user', content: 'remote ask' } }) + '\n');
+
+  // `~` — the default. Run the SHIPPED script under a HOME that holds the fixture.
+  const script = core.__remoteFallbackScript('~/.claude');
+  const out = cp.execFileSync('sh', ['-c', script], { encoding: 'utf8', env: { ...process.env, HOME: home } });
+  assert.match(out.split('\n')[0], /^OK$/, 'the tilde form finds the directory (it used to print NOPROJECTS)');
+  const rows = core.__parseRemoteRows(out);
+  assert.equal(rows.length, 1, 'and lists the session');
+  assert.equal(rows[0].id, 'sess-a');
+  assert.equal(rows[0].slug, '-tmp-work');
+  assert.ok(rows[0].lastActiveMs > 0, 'with a real mtime, not 0');
+
+  // An explicit absolute dir must work too — that path is quoted, and quoting is correct there.
+  const abs = core.__remoteFallbackScript(path.join(home, '.claude'));
+  const out2 = cp.execFileSync('sh', ['-c', abs], { encoding: 'utf8', env: { ...process.env, HOME: '/nonexistent' } });
+  assert.equal(core.__parseRemoteRows(out2).length, 1, 'an absolute config dir does not depend on $HOME');
+
+  // NOPROJECTS is still reported for a host that genuinely has none — the positive control for the
+  // sentinel this all keys on.
+  const none = core.__remoteFallbackScript(path.join(home, 'nope'));
+  assert.match(cp.execFileSync('sh', ['-c', none], { encoding: 'utf8' }).trim(), /^NOPROJECTS$/);
+  fs.rmSync(home, { recursive: true, force: true });
+});
+
+test('remote: the listing cache survives a process boundary, so a poll cannot ssh every tick', () => {
+  // JetBrains passes `--remote` on its ~3-second poll, and every CLI spawn is a FRESH process — so an
+  // in-process Map never hit even once, while a comment claimed it absorbed the cost. Each tick paid
+  // a full synchronous ssh. The disk tier is what makes that comment true.
+  freshHome();
+  const host = { name: 'probe', host: 'probe.invalid' };
+  const t0 = 1_700_000_000_000;
+  const first = core.remoteRows([host], { now: t0 });
+  assert.equal(first.length, 1, 'an unreachable host still yields a ROW, never silence');
+  assert.ok(first[0].error, 'and the row carries the reason');
+
+  // A NEW process would have an empty Map. Simulate exactly that by clearing only the in-process
+  // tier — if the disk tier works, the answer still comes back without another ssh.
+  const cacheDir = path.join(core.rootDir(), 'remote-cache');
+  assert.ok(fs.existsSync(cacheDir), 'the listing was written to disk');
+  const files = fs.readdirSync(cacheDir);
+  assert.equal(files.length, 1, 'one entry per (host, configDir)');
+  const stampBefore = fs.statSync(path.join(cacheDir, files[0])).mtimeMs;
+
+  // Force the DISK tier to be the one that answers. Without this the in-process Map serves the
+  // second call and the cross-process claim — the whole reason this cache exists — is untested.
+  // `clearRemoteCache` drops both tiers, so the Map is emptied by hand instead.
+  core.__clearRemoteMemoOnly();
+  const again = core.remoteRows([host], { now: t0 + 1000 });
+  assert.deepEqual(again.map((r) => r.id), first.map((r) => r.id), 'a FRESH process shape still gets the answer');
+  assert.ok(again[0].error, 'including the reason the host failed');
+  assert.equal(fs.statSync(path.join(cacheDir, files[0])).mtimeMs, stampBefore, 'and it was not rewritten');
+  // 0600 in a 0700 directory: these entries hold session titles from another machine. POSIX mode bits
+  // do not exist on Windows — `mode & 0o777` there reports a synthesized value that says nothing about
+  // who can read the file — so the claim is only meaningful where the bits are real.
+  if (process.platform !== 'win32') {
+    assert.equal(fs.statSync(path.join(cacheDir, files[0])).mode & 0o777, 0o600, 'the entry is not world-readable');
+    assert.equal(fs.statSync(cacheDir).mode & 0o777, 0o700, 'nor is its directory');
+  }
+
+  // Past the TTL it asks again…
+  core.remoteRows([host], { now: t0 + 61_000 });
+  // …and an explicit clear drops the disk tier too, or "retry this host now" would be a no-op.
+  core.clearRemoteCache();
+  assert.ok(!fs.existsSync(cacheDir) || fs.readdirSync(cacheDir).length === 0,
+    'clearRemoteCache clears the cross-process tier as well');
+});
+
+test('panes: the change map’s row list depends on the pane WIDTH, so a resolver must pass it', () => {
+  // `rowsFor` defaults to 100 columns — a rendering width, not a neutral one. On the map a long
+  // folder name wraps onto continuation rows, so the row LIST at 78 columns (what Detail gets at
+  // 120x34) is not the list at 100. Every keyboard resolver used the default while the pane drew at
+  // its real width, so Enter folded a different node than the highlighted one.
+  const long = (n) => `${n}-package-with-a-deliberately-long-name/inner/leaf.ts`;
+  const files = [1, 2, 3].map((i) => ({
+    rel: long(`alpha${i}`), cnt: 2, added: 9, removed: 1, status: 'pending',
+    module: `alpha${i}-package-with-a-deliberately-long-name/inner`,
+    moduleLabel: `alpha${i}-package-with-a-deliberately-long-name/inner`,
+    file: 'leaf.ts', churn: 10, kept: 0, pending: 2, undone: 0,
+  }));
+  const st = { ...paneFixture(), screen: 'map', views: { ...paneFixture().views, changemap: { summary: {}, files } } };
+  const wide = tui.rowsFor(st, 140);
+  const narrow = tui.rowsFor(st, 40);
+  assert.notEqual(narrow.length, wide.length,
+    'a narrower pane genuinely produces a different row list — otherwise this test proves nothing');
+  // …and the openPath at a given index differs, which is what made Enter act on the wrong node.
+  const firstDiff = wide.findIndex((r, i) => (narrow[i]?.openPath ?? null) !== (r.openPath ?? null));
+  assert.ok(firstDiff >= 0, 'and the two lists disagree about what row N is');
+});
+
+test('ignore: `clean --resolved` clears exactly what the reader was shown', () => {
+  // The bug this guards: VS Code counted the confirmation one way and `clean --resolved` acted on
+  // another, so the modal said "Clear 1 resolved edit(s)?" and three went. Under one mode the two
+  // sets are the same log, which is the fix — asserted here rather than assumed.
+  freshHome();
+  const S = 'ign-clear';
+  const cwd = tmpWork();
+  fs.writeFileSync(path.join(cwd, '.observatoryignore'), 'dist/\n');
+  fs.mkdirSync(path.join(cwd, 'dist'), { recursive: true });
+  editHook(S, cwd, path.join(cwd, 'src.ts'), 'a\n', 'A\n');
+  editHook(S, cwd, path.join(cwd, 'dist', 'one.js'), 'b\n', 'B\n');
+  editHook(S, cwd, path.join(cwd, 'dist', 'two.js'), 'c\n', 'C\n');
+  assert.equal(core.readLog(S).length, 1, 'the dist pair was never recorded');
+  core.setStatusMany(S, core.readLog(S).map((r) => r.id), 'kept');
+
+  const shown = core.readLog(S).filter((r) => r.status !== 'pending').length;
+  assert.equal(shown, 1, 'the reader is shown one resolved edit');
+  assert.equal(core.clearResolved(S), shown, 'and exactly that many are cleared');
+  assert.equal(core.readLog(S).length, 0, 'leaving nothing behind');
+});
+
+test('ignore: a file that exists but cannot be read is REPORTED, never treated as absent', () => {
+  // `stampOf` proves the file is there (its directory was readable), so a read failure is a
+  // permissions problem — and returning the same `null` that "no file" returns makes a whole rule set
+  // silently stop applying. Under one mode this fails in the SAFE direction (more is captured, not
+  // less), which is exactly why it must still be said out loud: the reader believes a path is
+  // excluded and it is not.
+  const root = ignoreWork({ '.observatoryignore': 'secret.txt\n' });
+  const file = path.join(root, '.observatoryignore');
+  // Enforced by the OS, so skip where it cannot be (a root-owned CI runner ignores mode 000).
+  fs.chmodSync(file, 0o000);
+  let readable = true;
+  try { fs.readFileSync(file, 'utf8'); } catch { readable = false; }
+  if (!readable) {
+    const ctx = core.ignoreContext({ home: null });
+    assert.equal(ctx.ignored(path.join(root, 'secret.txt')), false,
+      'the rules genuinely are not in force — that part is unavoidable');
+    const problems = core.ignoreProblems();
+    assert.ok(problems.some((p) => p.includes(file)), 'but the file is NAMED');
+    assert.ok(problems.some((p) => /NOT in force/.test(p)), 'and the consequence is stated');
+  }
+  fs.chmodSync(file, 0o644);
+  // Positive control: once readable, the rule applies and nothing is reported for it.
+  const ok = core.ignoreContext({ home: null });
+  assert.equal(ok.ignored(path.join(root, 'secret.txt')), true);
+  assert.ok(!core.ignoreProblems().some((p) => p.includes(file)), 'and the problem clears');
+});
+
+test('sweep: the gate notices a rule created, edited and deleted — driven through the real hook', () => {
+  // The two-mode design memoized the matcher per session and had to revalidate it; one mode replaced
+  // that with a stamp over the ignore files reachable from the session's directories. The failure
+  // mode is the same either way and it is silent: miss a change and the rule looks like it works
+  // while nothing ever happens. Every case below goes through the CAPTURE HOOK, so it measures the
+  // shipped trigger and not a helper.
+  freshHome();
+  const S = 'sweep-gate';
+  const cwd = tmpWork();
+  const ig = path.join(cwd, '.observatoryignore');
+  const recorded = () => core.readLog(S).map((r) => path.basename(r.file)).sort();
+
+  editHook(S, cwd, path.join(cwd, 'a.ts'), 'a\n', 'A\n');
+  editHook(S, cwd, path.join(cwd, 'b.ts'), 'b\n', 'B\n');
+  assert.deepEqual(recorded(), ['a.ts', 'b.ts'], 'both to start');
+
+  // CREATED, then one more capture — the trigger.
+  fs.writeFileSync(ig, 'a.ts\n');
+  editHook(S, cwd, path.join(cwd, 'c.ts'), 'c\n', 'C\n');
+  assert.deepEqual(recorded(), ['b.ts', 'c.ts'], 'a brand-new rule sweeps the record it now covers');
+
+  // EDITED — same path, different rule. The previously swept file cannot come back (its record is
+  // gone for good), but the newly covered one must go.
+  fs.writeFileSync(ig, 'b.ts\n');
+  editHook(S, cwd, path.join(cwd, 'd.ts'), 'd\n', 'D\n');
+  assert.deepEqual(recorded(), ['c.ts', 'd.ts'], 'editing the file is caught too');
+
+  // DELETED — nothing is swept, and nothing that survived is disturbed.
+  fs.rmSync(ig);
+  editHook(S, cwd, path.join(cwd, 'e.ts'), 'e\n', 'E\n');
+  assert.deepEqual(recorded(), ['c.ts', 'd.ts', 'e.ts'], 'removing the rule sweeps nothing');
+
+  // The PER-CHECKOUT tier moves independently of the shared one, so the stamp has to cover both
+  // names per directory; dropping either half is a rule that silently never fires.
+  fs.mkdirSync(path.join(cwd, '.git', 'info'), { recursive: true });
+  fs.writeFileSync(path.join(cwd, '.git', 'info', 'observatoryignore'), 'c.ts\n');
+  editHook(S, cwd, path.join(cwd, 'f.ts'), 'f\n', 'F\n');
+  assert.deepEqual(recorded(), ['d.ts', 'e.ts', 'f.ts'], 'a .git/info rule fires as well');
+  assert.equal(core.readSweep(S).dropped, 3, 'and the session totals what was destroyed');
+});
+
+test('sweep: a rule BELOW cwd fires too — the Bash walk reports where it actually wrote', () => {
+  // The gate stamped only the directory the hook was INVOKED from. A Bash walk records at any depth
+  // beneath cwd, so a `.observatoryignore` created in one of those deeper directories was invisible
+  // to the stamp: the rule refused new captures immediately, while the records it covered stayed in
+  // the store forever with nothing to move the stamp. Found by the pre-commit review, reproduced end
+  // to end, and this is that reproduction.
+  freshHome();
+  const S = 'sweep-below';
+  const cwd = tmpWork();
+  const deep = path.join(cwd, 'sub', 'deep');
+  fs.mkdirSync(deep, { recursive: true });
+
+  bashHook(S, cwd, 'PreToolUse');
+  fs.writeFileSync(path.join(deep, 'a.txt'), 'hello\nworld\n');
+  bashHook(S, cwd, 'PostToolUse');
+  assert.deepEqual(core.readLog(S).map((r) => path.basename(r.file)), ['a.txt'], 'the deep file is recorded');
+
+  // The rule goes in the directory the file LIVES in — three levels below cwd.
+  fs.writeFileSync(path.join(deep, '.observatoryignore'), '*\n');
+  assert.equal(core.ignoreContext().ignored(path.join(deep, 'a.txt')), true,
+    'the rule is live for new captures — so a surviving record is the GATE being blind, not the matcher');
+
+  // One more command, run from cwd as before.
+  bashHook(S, cwd, 'PreToolUse');
+  fs.writeFileSync(path.join(cwd, 'top.txt'), 'x\n');
+  bashHook(S, cwd, 'PostToolUse');
+
+  assert.deepEqual(core.readLog(S).map((r) => path.basename(r.file)), ['top.txt'],
+    'the covered record is swept, even though the rule sits below the directory the hook was invoked from');
+  assert.equal(core.readSweep(S).dropped, 1);
+});
+
+test('sweep: a rule at an ANCESTOR of the edited files still fires, and from ANY directory', () => {
+  // The two mistakes a cheap gate makes, both silent:
+  //   1. stamping only the directories files live IN — the matcher walks every ancestor, so a rule at
+  //      `<repo>/.observatoryignore` governing `<repo>/sub/*` never invalidates anything;
+  //   2. stamping only the CURRENT capture's own chain — a rule written for one directory then never
+  //      fires, because the next edit happens somewhere else.
+  // The second is the common case: you add `dist/` and then keep working in `src/`.
+  freshHome();
+  const S = 'sweep-ancestor';
+  const cwd = tmpWork();
+  fs.mkdirSync(path.join(cwd, 'sub'), { recursive: true });
+  fs.mkdirSync(path.join(cwd, 'other'), { recursive: true });
+  editHook(S, cwd, path.join(cwd, 'sub', 'a.ts'), 'a\n', 'A\n');
+  editHook(S, cwd, path.join(cwd, 'sub', 'keep.md'), 'k\n', 'K\n');
+  const recorded = () => core.readLog(S).map((r) => path.basename(r.file)).sort();
+  assert.deepEqual(recorded(), ['a.ts', 'keep.md']);
+
+  // The rule at the PARENT of every edited file, and the next capture in a DIFFERENT directory.
+  fs.writeFileSync(path.join(cwd, '.observatoryignore'), 'a.ts\n');
+  editHook(S, cwd, path.join(cwd, 'other', 'z.ts'), 'z\n', 'Z\n');
+  assert.deepEqual(recorded(), ['keep.md', 'z.ts'],
+    'an ancestor rule fires on a capture that is not beneath the rule it was written for');
+
+  // The per-checkout tier lives at a repo ROOT, which is an ancestor almost by definition.
+  fs.mkdirSync(path.join(cwd, '.git', 'info'), { recursive: true });
+  fs.writeFileSync(path.join(cwd, '.git', 'info', 'observatoryignore'), 'keep.md\n');
+  editHook(S, cwd, path.join(cwd, 'other', 'y.ts'), 'y\n', 'Y\n');
+  assert.deepEqual(recorded(), ['y.ts', 'z.ts'], 'and so does a repo-private rule at the root');
+});
+
+test('sweep: it does not run when nothing changed, and never rewrites for nothing', () => {
+  // Two properties that keep this off the critical path. It sits on the capture hook, so a store
+  // rewrite per edit would be a real cost — and a mtime that moves on every capture would invalidate
+  // every derived cache in the product.
+  freshHome();
+  const S = 'sweep-quiet';
+  const cwd = tmpWork();
+  fs.writeFileSync(path.join(cwd, '.observatoryignore'), 'nothing-matches-this\n');
+  editHook(S, cwd, path.join(cwd, 'a.ts'), 'a\n', 'A\n');
+  const logFile = core.logPath(S);
+  const before = fs.statSync(logFile).mtimeMs;
+  const sizeBefore = fs.statSync(logFile).size;
+  // Ten more gate runs with the rules unchanged — the second and later ones must be pure no-ops.
+  for (let i = 0; i < 10; i++) core.sweepIgnoredIfChanged(S, cwd);
+  assert.equal(fs.statSync(logFile).mtimeMs, before, 'an unchanged stamp rewrites nothing');
+  assert.equal(fs.statSync(logFile).size, sizeBefore);
+  assert.equal(core.readSweep(S), null, 'and records no sweep');
+
+  // Positive control: a rule that DOES match proves the probe can tell the difference.
+  fs.writeFileSync(path.join(cwd, '.observatoryignore'), 'a.ts\n');
+  const res = core.sweepIgnoredIfChanged(S, cwd);
+  assert.ok(res && res.dropped === 1, 'the same call sweeps once the rule covers something');
+  assert.equal(core.readLog(S).length, 0);
+});
+
+test('sweep: it retires the skip marker for a file the rules now cover', () => {
+  // A skip marker names a path and says "a real edit here was not captured". Leaving one behind for
+  // a now-ignored file keeps reporting the very path the reader asked never to be recorded.
+  freshHome();
+  const S = 'sweep-skips';
+  const cwd = tmpWork();
+  core.ensureStore(S);
+  core.appendSkip(S, path.join(cwd, 'huge.bin'), 'file too large');
+  core.appendSkip(S, path.join(cwd, 'real.ts'), 'file too large');
+  core.appendSkip(S, '<bash-tree>', 'walk truncated');
+  assert.equal(core.readSkips(S).length, 3);
+  // A record too, so the sweep has something to drop — it returns early when nothing matches.
+  editHook(S, cwd, path.join(cwd, 'huge.bin.ts'), 'x\n', 'y\n');
+
+  fs.writeFileSync(path.join(cwd, '.observatoryignore'), '*.bin\n*.bin.ts\n');
+  core.dropIgnored(S);
+  const left = core.readSkips(S).map((k) => path.basename(k.file)).sort();
+  assert.deepEqual(left, ['<bash-tree>', 'real.ts'],
+    'the covered marker is gone; the uncovered one and the non-path sentinel both survive');
+});
+
+test('sweep: the swept op is cumulative, not one line per sweep', () => {
+  // The op is carried verbatim through every later log rewrite, so appending one per sweep would
+  // grow the log for the lifetime of the session and make readSweep slower forever.
+  freshHome();
+  const S = 'sweep-op';
+  const cwd = tmpWork();
+  editHook(S, cwd, path.join(cwd, 'a.log'), 'a\n', 'A\n');
+  editHook(S, cwd, path.join(cwd, 'b.tmp'), 'b\n', 'B\n');
+  editHook(S, cwd, path.join(cwd, 'keep.ts'), 'k\n', 'K\n');
+
+  fs.writeFileSync(path.join(cwd, '.observatoryignore'), '*.log\n');
+  assert.equal(core.dropIgnored(S).dropped, 1);
+  fs.writeFileSync(path.join(cwd, '.observatoryignore'), '*.log\n*.tmp\n');
+  assert.equal(core.dropIgnored(S).dropped, 1);
+
+  const opLines = fs.readFileSync(core.logPath(S), 'utf8').split('\n')
+    .filter((l) => l.includes('"swept"'));
+  assert.equal(opLines.length, 1, 'exactly one swept line, however many sweeps ran');
+  assert.equal(core.readSweep(S).dropped, 2, 'and it totals both');
+  assert.equal(core.readSweep(S).files, 2);
+  assert.equal(core.readLog(S).length, 1, 'with the uncovered edit untouched');
+});
+
+test('remote: the config-dir check is linear, and accepts exactly what the regex did', () => {
+  // This guards a string that is interpolated into a shell on ANOTHER machine, and it used to be a
+  // regex whose `$VAR` head and path tail overlapped on letters, digits and underscore — so a long
+  // `$AAAA…` could be split between them many ways and the match was polynomial (CodeQL:
+  // js/polynomial-redos). Every regex repair for that also MOVED the accepted set, which is not a
+  // trade worth making on a shell-adjacent validator, so it became a one-pass scan.
+  //
+  // The risk of hand-writing it is drift, so the original regex is kept here as the oracle and the two
+  // are compared over every short string in a hostile alphabet plus a large random sample.
+  const ORIGINAL = /^(?:\$[A-Za-z_][A-Za-z0-9_]*|~|\/)[A-Za-z0-9._\-\/]*$/;
+  const alpha = ['$', '~', '/', 'a', 'Z', '0', '9', '_', '.', '-', ';', '`', '(', ')', ' ', '"', "'", '\\', '*', '\n'];
+  let compared = 0;
+  const walk = (str, depth) => {
+    if (str.length) {
+      compared++;
+      assert.equal(core.CONFIG_DIR_OK.test(str), ORIGINAL.test(str), `disagreed on ${JSON.stringify(str)}`);
+    }
+    if (!depth) return;
+    for (const c of alpha) walk(str + c, depth - 1);
+  };
+  walk('', 3); // every string up to length 3 over that alphabet
+  for (let i = 0; i < 20_000; i++) {
+    let str = '';
+    const len = 1 + (i % 12);
+    for (let k = 0; k < len; k++) str += alpha[(i * 7 + k * 13) % alpha.length];
+    compared++;
+    assert.equal(core.CONFIG_DIR_OK.test(str), ORIGINAL.test(str), `disagreed on ${JSON.stringify(str)}`);
+  }
+  assert.ok(compared > 25_000, `the comparison must actually run, did ${compared}`);
+
+  // …and the shape that made the old one quadratic is now trivial. Bounded by TIME rather than by a
+  // fixed threshold ratio: the original takes seconds on this input, the scan takes about a millisecond.
+  const hostile = '$' + 'A'.repeat(50_000) + '!';
+  const started = Date.now();
+  assert.equal(core.CONFIG_DIR_OK.test(hostile), false, 'still refused, for the right reason');
+  assert.ok(Date.now() - started < 250, `50k characters must not backtrack (took ${Date.now() - started}ms)`);
+});
+
+test('remote: a config dir cannot smuggle a command onto the other machine', () => {
+  // The `$`-leading form is passed to the remote shell UNQUOTED on purpose, so `$HOME/.claude` and
+  // `$CLAUDE_CONFIG_DIR` work. That is exactly why it cannot be a free string: in that position
+  // `$(...)` is command substitution, executed THERE. It reached the shell through prefs.json and
+  // through the options window, neither of which validated it — only the host was checked.
+  for (const bad of ['$(touch /tmp/x)/.claude', 'a;rm -rf /', '`id`', '~/my dir', '"x"', '$(id)']) {
+    assert.equal(core.CONFIG_DIR_OK.test(bad), false, `${bad} must be refused`);
+    const r = core.listRemoteSessions({ name: 'x', host: 'somehost', configDir: bad });
+    assert.match(String(r.error), /not a usable config directory/, `${bad} refused before any spawn`);
+    assert.equal(r.reachable, false);
+  }
+  // …and every legitimate form still works, or the guard has broken the feature instead of the hole.
+  for (const ok of ['~/.claude', '$HOME/.claude', '$CLAUDE_CONFIG_DIR', '/opt/claude', '~']) {
+    assert.equal(core.CONFIG_DIR_OK.test(ok), true, `${ok} must be accepted`);
+  }
+  // The settings file is the other door: a hostile value there is dropped on read, and the rest of
+  // the entry survives rather than the whole remote vanishing.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-cfgdir-'));
+  const file = path.join(dir, 'prefs.json');
+  fs.writeFileSync(file, JSON.stringify({ remotes: [{ name: 'nova', host: 'nova', configDir: '$(id)' }] }));
+  const p = core.readPrefs(file);
+  assert.equal(p.remotes.length, 1, 'the host is kept');
+  assert.equal(p.remotes[0].configDir, undefined, 'and the unusable config dir is dropped');
+  fs.rmSync(dir, { recursive: true, force: true });
 });

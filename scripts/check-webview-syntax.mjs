@@ -27,8 +27,24 @@ let ok = 0; const fails = [];
 for (const n of names) {
   const body = literalFor(n);
   if (body == null) { fails.push(`${n}: could not locate its template literal`); continue; }
-  const js = body.replace(/\$\{[^{}]*(\{[^{}]*\}[^{}]*)*\}/g, '0'); // host-side interpolation → a literal
-  try { new Function(js); ok++; } catch (e) { fails.push(`${n} (${body.length}b): ${e.message}`); }
+  const neutral = body.replace(/\$\{[^{}]*(\{[^{}]*\}[^{}]*)*\}/g, '0'); // host-side interpolation → a literal
+  // EVALUATE the template literal before parsing it. The engine resolves its escapes first, so the
+  // text that ships is not the text in the source: `\'` here is a valid escape and reaches the browser
+  // as a bare apostrophe, which terminates the JS string it was sitting in. Parsing the raw source
+  // called that script healthy and it shipped broken — the exact failure this gate exists to catch.
+  let js;
+  try {
+    // BACKSLASHES FIRST, then backticks and `${`. Escaping only the backtick is incomplete: a source
+    // ending in `\` would have its escape consumed by the backtick that follows, so the literal this
+    // builds terminates early and the gate evaluates something other than the file it is checking —
+    // the exact class of silent wrong-answer this script exists to prevent.
+    const literal = neutral.replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$\{/g, '\\${');
+    js = new Function('return `' + literal + '`')();
+  } catch (e) {
+    fails.push(`${n}: its template literal does not even evaluate: ${e.message}`);
+    continue;
+  }
+  try { new Function(js); ok++; } catch (e) { fails.push(`${n} (${js.length}b): ${e.message}`); }
 }
 console.log(`  webview scripts: ${names.join(', ')}`);
 console.log(`  parsed: ${ok}   failed: ${fails.length}`);

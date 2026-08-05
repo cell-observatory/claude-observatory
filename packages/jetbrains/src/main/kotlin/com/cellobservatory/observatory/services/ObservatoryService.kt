@@ -98,17 +98,40 @@ class ObservatoryService(private val project: Project) : Disposable {
     }
 
     @Volatile private var pendingByFile: Map<String, Int> = emptyMap()
+    @Volatile private var pendingFilesCache: List<String> = emptyList()
 
     /** Folded log for the current session, cached on the log file's (mtime,size). */
     fun log(): List<EditRecord> {
-        val session = currentSession() ?: run { pendingByFile = emptyMap(); return emptyList() }
+        val session = currentSession() ?: run {
+            pendingByFile = emptyMap()
+            pendingFilesCache = emptyList()
+            return emptyList()
+        }
         val key = "$session:${StoreReader.logKey(session)}"
         if (key != cachedKey) {
             cachedLog = StoreReader.readLog(session)
             pendingByFile = cachedLog.filter { it.pending }.groupingBy { it.file }.eachCount() // for the Project-view decorator
+            // …and the FILE AXIS, derived here for the same reason: it was recomputed by every caller
+            // on every toolbar tick — a filter, a distinct and a SORT over every record in the session
+            // — and there are a lot of callers. The floating bar alone expands 14 actions per tick, the
+            // status-bar nav bar and the editor banner ask again, and three of them had their own copy
+            // of the expression. One derivation, cached on the same key as the log it comes from.
+            pendingFilesCache = cachedLog.filter { it.pending }.map { it.file }.distinct().sorted()
             cachedKey = key
         }
         return cachedLog
+    }
+
+    /**
+     * Every file with pending edits, distinct and path-sorted — THE File axis, for the status-bar nav
+     * bar, the floating review bar and the editor banner.
+     *
+     * `log()` first, so the cache is current: this is derived there, and reading the field without
+     * that would answer from the previous session after a switch.
+     */
+    fun pendingFiles(): List<String> {
+        log()
+        return pendingFilesCache
     }
 
     /** Pending-edit count for a file path — O(1), cached with the log (drives the Project-view badge).

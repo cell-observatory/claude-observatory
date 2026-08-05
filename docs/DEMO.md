@@ -331,8 +331,8 @@ in the others instantly. The layout is deliberately identical; only the host chr
 | **Prompts · Observations · Actions** (the Timeline) | the **Observatory Timeline** panel — one webview whose tab strip carries all three (0.10.0 consolidated the former `claudeObservatory.prompts` / `.actions` / `.observations` views into it) | the **Observatory Timeline** tool window, right stripe — one content, the same three as tabs |
 | **Group tabs** (beside both tab strips) | a toggle beside the Overview's and the Timeline's tab strips: columns instead of tabs, each resizable by dragging the divider (double-click resets the pair) and foldable to a named rail that is itself the button back. Widths and folds ride the webview's own state | the same toggle, same groupings, on an `ActionToolbar` beside each tab strip; widths and folds persist in `claude-observatory.xml` |
 | Inline menu | `🔬 #N +A −R · n/m` │ ✓ Keep │ ↩ Undo │ 💬 Chat │ ⧉ Diff │ ⋯ Details — CodeLens above each edit + ✨ gutter star + bold green/red highlight + coral ruler mark | `✦ #N +A −R · edit n/m in file · file i/k  view changes` ✓ Keep ↩ Undo ❝ Chat ⧉ View diff — lens above each edit + clickable ✨ gutter star + bold green/red highlight + coral stripe |
-| Click the lens header | **⋯ Details** opens the review bubble at the edit — the diff in git's colors + reasoning + `+A −R`, with Pin/Prev/Next/Prev-File/Next-File/Keep/Undo/Accept-File/Reject-File/Chat/Clear/Spotlight/Search/Collapse on its toolbar (no tab); the `🔬` header opens the floating review bar | **view changes** opens the edit's unified **diff** (reasoning in title, Keep/Undo/Chat on toolbar) |
-| The in-editor **review bar** | a compact **floating bar** built on the one surface an extension can float over code — a comment thread with no body. `✦ Claude edit #12 · +8 −3 · Diff 2/5 · File 1/3` with Keep · Undo · ⌃⌄ · ‹› · Diff · Details. `editorReviewSurface` picks `floating` (default) / `bubble` / `none`. VS Code still exposes no floating-widget API; this is that constraint answered, not lifted | a true **floating toolbar** on the platform's floating-toolbar layer while the open file has unreviewed edits — Keep, Undo, Chat, View diff, `Diff n/m` and its steppers, Accept/Reject File, Spotlight, Clear Resolved. Replaces the notification banner by default; `editorReviewSurface` picks `floating` / `banner` / `both` / `none` |
+| Click the lens header | **⋯ Details** opens the review bubble at the edit — the diff in git's colors + reasoning + `+A −R`, with Pin/Prev/Next/Prev-File/Next-File/Keep/Undo/Accept-File/Reject-File/Chat/Clear/Spotlight/Search on its toolbar plus the platform's own `^`, which steps back down to the bar (no tab); the `🔬` header opens the floating review bar | **view changes** opens the edit's unified **diff** (reasoning in title, Keep/Undo/Chat on toolbar) |
+| The in-editor **review bar** | a compact **floating bar** built on the one surface an extension can float over code — a comment thread emptied down to its header. `✦ Claude edit #12 · +8 −3 · Diff 2/5 · File 1/3` with Keep · Undo · ⌃⌄ · ‹› · Diff · Chat · Spotlight · ⌄. `editorReviewSurface` picks `floating` (default) / `bubble` / `none`. VS Code still exposes no floating-widget API; this is that constraint answered, not lifted | a true **floating toolbar** on the platform's floating-toolbar layer while the open file has unreviewed edits — Keep, Undo, Chat, View diff, `Diff n/m` and its steppers, Accept/Reject File, Spotlight, Clear Resolved. Replaces the notification banner by default; `editorReviewSurface` picks `floating` / `banner` / `both` / `none` |
 | **Pending badge** on files | count in the Explorer and on the editor tab | count in the Project tree, plus the tool-window stripe |
 | **Session selector** on the Timeline | a chip leading the window, above the tabs: the live sessions plus the one under review, then **All sessions…**, which reveals the Overview's Sessions tab. Also the **Switch to an active session** command | the same chip, an `ActionToolbar` inside the window content (it left the tool-window title bar in 0.10.0), with the same rows; its **All sessions…** row opens the plugin's every-session popup chooser rather than the Sessions tab |
 | Resolving one edit | opens the next unreviewed edit, crossing files (`revealNextOnResolve`, on) | same, via the settings checkbox **After keeping or reverting one edit, open the next edit still awaiting review** |
@@ -416,10 +416,11 @@ bar cycling the file's edits in place.
 **review bubble** right at the edit — no tab — with the diff in **git's own theme colors** (green/red text
 over the diff editor's translucent line fills — the same theme variables the real diff editor uses),
 Claude's reasoning, and the `+A −R` counts, plus **Pin · Prev · Next · Prev/Next file · Keep · Undo ·
-Accept File · Reject File · Chat · Clear Resolved · Spotlight · Search · Collapse** as real toolbar
-buttons. The
-`🔬` header opens the compact **floating review bar** at the same edit instead; **Collapse** and
-**Details** swap between the two at any time. In **PyCharm**, the ✨ gutter star / lens's **view changes**
+Accept File · Reject File · Chat · Clear Resolved · Spotlight · Search** as real toolbar
+buttons, followed by the platform's own **^**. The
+`🔬` header opens the compact **floating review bar** at the same edit instead. One axis swaps them:
+**⌄** goes up to the bubble, and the platform's **^** — that chevron rotated — goes down, bubble → bar
+and then bar → hidden. In **PyCharm**, the ✨ gutter star / lens's **view changes**
 opens the edit's before ⟷ after as a **unified diff** (reasoning in the title, Keep/Undo/Chat on its
 toolbar).
 
@@ -765,7 +766,7 @@ scope's work as one picture. (The default selection is the **orchestrator** — 
 session.)
 
 ```text
-🔬 ad93a29f   185 edits · 20 pending · 27 kept · 57% reviewed · 3 agents · 2 err · 🛰 13 · ⇅ 3
+🔬 demo-a1b2c3d4  185 edits · 20 pending · 27 kept · 57% reviewed · 3 agents · 2 err · 🛰 13 · ⇅ 3
 [██████████ core ██████████|████ vscode ████|██ docs ██|cli]
 extension.ts    vscode   ████████████  +751   6⧗
 changemap.ts    core     █████         +285   ✓
@@ -1211,6 +1212,90 @@ Metrics  session demo-0c396c6b
 the transcript, add nothing to the store, and change no on-disk format. The `actions --json` payload gains four
 fields — **`subagents`**, **`subagentsSummary`**, **`fleet`**, **`fleetSummary`** — alongside its
 unchanged `{ session, summary, actions, groups }`; every existing shape stays as it was.
+
+---
+
+## 8 · `tui` — the observatory without an editor
+
+Everything above is available in one live screen, with the same review actions:
+
+```bash
+claude-observatory            # no verb needed — the app is the front door
+```
+
+Four windows mirroring the editors, named on the top row so what exists is visible before you press
+anything. Focus one with its F-key — press it again to zoom — or with a click:
+
+| Window | Key | What it answers |
+| --- | --- | --- |
+| **Prompts** *(top)* | `F1` | your own turns, and the edits each one produced |
+| **Observatory Traces** *(left)* | `F2` | every review unit, newest first — id, age, ±lines, file |
+| **Map / Diff** *(centre)* | `F3` / `F4` | one window, two faces: the session's change map, or the selected edit's before-and-after |
+| **Observatory Dashboards** *(bottom)* | `F5` | Fleet · Workflows · Tasks · Observations · Actions · Processes · Feed |
+
+The centre is **one window with two faces** rather than two windows, because you are only ever
+looking at one of them. `F3` shows the Map, `F4` the Diff, and the title says which face is up with
+that face's own key. With nothing selected it opens on the Map.
+
+**The Map face** is the change map — a folder tree where each row carries lines added, lines removed,
+edits pending and edits kept, plus a **✓ / ↩** pair that accepts or reverts everything beneath it.
+It rolls up by path prefix, so nothing hides behind a top-N cut: whatever is off screen is still
+counted by a visible ancestor. `space` folds and unfolds a folder.
+
+Windows minimize (`m`), zoom to fill the frame (`z`) and reset (`=`), and each keeps its own
+selection. Sizes are proportional: at 80 columns Dashboards folds onto the window bar, keeping its
+jump key and counter, and the status row says what it would take —
+`at this size: Dashboards needs 23 body rows`.
+
+The session in effect leads the second row, with pending, kept, high-risk commands, remote egress,
+live conflicts and active agents right-aligned beside it — so a count that should stop you is never
+one window away.
+
+`a` keeps the selection and `u` undoes it. `A` and `U` act on **everything the focused window
+currently lists**, honouring the active `/` filter, and always ask first with the real number. Where
+the rows are observations rather than edits, those keys explain that instead of silently doing
+nothing. `↵` opens the selection full screen — the same Detail window, zoomed, with its navbar, its
+colours and an `edit #N · path` status bar. `e` hands the terminal to `$VISUAL`/`$EDITOR` until it
+exits, and `o` opens the options window (editor, display, theme, store, machines, keybinds), which
+names the file it writes.
+
+`x` **marks** a row and `a`/`u` then act on every marked edit at once, so six files can be accepted
+together instead of six times; `esc` clears the marks. `s` cycles the **sort** (newest, by path, by
+churn) and `w` swaps wrapping for horizontal panning. `’`/`` ` `` set and jump to a **mark**, and `P`
+jumps to a file — the filter narrows, this takes you there. `/` on the Diff face searches the patch
+and **marks** what it finds, with `n`/`N` stepping the matches. `:` opens command mode over a closed
+allow-list of read-only verbs, `:help` among them. **Right-click** any row for its verbs. The ctrl
+layer is vim's: `^D`/`^U` half a page, `^F`/`^B` a whole one, `^R` redo, `^Z` suspend, `^C` quit —
+and every other ctrl chord does nothing, deliberately, rather than running its plain letter's verb.
+
+Selection is carried by **colour**, not by a `>` arrow: the focused window's cursor is a solid band
+and an unfocused one is a fainter band. With colour off (`--no-color`, `NO_COLOR`) the `>` comes
+back, because then there is nothing else to carry it.
+
+For scripts, `--once` prints a single frame and exits — which is also exactly what a pipe gets:
+
+```bash
+claude-observatory --once --cols 100 --rows 24 --no-color
+```
+
+### `.observatoryignore`
+
+A session on a real repo is mostly noise — lockfiles, `dist/`, snapshots. A `.observatoryignore`,
+in `.gitignore` syntax, keeps them from being recorded at all:
+
+```gitignore
+package-lock.json
+dist/*
+!dist/manifest.json
+**/*.mp4
+```
+
+**One mode**: anything a rule matches is never recorded — not listed, not counted, not revertible,
+because there is nothing to revert. A rule added later reaches back too: the edits it now covers are
+dropped on the next capture, and `claude-observatory ignore` reports the count. Files nest like
+`.gitignore` (nearest wins), `.git/info/observatoryignore` holds rules for one checkout, and
+`~/.claude/.observatoryignore` is a personal outermost layer. `claude-observatory ignore --check
+<path>` names the rule that decided, its file and its line.
 
 ---
 

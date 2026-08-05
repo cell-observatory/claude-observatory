@@ -17,6 +17,9 @@ import { CODICON_STYLE } from './codicon';
 
 const SCHEME = 'claude-edit'; // in-memory before/after blobs for vscode.diff
 
+/** Sentinel for "no refresh has run yet" — distinct from `undefined`, which means "no session". */
+const FIRST_REFRESH = Symbol('first-refresh');
+
 // Claude's signature marker color for the overview ruler — a distinct coral so Claude's edits are
 // recognizable at a glance and don't blend into VCS (green/blue/red) gutter markers.
 const CLAUDE_MARK_COLOR = 'rgba(204, 120, 92, 0.85)';
@@ -113,6 +116,25 @@ function logPath(session: string): string {
 
 const logCache = new Map<string, { key: string; log: core.EditRecord[] }>();
 /** readLog, memoized on log.jsonl's mtime+size. */
+/**
+ * The DISPLAY units — the same same-code collapse the change map draws and `sessionCounts` counts.
+ *
+ * Every number a reader SEES must come from here, and every id set an ACTION builds must come from
+ * `cachedLog`. Mixing them is what made the activity-bar badge and the status bar say 3,067 while the
+ * Overview said 2,052 for one session: `keep`/`undo` resolve a whole group, so the raw record count
+ * is not the number of decisions anyone has to make. Core settled this in `sessionCounts` — these
+ * three surfaces simply never followed.
+ */
+const reviewCache = new Map<string, { key: string; log: core.EditRecord[] }>();
+function cachedReview(session: string): core.EditRecord[] {
+  const key = fileKey(logPath(session));
+  const hit = reviewCache.get(session);
+  if (hit && hit.key === key) return hit.log;
+  const log = core.reviewEdits(session);
+  reviewCache.set(session, { key, log });
+  return log;
+}
+
 function cachedLog(session: string): core.EditRecord[] {
   const key = fileKey(logPath(session));
   const hit = logCache.get(session);
@@ -274,7 +296,7 @@ class EditsProvider implements vscode.TreeDataProvider<Node> {
     if (!this.view) return;
     const session = currentSession();
     const pending = session
-      ? cachedLog(session).filter((r) => r.status === 'pending').length
+      ? cachedReview(session).filter((r) => r.status === 'pending').length
       : 0;
     this.view.badge = pending
       ? { value: pending, tooltip: `${pending} pending Claude edit${pending === 1 ? '' : 's'} to review` }
@@ -511,6 +533,22 @@ class EditPeek implements vscode.Disposable {
    * lands on the wrong edit until the next refresh corrects it. An open in progress wins outright.
    */
   private showing = 0;
+  /** The edit whose surface the reader dismissed. Cleared the moment the review moves elsewhere, so a
+   *  dismissal is about THIS edit and never suppresses the bar for the rest of the session. */
+  private dismissed: number | undefined;
+  /**
+   * Watches the live thread's collapsible state, because nothing else will.
+   *
+   * `followPlatformCollapse` polls — the Comment API raises no event when the reader clicks `^`. That
+   * was fine only while something else was calling `syncSurface`, and the single caller runs on store
+   * changes and tab switches. On a session with nothing writing — a finished review is exactly that —
+   * clicking `^` produced no store change, no refresh, and therefore no poll: the bubble stayed
+   * collapsed, which on screen is indistinguishable from having been hidden.
+   *
+   * So the surface watches itself while it is up. One enum read off an object already in memory, and
+   * only while a thread exists — `closeThread` clears it, or a disposed thread keeps a timer alive.
+   */
+  private collapseWatch: ReturnType<typeof setInterval> | undefined;
 
   /**
    * Injected by `activate` (the review loop is closure-scoped, this class is not): pick the next pending
@@ -539,22 +577,42 @@ class EditPeek implements vscode.Disposable {
   }
 
   /**
-   * THE ONE PLACE THAT DECIDES THE BAR'S BODY.
+   * THE BAR IS BORN WITH A BODY, AND EMPTIED ONE STATEMENT LATER.
    *
-   * The bar is a comment thread with NO comments: `CommentThreadWidget.display()` renders the header at a
-   * fixed one-row height, renders an empty body, and creates the reply form only when `canReply` — which
-   * this class sets false — so the whole widget collapses to about three editor lines. That is the
-   * premise of the design.
+   * What the bar wants to END as is a comment-less thread: that is what `CommentThreadWidget` renders
+   * at its minimum — the header at a fixed one-row height, no body, no reply form (this class sets
+   * `canReply` false). A band across the editor, which is what a review bar should be.
    *
-   * If a VS Code build ever renders an empty body as visible empty-state chrome, the documented fallback
-   * is a ONE-LINE comment body, and this method is the only thing that changes:
-   *   `return [{ body: new vscode.MarkdownString(label), mode: vscode.CommentMode.Preview,
-   *              author: { name: 'Claude Observatory' } }];`
-   * Nothing else in this file — not the menus, not the counters, not the follow behaviour — depends on
-   * the body being empty.
+   * Constructing it that way cost the header's dismiss glyph. VS Code picks that icon in
+   * `CommentThreadHeader._fillHead`, re-read from the shipped bundle rather than trusted from an
+   * older note (1.131.0, `workbench.desktop.main.js`):
+   *
+   *   function hOi(s){ return !!s && s.length > 0 }
+   *   let o = hOi(this._commentThread.comments) ? bLo : i_n;   // chevron : TRASHCAN
+   *   this._collapseAction = new tt("workbench.action.hideComment", …, o, !0, …);
+   *   if (!hOi(this._commentThread.comments)) { …onDidChangeComments(() => {   // one-way upgrade
+   *     hOi(this._commentThread.comments) && (this._collapseAction.class = bLo, r.clear()); }) }
+   *
+   * …so an empty thread got a bin that deletes nothing, on an action an extension cannot suppress or
+   * restyle. The earlier note here concluded there was no third option, because "a thread outlives
+   * its widget". Two facts it had wrong:
+   *
+   *   1. `updateCommentThread()` never re-evaluates that class — it re-reads only the label. The icon
+   *      is decided once per WIDGET and never revisited, in either direction.
+   *   2. This class disposes its thread and builds a fresh one on every `showInner` (see the
+   *      `closeThread()` above), so no thread here outlives its widget.
+   *
+   * So the bar is constructed with one throwaway comment — `_fillHead` sees a non-empty thread, takes
+   * the chevron, and does not even register the upgrade listener — and emptied immediately after, which
+   * returns the widget to its one-row minimum with the chevron already won. The ordering is not a race:
+   * `ExtHostCommentThread`'s constructor sends the initial comments INSIDE the `$createCommentThread`
+   * RPC, while every later mutation goes out as a separate `$updateCommentThread`, so the renderer sees
+   * a non-empty create and an empty update, in that order.
+   *
+   * Both halves are load-bearing and both are asserted; dropping either brings the bin back.
    */
-  private barBody(_label: string): vscode.Comment[] {
-    return [];
+  private barBody(): vscode.Comment[] {
+    return [{ body: new vscode.MarkdownString(''), mode: vscode.CommentMode.Preview, author: { name: 'Claude Observatory' } }];
   }
 
   /**
@@ -629,7 +687,7 @@ class EditPeek implements vscode.Disposable {
       // The bar builds NO body — which also means it never reads the transcript or runs coloredDiff.
       // That matters: this path runs on every tab switch and every store refresh, and the bubble's body
       // is by far the expensive half of this method.
-      body = this.barBody(label);
+      body = this.barBody();
     } else {
       const cwd = workspaceRoot();
       const why = cwd ? cachedTranscript(cwd, session).reasoning.get(id)?.trim() : undefined;
@@ -654,6 +712,10 @@ class EditPeek implements vscode.Disposable {
     }
 
     const thread = this.controller.createCommentThread(doc.uri, range, body);
+    // …and emptied right back out. The thread was CONSTRUCTED non-empty so the platform's appended
+    // collapse action picks the chevron over the trashcan; nothing ever re-reads that choice, so
+    // dropping the body now leaves a one-row header wearing the icon we wanted. See barBody().
+    if (mode === 'bar') thread.comments = [];
     thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
     thread.canReply = false;
     thread.contextValue = mode === 'bar' ? 'claudeNavBar' : 'claudeEdit';
@@ -664,6 +726,7 @@ class EditPeek implements vscode.Disposable {
     this.thread = thread;
     this.mode = mode;
     this.edit = { id, file: rec.file };
+    this.watchCollapse();
     // The bar hides its steppers when there is nowhere to step, matching FloatingDiffStep.applies in
     // JetBrains: a floating widget sits on top of code, so a dead button there covers text for nothing.
     this.syncStepContext(filePending.length > 1, files.length > 1);
@@ -699,13 +762,85 @@ class EditPeek implements vscode.Disposable {
       if (this.thread) this.closeThread();
       return;
     }
+    // THE COLLAPSE IS CHECKED FIRST, because it is newer information than a dismissal.
+    //
+    // These two were the other way round, and the `dismissed` guard swallowed the bubble's step-down:
+    // `dismissed` is set whenever the BAR is collapsed, and neither `show` nor `swapTo` cleared it —
+    // so once a reader had dismissed the bar at an edit, `^` on the bubble at that same edit returned
+    // here and did nothing for the rest of the session. Ordering it this way costs the dismissal
+    // nothing: a dismissed bar has no thread, so `followPlatformCollapse` returns false on its first
+    // line and the guard below still holds.
+    if (await this.followPlatformCollapse()) return;
+    // A surface the reader dismissed stays dismissed until the review moves to a different edit.
+    // Without this the next refresh — a keystroke away — puts it straight back, and "collapse" reads
+    // as a button that does nothing.
+    if (this.dismissed === id) return;
     if (this.thread && this.edit?.id === id) return;
+    this.dismissed = undefined;
     await this.show(id, { reveal: false, mode });
   }
 
-  /** Swap the live surface to `mode` at the same edit — the bar's "⋯ Details" and the bubble's
-   *  "Collapse". Reveals, because this one IS a click the reader made. */
+  /**
+   * Honour the platform's own collapse chevron: `^` on the bubble steps DOWN to the review bar, and
+   * on the bar it dismisses.
+   *
+   * The Comment API exposes no event for this, but the state does come back to us. Verified against
+   * the shipped bundle rather than assumed — the main thread pushes it and the extension host stores
+   * it on our own thread object:
+   *
+   *   workbench:  u.onDidChangeCollapsibleState(() => this.proxy.$updateCommentThread(
+   *                 this.handle, u.commentThreadHandle, { collapseState: u.collapsibleState }))
+   *   ext host:   $updateCommentThread(h, I) { … ("collapseState") && (x.collapsibleState = c(I.collapseState)) }
+   *
+   * So the value is polled here, on the refresh that already runs for every store change and tab
+   * switch. `showInner` always creates threads Expanded, so Collapsed can only mean the reader
+   * clicked it.
+   *
+   * Returns true when it handled the tick, so the caller does not immediately re-open what it closed.
+   */
+  /**
+   * Poll the live thread's collapsible state, so `^` acts when it is clicked rather than whenever the
+   * store next happens to change. See `collapseWatch`.
+   *
+   * Deliberately not `unref`'d and deliberately short: it exists for as long as a surface is on
+   * screen, which is the only window in which the reader can click that chevron. `closeThread` is the
+   * one exit, and `followPlatformCollapse` itself closes or re-shows, so each firing either does
+   * nothing or ends this timer's reason to exist.
+   */
+  private watchCollapse(): void {
+    if (this.collapseWatch) clearInterval(this.collapseWatch);
+    this.collapseWatch = setInterval(() => {
+      void this.followPlatformCollapse().catch(() => {
+        /* the document went away under it; the next refresh re-resolves against whatever is open */
+      });
+    }, 250);
+    // unref'd, like the status timer: this must never be the reason a process stays alive. The
+    // extension host's lifetime is not ours to hold open, and in the test harness an un-unref'd
+    // interval simply hangs the run forever — which is how this was noticed.
+    this.collapseWatch.unref?.();
+  }
+
+  private async followPlatformCollapse(): Promise<boolean> {
+    const t = this.thread;
+    if (!t || t.collapsibleState !== vscode.CommentThreadCollapsibleState.Collapsed) return false;
+    const id = this.edit?.id;
+    if (this.mode === 'bar' || id === undefined) {
+      // The bar is already the smallest surface, so collapsing it means "go away".
+      this.dismissed = id;
+      this.closeThread();
+      return true;
+    }
+    await this.show(id, { reveal: false, mode: 'bar' });
+    return true;
+  }
+
+  /** Swap the live surface to `mode` at the same edit — the bar's `⌄`. Reveals, because this one IS
+   *  a click the reader made. The way back down is the platform's own `^`, via followPlatformCollapse. */
   async swapTo(mode: PeekMode): Promise<void> {
+    // Clicking `⌄` is the reader asking for this surface, so a dismissal from earlier is stale. Without
+    // this, swapping up to the bubble at an edit whose bar had been dismissed left `dismissed` standing
+    // and the two flags disagreed about whether the surface was wanted.
+    this.dismissed = undefined;
     const id = this.edit?.id;
     if (id === undefined) return;
     await this.show(id, { mode });
@@ -796,6 +931,10 @@ class EditPeek implements vscode.Disposable {
   }
 
   private closeThread(): void {
+    if (this.collapseWatch) {
+      clearInterval(this.collapseWatch);
+      this.collapseWatch = undefined;
+    }
     this.thread?.dispose();
     this.thread = undefined;
     this.edit = undefined;
@@ -1988,10 +2127,28 @@ class ObservationsProvider {
   /** Drop what is held for one render cycle. */
   refresh(): void {
     this.memo.clear();
+    this.prefilled = false;
   }
   // Per-file review memory (cross-session), recomputed lazily each refresh cycle.
   private memo = new Map<string, core.FileMemory>();
+  private prefilled = false;
   private mem(file: string): core.FileMemory {
+    // Filled for the whole session in one pass on the first ask. The per-file form is memoized, but
+    // each MISS still revalidates the cross-session index against every session log — a readdir, an
+    // existsSync per session and a statSync per session log — which measured 383,830 stats for a
+    // 3,957-file session, in the extension host, on every render. This provider asks about nearly
+    // every one of those files, so it pays that whole bill unless the index is built once.
+    if (!this.prefilled) {
+      this.prefilled = true;
+      const session = currentSession();
+      if (session) {
+        try {
+          for (const [f, m] of core.fileMemories(new Set(cachedLog(session).map((r) => r.file)))) this.memo.set(f, m);
+        } catch {
+          /* fall through to the per-file path below — a slow render beats a broken one */
+        }
+      }
+    }
     let m = this.memo.get(file);
     if (!m) {
       m = core.fileMemory(file);
@@ -2827,8 +2984,10 @@ function changeMapShell(): string {
      (user call 2026-07-28): the whole human-readable name shows; when the row runs short the BUTTONS
      wrap to the next line (the group is flex-wrap), never the title. Tooltip carries the raw id. */
   .ov-sesslabel { font-family: var(--cm-mono); font-size:11px; color: var(--vscode-foreground); white-space:nowrap; }
-  /* version chip + its dropdown (update / channel switch) — pinned at the controls row's right edge */
-  .ov-verwrap { position:relative; display:inline-flex; }
+  /* The "about this extension" cluster closing the controls row: version chip + settings gear, and the
+     version dropdown positioned against the pair (see the markup for why it anchors here and not to
+     the chip or the group). The gap replaces the one .ov-navgrp used to give these two as siblings. */
+  .ov-verwrap { position:relative; display:inline-flex; align-items:center; gap:6px; }
   .ov-verchip { font-family: var(--cm-mono); white-space:nowrap; }
   .ov-verchip.upd::before { content:''; width:6px; height:6px; border-radius:50%; background:var(--vscode-charts-yellow, #d9a441); display:inline-block; margin-right:4px; }
   .ov-vermenu { position:absolute; right:0; top:calc(100% + 4px); z-index:60; min-width:240px; background:var(--vscode-editorWidget-background, var(--cm-panel)); border:1px solid var(--cm-border); border-radius:4px; padding:4px; box-shadow:0 4px 14px rgba(0,0,0,.35); }
@@ -3026,6 +3185,13 @@ function changeMapShell(): string {
   .mt-resolve { flex:none; font-size:9px; background:transparent; border:1px solid var(--cm-border); border-radius:3px; color: var(--vscode-descriptionForeground); padding:0 5px; margin-left:4px; cursor:pointer; }
   .mt-resolve:hover { color: var(--vscode-foreground); border-color: var(--vscode-focusBorder); }
   .mt-schip { flex:none; font-family: var(--cm-mono); font-size:9px; color: var(--vscode-descriptionForeground); border:1px solid var(--cm-border); border-radius:3px; padding:0 4px; white-space:nowrap; }
+  .mt-smc { flex:none; font-family: var(--cm-mono); font-size:9px; color: var(--vscode-descriptionForeground); border:1px solid var(--cm-border); border-radius:3px; padding:0 4px; white-space:nowrap; }
+  /* Off this machine — same hue and same meaning as the Timeline selector's rq-smc.away, declared
+     HERE because this is the shell whose script emits mt-smc. (No backticks in this comment: the
+     whole stylesheet ships inside a TS template literal, so one would close it early.) */
+  .mt-smc.away { color:#9a6ac2; border-color:#9a6ac2; }
+  .mt-smc.bridged { color: var(--vscode-descriptionForeground); opacity:.75; font-style:italic; }
+  .mt-smc.bad { color:#e5534b; border-color:#e5534b; }
   .mt-trow { display:flex; align-items:baseline; gap:7px; font-size:11px; padding:2px 2px; border-radius:3px; }
   .mt-trow .mt-tg { flex:none; }
   .mt-trow[data-feed] { cursor:pointer; }
@@ -3152,14 +3318,25 @@ function changeMapShell(): string {
   .cm-md { font-size:8.5px; color: var(--vscode-descriptionForeground); white-space:nowrap; flex:none; }
   .cm-bar { flex:1; height:5px; border-radius:2px; background: var(--vscode-editorWidget-background, rgba(127,127,127,0.18)); overflow:hidden; min-width:20px; }
   .cm-fill { display:block; height:100%; border-radius:2px; }
-  .cm-n { font-family: var(--cm-mono); font-size:9px; width:44px; text-align:right; flex:none; font-variant-numeric:tabular-nums; color: var(--vscode-descriptionForeground); }
-  .cm-pd { font-family: var(--cm-mono); font-size:9px; width:28px; text-align:right; flex:none; }
+  .cm-n { font-family: var(--cm-mono); font-size:9px; width:40px; text-align:right; flex:none; font-variant-numeric:tabular-nums; color: var(--vscode-descriptionForeground); }
+  .cm-pd { font-family: var(--cm-mono); font-size:9px; width:30px; text-align:right; flex:none; font-variant-numeric:tabular-nums; }
+  /* The name is the click target; the row is a container, so its two action buttons are valid markup. */
+  .cm-open { display:flex; align-items:center; gap:6px; flex:1; min-width:0; background:transparent; border:0; color:inherit; font:inherit; padding:0; cursor:pointer; text-align:left; }
+  /* Disabled rather than hidden when nothing is pending: a row that changes shape as its counts change
+     makes the whole ledger jump, and the tooltip already says why the button will not act. */
+  .cm-act { flex:none; width:20px; height:18px; padding:0; border:0; border-radius:3px; cursor:pointer; font:inherit; font-size:11px; line-height:1; background:transparent; color: var(--vscode-descriptionForeground); }
+  .cm-act:hover:not(:disabled) { background: var(--vscode-toolbar-hoverBackground, rgba(127,127,127,0.2)); }
+  .cm-act:disabled { opacity:.28; cursor:default; }
+  .cm-keep:hover:not(:disabled) { color: var(--vscode-charts-green, #89d185); }
+  .cm-undo:hover:not(:disabled) { color: var(--vscode-charts-red, #f14c4c); }
   .cm-none { padding:10px 4px; color: var(--vscode-descriptionForeground); }
   .cm-empty { padding:14px 4px; color: var(--vscode-descriptionForeground); line-height:1.5; }
   .cm-empty b { color: var(--vscode-foreground); }
   .cm-readout { font-family: var(--cm-mono); font-size:12px; color: var(--vscode-foreground); margin-top:6px; min-height:16px; flex:none; }
   /* bottom summary bar — pending/accepted edit · file · folder totals for the current change-map view */
   .cm-summary { font-family: var(--cm-mono); font-size:10.5px; color: var(--vscode-descriptionForeground); flex:none; padding-top:5px; margin-top:4px; border-top:1px solid var(--cm-border); font-variant-numeric:tabular-nums; }
+  /* "N hidden" — what .observatoryignore removed. Deliberately quieter than the counts beside it:
+     it describes what is NOT on screen, so it must be findable without competing with what is. */
   .cm-summary:empty { display:none; }
   .cm-summary b { color: var(--vscode-foreground); }
   .cm-readout b { color: var(--vscode-foreground); }
@@ -3269,9 +3446,21 @@ function changeMapShell(): string {
     `<span class="ov-nbsep"></span>` +
     `<button class="ov-nb" id="ov-spotlight" title="Toggle spotlight — dim unedited lines to highlight Claude’s changes"><i class="codicon codicon-lightbulb"></i> Spotlight</button>` +
     `<button class="ov-tb" id="ov-refresh" title="Refresh the Overview"><i class="codicon codicon-refresh"></i> Refresh</button>` +
-    // The version chip — LAST, i.e. pinned to the row's right edge: the installed Observatory
-    // version, opening the update / release-channel menu (Stable ⇄ Pre-release).
-    `<span class="ov-verwrap"><button class="ov-tb ov-verchip" id="ov-version" title="Claude Observatory version — update, or switch between the stable and pre-release channels">v— <i class="codicon codicon-chevron-down"></i></button>` +
+    // The version chip and the gear — the two "about this extension" controls — close the row, and
+    // they share ONE wrapper because that wrapper is what `.ov-vermenu` positions against. Put the
+    // gear beside it instead and the dropdown either stops being flush with the panel edge (anchored
+    // to the chip) or, once the narrow-width media query gives .ov-navgrp the whole row and packs its
+    // buttons left, opens ~190px away from the chip that spawned it (anchored to the group). Measured
+    // both ways; keeping the cluster in one positioned span is the only option that is flush at full
+    // width AND still under its trigger when the row is narrow.
+    `<span class="ov-verwrap">` +
+    // The installed Observatory version, opening the update / release-channel menu (Stable ⇄ Pre-release).
+    `<button class="ov-tb ov-verchip" id="ov-version" title="Claude Observatory version — update, or switch between the stable and pre-release channels">v— <i class="codicon codicon-chevron-down"></i></button>` +
+    // The gear LAST, i.e. hard against the row's right edge — the same place JetBrains puts it. The
+    // terminal keeps its settings in its own file because it has no host to keep them in; here the
+    // host owns them, so this opens VS Code's own settings scoped to this extension rather than
+    // inventing a second place to store the same preferences.
+    `<button class="ov-tb" id="ov-options" title="Claude Observatory settings"><i class="codicon codicon-settings-gear"></i></button>` +
     `<div class="ov-vermenu" id="ov-vermenu" hidden></div></span>` +
     `</span>` +
     `</div>` + // end ROW 2 (controls)
@@ -3921,6 +4110,21 @@ function timelineShell(): string {
   .rq-srow:hover { background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.12)); }
   .rq-srow.on { background: var(--vscode-list-activeSelectionBackground, rgba(80,120,200,0.16)); }
   .rq-sago { flex:none; font-family: var(--cm-mono); font-size:9px; color: var(--vscode-descriptionForeground); }
+  /* The workspace a row came from. Bounded and ellipsised by CSS rather than by cutting the string,
+     so the full name is still in the DOM for the tooltip and for anyone reading it aloud. */
+  .rq-sws { flex:none; max-width:36%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+    font-family: var(--cm-mono); font-size:9px; opacity:.7; color: var(--vscode-descriptionForeground); }
+  /* WHICH MACHINE. Boxed like the model chip beside it, because it is the same kind of fact: a
+     structural property of the session rather than something it did. */
+  .rq-smc { flex:none; font-family: var(--cm-mono); font-size:9px; white-space:nowrap;
+    color: var(--vscode-descriptionForeground); border:1px solid var(--cm-border); border-radius:3px; padding:0 4px; }
+  /* Off this machine. Same hue as the egress chip, because it is the same fact. The mt-smc twins
+     live in changeMapShell, NOT here: a rule belongs in the stylesheet of the shell whose script
+     emits the class. Declaring both sets together read fine and shipped a dead highlight — the
+     Overview's Sessions tab painted every machine grey because its shell had no rule to apply. */
+  .rq-smc.away { color:#9a6ac2; border-color:#9a6ac2; }
+  .rq-smc.bridged { color: var(--vscode-descriptionForeground); opacity:.75; font-style:italic; }
+  .rq-smc.bad { color:#e5534b; border-color:#e5534b; }
   .rq-head { flex:none; display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; padding:6px 9px 5px; border-bottom:1px solid var(--cm-border); }
   .rq-title { font-size:9px; letter-spacing:.6px; text-transform:uppercase; color: var(--vscode-descriptionForeground); }
   .rq-sum { font-family: var(--cm-mono); font-size:10px; color: var(--vscode-descriptionForeground); font-variant-numeric:tabular-nums; }
@@ -4135,7 +4339,7 @@ const TIMELINE_SCRIPT = `
     } else {
       f.push('<span class="rq-none">'+(r.actions ? ('no edits · '+r.actions+' tool call'+(r.actions===1?'':'s')) : 'no edits — a question or a decision')+'</span>');
     }
-    if(r.tokens) f.push('<span class="rq-meta" title="main-chain assistant tokens spent answering (incl. cache)">'+fmtTok(r.tokens)+' tok</span>');
+    if(r.tokens) f.push('<span class="rq-meta" title="tokens processed once — input + output + cache writes. Cache READS are excluded: the prompt is re-read every turn, so counting them made the same context accumulate per turn.">'+fmtTok(r.tokens)+' tok</span>');
     var w=[];
     if((r.agents||[]).length) w.push(r.agents.length+' subagent'+(r.agents.length===1?'':'s'));
     if((r.workflows||[]).length) w.push(r.workflows.length+' workflow run'+(r.workflows.length===1?'':'s'));
@@ -4456,10 +4660,30 @@ const TIMELINE_SCRIPT = `
   // (FLEET_ACTIVE_MS) and is never re-derived here. Picking one switches the WHOLE observatory, not this
   // window's scope, which is why it goes through a command rather than a local filter.
   // (No backticks in this region: it is inside the TS template literal, which they would close.)
-  var SESSROWS=[], SESSCUR='', SESSOPEN=false, SESSSEEN=false;
+  var SESSROWS=[], SESSREMOTE=[], SESSCUR='', SESSOPEN=false, SESSSEEN=false;
   function ago(ts){ if(!ts) return '—'; var s=Math.max(0, Math.round((Date.now()-ts)/1000));
     if(s<60) return s+'s ago'; var m=Math.round(s/60); if(m<60) return m+'m ago'; var hr=Math.round(m/60); if(hr<48) return hr+'h ago'; return Math.round(hr/24)+'d ago'; }
   function sessName(r){ return (r&&r.title)? r.title : ('session '+String((r&&r.id)||'').slice(0,8)); }
+  // Where a session's conversation actually lives. A bridge pointer is not an empty session — its
+  // content is on Claude Code's bridge — and saying "no edits" about one sends the reader to open
+  // something that is not there.
+  // What the machine cell MEANS for reviewing this session, as a class. One palette, one meaning:
+  // purple is "off this machine" — the hue the egress chip already uses — so a session you cannot
+  // review from here is obvious before you click it. Local is deliberately quiet: it is the common
+  // case, and the common case should not shout.
+  function machKind(r){
+    if(!r) return '';
+    if(r.error) return ' bad';
+    if(r.origin==='remote') return ' away';
+    if(r.origin==='bridged') return ' bridged';
+    return '';
+  }
+  function sessWhere(r){
+    if(!r) return '';
+    if(r.origin==='bridged') return 'on the Claude Code bridge, not this machine';
+    if(r.origin==='remote') return 'on '+(r.machine||r.host||'another machine')+' · '+(r.workspace||'');
+    return (r.machine||'this machine')+' · '+(r.workspace||'this workspace');
+  }
   function sessCurRow(){ for(var i=0;i<SESSROWS.length;i++) if(String(SESSROWS[i].id)===String(SESSCUR)) return SESSROWS[i]; return null; }
   function renderSess(){
     var dot=document.getElementById('rq-sdot'), nm=document.getElementById('rq-sname'),
@@ -4479,20 +4703,40 @@ const TIMELINE_SCRIPT = `
     var h='';
     for(var i=0;i<SESSROWS.length;i++){ var s=SESSROWS[i], on=(String(s.id)===String(SESSCUR));
       h+='<button class="rq-srow'+(on?' on':'')+'" data-sid="'+esc(s.id)+'" title="'+
-        esc(sessName(s)+' — session '+s.id+' · '+(s.active?'active · ':'')+ago(s.lastActiveMs))+'">'+
+        esc(sessName(s)+' — session '+s.id+' · '+sessWhere(s)+' · '+(s.active?'active · ':'')+ago(s.lastActiveMs))+'">'+
         '<span class="rq-sdot'+(s.active?' live':'')+'">'+(s.active?'●':'○')+'</span>'+
         '<span class="rq-sname">'+esc(sessName(s))+'</span>'+
+        // WHICH MACHINE, then which workspace. The list spans both now — this machine's sessions and
+        // every configured remote's — so a row that names neither silently claims to be this
+        // project's, on this computer.
+        // OMITTED when blank, not drawn empty: a synthesized row for a pinned session carries no
+        // machine on purpose, and an empty bordered box with a tooltip naming a machine is worse than
+        // no chip at all. JetBrains already omits it in the same state.
+        (s.machine? '<span class="rq-smc'+machKind(s)+'" title="The machine this session lives on">'+esc(s.machine)+'</span>' : '')+
+        '<span class="rq-sws">'+esc(s.workspace||'')+'</span>'+
         '<span class="rq-sago">'+esc(ago(s.lastActiveMs))+(on?' · reviewing':'')+'</span></button>';
     }
     // The way out to everything this list deliberately leaves out.
-    h+='<button class="rq-srow" data-sall="1" title="Every session recorded for this workspace — the Overview’s Sessions tab is the full browser">'+
+    h+='<button class="rq-srow" data-sall="1" title="Every session on this machine, from every workspace — the Overview’s Sessions tab is the full browser">'+
       '<span class="rq-sdot">☰</span><span class="rq-sname">All sessions…</span></button>';
+    // Machines, from the one list that shows sessions from them. Configuring a remote used to be
+    // reachable only from the terminal dashboard's options window, which made a feature all three
+    // front ends RENDER a setting only one of them could change.
+    h+='<button class="rq-srow" data-smach="1" title="Add, remove or turn off the machines this install looks for sessions on, over SSH">'+
+      '<span class="rq-sdot">＋</span><span class="rq-sname">Machines…</span></button>';
     list.hidden=false; list.innerHTML=h;
     var rs=list.querySelectorAll('[data-sid]');
     for(var q=0;q<rs.length;q++) rs[q].addEventListener('click', function(){
-      SESSOPEN=false; renderSess(); vscode.postMessage({type:'pickSession', id:this.getAttribute('data-sid')}); });
+      SESSOPEN=false; renderSess();
+      // origin/host ride along: remote rows exist only in this webview (they arrive from a CLI spawn
+      // and are never in the host's sessionMeta), so the host cannot tell a remote id from a local one
+      // on its own — and it has to, because pinning one persists a session this machine cannot open.
+      var picked=null; for(var pi=0;pi<SESSROWS.length;pi++){ if(String(SESSROWS[pi].id)===String(this.getAttribute('data-sid'))){ picked=SESSROWS[pi]; break; } }
+      vscode.postMessage({type:'pickSession', id:this.getAttribute('data-sid'), origin:(picked&&picked.origin)||'local', host:(picked&&picked.host)||''}); });
     var al=list.querySelector('[data-sall]');
     if(al) al.addEventListener('click', function(){ SESSOPEN=false; renderSess(); vscode.postMessage({type:'allSessions'}); });
+    var ml=list.querySelector('[data-smach]');
+    if(ml) ml.addEventListener('click', function(){ SESSOPEN=false; renderSess(); vscode.postMessage({type:'manageRemotes'}); });
   }
   var schip=document.getElementById('rq-schip');
   if(schip) schip.addEventListener('click', function(){ SESSOPEN=!SESSOPEN; renderSess(); });
@@ -4523,7 +4767,10 @@ const TIMELINE_SCRIPT = `
 
   window.addEventListener('message', function(ev){ var m=ev.data||{};
     if(m.type==='tour'){ applyTour(m.anchor||null); return; }
-    if(m.type==='sessions'){ SESSROWS=m.rows||[]; SESSCUR=m.current||''; SESSSEEN=true; renderSess(); return; }
+    if(m.type==='sessions'){ SESSROWS=(m.rows||[]).concat(SESSREMOTE); SESSCUR=m.current||''; SESSSEEN=true; renderSess(); return; }
+    // Remote rows land LATER than the local ones and are kept aside, so the next local refresh does
+    // not drop them — and so a machine that stops answering does not blank the list it was in.
+    if(m.type==='remoteSessions'){ SESSREMOTE=m.rows||[]; SESSROWS=SESSROWS.filter(function(r){return r.origin!=='remote';}).concat(SESSREMOTE); renderSess(); return; }
     // A tour step (or a command) naming a tab brings it forward. Grouped, everything it could name is
     // already on screen — except a column the reader folded, which is brought back rather than left
     // pointing at nothing.
@@ -4575,7 +4822,11 @@ const TIMELINE_SCRIPT = `
 function activeSessionRows(rows: core.SessionMetaRow[], current: string | null | undefined): core.SessionMetaRow[] {
   const keep = rows.filter((r) => core.isFleetActive(r.lastActiveMs) || r.id === current);
   if (current && !keep.some((r) => r.id === current))
-    keep.push({ id: current, title: null, lastActiveMs: 0, current: false, edits: 0, pending: 0, files: 0, added: 0, removed: 0, tokens: 0, durationMs: 0, model: '', effort: '' });
+    // A synthesized row for a pin nothing enumerated. `workspace` and `machine` are blank and `origin`
+    // is `local` because none of them is KNOWN here — the row exists so the selector can name what it
+    // is reviewing, and claiming a provenance it never looked up would be worse than saying nothing.
+    // The renderers omit a blank machine rather than drawing "this machine" over a guess.
+    keep.push({ id: current, workspace: '', machine: '', origin: 'local', title: null, lastActiveMs: 0, current: false, edits: 0, pending: 0, files: 0, added: 0, removed: 0, tokens: 0, cached: 0, durationMs: 0, model: '', effort: '' });
   return [...keep.filter((r) => r.id === current), ...keep.filter((r) => r.id !== current)];
 }
 
@@ -4742,6 +4993,31 @@ class TimelineViewProvider implements vscode.WebviewViewProvider {
       rows = [];
     }
     this.view?.webview.postMessage({ type: 'sessions', rows, current: session ?? '' });
+    this.postRemoteSessions(cwd, session);
+  }
+
+  /** Remote rows arrive SEPARATELY, and asynchronously.
+   *
+   *  `sessionMeta` above is stat-bound, so it rides this window's refresh for free. A configured
+   *  machine is an ssh — hundreds of milliseconds, unbounded if the host is far away or down — and
+   *  running that in-process would block the extension host on every refresh. So it goes out through
+   *  the CLI, which does the ssh in a child process and caches for a minute, and its rows are pushed
+   *  as a second message when they land. The selector renders whatever it has; nothing waits. */
+  private remoteAt = 0;
+  private postRemoteSessions(cwd: string, session: string | null | undefined): void {
+    // The CLI caches for 60 s; asking more often than that only spawns a process to be told so.
+    const now = Date.now();
+    if (now - this.remoteAt < 60_000) return;
+    this.remoteAt = now;
+    spawnCliJson(['sessions', '--remote', '--json', '--root', cwd, ...(session ? ['--session', session] : [])], cwd, (data) => {
+      const all = ((data as { sessions?: Record<string, unknown>[] } | null)?.sessions ?? []).filter(
+        (r) => r.origin === 'remote'
+      );
+      // POST EVEN WHEN EMPTY. Returning early meant the webview kept whatever rows it was last given:
+      // remove the last configured machine and its sessions stayed in the selector for the lifetime of
+      // the webview, clickable, refused on click. An empty list is a real answer, not "no answer".
+      this.view?.webview.postMessage({ type: 'remoteSessions', rows: all });
+    });
   }
   /** Fetch Claude's prose reply to one ask and post it back to the row that asked to expand. */
   private fetchResponse(id: string): void {
@@ -4757,7 +5033,7 @@ class TimelineViewProvider implements vscode.WebviewViewProvider {
     this.view = view;
     view.webview.options = { enableScripts: true };
     view.webview.html = timelineShell();
-    view.webview.onDidReceiveMessage((m: { type?: string; id?: string | null; tab?: string; key?: string; verb?: string; shows?: Record<string, boolean> }) => {
+    view.webview.onDidReceiveMessage((m: { type?: string; id?: string | null; tab?: string; key?: string; verb?: string; shows?: Record<string, boolean>; origin?: string; host?: string }) => {
       if (!m) return;
       const treeTab = m.tab === 'actions' || m.tab === 'observations' ? m.tab : null;
       // Pick the ask that scopes the Overview; lazily fetch Claude's reply when a row is expanded (the
@@ -4793,11 +5069,20 @@ class TimelineViewProvider implements vscode.WebviewViewProvider {
       } else if (m.type === 'startDemo') void vscode.commands.executeCommand('claudeObservatory.startDemo');
       // The selector switches the WHOLE observatory (the user's call), so it goes through pinSession —
       // which is also what keeps a switch made mid-demo out of the user's settings.json.
-      else if (m.type === 'pickSession' && typeof m.id === 'string')
-        void vscode.commands.executeCommand('claudeObservatory.pinSession', m.id);
+      else if (m.type === 'pickSession' && typeof m.id === 'string') {
+        // Refused HERE, where the row's provenance is still known, and again inside pinSession for
+        // anything that reaches it by another door.
+        if (m.origin === 'remote') {
+          void vscode.window.showWarningMessage(
+            `Claude Observatory: that session lives on ${typeof m.host === 'string' && m.host ? m.host : 'another machine'}. ` +
+              'Sessions are reviewed where their files are — this window reviews local ones.'
+          );
+        } else void vscode.commands.executeCommand('claudeObservatory.pinSession', m.id);
+      }
       // The way out to the full browser is the Overview's Sessions tab — the deprecated QuickPick is no
       // longer where this hands over to.
       else if (m.type === 'allSessions') void vscode.commands.executeCommand('claudeObservatory.showSessions');
+      else if (m.type === 'manageRemotes') void vscode.commands.executeCommand('claudeObservatory.manageRemotes');
     });
     view.onDidChangeVisibility(() => {
       if (view.visible) this.refresh(true);
@@ -5092,7 +5377,7 @@ class ChangeMapViewProvider implements vscode.WebviewViewProvider {
     // forever with no explanation. Say where the Overview went instead of looking broken.
     if (this.editorPanel && host !== this.editorPanel)
       setTimeout(() => host.webview.postMessage({ type: 'elsewhere', where: 'editor' }), 0);
-    host.webview.onDidReceiveMessage((m: { type?: string; id?: number | string; kind?: string; taskId?: string; promptId?: string; folder?: string; ref?: core.ChatContextRef; session?: string; name?: string; pending?: string | number; channel?: string }) => {
+    host.webview.onDidReceiveMessage((m: { type?: string; id?: number | string; kind?: string; taskId?: string; promptId?: string; folder?: string; ref?: core.ChatContextRef; session?: string; name?: string; pending?: string | number; channel?: string; act?: string; rel?: string }) => {
       if (!m) return;
       if (m.type === 'ready') {
         this.refresh(true);
@@ -5101,6 +5386,17 @@ class ChangeMapViewProvider implements vscode.WebviewViewProvider {
       // The version chip's menu opened — (re)send release info; the 1h cache absorbs repeat opens.
       else if (m.type === 'versionMenuOpen')
         void versionChipInfo().then((v) => host.webview.postMessage({ type: 'version', v }));
+      else if (m.type === 'openSettings')
+        // VS Code's own settings UI, filtered to this extension. Not a webview of our own: the host
+        // already owns these values, and a second editor for them would be a second place they can
+        // disagree.
+        // The id is DERIVED, never typed: `@ext:` silently filters to nothing when the string is
+        // wrong, so a hand-written "publisher.name" would open an empty settings page and look like
+        // the button had done nothing.
+        void vscode.commands.executeCommand(
+          'workbench.action.openSettings',
+          `@ext:${EXTENSION_ID}`
+        );
       else if (m.type === 'versionUpdate') void vscode.commands.executeCommand('claudeObservatory.updateNow');
       else if (m.type === 'switchChannel' && (m.channel === 'stable' || m.channel === 'dev'))
         void vscode.commands.executeCommand('claudeObservatory.switchChannel', m.channel);
@@ -5110,6 +5406,61 @@ class ChangeMapViewProvider implements vscode.WebviewViewProvider {
         this.followFeed(typeof m.kind === 'string' && m.kind ? { kind: m.kind, id: typeof m.id === 'string' ? m.id : '' } : null);
       else if (m.type === 'openEdit' && typeof m.id === 'number')
         void vscode.commands.executeCommand('claudeObservatory.viewChanges', m.id);
+      // Keep / Undo scoped to one change-map row. `--under <path>` is the CLI's own file-or-folder
+      // scope, so this shares an exact rule with the terminal's map and with the folder actions in the
+      // trees, rather than re-deriving an id set here that the three could disagree about.
+      else if (m.type === 'mapScope' && (m.act === 'keep' || m.act === 'undo') && typeof m.rel === 'string' && m.rel) {
+        const act = m.act as 'keep' | 'undo';
+        const rel = m.rel as string;
+        const name = typeof m.name === 'string' && m.name ? m.name : rel;
+        const pending = Number(m.pending) || 0;
+        void (async () => {
+          const cwd = workspaceRoot();
+          const session = currentSession();
+          if (!cwd || !session) return;
+          // Undo REWRITES FILES ON DISK, so it asks first with the real number. Keep records a verdict
+          // and changes nothing, so it does not — the same asymmetry every other surface here uses.
+          if (act === 'undo') {
+            const ok = await vscode.window.showWarningMessage(
+              `Undo ${pending} pending edit(s) in ${name}?`,
+              { modal: true, detail: 'This reverts them on disk. Keeping instead records a verdict and changes no file.' },
+              'Undo'
+            );
+            if (ok !== 'Undo') return;
+          }
+          // Spawned, like every other bulk verb here: `--under` can resolve to hundreds of records on a
+          // folder, and doing that in-process froze the host the last time a bulk path took that route.
+          spawnCliJson([act, '--under', rel, '--session', session, '--json'], cwd, (data) => {
+            const r = (data ?? {}) as Record<string, unknown>;
+            const n = Number(r[act === 'keep' ? 'kept' : 'undone'] ?? 0);
+            // CONFLICTS and REFUSALS are separate numbers and both have to be said. The CLI exits 0
+            // while returning `{"undone":0,"conflicts":2}` — an undo that reverted nothing because
+            // every file had changed on disk — and reporting only `undone` turned that into a
+            // 3-second "undid 0 edit(s)", which reads as "there was nothing to do". A refusal
+            // (`errors`, with its reason in `firstError`) was invisible the same way.
+            const conflicts = Number(r.conflicts ?? 0) || 0;
+            const errors = Number(r.errors ?? 0) || 0;
+            const first = typeof r.firstError === 'string' ? r.firstError : '';
+            if (data === null) {
+              vscode.window.showErrorMessage(`Could not ${act} ${name} — is the claude-observatory CLI installed?`);
+            } else if (conflicts || errors) {
+              // A modal, not a status-bar flash: nothing moved, or not all of it did, and the reader
+              // has to act on that rather than catch it in three seconds of peripheral vision.
+              void vscode.window.showWarningMessage(
+                `Claude Observatory: ${act === 'keep' ? 'kept' : 'undid'} ${n} edit(s) in ${name}` +
+                  (conflicts ? ` · ${conflicts} conflict(s) left — revert those individually to force` : '') +
+                  (errors ? ` · ${errors} refused${first ? ` — ${first}` : ''}` : '')
+              );
+            } else {
+              vscode.window.setStatusBarMessage(
+                `Claude Observatory: ${act === 'keep' ? 'kept' : 'undid'} ${n} edit(s) in ${name}`,
+                3000
+              );
+            }
+            void vscode.commands.executeCommand('claudeObservatory.refresh');
+          });
+        })();
+      }
       // (No openPath branch: the footprint drill-down was its last sender, and the file rows that replaced
       // it live in the Actions tree, which opens paths itself.)
       else if (m.type === 'showReason' && typeof m.id === 'number')
@@ -5438,7 +5789,18 @@ class ChangeMapViewProvider implements vscode.WebviewViewProvider {
       ['views', '--views', 'changemap,multitask,processes', '--json', '--root', cwd, '--session', session],
       cwd,
       (data) => {
-        const all = data as { changemap?: unknown; multitask?: unknown; processes?: unknown } | null;
+        const all = data as { changemap?: unknown; multitask?: unknown; processes?: unknown; __problems?: Record<string, string>; __ignoreProblems?: string[] } | null;
+        // A view the CLI could not build arrives as `null`, which renders as an empty panel — the same
+        // frame a session that did nothing produces. `views` now says which views failed and why, and
+        // an unreadable ignore file rides along; surfacing it here is what keeps "could not read" from
+        // looking like "nothing happened" in the editors as well as the terminal.
+        const problems = all?.__problems && typeof all.__problems === 'object' ? Object.entries(all.__problems) : [];
+        if (problems.length) {
+          void vscode.window.showWarningMessage(
+            `Claude Observatory: ${problems.length === 1 ? `the ${problems[0][0]} view` : `${problems.length} views`} could not be read — ${problems[0][1]}`
+          );
+        }
+        for (const why of all?.__ignoreProblems ?? []) void vscode.window.showWarningMessage(`Claude Observatory: ${why}`);
         const d = (all?.changemap ?? null) as (core.ChangeMap & { agents?: unknown[] }) | null;
         cm = d && d.summary && Array.isArray(d.edits) && Array.isArray(d.files) && Array.isArray(d.modules) && Array.isArray(d.agents) ? d : null;
         const m = (all?.multitask ?? null) as { agents?: unknown[]; collisions?: unknown[] } | null;
@@ -5825,6 +6187,9 @@ const OVERVIEW_SCRIPT = `
     parts.push('<b style="color:'+PAL.pending+'">'+sp+'</b> pending', '<b style="color:'+PAL.kept+'">'+sk+'</b> accepted');
     if(su) parts.push('<b style="color:'+PAL.reverted+'">'+su+'</b> reverted');
     parts.push('<b>'+nfiles+'</b> file'+(nfiles===1?'':'s'), '<b>'+nfo+'</b> folder'+(nfo===1?'':'s'));
+    // Nothing here about .observatoryignore: under one mode a matching path is never recorded, so
+    // there is no count to report — the summary describes what the session HAS, and an ignored file
+    // was never part of it.
     sumEl.innerHTML=parts.join(' · ');
   }
   function renderLedger(){
@@ -5834,14 +6199,28 @@ const OVERVIEW_SCRIPT = `
     var max=0; for(var j=0;j<shown.length;j++){ var wj=weight(shown[j]); if(wj>max) max=wj; } if(!max) max=1;
     var h='';
     for(var k=0;k<shown.length;k++){ var f=shown[k], w=Math.max(2, weight(f)/max*100);
-      h+='<button class="cm-row" data-idx="'+k+'">'+
-        '<span class="cm-dot" style="background:'+colorOf(f.status)+'"></span>'+
-        '<span class="cm-fn">'+esc(f.file)+(f.agent?'<span class="cm-ag">●</span>':'')+(f.risk?'<span class="cm-rk">⌐</span>':'')+'</span>'+
-        '<span class="cm-md">'+esc(f.moduleLabel)+'</span>'+
+      // A ROW, not a button: it carries two buttons of its own now, and a button inside a button is
+      // invalid markup that browsers resolve by dropping one of them. The name is the click target.
+      h+='<div class="cm-row" data-idx="'+k+'">'+
+        '<button class="cm-open" data-idx="'+k+'" title="Open the diff for this file">'+
+          '<span class="cm-dot" style="background:'+colorOf(f.status)+'"></span>'+
+          '<span class="cm-fn">'+esc(f.file)+(f.agent?'<span class="cm-ag">●</span>':'')+(f.risk?'<span class="cm-rk">⌐</span>':'')+'</span>'+
+          '<span class="cm-md">'+esc(f.moduleLabel)+'</span>'+
+        '</button>'+
         '<span class="cm-bar"><span class="cm-fill" style="width:'+w+'%;background:'+colorOf(f.status)+'"></span></span>'+
-        '<span class="cm-n">+'+f.churn+'</span>'+
-        '<span class="cm-pd">'+(f.pending?('<span style="color:'+PAL.pending+'">'+f.pending+'⧗</span>'):('<span style="color:'+PAL.kept+'">✓</span>'))+'</span>'+
-        '</button>';
+        // Added and removed, APART — the same change the terminal's map made. +900/−4 and +4/−900 are
+        // the same churn and are not remotely the same change to review.
+        '<span class="cm-n" title="lines added"><span style="color:'+PAL.kept+'">+'+(f.added||0)+'</span></span>'+
+        '<span class="cm-n" title="lines removed"><span style="color:'+PAL.reverted+'">−'+(f.removed||0)+'</span></span>'+
+        // Pending and accepted as NUMBERS. "How much is left to review here" is what this ledger is
+        // for, and a proportional bar cannot answer it.
+        '<span class="cm-pd" title="pending edits"><span style="color:'+PAL.pending+'">'+(f.pending||0)+'⧗</span></span>'+
+        '<span class="cm-pd" title="accepted edits"><span style="color:'+PAL.kept+'">'+(f.kept||0)+'✓</span></span>'+
+        // The two actions, on the row that names what they act on. Disabled — not hidden — when there
+        // is nothing pending, so the row keeps its shape and the reason is in the tooltip.
+        '<button class="cm-act cm-keep" data-idx="'+k+'" data-act="keep"'+(f.pending?'':' disabled title="nothing pending in this file"')+(f.pending?' title="Keep the '+f.pending+' pending edit(s) in this file"':'')+'>✓</button>'+
+        '<button class="cm-act cm-undo" data-idx="'+k+'" data-act="undo"'+(f.pending?'':' disabled title="nothing pending in this file"')+(f.pending?' title="Undo the '+f.pending+' pending edit(s) in this file"':'')+'>↩</button>'+
+        '</div>';
     }
     var host=document.getElementById('cm-ledger');
     host.innerHTML=h||'<div class="cm-none">nothing matches this filter</div>';
@@ -5851,9 +6230,25 @@ const OVERVIEW_SCRIPT = `
     if(FILTER) document.getElementById('cm-readout').innerHTML='search “'+esc(FILTER)+'” · '+shown.length+' file(s) — Search again (empty) to clear';
     var rs=host.querySelectorAll('.cm-row');
     for(var r=0;r<rs.length;r++){
-      rs[r].addEventListener('click', function(){ var f=ROWS[+this.getAttribute('data-idx')]; if(f&&f.maxId>=0){ vscode.postMessage({type:'openEdit', id:f.maxId}); document.getElementById('cm-readout').innerHTML='→ <b>open diff</b> · '+esc(f.file)+' (edit #'+f.maxId+')'; } });
       rs[r].addEventListener('mousemove', function(ev){ showTip(ev, ROWS[+this.getAttribute('data-idx')]); });
       rs[r].addEventListener('mouseleave', hideTip);
+    }
+    var os=host.querySelectorAll('.cm-open');
+    for(var o=0;o<os.length;o++){
+      os[o].addEventListener('click', function(){ var f=ROWS[+this.getAttribute('data-idx')]; if(f&&f.maxId>=0){ vscode.postMessage({type:'openEdit', id:f.maxId}); document.getElementById('cm-readout').innerHTML='→ <b>open diff</b> · '+esc(f.file)+' (edit #'+f.maxId+')'; } });
+    }
+    // Keep / Undo, scoped to the FILE the row names. The host resolves the edit set through the CLI's
+    // own --under scope, so the ledger, the terminal's change map and the folder actions in the trees
+    // all act on exactly the same rule instead of three id sets that could disagree.
+    // (No backticks in this comment: it lives inside the webview template literal, where one would
+    // terminate the string and take the rest of the script with it.)
+    var as=host.querySelectorAll('.cm-act');
+    for(var a=0;a<as.length;a++){
+      as[a].addEventListener('click', function(ev){
+        ev.stopPropagation();
+        var f=ROWS[+this.getAttribute('data-idx')]; if(!f||!f.pending) return;
+        vscode.postMessage({type:'mapScope', act:this.getAttribute('data-act'), rel:f.rel, pending:f.pending, name:f.file});
+      });
     }
   }
   function tipHtml(f){ var cls=f.classes||[];
@@ -6054,7 +6449,9 @@ const OVERVIEW_SCRIPT = `
       '<span class="mt-wat">'+esc(lbl)+'</span>'+
       spark(a.sparkline)+
       '<span class="mt-diff sm"><span class="mt-add">+'+(a.added||0)+'</span> <span class="mt-rem">−'+(a.removed||0)+'</span></span>'+
-      '<span class="mt-wmeta">'+(a.model?esc(a.model)+' · ':'')+fmtTok(a.tokens)+' tok · '+fmtDur(a.durationMs)+' · '+(a.edits||0)+' edit'+(a.edits===1?'':'s')+'</span></div>'; }
+      // Model AND effort — the pair, like the Sessions row's chip. An unknown effort is left OUT
+      // rather than guessed: the default differs by build and by model, so a placeholder is fiction.
+      '<span class="mt-wmeta">'+(a.model?esc(a.model)+(a.effort?' · '+esc(a.effort):'')+' · ':(a.effort?esc(a.effort)+' · ':''))+fmtTok(a.tokens)+' tok · '+fmtDur(a.durationMs)+' · '+(a.edits||0)+' edit'+(a.edits===1?'':'s')+'</span></div>'; }
   function renderWorkflows(){ var host=paneHost('workflows'); if(!host) return;
     var all=(MT&&MT.workflows)||[];
     if(!all.length){ host.innerHTML='<div class="mt-none">No workflow runs in this session yet.</div>'; return; }
@@ -6231,6 +6628,7 @@ const OVERVIEW_SCRIPT = `
   // Version chip state + renderer — TOP-LEVEL, beside the other renderers: the message listener that
   // feeds VERINFO is a sibling of the wiring IIFE, so anything scoped inside it is unreachable here.
   var VERINFO=null;
+  (function(){ var b=document.getElementById('ov-options'); if(b) b.addEventListener('click', function(){ vscode.postMessage({type:'openSettings'}); }); })();
   function renderVersion(){ var chip=document.getElementById('ov-version'); var menu=document.getElementById('ov-vermenu'); if(!chip||!menu) return; var v=VERINFO||{};
     chip.innerHTML='v'+esc(v.current||'—')+' <i class="codicon codicon-chevron-down"></i>';
     chip.classList.toggle('upd', !!v.updateAvailable);
@@ -6256,6 +6654,16 @@ const OVERVIEW_SCRIPT = `
     el.textContent='🔬 '+(nm || ('session '+(s? String(s).slice(0,8) : '—')));
     el.title=(nm? nm+' — ' : '')+'session '+(s||'—')+' · switch in the Sessions tab'; }
 
+  // The SAME classifier the Timeline selector uses, and deliberately a second copy: these are two
+  // separate webviews, each a self-contained script, so there is no scope they can share. Kept
+  // byte-identical on purpose — the two session lists must not disagree about what a row means.
+  function machKind(r){
+    if(!r) return '';
+    if(r.error) return ' bad';
+    if(r.origin==='remote') return ' away';
+    if(r.origin==='bridged') return ' bridged';
+    return '';
+  }
   function renderSessions(){ var host=paneHost('sessions'); if(!host) return;
     var rows=(SESS&&SESS.sessions)||[];
     var under=SELF_KEY||'', seen=false;
@@ -6318,9 +6726,13 @@ const OVERVIEW_SCRIPT = `
       var chip=(r.model||r.effort)
         ? '<span class="mt-schip" title="What this session ran on, as recorded by the harness — never inferred">'+
           esc(r.model||'')+(r.effort? (r.model?' · ':'')+esc(r.effort)+' effort' : '')+'</span>' : '';
-      h+='<div class="mt-trow'+(mine?' sel':'')+'" data-sess-switch="'+esc(r.id)+'" title="'+esc((r.title||r.id)+' — session '+r.id+(r.current?' · live':'')+(mine?' · the session you are reviewing':' · click to review it'))+'">'+
+      // WHICH MACHINE. Always rendered, including "this machine": a chip that appears only for
+      // remotes makes its absence the load-bearing signal, and an absent thing is exactly what a
+      // reader does not notice.
+      var mc=r.machine? '<span class="mt-smc'+machKind(r)+'" title="The machine this session lives on">'+esc(r.machine)+'</span>' : '';
+      h+='<div class="mt-trow'+(mine?' sel':'')+'" data-sess-switch="'+esc(r.id)+'" title="'+esc((r.title||r.id)+' — session '+r.id+' on '+(r.machine||'?')+(r.current?' · live':'')+(mine?' · the session you are reviewing':' · click to review it'))+'">'+
         '<span class="mt-tg">'+(r.current?'●':'○')+'</span>'+
-        '<span class="mt-ts">'+esc(name)+'</span>'+
+        '<span class="mt-ts">'+esc(name)+'</span>'+mc+
         diff+meta+chip+
         '<span class="mt-tct">'+esc(ago(r.lastActiveMs))+(mine?' · reviewing':'')+'</span>'+
         // Resolve: accept what is left and stop carrying the history. Only offered where there IS
@@ -6984,6 +7396,10 @@ function runObservatoryUpdate(args: string[], title: string, doneMsg: string, up
  *  channels' newest tags (1h in-memory cache — the chip renders instantly, the menu stays honest). */
 let versionInfoCache: { at: number; stableLatest: string | null; devLatest: string | null } | null = null;
 let extensionVersion = ''; // set once in activate() from the extension's own manifest
+/** `publisher.name` for this extension, read from the host at activation. Used to scope VS Code's
+ *  settings UI — `@ext:` with a wrong id filters to nothing and reads as a dead button, so it is
+ *  never spelled out by hand. Empty under the smoke-test mock, which has no `context.extension`. */
+let EXTENSION_ID = '';
 
 async function versionChipInfo(): Promise<{
   current: string;
@@ -7153,6 +7569,7 @@ export function activate(context: vscode.ExtensionContext): void {
   // The running build's own version — what the Overview's version chip shows ('' under the smoke
   // mock, which has no `context.extension`; the chip then renders v— and stays inert).
   extensionVersion = String(context.extension?.packageJSON?.version ?? '');
+  EXTENSION_ID = String(context.extension?.id ?? '');
   // 0.8.6 changed the publisher (claude-observatory → cell-observatory), which changed the extension
   // id — editors treat the pre-rename install as a SEPARATE extension, so both can be installed at
   // once, racing to register the same commands and views (the loser's activate() throws). Don't
@@ -7596,7 +8013,7 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
 
-  // A SUBTLE whole-line green tint + coral change-bar on Claude's added/changed lines — deliberately
+  // A SUBTLE whole-line green tint + GREEN change-bar on Claude's added/changed lines — deliberately
   // low-alpha (not the default diff green) so a file where Claude edited many lines doesn't drown in
   // color, while still showing at a glance what changed.
   inlineDecoration = vscode.window.createTextEditorDecorationType({
@@ -7722,7 +8139,8 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const updateStatusItem = () => {
     const session = currentSession();
-    const log = session ? cachedLog(session) : [];
+    // DISPLAY units — the same collapse the Overview and the Sessions rows use. See `cachedReview`.
+    const log = session ? cachedReview(session) : [];
     const pendingRecs = log.filter((r) => r.status === 'pending');
     const pending = pendingRecs.length;
     const kept = log.filter((r) => r.status === 'kept').length;
@@ -8101,11 +8519,22 @@ export function activate(context: vscode.ExtensionContext): void {
   // `force` is set only by the explicit Refresh command: it bypasses the Overview's coalescing throttle
   // and re-fetches the followed feed even if it had settled, so a pane stuck on a failed spawn (an older
   // CLI on PATH, since upgraded) is recoverable without reloading the window.
+  /** The session the last refresh ran for — see the cache drop in refreshAll. `undefined` is a real
+   *  value here (no session resolves yet), so it starts as a sentinel no session id can equal. */
+  let lastRefreshedSession: string | undefined | symbol = FIRST_REFRESH;
   const refreshAll = (force = false) => {
     // Demo sessions leave no residue (0.8.0): once every demo edit is reviewed (e.g. Accept All), the
     // resolved records are dropped so the panels empty out. No-op for real sessions; the resulting
     // store change re-enters here once and then no-ops (the log is empty).
     const s = currentSession();
+    // Switching sessions drops core's per-process file caches — the SAME rule `claude-observatory warm`
+    // applies between sessions in the CLI. This host is the one long-lived core consumer: the shared
+    // raw-text layer beneath the derivation memos is byte-budgeted, so it can never run away, but
+    // without this the budget stays FULL of the session you just left while you read the next one.
+    if (s !== lastRefreshedSession) {
+      lastRefreshedSession = s;
+      core.clearFsCache();
+    }
     if (s) core.autoClearDemo(s);
     // AFTER the auto-clear: a fully reviewed demo has just dropped its records, and that empty log is
     // the verdict a wait step is looking for.
@@ -8649,6 +9078,18 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.window.setStatusBarMessage(id ? `Claude Observatory: showing session ${id}` : 'Claude Observatory: session set to auto', 3000);
         return;
       }
+      // A pinned id is PERSISTED to .vscode/settings.json, so an unusable one is not a bad refresh —
+      // it is a bad refresh that survives a restart. The session list can carry rows that are not
+      // openable ids at all: an unreachable remote host is rendered as a row whose id is `!<name>`
+      // with the error as its title, and `core.storeDir` throws on it, which would then throw on
+      // every tick. Refuse it here, at the one place that writes.
+      if (id && !core.isSafeSessionId(id)) {
+        vscode.window.showWarningMessage(
+          `Claude Observatory: “${id}” is not a session — that row is a host that could not be reached.`
+        );
+        return;
+      }
+
       const cfg = vscode.workspace.getConfiguration('claudeObservatory');
       await cfg.update('session', id ?? '', vscode.ConfigurationTarget.Workspace);
       // Refresh from HERE rather than leaning on the configuration event: re-picking the session that
@@ -8715,6 +9156,120 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('claudeObservatory.showSessions', async () => {
       await vscode.commands.executeCommand('claudeObservatory.changemap.focus');
       changeMapProvider.setTour('sessions', null);
+    }),
+    /**
+     * The machines this install looks for sessions on, over SSH.
+     *
+     * Every operation goes through `core.parseRemoteSpec` and `writePrefs` — the same door the
+     * terminal's options window uses — because both fields are interpolated into a shell that runs on
+     * ANOTHER computer, and a second copy of that guard is a second chance to get it wrong. Before
+     * this, `prefs.remotes` was editable only from the terminal dashboard: a feature all three front
+     * ends render was configurable in one of them.
+     */
+    /**
+     * Where the observatory keeps its data — shown, and changeable.
+     *
+     * The move is `core.moveStore`, shared with the terminal's options window, because a setting that
+     * changed where NEW data goes while leaving the old data behind would strand a session's history
+     * somewhere the product no longer looks.
+     */
+    vscode.commands.registerCommand('claudeObservatory.storeLocation', async () => {
+      const current = core.rootDir();
+      const prefs = core.readPrefs();
+      const MOVE = 'Move it…';
+      const DEFAULT = 'Restore the default location';
+      const pick = await vscode.window.showQuickPick(
+        [
+          { label: current, description: prefs.storeDir ? 'moved' : 'default', detail: 'Where this session\u2019s edits, snapshots and caches are kept' },
+          { label: MOVE, detail: 'Pick a new directory — your existing sessions move with it' },
+          ...(prefs.storeDir ? [{ label: DEFAULT, detail: 'Move it back beside your Claude config' }] : []),
+        ],
+        { title: 'Claude Observatory — store location' }
+      );
+      if (!pick || pick.label === current) return;
+      let target = '';
+      if (pick.label === MOVE) {
+        const chosen = await vscode.window.showOpenDialog({
+          canSelectFolders: true, canSelectFiles: false, canSelectMany: false, openLabel: 'Move the store here',
+        });
+        if (!chosen?.length) return;
+        target = chosen[0].fsPath;
+      } else {
+        target = path.join(core.claudeConfigDir(), 'claude-observatory');
+      }
+      const res = core.moveStore(target);
+      if ('error' in res) {
+        void vscode.window.showErrorMessage(`Claude Observatory: store not moved — ${res.error}`);
+        return;
+      }
+      const next = { ...prefs };
+      if (pick.label === MOVE) next.storeDir = target;
+      else delete next.storeDir;
+      core.writePrefs(next);
+      void vscode.window.showInformationMessage(`Claude Observatory: store moved to ${res.to}`);
+      void vscode.commands.executeCommand('claudeObservatory.refresh');
+    }),
+    vscode.commands.registerCommand('claudeObservatory.manageRemotes', async () => {
+      const prefs = core.readPrefs();
+      const list = [...(prefs.remotes ?? [])];
+      const save = (next: typeof list): void => {
+        const p = { ...prefs };
+        if (next.length) p.remotes = next;
+        else delete p.remotes;
+        core.writePrefs(p);
+        void vscode.commands.executeCommand('claudeObservatory.refresh');
+      };
+      const ADD = '＋  Add a machine…';
+      const pick = await vscode.window.showQuickPick(
+        [
+          { label: ADD, detail: 'name host [configDir] — host is anything ssh accepts' },
+          ...list.map((r) => ({
+            label: `${r.enabled === false ? '○' : '●'}  ${r.name}`,
+            description: r.host + (r.configDir ? `  ${r.configDir}` : ''),
+            detail: r.enabled === false ? 'off — pick to turn it back on, or remove it' : 'on — pick to turn it off, or remove it',
+          })),
+        ],
+        { title: 'Machines — sessions there can be browsed, never reverted from here', placeHolder: list.length ? 'Pick a machine, or add one' : 'No machines configured yet' }
+      );
+      if (!pick) return;
+      if (pick.label === ADD) {
+        const line = await vscode.window.showInputBox({
+          title: 'Add a machine',
+          prompt: 'name host [configDir] — a single word is read as the host',
+          placeHolder: 'build-box buildhost.internal',
+          // Validated AS YOU TYPE, by the same parser that stores it, so the refusal reason appears
+          // before the box is dismissed rather than as a notification after the value is lost.
+          validateInput: (v) => {
+            if (!v.trim()) return null;
+            const r = core.parseRemoteSpec(v);
+            return 'error' in r ? r.error : null;
+          },
+        });
+        if (!line?.trim()) return;
+        const r = core.parseRemoteSpec(line);
+        if ('error' in r) {
+          void vscode.window.showErrorMessage(`Claude Observatory: ${r.error}`);
+          return;
+        }
+        const at = list.findIndex((x) => x.name === r.remote.name);
+        if (at >= 0) list[at] = { ...r.remote, enabled: list[at].enabled };
+        else list.push(r.remote);
+        save(list);
+        void vscode.window.setStatusBarMessage(`Claude Observatory: added ${r.remote.name}`, 3000);
+        return;
+      }
+      const name = pick.label.replace(/^[○●]\s+/, '');
+      const at = list.findIndex((r) => r.name === name);
+      if (at < 0) return;
+      const what = await vscode.window.showQuickPick(
+        [list[at].enabled === false ? 'Turn on' : 'Turn off', 'Remove'],
+        { title: name, placeHolder: `${name} — ${list[at].host}` }
+      );
+      if (!what) return;
+      if (what === 'Remove') list.splice(at, 1);
+      else list[at] = { ...list[at], enabled: what === 'Turn on' };
+      save(list);
+      void vscode.window.setStatusBarMessage(`Claude Observatory: ${what.toLowerCase()} ${name}`, 3000);
     }),
     // The Timeline's selector as a command, so the Prompts tab's chip and the palette drive one
     // implementation. ACTIVE sessions only — switching between two live conversations is the thing this
@@ -8821,7 +9376,11 @@ export function activate(context: vscode.ExtensionContext): void {
       withSession(async (s) => {
         const pick = await vscode.window.showQuickPick(
           [
-            { label: '$(trash) Reclaim disk', description: 'garbage-collect orphaned blobs in this session', act: 'gc' as const },
+            // No bin glyph anywhere in this product, deliberately. Every control here sits within reach
+            // of buttons that keep or undo real code, and a trash can next to those reads as "discard my
+            // changes" — the one meaning they must never carry. This reclaims space from orphaned blobs;
+            // it changes no file on disk. `$(clear-all)` is what the Clear Resolved command already uses.
+            { label: '$(clear-all) Reclaim disk', description: 'garbage-collect orphaned blobs in this session', act: 'gc' as const },
             { label: '$(history) Clear completed sessions…', description: 'drop finished sessions with nothing left to review', act: 'completed' as const },
             { label: '$(close) Drop this session…', description: "delete this session's captured edits + blobs (files on disk are NOT changed)", act: 'drop' as const },
           ],
@@ -8994,7 +9553,6 @@ export function activate(context: vscode.ExtensionContext): void {
     // The two swaps between the review surfaces, at the SAME edit: the bar's "⋯ Details" opens the bubble
     // (reasoning + the git-coloured diff), and the bubble's "Collapse" returns to the bar.
     vscode.commands.registerCommand('claudeObservatory.barDetails', () => editPeek.swapTo('detail')),
-    vscode.commands.registerCommand('claudeObservatory.peekCollapse', () => editPeek.swapTo('bar')),
     // The bar has no diff in its body — this is its way to the patch.
     vscode.commands.registerCommand('claudeObservatory.peekViewDiff', () => editPeek.viewDiff()),
     // Pin/unpin the review bubble. One setting, two commands, so the bubble's toolbar can show the
@@ -9115,12 +9673,22 @@ export function activate(context: vscode.ExtensionContext): void {
     )
   );
 
-  // Live updates: watch the store's log files (base ~/.claude exists even before first capture).
-  const base = vscode.Uri.file(path.dirname(core.rootDir()));
+  // Live updates: watch the store's log files.
+  //
+  // TWO ROOTS, resolved SEPARATELY. These were both derived from `path.dirname(rootDir())`, which
+  // equalled the Claude config dir only while the store was always `<config>/claude-observatory`.
+  // The store-location setting breaks that invariant: after a move, dirname() is the parent of
+  // wherever the reader put it, so the store pattern pointed at a sibling that does not exist AND
+  // the transcript pattern — which has nothing to do with the store — pointed somewhere with no
+  // transcripts in it. Both watchers went silent, and the log watcher is the ONLY live path (see the
+  // note at updateStatusItem), so every view stopped updating while Claude worked.
+  // core/src/watch.ts already resolves them independently; this is the same rule.
+  const storeRoot = vscode.Uri.file(core.rootDir());
+  const configRoot = vscode.Uri.file(core.claudeConfigDir());
   const watcher = vscode.workspace.createFileSystemWatcher(
     // Narrowed from machine-wide '*/log.jsonl' (0.8.8): any session anywhere used to wake every
     // window for a full refresh. Watch the whole store dir but debounce-filter in the handler below.
-    new vscode.RelativePattern(base, 'claude-observatory/*/log.jsonl')
+    new vscode.RelativePattern(storeRoot, '*/log.jsonl')
   );
   // Capture writes land in bursts (PreToolUse + PostToolUse per edit) — debounce so one refresh
   // covers the burst instead of re-rendering every view per file event.
@@ -9168,7 +9736,9 @@ export function activate(context: vscode.ExtensionContext): void {
   // those views update in real time as Claude works — not just when it happens to edit a file. A
   // gentler debounce (the transcript is rewritten far more often than the store) coalesces the churn.
   const transcriptWatcher = vscode.workspace.createFileSystemWatcher(
-    new vscode.RelativePattern(base, 'projects/**/*.jsonl')
+    // The CONFIG root, never the store root — transcripts live beside the config wherever the store
+    // is, and a store the reader moved must not take this watcher with it.
+    new vscode.RelativePattern(configRoot, 'projects/**/*.jsonl')
   );
   // ~/.claude/projects holds EVERY project on the machine, so that pattern also fires for repos this
   // window knows nothing about — and each spurious wake costs a full refreshAll (two CLI spawns). Keep
@@ -9392,4 +9962,7 @@ function offerDemo(context: vscode.ExtensionContext, run: () => void, standDown:
 
 export function deactivate(): void {
   /* disposables handled via context.subscriptions */
+  // …except core's caches, which are module state in an imported package and nothing disposes them.
+  // The raw-text layer can be holding up to its byte budget of transcript text at this point.
+  core.clearFsCache();
 }

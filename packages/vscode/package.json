@@ -74,7 +74,7 @@
       "claudeObservatoryPrompts": [
         {
           "id": "claudeObservatory.timeline",
-          "name": "Timeline",
+          "name": "Observatory Timeline",
           "type": "webview",
           "initialSize": 2
         }
@@ -210,15 +210,9 @@
       },
       {
         "command": "claudeObservatory.barDetails",
-        "title": "Details (open the full review bubble)",
+        "title": "Expand to the review bubble",
         "category": "Claude Observatory",
-        "icon": "$(list-selection)"
-      },
-      {
-        "command": "claudeObservatory.peekCollapse",
-        "title": "Collapse to the review bar",
-        "category": "Claude Observatory",
-        "icon": "$(chrome-minimize)"
+        "icon": "$(chevron-down)"
       },
       {
         "command": "claudeObservatory.peekViewDiff",
@@ -658,6 +652,18 @@
         "command": "claudeObservatory.tourReducedMotion",
         "title": "Guided tour: reduced motion",
         "category": "Claude Observatory"
+      },
+      {
+        "command": "claudeObservatory.manageRemotes",
+        "title": "Machines: add or remove a machine to browse sessions on",
+        "category": "Claude Observatory",
+        "icon": "$(vm)"
+      },
+      {
+        "command": "claudeObservatory.storeLocation",
+        "title": "Store location: show or move where the observatory keeps its data",
+        "category": "Claude Observatory",
+        "icon": "$(database)"
       }
     ],
     "keybindings": [
@@ -754,10 +760,6 @@
         },
         {
           "command": "claudeObservatory.barDetails",
-          "when": "false"
-        },
-        {
-          "command": "claudeObservatory.peekCollapse",
           "when": "false"
         },
         {
@@ -1009,11 +1011,6 @@
           "group": "inline@12"
         },
         {
-          "command": "claudeObservatory.peekCollapse",
-          "when": "commentController == claudeObservatory && commentThread == claudeEdit",
-          "group": "inline@13"
-        },
-        {
           "command": "claudeObservatory.peekKeep",
           "when": "commentController == claudeObservatory && commentThread == claudeNavBar",
           "group": "inline@0"
@@ -1049,9 +1046,19 @@
           "group": "inline@6"
         },
         {
-          "command": "claudeObservatory.barDetails",
+          "command": "claudeObservatory.peekChat",
           "when": "commentController == claudeObservatory && commentThread == claudeNavBar",
           "group": "inline@7"
+        },
+        {
+          "command": "claudeObservatory.toggleHeatmap",
+          "when": "commentController == claudeObservatory && commentThread == claudeNavBar",
+          "group": "inline@8"
+        },
+        {
+          "command": "claudeObservatory.barDetails",
+          "when": "commentController == claudeObservatory && commentThread == claudeNavBar",
+          "group": "inline@9"
         }
       ],
       "view/title": [

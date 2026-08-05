@@ -15,7 +15,7 @@ import { readLog, readBlob, findRecord, EditRecord, minOf, maxOf, sidecarMemo } 
 import { findTranscript } from './observe';
 import { findSubagentsDir } from './subagents';
 import { scoreCommand, CommandRisk } from './risk';
-import { cachedByFiles } from './fscache';
+import { cachedByFiles, readLines } from './fscache';
 import { taskId } from './changemap';
 
 /** Coarse action kind, drives the timeline's icon + grouping + which rows the UI can dim/filter. */
@@ -252,7 +252,7 @@ export function parseTranscriptActions(transcriptPath: string, opts?: { includeS
 function parseTranscriptActionsUncached(transcriptPath: string, includeSidechain: boolean): ActionRecord[] {
   let lines: string[];
   try {
-    lines = fs.readFileSync(transcriptPath, 'utf8').split('\n');
+    lines = readLines(transcriptPath);
   } catch {
     return [];
   }
@@ -797,7 +797,7 @@ const RESULT_CONTEXT_MAX = 4000;
 function toolResultText(transcriptPath: string, toolUseId: string): string | null {
   let lines: string[];
   try {
-    lines = fs.readFileSync(transcriptPath, 'utf8').split('\n');
+    lines = readLines(transcriptPath);
   } catch {
     return null;
   }
@@ -833,7 +833,7 @@ function toolResultText(transcriptPath: string, toolUseId: string): string | nul
 function taskContentFor(transcriptPath: string, wantTaskId: string): string | null {
   let lines: string[];
   try {
-    lines = fs.readFileSync(transcriptPath, 'utf8').split('\n');
+    lines = readLines(transcriptPath);
   } catch {
     return null;
   }

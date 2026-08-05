@@ -10,7 +10,7 @@
  * thin renderers over the tree/keep/undo this backs.
  */
 import { diffArrays } from 'diff';
-import { EditRecord, EditStatus, readLog, readBlob, logPath } from './store';
+import { EditRecord, EditStatus, readLog, blobText as storeBlobText, logPath } from './store';
 import { cachedByFiles } from './fscache';
 
 function tokenizeLines(s: string): string[] {
@@ -20,7 +20,7 @@ function tokenizeLines(s: string): string[] {
 function blobText(session: string, sha: string | null): string {
   if (!sha) return '';
   try {
-    return readBlob(session, sha).toString('utf8');
+    return storeBlobText(session, sha);
   } catch {
     return '';
   }
@@ -185,6 +185,10 @@ export function groupRep(session: string, id: number): number {
  * synthetic record — the most-recent edit's id/tool/status/ts/afterBlob, but the earliest member's
  * beforeBlob, so its delta/diff/placement reflect the group's net before→after. Resolved (kept/undone)
  * edits pass through unchanged. Shared by the tree and the CLI `list` so both collapse identically.
+ *
+ * No `.observatoryignore` filtering happens here, or anywhere else on a read path. A matching file is
+ * never CAPTURED, so there is nothing in the log to filter — which is what let the whole display
+ * layer that used to sit here go away.
  */
 export function reviewEdits(session: string): EditRecord[] {
   const log = readLog(session);

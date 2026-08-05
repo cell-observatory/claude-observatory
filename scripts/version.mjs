@@ -15,10 +15,15 @@ import { dirname, join } from 'node:path';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
+// EVERY workspace, or the one that is missing becomes the one that breaks CI. `packages/tui` was
+// absent from all three lists below while root package.json listed it as a workspace, and the drift
+// check still reported "all versions consistent" because it never looked — so the gap was invisible
+// right up until `npm ci`.
 const PKGS = [
   'package.json',
   'packages/core/package.json',
   'packages/cli/package.json',
+  'packages/tui/package.json',
   'packages/vscode/package.json',
 ];
 const GRADLE = 'packages/jetbrains/build.gradle.kts';
@@ -30,14 +35,14 @@ const reFor = (rel) => (rel === GRADLE ? gradleVersionRe : pkgVersionRe);
 
 // @claude-observatory/core is repo-only (never published): cli + vscode pin it exactly, and if a pin
 // drifts from the workspace version, `npm ci` falls back to the registry and 404s. Lockstep these too.
-const CORE_PIN_FILES = ['packages/cli/package.json', 'packages/vscode/package.json'];
+const CORE_PIN_FILES = ['packages/cli/package.json', 'packages/tui/package.json', 'packages/vscode/package.json'];
 const corePinRe = /("@claude-observatory\/core":\s*")([^"]+)(")/;
 
 // The lockfile records the same versions again (`npm ci` in CI + release hard-fails if it disagrees
 // with package.json). A bump that skips it passes this drift check but reddens every CI run — so we
 // sync + verify it here too. Patched by field (round-trip is byte-identical) to avoid npm/network churn.
 const LOCKFILE = 'package-lock.json';
-const WORKSPACE_KEYS = ['packages/core', 'packages/cli', 'packages/vscode'];
+const WORKSPACE_KEYS = ['packages/core', 'packages/cli', 'packages/tui', 'packages/vscode'];
 
 const read = (rel) => readFileSync(join(root, rel), 'utf8');
 

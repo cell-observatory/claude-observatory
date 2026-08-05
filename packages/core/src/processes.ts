@@ -17,7 +17,7 @@
  */
 import * as fs from 'fs';
 import { findTranscript } from './observe';
-import { cachedByFiles } from './fscache';
+import { cachedByFiles, readLines } from './fscache';
 
 export interface BackgroundProcess {
   /** The harness's background shell id (e.g. `bpkyyxbff`) — how the agent reads or kills it. */
@@ -104,7 +104,7 @@ function parseProcesses(transcript: string): BackgroundProcess[] {
 function parseProcessesUncached(transcript: string): BackgroundProcess[] {
   let lines: string[];
   try {
-    lines = fs.readFileSync(transcript, 'utf8').split('\n');
+    lines = readLines(transcript);
   } catch {
     return [];
   }

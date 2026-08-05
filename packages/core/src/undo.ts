@@ -16,10 +16,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { diffArrays } from 'diff';
-import { EditRecord, findRecord, isUnderPath, readBlob, readLog, readLogRaw, setStatus, setStatusMany } from './store';
+import { EditRecord, findRecord, isUnderPath, logPath, readBlob, readLog, readLogRaw, setStatus, setStatusMany } from './store';
 import { canonPath } from './paths';
 import { groupMembers } from './groups';
 import { taskEditIds } from './changemap';
+
 
 export interface UndoResult {
   ok: boolean;
