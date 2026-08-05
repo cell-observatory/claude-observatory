@@ -189,6 +189,24 @@ export interface DashRow {
   cont?: boolean;
 }
 
+/**
+ * A row's human name, or a NAMED fallback — never a bare identifier.
+ *
+ * Every dashboard here answers "what is this thing", and an id answers it for nobody: the Tasks pane
+ * listed nineteen rows of `a3f21c...` because it read `content`/`title`, which the plan harness stopped
+ * emitting when tasks gained `subject`. The editors were already right — VS Code reads `t.subject` and
+ * JetBrains reads it with a `task #N` fallback — so this was the terminal drifting away from them, and
+ * the fallback below is deliberately the shape JetBrains uses.
+ *
+ * `what` names the KIND, so an unnamed row still says what it is rather than showing a digest. The id
+ * is trimmed because a 40-hex sha in a pane column is noise wearing the costume of information.
+ */
+function named(candidates: readonly (string | undefined)[], what: string, id: string): string {
+  for (const c of candidates) if (c && c.trim()) return c.trim();
+  const short = id.length > 8 ? id.slice(0, 8) : id;
+  return short ? `${what} ${short}` : `(unnamed ${what})`;
+}
+
 function view<T>(state: DashState, name: string): T | null {
   const v = state.views?.[name];
   return v === undefined || v === null ? null : (v as T);
@@ -399,7 +417,10 @@ function rowsForUncached(state: DashState, cols = 100, g: Glyphs = defaultGlyphs
       roll.set(str(r.taskId), r);
     }
     for (const t of arr(view<{ tasks?: unknown[] }>(state, 'multitask')?.tasks)) {
-      const label = str(t.content) || str(t.title) || str(t.taskId);
+      // `subject` FIRST: that is what the plan harness emits today. `content` and `title` are the
+      // older spellings, kept so an archived session still reads correctly rather than turning into a
+      // wall of digests the moment it is opened.
+      const label = named([str(t.subject), str(t.content), str(t.title)], 'task', str(t.id) || str(t.taskId));
       if (!keep(label)) continue;
       const id = str(t.taskId);
       const r = roll.get(id) ?? {};
@@ -418,7 +439,7 @@ function rowsForUncached(state: DashState, cols = 100, g: Glyphs = defaultGlyphs
       roll.set(str(r.workflowId), r);
     }
     for (const w of arr(view<{ workflows?: unknown[] }>(state, 'multitask')?.workflows)) {
-      const label = str(w.name) || str(w.id);
+      const label = named([str(w.name)], 'workflow', str(w.id));
       if (!keep(label)) continue;
       const r = roll.get(str(w.id)) ?? {};
       const live = w.running === true;
@@ -431,7 +452,7 @@ function rowsForUncached(state: DashState, cols = 100, g: Glyphs = defaultGlyphs
     }
   } else if (state.screen === 'agents') {
     for (const a of arr(view<{ agents?: unknown[] }>(state, 'multitask')?.agents)) {
-      const label = str(a.gitBranch) || str(a.worktree) || str(a.session);
+      const label = named([str(a.gitBranch), str(a.worktree)], 'session', str(a.session));
       if (!keep(label)) continue;
       const d = (a.diff ?? {}) as Record<string, unknown>;
       // The payload's sparkline is a NUMBER ARRAY. Coercing it to a string drew nothing at all, which

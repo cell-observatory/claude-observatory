@@ -10,6 +10,30 @@ Per-tag release artifacts and auto-generated notes are on the
 <!-- Every feature/fix PR into `dev` appends its line here; a promote renames this section to the
      release version and opens a fresh one. -->
 
+### Fixed
+- **The terminal's dashboards showed identifiers where names belong.** The Tasks pane listed rows of
+  `a3f21c9de4b7…` and nothing else, because it read `content`/`title` — the spellings the plan
+  harness used before tasks gained `subject`. Both editors were already right (VS Code reads
+  `t.subject`; JetBrains reads it with a `task #N` fallback), so this was the terminal drifting away
+  from them, and nothing noticed because falling back to an id is *silent*: the pane still rendered,
+  still filtered, still scrolled. It just stopped answering "what is this".
+
+  Every dashboard now goes through one resolver, and its fallback names the KIND rather than printing
+  a digest — an unnamed task reads `task 3`, an unnamed workflow `workflow 0f1e2d3c`, an agent with
+  no branch or worktree `session deadbeef`. The older `content`/`title` spellings are still read, so
+  an archived session does not turn into a wall of hashes the moment it is opened.
+
+### Build / CI
+- **The rolling pre-release channel cannot go backwards any more.** `dev`'s committed version is the
+  next stable target, and a promote could pull it back without a word: `main` carries the release it
+  just cut, and because main contains dev afterwards, merging main into dev is a fast-forward — no
+  conflict, no warning, and dev's `0.10.0` quietly becomes `0.9.3`. `version:check` still passed,
+  because it only proves the files agree with each other, and they agreed perfectly at the wrong
+  number. The first symptom would have been a `0.9.3-dev.N` published over a live `0.10.0-dev.M`,
+  stranding every pre-release install above the version line with auto-update quietly finding nothing
+  newer. The dev workflow now refuses to publish a version that does not outrank what is already
+  live, compared with core's own `isNewer` rather than a constant.
+
 ### Added
 - **`tui` — a terminal app with the editors' review actions.** **Four windows** over one
   session — **Prompts** across the top, **Traces** on the left, a centre **Detail** window and

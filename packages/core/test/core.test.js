@@ -10197,6 +10197,41 @@ test('tui: `w` keeps long lines long and pans across them, and never hides conte
     'the far END of the line is reachable by panning — nothing is out of reach');
 });
 
+test('tui: every dashboard names its rows, and never shows a bare id', () => {
+  // The Tasks pane listed nineteen rows of `a3f21c9de4b7…` because it read `content`/`title` — the
+  // spellings the plan harness used BEFORE tasks gained `subject`. The editors never had the bug:
+  // VS Code reads `t.subject`, JetBrains reads it with a `task #N` fallback. This was the terminal
+  // drifting away from them, and nothing noticed because falling back to an id is silent — the pane
+  // still rendered, still filtered, still scrolled. It just stopped answering "what is this".
+  const st = (screen, views) => paneFixture({ screen, views, panes: null });
+  const cells = (screen, views) => tui.rowsFor(st(screen, views), 120).map((r) => r.cells);
+
+  const tasks = [
+    { id: '1', taskId: 'a3f21c9de4b7', subject: 'Ship the release', status: 'in_progress' },
+    { id: '2', taskId: 'bb77aa11ccdd', content: 'an older session, still readable', status: 'completed' },
+    { id: '3', taskId: 'cc88bb22ddee', status: 'pending' },
+  ];
+  const t = cells('tasks', { multitask: { tasks }, changemap: { rollupByTask: [] } });
+  assert.match(t[0], /Ship the release/, '`subject` is what the harness emits today');
+  assert.ok(!t[0].includes('a3f21c9de4b7'), 'and the digest does not appear beside it');
+  assert.match(t[1], /an older session, still readable/, '`content` still works — an archived session must not turn into digests');
+  // A task with NO name at all still says what it is. `task 3` beats `cc88bb22ddee` for a reader.
+  assert.match(t[2], /task 3/, 'an unnamed row names its KIND rather than showing a raw id');
+  assert.ok(!t[2].includes('cc88bb22ddee'), 'the digest is not the label');
+
+  const w = cells('workflows', {
+    multitask: { workflows: [{ id: '0f1e2d3c4b5a' }, { id: 'x', name: 'find-flaky-tests' }] },
+    changemap: { rollupByWorkflow: [] },
+  });
+  assert.match(w[0], /workflow 0f1e2d3c/, 'an unnamed workflow is named as one, with a trimmed id');
+  assert.match(w[1], /find-flaky-tests/, 'and a named one shows its name');
+
+  // Agents already read a branch or a worktree; the point here is the LAST resort, which used to be a
+  // bare session UUID.
+  const a = cells('agents', { multitask: { agents: [{ session: 'deadbeefcafe1234', diff: {} }] } });
+  assert.match(a[0], /session deadbeef/, 'an agent with no branch or worktree is still named as a session');
+});
+
 test('release: the version stamper knows about every workspace', () => {
   // `packages/tui` was a declared workspace that `scripts/version.mjs` had never heard of — absent
   // from its package list, from the core-pin list and from the lockfile keys. Nothing caught it:
