@@ -420,6 +420,28 @@ Per-tag release artifacts and auto-generated notes are on the
   chevron is deliberately not `$(arrow-down)`, which is the Diff stepper's tailed arrow two buttons
   along; the test pins both so they cannot converge.
 
+  …and **^** on the bubble now actually steps down, which it did not. Two separate faults, either of
+  which alone made it look like a hide button. The Comment API raises no event for a collapse, so the
+  state is polled — and the only thing calling that poll ran on store changes and tab switches, so on
+  a session with nothing writing (a finished review is exactly that) the click produced no refresh, no
+  poll, and a bubble that simply stayed collapsed. The surface watches its own state while it is on
+  screen now. Separately, the dismissal guard was checked BEFORE the collapse, and dismissing the
+  **bar** at an edit left that flag standing — so from then on **^** on the bubble at that same edit
+  returned early and did nothing for the rest of the session. A collapse the reader just performed
+  outranks a dismissal from earlier, and an explicit re-open clears the flag. Both halves are driven by
+  tests, one of which deliberately does NOT refresh, because the existing test hand-delivered the very
+  tick whose absence was the bug.
+
+- **The version stamper had never heard of `packages/tui`.** It was a declared workspace absent from
+  the stamper's package list, its core-pin list and its lockfile keys — so `node scripts/version.mjs
+  <v>` moved every other package and left tui behind, pinned to a `@claude-observatory/core` build
+  that no longer existed. `version:check` reported "all versions consistent" throughout, because it
+  only compares the files it already knows about. The failure surfaces two steps later: the dev
+  pre-release workflow stamps and then runs `npm ci`, which resolves that stale pin from the registry,
+  where core has never been published, and 404s. A test now asserts the stamper covers every entry in
+  the root `workspaces` list — by list, not by naming tui, because the next package added would have
+  had exactly the same problem.
+
 - **The "adds a debug statement" flag could never see Rust's `dbg!`, or a no-argument `print()`.** One
   trailing word-boundary applied to every branch of the pattern, and `!` and `(` are not word
   characters — so a boundary after them required a word character to follow. `dbg!` is always written

@@ -2562,14 +2562,47 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.equal(bar().collapsibleState, vscode.CommentThreadCollapsibleState.Expanded,
       'the bar it lands on is expanded — a collapsed one shows no toolbar at all');
 
+    // ^ ACTS WHEN IT IS CLICKED, not whenever the store next happens to change.
+    //
+    // The API raises no event for a collapse, so this is polled — and the only caller of syncSurface
+    // runs on store changes and tab switches. On a session with nothing writing (a finished review is
+    // exactly that) `^` produced no refresh and therefore no poll, and the bubble sat there collapsed,
+    // which on screen is indistinguishable from having been hidden. That is what was reported.
+    //
+    // So this drives the collapse and then does NOT call settle(): no refresh, no tab switch, nothing
+    // but time. The surface has to notice on its own. The test above passes either way, because
+    // settle() hand-delivers the tick that was missing.
+    await commands['claudeObservatory.barDetails']();
+    assert.equal(bar().contextValue, 'claudeEdit', 'the bubble is up again');
+    bar().collapsibleState = vscode.CommentThreadCollapsibleState.Collapsed;
+    await new Promise((r) => setTimeout(r, 600)); // no refresh — only the surface's own watch
+    assert.equal(liveThreads().length, 1, '^ was noticed with no refresh to carry it');
+    assert.equal(bar().contextValue, 'claudeNavBar', '…and it stepped DOWN to the bar rather than hiding');
+
     // …and on the BAR the same gesture hides it outright, because the bar is already the smallest
     // surface — there is no next step down. It stays hidden: a refresh is one tick away, so a dismissal
     // the next tick undoes is a button that does nothing.
     bar().collapsibleState = vscode.CommentThreadCollapsibleState.Collapsed;
     await settle();
     assert.equal(liveThreads().length, 0, '^ on the bar closes the surface outright');
+
     await settle();
     assert.equal(liveThreads().length, 0, '…and the next refresh does not put it straight back');
+
+    // A DISMISSED BAR MUST NOT DISABLE THE BUBBLE'S STEP-DOWN AT THE SAME EDIT.
+    //
+    // The line above left `dismissed` set to this edit. `syncSurface` checked that flag BEFORE it
+    // checked for a collapse, so from here on `^` on the bubble at this edit returned early and did
+    // nothing — for the rest of the session. The reader sees a chevron that hides instead of stepping
+    // down, which is exactly the report. Reopening explicitly is the reader saying they want the
+    // surface, so the dismissal is stale by then.
+    await commands['claudeObservatory.viewChanges'](barId);
+    assert.equal(liveThreads().length, 1, 'viewChanges reopens at that edit despite the dismissal');
+    assert.equal(bar().contextValue, 'claudeEdit', 'and it opens the bubble');
+    bar().collapsibleState = vscode.CommentThreadCollapsibleState.Collapsed;
+    await settle();
+    assert.equal(liveThreads().length, 1, '^ still steps down rather than being swallowed by the old dismissal');
+    assert.equal(bar().contextValue, 'claudeNavBar', '…and what is left is the bar');
 
     // It is scoped to THAT edit, not to the session: move to another changed file and the surface
     // returns. Without this a dismissal would suppress review chrome everywhere, with no way back —

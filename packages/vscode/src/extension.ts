@@ -536,6 +536,19 @@ class EditPeek implements vscode.Disposable {
   /** The edit whose surface the reader dismissed. Cleared the moment the review moves elsewhere, so a
    *  dismissal is about THIS edit and never suppresses the bar for the rest of the session. */
   private dismissed: number | undefined;
+  /**
+   * Watches the live thread's collapsible state, because nothing else will.
+   *
+   * `followPlatformCollapse` polls — the Comment API raises no event when the reader clicks `^`. That
+   * was fine only while something else was calling `syncSurface`, and the single caller runs on store
+   * changes and tab switches. On a session with nothing writing — a finished review is exactly that —
+   * clicking `^` produced no store change, no refresh, and therefore no poll: the bubble stayed
+   * collapsed, which on screen is indistinguishable from having been hidden.
+   *
+   * So the surface watches itself while it is up. One enum read off an object already in memory, and
+   * only while a thread exists — `closeThread` clears it, or a disposed thread keeps a timer alive.
+   */
+  private collapseWatch: ReturnType<typeof setInterval> | undefined;
 
   /**
    * Injected by `activate` (the review loop is closure-scoped, this class is not): pick the next pending
@@ -713,6 +726,7 @@ class EditPeek implements vscode.Disposable {
     this.thread = thread;
     this.mode = mode;
     this.edit = { id, file: rec.file };
+    this.watchCollapse();
     // The bar hides its steppers when there is nowhere to step, matching FloatingDiffStep.applies in
     // JetBrains: a floating widget sits on top of code, so a dead button there covers text for nothing.
     this.syncStepContext(filePending.length > 1, files.length > 1);
@@ -748,11 +762,19 @@ class EditPeek implements vscode.Disposable {
       if (this.thread) this.closeThread();
       return;
     }
+    // THE COLLAPSE IS CHECKED FIRST, because it is newer information than a dismissal.
+    //
+    // These two were the other way round, and the `dismissed` guard swallowed the bubble's step-down:
+    // `dismissed` is set whenever the BAR is collapsed, and neither `show` nor `swapTo` cleared it —
+    // so once a reader had dismissed the bar at an edit, `^` on the bubble at that same edit returned
+    // here and did nothing for the rest of the session. Ordering it this way costs the dismissal
+    // nothing: a dismissed bar has no thread, so `followPlatformCollapse` returns false on its first
+    // line and the guard below still holds.
+    if (await this.followPlatformCollapse()) return;
     // A surface the reader dismissed stays dismissed until the review moves to a different edit.
     // Without this the next refresh — a keystroke away — puts it straight back, and "collapse" reads
     // as a button that does nothing.
     if (this.dismissed === id) return;
-    if (await this.followPlatformCollapse()) return;
     if (this.thread && this.edit?.id === id) return;
     this.dismissed = undefined;
     await this.show(id, { reveal: false, mode });
@@ -776,6 +798,28 @@ class EditPeek implements vscode.Disposable {
    *
    * Returns true when it handled the tick, so the caller does not immediately re-open what it closed.
    */
+  /**
+   * Poll the live thread's collapsible state, so `^` acts when it is clicked rather than whenever the
+   * store next happens to change. See `collapseWatch`.
+   *
+   * Deliberately not `unref`'d and deliberately short: it exists for as long as a surface is on
+   * screen, which is the only window in which the reader can click that chevron. `closeThread` is the
+   * one exit, and `followPlatformCollapse` itself closes or re-shows, so each firing either does
+   * nothing or ends this timer's reason to exist.
+   */
+  private watchCollapse(): void {
+    if (this.collapseWatch) clearInterval(this.collapseWatch);
+    this.collapseWatch = setInterval(() => {
+      void this.followPlatformCollapse().catch(() => {
+        /* the document went away under it; the next refresh re-resolves against whatever is open */
+      });
+    }, 250);
+    // unref'd, like the status timer: this must never be the reason a process stays alive. The
+    // extension host's lifetime is not ours to hold open, and in the test harness an un-unref'd
+    // interval simply hangs the run forever — which is how this was noticed.
+    this.collapseWatch.unref?.();
+  }
+
   private async followPlatformCollapse(): Promise<boolean> {
     const t = this.thread;
     if (!t || t.collapsibleState !== vscode.CommentThreadCollapsibleState.Collapsed) return false;
@@ -793,6 +837,10 @@ class EditPeek implements vscode.Disposable {
   /** Swap the live surface to `mode` at the same edit — the bar's `⌄`. Reveals, because this one IS
    *  a click the reader made. The way back down is the platform's own `^`, via followPlatformCollapse. */
   async swapTo(mode: PeekMode): Promise<void> {
+    // Clicking `⌄` is the reader asking for this surface, so a dismissal from earlier is stale. Without
+    // this, swapping up to the bubble at an edit whose bar had been dismissed left `dismissed` standing
+    // and the two flags disagreed about whether the surface was wanted.
+    this.dismissed = undefined;
     const id = this.edit?.id;
     if (id === undefined) return;
     await this.show(id, { mode });
@@ -883,6 +931,10 @@ class EditPeek implements vscode.Disposable {
   }
 
   private closeThread(): void {
+    if (this.collapseWatch) {
+      clearInterval(this.collapseWatch);
+      this.collapseWatch = undefined;
+    }
     this.thread?.dispose();
     this.thread = undefined;
     this.edit = undefined;

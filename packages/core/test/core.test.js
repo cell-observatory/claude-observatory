@@ -10189,6 +10189,51 @@ test('tui: `w` keeps long lines long and pans across them, and never hides conte
     'the far END of the line is reachable by panning — nothing is out of reach');
 });
 
+test('release: the version stamper knows about every workspace', () => {
+  // `packages/tui` was a declared workspace that `scripts/version.mjs` had never heard of — absent
+  // from its package list, from the core-pin list and from the lockfile keys. Nothing caught it:
+  // `version:check` only compares the files it already knows, so it reported "all versions
+  // consistent" while tui sat at a different version with a pin to a core build that no longer
+  // existed. The failure surfaces two steps later, in CI, as `npm ci` resolving that pin from the
+  // registry — where `@claude-observatory/core` has never been published — and 404ing.
+  //
+  // Asserted over the WORKSPACE LIST rather than by naming tui, because the next package added will
+  // have exactly the same problem and nobody will remember this.
+  const fs = require('fs');
+  const path = require('path');
+  const root = path.resolve(__dirname, '../../..');
+  const workspaces = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).workspaces;
+  const stamper = fs.readFileSync(path.join(root, 'scripts/version.mjs'), 'utf8');
+  assert.ok(workspaces.length >= 3, `the workspace list must be real, got ${JSON.stringify(workspaces)}`);
+
+  // Each list is sliced out and searched SEPARATELY. Searching the whole file passes as soon as the
+  // path appears anywhere in it — so dropping a workspace from PKGS while it is still in
+  // CORE_PIN_FILES read as covered, which is precisely the half-configured state this is for.
+  const listBetween = (from, to) => stamper.slice(stamper.indexOf(from), stamper.indexOf(to));
+  const pkgList = listBetween('const PKGS = [', 'const GRADLE');
+  const keyList = listBetween('const WORKSPACE_KEYS = [', 'const read =');
+  assert.ok(pkgList.includes('package.json') && keyList.includes('packages/'), 'the slices found real lists');
+
+  for (const ws of workspaces) {
+    assert.ok(pkgList.includes(`'${ws}/package.json'`),
+      `${ws} is a workspace but scripts/version.mjs never stamps its version`);
+    assert.ok(keyList.includes(`'${ws}'`),
+      `${ws} is a workspace but is not among the stamper's lockfile keys`);
+  }
+
+  // …and any workspace that PINS core has to be in the pin list, or the pin outlives the version it
+  // points at. Read from the manifests rather than assumed, so a package that starts depending on
+  // core later is covered without anyone editing this test.
+  const pinList = stamper.slice(stamper.indexOf('const CORE_PIN_FILES'), stamper.indexOf('const corePinRe'));
+  for (const ws of workspaces) {
+    const manifest = JSON.parse(fs.readFileSync(path.join(root, ws, 'package.json'), 'utf8'));
+    const pins = { ...manifest.dependencies, ...manifest.devDependencies }['@claude-observatory/core'];
+    if (!pins) continue;
+    assert.ok(pinList.includes(`'${ws}/package.json'`),
+      `${ws} pins @claude-observatory/core, so version.mjs must lockstep that pin`);
+  }
+});
+
 test('keymap: every verb has a DOOR, and no two differ only by case', () => {
   // The existing scrape above runs one direction — advertised ⊆ bound — which is why `sort` and `wrap`
   // could ship bound to keys that no surface in the product named. `S` cycled the sort and `w` swapped
