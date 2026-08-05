@@ -36,6 +36,8 @@ class StoreWatcher : Disposable {
     @Volatile
     private var watcher: WatchService? = null
     private var started = false
+    /** The poll task, so a restart can cancel it instead of leaving a second one running. */
+    private var pollTask: ScheduledFuture<*>? = null
 
     fun addListener(l: Runnable) {
         listeners.add(l)
@@ -43,6 +45,24 @@ class StoreWatcher : Disposable {
     }
 
     fun removeListener(l: Runnable) = listeners.remove(l)
+
+    /**
+     * Re-point at the store root and start again — called when a move lands.
+     *
+     * Without this the watcher kept its ORIGINAL root for the life of the IDE: `ensureStarted` reads
+     * `ClaudePaths.rootDir()` once, and it had already re-created the abandoned directory, so it
+     * polled a folder nothing would ever write to and live refresh never fired again.
+     */
+    @Synchronized
+    fun restart() {
+        pollTask?.cancel(false)
+        pollTask = null
+        // Closing the service ends `loop`, which exits on the ClosedWatchServiceException.
+        runCatching { watcher?.close() }
+        watcher = null
+        started = false
+        if (listeners.isNotEmpty()) ensureStarted()
+    }
 
     @Synchronized
     private fun ensureStarted() {
@@ -73,7 +93,7 @@ class StoreWatcher : Disposable {
      *  poll session-log mtimes instead so remote-dev setups still refresh live. */
     private fun startPollFallback(root: Path) {
         var last = pollStamp(root)
-        debouncer.scheduleWithFixedDelay({
+        pollTask = debouncer.scheduleWithFixedDelay({
             val now = pollStamp(root)
             if (now != last) {
                 last = now

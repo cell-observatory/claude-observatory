@@ -166,7 +166,7 @@ class ObservatoryEditorBanner : EditorNotificationProvider, DumbAware {
     /** Open the first pending edit of the prev (-1) / next (+1) file with pending edits, wrapping. */
     private fun stepFile(project: Project, service: ObservatoryService, current: String, dir: Int) {
         val s = service.currentSession() ?: return
-        val files = service.log().filter { it.pending }.map { it.file }.distinct().sorted()
+        val files = service.pendingFiles()
         if (files.isEmpty()) return
         val idx = files.indexOf(ClaudePaths.storeKey(current))
         val target = files[((if (idx < 0) 0 else idx) + dir + files.size) % files.size]

@@ -102,6 +102,12 @@ object ObservatoryCli {
     /** Drop the batched view cache — call after a mutation, before a forced refresh. */
     fun invalidateViewBatch() = ViewBatch.invalidate()
 
+    /** What the last batched fetch could NOT build, in the reader's terms. Empty is the normal case;
+     *  a panel that finds entries here must say so instead of drawing an empty view. */
+    @Volatile
+    var lastProblems: List<String> = emptyList()
+        private set
+
     private object ViewBatch {
         private const val WINDOW_MS = 2_500L
         private val lock = Any()
@@ -166,6 +172,11 @@ object ObservatoryCli {
         private fun fetch(session: String?, workDir: String?): Map<String, String?> {
             val args = buildList {
                 add("views"); add("--json")
+                // Configured machines, folded into the same batched spawn. The ssh happens in the CLI
+                // child process, never on the EDT, and the CLI caches each host for a minute — so a
+                // 3 s refresh tick asks for remotes at no cost until that minute is up. Asking here
+                // rather than on a timer of its own keeps the "one spawn per tick" promise intact.
+                add("--remote")
                 session?.takeIf { it.isNotBlank() }?.let { add("--session"); add(it) }
                 workDir?.let { add("--root"); add(it) }
             }
@@ -183,6 +194,16 @@ object ObservatoryCli {
             }
             return try {
                 val obj = com.google.gson.JsonParser.parseString(r.stdout).asJsonObject
+                // A view the CLI could not build arrives as `null`, which every panel renders as an
+                // empty one — the same frame a session that did nothing produces. `views` names the
+                // ones that failed, and an unreadable .observatoryignore rides along; both are kept
+                // here so a panel can SAY so rather than showing a convincing zero.
+                lastProblems = buildList {
+                    obj.getAsJsonObject("__problems")?.entrySet()?.forEach { (k, v) ->
+                        add("the $k view could not be read — ${v.asString}")
+                    }
+                    obj.getAsJsonArray("__ignoreProblems")?.forEach { add(it.asString) }
+                }
                 obj.entrySet().associate { (k, v) -> k to if (v.isJsonNull) null else v.toString() }
             } catch (_: Exception) {
                 // Unparseable stdout from a CLI that DID accept the command — a truncated pipe, or a
@@ -577,6 +598,73 @@ object ObservatoryCli {
         return LocateParser.parse(r.stdout)
     }
 
+    /** Where the store lives, and whether that is the default. */
+    data class StoreInfo(val dir: String, val moved: Boolean)
+
+    /** `store --json` — the resolved store root. Null when the CLI is too old to know the verb, which
+     *  the caller shows as "unavailable" rather than inventing a path. */
+    fun store(workDir: String?): StoreInfo? {
+        val res = run(listOf("store", "--json"), workDir)
+        if (!res.ok) return null
+        return try {
+            val o = JsonParser.parseString(res.stdout).asJsonObject
+            StoreInfo(o.get("dir")?.asString ?: return null, o.get("moved")?.asBoolean ?: false)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** `store --move <dir>` (or `--default`). The move is the CLI's, shared with every other front end. */
+    fun storeMove(workDir: String?, dir: String?): RemoteChange {
+        val res = run(if (dir == null) listOf("store", "--default") else listOf("store", "--move", dir), workDir)
+        return RemoteChange(if (res.ok) null else res.stderr.trim().ifBlank { "could not move the store" })
+    }
+
+    /** One configured machine, as `remotes --json` reports it. */
+    data class RemoteEntry(val name: String, val host: String, val configDir: String, val enabled: Boolean)
+
+    /** What a remotes mutation did, or why it refused. [error] carries the verb's own message verbatim
+     *  — inventing a friendlier one here would mean two messages for one rule. */
+    data class RemoteChange(val error: String?)
+
+    /** `remotes --json` — the machines this install looks for sessions on. Empty on any failure: a
+     *  chooser that cannot list must still open, and "none configured" is the honest reading of a CLI
+     *  too old to know the verb. */
+    fun remotes(workDir: String?): List<RemoteEntry>? {
+        val res = run(listOf("remotes", "--json"), workDir)
+        // NULL, not empty. prefs.json is written by the VS Code extension's bundled core and by the
+        // terminal dashboard, neither of which needs this CLI on PATH — so an older or missing binary
+        // would have reported "no machines configured" over a file holding several.
+        if (!res.ok) return null
+        return try {
+            val arr = JsonParser.parseString(res.stdout).asJsonObject.getAsJsonArray("remotes") ?: return emptyList()
+            arr.mapNotNull { e ->
+                val o = e.takeIf { it.isJsonObject }?.asJsonObject ?: return@mapNotNull null
+                RemoteEntry(
+                    name = o.get("name")?.takeIf { it.isJsonPrimitive }?.asString ?: return@mapNotNull null,
+                    host = o.get("host")?.takeIf { it.isJsonPrimitive }?.asString ?: "",
+                    configDir = o.get("configDir")?.takeIf { it.isJsonPrimitive }?.asString ?: "",
+                    enabled = o.get("enabled")?.takeIf { it.isJsonPrimitive }?.asBoolean ?: true,
+                )
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** `remotes --add "<spec>"`. Validation is the CLI's `parseRemoteSpec`, shared with the terminal's
+     *  options window, because both fields land in a shell running on ANOTHER machine. */
+    fun remoteAdd(workDir: String?, spec: String): RemoteChange {
+        val res = run(listOf("remotes", "--add", spec), workDir)
+        return RemoteChange(if (res.ok) null else res.stderr.trim().ifBlank { "could not add that machine" })
+    }
+
+    /** `remotes --remove|--enable|--disable <name>`. */
+    fun remoteChange(workDir: String?, flag: String, name: String): RemoteChange {
+        val res = run(listOf("remotes", flag, name), workDir)
+        return RemoteChange(if (res.ok) null else res.stderr.trim().ifBlank { "could not change that machine" })
+    }
+
     /** `sessions --json` — every store session incl. its human-readable title (0.8.6), for the chooser.
      *
      *  [buildBatch] separates the two callers, which want opposite things from the batch. The POLLING
@@ -644,7 +732,23 @@ object ObservatoryCli {
         return if (r.ok) parseInt(r.stdout, "kept") else null
     }
 
-    data class TaskUndoResult(val undone: Int, val conflicts: Int, val total: Int)
+    /** `keep --under <path>` — accept every PENDING edit at or beneath one file or folder.
+     *  Records a verdict; changes no file on disk. Returns the count, or null if the call failed. */
+    fun keepUnder(session: String, under: String, workDir: String?): Int? {
+        val r = run(listOf("keep", "--under", under, "--session", session, "--json"), workDir)
+        return if (r.ok) parseInt(r.stdout, "kept") else null
+    }
+
+    /** [errors] and [firstError] are NOT decoration: `undoScope` returns refusals separately from
+     *  conflicts, and dropping them turned "every edit here refused, and here is why" into
+     *  "No pending edits to reject" — a statement that is flatly false. */
+    data class TaskUndoResult(
+        val undone: Int,
+        val conflicts: Int,
+        val total: Int,
+        val errors: Int = 0,
+        val firstError: String? = null,
+    )
 
     /** `task-undo <taskId>` — revert every PENDING edit in a task's STRICT span, newest-first.
      *  Writes to disk. Returns {undone, conflicts, total}, or null if the CLI call failed. */
@@ -653,7 +757,32 @@ object ObservatoryCli {
         if (!r.ok) return null
         return try {
             val o = JsonParser.parseString(r.stdout).asJsonObject
-            TaskUndoResult(o.get("undone").asInt, o.get("conflicts").asInt, o.get("total").asInt)
+            TaskUndoResult(
+                o.get("undone").asInt, o.get("conflicts").asInt, o.get("total").asInt,
+                o.get("errors")?.takeIf { !it.isJsonNull }?.asInt ?: 0,
+                o.get("firstError")?.takeIf { !it.isJsonNull }?.asString,
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** `undo --under <path>` — revert every PENDING edit at or beneath one file or folder, newest
+     *  first. WRITES TO DISK. Returns {undone, conflicts, total}, or null if the CLI call failed.
+     *  The same scope the terminal's change map and VS Code's ledger use, so one rule serves all three
+     *  instead of each deriving an id set the others could disagree with. */
+    fun undoUnder(session: String, under: String, workDir: String?): TaskUndoResult? {
+        val r = run(listOf("undo", "--under", under, "--session", session, "--json"), workDir)
+        if (!r.ok) return null
+        return try {
+            val o = JsonParser.parseString(r.stdout).asJsonObject
+            TaskUndoResult(
+                o.get("undone")?.asInt ?: 0,
+                o.get("conflicts")?.asInt ?: 0,
+                o.get("total")?.asInt ?: 0,
+                o.get("errors")?.takeIf { !it.isJsonNull }?.asInt ?: 0,
+                o.get("firstError")?.takeIf { !it.isJsonNull }?.asString,
+            )
         } catch (_: Exception) {
             null
         }

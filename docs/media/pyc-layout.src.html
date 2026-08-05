@@ -68,7 +68,10 @@
   .cl .gut .tele{font-size:10px;line-height:1;color:#cc785c}
   .cl .code{white-space:pre}
   .cl.added{background:var(--added-line)}
-  .cl.added .gutbar{position:absolute;left:0;width:3px;height:22px;background:#cc785c}
+  /* No .gutbar rule: the JetBrains plugin draws NO change bar. Its added-line highlighter carries a
+     background only (TextAttributes(null, ADDED_LINE_BG, …)), and its one other highlighter exists
+     solely to host the ✦ gutter icon. Drawing a bar here — in any colour — depicts an element the
+     plugin does not have, so this is deleted rather than recoloured. */
   .k{color:#cf8e6d}.fn{color:#56a8f5}.str{color:#6aab73}.pn{color:#dfe1e5}.cmt{color:#7a7e85}.this{color:#c77dbb}
   .lens{color:#7a7e85;font-size:11.5px;padding-left:74px;height:22px;display:flex;align-items:center;gap:0}
   .lens .a{color:#7a7e85}
@@ -164,17 +167,17 @@
     <div class="ed">
       <div class="ed-tabs"><span class="ed-tab"><span class="js">PY</span> features.py</span></div>
       <div class="ed-body">
-        <div class="cl added"><span class="gutbar"></span><span class="gut">1</span><span class="code"><span class="k">from</span> statistics <span class="k">import</span> mean, stdev</span></div>
+        <div class="cl added"><span class="gut">1</span><span class="code"><span class="k">from</span> statistics <span class="k">import</span> mean, stdev</span></div>
         <div class="cl"><span class="gut">2</span><span class="code"></span></div>
         <div class="cl"><span class="gut">3</span><span class="code"></span></div>
         <div class="cl"><span class="gut">4</span><span class="code"><span class="k">def</span> <span class="fn">summarize</span><span class="pn">(values):</span></span></div>
         <div class="cl"><span class="gut">5</span><span class="code">    <span class="k">return</span> {<span class="str">"count"</span>: len(values), <span class="str">"mean"</span>: mean(values)}</span></div>
         <div class="cl"><span class="gut">6</span><span class="code"></span></div>
         <div class="lens"><span class="hov">✦ #1 view changes</span><span class="a">&nbsp;&nbsp;&nbsp;&nbsp;</span><span class="a">✓ Keep</span><span class="a">&nbsp;&nbsp;&nbsp;&nbsp;</span><span class="a">↩ Undo</span><span class="a">&nbsp;&nbsp;&nbsp;&nbsp;</span><span class="a">Chat</span></div>
-        <div class="cl added"><span class="gutbar"></span><span class="gut">7</span><span class="code"></span></div>
-        <div class="cl added"><span class="gutbar"></span><span class="gut"><span class="tele">✦</span>8</span><span class="code"><span class="k">def</span> <span class="fn">scale</span><span class="pn">(values):</span></span></div>
-        <div class="cl added"><span class="gutbar"></span><span class="gut">9</span><span class="code">    mu, sigma = mean(values), stdev(values)</span></div>
-        <div class="cl added"><span class="gutbar"></span><span class="gut">10</span><span class="code">    <span class="k">return</span> [(v - mu) / sigma <span class="k">for</span> v <span class="k">in</span> values]</span></div>
+        <div class="cl added"><span class="gut">7</span><span class="code"></span></div>
+        <div class="cl added"><span class="gut"><span class="tele">✦</span>8</span><span class="code"><span class="k">def</span> <span class="fn">scale</span><span class="pn">(values):</span></span></div>
+        <div class="cl added"><span class="gut">9</span><span class="code">    mu, sigma = mean(values), stdev(values)</span></div>
+        <div class="cl added"><span class="gut">10</span><span class="code">    <span class="k">return</span> [(v - mu) / sigma <span class="k">for</span> v <span class="k">in</span> values]</span></div>
       </div>
     </div>
   </div>

@@ -93,21 +93,39 @@ class TimelineSessionAction(private val project: Project) : AnAction(), DumbAwar
 
     private fun showChooser(rows: List<SessionRow>, current: String?, now: Long, anchor: JComponent?) {
         val labelToId = LinkedHashMap<String, String?>()
+        val labelToRow = HashMap<String, com.cellobservatory.observatory.model.SessionRow>()
         for (r in rows) {
             val mark = if (isSessionActive(r.lastActiveMs, now)) "● " else "○ "
             // The 8-char id keeps labels unique when two live sessions share a title (the map is keyed by
             // label). Recency is omitted for a synthesized row rather than shown as an epoch date.
+            // WHICH MACHINE rides in the label, like the other two pickers: this popup can list a
+            // remote's sessions, and choosing one is refused — so the row has to say so BEFORE the
+            // click rather than only in the notification that explains the refusal afterwards.
             val label = "$mark${r.displayName}  —  ${r.id.take(8)}" +
+                (if (r.machine.isNotBlank()) " · ${r.machine}" else "") +
                 (if (r.lastActiveMs > 0) " · ${relTime(r.lastActiveMs, now)}" else "") +
                 (if (r.id == current) " · reviewing" else "")
             labelToId[label] = r.id
+            labelToRow[label] = r
         }
         labelToId[ALL_SESSIONS] = null
+        // Machines, from the one list that shows sessions from them. Configuring a remote used to be
+        // reachable only from the terminal dashboard's options window — a feature all three front ends
+        // RENDER, configurable in exactly one of them.
+        labelToId[MACHINES] = null
+        // …and where the data itself lives. "Where does this thing keep my files" had no answer in
+        // any of the three front ends until now.
+        labelToId[STORE] = null
         val popup = JBPopupFactory.getInstance()
             .createPopupChooserBuilder(labelToId.keys.toList())
             .setTitle(if (rows.size > 1) "Which live session?" else "Which session?")
             .setItemChosenCallback { chosen ->
-                if (chosen == ALL_SESSIONS) ReviewOps.chooseSession(project, anchor)
+                if (chosen == STORE) ReviewOps.storeLocation(project, anchor)
+                else if (chosen == MACHINES) ReviewOps.manageRemotes(project, anchor)
+                else if (chosen == ALL_SESSIONS) ReviewOps.chooseSession(project, anchor)
+                // A remote row is listed (it may be live) but cannot be reviewed here — refused with
+                // the reason, exactly as the terminal and VS Code do.
+                else if (ReviewOps.refuseRemote(project, labelToRow[chosen])) Unit
                 else labelToId[chosen]?.let { ReviewOps.applySessionChoice(project, it) }
             }
             .createPopup()
@@ -119,5 +137,7 @@ class TimelineSessionAction(private val project: Project) : AnAction(), DumbAwar
         /** The fall-through row. `null` in the map would mean "auto-resolve" to applySessionChoice, so this
          *  row is matched by label and handed to the full chooser instead. */
         const val ALL_SESSIONS = "All sessions…"
+        const val MACHINES = "＋  Machines…"
+        const val STORE = "🗄  Store location…"
     }
 }

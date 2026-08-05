@@ -2,7 +2,7 @@
   "name": "claude-observatory-vscode",
   "displayName": "Claude Observatory",
   "description": "A running list of every file change Claude Code makes, each with its own Keep / Undo (surgical, git-free) — built for established and mission-critical codebases.",
-  "version": "0.9.2",
+  "version": "0.9.3",
   "publisher": "cell-observatory",
   "private": true,
   "engines": {
@@ -74,7 +74,7 @@
       "claudeObservatoryPrompts": [
         {
           "id": "claudeObservatory.timeline",
-          "name": "Timeline",
+          "name": "Observatory Timeline",
           "type": "webview",
           "initialSize": 2
         }
@@ -210,15 +210,9 @@
       },
       {
         "command": "claudeObservatory.barDetails",
-        "title": "Details (open the full review bubble)",
+        "title": "Expand to the review bubble",
         "category": "Claude Observatory",
-        "icon": "$(list-selection)"
-      },
-      {
-        "command": "claudeObservatory.peekCollapse",
-        "title": "Collapse to the review bar",
-        "category": "Claude Observatory",
-        "icon": "$(chrome-minimize)"
+        "icon": "$(chevron-down)"
       },
       {
         "command": "claudeObservatory.peekViewDiff",
@@ -658,6 +652,18 @@
         "command": "claudeObservatory.tourReducedMotion",
         "title": "Guided tour: reduced motion",
         "category": "Claude Observatory"
+      },
+      {
+        "command": "claudeObservatory.manageRemotes",
+        "title": "Machines: add or remove a machine to browse sessions on",
+        "category": "Claude Observatory",
+        "icon": "$(vm)"
+      },
+      {
+        "command": "claudeObservatory.storeLocation",
+        "title": "Store location: show or move where the observatory keeps its data",
+        "category": "Claude Observatory",
+        "icon": "$(database)"
       }
     ],
     "keybindings": [
@@ -754,10 +760,6 @@
         },
         {
           "command": "claudeObservatory.barDetails",
-          "when": "false"
-        },
-        {
-          "command": "claudeObservatory.peekCollapse",
           "when": "false"
         },
         {
@@ -1009,11 +1011,6 @@
           "group": "inline@12"
         },
         {
-          "command": "claudeObservatory.peekCollapse",
-          "when": "commentController == claudeObservatory && commentThread == claudeEdit",
-          "group": "inline@13"
-        },
-        {
           "command": "claudeObservatory.peekKeep",
           "when": "commentController == claudeObservatory && commentThread == claudeNavBar",
           "group": "inline@0"
@@ -1049,9 +1046,19 @@
           "group": "inline@6"
         },
         {
-          "command": "claudeObservatory.barDetails",
+          "command": "claudeObservatory.peekChat",
           "when": "commentController == claudeObservatory && commentThread == claudeNavBar",
           "group": "inline@7"
+        },
+        {
+          "command": "claudeObservatory.toggleHeatmap",
+          "when": "commentController == claudeObservatory && commentThread == claudeNavBar",
+          "group": "inline@8"
+        },
+        {
+          "command": "claudeObservatory.barDetails",
+          "when": "commentController == claudeObservatory && commentThread == claudeNavBar",
+          "group": "inline@9"
         }
       ],
       "view/title": [
@@ -1427,7 +1434,7 @@
     "package": "vsce package --no-dependencies -o claude-observatory.vsix"
   },
   "devDependencies": {
-    "@claude-observatory/core": "0.9.2",
+    "@claude-observatory/core": "0.9.3",
     "@types/node": "^26.1.1",
     "@types/vscode": "^1.85.0",
     "@vscode/codicons": "^0.0.45",

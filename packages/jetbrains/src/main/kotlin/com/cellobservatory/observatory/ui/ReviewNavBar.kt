@@ -62,7 +62,13 @@ internal object NavTint {
     /** Rewind = stepping BACK through the conversation, so a rewind glyph rather than another rollback:
      *  it sits next to Reject Prompt and the two must not read as the same operation at a glance. */
     val REWIND: Icon = tint(AllIcons.Actions.Undo, RED)
-    val CLEAR: Icon = tint(AllIcons.Actions.GC, ORANGE)
+    // NOT Actions.GC. That resolves to expui/general/delete.svg on the New UI and actions/gc.svg on the
+    // Classic theme, and both are unmistakable trash cans — on the icon shared by all nine "Clear
+    // Resolved" controls, which sit beside Reject All. A bin there reads as "discard my code", the one
+    // meaning these controls must never carry. Clearing resolved edits drops RECORDS; it changes no file.
+    // Collapseall is the platform's "fold this list away" glyph and carries no deletion sense; VS Code's
+    // counterpart for the same command is the codicon `clear-all`.
+    val CLEAR: Icon = tint(AllIcons.Actions.Collapseall, ORANGE)
     val SEARCH: Icon = tint(AllIcons.Actions.Find, PURPLE)
     val SPOTLIGHT: Icon = tint(AllIcons.Actions.IntentionBulb, PURPLE)
     /** Chat = a speech balloon (VS Code's comment-discussion) — NOT the bulb, which is Spotlight's. */
@@ -191,7 +197,7 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
     private fun activeFilePath(): String? =
         com.cellobservatory.observatory.services.ActiveFileTracker.getInstance(project).activePath()
     private fun sessionHasPending(): Boolean = service.counts().pending > 0
-    private fun pendingFiles(): List<String> = service.log().filter { it.pending }.map { it.file }.distinct().sorted()
+    private fun pendingFiles(): List<String> = service.pendingFiles()
     private fun pendingInActiveFile(): List<EditRecord> {
         val f = activeFilePath() ?: return emptyList()
         val key = ClaudePaths.storeKey(f) // hoisted: this runs per toolbar tick over every record

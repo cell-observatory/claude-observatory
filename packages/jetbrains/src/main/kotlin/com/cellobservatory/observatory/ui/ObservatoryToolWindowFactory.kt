@@ -42,12 +42,19 @@ class ObservatoryToolWindowFactory : ToolWindowFactory, DumbAware {
  *  0.10.0: ONE content, whose tabs, session selector and group toggle are all components of
  *  [TimelinePanel]. The selector was a `setTitleActions` chip on the platform header and could be clipped
  *  away there with nothing to show for it; the tabs had to move into the content with it, because a
- *  selector above them is only "above them" when they share a panel. */
+ *  selector above them is only "above them" when they share a panel.
+ *
+ *  The blank toolwindowTitle is what keeps the header from reading "Observatory Timeline · Timeline".
+ *  TabContentLayout.isToDrawTabs() hides the tab of a lone content only when Content.getToolwindowTitle()
+ *  is blank AND the label has no active icons — and getToolwindowTitle() falls back to the displayName,
+ *  which is "Timeline" here. Setting it empty (the displayName stays, for the tab-overflow chooser) leaves
+ *  the window's own name alone in the header, next to the tabs [TimelinePanel] draws itself. Unlike
+ *  [iconTab] above, blanking is the goal: with one content there is no tab worth showing. */
 class ObservatoryTimelineFactory : ToolWindowFactory, DumbAware {
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
         val content = ContentFactory.getInstance()
             .createContent(TimelinePanel(project), "Timeline", false)
-            .apply { isCloseable = false }
+            .apply { isCloseable = false; toolwindowTitle = "" }
         toolWindow.contentManager.addContent(content)
     }
 }

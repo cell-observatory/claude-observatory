@@ -1,15 +1,16 @@
 {
   "name": "claude-observatory-monorepo",
-  "version": "0.9.2",
+  "version": "0.9.3",
   "private": true,
-  "description": "Standalone, git-free, per-edit Keep/Undo for Claude Code on established and mission-critical codebases — terminal, VS Code and JetBrains, zero extra tokens.",
+  "description": "Standalone, git-free, per-edit Keep/Undo for Claude Code on established and mission-critical codebases \u2014 terminal, VS Code and JetBrains, zero extra tokens.",
   "workspaces": [
     "packages/core",
     "packages/cli",
+    "packages/tui",
     "packages/vscode"
   ],
   "scripts": {
-    "build": "npm run build -w @claude-observatory/core && npm run build -w claude-observatory",
+    "build": "npm run build -w @claude-observatory/core && npm run build -w @claude-observatory/tui && npm run build -w claude-observatory",
     "build:core": "npm run build -w @claude-observatory/core",
     "build:cli": "npm run build -w claude-observatory",
     "build:vscode": "npm run build -w @claude-observatory/core && npm run build -w claude-observatory-vscode",
@@ -21,7 +22,8 @@
     "release": "bash scripts/release.sh",
     "clean": "rm -rf packages/*/dist release",
     "check:webview": "node scripts/check-webview-syntax.mjs",
-    "check:privacy": "node scripts/check-docs-privacy.mjs"
+    "check:privacy": "node scripts/check-docs-privacy.mjs",
+    "build:tui": "npm run build -w @claude-observatory/core && npm run build -w @claude-observatory/tui"
   },
   "devDependencies": {
     "gifenc": "^1.0.3",

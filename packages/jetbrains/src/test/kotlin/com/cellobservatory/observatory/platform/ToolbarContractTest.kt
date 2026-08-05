@@ -120,6 +120,7 @@ class ToolbarContractTest : BasePlatformTestCase() {
             listOf(
                 "Keep", "Undo", "Chat", "View diff", // this edit
                 "Previous Edit", "", "Next Edit",    // …and which edit that is (the counter has no static text)
+                "Previous Changed File", "", "Next Changed File", // …and the file axis, counter between
                 "Accept File", "Reject File",        // this file
                 "Spotlight", "Clear Resolved",       // this session
             ),
@@ -239,6 +240,90 @@ class ToolbarContractTest : BasePlatformTestCase() {
             )
         } finally {
             settings.editorReviewSurface = savedSurface
+            settings.session = savedSession
+            com.cellobservatory.observatory.core.ClaudePaths.configDirOverride = savedCfg
+            cfg.toFile().deleteRecursively()
+        }
+    }
+
+    /**
+     * The floating bar's "File n/m" must be the SAME number the status-bar nav bar shows.
+     *
+     * Both can be on screen at once, over the same session, and they resolve the file list and the index
+     * independently — `FloatingFileCounter` off `pendingFiles(project)` and the event's virtual file,
+     * `ReviewNavBar` off its own `pendingFiles()` and `ActiveFileTracker`. Two expressions of one rule is
+     * exactly the shape that drifts silently: whichever one changed, the reader would see "File 2/7" on
+     * the bar and "File 3/7" in the status bar and have no way to know which had lied. Asserted against
+     * the real nav bar rather than a hard-coded string, so a change to the RULE keeps them together and a
+     * change to only one of them fails here.
+     */
+    fun testTheFloatingFileCounterAgreesWithTheNavBar() {
+        val session = "file-counter-session"
+        val settings = com.cellobservatory.observatory.settings.ObservatorySettings.instance.state
+        val savedCfg = com.cellobservatory.observatory.core.ClaudePaths.configDirOverride
+        val savedSession = settings.session
+        val cfg = java.nio.file.Files.createTempDirectory("co-file-counter")
+        try {
+            com.cellobservatory.observatory.core.ClaudePaths.configDirOverride = cfg
+            settings.session = session
+            java.nio.file.Files.createDirectories(com.cellobservatory.observatory.core.ClaudePaths.storeDir(session))
+            val a = myFixture.configureByText("aaa-first.txt", "hello").virtualFile
+            val b = myFixture.configureByText("zzz-second.txt", "hello").virtualFile
+            // Written in the OPPOSITE order to the one they sort in — `zzz` first, `aaa` second. The axis
+            // is defined as path-sorted, so a counter that indexed the store's own order would read
+            // "File 1/2" here instead of 2/2. With the fixture in sorted order the two are the same list
+            // and dropping the sort changes nothing, which is a test that cannot see the bug it is for.
+            java.nio.file.Files.writeString(
+                com.cellobservatory.observatory.core.ClaudePaths.logPath(session),
+                """{"id":1,"ts":1000,"tool":"Edit","file":"${b.path}",""" +
+                    """"beforeBlob":"cc","afterBlob":"dd","status":"pending"}""" + "\n" +
+                    """{"id":2,"ts":2000,"tool":"Edit","file":"${a.path}",""" +
+                    """"beforeBlob":"aa","afterBlob":"bb","status":"pending"}""" + "\n",
+            )
+            // The nav bar reads the ACTIVE file, the floating bar reads the event's — so they have to be
+            // pointed at the same one for the comparison to mean anything. `b` sorts second by path.
+            myFixture.openFileInEditor(b)
+
+            val counter = com.cellobservatory.observatory.ui.editor.ObservatoryFloatingToolbarProvider()
+                .actionGroup.getChildren(null)
+                .first { it.javaClass.simpleName == "FloatingFileCounter" }
+            val ctx = com.intellij.openapi.actionSystem.impl.SimpleDataContext.builder()
+                .add(com.intellij.openapi.actionSystem.CommonDataKeys.PROJECT, project)
+                .add(com.intellij.openapi.actionSystem.CommonDataKeys.VIRTUAL_FILE, b)
+                .build()
+            val floating = com.intellij.openapi.actionSystem.AnActionEvent.createFromDataContext(
+                ActionToolbar.ACTION_TOOLBAR_PROPERTY_KEY.toString(), null, ctx
+            )
+            counter.update(floating)
+
+            val navCounter = com.cellobservatory.observatory.ui.ReviewNavBar(project).fileAxis()[1]
+            val nav = com.intellij.openapi.actionSystem.AnActionEvent.createFromDataContext(
+                ActionToolbar.ACTION_TOOLBAR_PROPERTY_KEY.toString(), null, ctx
+            )
+            navCounter.update(nav)
+
+            assertEquals("the floating counter names the second of two changed files", "File 2/2", floating.presentation.text)
+            assertEquals(
+                "the floating bar and the status-bar nav bar must never name different positions",
+                nav.presentation.text,
+                floating.presentation.text,
+            )
+            assertTrue("and it is visible while two files are pending", floating.presentation.isVisible)
+
+            // …and it HIDES below two files, matching the steppers it sits between: a bar that floats over
+            // code must not cover a line to say "File 1/1".
+            java.nio.file.Files.writeString(
+                com.cellobservatory.observatory.core.ClaudePaths.logPath(session),
+                """{"id":1,"ts":1000,"tool":"Edit","file":"${b.path}",""" +
+                    """"beforeBlob":"aa","afterBlob":"bb","status":"pending"}""" + "\n",
+            )
+            com.cellobservatory.observatory.services.ObservatoryService.getInstance(project).refresh()
+            val lone = com.intellij.openapi.actionSystem.AnActionEvent.createFromDataContext(
+                ActionToolbar.ACTION_TOOLBAR_PROPERTY_KEY.toString(), null, ctx
+            )
+            counter.update(lone)
+            assertFalse("one changed file means nothing to step through, so no counter", lone.presentation.isVisible)
+        } finally {
             settings.session = savedSession
             com.cellobservatory.observatory.core.ClaudePaths.configDirOverride = savedCfg
             cfg.toFile().deleteRecursively()

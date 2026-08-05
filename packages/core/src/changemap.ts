@@ -23,7 +23,7 @@ import { parseWorkflows, workflowWindows, workflowForTs } from './workflows';
 import { taskSnaps, digest12 } from './tasks';
 import { sessionPrompts } from './prompts';
 import { sessionProcesses } from './processes';
-import { cachedByFiles } from './fscache';
+import { cachedByFiles, readLines } from './fscache';
 
 /** One edit (review unit) placed in the map: where it landed, how big, how reviewed, why, and which goal. */
 export interface ChangeMapEdit {
@@ -437,7 +437,7 @@ function todoSnaps(transcriptPath: string): TodoSnap[] {
 function todoSnapsUncached(transcriptPath: string): TodoSnap[] {
   let lines: string[];
   try {
-    lines = fs.readFileSync(transcriptPath, 'utf8').split('\n');
+    lines = readLines(transcriptPath);
   } catch {
     return [];
   }
@@ -930,7 +930,19 @@ export function taskEditIds(cwd: string, session: string, taskId: string): numbe
 // entry stays "valid" while holding the old raw numbers — the fleet would report 2,800 pending against
 // the Sessions row's 1,855, from cache, indefinitely. When the MEANING of a cached payload changes, the
 // version is the only thing that can tell the two apart.
-const MAP_CACHE_VERSION = 3;
+// 4: the payload was `.observatoryignore`-FILTERED and carried summary.hidden/hiddenFiles. Same
+// hazard, same answer: a v3 entry is structurally valid and semantically wrong — it holds counts from
+// before any ignore file existed, and lacks the two fields the surfaces read to say what they dropped.
+// 5: those two fields are GONE, and the payload is no longer filtered at all — `.observatoryignore`
+// became a capture-time rule with one mode, so a matching file is never recorded and there is nothing
+// to filter or count on a read path. A v4 entry is once again structurally valid and semantically
+// wrong: its `units` counts what a filter left behind, and the surfaces no longer read the two fields
+// it carries. Not bumping this is invisible — it serves a stale number from disk, forever.
+// Exported so `clean`'s test can plant a LIVE-version payload without hardcoding the number: a test
+// that says `3|live` becomes a false alarm the moment this is bumped for a real reason, which is
+// exactly what it did here. Deriving it keeps the assertion about the BEHAVIOUR (live survives,
+// superseded is reaped) instead of about the current value.
+export const MAP_CACHE_VERSION = 5;
 
 /** (mtimeMs:size) for a file, or '' when it can't be stat'd. */
 /**
@@ -1018,6 +1030,7 @@ function derivedInputsStamp(cwd: string, session: string, includeWorkspace: bool
     includeWorkspace ? workspaceStamp(session, cwd) : '',
   ].join('|');
 }
+
 
 /**
  * (mtimeMs:size) of every WORKSPACE file the session edited — a third input, alongside the transcript

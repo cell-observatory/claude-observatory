@@ -56,10 +56,33 @@ function memoryIndex(): Map<string, { session: string; rec: EditRecord }[]> {
   );
 }
 
+type MemoryIndex = Map<string, { session: string; rec: EditRecord }[]>;
+
 /** Cross-session review history for one file, derived live from the store. */
 export function fileMemory(file: string): FileMemory {
+  return memoryOf(memoryIndex(), file);
+}
+
+/**
+ * The same, for many files at once — the index is built, or revalidated, exactly ONCE.
+ *
+ * `memoryIndex` is memoized, but proving the memo still valid is not free: every call does a readdir,
+ * an `existsSync` per session, a `statSync` per session log, and builds a JSON key over all of their
+ * paths. Per file that is invisible. Observations asks about every file a session touched, and at
+ * 3,957 files against a 47-session store that measured 383,830 stats and 186,000 existsSync calls to
+ * revalidate an index that had not changed — about 99% of the time spent there. Callers with a file
+ * SET should use this; `fileMemory` above remains the one-file form.
+ */
+export function fileMemories(files: Iterable<string>): Map<string, FileMemory> {
+  const idx = memoryIndex();
+  const out = new Map<string, FileMemory>();
+  for (const file of files) out.set(file, memoryOf(idx, file));
+  return out;
+}
+
+function memoryOf(idx: MemoryIndex, file: string): FileMemory {
   const m: FileMemory = { edits: 0, kept: 0, undone: 0, pending: 0, lastVerdict: null, notes: [] };
-  for (const { session, rec } of memoryIndex().get(path.resolve(file)) ?? []) {
+  for (const { session, rec } of idx.get(path.resolve(file)) ?? []) {
     m.edits++;
     if (rec.status === 'kept') m.kept++;
     else if (rec.status === 'undone') m.undone++;

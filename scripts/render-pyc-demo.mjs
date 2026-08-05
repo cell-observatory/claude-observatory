@@ -99,7 +99,11 @@ const R = '#E5534B', O = '#D9822B', P = '#9A6AC2', BLUE = '#4C8BF5';
 const ico = (d) => `<svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px">${d}</svg>`;
 const icoCommit = ico('<circle cx="8" cy="8" r="6"/><path d="M5.2 8.2l2 2 3.6-4"/>');
 const icoHistory = ico('<path d="M2.5 8a5.5 5.5 0 1 1 1.6 3.9"/><path d="M2.5 8L1.2 6.5M2.5 8L4 6.8"/><path d="M8 5.2V8l2.2 1.6"/>');
-const icoTrash = ico('<path d="M2.5 4.5h11M6.5 2.5h3M4.5 4.5l.7 9h5.6l.7-9M6.7 7v4M9.3 7v4"/>');
+// The lines-and-X "clear a list" glyph, matching render-media.mjs's icoClear and the codicon the
+// product actually uses. This was a hand-drawn trash can (lid, handle, tapered body, two stripes)
+// on Clear Resolved — an action that drops RECORDS and changes no file — and it shipped in
+// docs/media/demo-pyc.gif.
+const icoClear = ico('<path d="M2 3.5h11M2 7h7M2 10.5h5"/><path d="M10.5 9l4 4M14.5 9l-4 4"/>');
 const icoFind = ico('<circle cx="6.8" cy="6.8" r="4.5"/><path d="M10.2 10.2L14 14"/>');
 const icoBulb = ico('<path d="M6 12.5h4M6.7 14.5h2.6M8 1.8a4.4 4.4 0 0 0-2.6 7.9c.7.5 1.1 1.1 1.1 1.8v.5h3v-.5c0-.7.4-1.3 1.1-1.8A4.4 4.4 0 0 0 8 1.8z"/>');
 
@@ -147,7 +151,7 @@ const wfRun = ({ running, sel }) => `
 const frame = ({ tab = 'fleet', agent, wf, tasks, sessions, mods, files, empty, cap }) => `<!doctype html><html><head><meta charset="utf-8"><style>${CSS}</style></head><body>
   <div class="tw-head"><span class="title">Observatory Dashboards</span>
     <span class="tw-toggles"><span>Stats</span></span>
-    <span class="toolbar"><span style="font-family:var(--mono);font-size:10.5px">\u{1F52C} Extend the training pipeline</span><span class="b" style="color:${G}">${icoCommit} Accept All</span><span class="b" style="color:${R}">${icoHistory} Reject All</span><span class="b" style="color:${O}">${icoTrash} Clear Resolved</span><span class="b" style="color:${BLUE}">↗ Export</span><span class="sep"></span><span class="b" style="color:${P}">${icoFind} Search</span><span class="b tog">Active only</span><span class="b" style="color:${P}">${icoBulb} Spotlight</span><span class="b">⟳</span></span></div>
+    <span class="toolbar"><span style="font-family:var(--mono);font-size:10.5px">\u{1F52C} Extend the training pipeline</span><span class="b" style="color:${G}">${icoCommit} Accept All</span><span class="b" style="color:${R}">${icoHistory} Reject All</span><span class="b" style="color:${O}">${icoClear} Clear Resolved</span><span class="b" style="color:${BLUE}">↗ Export</span><span class="sep"></span><span class="b" style="color:${P}">${icoFind} Search</span><span class="b tog">Active only</span><span class="b" style="color:${P}">${icoBulb} Spotlight</span><span class="b">⟳</span></span></div>
   <div class="axrow"><span class="b" style="color:${B}">▲</span><span class="ct">Diff 1/2</span><span class="b" style="color:${B}">▼</span><span class="b" style="color:${G}">✓</span><span class="b" style="color:${R}">↩</span><span class="sep"></span><span class="b" style="color:${B}">◀</span><span class="ct">File 1/3</span><span class="b" style="color:${B}">▶</span><span class="b" style="color:${G}">✓✓</span><span class="b" style="color:${R}">✕</span><span class="sep"></span><span class="b" style="color:${B}">◀</span><span class="ct">Folder 1/2</span><span class="b" style="color:${B}">▶</span><span class="b" style="color:${G}">✓✓</span><span class="b" style="color:${R}">✕</span><span class="sep"></span><span class="b" style="color:${B}">◀</span><span class="ct">Prompt 1/2</span><span class="b" style="color:${B}">▶</span><span class="b" style="color:${B}">▷</span><span class="b" style="color:${G}">✓✓</span><span class="b" style="color:${R}">✕</span></div>
   <div class="main">
     <div class="nav">

@@ -20,6 +20,7 @@ const glyphs = {
   'cloud-download': 'eac2', // version dropdown: Update now
   'debug-step-back': 'eb8f', // Prompt axis Rewind: revert this ask and everything after it
   'split-horizontal': 'eb56', // left-nav toggle: pair related sections side by side
+  'settings-gear': 'eb51', // Overview controls: open this extension's settings, beside the version chip
 };
 
 let rules = '';

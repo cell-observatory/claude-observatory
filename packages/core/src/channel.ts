@@ -29,9 +29,38 @@ export function getUpdateChannel(): UpdateChannel {
   return 'stable';
 }
 
+/**
+ * Persist the channel, or explain exactly why it could not be.
+ *
+ * The raw failure here is an `EACCES` stack trace naming a path the reader never chose, which is the
+ * least useful thing this can do — and it happens for a mundane reason: in a devcontainer the config
+ * directory is often bind-mounted read-only or owned by another uid, so a switch that looks like it
+ * worked silently does not survive. The error names the file, the cause, and the override.
+ */
 export function setUpdateChannel(ch: UpdateChannel): void {
-  fs.mkdirSync(rootDir(), { recursive: true });
-  fs.writeFileSync(path.join(rootDir(), 'channel'), ch + '\n');
+  const dir = rootDir();
+  const file = path.join(dir, 'channel');
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(file, ch + '\n');
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code ?? '';
+    throw new Error(
+      `could not save the update channel to ${file}` +
+        (code ? ` (${code})` : '') +
+        `.\n  The config directory is not writable by this user — common in a devcontainer, where it is` +
+        `\n  often bind-mounted read-only or owned by a different uid.` +
+        `\n  Point CLAUDE_CONFIG_DIR at a writable directory, or fix the permissions on ${dir}.`
+    );
+  }
+  // Verify the write LANDED. A silently-ignored write (some overlay and network filesystems) would
+  // otherwise report success and leave the reader on the old channel with no way to tell.
+  if (getUpdateChannel() !== ch) {
+    throw new Error(
+      `the update channel did not persist: ${file} still reads "${getUpdateChannel()}" after writing "${ch}".` +
+        `\n  That filesystem accepted the write without keeping it. Set CLAUDE_CONFIG_DIR to a real local path.`
+    );
+  }
 }
 
 /** Accepts every spelling a human will type for the pre-release channel. Null = not a channel. */

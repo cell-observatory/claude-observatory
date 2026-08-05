@@ -10,9 +10,21 @@ import java.nio.file.Paths
  * itself honors), defaulting to ~/.claude — devcontainers relocate it onto a persistent volume.
  */
 object ClaudePaths {
-    /** Test seam: unit tests point the whole path layer at a temp dir without an IDE application. */
+    /**
+     * Test seam: unit tests point the whole path layer at a temp dir without an IDE application.
+     *
+     * Assigning it drops [rootCache], because the store root is derived from this and cached for a
+     * second: without that, a test that redirected the seam and then wrote its fixture could create
+     * the session directory under the PREVIOUS test's root and write `log.jsonl` under its own, one
+     * cache expiry apart. That failed as `NoSuchFileException` in whichever test happened to run
+     * second — a cross-test order dependency, invisible when the test was run alone.
+     */
     @Volatile
     var configDirOverride: Path? = null
+        set(value) {
+            field = value
+            forgetRoot()
+        }
 
     fun configDir(): Path {
         configDirOverride?.let { return it }
@@ -24,8 +36,52 @@ object ClaudePaths {
         return Paths.get(System.getProperty("user.home"), ".claude")
     }
 
-    /** The edit store root: <config>/claude-observatory */
-    fun rootDir(): Path = configDir().resolve("claude-observatory")
+    /**
+     * The edit store root — `prefs.storeDir` when the reader has moved it, else
+     * `<config>/claude-observatory`.
+     *
+     * This used to be the second half unconditionally, which was correct only while the store could
+     * not move. It can now, from this plugin's own "Store location…" popup as well as from the
+     * terminal app and VS Code — and every DIRECT read on the Kotlin side goes through here:
+     * StoreReader's log/blob/session readers and StoreWatcher's polling root. Ignoring the setting
+     * left them all pointed at an abandoned directory: pending badges fell to zero, "Undo all"
+     * reported nothing to revert while edits were pending, a double-clicked edit opened a diff of
+     * empty-against-empty (readBlob swallows the miss), and the watcher polled a directory it had
+     * just re-created, so live refresh never fired again. The CLI-backed panels followed the move,
+     * so the tool window showed edits in one pane and nothing in the others.
+     *
+     * Read straight from prefs.json rather than through the CLI: this is on the read path, and it
+     * must answer the same way core does even when the CLI is missing from PATH. Cached for a second
+     * so a poll does not re-read it per call; [forgetRoot] drops the cache the moment a move lands.
+     */
+    @Volatile private var rootCache: Pair<Long, Path>? = null
+
+    fun rootDir(): Path {
+        val now = System.currentTimeMillis()
+        rootCache?.let { (at, dir) -> if (now - at < 1_000) return dir }
+        val fallback = configDir().resolve("claude-observatory")
+        val dir = runCatching {
+            val text = java.nio.file.Files.readString(fallback.resolve("prefs.json"))
+            val o = com.google.gson.JsonParser.parseString(text).asJsonObject
+            val raw = o.get("storeDir")?.takeIf { it.isJsonPrimitive }?.asString?.trim().orEmpty()
+            if (raw.isEmpty()) fallback else Paths.get(expandHome(raw))
+        }.getOrDefault(fallback)
+        rootCache = now to dir
+        return dir
+    }
+
+    /** Drop the cached root. Called when a move lands, so the next read follows it immediately. */
+    fun forgetRoot() {
+        rootCache = null
+    }
+
+    /** `~` is the reader's own shorthand in that setting; every path below wants a real one. */
+    private fun expandHome(p: String): String = when {
+        p == "~" -> System.getProperty("user.home")
+        p.startsWith("~/") || p.startsWith("~\\") ->
+            Paths.get(System.getProperty("user.home"), p.substring(2)).toString()
+        else -> p
+    }
 
     fun storeDir(sessionId: String): Path = rootDir().resolve(sessionId)
 

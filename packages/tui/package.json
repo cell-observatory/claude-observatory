@@ -1,0 +1,16 @@
+{
+  "name": "@claude-observatory/tui",
+  "version": "0.9.3",
+  "private": true,
+  "description": "The terminal app \u2014 the observatory's third front end, beside the VS Code and JetBrains extensions.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@claude-observatory/core": "0.9.3",
+    "diff": "^9.0.0"
+  },
+  "license": "Apache-2.0"
+}

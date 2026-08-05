@@ -17,8 +17,10 @@
  * this module must NOT import the `diff`-based undo engine.
  */
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { canonPath } from './paths';
+import { ignoreContext } from './ignore';
 import {
   ensureStore,
   pathKey,
@@ -35,6 +37,8 @@ import {
   withBashPreLock,
   appendLog,
   appendSkip,
+  sweepIgnoredIfChanged,
+  EMPTY_BLOB,
   type BashStatCache,
 } from './store';
 
@@ -110,7 +114,34 @@ function resolveFile(payload: HookPayload): string | null {
   if (typeof f !== 'string' || !f) return null;
   const cwd = payload.cwd || process.cwd();
   // canonPath: hook events can disagree about drive-letter case on Windows (#43) — one key per file.
-  return canonPath(path.isAbsolute(f) ? f : path.resolve(cwd, f));
+  const abs = canonPath(path.isAbsolute(f) ? f : path.resolve(cwd, f));
+  // `.observatoryignore` — never recorded. HERE and not in handlePre, because this is the one funnel
+  // BOTH handlers use and both already treat null as "nothing to do". Refusing in Pre alone would
+  // leave Post with no staging record, sending it down the appendSkip branch to write an "edit not
+  // captured — no before-snapshot" marker for a file the reader asked us to leave alone.
+  if (ignoreContext().ignored(abs)) return null;
+  return abs;
+}
+
+/**
+ * The directories this hook event touched, for the ignore sweep's stamp.
+ *
+ * Deliberately NOT `resolveFile`: that returns null for an ignored path, and an ignored path is
+ * exactly the case whose directory the sweep most needs, because that is where the new rule lives.
+ *
+ * For a Bash tool this returns the working directory ALONE, which is why `handlePostBash` reports the
+ * directories it actually wrote into instead. The walk records files at ANY depth under cwd, so
+ * stamping cwd alone left the gate blind to a `.observatoryignore` created BELOW it: the rule refused
+ * new captures immediately while the records it covered stayed in the store forever, because the
+ * stamp could never move. Reproduced end to end before this was written.
+ */
+function editedDirs(payload: HookPayload): string[] {
+  const cwd = payload.cwd || process.cwd();
+  const f = (payload.tool_input || {}).file_path || (payload.tool_input || {}).notebook_path;
+  if (typeof f === 'string' && f) {
+    return [path.dirname(canonPath(path.isAbsolute(f) ? f : path.resolve(cwd, f)))];
+  }
+  return [canonPath(cwd)];
 }
 
 function handlePre(session: string, payload: HookPayload): void {
@@ -179,6 +210,9 @@ function handlePost(session: string, payload: HookPayload): void {
 function walkCandidates(root: string, onFile: (abs: string) => void): boolean {
   const stack: string[] = [root];
   let count = 0;
+  // One matcher for the whole walk, so each directory's `.observatoryignore` is read once rather
+  // than once per file under it.
+  const ignore = ignoreContext();
   while (stack.length) {
     const dir = stack.pop() as string;
     let entries: fs.Dirent[];
@@ -190,8 +224,11 @@ function walkCandidates(root: string, onFile: (abs: string) => void): boolean {
     for (const e of entries) {
       const full = path.join(dir, e.name);
       if (e.isDirectory()) {
-        if (!BASH_SKIP_DIRS.has(e.name)) stack.push(full); // isDirectory() is false for symlinks → no loops
+        // An ignored directory is never descended — the same shape as BASH_SKIP_DIRS, so a rule on
+        // `dist/` costs nothing rather than costing a walk of everything inside it.
+        if (!BASH_SKIP_DIRS.has(e.name) && !ignore.ignored(full, true)) stack.push(full); // isDirectory() is false for symlinks → no loops
       } else if (e.isFile()) {
+        if (ignore.ignored(full)) continue;
         if (++count > BASH_MAX_FILES) return false;
         onFile(full);
       }
@@ -255,11 +292,49 @@ function cachedSnapshotHash(session: string, abs: string, cache: BashStatCache, 
 /** Bash Pre: snapshot the before-content of every candidate file under cwd into a manifest.
  *  Runs under the session lock so concurrent GC can't collect fresh blobs before the manifest
  *  lands; appendSkip happens AFTER release (appendLog takes the same lock — never append inside). */
+/**
+ * A directory the Bash full-tree snapshot must NOT treat as a working tree.
+ *
+ * The walk records every file whose content differs across the command, which is the right model for
+ * a project directory and completely wrong for `$HOME` or a filesystem root: a session that ran
+ * `install neovim` from the home directory recorded 2,445 "edits" — `.Xauthority`,
+ * `.CFUserTextEncoding`, `.bash_history`, shell state, caches — against ONE real Write. None of them
+ * were changes the agent made; they were files that happened to move while a command ran, and the
+ * session's review list was 99.8% noise. Sweeping a person's home directory into a snapshot store is
+ * also the wrong thing to do on its own terms.
+ *
+ * Deliberately narrow: a project without a VCS marker is still a project, so the test is the specific
+ * pair of places that are never one, not a positive test for project-ness.
+ */
+function unwalkableRoot(dir: string): string | null {
+  if (dir === path.parse(dir).root) return 'the filesystem root';
+  let home: string;
+  try {
+    home = canonPath(os.homedir());
+  } catch {
+    return null;
+  }
+  return dir === home ? 'your home directory' : null;
+}
+
 function handlePreBash(session: string, payload: HookPayload): void {
   // Canonical drive-letter case for the tree every walk key derives from (#43): a Pre manifest keyed
   // C:\ against a Post walk keyed c:\ made every file a phantom create + delete pair.
   const cwd = payload.cwd ? canonPath(payload.cwd) : payload.cwd;
   if (!cwd) return;
+  const refuse = unwalkableRoot(cwd);
+  if (refuse) {
+    ensureStore(session);
+    // The manifest MUST be cleared before returning. `handlePostBash` no-ops only when there is no
+    // manifest, so leaving a previous command's behind would have it diff that against a walk of the
+    // very tree this branch exists to refuse — turning a guard into the bug it was written to stop.
+    withBashPreLock(session, () => deleteBashManifest(session));
+    // A marker, not silence: a real Bash command ran and its changes are genuinely not captured, and
+    // that is exactly what SkipOp exists to say. Written once per command, like the truncation case,
+    // and AFTER the lock is released (appendSkip takes the same one).
+    appendSkip(session, '<bash-tree>', `Bash ran in ${refuse} — its tree is not snapshotted, so changes made by this command are not captured`);
+    return;
+  }
   ensureStore(session);
   const truncated = withBashPreLock(session, () => {
     deleteBashManifest(session); // clear any stale manifest from an interrupted command
@@ -286,17 +361,34 @@ function handlePreBash(session: string, payload: HookPayload): void {
 /** Bash Post: diff the tree against the manifest and log one edit per changed/created/deleted file.
  *  Unlocked like always: each changed file's blob is log-referenced by appendLog immediately after
  *  it is written, so the unreferenced window stays microseconds. */
-function handlePostBash(session: string, payload: HookPayload): void {
+function handlePostBash(session: string, payload: HookPayload): string[] {
   // Canonical drive-letter case for the tree every walk key derives from (#43): a Pre manifest keyed
   // C:\ against a Post walk keyed c:\ made every file a phantom create + delete pair.
   const cwd = payload.cwd ? canonPath(payload.cwd) : payload.cwd;
-  if (!cwd) return;
+  if (!cwd) return [];
   const manifest = readBashManifest(session);
-  if (!manifest) return; // Pre skipped/truncated — nothing reliable to diff
+  if (!manifest) return []; // Pre skipped/truncated — nothing reliable to diff
   const before = manifest.files;
   const seen = new Set<string>();
   const cache = readBashStatCache(session);
   const blobs = blobPresence(session);
+  /**
+   * Empty-file appearances and disappearances this command produced.
+   *
+   * The Bash walk INFERS edits from a before/after tree diff, so it sees every side effect of a
+   * command, not only what the agent meant to change. A file that goes from absent to zero bytes (or
+   * back) is the degenerate case: there is no content, so the diff is empty, and the row renders as
+   * "+0 −0" with nothing behind it. One real session — `install neovim`, run from the home directory
+   * — produced 2,241 of these out of 2,446 records: postgres relation stubs from `initdb`, plus
+   * `.Xauthority`, `.tig_history`, `btmp`. 91.6% of the review list was rows with nothing to review.
+   *
+   * Counted, not swallowed: one marker per command says how many there were. Edit / Write /
+   * NotebookEdit are untouched — a zero-byte file Claude created ON PURPOSE is a real edit.
+   */
+  let emptyNoise = 0;
+  /** Directories this command actually recorded into — what the ignore sweep must stamp. The walk
+   *  reaches any depth under cwd, so cwd alone is not the answer (see `editedDirs`). */
+  const wrote = new Set<string>();
   const ok = walkCandidates(cwd, (abs) => {
     if (isSecretName(path.basename(abs))) return; // symmetric with Pre: secrets are out of scope
     seen.add(abs);
@@ -304,17 +396,32 @@ function handlePostBash(session: string, payload: HookPayload): void {
     if (afterBlob === null) return;
     const beforeBlob = Object.prototype.hasOwnProperty.call(before, abs) ? before[abs] : null;
     if (beforeBlob === afterBlob) return; // unchanged — no edit
+    if (beforeBlob === null && afterBlob === EMPTY_BLOB) return void emptyNoise++;
+    wrote.add(path.dirname(abs));
     appendLog(session, { ts: Date.now(), tool: 'Bash', file: abs, beforeBlob, afterBlob, status: 'pending' });
   });
   // Deletions: present before, gone now. Only trust this when the post-walk wasn't truncated.
   if (ok) {
     for (const abs of Object.keys(before)) {
       if (seen.has(abs) || before[abs] === null) continue;
+      if (before[abs] === EMPTY_BLOB) {
+        emptyNoise++; // symmetric with the creation case: an empty file removed has nothing to review
+        continue;
+      }
+      wrote.add(path.dirname(abs));
       appendLog(session, { ts: Date.now(), tool: 'Bash', file: abs, beforeBlob: before[abs], afterBlob: null, status: 'pending' });
     }
   }
+  if (emptyNoise) {
+    appendSkip(
+      session,
+      '<bash-empty>',
+      `${emptyNoise} zero-byte file(s) appeared or vanished while this command ran — no content to review, so they were not recorded`
+    );
+  }
   writeBashStatCache(session, cache);
   deleteBashManifest(session);
+  return [...wrote];
 }
 
 /**
@@ -332,8 +439,16 @@ export function handleHookPayload(payload: HookPayload): void {
       if (isBash) handlePreBash(session, payload);
       else handlePre(session, payload);
     } else if (payload.hook_event_name === 'PostToolUse') {
-      if (isBash) handlePostBash(session, payload);
-      else handlePost(session, payload);
+      // The directories the capture actually wrote into. A Bash walk reports its own, because only
+      // it knows how deep beneath cwd the command reached.
+      const touched = isBash ? handlePostBash(session, payload) : (handlePost(session, payload), editedDirs(payload));
+      // Records written BEFORE a rule existed are the one case the refusal in `resolveFile` cannot
+      // reach, so they are swept here. On the WRITE path deliberately: a read path is called dozens
+      // of times per refresh by several processes at once, and a read that rewrites the store would
+      // race every other reader. Gated on a stamp of the ignore files this session's directories can
+      // see, so it rewrites once per rule change rather than once per edit — and it reports through a
+      // control op, never through stdout (see the note at the top of this file).
+      sweepIgnoredIfChanged(session, [...editedDirs(payload), ...touched]);
     }
   } catch {
     // Silent by design: capture must never block, slow, or perturb an edit.

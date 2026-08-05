@@ -9,7 +9,7 @@ plugins {
 }
 
 group = "com.cell-observatory"
-version = "0.9.2" // keep in lockstep with the monorepo/vscode version (see root package.json)
+version = "0.9.3" // keep in lockstep with the monorepo/vscode version (see root package.json)
 
 repositories {
     mavenCentral()

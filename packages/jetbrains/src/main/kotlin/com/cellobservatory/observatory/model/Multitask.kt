@@ -100,6 +100,9 @@ data class WorkflowAgent(
     val removed: Int,
     /** The agent's model as a short label (e.g. 'Opus 4.8'), '' when unknown. */
     val model: String,
+    /** The agent's declared reasoning effort, "" when the transcript never said it. Shown beside the
+     *  model and never guessed — the default differs by build and by model. */
+    val effort: String = "",
     /** 20-bin activity histogram over the agent's own assistant turns — the same sparkline the run draws. */
     val sparkline: List<Int>,
 )
@@ -222,6 +225,7 @@ object MultitaskParser {
                 added = int(ao, "added"),
                 removed = int(ao, "removed"),
                 model = str(ao, "model") ?: "",
+                effort = str(ao, "effort") ?: "",
                 sparkline = arr(ao, "sparkline").map { it.asInt },
             )
         },

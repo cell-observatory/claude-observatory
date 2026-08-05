@@ -6,7 +6,7 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
-import { EditRecord, EditStatus, readBlob, rootDir, isSafeSessionId } from './store';
+import { EditRecord, EditStatus, blobText as storeBlobText, rootDir, isSafeSessionId } from './store';
 import { lineDelta } from './format';
 import { detectClasses, classAt } from './classes';
 import * as crypto from 'crypto';
@@ -127,10 +127,10 @@ function buildFile(session: string, rel: string, file: string, recs: EditRecord[
   // only ever mattered until exit; persisted, it would outlive the process as a wrong answer. Track it
   // and keep such a result out of the disk tier (the memo above is still fine for this run).
   let blobsIntact = true;
-  const readText = (sha: string | null): string => {
+  const blobText = (sha: string | null): string => {
     if (!sha) return ''; // no snapshot recorded — a legitimate state (file created), not a failure
     try {
-      return readBlob(session, sha).toString('utf8');
+      return storeBlobText(session, sha);
     } catch {
       blobsIntact = false;
       return '';
@@ -145,7 +145,7 @@ function buildFile(session: string, rel: string, file: string, recs: EditRecord[
   // follows surviving lines, so a hop between unrelated states drops them and the earlier edits come
   // back unplaced. Feeding the same three edits as (2,0,1) yields [[],[1],[3]] where chronological order
   // yields [[1],[3],[5]] — a silently missing placement, not a slower one.
-  const lines = locateCached(textKey, recs, readText, text, store, () => blobsIntact);
+  const lines = locateCached(textKey, recs, blobText, text, store, () => blobsIntact);
   for (let i = 0; i < recs.length; i++) {
     const r = recs[i];
     const line = lines[i];
@@ -261,7 +261,7 @@ function placementStore(session: string): PlacementStore {
 function locateCached(
   textKey: string,
   recs: EditRecord[],
-  readText: (sha: string | null) => string,
+  blobText: (sha: string | null) => string,
   text: string,
   store: PlacementStore,
   blobsIntact: () => boolean
@@ -291,7 +291,7 @@ function locateCached(
   // the file's whole history resident.
   const lines = locateEditsInCurrent(
     recs.length,
-    (i) => ({ before: readText(recs[i].beforeBlob), after: readText(recs[i].afterBlob) }),
+    (i) => ({ before: blobText(recs[i].beforeBlob), after: blobText(recs[i].afterBlob) }),
     text
   ).map((p) => p.lines[0]);
   const persistable = blobsIntact(); // only after the reads, which is what sets the flag

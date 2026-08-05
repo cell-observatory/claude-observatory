@@ -25,7 +25,7 @@ import * as path from 'path';
 import { diffLines } from 'diff';
 import { parseTranscriptActions } from './actions';
 import { findSubagentsDir } from './subagents';
-import { cachedByFiles } from './fscache';
+import { cachedByFiles, readLines, readText } from './fscache';
 import { friendlyModel } from './format';
 /**
  * Freshness window for a workflow's `running` gate. Deliberately WIDER than the fleet's 60s
@@ -64,6 +64,9 @@ export interface WorkflowAgent {
   removed: number;
   /** The agent's model as a short label (e.g. 'Opus 4.8'), '' when unknown. */
   model: string;
+  /** The agent's declared reasoning effort ('high', 'max'), '' when the transcript never said it.
+   *  Shown beside the model, never guessed — the default differs by build and model. */
+  effort: string;
   /** 20-bin activity histogram over the agent's own assistant turns — the same sparkline the run header
    *  draws, per agent. */
   sparkline: number[];
@@ -149,6 +152,9 @@ interface AgentMetrics {
   activityTs: number[];
   /** The model the agent ran on (raw id, e.g. 'claude-opus-4-8'), '' when none seen. */
   model: string;
+  /** The agent's declared reasoning effort ('low'…'max'), '' when the transcript never said. Never
+   *  guessed: the default differs by build and by model, so a placeholder here would be fiction. */
+  effort: string;
 }
 
 /** Bucket activity timestamps into a fixed-width sparkline (counts per bin, span-normalized) — the same
@@ -192,9 +198,9 @@ function agentMetricsUncached(jsonlPath: string): AgentMetrics {
   const edits = parseTranscriptActions(jsonlPath, { includeSidechain: true }).filter((a) => a.category === 'edit').length;
   let lines: string[];
   try {
-    lines = fs.readFileSync(jsonlPath, 'utf8').split('\n');
+    lines = readLines(jsonlPath);
   } catch {
-    return { tokens: 0, durationMs: 0, edits, added: 0, removed: 0, firstTs: 0, lastTs: 0, activityTs: [], model: '' };
+    return { tokens: 0, durationMs: 0, edits, added: 0, removed: 0, firstTs: 0, lastTs: 0, activityTs: [], model: '', effort: '' };
   }
   let tokens = 0;
   let added = 0;
@@ -202,6 +208,7 @@ function agentMetricsUncached(jsonlPath: string): AgentMetrics {
   let firstTs = 0;
   let lastTs = 0;
   let model = '';
+  let effort = '';
   const activityTs: number[] = [];
   const seen = new Set<string>();
   for (const line of lines) {
@@ -218,6 +225,10 @@ function agentMetricsUncached(jsonlPath: string): AgentMetrics {
       if (!firstTs || ts < firstTs) firstTs = ts;
       if (ts > lastTs) lastTs = ts;
     }
+    // The effort rides the RECORD, not the message — the same place `metrics.ts` reads it. Taken
+    // before the assistant filter below for exactly one reason: a `/effort` turn is not an assistant
+    // record, and on builds that predate the field it is the only place the level is ever stated.
+    if (typeof o.effort === 'string' && o.effort) effort = o.effort;
     const m = o.message;
     if (!m || m.role !== 'assistant') continue;
     if (typeof m.model === 'string' && m.model) model = m.model; // the agent's model (last non-empty wins)
@@ -227,7 +238,12 @@ function agentMetricsUncached(jsonlPath: string): AgentMetrics {
     if (id === null || !seen.has(id)) {
       if (id !== null) seen.add(id);
       const u = m.usage || {};
-      tokens += num(u.output_tokens) + num(u.input_tokens) + num(u.cache_read_input_tokens) + num(u.cache_creation_input_tokens);
+      // NEW tokens only. Adding the cache counters made the same context count once per turn,
+      // so this row reported millions where Claude Code's own view reported ~128k for the very
+      // same agent. Two tools reporting different numbers for one run is worse than either being
+      // slightly off — the reader cannot tell which to trust. Cache traffic is surfaced
+      // separately (SessionTokens.cacheRead/cacheCreation), never folded in here.
+      tokens += num(u.output_tokens) + num(u.input_tokens) + num(u.cache_creation_input_tokens);
       if (ts > 0) activityTs.push(ts); // one tick per assistant turn → the run's activity sparkline
     }
     if (!Array.isArray(m.content)) continue;
@@ -248,7 +264,7 @@ function agentMetricsUncached(jsonlPath: string): AgentMetrics {
       }
     }
   }
-  return { tokens, durationMs: firstTs && lastTs ? Math.max(0, lastTs - firstTs) : 0, edits, added, removed, firstTs, lastTs, activityTs, model };
+  return { tokens, durationMs: firstTs && lastTs ? Math.max(0, lastTs - firstTs) : 0, edits, added, removed, firstTs, lastTs, activityTs, model, effort };
 }
 
 /** The journal `key` USED to be a phase name, but newer workflow runtimes put a per-agent content HASH
@@ -333,7 +349,7 @@ function readJournal(journalPath: string): Map<string, { phase: string | null; p
   const out = new Map<string, { phase: string | null; phaseFromKey: boolean; label: string | null; done: boolean }>();
   let lines: string[];
   try {
-    lines = fs.readFileSync(journalPath, 'utf8').split('\n');
+    lines = readLines(journalPath);
   } catch {
     return out;
   }
@@ -452,7 +468,9 @@ function resolveMeta(scriptsDir: string, wfId: string): { name: string; descript
 /** The agentType from a workflow agent's `agent-<id>.meta.json` sidecar, or null when absent/unreadable. */
 function readAgentType(wfDir: string, agentId: string): string | null {
   try {
-    const s = JSON.parse(fs.readFileSync(path.join(wfDir, `agent-${agentId}.meta.json`), 'utf8'));
+    // Unmemoized and called from four places per pass — 863 reads of 220 sidecars in one cold run.
+    // The parse stays per-call (callers get a fresh object); only the read is shared.
+    const s = JSON.parse(readText(path.join(wfDir, `agent-${agentId}.meta.json`)));
     return s && typeof s.agentType === 'string' ? s.agentType : null;
   } catch {
     return null; // no sidecar
@@ -462,7 +480,7 @@ function readAgentType(wfDir: string, agentId: string): string | null {
 /** The rich per-run state file, or null when absent/unparseable (older runs → the journal fallback). */
 function readWorkflowState(stateFile: string): any | null {
   try {
-    const o = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+    const o = JSON.parse(readText(stateFile));
     return o && typeof o === 'object' ? o : null;
   } catch {
     return null;
@@ -522,6 +540,7 @@ function buildRunFromState(state: any, wfDir: string, wfId: string, stateFile: s
       added: met.added,
       removed: met.removed,
       model: friendlyModel(met.model),
+      effort: met.effort,
       sparkline: activitySparkline(met.activityTs),
     });
   }
@@ -651,6 +670,7 @@ function buildRunFromJournal(wfDir: string, wfId: string, scriptsDir: string, no
       added: met.added,
       removed: met.removed,
       model: friendlyModel(met.model),
+      effort: met.effort,
       sparkline: activitySparkline(met.activityTs),
     });
   }

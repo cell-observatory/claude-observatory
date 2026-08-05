@@ -37,3 +37,11 @@ export { runCapture, handleHookPayload } from './capture';
 export * from './demo';
 export * from './tour';
 export * from './trace';
+export * from './ignore';
+export * from './prefs';
+// The terminal app's rendering — the frame, layout, glyphs, key decoder, options screen and rich
+// diff — moved to `@claude-observatory/tui`. It is a FRONT END, like the two editor extensions, and
+// core is the data layer all three consume. Nothing outside that package imported any of it.
+export * from './remote';
+export * from './watch';
+export { readText, readLines } from './fscache'; // clearFsCache is already exported above

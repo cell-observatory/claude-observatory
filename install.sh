@@ -52,7 +52,10 @@ JB_ZIP=""
 if [ "$WITH_JETBRAINS" = "1" ]; then
   head "Building the JetBrains plugin (JDK 21 + Gradle)"
   if bash scripts/install-jetbrains.sh --build-only; then
-    JB_ZIP="$(ls -t packages/jetbrains/build/distributions/claude-observatory-jetbrains-*.zip 2>/dev/null | head -1 || true)"
+    # `command head`, not bare `head`: this script defines its own head() for section banners (above),
+    # which shadows the binary. A bare pipe therefore captured the BANNER — "[6/6] -1" — as the zip
+    # path, so the JetBrains plugin never installed and the only clue was a generic warning.
+    JB_ZIP="$(ls -t packages/jetbrains/build/distributions/claude-observatory-jetbrains-*.zip 2>/dev/null | command head -1 || true)"
     [ -n "$JB_ZIP" ] && JB_ZIP="$PWD/${JB_ZIP#./}"
   fi
   # Never silently: if the build failed, say so — the install step below will simply skip JetBrains.

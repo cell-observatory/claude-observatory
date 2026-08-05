@@ -424,11 +424,12 @@
 
 <nav class="nav" id="nav">
   <div class="wrap row">
-    <a class="brand" href="#hero"><span class="m">🔬</span> Claude Observatory <span class="brandver" data-co-version>v0.9.2</span></a>
+    <a class="brand" href="#hero"><span class="m">🔬</span> Claude Observatory <span class="brandver" data-co-version>v0.9.3</span></a>
     <div class="links">
       <a href="showcase.html" aria-current="page">Home</a>
       <a href="#install">Install</a>
       <a href="getting-started.html">Getting started</a>
+      <a href="apps.html">Apps</a>
       <a href="concepts.html">Docs</a>
       <a href="releases.html">Releases</a>
       <a class="more" href="https://github.com/cell-observatory/claude-observatory">GitHub</a>
@@ -443,8 +444,8 @@
 
 <aside class="gutter" aria-hidden="true">
   <a href="#hero" data-spy="hero">01</a>
-  <a href="#demo" data-spy="demo">02</a>
-  <a href="#manifesto" data-spy="manifesto">03</a>
+  <a href="#manifesto" data-spy="manifesto">02</a>
+  <a href="#demo" data-spy="demo">03</a>
   <a href="#tour" data-spy="tour">04</a>
   <a href="#install" data-spy="install">05</a>
 </aside>
@@ -465,6 +466,33 @@
   </div>
 </header>
 
+
+
+<section class="essay" id="manifesto">
+  <div class="wrap rv">
+    <span class="eyebrow">The gap</span>
+    <h2>Interpretability at crunch time</h2>
+    <p>A backlog of changes reviewed at the end of an agent's session creates a bottleneck, moving the work of verifying and evaluating every change onto the reviewer at once, after the context that produced them is gone. Existing tools address parts of the problem: usage meters count tokens, log viewers replay a session, editor assistants and Claude Code's own <code>/rewind</code> roll back to a checkpoint, and orchestrators launch fleets of agents and present each branch as one diff to merge. A checkpoint is coarse — it reverts a whole turn rather than one edit, does not track the files a shell command changed, and clears when the session ends. The observatory records each edit instead, tracing each action back to the chain of thought the model recorded for it.</p>
+  </div>
+</section>
+
+<section class="essay" id="how">
+  <div class="wrap rv">
+    <span class="eyebrow">What sets it apart</span>
+    <h2>From one edit to the whole trace</h2>
+    <ul>
+      <li><b>The record is built outside the model loop.</b> Capture runs in local hooks: it costs no tokens and changes nothing about what the agent sees or the decisions it makes. The record builds itself as the agent works, so it exists before you need it rather than being reconstructed once the context is gone. Everything stays on your machine; nothing is sent anywhere.</li>
+      <li><b>Any edit can be reversed on its own.</b> A position-anchored merge removes one change while the edits around it stay in place. When a later edit genuinely overlaps, the undo is refused rather than applied blindly: no clean git state is required, and nothing is silently overwritten.</li>
+      <li><b>Review follows the unit of work.</b> The edits one prompt produced read as one sequence, in the order the agent made them, across files; the same review scales down to a single edit or up to a task or a workflow run. Single edits give precision; sequences give the shape of the work.</li>
+      <li><b>Every edit is recorded.</b> Each text change is saved the moment the agent makes it, including the files a shell command changed. When a named file cannot be snapshotted — a binary, or one past the size cap — the record marks it an explicit skip rather than dropping it quietly. The shell walk is bounded: it skips vendor and build directories and stops at a file-count cap, so changes beneath those are not captured at all.</li>
+      <li><b>Every surface reads one store.</b> VS Code, JetBrains IDEs, and the terminal share the same local record, so review does not depend on a particular editor or on an outside service.</li>
+      <li><b>Every tool call is explained.</b> The transcript the session already produced yields Claude's reasoning, a timeline of each tool call, flags on risky shell commands, and the two audits: the edits and reads that landed outside the workspace, and everywhere the session reached off the machine.</li>
+      <li><b>Many agents appear in one view.</b> When several agents run in parallel across git worktrees, the observatory unifies them: who is working, on what, and where their changes conflict.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- FEATURE TOUR: every surface, one slide at a time -->
 <section class="moment" id="demo">
   <div class="wrap">
     <span class="eyebrow">Interactive demo</span>
@@ -568,32 +596,6 @@
   </div>
 </section>
 
-
-<section class="essay" id="manifesto">
-  <div class="wrap rv">
-    <span class="eyebrow">The gap</span>
-    <h2>Interpretability at crunch time</h2>
-    <p>A backlog of changes reviewed at the end of an agent's session creates a bottleneck, moving the work of verifying and evaluating every change onto the reviewer at once, after the context that produced them is gone. Existing tools address parts of the problem: usage meters count tokens, log viewers replay a session, editor assistants and Claude Code's own <code>/rewind</code> roll back to a checkpoint, and orchestrators launch fleets of agents and present each branch as one diff to merge. A checkpoint is coarse — it reverts a whole turn rather than one edit, does not track the files a shell command changed, and clears when the session ends. The observatory records each edit instead, tracing each action back to the chain of thought the model recorded for it.</p>
-  </div>
-</section>
-
-<section class="essay" id="how">
-  <div class="wrap rv">
-    <span class="eyebrow">What sets it apart</span>
-    <h2>From one edit to the whole trace</h2>
-    <ul>
-      <li><b>The record is built outside the model loop.</b> Capture runs in local hooks: it costs no tokens and changes nothing about what the agent sees or the decisions it makes. The record builds itself as the agent works, so it exists before you need it rather than being reconstructed once the context is gone. Everything stays on your machine; nothing is sent anywhere.</li>
-      <li><b>Any edit can be reversed on its own.</b> A position-anchored merge removes one change while the edits around it stay in place. When a later edit genuinely overlaps, the undo is refused rather than applied blindly: no clean git state is required, and nothing is silently overwritten.</li>
-      <li><b>Review follows the unit of work.</b> The edits one prompt produced read as one sequence, in the order the agent made them, across files; the same review scales down to a single edit or up to a task or a workflow run. Single edits give precision; sequences give the shape of the work.</li>
-      <li><b>Every edit is recorded.</b> Each text change is saved the moment the agent makes it, including the files a shell command changed. When a named file cannot be snapshotted — a binary, or one past the size cap — the record marks it an explicit skip rather than dropping it quietly. The shell walk is bounded: it skips vendor and build directories and stops at a file-count cap, so changes beneath those are not captured at all.</li>
-      <li><b>Every surface reads one store.</b> VS Code, JetBrains IDEs, and the terminal share the same local record, so review does not depend on a particular editor or on an outside service.</li>
-      <li><b>Every tool call is explained.</b> The transcript the session already produced yields Claude's reasoning, a timeline of each tool call, flags on risky shell commands, and the two audits: the edits and reads that landed outside the workspace, and everywhere the session reached off the machine.</li>
-      <li><b>Many agents appear in one view.</b> When several agents run in parallel across git worktrees, the observatory unifies them: who is working, on what, and where their changes conflict.</li>
-    </ul>
-  </div>
-</section>
-
-<!-- FEATURE TOUR: every surface, one slide at a time -->
 <section class="moment" id="tour">
   <div class="wrap rv">
     <span class="eyebrow">Feature tour</span>
@@ -796,7 +798,7 @@
             <div class="slide-in">
               <div><span class="eyebrow">In the editor</span><h3>The review bar where you are reading</h3>
                 <p>Each editor carries the controls into the file itself, in the form its API allows. JetBrains IDEs get a <b>floating toolbar</b> on the platform's own floating-toolbar layer while the open file has edits awaiting review — Keep, Undo, Chat, View diff, the Diff counter and its steppers, Accept and Reject File, Spotlight, and Clear Resolved — and a setting chooses the bar, the notification banner it replaces, both, or neither.</p>
-                <p>VS Code exposes no floating-widget API to extensions, and that has not changed: an extension cannot draw an overlay widget, and a comment thread is the only interactive surface that can float over code. What it now has is a <b>compact bar</b> built on exactly that surface — a single row of Keep, Undo, the edit and file steppers, Diff and Details, under a live title naming the edit, its churn and its position on both axes. The full <b>review bubble</b>, with Claude's reasoning and the diff in git's colors, is the same widget in its other form, one click away on Details and back again on Collapse. The setting is spelled the same in both editors and means the same thing where they overlap. Keeping or reverting one edit opens the next one still awaiting review, crossing into another file when that is where it is; bulk actions and redo never move you.</p></div>
+                <p>VS Code exposes no floating-widget API to extensions, and that has not changed: an extension cannot draw an overlay widget, and a comment thread is the only interactive surface that can float over code. What it now has is a <b>compact bar</b> built on exactly that surface — a single row of Keep, Undo, the edit and file steppers, Diff, Chat, Spotlight and a <b>⌄</b> that opens the bubble, under a live title naming the edit, its churn and its position on both axes. The full <b>review bubble</b>, with Claude's reasoning and the diff in git's colors, is the same widget in its other form, one click away on Details and back again on the collapse chevron. The setting is spelled the same in both editors and means the same thing where they overlap. Keeping or reverting one edit opens the next one still awaiting review, crossing into another file when that is where it is; bulk actions and redo never move you.</p></div>
               <div class="panel"><div class="mock">
                 <div class="mh">The bar at the edit</div>
                 <div><span class="d">6</span> // redirect home to the activities page</div>
@@ -911,8 +913,9 @@
 <footer class="foot" id="footer">
   <div class="wrap">
     <div class="row">
-      <span class="brand"><span class="m">🔬</span> Claude Observatory <span class="brandver" data-co-version>v0.9.2</span></span>
+      <span class="brand"><span class="m">🔬</span> Claude Observatory <span class="brandver" data-co-version>v0.9.3</span></span>
       <div class="flinks">
+        <a href="apps.html">Apps</a>
         <a href="concepts.html">Docs</a>
         <a href="releases.html">Releases</a>
         <a href="https://github.com/cell-observatory/claude-observatory/blob/main/docs/DEMO.md">Demo</a>
@@ -1031,7 +1034,7 @@
       links.forEach(function(a){a.classList.remove('is-active');});
       var a=map[e.target.id];if(a)a.classList.add('is-active');
     }});},{rootMargin:'-45% 0px -50% 0px'});
-    ['hero','demo','manifesto','tour','install'].forEach(function(id){var el=document.getElementById(id);if(el)io.observe(el);});
+    ['hero','manifesto','demo','tour','install'].forEach(function(id){var el=document.getElementById(id);if(el)io.observe(el);});
   })();
   (function(){
     var nav=document.getElementById('nav'),btn=document.getElementById('menu');
@@ -1340,7 +1343,7 @@
       if(st.gate==='acceptall'&&!res[step]) bulk+='<button id="ov-acceptall" class="hint">✓✓ Accept All</button>';
       else bulk+='<span class="tk">✓✓ Accept All</span>';
       bulk+='<span class="tu">↩ Reject All</span><span class="ts">Clear Resolved</span><span class="ts">Export</span></span>';
-      var view='<span class="g"><span class="ts">Search</span><span class="ts">Active only</span><span class="sep"></span><span class="ts">Spotlight</span><span class="ts">Refresh</span><span class="on"><span data-co-version>v0.9.2</span> ▾</span></span>';
+      var view='<span class="g"><span class="ts">Search</span><span class="ts">Active only</span><span class="sep"></span><span class="ts">Spotlight</span><span class="ts">Refresh</span><span class="on"><span data-co-version>v0.9.3</span> ▾</span></span>';
       var bar='<div class="row">'+axes+'</div><div class="row split">'+bulk+view+'</div>';
       el('ovbar').innerHTML=bar;
       var ab=el('ov-acceptall');

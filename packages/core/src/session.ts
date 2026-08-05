@@ -10,6 +10,7 @@
  * exists for the CLI and the VS Code sidebar.
  */
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { StringDecoder } from 'string_decoder';
 import { claudeConfigDir } from './paths';
@@ -67,6 +68,97 @@ function newestSessionIn(dir: string): string | null {
     if (hasAssistantRecord(c.file)) return c.id;
   }
   return candidates[0].id;
+}
+
+/**
+ * Every workspace that has a project directory, as `{slug, label}`, plus where its transcripts live.
+ *
+ * The slug is `mangleCwd`'s output — every non-alphanumeric byte replaced by `-` — which is LOSSY and
+ * cannot be inverted: `~/my-repo` and `~/my/repo` mangle to the same string. So nothing here pretends
+ * to reconstruct a path. The label is derived for READING: the home directory's own slug becomes `~`,
+ * and anything beneath it drops that prefix. What is displayed is therefore always a suffix of the
+ * truth, never a guess at it.
+ */
+export interface WorkspaceDir {
+  slug: string;
+  label: string;
+  dir: string;
+}
+
+export function listWorkspaces(): WorkspaceDir[] {
+  const base = path.join(claudeConfigDir(), 'projects');
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(base);
+  } catch {
+    return [];
+  }
+  const homeSlug = mangleCwd(os.homedir());
+  const out: WorkspaceDir[] = [];
+  for (const slug of names) {
+    const dir = path.join(base, slug);
+    try {
+      if (!fs.statSync(dir).isDirectory()) continue;
+    } catch {
+      continue;
+    }
+    let label: string;
+    if (slug === homeSlug) label = '~';
+    else if (slug.startsWith(homeSlug + '-')) label = slug.slice(homeSlug.length + 1);
+    else label = slug.replace(/^-/, '');
+    if (!label) label = slug || '(root)'; // a slug that reduces to nothing still needs a name
+    // A workspace label is a DERIVED display string over an already-lossy slug, not content — and a
+    // temp-dir slug runs to a hundred characters, which wraps the row it labels and makes the whole
+    // list unreadable. Abbreviated from the FRONT, keeping the tail that distinguishes it, and marked
+    // so it never reads as the whole name.
+    const CAP = 26;
+    if (label.length > CAP) label = '…' + label.slice(-(CAP - 1));
+    out.push({ slug, label, dir });
+  }
+  return out.sort((a, b) => a.label.localeCompare(b.label));
+}
+
+/**
+ * A transcript that is only a BRIDGE POINTER — a session whose conversation lives on Claude Code's
+ * bridge rather than on this machine.
+ *
+ * Claude Code writes these as a single line: `{type:"bridge-session", sessionId, bridgeSessionId,
+ * lastSequenceNum}` and nothing else, typically ~146 bytes against a real transcript's megabytes.
+ * `newestSessionIn` already knows they exist — it refuses to let one win the newest-mtime race — but
+ * nothing NAMED them, so every listing that widened beyond the store started reporting them as
+ * ordinary local sessions with "no edits". They are not empty; their content is elsewhere, and a
+ * reader who opens one finds nothing with no explanation.
+ *
+ * Detected by reading the FIRST line only. A real transcript's first line is a summary/user record,
+ * so this costs one small read and never scans a large file.
+ */
+export function bridgeInfo(transcriptPath: string): { bridgeSessionId: string; lastSequenceNum: number } | null {
+  let fd: number;
+  try {
+    fd = fs.openSync(transcriptPath, 'r');
+  } catch {
+    return null;
+  }
+  try {
+    const buf = Buffer.alloc(4096);
+    const n = fs.readSync(fd, buf, 0, buf.length, 0);
+    const first = buf.toString('utf8', 0, n).split('\n', 1)[0];
+    if (!first.includes('"bridge-session"')) return null;
+    const o = JSON.parse(first) as Record<string, unknown>;
+    if (o.type !== 'bridge-session') return null;
+    return {
+      bridgeSessionId: String(o.bridgeSessionId ?? ''),
+      lastSequenceNum: Number(o.lastSequenceNum ?? 0) || 0,
+    };
+  } catch {
+    return null; // unparseable first line — treat it as an ordinary transcript, not a bridge
+  } finally {
+    try {
+      fs.closeSync(fd);
+    } catch {
+      /* already gone */
+    }
+  }
 }
 
 /**

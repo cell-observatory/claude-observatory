@@ -61,11 +61,29 @@ const RULES = [
     why: 'a mangled project path points at a real transcript directory',
   },
   {
+    // Plan and memory files are private working state in exactly the way a transcript is, and this
+    // check did not look for them: a real `~/.claude/plans/<name>.md` path reached a committed doc and
+    // a source comment as an example of a long filename, carrying the plan's generated name with it.
+    id: 'plan-or-memory-path',
+    re: /\.claude\/(?:plans|memory)\b/g,
+    why: 'a plan or memory path is private working state — use a neutral example filename',
+  },
+  {
     id: 'real-session-id',
     // Claude Code session ids are v4 UUIDs. Demo sessions are `demo-xxxxxxxx`, which is the only kind
     // of id that belongs in published output.
     re: /\b[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi,
     why: 'that is a real Claude Code session id — quote a demo session (demo-xxxxxxxx) instead',
+  },
+  {
+    id: 'session-id-prefix',
+    // The dashboard and both editors DISPLAY a session by its first 8 hex characters, so that is the
+    // form a leak actually takes — a full UUID is what nobody pastes. The published README shipped
+    // "🔬 1da03a90" (a live session, with its live counts beside it) and the UUID rule above matched
+    // nothing. Anchored to the shapes that mean "session" so an ordinary 8-hex string — a colour, a
+    // short commit — is not a false alarm.
+    re: /(?:🔬\s*|session\s+|--session\s+)(?!demo-)\b[0-9a-f]{8}\b/gi,
+    why: 'that is a real session id as the product displays it — use the demo session (demo-xxxxxxxx)',
   },
   {
     id: 'long-agent-id',

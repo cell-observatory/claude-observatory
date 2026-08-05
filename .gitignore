@@ -11,3 +11,6 @@ release/
 .claude/settings.local.json
 # the demo simulator's scratch workspace, created in the CWD by `claude-observatory demo`
 observatory-demo/
+
+# Bun compile scratch (temp artifacts from `bun build --compile`)
+*.bun-build
