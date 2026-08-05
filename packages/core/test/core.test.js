@@ -2620,7 +2620,12 @@ test('watch: recursion is chosen by PLATFORM, never by try/catch', () => {
   // observe any of it. A pure predicate can.
   assert.equal(core.nativeRecursive('linux'), false, 'Linux must NOT take the recursive path');
   assert.equal(core.nativeRecursive('darwin'), true);
-  assert.equal(core.nativeRecursive('win32'), true);
+  // Windows is NOT on the recursive path, and this is a crash guard rather than a tuning choice.
+  // libuv's Windows recursive watcher asserts `!_wcsnicmp(filename, dir, dirlen)` in fs-event.c, and a
+  // libuv assertion is an abort(): the process dies with nothing to catch and nothing logged. It took
+  // the test run down on windows-latest/node 24 while node 20 and 22 passed, which is the shape of a
+  // bug that reaches a user first. Fanning out costs handles; aborting costs the session.
+  assert.equal(core.nativeRecursive('win32'), false, 'Windows fans out — libuv aborts on its recursive watcher');
   assert.equal(core.nativeRecursive('freebsd'), false, 'anything without a native recursive watch fans out');
 });
 

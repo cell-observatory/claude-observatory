@@ -82,11 +82,21 @@ export const MAX_WATCHERS = 512;
  * thousands of handles. This predicate is the exact complement of Node's own condition, which makes
  * the substitute unreachable rather than merely unlikely.
  *
+ * WINDOWS IS EXCLUDED, and not for efficiency. libuv's Windows recursive watcher carries an
+ * assertion — `!_wcsnicmp(filename, dir, dirlen)` in `src/win/fs-event.c` — that fires when a reported
+ * filename does not share the watched directory's prefix, and an assertion in libuv is an `abort()`:
+ * it takes the whole process down, with no exception to catch and nothing logged. CI caught it on
+ * windows-latest/node 24, where the test run died mid-file; node 20 and 22 ship a libuv that does not
+ * trip it, which is exactly what makes this the kind of failure that reaches a user before it reaches
+ * anyone else. A crash on a review tool is the worst available outcome, so Windows takes the same
+ * fan-out this uses for Linux — one non-recursive watch per directory that matters, which is a working,
+ * exercised path rather than a new one.
+ *
  * Exported so it can be asserted as a pure function: a runtime probe on a macOS CI machine cannot
  * catch a Linux-only trap, and this is the only instrument that can.
  */
 export function nativeRecursive(platform: NodeJS.Platform = process.platform): boolean {
-  return platform === 'darwin' || platform === 'win32';
+  return platform === 'darwin';
 }
 
 interface ArmedRoot {
