@@ -489,11 +489,17 @@ const BASH_MANIFEST_PREFIX = '__bash__';
 
 /** Roots are compared as strings, so they must be spelled one way: `canonPath` fixes the drive
  *  letter (#43) and this drops a trailing separator, the other way two hook events for one command
- *  have been seen to disagree. A mismatch would strand the snapshot and capture nothing. */
+ *  have been seen to disagree. A mismatch would strand the snapshot and capture nothing.
+ *
+ *  Trimmed by scanning, not by `/[\\/]+$/`: that regex backtracks polynomially on a path of many
+ *  separators, and this input arrives from a hook payload (CodeQL flags it as a ReDoS). One pass
+ *  from the end is linear and says the same thing. */
 function normalizeRoot(root: string | undefined): string | undefined {
   if (root === undefined) return undefined;
   const r = canonPath(root);
-  return r.length > 1 ? r.replace(/[\\/]+$/, '') : r;
+  let end = r.length;
+  while (end > 1 && (r[end - 1] === '/' || r[end - 1] === '\\')) end--;
+  return r.slice(0, end);
 }
 
 function manifestFiles(sessionId: string): string[] {

@@ -779,6 +779,23 @@ test('capture: a pending Bash snapshot still protects its blobs from the reaper'
   assert.ok(core.hasBlob(S, blob), 'the pending snapshot keeps its before-blob alive');
 });
 
+test('capture: a root spelled with trailing separators still finds its own snapshot', () => {
+  // Roots are matched as STRINGS, so the two hook events for one command have to normalize to the
+  // same spelling. That trim used a `/[\\/]+$/` regex, which backtracks polynomially on a path of
+  // many separators and takes its input from a hook payload — CodeQL rates it a ReDoS. It is a
+  // backwards scan now; this pins the behaviour the scan has to keep.
+  freshHome();
+  const S = 'rootnorm';
+  core.ensureStore(S);
+  const blob = core.writeBlob(S, Buffer.from('x\n'));
+  core.writeBashManifest(S, { files: { '/w/f.txt': blob }, ts: Date.now(), root: '/w///' });
+  assert.ok(core.readBashManifest(S, '/w'), 'trailing separators do not strand the snapshot');
+  assert.ok(core.readBashManifest(S, '/w/'), '…however the second event spells it');
+  // …and the root separator itself is never trimmed away into an empty string.
+  core.writeBashManifest(S, { files: { '/f.txt': blob }, ts: Date.now(), root: '/' });
+  assert.ok(core.readBashManifest(S, '/'), 'the filesystem root is still a root');
+});
+
 test('preview: a huge diff is bounded to the budget, and says what it left out', () => {
   freshHome();
   const S = 'prev1';
