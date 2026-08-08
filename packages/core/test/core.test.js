@@ -8065,8 +8065,13 @@ test('observe: a compaction summary can never become the session title (0.8.6)',
     JSON.stringify({ timestamp: new Date(3000).toISOString(), type: 'user', message: { role: 'user', content: 'Third session' } }) + '\n'
   );
   core.ensureStore(S3);
+  // Every mtime in this fixture is set EXPLICITLY, a minute apart. S3 used to take `new Date()` while
+  // S2 kept whatever its write had just stamped — also "now" — so which of the two led was decided by
+  // sub-millisecond ordering, and a fast filesystem put S2 first (observed on CI, node 20).
   const newest = new Date();
   fs.utimesSync(path.join(proj, S3 + '.jsonl'), newest, newest);
+  const middle = new Date(Date.now() - 60_000);
+  fs.utimesSync(path.join(proj, S2 + '.jsonl'), middle, middle);
   const older2 = new Date(Date.now() - 120_000);
   // S2 and S3 are command-only stubs (no assistant record), so resolution stays on S even though S3 is
   // the newest file — the two properties now disagree, which is the only way this assertion can fail.
