@@ -3,6 +3,7 @@
 Thanks for helping build the observatory. This guide is the practical "add a feature across all
 platforms" playbook. For the deeper "how it really works" reference — the dependency graph, the
 store format, the `--json` contract table — see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Prose in the site, the READMEs and the walkthroughs follows [docs/STYLE.md](docs/STYLE.md).
 
 ## The golden rule
 
@@ -79,8 +80,8 @@ example below) is the reference implementation of every step.
 - In `packages/vscode/src/extension.ts`, call `core.*` in-process (e.g. `core.buildEditTree`,
   `core.undoEdit`, `core.setStatus`, `core.readLog`, `core.fileMemory`). For a heavy scan, spawn the
   CLI subprocess instead (that's how Stats works).
-- If it's tree/observe-shaped data, it flows through the existing providers (`EditsProvider`, the
-  Observations/Timeline providers) — extend those rather than adding a parallel path.
+- If it's tree/observe-shaped data, it flows through the existing providers (`ReviewViewProvider`,
+  the Observations/Timeline providers) — extend those rather than adding a parallel path.
 - Declare every UI affordance in `packages/vscode/package.json` under `contributes`:
   `commands`, `menus`, `keybindings`, `views`/`viewsContainers`, `configuration`.
 
@@ -123,11 +124,14 @@ rendered by both editors:
    `added`/`removed` deltas). Re-exported from `index.ts`.
 2. **cli** — `cmdTree` (`case 'tree'` in `main()`) calls `core.buildEditTree(...)` and
    `emitJson(...)` it. Listed in `usage()` as `tree [--root <d>] [--filter <q>]`.
-3. **VS Code** — `EditsProvider.getChildren` calls `core.buildEditTree(session, { root, filter })`
-   **directly** (in-process) and walks the returned structure. No local tree logic.
+3. **VS Code** — the Review webview builds its rows from `core.reviewEdits` + `core.cancelledGroups`
+   **directly** (in-process) and posts them; the same in-process rule holds for every other view.
+   `buildEditTree` is the JetBrains tree's payload rather than VS Code's since 0.9.4.
 4. **JetBrains** — `ObservatoryService.refreshEditTree()` calls `ObservatoryCli.treeJson(...)`,
    `model/Tree.kt`'s `TreeParser.parse(...)` turns the JSON into the mirrored `EditTree` data
-   classes, and `ui/EditsTreePanel.kt` renders it.
+   classes, and `ui/EditsTreePanel.kt` renders it inside the Review tab. That payload also carries
+   `hiddenIds`, which every derived count in the plugin filters by — add a new count and it must
+   read the same set, or it will disagree with the tree beside it.
 
 Copy this shape for any new structured view.
 

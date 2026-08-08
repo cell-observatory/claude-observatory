@@ -55,6 +55,27 @@ function emitJson(v: unknown): void {
 
 // --- session resolution (shared shape with the VS Code front-end) ---
 
+/**
+ * The TERMINAL APP's session resolver. Every scripted verb stays strictly cwd-scoped
+ * (`getSessionId`), but the front door launched OUTSIDE any repo — a shell at $HOME, the Desktop —
+ * used to walk up to whatever stale session an ancestor directory once launched; opening the
+ * observatory from nowhere means "show me what Claude is doing NOW", so the machine-wide newest
+ * wins there (core.defaultTuiSession). Explicit `--session`, `--root` and the env pin all still win.
+ */
+function getTuiSessionId(args: string[]): string {
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  const pinned =
+    args.includes('--session') ||
+    args.includes('--root') ||
+    process.env.CLAUDE_OBSERVATORY_SESSION ||
+    process.env.CLAUDE_CHANGES_SESSION;
+  if (!pinned) {
+    const id = core.defaultTuiSession(process.cwd());
+    if (id && core.isSafeSessionId(id)) return id;
+  }
+  return getSessionId(args);
+}
+
 function getSessionId(args: string[]): string {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const i = args.indexOf('--session');
@@ -204,7 +225,11 @@ function cmdStatus(args: string[] = []): void {
   const session = core.resolveSessionId(process.cwd());
   const log = session ? core.readLog(session) : [];
   const skips = session ? core.readSkips(session) : [];
-  const by = (s: string) => log.filter((r) => r.status === s).length;
+  // Cancelled-out chains are not edits anybody reviews, and this line sits beside `list`'s: one
+  // session read "2 pending" here and "0 pending" there until they counted the same set.
+  const statusHidden = session ? core.cancelledMemberIds(session) : new Set<number>();
+  const shownLog = log.filter((r) => !statusHidden.has(r.id));
+  const by = (s: string) => shownLog.filter((r) => r.status === s).length;
 
   if (args.includes('--json')) {
     emitJson({
@@ -214,7 +239,7 @@ function cmdStatus(args: string[] = []): void {
       store: session ? core.storeDir(session) : null,
       lastCaptureTs: log.length ? core.maxOf(log.map((r) => r.ts)) : null,
       counts: session
-        ? { total: log.length, pending: by('pending'), kept: by('kept'), undone: by('undone') }
+        ? { total: shownLog.length, pending: by('pending'), kept: by('kept'), undone: by('undone'), cancelled: log.length - shownLog.length }
         : null,
       skipped: session ? skips.length : null,
     });
@@ -238,7 +263,10 @@ function cmdStatus(args: string[] = []): void {
     `active session:  ${session}\n` +
       `store:           ${core.storeDir(session)}\n` +
       `last capture:    ${last}\n` +
-      `edits:           ${log.length}  ${c.dim(`(${by('pending')} pending · ${by('kept')} kept · ${by('undone')} undone)`)}\n`
+      `edits:           ${shownLog.length}  ${c.dim(`(${by('pending')} pending · ${by('kept')} kept · ${by('undone')} undone)`)}\n` +
+      (log.length > shownLog.length
+        ? c.dim(`                 ${log.length - shownLog.length} more in cancelled-out chains — nothing to review\n`)
+        : '')
   );
   if (skips.length) {
     process.stdout.write(
@@ -578,6 +606,162 @@ function statusLabel(s: string): string {
   return c.dim('reverted');
 }
 
+/** A prompt's patches can be large; a whole ask's worth crossing a pipe into a Swing panel is not the
+ *  same budget as a whole-session `export`, which bounds itself at 64 MB (core `trace.ts`). */
+const REVIEW_PATCH_BUDGET = 8 * 1024 * 1024;
+
+/**
+ * `review [--prompt <id>]` — the session's work as review units with their patches; `--prompt`
+ * scopes to one ask. The session-wide answer is the Review tab's DEFAULT view (nothing selected
+ * loses nothing), and prompt selection filters it.
+ *
+ * The surface every Review tab renders, and the reason it is a CLI command rather than three
+ * client-side compositions: JetBrains never links core, so without this it would have to spawn
+ * `prompts --id` plus one `diff` per unit on every repaint. It is also what finally gives that plugin
+ * the collapse at all — it reads raw records off disk today, so its review cursor steps through every
+ * member of a unit individually where the other two surfaces show one row.
+ *
+ * Deliberately NOT in the `views` batch: `views` hands one argument list to every view it runs, so a
+ * `--prompt` would retarget the others, and the backend's dedupe key is the whole argument list — so
+ * batching it would respawn every view on each prompt selection, which is the opposite of the saving.
+ */
+function cmdReview(args: string[]): void {
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  // `--root` scopes this to the SESSION's workspace, not the terminal's — same rule every
+  // transcript-derived view follows, and the reason a dashboard opened outside the workspace used to
+  // render empty with no error.
+  const viewRoot = flagValue(args, '--root') ?? process.cwd();
+  const session = getSessionId(args);
+  const json = args.includes('--json');
+  if (noTranscript(session, json, flagValue(args, '--root') ?? undefined)) return;
+
+  // Without --prompt the answer is the WHOLE session's units — the Review tab's default view; a
+  // prompt id or index scopes it to one ask.
+  const want = flagValue(args, '--prompt');
+  const reqs = core.sessionPrompts(viewRoot, session);
+  const r = want ? (reqs.find((x) => x.id === want || String(x.index) === want) ?? null) : null;
+  if (want && !r) fail(`no prompt "${want}" in session ${session} (1..${reqs.length}).`);
+
+  const byId = new Map(core.reviewEdits(session).map((rec) => [rec.id, rec]));
+  const unitIds = r ? r.editIds : [...byId.keys()];
+  const errors: string[] = [];
+  let spent = 0;
+  let omittedFrom: number | null = null;
+  const noPatch = args.includes('--no-patch');
+  // The Review tabs' filter: still-undecided units only. Applied AFTER the missing-record check, so
+  // a bad id is still an error, never silently absent.
+  const pendingOnly = args.includes('--pending');
+
+  const units = unitIds.map((id) => {
+    const rec = byId.get(id);
+    if (!rec) {
+      // A display id with no record behind it is a bug somewhere upstream, not an empty unit — say so
+      // rather than emitting a hole the renderer would draw as "no changes".
+      errors.push(`unit #${id} is named by this prompt but has no record in the log`);
+      return null;
+    }
+    if (pendingOnly && rec.status !== 'pending') return null;
+    const d = core.lineDelta(session, rec);
+    const members = core.groupMembers(session, id);
+    let patch: string | undefined;
+    if (!noPatch) {
+      const p = core.coloredDiff(session, rec, false);
+      // ONE cut ends the attachments: the error says "from unit #N onward", and quietly attaching
+      // later, smaller patches made that a lie — a reader scrolling past the cut saw patches again
+      // and could not tell which absences were the budget and which were empty diffs.
+      if (omittedFrom !== null || spent + p.length > REVIEW_PATCH_BUDGET) {
+        if (omittedFrom === null) omittedFrom = id;
+      } else {
+        spent += p.length;
+        patch = p;
+      }
+    }
+    return {
+      id,
+      members,
+      file: rec.file,
+      rel: core.relPath(viewRoot, rec.file),
+      tool: rec.tool,
+      status: rec.status,
+      ts: rec.ts,
+      added: d.added,
+      removed: d.removed,
+      ...(patch === undefined ? {} : { patch }),
+    };
+  });
+  const all = units.filter(Boolean) as NonNullable<(typeof units)[number]>[];
+  // Chains that CANCEL OUT leave the row list: a file created then deleted (or an edit put back)
+  // ends on the content it started from, so there is nothing to decide. They are NOT dropped — they
+  // ride their own array, and every surface accounts for them in one footer with a Dismiss.
+  const cancelledMap = core.cancelledGroups(session);
+  // Every cancelled member at ANY status. `cancelledMap` answers the pending question — what Dismiss
+  // acts on — and a chain that was already dismissed is still nothing to look at, so renderers hide
+  // this whole set. Without it, one Dismiss turned the footer into thousands of greyed rows.
+  const hidden = core.cancelledMemberIds(session);
+  const cancelled = all.filter((u) => cancelledMap.has(u.id));
+  const rows = all.filter((u) => !cancelledMap.has(u.id) && !hidden.has(u.id));
+  const cancelledIds = [...new Set(cancelled.flatMap((u) => u.members))].sort((a, b) => a - b);
+  const hiddenIds = [...hidden].sort((a, b) => a - b);
+  if (omittedFrom !== null) {
+    errors.push(`patches from unit #${omittedFrom} onward exceed the ${Math.round(REVIEW_PATCH_BUDGET / 1024 / 1024)} MB budget — fetch them with \`diff <id> --patch\``);
+  }
+
+  // RAW ids, group-expanded: this is what `keep --ids` / `undo --ids` must act on. The rows above are
+  // display units, and acting on those alone strands their earlier members pending. Cancelled chains
+  // are INCLUDED here — "keep all in this scope" means all of it — while `cancelledIds` lets a
+  // surface dismiss only the ones that were never a decision.
+  const ids = [...new Set([...rows, ...cancelled].flatMap((u) => u.members))].sort((a, b) => a - b);
+
+  if (json) {
+    emitJson({
+      session,
+      prompt: r ? { id: r.id, index: r.index, ts: r.ts, endTs: r.endTs, title: r.title, text: r.text } : null,
+      units: rows,
+      cancelled,
+      cancelledIds,
+      // What a tree/list renderer must not draw, at any status — a superset of `cancelledIds`.
+      hiddenIds,
+      ids,
+      summary: {
+        units: rows.length,
+        pending: rows.filter((u) => u.status === 'pending').length,
+        cancelled: cancelled.length,
+        added: rows.reduce((a, u) => a + u.added, 0),
+        removed: rows.reduce((a, u) => a + u.removed, 0),
+      },
+      patchesOmittedFrom: omittedFrom,
+      errors,
+    });
+    return;
+  }
+
+  if (r) {
+    process.stdout.write(c.bold(`#${r.index}`) + c.dim(`  ${core.relTime(r.ts)} · ${rows.length} review unit(s)\n\n`));
+    process.stdout.write(`${r.text}\n\n`);
+  } else {
+    process.stdout.write(c.bold(session) + c.dim(`  whole session · ${rows.length} review unit(s)\n\n`));
+  }
+  if (!rows.length && !cancelled.length) {
+    process.stdout.write(c.dim(r ? 'this ask changed no files.\n' : 'no captured edits in this session.\n'));
+    return;
+  }
+  for (const u of rows) {
+    const mem = u.members.length > 1 ? c.dim(` (${u.members.length} edits)`) : '';
+    process.stdout.write(c.bold(`#${u.id} `) + `${u.rel}` + c.dim(` +${u.added}/−${u.removed}`) + mem + '\n');
+    if (u.patch) process.stdout.write(core.coloredDiff(session, byId.get(u.id) as EditRecord, isTTY()) + '\n');
+  }
+  // The footer: named, never a silent omission, and it carries the exact command that clears them.
+  if (cancelled.length) {
+    process.stdout.write(
+      c.dim(`\n${cancelled.length} cancelled-out chain(s) — created then deleted, or put back: nothing to review\n`) +
+        // `--session` spelled out: ids are per-session counters, so a pasted command without it
+        // would keep whatever ids 3,4,5 happen to be in whichever session the cwd resolves to.
+        c.dim(`  dismiss with: keep --ids ${cancelledIds.join(',')} --session ${session}\n`)
+    );
+  }
+  for (const e of errors) process.stderr.write(c.dim(`${e}\n`));
+}
+
 function cmdList(args: string[]): void {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const session = getSessionId(args);
@@ -599,6 +783,13 @@ function cmdList(args: string[]): void {
   if (sub) log = log.filter((r) => r.file.includes(sub));
 
   if (args.includes('--json')) {
+    // `cancelled` marks the units that go nowhere (created then deleted, or put back). Renderers
+    // keep them out of the row list and account for them in one footer — the flag rides per row so
+    // no renderer has to re-derive the grouping.
+    const cancelledMap = core.cancelledGroups(session);
+    // `cancelled` marks what to HIDE (any status); `members` rides only the pending ones, because
+    // those are the chains a Dismiss can still act on.
+    const hidden = core.cancelledMemberIds(session);
     emitJson({
       session,
       edits: log.map((r) => {
@@ -607,7 +798,12 @@ function cmdList(args: string[]): void {
         // shorten an absolute path, and the terminal's guess kept only the last two segments — so
         // packages/core/src/x.ts and packages/cli/src/x.ts both read as src/x.ts. Two different
         // files, indistinguishable, in a tool for deciding whether to revert one of them.
-        return { id: r.id, ts: r.ts, tool: r.tool, file: r.file, rel: core.relPath(process.cwd(), r.file), status: r.status, added: d.added, removed: d.removed };
+        const members = cancelledMap.get(r.id);
+        return {
+          id: r.id, ts: r.ts, tool: r.tool, file: r.file, rel: core.relPath(process.cwd(), r.file),
+          status: r.status, added: d.added, removed: d.removed,
+          ...(members ? { cancelled: true, members } : hidden.has(r.id) ? { cancelled: true } : {}),
+        };
       }),
     });
     return;
@@ -617,15 +813,20 @@ function cmdList(args: string[]): void {
     process.stdout.write(c.dim(`no matching edits (session ${session}).\n`));
     return;
   }
+  // Chains that cancel out are not rows here either — the same rule the JSON payload, the terminal
+  // and both editors follow. Counted in a footer below rather than dropped in silence.
+  const listHidden = core.cancelledMemberIds(session);
+  const shown = log.filter((r) => !listHidden.has(r.id));
+  const hiddenCount = log.length - shown.length;
   // group by file, preserve first-seen order
   const byFile = new Map<string, EditRecord[]>();
-  for (const r of log) {
+  for (const r of shown) {
     if (!byFile.has(r.file)) byFile.set(r.file, []);
     byFile.get(r.file)!.push(r);
   }
-  const pending = log.filter((r) => r.status === 'pending').length;
+  const pending = shown.filter((r) => r.status === 'pending').length;
   process.stdout.write(
-    c.bold(`${log.length} edit(s)`) +
+    c.bold(`${shown.length} edit(s)`) +
       c.dim(`  ·  ${pending} pending${only ? ` · ${only} only` : ''}  ·  session ${session}\n\n`)
   );
   for (const [file, recs] of byFile) {
@@ -641,6 +842,11 @@ function cmdList(args: string[]): void {
     }
     process.stdout.write('\n');
   }
+  if (hiddenCount) {
+    process.stdout.write(
+      c.dim(`${hiddenCount} row(s) not listed — cancelled-out chains (created then deleted, or put back): nothing to review\n`)
+    );
+  }
   process.stdout.write(c.dim('diff <id> · keep <id> · undo <id>\n'));
 }
 
@@ -650,6 +856,11 @@ function cmdTimeline(args: string[]): void {
   const core = require('@claude-observatory/core') as Core;
   const session = getSessionId(args);
   const log = core.readLog(session);
+  // This feed is deliberately RAW — every record, in the order it happened, because a phantom record
+  // is still something that happened and an audit that hides it is worse than one that explains it.
+  // But it must not CONTRADICT the review surfaces: the rows are marked and the pending count agrees
+  // with `list`, instead of reporting five pending for a session whose review list offers one.
+  const hidden = core.cancelledMemberIds(session);
   if (args.includes('--json')) {
     emitJson({
       session,
@@ -661,7 +872,7 @@ function cmdTimeline(args: string[]): void {
         // shorten an absolute path, and the terminal's guess kept only the last two segments — so
         // packages/core/src/x.ts and packages/cli/src/x.ts both read as src/x.ts. Two different
         // files, indistinguishable, in a tool for deciding whether to revert one of them.
-        return { id: r.id, ts: r.ts, tool: r.tool, file: r.file, rel: core.relPath(process.cwd(), r.file), status: r.status, added: d.added, removed: d.removed };
+        return { id: r.id, ts: r.ts, tool: r.tool, file: r.file, rel: core.relPath(process.cwd(), r.file), status: r.status, added: d.added, removed: d.removed, ...(hidden.has(r.id) ? { cancelled: true } : {}) };
         }),
     });
     return;
@@ -670,15 +881,20 @@ function cmdTimeline(args: string[]): void {
     process.stdout.write(c.dim(`no edits (session ${session}).\n`));
     return;
   }
-  const pending = log.filter((r) => r.status === 'pending').length;
+  const pending = log.filter((r) => r.status === 'pending' && !hidden.has(r.id)).length;
+  const inChains = log.filter((r) => hidden.has(r.id)).length;
   process.stdout.write(
-    c.bold('Timeline') + c.dim(`  ${log.length} edit(s) · ${pending} pending · newest first · session ${session}\n\n`)
+    c.bold('Timeline') +
+      c.dim(
+        `  ${log.length} edit(s) · ${pending} pending${inChains ? ` · ${inChains} in cancelled-out chains` : ''}` +
+          ` · newest first · session ${session}\n\n`
+      )
   );
   for (const r of [...log].reverse()) {
     const { added, removed } = core.lineDelta(session, r);
     const delta = c.green(`+${added}`) + ' ' + c.red(`-${removed}`);
     process.stdout.write(
-      `${c.dim(core.relTime(r.ts).padEnd(12))} ${c.bold('#' + r.id)}  ${statusLabel(r.status).padEnd(7)} ${delta}  ${c.cyan(relFile(r.file))} ${c.dim(r.tool)}\n`
+      `${c.dim(core.relTime(r.ts).padEnd(12))} ${c.bold('#' + r.id)}  ${statusLabel(r.status).padEnd(7)} ${delta}  ${c.cyan(relFile(r.file))} ${c.dim(r.tool)}${hidden.has(r.id) ? c.dim(' · cancelled-out chain') : ''}\n`
     );
   }
 }
@@ -1037,7 +1253,18 @@ function cmdPrompts(args: string[]): void {
     return;
   }
   if (args.includes('--json')) {
-    emitJson({ session, summary: core.summarizePrompts(reqs), prompts: reqs });
+    // `assignErrors` (additive): an override naming a prompt id this session does not have — the
+    // edit falls back to its temporal window rather than vanishing, and the mismatch is SAID here.
+    const known = new Set(reqs.map((p) => p.id));
+    const assignErrors = [...core.readScopeOverrides(session).entries()]
+      .filter(([, p]) => !known.has(p))
+      .map(([id, p]) => `edit #${id} assigned to unknown prompt "${p}" — override ignored`);
+    emitJson({
+      session,
+      summary: core.summarizePrompts(reqs),
+      prompts: reqs,
+      ...(assignErrors.length ? { assignErrors } : {}),
+    });
     return;
   }
   const sum = core.summarizePrompts(reqs);
@@ -1265,6 +1492,7 @@ function cmdMultitask(args: string[]): void {
         description: s.description ?? null,
         phase: s.phase,
         phaseConfidence: s.phaseConfidence, // 'high' | 'heuristic' — renderers dim staleness-inferred phases
+        running: s.running, // the digest's own liveness — dropping it left consumers deriving it from prose
         todos: s.todos,
         currentTask: s.currentTask,
         edits: roll ? roll.edits : 0,
@@ -1509,7 +1737,11 @@ function cmdDiff(args: string[]): void {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const session = getSessionId(args);
   const id = requireId(args);
-  const rec = core.findRecord(session, id);
+  // The DISPLAY record first: every list shows collapsed review units, and `diff <id>` on a unit's
+  // row must render the unit's whole net change — not the raw last hop, which shows a slice of what
+  // the row claims. An id no row shows (a pending member inside a unit) still answers raw, so a
+  // hand-typed member id keeps meaning the single record it names.
+  const rec = core.reviewEdits(session).find((r) => r.id === id) ?? core.findRecord(session, id);
   if (!rec) fail(`no edit #${id} in session ${session}`);
   process.stdout.write(core.coloredDiff(session, rec as EditRecord, isTTY()) + '\n');
   // `--patch` means "the patch and nothing else". The trailer below is a hint for a human at a
@@ -1659,13 +1891,18 @@ function cmdUndo(args: string[]): void {
       // and the other could not, which is the same feature behaving differently per editor.
       if (args.includes('--dry-run')) {
         if (args.includes('--json')) {
-          emitJson({ dryRun: true, pending: scope.pending, units: scope.units, files: scope.files, ids: scope.ids });
+          emitJson({ dryRun: true, pending: scope.pending, units: scope.units, fromEarlier: scope.fromEarlier, files: scope.files, ids: scope.ids });
           return;
         }
         process.stdout.write(
           scope.pending === 0
             ? c.dim('no pending edits to rewind from that prompt onward\n')
-            : `would revert ${scope.pending} pending edit(s) (${scope.units} review unit(s)) across ${scope.files.length} file(s)\n`
+            : `would revert ${scope.pending} pending edit(s) (${scope.units} review unit(s)) across ${scope.files.length} file(s)` +
+              // A unit is the smallest revertible thing and one can span two asks (a file absent in
+              // between), so a rewind can reach back past the boundary. Said, never discovered.
+              (scope.fromEarlier
+                ? `, including ${scope.fromEarlier} from an earlier ask that cannot be separated from this one\n`
+                : '\n')
         );
         return;
       }
@@ -1684,6 +1921,7 @@ function cmdUndo(args: string[]): void {
         total: res.total,
         ids: res.ids,
         ...(units === undefined ? {} : { units }),
+        ...(res.firstConflict === undefined ? {} : { firstConflict: res.firstConflict }),
       });
       return;
     }
@@ -1703,17 +1941,40 @@ function cmdUndo(args: string[]): void {
     // The refusal's remediation pointer (e.g. `clean --phantoms`) must reach the user — a bulk revert
     // that silently swallows it leaves a session that never empties and no way to learn why.
     if (res.errors && res.firstError) process.stdout.write(c.yellow('  ↳ ') + res.firstError + '\n');
+    // Same for a conflict: when it is a named-dependent refusal, the name and the closure are the remedy.
+    if (res.conflicts && res.firstConflict) process.stdout.write(c.yellow('  ↳ ') + res.firstConflict + '\n');
     return;
   }
   const id = requireId(args);
   const force = args.includes('--force');
-  // Undo the whole same-code review unit (collapsed group), newest-first; --force is the per-file fallback.
+  // Undo the whole same-code review unit (collapsed group) as ONE merge; --force is the per-file fallback.
   const res = force ? core.restoreFile(session, id) : core.undoGroup(session, id);
   core.autoClearDemo(session); // a fully reviewed demo session leaves no residue
+  // A named-dependent refusal gets prompt attribution here, not in core — core has no cwd at that
+  // depth. Best-effort: promptWindows answers in display units, which is what `dependents` carries.
+  if (res.status === 'conflict' && res.dependents?.length) {
+    try {
+      const windows = core.promptWindows(flagValue(args, '--root') ?? process.cwd(), session);
+      const notes = res.dependents
+        .map((d) => {
+          const w = windows.find((x) => x.editIds.includes(d));
+          return w ? `unit #${d} is prompt #${w.index}'s work` : null;
+        })
+        .filter((n): n is string => n !== null);
+      if (notes.length) res.message += ` (${notes.join('; ')})`;
+    } catch {
+      /* no transcript beside this store — the ids alone still name the edge */
+    }
+  }
   // --json: the full structured UndoResult, so a front-end can branch conflict → offer --force
   // instead of string-matching prose. Exit codes match the human path exactly.
   if (args.includes('--json')) {
-    emitJson({ ok: res.ok, status: res.status, message: res.message });
+    emitJson({
+      ok: res.ok,
+      status: res.status,
+      message: res.message,
+      ...(res.dependents ? { dependents: res.dependents, closure: res.closure } : {}),
+    });
     process.exit(res.status === 'conflict' ? 1 : res.ok ? 0 : 1);
   }
   if (res.status === 'conflict') {
@@ -1722,6 +1983,97 @@ function cmdUndo(args: string[]): void {
   }
   process.stdout.write((res.ok ? c.green('✓ ') : c.red('✗ ')) + res.message + '\n');
   process.exit(res.ok ? 0 : 1);
+}
+
+/**
+ * `assign --ids <a,b,c> --prompt <id|index> [--json]` / `assign --ids … --clear` — move edits'
+ * PROMPT ATTRIBUTION. The mechanism behind "this change belongs to that ask": an exact override
+ * table keyed by immutable record ids, appended to the log as `{op:"scope"}` lines (last wins,
+ * survives rewrites). Every read side follows — prompts, the change map's per-ask rollups,
+ * `review --prompt`, and rewind scopes — because they all attribute through one helper. Units are
+ * NOT re-derived: boundaries stay temporal; only the label moves. The editors' drag/menu gesture is
+ * deferred; this verb is the whole 0.9.4 surface.
+ */
+function cmdAssign(args: string[]): void {
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  const viewRoot = flagValue(args, '--root') ?? process.cwd();
+  const session = getSessionId(args);
+  const json = args.includes('--json');
+  if (noTranscript(session, json, flagValue(args, '--root') ?? undefined)) return;
+
+  const rawIds = flagValue(args, '--ids');
+  if (!rawIds) fail('`assign --ids <a,b,c>` requires a comma-separated id list');
+  const parsed = (rawIds as string).split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => Number.isInteger(n));
+  if (!parsed.length) fail('`assign --ids <a,b,c>` got no valid integer ids');
+  // Expand through units — the same rule as every id-set verb: a collapsed row names its rep, and
+  // moving the rep alone would strand its members' attribution.
+  const ids = [...new Set(parsed.flatMap((id) => core.groupMembers(session, id)))].sort((a, b) => a - b);
+
+  if (args.includes('--clear')) {
+    core.appendScopeOverride(session, ids, null);
+    if (json) emitJson({ assigned: false, ids, prompt: null });
+    else process.stdout.write(c.green('✓ ') + `cleared the assignment of ${ids.length} edit(s)\n`);
+    return;
+  }
+  const want = flagValue(args, '--prompt');
+  if (!want) fail('`assign --ids … --prompt <id|index>` requires a prompt (or --clear)');
+  const reqs = core.sessionPrompts(viewRoot, session);
+  const r = reqs.find((x) => x.id === want || String(x.index) === want);
+  if (!r) fail(`no prompt "${want}" in session ${session} (1..${reqs.length}).`);
+  core.appendScopeOverride(session, ids, r.id);
+  if (json) emitJson({ assigned: true, ids, prompt: r.id });
+  else process.stdout.write(c.green('✓ ') + `assigned ${ids.length} edit(s) to prompt #${r.index}\n`);
+}
+
+/**
+ * `oplog [--json]` / `oplog --revert-last [--json]` — the reviewer's own journaled operations.
+ * CLI-only surface, like `tasklog`: neither editor invokes it. Bulk keeps/reverts land in the log as
+ * `{op:"batch"}` lines with before-images (store.ts); this lists them newest first and reverts the
+ * most recent one — statuses restored for a keep, files rewritten for an undo/redo.
+ */
+function cmdOplog(args: string[]): void {
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  const session = getSessionId(args);
+  const json = args.includes('--json');
+  const ops = core.readOperations(session);
+  if (args.includes('--revert-last')) {
+    if (!ops.length) {
+      if (json) emitJson({ session, reverted: null });
+      else process.stdout.write(c.dim('no journaled operations in this session\n'));
+      return;
+    }
+    const last = ops[0];
+    const res = core.revertOperation(session, last);
+    core.autoClearDemo(session); // a fully reviewed demo session leaves no residue
+    const scoped = res.result as { undone?: number; redone?: number; conflicts?: number } | undefined;
+    if (json) {
+      emitJson({
+        session,
+        reverted: { kind: last.kind, label: last.label, ids: last.ids, ts: last.ts },
+        ...(res.restored === undefined ? {} : { restored: res.restored }),
+        ...(scoped ? { result: scoped } : {}),
+      });
+      return;
+    }
+    const outcome =
+      res.restored !== undefined
+        ? `${res.restored} status(es) restored`
+        : `${scoped?.undone ?? scoped?.redone ?? 0} edit(s) rewritten` +
+          (scoped?.conflicts ? ` · ${scoped.conflicts} conflict(s) left` : '');
+    process.stdout.write(c.green('✓ ') + `reverted "${last.label}" — ${outcome}\n`);
+    return;
+  }
+  if (json) {
+    emitJson({ session, operations: ops.map((o) => ({ kind: o.kind, label: o.label, ids: o.ids, ts: o.ts })) });
+    return;
+  }
+  if (!ops.length) {
+    process.stdout.write(c.dim('no journaled operations in this session — bulk keeps and reverts land here\n'));
+    return;
+  }
+  for (const o of ops) {
+    process.stdout.write(`${c.dim(core.relTime(o.ts).padEnd(8))} ${o.label}  ${c.dim(`(#${o.ids.join(', #')})`)}\n`);
+  }
 }
 
 function cmdRedo(args: string[]): void {
@@ -1868,7 +2220,7 @@ function cmdTaskUndo(args: string[]): void {
   if (args.includes('--json')) {
     // Same UndoScopeResult as the bulk path, so it gets the same JSON shape: a refusal that reaches one
     // caller and not the other is how a session that never empties gets no explanation.
-    emitJson({ undone: res.undone, conflicts: res.conflicts, errors: res.errors, firstError: res.firstError ?? null, total: res.total, ids: res.ids });
+    emitJson({ undone: res.undone, conflicts: res.conflicts, errors: res.errors, firstError: res.firstError ?? null, total: res.total, ids: res.ids, ...(res.firstConflict === undefined ? {} : { firstConflict: res.firstConflict }) });
     return;
   }
   process.stdout.write(
@@ -2689,7 +3041,10 @@ function cmdTree(args: string[]): void {
   const fi = args.indexOf('--filter');
   const filter = flagValue(args, '--filter');
   if (args.indexOf('--filter') >= 0 && !filter) fail('`tree --filter <substr>` requires a value');
-  emitJson(core.buildEditTree(session, { root, filter }));
+  // `hiddenIds` rides along, independent of `--filter`: the JetBrains plugin derives its status bar,
+  // its File/Diff/Folder axes and its project-view badges from the raw store, and without this it had
+  // no way to agree with the tree it renders beside them.
+  emitJson({ ...core.buildEditTree(session, { root, filter }), hiddenIds: [...core.cancelledMemberIds(session)].sort((a, b) => a - b) });
 }
 
 /** The session change-map: edits placed as module→file→class + strict per-task rollups, for the map webview.
@@ -3978,6 +4333,9 @@ function usage(): void {
       `  prompts [--json]     the session as the list of things YOU asked for, each with the edits,\n` +
       `                       files, folders, tokens, agents, workflows, tasks and shells it produced;\n` +
       `                       --id <n> drills into one; --id <n> --response prints Claude’s reply to it\n` +
+      `  review [--prompt <n>] the session's work as review units, each with its net patch — repeated\n` +
+      `                       edits to the same code read as one change; --prompt <id|index> scopes to\n` +
+      `                       one ask; --pending hides resolved units; --no-patch for metadata only\n` +
       `  feed [--json]        what ONE thing is doing now — a tail of its activity;\n` +
       `                       --kind session|agent|workflow|task|process --id <id> [--limit <n>]\n` +
       `  subagents [--json]   every subagent this session spawned, each with its own action timeline + metrics (alias: agents)\n` +
@@ -4002,6 +4360,12 @@ function usage(): void {
       `                       ones you had reverted before the rewind. To restore only what one rewind moved,\n` +
       `                       pass that rewind's --json ids to --ids (what the editors' Redo button does)\n` +
       `                       an id and a bulk flag are mutually exclusive\n` +
+      `  oplog [--json]       YOUR bulk operations (keeps, reverts, redos), journaled with before-images,\n` +
+      `                       newest first; --revert-last reverses the most recent one — statuses\n` +
+      `                       restored for a keep, files rewritten for a revert/redo\n` +
+      `  assign --ids <a,b,c> --prompt <id|index>   move those edits' PROMPT attribution — every\n` +
+      `                       surface follows (prompts, change map, review, rewind scopes); units\n` +
+      `                       keep their temporal boundaries. --clear restores the recorded window\n` +
       `  task-keep <taskId>   keep every pending edit in a task's strict in-progress span (--json)\n` +
       `  task-undo <taskId>   revert every pending edit in a task's strict in-progress span (--json)\n` +
       `  task-clear <taskId>  drop a task's resolved (kept/undone) edits (--json);\n` +
@@ -4040,8 +4404,9 @@ function usage(): void {
       `  tui [--session <id>] [--root <d>] [--tick <s>] [--once] [--no-color] [--no-mouse]\n` +
       `       [--cols N] [--rows N]\n` +
       `                       the terminal app (TUI) — the same review actions as the editors:\n` +
-      `                       Prompts, Traces, Detail and Dashboards. Keys: F1-F5 focus a window\n` +
-      `                       (press twice to zoom) — they are the ONLY window keys; 0-9 then Enter\n` +
+      `                       Claude, Prompts, Traces, Detail and Dashboards. Keys: F1-F6 focus a window\n` +
+      `                       (press twice to zoom — except F1, whose second press hands the terminal\n` +
+      `                       to \`claude --resume\`) — they are the ONLY window keys; 0-9 then Enter\n` +
       `                       names an EDIT id. Tab next, arrows move, [ ]\n` +
       `                       tabs, m minimize, z zoom, = reset, a keep, u undo, A/U everything listed\n` +
       `                       (with a counted confirm), R redo, e $EDITOR, s session, o options,\n` +
@@ -4190,9 +4555,9 @@ function maybeCheckForUpdate(cmd: string | undefined, rest: string[]): void {
  *  to tell a swallowed command apart from a flag's argument at the front door. Derived from
  *  the same switch that runs them, so the two cannot drift. */
 const KNOWN_VERBS = new Set([
-  'actions', 'agents', 'analyze', 'blob', 'capabilities', 'capture', 'changemap', 'chat-context', 'clean', 'demo', 'diff', 'doctor', 'egress', 'export', 'feed', 'fleet', 'footprint', 'help', 'ignore', 'init', 'insights', 'install-extensions', 'keep', 'list', 'locate', 'metrics', 'multitask', 'observations', 'observe', 'processes', 'prompts', 'recap', 'remotes', 'store', 'redo', 'resolve', 'risk', 'sessions', 'siblings', 'stats', 'status', 'statusline', 'subagents', 'tui', 'suggest', 'summary', 'task-clear', 'task-keep', 'task-undo', 'tasklog', 'timeline', 'trace', 'tree', 'undo', 'uninstall', 'update', 'usage', 'version', 'views', 'warm',
+  'actions', 'agents', 'analyze', 'assign', 'blob', 'capabilities', 'capture', 'changemap', 'chat-context', 'clean', 'demo', 'diff', 'doctor', 'egress', 'export', 'feed', 'fleet', 'footprint', 'help', 'ignore', 'init', 'insights', 'install-extensions', 'keep', 'list', 'locate', 'metrics', 'multitask', 'observations', 'observe', 'oplog', 'processes', 'prompts', 'recap', 'remotes', 'review', 'store', 'redo', 'resolve', 'risk', 'sessions', 'siblings', 'stats', 'status', 'statusline', 'subagents', 'tui', 'suggest', 'summary', 'task-clear', 'task-keep', 'task-undo', 'tasklog', 'timeline', 'trace', 'tree', 'undo', 'uninstall', 'update', 'usage', 'version', 'views', 'warm',
 ]);
-const FLAGS_WITH_VALUES = new Set(['--root', '--session', '--tick', '--cols', '--rows', '--out', '--under', '--ids', '--file', '--since', '--stale', '--drop', '--older-than', '--check', '--views', '--channel']);
+const FLAGS_WITH_VALUES = new Set(['--root', '--session', '--tick', '--cols', '--rows', '--out', '--under', '--ids', '--file', '--since', '--stale', '--drop', '--older-than', '--check', '--views', '--channel', '--prompt']);
 
 function main(): void {
   // Exit cleanly when output is piped to a consumer that closes early (`| head`, `| grep -q`, …)
@@ -4225,7 +4590,7 @@ function main(): void {
     if (verb) {
       fail(`\`${verb}\` is a command, so it goes first: \`claude-observatory ${verb} ${argv.filter((a) => a !== verb).join(' ')}\``);
     }
-    require('@claude-observatory/tui').runTui(require('@claude-observatory/core'), argv, getSessionId);
+    require('@claude-observatory/tui').runTui(require('@claude-observatory/core'), argv, getTuiSessionId);
     return;
   }
   maybeCheckForUpdate(cmd, rest); // register a once-a-day "update available" nudge (never blocks)
@@ -4304,6 +4669,9 @@ function main(): void {
     case 'prompts':
       cmdPrompts(rest);
       break;
+    case 'review':
+      cmdReview(rest);
+      break;
     case 'feed':
       cmdFeed(rest);
       break;
@@ -4332,6 +4700,12 @@ function main(): void {
       break;
     case 'undo':
       cmdUndo(rest);
+      break;
+    case 'oplog':
+      cmdOplog(rest);
+      break;
+    case 'assign':
+      cmdAssign(rest);
       break;
     case 'redo':
       cmdRedo(rest);
@@ -4376,7 +4750,7 @@ function main(): void {
       cmdViews(rest);
       break;
     case 'tui':
-      require('@claude-observatory/tui').runTui(require('@claude-observatory/core'), rest, getSessionId);
+      require('@claude-observatory/tui').runTui(require('@claude-observatory/core'), rest, getTuiSessionId);
       break;
     case 'changemap':
       cmdChangeMap(rest);

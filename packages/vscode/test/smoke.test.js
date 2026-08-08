@@ -237,6 +237,7 @@ test('extension: three views, click commands, inline annotations, chat, status s
       withProgress: (_o, task) => task({ report() {} }, { isCancellationRequested: progressCancelled, onCancellationRequested: () => ({ dispose() {} }) }),
       onDidChangeWindowState: () => ({ dispose() {} }),
       onDidChangeActiveTextEditor: () => ({ dispose() {} }),
+      onDidChangeVisibleTextEditors: () => ({ dispose() {} }), // DiffBars syncs per-diff review bars on this
       activeColorTheme: { kind: 2 }, // Dark — exercises the dark clear-tint branch
       onDidChangeActiveColorTheme: () => ({ dispose() {} }),
       onDidChangeTextEditorSelection: () => ({ dispose() {} }),
@@ -287,7 +288,11 @@ test('extension: three views, click commands, inline annotations, chat, status s
       },
     },
     languages: {
-      registerCodeLensProvider: (_sel, p) => { lensProvider = p; return { dispose() {} }; },
+      // Two providers register now: the inline-review lens (file documents — what this harness
+      // exercises) and the claude-edit diff-action lens. Capture the INLINE one: taking "the last
+      // registration" silently swapped providers when the diff lens landed, and every inline
+      // assertion below ran against a provider that answers [] for file docs.
+      registerCodeLensProvider: (sel, p) => { if (sel?.scheme !== 'claude-edit') lensProvider = p; return { dispose() {} }; },
       registerHoverProvider: (_sel, p) => { hoverProvider = p; return { dispose() {} }; },
     },
     env: { clipboard: { writeText: (t) => { clipboardText = t; return Promise.resolve(); } } },
@@ -306,9 +311,11 @@ test('extension: three views, click commands, inline annotations, chat, status s
       globalState: { get: (k, d) => (globalState.has(k) ? globalState.get(k) : d), update: (k, v) => { globalState.set(k, v); return Promise.resolve(); } },
     });
 
-    const editsTree = trees['claudeObservatory.edits'];
-    const diffsTree = trees['claudeObservatory.diffs'];
-    assert.ok(editsTree && diffsTree, 'Edits and Diffs views registered');
+    // 0.9.4 (N15): the Edits and Diffs trees are GONE — Review is the one review surface; the raw
+    // records stay backend-only (File History still reads them per file).
+    assert.ok(!trees['claudeObservatory.edits'] && !trees['claudeObservatory.diffs'],
+      'the Edits and Diffs trees are no longer registered');
+    assert.ok(trees['claudeObservatory.fileHistory'], 'File History remains a tree');
     // 0.8.0 panel consolidation: Timeline folded into Observations. Round 3: the standalone Multitasking
     // view is folded INTO the Overview (master–detail). Actions is now a SIDEBAR view (moved out of the
     // old bottom-panel Observations dock; 0.9.0 groups it with Prompts + Observations in the Timeline panel).
@@ -331,17 +338,56 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.doesNotThrow(() => folderChangeHandlers.forEach((cb) => cb({ added: [], removed: [] })),
       'a folder change refreshes without throwing');
 
-    // 0.9.0 regrouping: the SIDEBAR ("Observatory Traces") is purely the per-edit review side — Edits ·
-    // Diffs · File History — and the timeline-shaped surfaces (Prompts · Actions · Observations) live
-    // together in the "Observatory Timeline" panel container. The dock ("Observatory Dashboards") keeps
-    // Overview · Stats.
+    // The SIDEBAR ("Observatory Traces") is purely the review side — the Review webview (first, the
+    // default surface) · File History — and the timeline-shaped surfaces (Prompts · Actions ·
+    // Observations) live together in the "Observatory Timeline" panel container. The dock
+    // ("Observatory Dashboards") keeps Overview · Stats.
     const pkg = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../package.json'), 'utf8'));
     const sidebar = pkg.contributes.views.claudeObservatory;
     const dock = pkg.contributes.views.claudeObservatoryDock;
     const timeline = pkg.contributes.views.claudeObservatoryPrompts;
     assert.deepEqual(sidebar.map((v) => v.id),
-      ['claudeObservatory.edits', 'claudeObservatory.diffs', 'claudeObservatory.fileHistory'],
-      'the Traces sidebar is exactly the three per-edit review views');
+      ['claudeObservatory.reviewList', 'claudeObservatory.fileHistory'],
+      'the Traces sidebar is exactly Review (first — the ONE review surface) and File History');
+    assert.equal(sidebar[0].type, 'webview', 'Review is a webview — an actionable list, not a tree');
+    // Per-diff actions inside the "Open all in editor" rows ride as COMMENT-THREAD review bars on
+    // the after documents (DiffBars) — the multi-diff row-toolbar menu is proposed API stable
+    // builds ignore, and code lenses hid inside the hidden-unchanged folds. The bar's buttons are
+    // the same diffKeep/diffUndo/diffChat commands, contributed on the diff-bar thread context.
+    // Per-diff Keep/Undo/Chat ride a comment-thread REVIEW BAR on the after document, anchored at
+    // the first changed line. The two placements that would sit in the row header or the divider
+    // (multiDiffEditor/resource/title, diffEditor/gutter/hunk) are both PROPOSED api that stable
+    // builds silently drop; code lenses were rejected. NO codeLens default rides along with the bar.
+    assert.match(fs.readFileSync(path.resolve(__dirname, '../src/extension.ts'), 'utf8'),
+      /createCommentController\('claudeObservatoryDiffBar'/,
+      'the per-diff review-bar controller exists');
+    for (const proposed of ['multiDiffEditor/resource/title', 'diffEditor/gutter/hunk'])
+      assert.ok(!pkg.contributes.menus[proposed], `no contribution to the proposed ${proposed} menu`);
+    const diffBarMenu = pkg.contributes.menus['comments/commentThread/title']
+      .filter((m) => /claudeDiffEdit/.test(m.when || ''));
+    assert.deepEqual(diffBarMenu.map((m) => m.command),
+      ['claudeObservatory.diffKeep', 'claudeObservatory.diffUndo', 'claudeObservatory.diffChat',
+        'claudeObservatory.diffOpenFull'],
+      'the per-diff bar carries Keep/Undo/Chat, plus Open-full-diff on a previewed row');
+    // Keep/Undo/Chat must match BOTH thread kinds (plain and preview); Open-full-diff only the
+    // preview one — offering "open the full diff" on a diff that is already whole is noise.
+    for (const m of diffBarMenu.filter((x) => x.command !== 'claudeObservatory.diffOpenFull'))
+      assert.match(m.when, /claudeDiffEdit\//, 'the three verbs match previewed rows too');
+    assert.match(diffBarMenu.find((m) => m.command === 'claudeObservatory.diffOpenFull').when,
+      /claudeDiffEditPreview/, 'Open-full-diff is offered only where something was left out');
+    assert.equal(pkg.contributes.configuration.properties['claudeObservatory.openAllPreviewLines'].default, 50,
+      'the open-all preview budget has a default');
+    assert.ok(diffBarMenu.every((m) => /claudeObservatoryDiffBar/.test(m.when)),
+      'the bar entries are scoped to the diff-bar controller — never the floating review bar');
+    assert.ok(!('diffEditor.codeLens' in pkg.contributes.configurationDefaults),
+      'no code-lens default: the lenses are gone and nothing else here wants them on');
+    assert.equal(pkg.contributes.configurationDefaults['diffEditor.hideUnchangedRegions.enabled'], true,
+      'diffs read as hunks with expandable folds, not whole files');
+    // …and a webview declared in the manifest must be REGISTERED, or it renders as an empty pane with
+    // no error anywhere. The tree views are asserted the same way further down.
+    assert.match(fs.readFileSync(path.resolve(__dirname, '../src/extension.ts'), 'utf8'),
+      /registerWebviewViewProvider\('claudeObservatory\.reviewList'/,
+      'the Review webview provider is registered under the declared id');
     assert.deepEqual(timeline.map((v) => v.id), ['claudeObservatory.timeline'],
       'the Timeline panel is ONE view — the webview that draws the three tabs itself');
     assert.equal(timeline[0].type, 'webview', 'and it is a webview, not a tree');
@@ -429,11 +475,8 @@ test('extension: three views, click commands, inline annotations, chat, status s
       assert.equal(pendingOf(OTHER), beforeOther, 'an unsafe id is refused, not followed');
       assert.equal(pendingOf(S), beforeSelf, '…and does not silently retarget another session either');
     }
-    // 0.8.7 QoL: the sidebar trees carry VS Code's native Collapse-All button (showCollapseAll) — the
-    // file-Explorer affordance the user asked for. Actions and Observations are webview rows now, and
-    // carry their own twisties instead.
-    for (const id of ['claudeObservatory.edits', 'claudeObservatory.diffs'])
-      assert.equal(treeViewOpts[id] && treeViewOpts[id].showCollapseAll, true, `${id} tree offers Collapse All`);
+    // 0.9.4 (N15): the collapsible trees are gone with the Edits/Diffs views — nothing left in the
+    // sidebar deep enough to need Collapse All (File History is a flat list).
     // …and the palette commands that reveal each Timeline tab after a VS Code layout-persistence hide.
     for (const c of ['showPrompts', 'showActions', 'showObservations']) {
       assert.ok(typeof commands[`claudeObservatory.${c}`] === 'function', `${c} is registered`);
@@ -446,7 +489,7 @@ test('extension: three views, click commands, inline annotations, chat, status s
     // The tour is NOT a sidebar view: a slot there sits in the very container whose other views the
     // tour keeps asking you to look at. It is a detachable webview panel, floating by default.
     assert.ok(!sidebar.some((v) => v.id === 'claudeObservatory.tour'), 'the tour takes no sidebar slot');
-    assert.equal(sidebar[0].id, 'claudeObservatory.edits', 'so Edits still leads the container');
+    assert.equal(sidebar[0].id, 'claudeObservatory.reviewList', 'so Review still leads the container — the default surface');
     for (const c of ['tourDock', 'tourFloat'])
       assert.ok(pkg.contributes.commands.some((x) => x.command === `claudeObservatory.${c}`), `${c} is contributed`);
     for (const c of ['startDemo', 'restartDemo', 'startTour', 'tourNext', 'tourBack', 'exitDemo'])
@@ -480,10 +523,17 @@ test('extension: three views, click commands, inline annotations, chat, status s
     }
     for (const c of ['restartDemo', 'exitDemo'])
       assert.match(titles.find((m) => m.command === `claudeObservatory.${c}`).when, /&& claudeObservatory\.demoPresent/, `${c} shows only while a demo is running`);
-    const welcome = pkg.contributes.viewsWelcome.filter((w) => w.view === 'claudeObservatory.edits');
-    assert.ok(welcome.length >= 3, 'the Edits view keeps its three empty-state variants');
-    for (const w of welcome)
-      assert.match(w.contents, /command:claudeObservatory\.startDemo/, 'every Edits empty state offers the demo, including the hooks-missing one');
+    // N15: welcome content lives on File History (the one remaining tree — a webview never renders
+    // viewsWelcome), reduced to TWO variants whose claims are true on a PER-FILE host: the old
+    // session-wide "No edits in this session yet" texts lied there (an untouched file empties File
+    // History even mid-session), and VS Code stacks every matching entry. Both still offer the demo
+    // — the first-run path must survive the tree removal.
+    const welcome = pkg.contributes.viewsWelcome.filter((w) => w.view === 'claudeObservatory.fileHistory');
+    assert.equal(welcome.length, 2, 'exactly the two per-file-truthful File History empty states');
+    assert.ok(welcome.every((w) => /startDemo/.test(w.contents) && w.when), 'both offer the demo and are when-gated');
+    assert.ok(!welcome.some((w) => /this session/.test(w.contents)), 'no session-wide claim on a per-file host');
+    assert.ok(!pkg.contributes.viewsWelcome.some((w) => /claudeObservatory\.(edits|diffs)$/.test(w.view)),
+      'no welcome content targets the removed trees');
     const palette = pkg.contributes.menus.commandPalette || [];
     assert.equal(palette.find((m) => m.command === 'claudeObservatory.tourGoto').when, 'false', 'tourGoto is panel-driven, not a palette command');
     for (const c of ['tourNext', 'tourBack'])
@@ -492,16 +542,103 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.ok(contentProviders['claude-edit'] && contentProviders['claude-observation'], 'blob + markdown content providers registered');
     assert.ok(decoProvider, 'status FileDecorationProvider registered');
 
-    const files = editsTree.getChildren();
-    assert.equal(files.length, 1);
-    assert.equal(editsTree.getTreeItem(files[0]).label, 'app.txt');
-    assert.equal(editsTree.getTreeItem(files[0]).command.command, 'claudeObservatory.openFile', 'file click opens file');
-    const edits = editsTree.getChildren(files[0]);
-    assert.equal(edits.length, 2);
+    // N15: the Edits/Diffs trees are gone — the Review webview IS the review surface, so exercise
+    // its REAL payload and a real mutation, not just the manifest: resolve → ready → grouped rows;
+    // keepFile → the listed pending edits flip, group-safe.
+    const rvProvider = webviewProviders['claudeObservatory.reviewList'];
+    assert.ok(rvProvider, 'the Review webview provider is registered');
+    // Its TITLE-BAR nav — the row the Edits view carried until it was removed, and the only home six
+    // of these commands have. A webview view cannot draw its own toolbar, so if these entries go the
+    // commands become palette-only and the panel looks actionless.
+    {
+      const titleFor = (c) => pkg.contributes.menus['view/title']
+        .filter((e) => (e.when || '').includes('claudeObservatory.reviewList'))
+        .some((e) => e.command === `claudeObservatory.${c}`);
+      for (const c of ['searchEdits', 'reviewPrev', 'reviewNext', 'keepAll', 'undoAll', 'redoAll',
+        'clearResolved', 'switchSession', 'refresh', 'toggleInline', 'cleanStore', 'exportSummary',
+        'exportTrace', 'doctor']) {
+        assert.ok(titleFor(c), `${c} is on the Review view's title bar`);
+      }
+    }
+    const rvMsgs = [];
+    let rvOnMsg;
+    const rvView = {
+      visible: true,
+      webview: {
+        options: null,
+        html: '',
+        onDidReceiveMessage: (cb) => { rvOnMsg = cb; return { dispose() {} }; },
+        postMessage: (m) => { rvMsgs.push(m); return Promise.resolve(true); },
+      },
+      onDidChangeVisibility: () => ({ dispose() {} }),
+      badge: undefined,
+    };
+    rvProvider.resolveWebviewView(rvView);
+    rvOnMsg({ type: 'ready' });
+    const rvData = rvMsgs.filter((m) => m.type === 'review').pop().data;
+    assert.ok(rvData && Array.isArray(rvData.units) && rvData.units.length >= 2, 'the Review payload lists the units');
+    assert.ok(rvData.units.every((u) => typeof u.file === 'string' && typeof u.rel === 'string' && !!u.status),
+      'every row carries file, rel and status');
+    assert.equal(rvData.scoped, false, 'no prompt picked — the list is session-wide');
+    assert.ok(rvView.badge && rvView.badge.value >= 1, 'the pending badge rides the Review view');
+    // N22: a chain that CANCELS OUT is not a row, at any status, and the badge beside it agrees.
+    // Seeded on its own file so it really does net to nothing (on a file with later work it would
+    // merge into that unit instead — correct, but it would prove nothing here).
+    {
+      const ghost = path.join(ws, 'ghost.txt');
+      const gb = core.writeBlob(S, Buffer.from('gone\n'));
+      const g1 = core.nextId(S);
+      core.appendLog(S, { id: g1, ts: 9000, tool: 'Bash', file: ghost, beforeBlob: gb, afterBlob: null, status: 'pending' });
+      const g2 = core.nextId(S);
+      core.appendLog(S, { id: g2, ts: 9100, tool: 'Bash', file: ghost, beforeBlob: null, afterBlob: gb, status: 'pending' });
+      const before = rvView.badge && rvView.badge.value;
+      rvMsgs.length = 0;
+      rvOnMsg({ type: 'ready' });
+      const d = rvMsgs.filter((m) => m.type === 'review').pop().data;
+      assert.ok(!d.units.some((u) => u.rel === 'ghost.txt'), 'the cancelled chain is not a row');
+      assert.equal(d.cancelled, 1, 'it is counted in the footer instead');
+      assert.deepEqual(d.cancelledIds, [g1, g2], 'whose Dismiss carries every member');
+      assert.equal(rvView.badge && rvView.badge.value, before, 'and the badge does not count what the list refuses to show');
+      // Dismiss keeps them — and they must STAY hidden, or one click turns the footer into N grey rows.
+      rvOnMsg({ type: 'dismissCancelled', ids: d.cancelledIds });
+      assert.ok(core.readLog(S).filter((r) => r.file === ghost).every((r) => r.status === 'kept'), 'Dismiss kept them');
+      rvMsgs.length = 0;
+      rvOnMsg({ type: 'ready' });
+      const after = rvMsgs.filter((m) => m.type === 'review').pop().data;
+      assert.ok(!after.units.some((u) => u.rel === 'ghost.txt'), 'a dismissed chain stays hidden');
+      assert.equal(after.cancelled, 0, 'and there is nothing left to dismiss');
+      core.clearResolvedIds(S, [g1, g2]); // restore the fixture for the assertions below
+    }
 
-    // click behavior differs per view
-    assert.equal(editsTree.getTreeItem(edits[0]).command.command, 'claudeObservatory.openFileAtEdit', 'Edits view: edit click opens file at edit');
-    assert.equal(diffsTree.getTreeItem(edits[0]).command.command, 'claudeObservatory.openDiff', 'Diffs view: edit click opens diff');
+    // Search narrows THIS list (the trees that used to carry the filter are gone), and while a filter
+    // is on the bulk buttons hide — they act on the whole ask/session, which is wider than what the
+    // filtered list shows. A filter that matches nothing says so instead of blaming the session.
+    {
+      inputBoxValue = 'app.txt';
+      await commands['claudeObservatory.searchEdits']();
+      rvMsgs.length = 0;
+      rvOnMsg({ type: 'ready' });
+      let d = rvMsgs.filter((m) => m.type === 'review').pop().data;
+      assert.equal(d.filter, 'app.txt', 'the filter rides the payload');
+      assert.ok(d.units.every((u) => u.rel.includes('app.txt')), 'and narrows the rows');
+      inputBoxValue = 'zzz-no-such-file';
+      await commands['claudeObservatory.searchEdits']();
+      rvMsgs.length = 0;
+      rvOnMsg({ type: 'ready' });
+      d = rvMsgs.filter((m) => m.type === 'review').pop().data;
+      assert.equal(d.units.length, 0, 'a filter matching nothing lists nothing');
+      assert.equal(d.filter, 'zzz-no-such-file', '…and still names what it filtered by');
+      inputBoxValue = ''; // restore for the assertions below
+      await commands['claudeObservatory.searchEdits']();
+      rvOnMsg({ type: 'ready' });
+    }
+
+    // keepFile acts on exactly the listed pending rows of that file (raw member ids, group-safe).
+    rvOnMsg({ type: 'keepFile', file: F });
+    assert.ok(core.readLog(S).filter((r) => r.file === F).every((r) => r.status === 'kept'),
+      'keepFile kept the file’s pending edits');
+    core.setStatusMany(S, core.readLog(S).map((r) => r.id), 'pending'); // restore for downstream assertions
+    await commands['claudeObservatory.refresh'](); // re-render decorations from the RESTORED statuses — the star assertions below pop the LAST render
 
     // File History: a flat, chronological list of just the ACTIVE file's edits (follows the editor).
     const fileHistoryTree = trees['claudeObservatory.fileHistory'];
@@ -599,7 +736,7 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.ok(peek2.disposed, 'peekKeep disposes the thread');
     core.setStatus(S, 2, 'pending'); // undo the mutation so the store stays at "2 pending" downstream
     // Prev/Next also live on diff TABS (Diffs tree / revision nav): from #1's diff URI, Next → #2's diff.
-    await commands['claudeObservatory.openDiff'](edits[0]);
+    await commands['claudeObservatory.openDiff']({ kind: 'edit', rec: core.findRecord(S, 1) });
     const dUri = diffCalls[diffCalls.length - 1][1];
     await commands['claudeObservatory.diffNextEdit'](dUri);
     assert.match(diffCalls[diffCalls.length - 1][2], /#2/, 'diffNextEdit opens the next pending edit in the file');
@@ -1904,17 +2041,9 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.equal(lastShown.selection.active.line, 0, 'reviewFirst jumps back to the oldest pending edit (#1)');
     opened = null;
 
-    // Search: filter the Edits tree by file path (parity: the JetBrains tree filters identically).
+    // N15: search used to filter the Edits tree; the command survives (porting its filter to the
+    // Review list is an open follow-up recorded with the N15 work).
     assert.ok(typeof commands['claudeObservatory.searchEdits'] === 'function', 'searchEdits registered');
-    inputBoxValue = 'zzz-nomatch';
-    await commands['claudeObservatory.searchEdits']();
-    assert.equal(editsTree.getChildren().length, 0, 'a non-matching search hides every edit');
-    inputBoxValue = 'app';
-    await commands['claudeObservatory.searchEdits']();
-    assert.ok(editsTree.getChildren().length >= 1, 'a matching search shows the file again');
-    inputBoxValue = ''; // clear so the later assertions still see all edits
-    await commands['claudeObservatory.searchEdits']();
-    assert.ok(editsTree.getChildren().length >= 1, 'clearing the search restores all edits');
 
     // new commands exist
     for (const c of ['claudeObservatory.keepAll', 'claudeObservatory.undoAll', 'claudeObservatory.chatEdit',
@@ -1931,11 +2060,11 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.ok(clipboardText.includes('AAA') && clipboardText.includes('a\nb\nc'), 'chat prompt carries before/after');
 
     // openFileAtEdit opens the real file
-    await commands['claudeObservatory.openFileAtEdit'](edits[0]);
+    await commands['claudeObservatory.openFileAtEdit']({ kind: 'edit', rec: core.findRecord(S, 1) });
     assert.ok(opened && opened.uri.path === F, 'openFileAtEdit opened the file');
 
     // diff still works (Diffs view / inline)
-    await commands['claudeObservatory.openDiff'](edits[0]);
+    await commands['claudeObservatory.openDiff']({ kind: 'edit', rec: core.findRecord(S, 1) });
     assert.equal(diffCalls.length, 1);
     const [left, right] = diffCalls[0];
     assert.equal(left.scheme, 'claude-edit');
@@ -1965,7 +2094,7 @@ test('extension: three views, click commands, inline annotations, chat, status s
     // canonFsPath boundary the guard depends on (pre-fix it failed OPEN on Windows).
     vscode.workspace.textDocuments.push({ uri: Uri.file(F), isDirty: true });
     const warnsBefore = warnMessages.length;
-    await commands['claudeObservatory.undo'](edits[0]);
+    await commands['claudeObservatory.undo']({ kind: 'edit', rec: core.findRecord(S, 1) });
     assert.ok(
       warnMessages.length > warnsBefore && /unsaved changes/.test(warnMessages[warnMessages.length - 1]),
       'a dirty buffer blocks the undo with a warning'
@@ -1973,21 +2102,11 @@ test('extension: three views, click commands, inline annotations, chat, status s
     assert.equal(core.findRecord(S, 1).status, 'pending', 'the record is untouched while the buffer is dirty');
     vscode.workspace.textDocuments.pop();
 
-    await commands['claudeObservatory.undo'](edits[0]);
+    await commands['claudeObservatory.undo']({ kind: 'edit', rec: core.findRecord(S, 1) });
     const after = fs.readFileSync(F, 'utf8');
     assert.ok(after.startsWith('a\n'), 'top reverted');
     assert.ok(after.includes('ZZZ'), 'later edit preserved');
     assert.equal(core.findRecord(S, 1).status, 'undone');
-
-    // status styling: reverted #1 struck through; kept #2 + undone #1 greyed via the decoration provider
-    const edits3 = editsTree.getChildren(editsTree.getChildren()[0]);
-    const item1 = editsTree.getTreeItem(edits3.find((n) => n.rec.id === 1));
-    const item2 = editsTree.getTreeItem(edits3.find((n) => n.rec.id === 2));
-    assert.ok(item1.label.includes('̶'), 'reverted edit label is struck through');
-    assert.match(item1.resourceUri.query, /status=undone/, 'reverted item carries status uri');
-    assert.match(item2.resourceUri.query, /status=kept/, 'kept item carries status uri');
-    assert.ok(decoProvider.provideFileDecoration(item1.resourceUri), 'reverted row greyed');
-    assert.ok(decoProvider.provideFileDecoration(item2.resourceUri), 'kept row greyed');
     assert.equal(
       decoProvider.provideFileDecoration({ scheme: 'claude-change', query: 'status=pending' }),
       undefined,

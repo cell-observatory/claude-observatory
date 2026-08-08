@@ -22,7 +22,7 @@ IDEs** — at **zero extra Claude tokens**. The review model resembles Cursor's 
 is standalone, shareable, and git-free. It is built for **established and mission-critical codebases**
 rather than throwaway prototypes.
 
-![The observatory in VS Code: the Observatory Traces sidebar (Edits · Diffs · File History), the editor with the inline lens and the compact review bar, the Observatory Dashboards bottom panel (Overview · Stats), the Observatory Timeline panel (Prompts · Observations · Actions) with its session selector and Group tabs toggle, and the microscope scoreboard in the status bar](docs/media/layout.png)
+![The observatory in VS Code: the Observatory Traces sidebar (Review · File History), the editor with the inline lens and the compact review bar, the Observatory Dashboards bottom panel (Overview · Stats), the Observatory Timeline panel (Prompts · Observations · Actions) with its session selector and Group tabs toggle, and the microscope scoreboard in the status bar](docs/media/layout.png)
 
 ## Why use it?
 
@@ -32,6 +32,16 @@ one change at a time.
 
 - **Surgical review of AI edits** — accept, undo, or diff each change individually; undo one edit while
   keeping later edits to the same file.
+- **One change, however many tries** — repeated edits to the same lines or the same function collapse
+  into one review unit showing the net diff, bounded by the prompt that produced them; a superseded
+  intermediate state never asks for a decision. The editors' **Review** tab lists the session's
+  pending changes — scoped to one ask when a prompt is selected — and opens them in the editor: one
+  unit's net diff per row, or everything listed concatenated into a single view with per-diff
+  Keep/Undo/Chat; in the terminal, opening a prompt scopes the Review list the same way. A file
+  deleted and re-created is one decision, not two contradictory rows, and a chain that ends where it
+  started — a file created then deleted, an edit put back — is nothing to review: those are named in
+  one footer with a Dismiss rather than listed. Every count means the same thing by "pending", from
+  the review list to the change map to the status bar.
 - **Established and mission-critical codebases** — keep a human in the loop when Claude touches code whose
   failure is expensive.
 - **Any surface** — the same store is read/written by the CLI, the VS Code sidebar, and the JetBrains
@@ -324,6 +334,8 @@ and attaches the CLI `.tgz`, the VS Code `.vsix`, and the JetBrains `.zip` to a
 [GitHub Release](https://github.com/cell-observatory/claude-observatory/releases). See
 [docs/DEMO.md](docs/DEMO.md) for a feature-by-feature walkthrough, or the
 **[visual showcase](https://cell-observatory.github.io/claude-observatory/showcase.html)**.
+Adjacent work that informed the design is credited in the
+[showcase's credits section](https://cell-observatory.github.io/claude-observatory/showcase.html#credits).
 
 ## Notes
 

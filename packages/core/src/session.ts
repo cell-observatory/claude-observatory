@@ -215,6 +215,57 @@ export function resolveSessionId(cwd: string): string | null {
 }
 
 /**
+ * The newest session on this MACHINE, across every workspace. Same demotion rule as
+ * [newestSessionIn]: a transcript with no assistant record yet loses to one that has some. The
+ * assistant probe reads file heads, so it is bounded to the newest few dozen candidates.
+ */
+export function newestSessionGlobal(): string | null {
+  const base = path.join(claudeConfigDir(), 'projects');
+  let slugs: string[];
+  try {
+    slugs = fs.readdirSync(base);
+  } catch {
+    return null;
+  }
+  const candidates: { id: string; mtime: number; file: string }[] = [];
+  for (const slug of slugs) {
+    const dir = path.join(base, slug);
+    let entries: string[];
+    try {
+      entries = fs.readdirSync(dir);
+    } catch {
+      continue;
+    }
+    for (const name of entries) {
+      if (!name.endsWith('.jsonl')) continue;
+      const file = path.join(dir, name);
+      try {
+        candidates.push({ id: name.slice(0, -'.jsonl'.length), mtime: fs.statSync(file).mtimeMs, file });
+      } catch {
+        /* raced away */
+      }
+    }
+  }
+  if (!candidates.length) return null;
+  candidates.sort((a, b) => b.mtime - a.mtime);
+  for (const c of candidates.slice(0, 25)) {
+    if (hasAssistantRecord(c.file)) return c.id;
+  }
+  return candidates[0].id;
+}
+
+/**
+ * The terminal front door's DEFAULT session. Inside a repo, the workspace rules: that repo's newest
+ * session, exactly as every CLI verb resolves. OUTSIDE any repo — a shell at $HOME, the Desktop —
+ * there is no workspace to scope to, and the walk-up used to land on whatever stale session was
+ * once launched from an ancestor directory; "open the observatory" from nowhere means "show me what
+ * Claude is doing NOW", so the machine-wide newest wins there.
+ */
+export function defaultTuiSession(cwd: string): string | null {
+  return repoRoot(cwd) ? resolveSessionId(cwd) : newestSessionGlobal() ?? resolveSessionId(cwd);
+}
+
+/**
  * Walk up from `cwd` to the nearest ancestor directory that holds a `.git` entry (file OR dir),
  * mirroring resolveSessionId's parent walk. Returns that directory (the repo/worktree root) or
  * null if none is found. The transcript `cwd` is Claude's launch cwd, frequently a subdirectory

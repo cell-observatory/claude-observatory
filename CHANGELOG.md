@@ -7,89 +7,185 @@ Per-tag release artifacts and auto-generated notes are on the
 
 ## [Unreleased]
 
+
 <!-- Every feature/fix PR into `dev` appends its line here; a promote renames this section to the
      release version and opens a fresh one. -->
 
-### Fixed
-- **The terminal read the wrong workspace, and three panes went quietly empty.** Fleet showed nothing,
-  Prompts showed nothing, and the session picker listed ids instead of names — with no error anywhere.
-  All three are transcript-derived, and a transcript is found under its session's *mangled launch cwd*;
-  the views were resolving that from `process.cwd()`, so a dashboard opened anywhere but inside the
-  workspace — or pointed at another workspace's session by the picker — had no transcript to read.
-  Traces kept working the whole time, because it reads the store by session id, which is what made it
-  look like missing data rather than a bug.
-
-  The terminal now asks for the session's own workspace (`core.sessionWorkspace`, taken from the first
-  line of its append-only transcript), and every view honours `--root`. Five did not: `prompts`,
-  `feed`, `risk`, `egress` and `processes` — and a shared `noTranscript()` guard ignored it for all of
-  them, short-circuiting before any caller's root could matter. An end-to-end test now asserts the
-  property rather than the instances: **the same query from a foreign directory must answer exactly
-  what it answers from inside the workspace**, for all nine views, with a control proving `--root` is
-  what does it. That test found two more (`changemap`, `sessions`) the by-hand audit had missed.
-
-- **Fleet showed a fraction of what the editors show.** No tokens, no runtime, no model or effort, and
-  no subagents — a flat list where the editors show a tree. Everything but model and effort was
-  already on the payload; the row just never read it. Subagents now nest under the agent that spawned
-  them, as continuation rows so the cursor still steps between agents, and the token/duration
-  formatters moved into core so the terminal cannot drift from what the editors print for the same
-  agent.
-
-- **The session picker leads with the NAME, and carries what the session cost.** The name sat last,
-  past four columns of metadata. Titles come from a session's first ask, so several genuinely share
-  one — five rows here read the same thing — and a repeated title now carries its short id, while
-  unique ones stay clean. `b` also joined the key row; it was reachable and documented in the keys
-  screen, but the row never named it.
-
-  Each row now also shows `±lines`, `tokens · elapsed` and `model · effort`, the same fields the
-  editors' Sessions row shows. All of it was already on the payload and none of it was displayed, so
-  choosing a session to review meant choosing on a name and an age alone, with its size, spend and
-  model one keystroke out of reach.
-
-- **Every session was costed from the reader's directory, not its own.** The picker lists *every*
-  workspace's sessions, but `sessionMeta` re-resolved each transcript from the caller's cwd — and that
-  lookup only walks *up*. So from any directory that was not a session's own workspace, its tokens,
-  duration, model and effort all came back empty: on this machine, 82 of 107 rows. It already knew the
-  exact file (it scanned every workspace to build the list); it just did not pass it. This is core, so
-  it lands in both editors' Sessions tab as well as the terminal — and each row is now costed from the
-  same file its own workspace label names, which was not previously guaranteed.
-
-- **A wrapped row moved the selection highlight to a different row.** The overlay expands each logical
-  line into as many visual lines as it needs, then compared the cursor — an index into the *logical*
-  lines — against a position in the *expanded* ones. Every wrap above the cursor shifted the highlight
-  down by one. It was latent while picker rows fit on one line, which is why it survived; it now
-  tracks the row it belongs to, and marks every visual line of it.
-
-- **The picker drops whole columns on a narrow terminal instead of re-flowing.** A table is the one
-  thing the overlay must not wrap: a two-line row in a list you are arrowing through costs the
-  alignment that made it a table. Columns now go in the order a reader needs them least — workspace,
-  then ±lines, then model, then cost, then machine — with the name, review state and age never
-  dropped. Nothing is cut mid-word either way; a column is present in full or not at all.
-
-- **The terminal's dashboards showed identifiers where names belong.** The Tasks pane listed rows of
-  `a3f21c9de4b7…` and nothing else, because it read `content`/`title` — the spellings the plan
-  harness used before tasks gained `subject`. Both editors were already right (VS Code reads
-  `t.subject`; JetBrains reads it with a `task #N` fallback), so this was the terminal drifting away
-  from them, and nothing noticed because falling back to an id is *silent*: the pane still rendered,
-  still filtered, still scrolled. It just stopped answering "what is this".
-
-  Every dashboard now goes through one resolver, and its fallback names the KIND rather than printing
-  a digest: an unnamed task reads `task 3`, an unnamed workflow is named as a workflow, and an agent
-  with no branch or worktree is named as a session rather than shown as a bare identifier. The older
-  `content`/`title` spellings are still read, so an archived session does not turn into a wall of
-  hashes the moment it is opened.
-
-### Build / CI
-- **The rolling pre-release channel cannot go backwards any more.** `dev`'s committed version is the
-  next stable target, and a promote could pull it back without a word: `main` carries the release it
-  just cut, and because main contains dev afterwards, merging main into dev is a fast-forward — no
-  conflict, no warning, and dev's `0.10.0` quietly becomes `0.9.3`. `version:check` still passed,
-  because it only proves the files agree with each other, and they agreed perfectly at the wrong
-  number. The first symptom would have been a `0.9.3-dev.N` published over a live `0.10.0-dev.M`,
-  stranding every pre-release install above the version line with auto-update quietly finding nothing
-  newer. The dev workflow now refuses to publish a version that does not outrank what is already
-  live, compared with core's own `isNewer` rather than a constant.
-
 ### Added
+
+- **A refused undo now names WHY, when the reason is later work.** Units track line-range ancestry:
+  when a later unit rewrote lines an earlier one produced, the earlier unit's undo already conflicts —
+  and the refusal now names the depending unit(s) and carries the exact `undo --ids` closure that
+  reverts them together, offered as one action ("Undo both") in both editors beside the force
+  fallback, and surfaced on the terminal's status row. A conflict with no dependent unit keeps its
+  original wording. (The dependency model follows GitButler's hunk-locking research.)
+- **`oplog` — the reviewer's own operations, journaled and reversible.** Every bulk keep, revert or
+  redo (≥2 records) is journaled in the same append as its status flips, carrying each record's
+  before-status. `oplog` lists them newest first; `oplog --revert-last` reverses the most recent one —
+  statuses restored for a keep, files actually rewritten for an undo/redo — and the revert is itself
+  journaled, so reverting twice round-trips. CLI-only, like `tasklog`. (The operations-log design also
+  follows the GitButler comparison.)
+- **`assign` — move edits' prompt attribution.** `assign --ids <a,b,c> --prompt <id|index>` records
+  an exact override keyed by immutable record ids (`--clear` restores the recorded window); prompts,
+  the change map's per-ask rollups, `review --prompt`, and rewind scopes all follow — the prompt
+  surfaces through one shared helper, the change map through the same override table at its own
+  attribution site. Units are NOT re-derived — boundaries stay temporal; only the label moves. The
+  editors' drag/menu gesture is deferred to 0.10; the mechanism ships now.
+- **`review --prompt <id>` — one ask's work as review units, each with its net patch.** The payload
+  every Review surface renders, and the seam that finally gives the JetBrains plugin core's collapse
+  (it reads raw records off disk everywhere else). Patches are budgeted and omissions are NAMED in the
+  payload, never silently absent; `--no-patch` fetches metadata alone.
+- **Overlapping Bash commands no longer invent edits.** The whole-tree snapshot a `Bash` capture
+  diffs against lived in ONE file per session, so a backgrounded command's PostToolUse diffed its
+  walk against whatever snapshot the next command had just written: every file outside that
+  snapshot's directory read as CREATED, the mirror image read as DELETED, and the partner command
+  then found no snapshot at all and captured nothing. On the session that reported it, **3,050 of
+  3,378 records sat in chains that cancel out**, 3,211 of them written by Bash, including a
+  `.gitignore` that alternated created/deleted sixteen times without being touched. Each Pre now
+  writes its own snapshot keyed by
+  the tree it walked, each Post consumes the oldest one taken of ITS tree, stale snapshots are
+  reaped (by the collector too, not only when the next Bash command runs), and the blob reaper
+  honours all of them (a blob a command is mid-flight against must not be collected). Two commands
+  overlapping record their change once, not twice: whatever a Post writes to the log advances every
+  other pending snapshot whose tree CONTAINS that file, because both snapshots genuinely straddle the
+  change and a duplicate row makes undoing the first refuse as a conflict. Containment, not an equal
+  root — a command in `packages/jetbrains` running beside one at the repo root left the repo-root
+  snapshot holding pre-change content, and it recorded the same edit a second time. A file is only
+  ever added to a snapshot whose tree contains it: writing a key for a file outside that tree would
+  make its own Post walk, never see it, and report it deleted.
+  Existing logs keep their phantoms — the cancelled-chain rule below folds most of them away — but
+  no new ones are recorded. Two further holes closed with it: a snapshot is never told about a file
+  its own walk cannot reach (the walk skips `node_modules`, `build`, symlinked and unreadable
+  directories, so a change recorded by a command inside one of those made an ancestor's Post report
+  the file DELETED — and the resulting pair made the real change refuse to undo), and a previous
+  build's rootless `__bash__.json` no longer answers for a subdirectory (it matched any cwd and
+  sorted first, so the first command after an upgrade could report every file outside its own
+  directory as deleted). A truncated post-walk now says that it dropped deletions instead of
+  dropping them in silence, and an edit captured by `Edit`/`Write` advances the pending Bash
+  snapshots too, so a Bash window straddling it no longer records the same change a second time.
+- **A change captured by a tool call is no longer recorded a second time by a Bash command.** The
+  snapshot a `Bash` capture diffs is taken before the command runs and walked after it, so a
+  backgrounded command's PostToolUse routinely lands in the MIDDLE of an `Edit`/`Write` — its walk
+  sees the new content, records it, and then that edit's own Post records it again. Two rows, byte-
+  identical before AND after, consecutive ids, one of them attributed to `Bash` — and undoing the
+  first refuses as a conflict with the second. The EDIT is the side that yields, never the walk: the
+  walk's snapshot is consumed and cannot be replayed, so a capture declined there is a change lost
+  outright — and edits are declined and abandoned routinely (PreToolUse fires before the permission
+  prompt, PostToolUse only on success, so every denied or failed edit leaves its before-snapshot
+  behind). So the walk records what it saw, attributing it to the edit tool that is mid-flight rather
+  than to `Bash`, and that call's own commit declines when the file has already reached the content it
+  was going to report. Matching on the END STATE also covers the walk recording a WIDER transition
+  than the edit did, where appending the narrower one would break the file's chain. Pinned by five
+  hand-written interleavings and a seeded fuzz over randomised ones — mutation-checked: with the
+  dedupe removed the fuzz reports 22 duplicate pairs.
+- **The Review view has its toolbar back**, and its bulk verbs no longer overlap the scoped ones. Removing the Edits and Diffs views took their title-bar
+  nav with them, and a webview view cannot draw its own — so Search edits, previous/next edit, Keep
+  all, Undo all, Redo all, Clear resolved, Switch session, Refresh, Toggle inline review, and the
+  export/diagnostics overflow (Export summary, Export trace, Doctor, Clean store) had no home at all
+  and were reachable only from the command palette. They are back on Review, in the order they had — with Keep all / Undo all / Redo all hidden while a
+  prompt is picked, because those are session-wide and the panel's own buttons one row below are
+  scoped to that ask: one click reading "accept everything" above a button reading "Keep all (7)" is
+  the same word for a forty-times-larger action. While a search filter is active the bulk buttons hide
+  and say why (they act on the whole scope, not the filtered rows), and a filter that matches nothing
+  now says so instead of claiming the session has no changes.
+- **The review split stops re-deriving on every message.** Its memo was stamped on the transcript
+  FILE, and a transcript grows with each message rather than each ask — so a live session paid a full
+  re-derivation about ten times a minute for an input that could not change the answer (measured:
+  ~200 ms of core work per message on a 3,468-record session with a 24 MB transcript). It now keys on
+  the ask BOUNDARIES it actually reads, and the block text a move-detection compares is memoized per
+  hop instead of re-splitting whole files — 94% of records took that path on a Bash-heavy session,
+  re-tokenizing 1.8 million lines every time. Same answers, **~200 ms → 59 ms per message**, and the
+  two hottest callers (an ask's rollup, and the per-sibling fleet scan that runs in a fresh process)
+  ask only for the status they read. The editor caches that hide cancelled chains now stamp the
+  transcript as well as the log, so a boundary that appears between existing edits cannot serve a
+  stale set.
+- **A file's final newline is an edit again.** Blank-line churn is deliberately not tracked, and
+  splitting on `\n` made a trailing terminator look like an empty last line — so adding or removing
+  the newline at the end of a file compared equal to no change at all and was never recorded, never
+  shown, never undoable, while git renders it as `\ No newline at end of file` and linters fail on
+  it. Real blank-line churn still earns no row.
+- **Review is THE review surface.** The Edits and Diffs trees are gone from Observatory Traces in
+  both editors — the raw records stay in the backend; File History still reads them per file and
+  carries the first-run demo offers. What remains is one list: Review sits FIRST (the default
+  surface), shows the whole session by default, and scopes to one ask when a prompt is picked
+  (`review` without `--prompt` answers the session-wide units; `--pending` filters to the
+  undecided). One row per piece of code, however many times Claude revised it — the same-code
+  collapse, now MOVE-aware: a block deleted in one edit and re-inserted verbatim in another
+  collapses into the same unit (rotation-tolerant matching, because the diff attributes a slid
+  window when a block's boundary line repeats beside it). **A file being ABSENT is no longer a unit
+  boundary**, which is the other half of the same idea: `null` is not content, so a deletion and the
+  re-create that follows it have no state in between for anyone to decide about, and they are one
+  unit whose diff is the real before→after. Splitting them produced rows that lied in both
+  directions — "+0 −133" for a file that still exists, then "+133 −0" for one that was never gone —
+  and the delete-first ordering was worse than cosmetic: on every file whose chain alternated, the
+  FIRST and LAST record were stranded as two contradictory pending rows no matter how many cycles
+  sat between them. Chains that CANCEL OUT collapse too, and
+  they are the one thing allowed to cross an ask boundary: a file created in one ask and deleted in
+  a later one — or an edit put back exactly — is not a change at all, and listing it as two
+  contradictory rows (`+16 −0` then `+0 −16`) asked for two decisions about nothing. Such a chain is
+  no longer a row in any surface: **Review ends with one line naming them — "N cancelled-out chains
+  (nothing to review)" — and a Dismiss that keeps every record behind it at once** (the terminal's
+  footer is a row, so its ordinary `a` does the same job). `review --json` carries them as
+  `cancelled` / `cancelledIds` beside `units` (plus `hiddenIds`, everything a renderer must not
+  draw), and `list --json` marks the rows, so nothing is hidden from a count — only from the
+  decisions you are asked to make. A dismissed chain stays hidden rather than returning as a greyed
+  row, and **every count now means the same thing**: the review list, the change map, the Sessions
+  row, the Stats scoreboard, the status bar, the nav bar's File/Folder/Diff axes, the gutter marks
+  and the next-pending walk all skip these chains, where several of them used to count the raw log.
+  A rewind names what it reaches: one unit can span two asks when the file was absent in between, and
+  a unit is the smallest thing that can be reverted, so "rewind to before this ask" can revert an
+  edit from the ask before it — `review`'s dry run and both editors' confirmations now count those
+  records out loud instead of letting them be discovered afterwards.
+  A log written before the capture fix keeps whatever its chains say: where a real edit's recorded
+  "before" post-dates a phantom deletion, the chain is genuinely broken and no display rule can
+  repair it — this folds the pairs, it does not rewrite history. VS Code lists rows grouped by FILE, each
+  header carrying Keep/Undo over exactly the pending work listed under it; JetBrains renders the
+  same units as the classic folder → file → class TREE (virtualized, so a 3,000-unit session is
+  instant, no pagination) with Keep/Undo/Redo/Diff on every row's context menu. Resolved rows stay
+  listed, greyed — an undone row offers redo, a kept row can still be reverted — with **Clear
+  resolved** beside Keep all/Undo all on both; Search Edits narrows the list; and the activity-bar
+  pending badge rides the Review view. The list holds no code: a row opens that unit's NET diff in
+  the editor, and **Open all in editor** reads the pending work as one concatenated view (VS Code:
+  the native multi-diff editor; JetBrains: the plugin's own stacked review tab, ten hunks-only
+  diffs at a time, sized to the window). Each diff carries its own Keep/Undo/Chat — VS Code as a
+  review bar at the first CHANGED line of each diff (its rows keep the editor's own hidden-unchanged
+  folds, so a diff reads as its hunks with the rest one chevron away), JetBrains on each block's
+  header and on the embedded viewer's toolbar. A diff longer than
+  `claudeObservatory.openAllPreviewLines` (default 50 changed lines) opens there as a **bounded
+  preview** — whole hunks up to the budget, both sides windowed together so it stays a faithful diff
+  of what it shows, with markers naming where the window starts and how many changed lines are not
+  in it, and **Open full diff** on that row's bar. One 13,000-line rewrite no longer buries every
+  other change in the ask. To make diffs read as hunks rather than whole files, the VS
+  Code extension ships a `configurationDefaults` for `diffEditor.hideUnchangedRegions.enabled` —
+  an APPLICATION-WIDE default (git diffs included); a user's own explicit setting always wins. The picked ask is
+  marked in every Prompts list (VS Code: a review button and a "reviewing" pill on the row;
+  JetBrains: a Review action on the panel toolbar). The terminal's Traces window holds the same
+  unit-backed list — one review surface, not a separate tab (the window keeps the editors' name so a
+  reader moving between the two does not learn two words for one thing): opening a prompt (`↵`, or
+  its `[review]` cell) scopes the list to exactly that ask, `esc` clears. The guided tour reshaped with it (42 steps, 14 essential).
+- **`F1` in the terminal is Claude.** A thin status strip above Prompts — model, effort, liveness,
+  pending count, the newest ask — and pressing `F1` again hands the whole terminal to
+  `claude --resume <session>` in that session's own workspace, restoring the dashboard on exit with a
+  report of what moved while you were away. A LIVE session asks first (resume opens a second writer on
+  the same transcript) and offers `--fork-session`; a session whose workspace is not on this machine is
+  refused rather than resumed from the wrong directory. Window keys renumber to `F1`–`F6` (Claude ·
+  Prompts · Traces · Map · Diff · Dashboards); the strip yields to every workspace when rows run short
+  and keeps its chip and launch gesture while folded.
+- **Drag to copy, in the terminal.** With mouse reporting on, the terminal's native text selection
+  never reaches the app's rows — so the app does it itself: drag across any window's body and the
+  visible span lands on the system clipboard (OSC 52, so it works over SSH and tmux), with a
+  "copied N line(s)" receipt. A plain click still selects instantly.
+- **The terminal front door opens on the session that is actually live.** Launched inside a repo it
+  scopes to that workspace's newest session, as every verb always has; launched OUTSIDE any repo (a
+  shell at `$HOME`) it used to walk up to whatever stale session an ancestor directory once launched —
+  now it opens the machine-wide newest, and a long-running dashboard says — once — when a newer
+  session appears (`b` switches; it never auto-switches under an open review).
+- **The Claude window shows the session LIVE, and resizes like any window.** Beneath its status row
+  it tails the session feed — Claude's own activity as it lands, tool calls dim, the agent's words at
+  full weight, failures tinted — following the newest entry unless you are reading inside the pane
+  (`G` follows again). It opens at ten rows, grows or shrinks with its seam or `<`/`>`, zooms full
+  screen with `z`, and an `F1` restore the terminal is too small for now says exactly how many rows
+  it needs instead of silently staying folded.
 - **`tui` — a terminal app with the editors' review actions.** **Four windows** over one
   session — **Prompts** across the top, **Traces** on the left, a centre **Detail** window and
   **Dashboards** along the bottom — named on the top row so what exists is visible before you press
@@ -132,7 +228,6 @@ Per-tag release artifacts and auto-generated notes are on the
 
   The terminal is restored — alternate screen, cursor, mouse, focus, paste mode and raw mode — on
   every exit path including SIGINT, SIGTERM and SIGHUP, which do not run ordinary exit handlers.
-
 - **`.observatoryignore` — say which edits are never recorded.** A session on a real repo is mostly
   noise: lockfiles, `dist/`, snapshots, generated clients. This is a `.gitignore`-shaped file that
   says which — same patterns, same `!` negations, same "last matching rule wins", including git's
@@ -160,13 +255,11 @@ Per-tag release artifacts and auto-generated notes are on the
   `git check-ignore`'s own flags and exit codes, with `-v` output verified byte-for-byte against real
   git in the test suite. The bare verb additionally reports any rule that can never fire, the
   diagnostic git's own tooling leaves you to work out.
-
 - **A settings gear in both editors' Overview, at the far right of its toolbar.** JetBrains had a
   settings screen registered under Settings ▸ Tools and no way in the tool window to open it, so the
   only way to find it was to already know it was there; VS Code had the button but sat it before the
   version chip rather than at the end of the row. Both now close the row with the version chip and
   the gear, in that order.
-
 - **A shared filesystem watcher in core (`watch.ts`).** One implementation of what both editors had
   each grown separately: 150 ms store debounce, 700 ms activity debounce, a 30-second cache of which
   project directories are relevant, and filters that fail open because a stale panel is worse than a
@@ -174,7 +267,6 @@ Per-tag release artifacts and auto-generated notes are on the
   a recursive watch on Linux, it substitutes a per-file watcher, so a `catch` waiting to pick the poll
   fallback never fires and quietly opens one handle per file instead. Any degradation is reported to
   the caller rather than leaving a surface that has silently stopped updating.
-
 - **A terminal input decoder in core (`tui/input.ts`).** Terminals send more than keystrokes down
   stdin — mouse reports, paste wrappers, and unsolicited replies to capability queries — and they
   split them across reads wherever they like. A per-chunk scan mistakes all of it for typing, which in
@@ -183,21 +275,17 @@ Per-tag release artifacts and auto-generated notes are on the
   containing `U` arrived as bulk undo. The decoder buffers partial sequences and emits typed events, so
   a reply can never be a key. Over 3,000 randomised split points the old scanner leaked a destructive
   key 886 times; this leaks none.
-
 - **Display-width primitives in core (`textwidth.ts`).** `displayWidth`, `fitVisible`, `wrapVisible`
   and `sanitizeCell`. `String.length` is the wrong ruler for anything a terminal draws — a coloured
   `✓ ok` is 13 characters and 4 columns, `漢字テスト` is 5 and 10 — and nothing here measured properly
   before. `sanitizeCell` strips the escapes that move the cursor or erase the screen while keeping
   colour, because transcript-derived text reaches a rendered cell raw.
-
 - **`views` can batch `feed` and `list`.** Both are read-only and both were missing from the
   allow-list, so asking for either fell through to the unknown-view path and was swallowed into a
   `null` — a caller batching them got a silently empty pane rather than an error.
-
 - **The settings gear reaches JetBrains, and moves to the far right in both editors.** JetBrains had
   a settings screen registered under Settings ▸ Tools and no way in the tool window to open it, so the
   only way to find it was to already know it was there.
-
 - **Sessions on other machines, over SSH.** Configure a host in the terminal's options window
   (`o` → REMOTES) and the session picker lists that machine's Claude Code sessions beside the local
   ones, each labelled with the host it came from. It is **read-only and deliberately so**: every
@@ -207,12 +295,38 @@ Per-tag release artifacts and auto-generated notes are on the
   which — a failing host becomes a row carrying its own error rather than quietly vanishing. Remote
   sessions are listed but cannot be pinned for review, because their store and files are elsewhere;
   the picker says so instead of blanking every window.
-
 - **Cross-process caching for remote listings.** The per-host cache was in-process only, and every
   CLI-driven surface spawns a fresh process per refresh — so it never hit once, and JetBrains' 3-second
   poll paid a full synchronous `ssh` per tick while a comment claimed the cache absorbed it.
 
 ### Changed
+
+- **The review unit is redesigned: repeated edits to the same code are ONE change.** Agents revise a
+  region, move on, and come back to it; the old collapse only merged *adjacent* records in a file's
+  chain, so a superseded edit — one that no longer owns a single line on disk — still demanded its own
+  decision as a phantom row. Units are now contiguous **spans** of a file's records, merged when a
+  later edit rewrites lines an earlier one produced (same-lines) or when both changed the same detected
+  function (same-function — new per-language detection in core, regex + brace/indent at git's own
+  `xfuncname` fidelity, deliberately no parser dependency), and **bounded by the prompt that produced
+  them** — a unit never spans two asks, so every ask reports its own work and a rewind from ask N can
+  never drag in an edit ask N−1 made. Every surface's *pending* count changes once, together: on the
+  bench workload that used to render 3,001 rows for ~150 regions of real change, the list now shows
+  151, and the end-to-end refresh is ~38% faster because everything downstream handles 20× fewer rows.
+  `diff <id>` now renders the unit the row names — its whole net change — rather than the raw last
+  hop; a hand-typed member id still answers the single record it names.
+- **Blank-line-only churn is no longer captured.** An edit whose only difference is added or removed
+  blank (or whitespace-only) lines records nothing, the same way an identical rewrite already recorded
+  nothing. The check fails closed: creates, deletes, unreadable snapshots and non-UTF-8 content are
+  always captured.
+- **Undoing a review unit is ONE merge, not a member-by-member walk.** A unit's members are
+  contiguous, so its net change IS the blob pair `(first before, newest after)` — the same pair every
+  diff surface renders. The old walk paid one file read, one whole-file merge and one locked append
+  per member, and could conflict against the unit's *own* chain, stopping half-reverted; that state
+  is now impossible for a unit acted on AS a unit — its verb sums the chain, so a conflict means a
+  later unrelated edit or a manual change, never the chain itself. (An explicit multi-selection still
+  reverts record by record; that scope's per-record conflicts are its honest semantics.) Scoped bulk
+  reverts batch their ledger writes the same way (one status flush instead of one append per record,
+  which had made every next step re-parse the whole log).
 - **The terminal app gained the ten things every comparable TUI has.** Surveyed against the tools in
   `awesome-tuis` — lazygit, k9s, gitui, delta, fzf, btop, yazi — and grounded in what was already
   there rather than added twice:
@@ -272,7 +386,6 @@ Per-tag release artifacts and auto-generated notes are on the
     review colours — that is the signal, and a second colour language on the same row costs the reader
     the one that matters. It runs on the ~40 rows actually drawn rather than on the patch, which is
     what makes it affordable: **+0.04 ms per keystroke on a 4,000-line patch**, against 0.34 ms plain.
-
 - **The terminal frame built every row eight times per keystroke.** `rowsFor` enumerates the whole
   session — 2,730 rows for the 546-file session this is sized against — and a pane draws about 43.
   That would be tolerable once; it was **eight times per frame**, because `paneVisible` and
@@ -284,19 +397,16 @@ Per-tag release artifacts and auto-generated notes are on the
   neither changes a single row. `now` is in the key bucketed to the second, because rows carry ages
   and a memo that ignored it would freeze every timestamp on screen. A full frame went **2.50 ms →
   0.49 ms**.
-
 - **Marking a find's matches was quadratic in them.** The highlighter tested every match span against
   every character, so a one-character needle — an ordinary thing to type — cost 0.43 ms on a line with
   200 matches and 39.9 ms at 3,200, which at 45 drawn rows was about 19 ms of a single keystroke. A
   mask replaces the scan: **39.9 ms → 0.18 ms**, and a test asserts the SHAPE (4× the input must not
   cost ~16× the time) rather than a wall-clock threshold that would be flaky on shared CI.
-
 - **JetBrains recomputed the file axis once per bar button per tick.** `log()` was cached but its
   derived views were not, so a filter, a distinct and a **sort** over every record in the session ran
   for each of the floating bar's fourteen actions, again for the status-bar nav bar, and again for the
   editor banner — three of which carried their own copy of the expression. It is derived once beside
   `pendingByFile`, on the same cache key as the log, and the three copies are now one call.
-
 - **The terminal app is `tui`, and lives in its own package.** The verb is `claude-observatory tui`
   (the bare command still opens it), and `packages/tui` now holds the terminal's frame, layout, glyph
   sets, key decoder, options screen and runtime — moved out of `core` and `cli`. Nothing outside that
@@ -337,45 +447,6 @@ Per-tag release artifacts and auto-generated notes are on the
   content**, on its own row above the tabs, beside the line "Every tab below reads this session." A title
   action is drawn by the platform in a strip the reader does not associate with the window's contents; the
   session these tabs read is part of the contents.
-
-### Fixed
-- **Three raw NUL bytes were committed into `store.ts`.** `grep` and `ripgrep` classify a file with a
-  NUL as binary, so the module defining `readLog`, `appendLog` and `EditRecord` returned **zero hits**
-  for every one of them — 47 real occurrences invisible to any search. `git diff` did not show it
-  either: git only scans the first ~8000 bytes for NUL, and the first one sat at byte 42,758. This is
-  a recurrence of a scar `ignore.ts` already documents; the separator is now written as an escape.
-- **A `.observatoryignore` created BELOW the directory a command ran in never took effect on existing
-  records.** The sweep's stamp covered only the directory the hook was invoked from, while the Bash
-  walk records at any depth beneath it — so the rule refused new captures immediately while the
-  records it covered stayed forever, with nothing that could move the stamp. The walk now reports the
-  directories it actually wrote into.
-- **`e` ignored the editor you chose.** `openInEditor` read only `$VISUAL`/`$EDITOR`, so the options
-  window's editor row was decorative: you could pick one, it persisted, and `e` still answered "no
-  $EDITOR set". The preference now wins, and the message points at the options window first.
-- **Moving the store destroyed every other setting.** `prefs.json` lives inside the default store
-  directory, so a move renamed the preferences away with it and the write that recorded the new
-  location left a file holding only the location. Reproduced: one configured machine went in, and
-  `remotes` reported none afterwards. The file is now carried across explicitly.
-- **JetBrains pinned a remote session from two of its three pickers.** The refusal existed only in the
-  Overview's Sessions tab; the Timeline popup and "All sessions…" routed straight past it, persisting
-  a pin to a session whose store is on another machine — and an unreachable host's synthetic row could
-  be pinned at all, whose id throws inside `storeDir`. One shared guard now covers all three.
-- **The machine highlight painted nothing in VS Code's Sessions tab.** Its `.mt-smc` colour rules were
-  declared in the Timeline webview's stylesheet while only the Overview's script emits that class —
-  two documents, two `<style>` blocks. A smoke assertion now fails if a class a webview emits has no
-  rule in its own shell.
-- **Removing the last configured machine left its sessions in both selectors.** VS Code returned early
-  on an empty remote list rather than posting it, and the terminal's refetch was gated on there being
-  at least one machine — so rows for a machine `prefs.json` no longer contains stayed listed,
-  clickable, and refused on click.
-- **"Pending" meant two different numbers.** The VS Code status bar and activity-bar badge counted raw
-  records while the Overview, the Sessions rows and the Stats scoreboard counted collapsed review
-  units: one session read 3,067 in one place and 2,052 two panels away. `keep`/`undo` resolve a whole
-  same-code group, so the display units are the number of decisions — every surface counts those now.
-- **JetBrains reported "no machines configured" when the CLI could not answer.** `prefs.json` is
-  written by the VS Code extension and the terminal app, neither of which needs the CLI on PATH.
-
-### Changed
 - **The terminal's Traces pane groups by file**, matching the editors' trees: one header carrying the
   path and its edit and pending counts, with the file's edits nested beneath it. Every edit used to
   print its own full path, so a file touched a dozen times produced a dozen identical headers.
@@ -449,7 +520,6 @@ Per-tag release artifacts and auto-generated notes are on the
 - **A `.observatoryignore` that exists but cannot be read was treated as absent**, so a whole rule set
   silently stopped applying. It is now named, with the consequence stated — and under one mode this
   fails in the safe direction: more is captured, not less.
-
 - **The Observations flag cache held every edit's added text, and re-scanned it on every call.** The
   memo is keyed on the blob pair, which is immutable, so the answer could never change — but what it
   stored was the raw text, and both callers re-ran their regexes over all of it each time. On a
@@ -458,7 +528,6 @@ Per-tag release artifacts and auto-generated notes are on the
   warm pass takes 1.2 ms. (The two TODO patterns are deliberately kept as separate flags — the flag
   matches `TODO|FIXME|XXX|HACK` and the follow-up step only `TODO|FIXME`, and collapsing them would
   have invented 38 follow-ups on one real session.)
-
 - **A surface that shows one row could resolve only half of it.** What the review surfaces display as
   a single edit is often several raw records — a same-code chain collapses into one unit labelled with
   the most recent member's id. The `--ids` verbs are group-unaware by design, so sending that
@@ -466,7 +535,6 @@ Per-tag release artifacts and auto-generated notes are on the
   can name. Measured on a real session, 365 raw records collapse to 323 units with 35 of them
   multi-member, so roughly one row in ten was affected. Ids are now expanded to their whole review
   group at the mutation site, using the same rule the single-id verbs already followed.
-
 - **The compact review bar's dismiss button rendered as a trash can.** VS Code appends its own
   "Collapse" action to a comment thread's header and picks the glyph from whether the thread has any
   comments — chevron if it does, **trash can if it does not** — and the bar is a comment-less thread by
@@ -485,7 +553,6 @@ Per-tag release artifacts and auto-generated notes are on the
   bin, the second leaves a permanent empty box two editor lines tall. No trash-can glyph is used
   anywhere in the product; `Reclaim disk` in the store-cleanup menu now uses the same `clear-all` icon
   as Clear Resolved.
-
 - **The review surfaces had two collapse controls, and now have one axis.** The bar carried our own
   **−** *beside* the platform's **^**, both of which hid it — one button's worth of meaning drawn twice.
   It could not be fixed by moving ours somewhere else: VS Code appends its own collapse action after
@@ -510,7 +577,6 @@ Per-tag release artifacts and auto-generated notes are on the
   outranks a dismissal from earlier, and an explicit re-open clears the flag. Both halves are driven by
   tests, one of which deliberately does NOT refresh, because the existing test hand-delivered the very
   tick whose absence was the bug.
-
 - **The version stamper had never heard of `packages/tui`.** It was a declared workspace absent from
   the stamper's package list, its core-pin list and its lockfile keys — so `node scripts/version.mjs
   <v>` moved every other package and left tui behind, pinned to a `@claude-observatory/core` build
@@ -520,25 +586,21 @@ Per-tag release artifacts and auto-generated notes are on the
   where core has never been published, and 404s. A test now asserts the stamper covers every entry in
   the root `workspaces` list — by list, not by naming tui, because the next package added would have
   had exactly the same problem.
-
 - **The "adds a debug statement" flag could never see Rust's `dbg!`, or a no-argument `print()`.** One
   trailing word-boundary applied to every branch of the pattern, and `!` and `(` are not word
   characters — so a boundary after them required a word character to follow. `dbg!` is always written
   `dbg!(…)`, which meant that branch never matched in any form. Boundaries now sit only on the
   branches that end in a word character, so `debuggerish` and `sprint(` are still correctly ignored.
-
 - **`observe --json` built the entire Observations view model to read one string.** The recap is now
   read through a dedicated core accessor, so the per-edit reasoning, flag and file-memory walk no
   longer runs just to produce a recap line. Core still owns the single definition, so the surfaces
   cannot drift.
-
 - **`fileMemory` revalidated its cross-session index on every call.** The index is memoized, but
   proving the memo valid costs a readdir, an `existsSync` per session and a `statSync` per session
   log. Per file that is invisible; Observations asks about every file a session touched, and at 3,957
   files against a 47-session store it measured **383,830 stat calls** to revalidate an index that had
   not changed. A new `fileMemories(files)` builds it once — 97 stats for the same work. Together these
   three take `observe --json` on that session from 5.9 s to 2.6 s.
-
 - **Published screenshots showed a change bar the product does not draw.** `layout.png` — the README's
   lead image — plus `inline-review.png` and `spotlight.png` drew the change bar in the brand's coral;
   VS Code has always drawn it green. `pyc-layout.png` drew one at all, and the JetBrains plugin draws
@@ -547,6 +609,128 @@ Per-tag release artifacts and auto-generated notes are on the
   prompt's full text inlined where the product shows only `#1`, and missing the `N edits` term it
   always emits. An orphaned mockup that invented a `Prompt 2/6` counter was deleted along with the
   images nothing referenced.
+
+### Fixed
+
+- **Enter on an ask with no edits now says so** instead of silently doing nothing.
+- **A path-scoped confirm no longer reads "keep 0 edit(s)".** The `[y/n]` question for a file or
+  folder action counted an id list that is empty by design for path scopes; it now shows only the
+  real count ("keep — 12 edit(s) under everything in src?").
+- **VS Code's per-prompt Accept/Reject half-resolved collapsed units.** `keepPrompt`/`undoPrompt`
+  filtered the raw log by the prompt's *display* ids — unit representatives — so acting on an ask
+  resolved each unit's newest member and stranded the earlier ones pending, at an intermediate state no
+  surface can name. Both now expand through `groupMembers`, as the terminal always did.
+- **The terminal's vertical seams tracked the wrong rows with two top panes.** `hitTest` computed the
+  column band's top as "below the Prompts box" — true only while the top dock held exactly one pane.
+  It now sums every top-dock box, and the layout test that recomputed it the same wrong way (and so
+  passed while both were wrong) derives it the way the product does.
+- **The terminal read the wrong workspace, and three panes went quietly empty.** Fleet showed nothing,
+  Prompts showed nothing, and the session picker listed ids instead of names — with no error anywhere.
+  All three are transcript-derived, and a transcript is found under its session's *mangled launch cwd*;
+  the views were resolving that from `process.cwd()`, so a dashboard opened anywhere but inside the
+  workspace — or pointed at another workspace's session by the picker — had no transcript to read.
+  Traces kept working the whole time, because it reads the store by session id, which is what made it
+  look like missing data rather than a bug.
+
+  The terminal now asks for the session's own workspace (`core.sessionWorkspace`, taken from the first
+  line of its append-only transcript), and every view honours `--root`. Five did not: `prompts`,
+  `feed`, `risk`, `egress` and `processes` — and a shared `noTranscript()` guard ignored it for all of
+  them, short-circuiting before any caller's root could matter. An end-to-end test now asserts the
+  property rather than the instances: **the same query from a foreign directory must answer exactly
+  what it answers from inside the workspace**, for all nine views, with a control proving `--root` is
+  what does it. That test found two more (`changemap`, `sessions`) the by-hand audit had missed.
+- **Fleet showed a fraction of what the editors show.** No tokens, no runtime, no model or effort, and
+  no subagents — a flat list where the editors show a tree. Everything but model and effort was
+  already on the payload; the row just never read it. Subagents now nest under the agent that spawned
+  them, as continuation rows so the cursor still steps between agents, and the token/duration
+  formatters moved into core so the terminal cannot drift from what the editors print for the same
+  agent.
+- **The session picker leads with the NAME, and carries what the session cost.** The name sat last,
+  past four columns of metadata. Titles come from a session's first ask, so several genuinely share
+  one — five rows here read the same thing — and a repeated title now carries its short id, while
+  unique ones stay clean. `b` also joined the key row; it was reachable and documented in the keys
+  screen, but the row never named it.
+
+  Each row now also shows `±lines`, `tokens · elapsed` and `model · effort`, the same fields the
+  editors' Sessions row shows. All of it was already on the payload and none of it was displayed, so
+  choosing a session to review meant choosing on a name and an age alone, with its size, spend and
+  model one keystroke out of reach.
+- **Every session was costed from the reader's directory, not its own.** The picker lists *every*
+  workspace's sessions, but `sessionMeta` re-resolved each transcript from the caller's cwd — and that
+  lookup only walks *up*. So from any directory that was not a session's own workspace, its tokens,
+  duration, model and effort all came back empty: on this machine, 82 of 107 rows. It already knew the
+  exact file (it scanned every workspace to build the list); it just did not pass it. This is core, so
+  it lands in both editors' Sessions tab as well as the terminal — and each row is now costed from the
+  same file its own workspace label names, which was not previously guaranteed.
+- **A wrapped row moved the selection highlight to a different row.** The overlay expands each logical
+  line into as many visual lines as it needs, then compared the cursor — an index into the *logical*
+  lines — against a position in the *expanded* ones. Every wrap above the cursor shifted the highlight
+  down by one. It was latent while picker rows fit on one line, which is why it survived; it now
+  tracks the row it belongs to, and marks every visual line of it.
+- **The picker drops whole columns on a narrow terminal instead of re-flowing.** A table is the one
+  thing the overlay must not wrap: a two-line row in a list you are arrowing through costs the
+  alignment that made it a table. Columns now go in the order a reader needs them least — workspace,
+  then ±lines, then model, then cost, then machine — with the name, review state and age never
+  dropped. Nothing is cut mid-word either way; a column is present in full or not at all.
+- **The terminal's dashboards showed identifiers where names belong.** The Tasks pane listed rows of
+  `a3f21c9de4b7…` and nothing else, because it read `content`/`title` — the spellings the plan
+  harness used before tasks gained `subject`. Both editors were already right (VS Code reads
+  `t.subject`; JetBrains reads it with a `task #N` fallback), so this was the terminal drifting away
+  from them, and nothing noticed because falling back to an id is *silent*: the pane still rendered,
+  still filtered, still scrolled. It just stopped answering "what is this".
+
+  Every dashboard now goes through one resolver, and its fallback names the KIND rather than printing
+  a digest: an unnamed task reads `task 3`, an unnamed workflow is named as a workflow, and an agent
+  with no branch or worktree is named as a session rather than shown as a bare identifier. The older
+  `content`/`title` spellings are still read, so an archived session does not turn into a wall of
+  hashes the moment it is opened.
+- **Three raw NUL bytes were committed into `store.ts`.** `grep` and `ripgrep` classify a file with a
+  NUL as binary, so the module defining `readLog`, `appendLog` and `EditRecord` returned **zero hits**
+  for every one of them — 47 real occurrences invisible to any search. `git diff` did not show it
+  either: git only scans the first ~8000 bytes for NUL, and the first one sat at byte 42,758. This is
+  a recurrence of a scar `ignore.ts` already documents; the separator is now written as an escape.
+- **A `.observatoryignore` created BELOW the directory a command ran in never took effect on existing
+  records.** The sweep's stamp covered only the directory the hook was invoked from, while the Bash
+  walk records at any depth beneath it — so the rule refused new captures immediately while the
+  records it covered stayed forever, with nothing that could move the stamp. The walk now reports the
+  directories it actually wrote into.
+- **`e` ignored the editor you chose.** `openInEditor` read only `$VISUAL`/`$EDITOR`, so the options
+  window's editor row was decorative: you could pick one, it persisted, and `e` still answered "no
+  $EDITOR set". The preference now wins, and the message points at the options window first.
+- **Moving the store destroyed every other setting.** `prefs.json` lives inside the default store
+  directory, so a move renamed the preferences away with it and the write that recorded the new
+  location left a file holding only the location. Reproduced: one configured machine went in, and
+  `remotes` reported none afterwards. The file is now carried across explicitly.
+- **JetBrains pinned a remote session from two of its three pickers.** The refusal existed only in the
+  Overview's Sessions tab; the Timeline popup and "All sessions…" routed straight past it, persisting
+  a pin to a session whose store is on another machine — and an unreachable host's synthetic row could
+  be pinned at all, whose id throws inside `storeDir`. One shared guard now covers all three.
+- **The machine highlight painted nothing in VS Code's Sessions tab.** Its `.mt-smc` colour rules were
+  declared in the Timeline webview's stylesheet while only the Overview's script emits that class —
+  two documents, two `<style>` blocks. A smoke assertion now fails if a class a webview emits has no
+  rule in its own shell.
+- **Removing the last configured machine left its sessions in both selectors.** VS Code returned early
+  on an empty remote list rather than posting it, and the terminal's refetch was gated on there being
+  at least one machine — so rows for a machine `prefs.json` no longer contains stayed listed,
+  clickable, and refused on click.
+- **"Pending" meant two different numbers.** The VS Code status bar and activity-bar badge counted raw
+  records while the Overview, the Sessions rows and the Stats scoreboard counted collapsed review
+  units: one session read 3,067 in one place and 2,052 two panels away. `keep`/`undo` resolve a whole
+  same-code group, so the display units are the number of decisions — every surface counts those now.
+- **JetBrains reported "no machines configured" when the CLI could not answer.** `prefs.json` is
+  written by the VS Code extension and the terminal app, neither of which needs the CLI on PATH.
+
+### Build / CI
+
+- **The rolling pre-release channel cannot go backwards any more.** `dev`'s committed version is the
+  next stable target, and a promote could pull it back without a word: `main` carries the release it
+  just cut, and because main contains dev afterwards, merging main into dev is a fast-forward — no
+  conflict, no warning, and dev's `0.10.0` quietly becomes `0.9.3`. `version:check` still passed,
+  because it only proves the files agree with each other, and they agreed perfectly at the wrong
+  number. The first symptom would have been a `0.9.3-dev.N` published over a live `0.10.0-dev.M`,
+  stranding every pre-release install above the version line with auto-update quietly finding nothing
+  newer. The dev workflow now refuses to publish a version that does not outrank what is already
+  live, compared with core's own `isNewer` rather than a constant.
 
 ## [0.9.2] — 2026-07-30
 

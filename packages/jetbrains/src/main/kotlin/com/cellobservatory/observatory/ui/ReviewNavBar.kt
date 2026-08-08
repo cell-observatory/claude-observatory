@@ -201,7 +201,9 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
     private fun pendingInActiveFile(): List<EditRecord> {
         val f = activeFilePath() ?: return emptyList()
         val key = ClaudePaths.storeKey(f) // hoisted: this runs per toolbar tick over every record
-        return service.log().filter { it.pending && it.file == key }.sortedBy { it.id }
+        // …and never a cancelled-out chain: the Review tree hides those rows, so an axis that stepped
+        // them would park on a diff nothing else in the IDE admits exists.
+        return service.log().filter { it.pending && !service.isHidden(it) && it.file == key }.sortedBy { it.id }
     }
     private fun activeHasPending(): Boolean = pendingInActiveFile().isNotEmpty()
 
@@ -252,7 +254,7 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
         if (files.isEmpty()) return
         val idx = activeFilePath()?.let { files.indexOf(ClaudePaths.storeKey(it)) } ?: -1
         val target = files[((if (idx < 0) 0 else idx) + dir + files.size) % files.size]
-        val first = service.log().filter { it.pending && it.file == target }.minByOrNull { it.id } ?: return
+        val first = service.log().filter { it.pending && !service.isHidden(it) && it.file == target }.minByOrNull { it.id } ?: return
         navEditId = first.id
         session()?.let { Navigate.openFileAtEdit(project, it, first) }
         onNavChange()
@@ -318,9 +320,9 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
     private fun root(): String? = project.basePath
     private fun folderOf(file: String): String = folderLabelOf(file, root())
     private fun pendingFolders(): List<String> =
-        service.log().filter { it.pending }.map { folderOf(it.file) }.distinct().sorted()
+        service.log().filter { it.pending && !service.isHidden(it) }.map { folderOf(it.file) }.distinct().sorted()
     private fun pendingInFolder(folder: String): List<EditRecord> =
-        service.log().filter { it.pending && folderOf(it.file) == folder }.sortedBy { it.id }
+        service.log().filter { it.pending && !service.isHidden(it) && folderOf(it.file) == folder }.sortedBy { it.id }
     private fun currentFolder(): String? = activeFilePath()?.let { folderOf(it) }
     private fun activeInPendingFolder(): Boolean = currentFolder()?.let { pendingFolders().contains(it) } ?: false
 
@@ -390,7 +392,7 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
 
     /** Prompts with something still pending, in the order they were asked. */
     private fun pendingPrompts(): List<SessionPrompt> {
-        val pending = service.log().filter { it.pending }.map { it.id }.toHashSet()
+        val pending = service.log().filter { it.pending && !service.isHidden(it) }.map { it.id }.toHashSet()
         if (pending.isEmpty()) return emptyList()
         return promptsProvider().filter { r -> r.editIds.any { it in pending } }.sortedBy { it.index }
     }
@@ -505,7 +507,7 @@ class ReviewNavBar(private val project: Project, private val onNavChange: () -> 
     fun revealPrompt(promptId: String) {
         val r = promptsProvider().firstOrNull { it.id == promptId } ?: return
         val log = service.log()
-        val firstId = r.editIds.firstOrNull { id -> log.any { it.id == id && it.pending } } ?: return
+        val firstId = r.editIds.firstOrNull { id -> log.any { it.id == id && it.pending && !service.isHidden(it) } } ?: return
         val rec = log.find { it.id == firstId } ?: return
         navEditId = firstId
         // Revealing IS picking: the axis is now on this ask, so the pick that scopes every other surface

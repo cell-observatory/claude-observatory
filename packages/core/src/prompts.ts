@@ -18,10 +18,12 @@ import { findTranscript } from './observe';
 import { parseActions } from './actions';
 import { parseWorkflows } from './workflows';
 import { groupMembers, reviewEdits } from './groups';
+import { cancelledMemberIds } from './units';
 import { lineDelta } from './format';
 import { cachedByFiles, readLines } from './fscache';
-import { EditRecord, logPath, readLog } from './store';
+import { EditRecord, logPath, readLog, readScopeOverrides } from './store';
 import { taskIdForSubject, taskNamings } from './tasks';
+import { askScan, toMs } from './asks';
 
 export interface SessionPrompt {
   /** Stable id (content+time hash) — safe to key UI state and review ops on. */
@@ -81,49 +83,6 @@ function promptId(ts: number, text: string): string {
 }
 
 /**
- * Is this transcript record a REAL user prompt?
- *
- * The transcript is full of records that wear the user's role without being anything the user typed:
- * tool results, `<command-name>` / `<local-command-stdout>` wrappers from slash commands, injected
- * system reminders, the synthesized summary after a compaction, and the harness's own queue records.
- * Counting any of them would invent turns the person never took.
- */
-function userPrompt(o: any): string | null {
-  if (!o || o.isSidechain === true || o.isCompactSummary === true || o.isMeta === true) return null;
-  const msg = o.message;
-  if (!msg || msg.role !== 'user') return null;
-  let text: string | null = null;
-  if (typeof msg.content === 'string') text = msg.content;
-  else if (Array.isArray(msg.content)) {
-    // A turn made only of tool_results is the harness answering the agent, not a person speaking.
-    const block = msg.content.find((b: any) => b && b.type === 'text' && typeof b.text === 'string');
-    if (!block) return null;
-    text = block.text;
-  }
-  const clean = (text ?? '').trim();
-  if (!clean) return null;
-  // `<command-name>`, `<local-command-stdout>`, `<system-reminder>`, `<task-notification>` … all open
-  // with a tag; "Caveat:" is the harness's own preamble to a command's output.
-  if (clean.startsWith('<') || /^caveat:/i.test(clean)) return null;
-  return clean.replace(/\s+/g, ' ');
-}
-
-/** A finite number, or 0 — for token-usage fields that may be absent/malformed. */
-function num(v: unknown): number {
-  return typeof v === 'number' && isFinite(v) ? v : 0;
-}
-
-/** ISO/epoch → ms epoch, 0 when absent. */
-function toMs(v: unknown): number {
-  if (typeof v === 'number' && isFinite(v)) return v > 1e12 ? v : v * 1000;
-  if (typeof v === 'string') {
-    const t = Date.parse(v);
-    return isNaN(t) ? 0 : t;
-  }
-  return 0;
-}
-
-/**
  * The session as a list of the user's asks, each carrying what it produced. Memoized against the
  * transcript AND the store log, since both feed it.
  */
@@ -135,6 +94,34 @@ export interface PromptWindow {
   title: string;
   editIds: number[];
   pending: number;
+}
+
+/**
+ * Attribution with `assign` overrides: the temporal owner, unless an override moves this DISPLAY
+ * record elsewhere. Overrides are recorded per RAW id (the CLI writes every member of a unit, rep
+ * included), and a display record follows ITS OWN id's entry — the rep's, since display records are
+ * unit reps. An override naming a prompt id that is not in this session falls back to the temporal
+ * window rather than dropping the record; `prompts --json` surfaces the mismatch as `assignErrors`.
+ *
+ * UNITS STAY TEMPORAL: `runsOf` keeps splitting on `windowOf(ts)`. Assign moves ATTRIBUTION only,
+ * never the unit boundary — a unit that re-derived under an override would change shape when the
+ * reader relabels history, and the blob-pair contract (first.before, rep.after) must never depend
+ * on labels. This one helper is the ONLY place overrides apply, used by BOTH attribution passes —
+ * two paths that could disagree is the exact bug class the unit rework just finished killing.
+ */
+function ownerWithOverrides<T extends { id: string }>(
+  overrides: Map<number, string>,
+  byPromptId: Map<string, T>,
+  temporal: (ts: number) => T | null
+): (rec: { id: number; ts: number }) => T | null {
+  return (rec) => {
+    const want = overrides.get(rec.id);
+    if (want !== undefined) {
+      const target = byPromptId.get(want);
+      if (target) return target;
+    }
+    return temporal(rec.ts);
+  };
 }
 
 /**
@@ -172,10 +159,17 @@ export function promptWindows(cwd: string, sessionId: string): PromptWindow[] {
       }
       return reqs[lo];
     };
+    const resolve = ownerWithOverrides(readScopeOverrides(sessionId), new Map(reqs.map((r) => [r.id, r])), owner);
+    // `editIds` stays FULL — a rewind to before this ask must reach every record it produced, cancelled
+    // or not — while the COUNT skips chains that cancel out, so an ask's "N pending" matches the rows
+    // the review surfaces will actually offer under it. PENDING-only: the count it gates is `pending`,
+    // and asking for all three statuses walked the log twice more for an answer it cannot use.
+    const cancelled = cancelledMemberIds(sessionId, 'pending');
     for (const rec of reviewEdits(sessionId)) {
-      const r = owner(rec.ts);
+      const r = resolve(rec);
       if (!r) continue;
       r.editIds.push(rec.id);
+      if (cancelled.has(rec.id)) continue;
       if (rec.status === 'pending') r.pending++;
     }
     return reqs;
@@ -188,57 +182,6 @@ export function sessionPrompts(cwd: string, sessionId: string): SessionPrompt[] 
   return cachedByFiles('sessionPrompts', [transcript, logPath(sessionId)], () =>
     sessionPromptsUncached(transcript, cwd, sessionId)
   );
-}
-
-/** Phase 1 of sessionPrompts — the asks and the per-moment assistant token usage — memoized on the
- *  TRANSCRIPT alone. Everything else the prompt views derive is keyed on the log too, so before this
- *  split a keep click (a log-only change) re-read and re-parsed the whole transcript to recover facts
- *  that had not moved: ~60ms per click at 10MB, growing linearly with the conversation. */
-function askScan(transcript: string): { asks: { ts: number; text: string }[]; tokenAt: { ts: number; tokens: number }[] } {
-  return cachedByFiles('promptAsks', [transcript], () => {
-    let lines: string[];
-    try {
-      lines = readLines(transcript);
-    } catch {
-      return { asks: [], tokenAt: [] };
-    }
-    // The asks themselves — and, in the SAME pass, the assistant token usage per moment (this file is
-    // already fully read, so tokens cost no extra IO). One assistant message can span several lines
-    // that share a message.id and repeat the usage; count each id once, exactly as the Stats cursor does.
-    const asks: { ts: number; text: string }[] = [];
-    const tokenAt: { ts: number; tokens: number }[] = [];
-    const seenMsg = new Set<string>();
-    for (const line of lines) {
-      const t = line.trim();
-      if (!t) continue;
-      let o: any;
-      try {
-        o = JSON.parse(t);
-      } catch {
-        continue;
-      }
-      const msg = o.message;
-      if (msg && msg.role === 'assistant' && o.isSidechain !== true && msg.usage && typeof msg.id === 'string' && !seenMsg.has(msg.id)) {
-        seenMsg.add(msg.id);
-        const u = msg.usage;
-        // NEW tokens only. Adding the cache counters made the same context count once per turn,
-        // so this row reported millions where Claude Code's own view reported ~128k for the very
-        // same agent. Two tools reporting different numbers for one run is worse than either being
-        // slightly off — the reader cannot tell which to trust. Cache traffic is surfaced
-        // separately (SessionTokens.cacheRead/cacheCreation), never folded in here.
-        const tk = num(u.input_tokens) + num(u.output_tokens) + num(u.cache_creation_input_tokens);
-        const ts = toMs(o.timestamp ?? o.ts);
-        if (ts && tk) tokenAt.push({ ts, tokens: tk });
-      }
-      const text = userPrompt(o);
-      if (text === null) continue;
-      const ts = toMs(o.timestamp ?? o.ts);
-      if (!ts) continue; // an undated ask cannot own a window
-      asks.push({ ts, text });
-    }
-    asks.sort((a, b) => a.ts - b.ts);
-    return { asks, tokenAt };
-  });
 }
 
 function sessionPromptsUncached(transcript: string, cwd: string, sessionId: string): SessionPrompt[] {
@@ -311,10 +254,15 @@ function sessionPromptsUncached(transcript: string, cwd: string, sessionId: stri
     s.add(v);
   };
   // DISPLAY units: an ask's rollup must not count records the change map collapsed away.
+  const resolve = ownerWithOverrides(readScopeOverrides(sessionId), new Map(reqs.map((r) => [r.id, r])), owner);
+  // Same split as `promptWindows`: every id stays reachable for a rewind, and nothing that cancels out
+  // is counted as this ask's work.
+  const cancelled = cancelledMemberIds(sessionId);
   for (const rec of reviewEdits(sessionId)) {
-    const r = owner(rec.ts);
+    const r = resolve(rec);
     if (!r) continue;
     r.editIds.push(rec.id);
+    if (cancelled.has(rec.id)) continue;
     r.edits++;
     const d = lineDelta(sessionId, rec);
     r.added += d.added;
@@ -400,6 +348,10 @@ export interface CheckpointScope {
    *  the pending set because its job is making a rewind's confirmation honest; it is therefore meaningless
    *  on the redo path, where the same records are already undone. */
   units: number;
+  /** How many of the pending records PREDATE the ask this rewind was pointed at. A unit can span two
+   *  asks when the file was absent in between (`units.ts` PASS 1), and a unit is the smallest thing
+   *  that can be reverted — so a rewind reaches back. Never zero silently: every caller states it. */
+  fromEarlier: number;
   /** Distinct files among the pending records. Group expansion can never add one (groups are per-file). */
   files: string[];
 }
@@ -428,7 +380,7 @@ export interface CheckpointScope {
  * callers that must tell those apart check the prompt id themselves.
  */
 export function checkpointScope(cwd: string, sessionId: string, promptId: string): CheckpointScope {
-  const empty: CheckpointScope = { ids: [], pending: 0, units: 0, files: [] };
+  const empty: CheckpointScope = { ids: [], pending: 0, units: 0, fromEarlier: 0, files: [] };
   const windows = promptWindows(cwd, sessionId);
   const from = windows.find((w) => w.id === promptId || String(w.index) === promptId);
   if (!from) return empty;
@@ -469,10 +421,27 @@ export function checkpointScope(cwd: string, sessionId: string, promptId: string
   for (const rec of readLog(sessionId)) byId.set(rec.id, rec);
   const isPending = (id: number) => byId.get(id)?.status === 'pending';
   const pending = ids.filter(isPending);
+  /**
+   * Records this rewind will revert that were made BEFORE the ask it was pointed at.
+   *
+   * A unit is the smallest thing that can be reverted, and one unit may now span two asks: a file
+   * deleted in one and re-created in the next has no reviewable state in between, so both hops are
+   * one decision (`units.ts`, PASS 1). Expanding the scope by group therefore reaches back past the
+   * boundary — the file would otherwise land on content neither ask produced. That is the right
+   * revert and the wrong silence, so the number is reported and every caller says it out loud.
+   */
+  const fromEarlier = pending.filter((id) => {
+    const ts = byId.get(id)?.ts ?? 0;
+    return ts < from.ts;
+  }).length;
+  // Cancelled-out chains are not rows anywhere, so they are not this dialog's unit COUNT either —
+  // while `ids` and `pending` stay complete, because the rewind really does revert those records.
+  const cancelled = cancelledMemberIds(sessionId);
   return {
     ids,
     pending: pending.length,
-    units: groups.filter((g) => g.some(isPending)).length,
+    units: groups.filter((g) => g.some(isPending) && g.some((m) => !cancelled.has(m))).length,
+    fromEarlier,
     files: [...new Set(pending.map((id) => byId.get(id)?.file ?? ''))].filter(Boolean),
   };
 }

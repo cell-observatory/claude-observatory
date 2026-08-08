@@ -195,7 +195,7 @@ class ExitDemoAction : SessionAction() {
     }
 }
 
-/** Filter the Edits/Diffs trees by file path (empty clears) — the shared Search filter. */
+/** Filter the Review list and the Overview ledger by file path (empty clears) — the shared Search filter. */
 class SearchEditsAction : SessionAction() {
     override fun actionPerformed(e: AnActionEvent) {
         val project = e.project ?: return

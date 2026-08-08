@@ -35,6 +35,22 @@ class StoreReaderTest {
     }
 
     @Test
+    fun `any op line is a control line — op wins over id, exactly like core`() {
+        writeLog(
+            """{"id":1,"ts":1,"tool":"Edit","file":"/w/a.txt","beforeBlob":"aa","afterBlob":"bb","status":"kept"}""",
+            """{"op":"batch","kind":"keep","ids":[1],"prev":{"1":"pending"},"ts":2}""",
+            """{"op":"scope","ids":[1],"prompt":"p1","ts":3}""",
+            // The dangerous shape: a future op carrying BOTH id and file. Pre-fix, this fell through
+            // to the record path and overwrote records[1] with status "pending".
+            """{"op":"someFutureThing","id":1,"file":"/w/evil.txt","ts":4}""",
+        )
+        val log = StoreReader.readLog(session)
+        assertEquals(1, log.size)
+        assertEquals("/w/a.txt", log[0].file)
+        assertEquals("kept", log[0].status)
+    }
+
+    @Test
     fun `status ops fold onto records in file order and the last op wins`() {
         writeLog(
             """{"id":1,"ts":1000,"tool":"Edit","file":"/w/a.txt","beforeBlob":"aa","afterBlob":"bb","status":"pending"}""",

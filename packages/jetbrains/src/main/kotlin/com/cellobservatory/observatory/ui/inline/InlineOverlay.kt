@@ -176,7 +176,9 @@ class InlineOverlay(private val project: Project) : Disposable {
         val service = ObservatoryService.getInstance(project)
         val session = service.currentSession()
         val pending = if (file == null || session == null) emptyList()
-        else ClaudePaths.storeKey(file).let { key -> service.log().filter { it.pending && it.file == key } }
+        // A cancelled-out chain owns no line to annotate and no decision to offer, so it gets no lens
+        // — the same rule the gutter, the Review tree and VS Code's decorations follow.
+        else ClaudePaths.storeKey(file).let { key -> service.log().filter { it.pending && !service.isHidden(it) && it.file == key } }
         if (!ObservatorySettings.instance.state.inlineReview ||
             editor.document.lineCount > MAX_INLINE_LINES ||
             file == null || session == null || pending.isEmpty()

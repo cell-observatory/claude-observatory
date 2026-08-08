@@ -11,7 +11,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import { EditStatus, EditRecord, readLog, minOf, maxOf, logPath, rootDir, isSafeSessionId } from './store';
+import { EditStatus, EditRecord, readLog, minOf, maxOf, logPath, readScopeOverrides, rootDir, isSafeSessionId } from './store';
 import { canonPath } from './paths';
 import { buildEditTree, EditTree, TreeEdit, TreeFolder, TreeFile } from './tree';
 import { reasoningByEdit, transcriptInsights, findTranscript, flagsFor } from './observe';
@@ -839,10 +839,17 @@ function promptSlices(
     return lo;
   };
 
-  // 1. the edits, and with them the files/folders each ask touched
+  // 1. the edits, and with them the files/folders each ask touched. An `assign` override moves an
+  //    edit's slot exactly as it moves `sessionPrompts`' editIds (copied above) — the rollups here
+  //    are re-derived over ctx.edits, and the two attributions must never disagree. Everything
+  //    non-edit (subagents, workflows, shells) stays temporal; overrides are per record id.
+  const overrides = readScopeOverrides(session);
+  const slotById = new Map(slices.map((s, i) => [s.id, i] as const));
   const editsByAsk = new Map<number, ChangeMapEdit[]>();
   for (const e of ctx.edits) {
-    const i = owner(e.ts);
+    const want = overrides.get(e.id);
+    const oi = want === undefined ? undefined : slotById.get(want);
+    const i = oi !== undefined ? oi : owner(e.ts);
     if (i < 0) continue;
     let arr = editsByAsk.get(i);
     if (!arr) editsByAsk.set(i, (arr = []));

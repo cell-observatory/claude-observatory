@@ -441,6 +441,916 @@ test('groups: reviewEdits collapses pending to one net rep (earliest before -> l
   assert.equal(rev2.length, 3, 'both kept edits stay individual; the new pending edit is its own rep');
 });
 
+test('groups: a new ask invalidates the unit split without any log write (memo stamps the transcript)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const cwd = fs.realpathSync(tmpWork());
+  const S = 'askmemo';
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const line = (ts, o) => JSON.stringify({ timestamp: new Date(ts).toISOString(), ...o });
+  const T = path.join(proj, S + '.jsonl');
+  // One ask before both edits: the chained pair shares its window and collapses to one unit.
+  fs.writeFileSync(T, line(500, { type: 'user', message: { role: 'user', content: 'ask one' } }) + '\n');
+  const F = path.join(cwd, 'f.txt');
+  seedEdit(S, F, 'L1\nA\nL3\n', 'L1\nB\nL3\n'); // #1 ts1000
+  seedEdit(S, F, 'L1\nB\nL3\n', 'L1\nC\nL3\n'); // #2 ts2000, chains with #1
+  assert.equal(core.pendingGroups(S).size, 1, 'one window, one unit');
+  assert.deepEqual(core.groupMembers(S, 2), [1, 2], 'the members index sees the collapse');
+  // A second ask lands BETWEEN the two edits' timestamps — a transcript append, no log write. A
+  // long-lived host (the extension host, the terminal) must see the split move; a memo keyed on the
+  // log alone would serve the stale one-unit answer until the next edit.
+  fs.appendFileSync(T, line(1500, { type: 'user', message: { role: 'user', content: 'ask two' } }) + '\n');
+  assert.equal(core.pendingGroups(S).size, 2, 'the new ask splits the unit, with no log write between');
+  assert.deepEqual(core.groupMembers(S, 2), [2], 'the members index moved with it');
+});
+
+test('groups: a moved block — pure delete, then the identical pure insert — is ONE unit', () => {
+  freshHome();
+  const S = 'mv1';
+  const F = path.join(tmpWork(), 'm.txt');
+  seedEdit(S, F, 'A\nB\nC\nD\nE\n', 'A\nD\nE\n');       // #1 deletes the B,C block
+  seedEdit(S, F, 'A\nD\nE\n', 'A\nD\nB\nC\nE\n');       // #2 re-inserts it lower — a move
+  assert.equal(core.pendingGroups(S).size, 1, 'the move is ONE decision');
+  assert.deepEqual(core.groupMembers(S, 2), [1, 2]);
+  assert.equal(core.reviewEdits(S).length, 1, 'one row: the block moved');
+});
+
+test('groups: a move done the other way round — copy in first, delete the original after — also collapses', () => {
+  freshHome();
+  const S = 'mv2';
+  const F = path.join(tmpWork(), 'm.txt');
+  seedEdit(S, F, 'A\nB\nC\nD\nE\n', 'A\nB\nC\nD\nB\nC\nE\n'); // #1 pure insert of the copy
+  seedEdit(S, F, 'A\nB\nC\nD\nB\nC\nE\n', 'A\nD\nB\nC\nE\n'); // #2 pure delete of the original
+  assert.equal(core.pendingGroups(S).size, 1, 'insert-then-delete is the same move');
+  assert.deepEqual(core.groupMembers(S, 2), [1, 2]);
+});
+
+test('groups: a block moved to EOF still matches — the missing final newline is not a difference', () => {
+  freshHome();
+  const S = 'mv3';
+  const F = path.join(tmpWork(), 'm.txt');
+  seedEdit(S, F, 'B\nC\nA\n', 'A\n');                   // #1 deletes "B\nC\n" (terminated)
+  seedEdit(S, F, 'A\n', 'A\nB\nC');                     // #2 appends "B\nC" at EOF (unterminated)
+  assert.equal(core.pendingGroups(S).size, 1, 'the EOF form of the block is the same block');
+});
+
+test('groups: a moved block whose boundary line repeats — the diff attributes a ROTATED window — still collapses', () => {
+  freshHome();
+  const S = 'mv5';
+  const F = path.join(tmpWork(), 'm.ts');
+  // Moving the first comment past the second: Myers keeps the FOLLOWING block's identical `/**` as
+  // the survivor, so the deletion window is [ONE, */, /**] — a rotation of the real block — while
+  // the insertion is the true [/**, ONE, */]. This is the shape every real docblock/function move
+  // produces, and exact string equality alone misses it.
+  seedEdit(S, F, '/**\nONE\n*/\n/**\nTWO\n*/\nB\n', '/**\nTWO\n*/\nB\n');
+  seedEdit(S, F, '/**\nTWO\n*/\nB\n', '/**\nTWO\n*/\nB\n/**\nONE\n*/\n');
+  assert.equal(core.pendingGroups(S).size, 1, 'a slid diff window is the same move');
+  assert.deepEqual(core.groupMembers(S, 2), [1, 2]);
+});
+
+test('groups: a delete beside an UNRELATED insert stays two units — text equality is the whole signal', () => {
+  freshHome();
+  const S = 'mv4';
+  const F = path.join(tmpWork(), 'm.txt');
+  seedEdit(S, F, 'A\nB\nC\nD\nE\n', 'A\nD\nE\n');       // #1 deletes B,C
+  seedEdit(S, F, 'A\nD\nE\n', 'A\nD\nX\nY\nE\n');       // #2 inserts different text
+  assert.equal(core.pendingGroups(S).size, 2, 'different content is two decisions');
+});
+
+// A file CREATED in one ask and DELETED in a later one leaves nothing behind, but the two hops land
+// in different asks — and a unit never spans two asks. Reported from a real session as two rows for
+// one non-change ("+16 −0" then "+0 −16"), which asks the reader to decide twice about nothing.
+// seedEdit stamps ts = id*1000, so asks at 500 and 1500 put edit #1 in the first and #2 in the second.
+function twoAskStore(session) {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const cwd = fs.realpathSync(tmpWork());
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const ask = (ts, t) => JSON.stringify({ timestamp: new Date(ts).toISOString(), type: 'user', message: { role: 'user', content: t } });
+  fs.writeFileSync(path.join(proj, session + '.jsonl'), ask(500, 'ask one') + '\n' + ask(1500, 'ask two') + '\n');
+  return path.join(cwd, 'f.txt');
+}
+
+test('groups: a file created in one ask and deleted in another is ONE unit — it cancels out', () => {
+  const S = 'cancel1';
+  const F = twoAskStore(S);
+  seedEdit(S, F, null, 'a\nb\nc\n'); // ask 1 creates it
+  seedEdit(S, F, 'a\nb\nc\n', null); // ask 2 deletes it — net: nothing
+  assert.equal(core.pendingGroups(S).size, 1, 'the create and the delete are one decision');
+  assert.deepEqual(core.groupMembers(S, 2), [1, 2], 'both ids stay in the unit — keep/undo act on the pair');
+  const rows = core.reviewEdits(S).filter((r) => r.status === 'pending');
+  assert.equal(rows.length, 1, 'one row, not two contradictory ones');
+  const d = core.lineDelta(S, rows[0]);
+  assert.deepEqual([d.added, d.removed], [0, 0], 'and it honestly reads as no net change');
+  assert.ok(!fs.existsSync(F), 'the file really is gone');
+});
+
+test('groups: an edit reverted by a later ask cancels out too — same rule, same content', () => {
+  const S = 'cancel2';
+  const F = twoAskStore(S);
+  seedEdit(S, F, 'v0\n', 'v1\n');
+  seedEdit(S, F, 'v1\n', 'v0\n'); // put back exactly what was there
+  assert.equal(core.pendingGroups(S).size, 1, 'a chain that returns to its own start is not a change');
+  assert.deepEqual(core.groupMembers(S, 2), [1, 2]);
+});
+
+test('groups: a cancelling pair does NOT bridge over resolved records — recordIds stay contiguous', () => {
+  // pending #1 (v0→v1) · KEPT #2 (v1→v2) · KEPT #3 (v2→v1) · pending #4 (v1→v0). The blobs meet at
+  // v1, so a blob-only chain test merges #1 and #4 across two decisions already made — the very
+  // bridge `runsOf` refuses, and it would make a unit's ids non-contiguous.
+  const S = 'cancel4';
+  const F = twoAskStore(S);
+  seedEdit(S, F, 'v0\n', 'v1\n');
+  const k2 = seedEdit(S, F, 'v1\n', 'v2\n');
+  const k3 = seedEdit(S, F, 'v2\n', 'v1\n');
+  seedEdit(S, F, 'v1\n', 'v0\n');
+  core.setStatusMany(S, [k2, k3], 'kept');
+  assert.equal(core.pendingGroups(S).size, 2, 'a decided record between them breaks the chain');
+  assert.deepEqual(core.groupMembers(S, 4), [4], 'and each pending edit stays its own unit');
+  assert.equal(core.cancelledGroups(S).size, 0, 'nothing is claimed to cancel out');
+});
+
+test('groups: cancelled units are MARKED, so a surface can account for them apart from real work', () => {
+  const S = 'cancel5';
+  const F = twoAskStore(S);
+  seedEdit(S, F, null, 'a\n');
+  seedEdit(S, F, 'a\n', null);
+  const cancelled = core.cancelledGroups(S);
+  assert.deepEqual([...cancelled.keys()], [2], 'keyed by the unit rep, like every other group map');
+  assert.deepEqual(cancelled.get(2), [1, 2], 'carrying every member — one Dismiss keeps them all');
+});
+
+test('groups: a file DELETED first and re-created later cancels out — the shape that shipped broken', () => {
+  // The mirror of `cancel1`, and the one that reached a user. `runsOf` will not chain across a null
+  // junction, so the run boundaries land one position off the natural pair; until the fold learned to
+  // cross a create→delete cycle, the leading delete and trailing re-create were stranded as two
+  // contradictory rows for a file nobody had touched.
+  const S = 'cancel6';
+  const F = twoAskStore(S);
+  seedEdit(S, F, 'a\nb\nc\n', null); // ask 1: the file goes away
+  seedEdit(S, F, null, 'a\nb\nc\n'); // ask 2: it comes back, byte-identical
+  assert.equal(core.pendingGroups(S).size, 1, 'one decision, not two contradictory rows');
+  assert.deepEqual(core.groupMembers(S, 2), [1, 2]);
+  assert.deepEqual([...core.cancelledGroups(S).keys()], [2], 'and it is marked cancelled');
+});
+
+test('groups: an alternating delete/create chain leaves NO row at all', () => {
+  // The real session shape: eight records carrying ONE identical sha, produced by the Bash-capture
+  // bug. Every one of them is noise. The whole chain must fold — a single stranded record at either
+  // end is the reported defect.
+  const S = 'cancel8';
+  const F = twoAskStore(S);
+  const text = 'x\ny\n';
+  for (let i = 0; i < 4; i++) {
+    seedEdit(S, F, text, null);
+    seedEdit(S, F, null, text);
+  }
+  const units = core.reviewUnits(S, 'pending');
+  assert.equal(units.filter((u) => !u.cancelled).length, 0, 'nothing is left to review');
+  assert.equal(
+    units.reduce((n, u) => n + u.recordIds.length, 0),
+    8,
+    'and every record is still accounted for — folded, never dropped'
+  );
+});
+
+test('groups: deleted then re-created with DIFFERENT content is ONE unit showing the real diff', () => {
+  // Absence is not a state anyone can review, so the two hops are one story. As two rows the first
+  // claims a deletion of a file that still exists and the second a creation of one that was never
+  // gone; merged, the pair is exactly `v0 → v1`.
+  const S = 'cancel7';
+  const F = twoAskStore(S);
+  seedEdit(S, F, 'v0\n', null);
+  seedEdit(S, F, null, 'v1\n');
+  assert.equal(core.pendingGroups(S).size, 1, 'absence is not a unit boundary');
+  assert.equal(core.cancelledGroups(S).size, 0, 'it is real work, so it is NOT dismissed as cancelled');
+  const rows = core.reviewEdits(S).filter((r) => r.status === 'pending');
+  assert.equal(rows.length, 1, 'one row');
+  const d = core.lineDelta(S, rows[0]);
+  assert.deepEqual([d.added, d.removed], [1, 1], 'reading as the true v0→v1 change, not +0 −1 then +1 −0');
+});
+
+// Pending EDIT rows the change map actually draws — the tree carries no rollup, so the count has to
+// come from the same nodes a renderer walks.
+function treePending(t) {
+  let n = 0;
+  const file = (f) => {
+    for (const e of f.loose) if (e.status === 'pending') n++;
+    for (const c of f.classes) for (const e of c.edits) if (e.status === 'pending') n++;
+  };
+  const folder = (fo) => {
+    fo.files.forEach(file);
+    fo.folders.forEach(folder);
+  };
+  t.files.forEach(file);
+  t.folders.forEach(folder);
+  return n;
+}
+
+test('groups: a REAL edit inside a phantom chain is never swallowed by the fold', () => {
+  // The reason absence is merged rather than merely cancelled. A phantom delete, the file back, a
+  // genuine edit, then the phantom pair again: cancelling on the null endpoints alone would mark the
+  // whole run "nothing to review" and hide the real edit inside it — on the live session that buried
+  // 63 Edit/Write records. Merging across absence leaves ONE unit carrying the real change instead.
+  const S = 'cancel10';
+  const F = twoAskStore(S);
+  seedEdit(S, F, 'v0\n', null); // phantom delete
+  seedEdit(S, F, null, 'v0\n'); // phantom re-create
+  const real = seedEdit(S, F, 'v0\n', 'v1\n'); // …a genuine edit, in the middle
+  seedEdit(S, F, 'v1\n', null); // phantom delete again
+  seedEdit(S, F, null, 'v1\n'); // …and back
+  const units = core.reviewUnits(S, 'pending');
+  const owning = units.find((u) => u.recordIds.includes(real));
+  assert.ok(owning, 'the real edit is in a unit');
+  assert.equal(owning.cancelled, undefined, 'and that unit is NOT dismissed as cancelling out');
+  const rows = core.reviewEdits(S).filter((r) => r.status === 'pending' && !core.cancelledMemberIds(S).has(r.id));
+  assert.equal(rows.length, 1, 'exactly one row survives');
+  const d = core.lineDelta(S, rows[0]);
+  assert.deepEqual([d.added, d.removed], [1, 1], 'and it is the v0→v1 change the phantoms straddled');
+});
+
+test('groups: a dismissed cancelled chain stays hidden — Dismiss must not become thousands of grey rows', () => {
+  // `cancelledGroups` answers the PENDING question, so hiding by it alone brought every dismissed
+  // chain straight back as a resolved row. `cancelledMemberIds` (all statuses) is what surfaces hide.
+  const S = 'cancel11';
+  const F = twoAskStore(S);
+  const a = seedEdit(S, F, 'a\nb\nc\n', null);
+  const b = seedEdit(S, F, null, 'a\nb\nc\n');
+  core.setStatusMany(S, [a, b], 'kept'); // …what Dismiss does
+  const hidden = core.cancelledMemberIds(S);
+  assert.ok(hidden.has(a) && hidden.has(b), 'both members stay hidden once decided');
+  assert.equal(core.cancelledGroups(S).size, 0, 'and nothing is left for Dismiss to act on');
+  assert.equal(treePending(core.buildEditTree(S, { root: path.dirname(F) })), 0, 'the change map shows no pending work for them');
+});
+
+test('counts: every surface means the same thing by "pending"', () => {
+  // One meaning per word. Each of these used to count the raw or uncollapsed set, so a session could
+  // read 652 in the status bar, 1,425 in the map and 132 in the list — all for the same edits.
+  const S = 'cancel12';
+  const F = twoAskStore(S);
+  // A chain that genuinely cancels has to be on its OWN file: on the same file, the real edit below
+  // would chain onto the re-create and the whole thing merges into one honest unit — which is right,
+  // and which is why an earlier version of this fixture proved nothing (every filter it claimed to
+  // cover stayed green when removed, because there was no cancelled record to exclude).
+  const ghost = path.join(path.dirname(F), 'ghost.txt');
+  const g1 = seedEdit(S, ghost, 'gone\n', null);
+  const g2 = seedEdit(S, ghost, null, 'gone\n');
+  const real = seedEdit(S, F, 'v0\n', 'v1\n'); // …and one real edit, elsewhere
+  assert.deepEqual([...core.cancelledMemberIds(S)].sort((a, b) => a - b), [g1, g2],
+    'the fixture really does contain a cancelled chain — otherwise this test proves nothing');
+  const expected = 1;
+  assert.equal(core.reviewSummary(S).pending, expected, 'reviewSummary');
+  assert.equal(core.sessionMetrics(path.dirname(F), S).edits.pending, expected, 'sessionMetrics');
+  assert.equal(core.sessionCounts(S).pending, expected, 'sessionCounts (the Sessions row)');
+  assert.equal(treePending(core.buildEditTree(S, { root: path.dirname(F) })), expected, 'buildEditTree (the change map)');
+  assert.ok(core.reviewUnits(S, 'pending').some((u) => u.recordIds.includes(real)), 'and the real edit is the one left');
+});
+
+test('rewind: a unit that spans an absent file reaches back — and the scope SAYS how far', () => {
+  // The price of merging across absence, pinned so it stays a decision. A file deleted in ask 1 and
+  // re-created in ask 2 is ONE unit (there is no reviewable state in between), and a unit is the
+  // smallest thing that can be reverted — so "rewind to before ask 2" reverts ask 1's delete too,
+  // or the file lands on content neither ask produced. `fromEarlier` is what makes that honest.
+  const S = 'rewind-absent';
+  const F = twoAskStore(S);
+  seedEdit(S, F, 'x\n', null); // ask 1 deletes it
+  seedEdit(S, F, null, 'z\n'); // ask 2 brings it back with new content
+  const scope = core.checkpointScope(path.dirname(F), S, '2');
+  assert.deepEqual(scope.ids, [1, 2], 'the whole unit is in scope — a half-reverted unit is not a state');
+  assert.equal(scope.pending, 2, 'and both records really are reverted');
+  assert.equal(scope.fromEarlier, 1, 'the record from the EARLIER ask is counted, not hidden');
+  assert.equal(scope.units, 1, 'as one review unit');
+});
+
+test('groups: blob-less records never chain — an absent blob field is not a meeting point', () => {
+  // Older stores (and fixtures) hold records with no blob on either side. They say nothing about
+  // content, so they can neither cancel nor be crossed, and letting them meet would chain every one
+  // of them into a single bogus unit. This is the guard the create→delete relaxation must not break.
+  freshHome();
+  const S = 'cancel9';
+  const F = path.join(tmpWork(), 'a.ts');
+  core.ensureStore(S);
+  core.appendLog(S, { tool: 'Edit', file: F, before: null, after: null, added: 1, removed: 0, status: 'pending', ts: 1200 });
+  core.appendLog(S, { tool: 'Edit', file: F, before: null, after: null, added: 2, removed: 0, status: 'pending', ts: 1300 });
+  assert.equal(core.pendingGroups(S).size, 2, 'two records with no content are two units');
+});
+
+test('groups: cross-ask edits that do NOT cancel stay separate — the ask boundary still holds', () => {
+  const S = 'cancel3';
+  const F = twoAskStore(S);
+  seedEdit(S, F, 'v0\n', 'v1\n');
+  seedEdit(S, F, 'v1\n', 'v2\n'); // real work in the second ask
+  assert.equal(core.pendingGroups(S).size, 2, 'two asks, two decisions — attribution is intact');
+});
+
+test('capture: overlapping Bash commands do not steal each other’s snapshots', () => {
+  // THE bug behind "repeated reviews": one manifest per session meant a backgrounded command's Post
+  // diffed its walk against whatever snapshot the NEXT command had just written. A repo-root walk
+  // against a subtree snapshot reports every file outside that subtree as created; the mirror image
+  // reports them deleted; and the partner then found no manifest and captured nothing at all.
+  // Measured on the reporting session before the fix: 3,050 of 3,378 records sat in chains that
+  // cancel out, and 3,211 of them came from Bash.
+  freshHome();
+  const S = 'overlap';
+  core.ensureStore(S);
+  const root = fs.realpathSync(tmpWork());
+  const sub = path.join(root, 'sub');
+  core.writeBashManifest(S, { files: { [path.join(root, 'keeper.txt')]: 'h1', [path.join(sub, 'b.txt')]: 'h2' }, ts: Date.now(), root });
+  core.writeBashManifest(S, { files: { [path.join(sub, 'b.txt')]: 'h2' }, ts: Date.now(), root: sub });
+
+  const forSub = core.takeBashManifest(S, sub);
+  assert.deepEqual(Object.keys(forSub.files), [path.join(sub, 'b.txt')], 'the subtree command gets ITS snapshot');
+  const forRoot = core.takeBashManifest(S, root);
+  assert.equal(Object.keys(forRoot.files).length, 2, 'and the root command still finds its own');
+  assert.equal(core.takeBashManifest(S, root), null, 'each is consumed exactly once');
+});
+
+test('capture: a pending Bash snapshot still protects its blobs from the reaper', () => {
+  // The GC keyed on one well-known filename; per-command manifests must all be honoured or a blob a
+  // command is mid-flight against gets collected and its undo is corrupt forever.
+  freshHome();
+  const S = 'gcman';
+  core.ensureStore(S);
+  const blob = core.writeBlob(S, Buffer.from('in flight\n'));
+  core.writeBashManifest(S, { files: { '/w/f.txt': blob }, ts: Date.now(), root: '/w' });
+  core.gcSession(S);
+  assert.ok(core.hasBlob(S, blob), 'the pending snapshot keeps its before-blob alive');
+});
+
+test('capture: a root spelled with trailing separators still finds its own snapshot', () => {
+  // Roots are matched as STRINGS, so the two hook events for one command have to normalize to the
+  // same spelling. That trim used a `/[\\/]+$/` regex, which backtracks polynomially on a path of
+  // many separators and takes its input from a hook payload — CodeQL rates it a ReDoS. It is a
+  // backwards scan now; this pins the behaviour the scan has to keep.
+  freshHome();
+  const S = 'rootnorm';
+  core.ensureStore(S);
+  const blob = core.writeBlob(S, Buffer.from('x\n'));
+  core.writeBashManifest(S, { files: { '/w/f.txt': blob }, ts: Date.now(), root: '/w///' });
+  assert.ok(core.readBashManifest(S, '/w'), 'trailing separators do not strand the snapshot');
+  assert.ok(core.readBashManifest(S, '/w/'), '…however the second event spells it');
+  // …and the root separator itself is never trimmed away into an empty string.
+  core.writeBashManifest(S, { files: { '/f.txt': blob }, ts: Date.now(), root: '/' });
+  assert.ok(core.readBashManifest(S, '/'), 'the filesystem root is still a root');
+});
+
+test('preview: a huge diff is bounded to the budget, and says what it left out', () => {
+  freshHome();
+  const S = 'prev1';
+  const F = path.join(tmpWork(), 'big.txt');
+  const before = Array.from({ length: 500 }, (_, i) => `line ${i}`).join('\n') + '\n';
+  const after = Array.from({ length: 500 }, (_, i) => `CHANGED ${i}`).join('\n') + '\n';
+  const id = seedEdit(S, F, before, after);
+  const rec = core.findRecord(S, id);
+  const p = core.previewPair(S, rec, 50);
+  // ONE hunk holds all 1,000 changed lines here — a budget that only stops between hunks would
+  // never stop, which is exactly how the first version shipped a 13,083-line "preview".
+  const changed = require('diff').diffLines(p.before, p.after).filter((c) => c.added || c.removed)
+    .reduce((n, c) => n + c.count, 0);
+  assert.ok(changed <= 50, `the preview honours the budget, got ${changed}`);
+  assert.equal(p.omittedLines, 1000 - 50, 'and names exactly what is missing');
+  for (const side of [p.before, p.after]) {
+    assert.match(side, /preview of #\d+ from line \d+/, 'the head marker says where the window starts');
+    assert.match(side, /more changed lines — open the full diff/, 'the tail marker says what is left');
+  }
+  // Markers must be IDENTICAL on both sides, or they render as a change Claude never made.
+  const markers = (s) => s.split('\n').filter((l) => l.startsWith('⋯'));
+  assert.deepEqual(markers(p.before), markers(p.after), 'markers are context, never a diff');
+});
+
+test('preview: a wholesale rewrite shows BOTH sides — the budget is spent half each', () => {
+  freshHome();
+  const S = 'prev3';
+  const F = path.join(tmpWork(), 'rewrite.ts');
+  const before = Array.from({ length: 400 }, (_, i) => `old ${i}`).join('\n') + '\n';
+  const after = Array.from({ length: 400 }, (_, i) => `new ${i}`).join('\n') + '\n';
+  const rec = core.findRecord(S, seedEdit(S, F, before, after));
+  const p = core.previewPair(S, rec, 200);
+  // A unified hunk lists every `-` before every `+`, so ONE running counter spends the whole budget
+  // on removals: the preview then reads "−200 +0" for an edit the row calls +400 −400 — Claude
+  // deleting a file and writing nothing. Both sides must be represented.
+  let added = 0;
+  let removed = 0;
+  for (const c of require('diff').diffLines(p.before, p.after)) {
+    if (c.added) added += c.count;
+    if (c.removed) removed += c.count;
+  }
+  assert.ok(added > 0 && removed > 0, `both sides appear, got +${added} −${removed}`);
+  assert.ok(added + removed <= 200, `and the budget still holds, got ${added + removed}`);
+});
+
+test('preview: diff metadata never becomes content ("\\ No newline at end of file")', () => {
+  freshHome();
+  const S = 'prev4';
+  const F = path.join(tmpWork(), 'nonl.txt');
+  // Neither side ends with a newline — jsdiff emits its marker line inside the hunk.
+  const rec = core.findRecord(S, seedEdit(S,
+    F,
+    Array.from({ length: 20 }, (_, i) => `b${i}`).join('\n'),
+    Array.from({ length: 20 }, (_, i) => `a${i}`).join('\n')));
+  const p = core.previewPair(S, rec, 10);
+  assert.ok(!p.before.includes('No newline') && !p.after.includes('No newline'),
+    'a line that exists in neither blob must never be rendered inside a review diff');
+});
+
+test('preview: a diff inside the budget is passed through untouched — no markers, no window', () => {
+  freshHome();
+  const S = 'prev2';
+  const F = path.join(tmpWork(), 'small.txt');
+  const id = seedEdit(S, F, 'a\nb\nc\n', 'a\nB\nc\n');
+  const rec = core.findRecord(S, id);
+  const p = core.previewPair(S, rec, 200);
+  assert.equal(p.omittedLines, 0);
+  assert.equal(p.before, 'a\nb\nc\n', 'the real before');
+  assert.equal(p.after, 'a\nB\nc\n', 'the real after');
+});
+
+test('groups: undoGroup is ONE merge — the unit reverts whole, members flip in one batch', () => {
+  const home = freshHome();
+  const S = 'unet';
+  const F = path.join(tmpWork(), 'f.txt');
+  seedEdit(S, F, 'L0\nL1\nL2\nL3\nL4\n', 'A\nL1\nL2\nL3\nL4\n'); // #1 line 0
+  seedEdit(S, F, 'A\nL1\nL2\nL3\nL4\n', 'B\nL1\nL2\nL3\nL4\n'); // #2 line 0 (unit with #1)
+  seedEdit(S, F, 'B\nL1\nL2\nL3\nL4\n', 'B\nL1\nL2\nL3\nX\n'); // #3 line 4 (separate unit, later)
+  fs.writeFileSync(F, 'B\nL1\nL2\nL3\nX\n');
+  const res = core.undoGroup(S, 2);
+  assert.equal(res.status, 'undone');
+  assert.equal(fs.readFileSync(F, 'utf8'), 'L0\nL1\nL2\nL3\nX\n', "the unit's region reverts; the later edit stays");
+  assert.equal(core.findRecord(S, 3).status, 'pending');
+  const ops = fs
+    .readFileSync(path.join(home, '.claude', 'claude-observatory', S, 'log.jsonl'), 'utf8')
+    .trim().split('\n').map((l) => JSON.parse(l)).filter((o) => o.op === 'status');
+  assert.deepEqual(ops.map((o) => o.id).sort((a, b) => a - b), [1, 2], 'one status op per member, none doubled');
+  // The DISCRIMINATING one-batch witness: the member-by-member engine journaled nothing (each
+  // member flipped through the singular setStatus); the one-merge engine flips through setStatusMany,
+  // which journals the pair as ONE batch op. (A shared-ts assertion was tried first and proven weak —
+  // two per-member appends land in the same millisecond essentially always.)
+  const journaled = core.readOperations(S);
+  assert.equal(journaled.length, 1, 'the unit flip is journaled once, as a batch');
+  assert.deepEqual(journaled[0].ids, [1, 2]);
+});
+
+test('groups: undoing a create-then-delete unit NEVER unlinks a file it did not capture', () => {
+  freshHome();
+  const S = 'cdel';
+  const F = path.join(tmpWork(), 'ghost.txt');
+  seedEdit(S, F, null, 'tmp\n'); // #1 create
+  seedEdit(S, F, 'tmp\n', null); // #2 delete — one unit: the delete rewrites the create's lines
+  assert.deepEqual(core.groupMembers(S, 2), [1, 2], 'create+delete collapse to one unit');
+  fs.writeFileSync(F, 'THE USERS FILE\n'); // someone else's file at that path — captured in NO blob
+  const res = core.undoGroup(S, 2);
+  assert.equal(res.status, 'conflict', 'a file we never captured is never deleted');
+  assert.equal(fs.readFileSync(F, 'utf8'), 'THE USERS FILE\n');
+  assert.equal(core.findRecord(S, 1).status, 'pending');
+  fs.unlinkSync(F);
+  const res2 = core.undoGroup(S, 2); // absent: the undo is a pure ledger flip
+  assert.equal(res2.ok, true, res2.message);
+  assert.equal(core.findRecord(S, 1).status, 'undone');
+  assert.ok(!fs.existsSync(F));
+  fs.writeFileSync(F, 'SQUATTER\n'); // redo of the both-null unit: never fabricate "" over a squatter
+  const res3 = core.redoGroup(S, 2);
+  assert.equal(res3.status, 'conflict');
+  assert.equal(fs.readFileSync(F, 'utf8'), 'SQUATTER\n');
+  fs.unlinkSync(F);
+  const res4 = core.redoGroup(S, 2);
+  assert.equal(res4.ok, true, res4.message);
+  assert.ok(!fs.existsSync(F), 'the net effect of the unit is "no file"');
+  assert.equal(core.findRecord(S, 2).status, 'pending');
+});
+
+test('groups: a conflicting undoGroup leaves DISK untouched and EVERY member pending — no half-revert', () => {
+  freshHome();
+  const S = 'uconf';
+  const F = path.join(tmpWork(), 'f.txt');
+  seedEdit(S, F, 'L1\nA\nL3\n', 'L1\nB\nL3\n'); // #1
+  seedEdit(S, F, 'L1\nB\nL3\n', 'L1\nC\nL3\n'); // #2 — one unit with #1
+  fs.writeFileSync(F, 'L1\nMANUAL\nL3\n'); // a manual change on the unit's own line
+  const res = core.undoGroup(S, 2);
+  assert.equal(res.status, 'conflict');
+  assert.equal(fs.readFileSync(F, 'utf8'), 'L1\nMANUAL\nL3\n', 'disk untouched');
+  assert.equal(core.findRecord(S, 1).status, 'pending', 'no member was half-reverted');
+  assert.equal(core.findRecord(S, 2).status, 'pending');
+});
+
+test('groups: a create-chain unit undoes as one unlink, guarded by the current content', () => {
+  freshHome();
+  const S = 'ucreate';
+  const F = path.join(tmpWork(), 'new.txt');
+  seedEdit(S, F, null, 'a\n'); // #1 create
+  seedEdit(S, F, 'a\n', 'b\n'); // #2 same-line edit — one unit with #1 (net: null -> 'b\n')
+  assert.deepEqual(core.groupMembers(S, 2), [1, 2], 'the create chains into the unit');
+  fs.writeFileSync(F, 'x\n'); // drifted content: the guard must refuse rather than delete
+  const guard = core.undoGroup(S, 2);
+  assert.equal(guard.status, 'conflict', 'a drifted file is never deleted');
+  assert.ok(fs.existsSync(F));
+  assert.equal(core.findRecord(S, 1).status, 'pending');
+  fs.writeFileSync(F, 'b\n'); // back at the unit's net after
+  const res = core.undoGroup(S, 2);
+  assert.equal(res.status, 'deleted');
+  assert.ok(!fs.existsSync(F), 'undoing the whole unit removes the file it created');
+  assert.equal(core.findRecord(S, 1).status, 'undone');
+  assert.equal(core.findRecord(S, 2).status, 'undone');
+  const r = core.redoGroup(S, 2);
+  assert.equal(r.status, 'redone');
+  assert.equal(fs.readFileSync(F, 'utf8'), 'b\n', 'redo recreates the file at the unit net after');
+});
+
+test('deps: a later unit rewriting lines an earlier unit produced DEPENDS on it — across asks', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const cwd = fs.realpathSync(tmpWork());
+  const S = 'dep1';
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const line = (ts, t) => JSON.stringify({ timestamp: new Date(ts).toISOString(), type: 'user', message: { role: 'user', content: t } });
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), [line(500, 'ask one'), line(1500, 'ask two')].join('\n') + '\n');
+  const F = path.join(cwd, 'f.txt');
+  seedEdit(S, F, 'L1\nA0\nL3\n', 'L1\nA1\nL3\n'); // #1 ts1000, ask 1
+  core.setStatus(S, 1, 'kept');
+  seedEdit(S, F, 'L1\nA1\nL3\n', 'L1\nA2\nL3\n'); // #2 ts2000, ask 2 — rewrites #1's line
+  assert.deepEqual(core.groupMembers(S, 2), [2], 'across asks the units stay separate');
+  assert.deepEqual(core.unitDeps(S).get(2), [1], '#2 rewrote a line #1 produced');
+  assert.deepEqual(core.unitDependents(S, 1), [2]);
+  assert.deepEqual(core.unitDependents(S, 2), [], 'and never the reverse');
+});
+
+test('deps: independent regions draw no edge, even adjacent in the chain', () => {
+  freshHome();
+  const S = 'dep2';
+  const F = path.join(tmpWork(), 'f.txt');
+  seedEdit(S, F, 'L0\nL1\nL2\nL3\nL4\n', 'A\nL1\nL2\nL3\nL4\n'); // #1 line 0
+  seedEdit(S, F, 'A\nL1\nL2\nL3\nL4\n', 'A\nL1\nL2\nL3\nX\n'); // #2 line 4 — different region
+  assert.equal(core.pendingGroups(S).size, 2);
+  assert.equal(core.unitDeps(S).size, 0, 'no line of one was produced by the other');
+});
+
+test('deps: an external write between two units breaks attribution — no edge', () => {
+  freshHome();
+  const S = 'dep3';
+  const F = path.join(tmpWork(), 'f.txt');
+  seedEdit(S, F, 'L1\nA\nL3\n', 'L1\nB\nL3\n'); // #1
+  seedEdit(S, F, 'L1\nEXT\nL3\n', 'L1\nC\nL3\n'); // #2 — before ≠ #1.after: something else intervened
+  assert.equal(core.unitDeps(S).size, 0, 'nothing is attributable across content we did not produce');
+});
+
+test('deps: ancestry is DIRECT — C→B and B→A, never C→A', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const cwd = fs.realpathSync(tmpWork());
+  const S = 'dep4';
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const line = (ts, t) => JSON.stringify({ timestamp: new Date(ts).toISOString(), type: 'user', message: { role: 'user', content: t } });
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), [line(500, 'one'), line(1500, 'two'), line(2500, 'three')].join('\n') + '\n');
+  const F = path.join(cwd, 'f.txt');
+  seedEdit(S, F, 'L1\nX\nL3\n', 'L1\nA\nL3\n'); // #1 ask 1
+  seedEdit(S, F, 'L1\nA\nL3\n', 'L1\nB\nL3\n'); // #2 ask 2 — rewrites #1's line
+  seedEdit(S, F, 'L1\nB\nL3\n', 'L1\nC\nL3\n'); // #3 ask 3 — rewrites #2's line
+  const deps = core.unitDeps(S);
+  assert.deepEqual(deps.get(2), [1]);
+  assert.deepEqual(deps.get(3), [2], 'the line #3 touched belongs to #2 now, not #1');
+  assert.equal(deps.size, 2, 'no transitive C→A edge is stored');
+});
+
+test('deps: a conflicted undo NAMES its dependents and offers the closure', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const cwd = fs.realpathSync(tmpWork());
+  const S = 'dep5';
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const line = (ts, t) => JSON.stringify({ timestamp: new Date(ts).toISOString(), type: 'user', message: { role: 'user', content: t } });
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), [line(500, 'one'), line(1500, 'two')].join('\n') + '\n');
+  const F = path.join(cwd, 'f.txt');
+  seedEdit(S, F, 'L1\nA0\nL3\n', 'L1\nA1\nL3\n'); // #1 ask 1
+  seedEdit(S, F, 'L1\nA1\nL3\n', 'L1\nA2\nL3\n'); // #2 ask 2 — depends on #1
+  fs.writeFileSync(F, 'L1\nA2\nL3\n');
+  const res = core.undoGroup(S, 1);
+  assert.equal(res.status, 'conflict');
+  assert.deepEqual(res.dependents, [2], 'the refusal names the depending unit');
+  assert.deepEqual(res.closure, [2, 1], 'and carries the one-call closure, newest first');
+  assert.ok(res.message.includes('unit #2') && res.message.includes('undo --ids 2,1'), res.message);
+  assert.equal(fs.readFileSync(F, 'utf8'), 'L1\nA2\nL3\n', 'disk untouched');
+  const bulk = core.undoScope(S, { ids: res.closure }); // the suggested closure actually resolves it
+  assert.equal(bulk.undone, 2);
+  assert.equal(fs.readFileSync(F, 'utf8'), 'L1\nA0\nL3\n');
+});
+
+test('deps: a conflict from a MANUAL change carries no dependents and keeps the original wording', () => {
+  freshHome();
+  const S = 'dep6';
+  const F = path.join(tmpWork(), 'f.txt');
+  seedEdit(S, F, 'L1\nA\nL3\n', 'L1\nB\nL3\n');
+  fs.writeFileSync(F, 'L1\nMANUAL\nL3\n');
+  const res = core.undoEdit(S, 1);
+  assert.equal(res.status, 'conflict');
+  assert.equal(res.dependents, undefined, 'no dependent unit — no invented edge');
+  assert.match(res.message, /overlaps a later change to f\.txt/);
+});
+
+test('deps: a kept dependent withholds the closure — the suggested command must actually work', () => {
+  freshHome();
+  const S = 'dep7';
+  const F = path.join(tmpWork(), 'f.txt');
+  seedEdit(S, F, 'L1\nX\nL3\n', 'L1\nA\nL3\n'); // #1 pending — the undo target
+  seedEdit(S, F, 'L1\nA\nL3\n', 'L1\nB\nL3\n'); // #2 rewrites #1's line, then is ACCEPTED
+  core.setStatus(S, 2, 'kept');
+  fs.writeFileSync(F, 'L1\nB\nL3\n');
+  const res = core.undoGroup(S, 1);
+  assert.equal(res.status, 'conflict');
+  assert.deepEqual(res.dependents, [2], 'the kept dependent is still NAMED');
+  assert.equal(res.closure, undefined, 'but no one-call closure — undo --ids reverts pending only');
+  assert.match(res.message, /already accepted/);
+});
+
+test('deps: an undone dependent is no dependent at all — the original wording returns', () => {
+  freshHome();
+  const S = 'dep8';
+  const F = path.join(tmpWork(), 'f.txt');
+  seedEdit(S, F, 'L1\nX\nL3\n', 'L1\nA\nL3\n'); // #1 pending
+  seedEdit(S, F, 'L1\nA\nL3\n', 'L1\nB\nL3\n'); // #2 rewrote the line, then was undone
+  core.setStatus(S, 2, 'undone');
+  fs.writeFileSync(F, 'L1\nMANUAL\nL3\n'); // the conflict source is a manual change
+  const res = core.undoGroup(S, 1);
+  assert.equal(res.status, 'conflict');
+  assert.equal(res.dependents, undefined, 'work that is no longer applied is not a dependent');
+  assert.match(res.message, /overlaps a later change/);
+});
+
+test('deps: a bulk revert carries the first conflict MESSAGE — the named refusal reaches bulk readers', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const cwd = fs.realpathSync(tmpWork());
+  const S = 'dep9';
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const line = (ts, t) => JSON.stringify({ timestamp: new Date(ts).toISOString(), type: 'user', message: { role: 'user', content: t } });
+  // Two asks: without the boundary the chained pair is ONE unit and no cross-unit edge exists.
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), [line(500, 'one'), line(1500, 'two')].join('\n') + '\n');
+  const F = path.join(cwd, 'f.txt');
+  seedEdit(S, F, 'L1\nX\nL3\n', 'L1\nA\nL3\n'); // #1 pending, ask 1
+  seedEdit(S, F, 'L1\nA\nL3\n', 'L1\nB\nL3\n'); // #2 pending, ask 2 — depends on #1
+  fs.writeFileSync(F, 'L1\nB\nL3\n');
+  const bulk = core.undoScope(S, { ids: [1] }); // scoped to the depended-on unit alone
+  assert.equal(bulk.conflicts, 1);
+  assert.match(bulk.firstConflict, /unit #2 depends on it/);
+});
+
+test('oplog: a bulk keep journals a batch op with before-images, and revertOperation restores them', () => {
+  freshHome();
+  assert.deepEqual(core.readOperations('never-seeded'), [], 'an empty store answers an empty list');
+  const S = 'op1';
+  const F = path.join(tmpWork(), 'f.txt');
+  seedEdit(S, F, 'a\n', 'b\n'); // #1
+  seedEdit(S, F, 'b\n', 'c\n'); // #2 — one unit with #1
+  core.keepGroup(S, 1);
+  const ops = core.readOperations(S);
+  assert.equal(ops.length, 1, 'one journaled operation for the bulk keep');
+  assert.equal(ops[0].kind, 'keep');
+  assert.deepEqual(ops[0].ids, [1, 2]);
+  assert.deepEqual(ops[0].prev, { 1: 'pending', 2: 'pending' });
+  assert.match(ops[0].label, /kept 2 edit/);
+  const res = core.revertOperation(S, ops[0]);
+  assert.equal(res.restored, 2);
+  assert.equal(core.findRecord(S, 1).status, 'pending');
+  assert.equal(core.findRecord(S, 2).status, 'pending');
+  // The revert flows back through setStatusMany, so it is journaled too — reverting twice round-trips.
+  assert.equal(core.readOperations(S).length, 2);
+});
+
+test('oplog: the journal is invisible to readLog and survives a log rewrite', () => {
+  freshHome();
+  const S = 'op2';
+  const dir = tmpWork();
+  seedEdit(S, path.join(dir, 'a.txt'), 'a\n', 'b\n');
+  seedEdit(S, path.join(dir, 'b.txt'), 'x\n', 'y\n');
+  core.setStatusMany(S, [1, 2], 'kept');
+  assert.equal(core.readLog(S).length, 2, 'the batch op line is a control line, not a record');
+  core.clearResolved(S);
+  assert.equal(core.readLog(S).length, 0, 'the kept records were compacted away');
+  assert.equal(core.readOperations(S).length, 1, 'the journal survived the rewrite');
+});
+
+test('oplog: reverting a bulk undo REWRITES the files, not just the ledger', () => {
+  freshHome();
+  const S = 'op3';
+  const dir = tmpWork();
+  const F = path.join(dir, 'a.txt');
+  const G = path.join(dir, 'b.txt');
+  seedEdit(S, F, 'a\n', 'b\n');
+  seedEdit(S, G, 'x\n', 'y\n');
+  fs.writeFileSync(F, 'b\n');
+  fs.writeFileSync(G, 'y\n');
+  const bulk = core.undoScope(S, {});
+  assert.equal(bulk.undone, 2);
+  assert.equal(fs.readFileSync(F, 'utf8'), 'a\n');
+  const last = core.readOperations(S)[0];
+  assert.equal(last.kind, 'undo');
+  const res = core.revertOperation(S, last);
+  assert.equal(res.result.redone, 2);
+  assert.equal(fs.readFileSync(F, 'utf8'), 'b\n', 'the file came back, byte-identical');
+  assert.equal(fs.readFileSync(G, 'utf8'), 'y\n');
+  assert.equal(core.findRecord(S, 1).status, 'pending');
+});
+
+test('oplog: a single flip journals nothing — the journal is for BULK actions', () => {
+  freshHome();
+  const S = 'op5';
+  const F = path.join(tmpWork(), 'f.txt');
+  seedEdit(S, F, 'a\n', 'b\n');
+  fs.writeFileSync(F, 'b\n');
+  core.undoEdit(S, 1);
+  assert.equal(core.findRecord(S, 1).status, 'undone');
+  assert.deepEqual(core.readOperations(S), [], 'one edit is cheap to reverse by hand');
+});
+
+test('oplog: reverting a revert of a KEEP stays ledger-only — disk untouched, statuses back to kept', () => {
+  freshHome();
+  const S = 'op4';
+  const dir = tmpWork();
+  const F = path.join(dir, 'a.txt');
+  const G = path.join(dir, 'b.txt');
+  seedEdit(S, F, 'a\n', 'b\n');
+  seedEdit(S, G, 'x\n', 'y\n');
+  fs.writeFileSync(F, 'b\n');
+  fs.writeFileSync(G, 'y\n');
+  core.setStatusMany(S, [1, 2], 'kept');
+  core.revertOperation(S, core.readOperations(S)[0]); // un-keep: statuses back to pending
+  assert.equal(core.findRecord(S, 1).status, 'pending');
+  const second = core.revertOperation(S, core.readOperations(S)[0]); // revert the revert
+  assert.equal(second.restored, 2, 'a ledger-only op reverts as a ledger-only op');
+  assert.equal(second.result, undefined, 'no scoped disk verb ran');
+  assert.equal(core.findRecord(S, 1).status, 'kept', 'back where it started');
+  assert.equal(fs.readFileSync(F, 'utf8'), 'b\n', 'disk untouched');
+  assert.equal(fs.readFileSync(G, 'utf8'), 'y\n');
+});
+
+test('oplog: revertOperation restores EACH record to ITS OWN before-status', () => {
+  freshHome();
+  const S = 'op6';
+  const dir = tmpWork();
+  seedEdit(S, path.join(dir, 'a.txt'), 'a\n', 'b\n'); // #1 pending at journal time
+  seedEdit(S, path.join(dir, 'b.txt'), 'x\n', 'y\n'); // #2 undone at journal time
+  core.setStatus(S, 2, 'undone');
+  core.setStatusMany(S, [1, 2], 'kept'); // journals prev {1: pending, 2: undone}
+  const res = core.revertOperation(S, core.readOperations(S)[0]);
+  assert.equal(res.restored, 2);
+  assert.equal(core.findRecord(S, 1).status, 'pending');
+  assert.equal(core.findRecord(S, 2).status, 'undone', 'never blanket-restored to one status');
+});
+
+test('assign: moves an edit between prompt rows, and every read side agrees', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const cwd = fs.realpathSync(tmpWork());
+  const S = 'asg1';
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const line = (ts, t) => JSON.stringify({ timestamp: new Date(ts).toISOString(), type: 'user', message: { role: 'user', content: t } });
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), [line(500, 'ask one'), line(1500, 'ask two')].join('\n') + '\n');
+  seedEdit(S, path.join(cwd, 'a.txt'), 'a\n', 'b\n'); // #1 ts1000, ask 1
+  seedEdit(S, path.join(cwd, 'b.txt'), 'x\n', 'y\n'); // #2 ts2000, ask 2
+  const w0 = core.promptWindows(cwd, S);
+  assert.deepEqual([w0[0].editIds, w0[1].editIds], [[1], [2]], 'temporal attribution before any override');
+  core.appendScopeOverride(S, [2], w0[0].id); // move #2 to ask 1
+  const w1 = core.promptWindows(cwd, S);
+  assert.deepEqual([w1[0].editIds, w1[1].editIds], [[1, 2], []], 'the window rows follow the override');
+  const sp = core.sessionPrompts(cwd, S);
+  assert.deepEqual([sp[0].editIds, sp[1].editIds], [[1, 2], []], 'sessionPrompts agrees');
+  assert.equal(sp[0].edits, 2);
+  const sc = core.checkpointScope(cwd, S, '2');
+  assert.deepEqual(sc.ids, [], 'rewinding from ask 2 now takes nothing — the edit belongs to ask 1');
+  const cm = core.buildChangeMap(cwd, S, { root: cwd, prompts: true });
+  assert.deepEqual(cm.prompts.map((p) => p.rollup.edits), [2, 0], 'the change-map rollups moved with it');
+  core.appendScopeOverride(S, [2], null); // --clear
+  assert.deepEqual(core.promptWindows(cwd, S)[1].editIds, [2], 'cleared — back to the recorded window');
+});
+
+test('assign: an unknown prompt id falls back to the temporal window, never dropping the edit', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const cwd = fs.realpathSync(tmpWork());
+  const S = 'asg2';
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  fs.writeFileSync(
+    path.join(proj, S + '.jsonl'),
+    JSON.stringify({ timestamp: new Date(500).toISOString(), type: 'user', message: { role: 'user', content: 'only ask' } }) + '\n'
+  );
+  seedEdit(S, path.join(cwd, 'a.txt'), 'a\n', 'b\n');
+  core.appendScopeOverride(S, [1], 'p_never_existed');
+  assert.deepEqual(core.promptWindows(cwd, S)[0].editIds, [1], 'the edit stays in its temporal window');
+});
+
+test('assign: overrides survive a log rewrite (clean --resolved)', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const cwd = fs.realpathSync(tmpWork());
+  const S = 'asg3';
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  const line = (ts, t) => JSON.stringify({ timestamp: new Date(ts).toISOString(), type: 'user', message: { role: 'user', content: t } });
+  fs.writeFileSync(path.join(proj, S + '.jsonl'), [line(500, 'ask one'), line(1500, 'ask two')].join('\n') + '\n');
+  seedEdit(S, path.join(cwd, 'a.txt'), 'a\n', 'b\n'); // #1 ask 1
+  seedEdit(S, path.join(cwd, 'b.txt'), 'x\n', 'y\n'); // #2 ask 2
+  core.appendScopeOverride(S, [2], core.promptWindows(cwd, S)[0].id);
+  core.setStatus(S, 1, 'kept');
+  core.clearResolved(S); // rewrites the log, dropping #1
+  assert.equal(core.readLog(S).length, 1, 'the kept record was compacted away');
+  assert.equal(core.readScopeOverrides(S).size, 1, 'the override op survived the rewrite');
+  const w = core.promptWindows(cwd, S);
+  assert.deepEqual([w[0].editIds, w[1].editIds], [[2], []], 'attribution still follows it');
+});
+
+/**
+ * A 60-line file where an edit elsewhere sits BETWEEN two edits to the same line.
+ *
+ * `#1` and `#3` rewrite line 10; `#2` rewrites line 50. All three chain perfectly (nothing outside the
+ * session touched the file), so the chain is intact — only the ADJACENCY of the same-line pair is
+ * broken. This is the shape a real session produces constantly: an agent revises one region, moves on,
+ * and comes back to it.
+ */
+function threeEditsAroundOne(session, file) {
+  const at = (line10, line50) =>
+    Array.from({ length: 60 }, (_, i) => (i === 9 ? line10 : i === 49 ? line50 : `L${i}`)).join('\n') + '\n';
+  const s0 = at('A0', 'B0');
+  const s1 = at('A1', 'B0'); // #1 rewrites line 10
+  const s2 = at('A1', 'B1'); // #2 rewrites line 50 — unrelated region, chained
+  const s3 = at('A2', 'B1'); // #3 rewrites line 10 AGAIN — same code as #1
+  seedEdit(session, file, s0, s1);
+  seedEdit(session, file, s1, s2);
+  seedEdit(session, file, s2, s3);
+  return { s0, s3 };
+}
+
+test('units: a later edit reclaims lines a NON-ADJACENT earlier edit produced', () => {
+  freshHome();
+  const S = 'u1';
+  const F = path.join(tmpWork(), 'f.txt');
+  threeEditsAroundOne(S, F);
+  // #1 no longer owns a single line on disk — #3 rewrote it. Reviewing it as its own unit asks for a
+  // decision about text that is not there, which is the phantom row this exists to remove.
+  //
+  // #2 comes along, and that is deliberate rather than sloppy: the unit is shown by reading
+  // (first.beforeBlob, last.afterBlob), so its members have to be CONTIGUOUS or the diff on screen
+  // would contain a change the row does not claim. #2 sits between the two line-10 edits, so the
+  // honest span is all three — one decision, whose diff is exactly what it says it is.
+  assert.equal(core.pendingGroups(S).size, 1, 'one review unit, not three');
+  assert.deepEqual(core.groupMembers(S, 1), [1, 2, 3], 'the span covering both line-10 edits');
+  assert.deepEqual(core.groupMembers(S, 3), [1, 2, 3], 'membership resolves from any member');
+});
+
+test('units: independent regions in one file stay independently reviewable', () => {
+  freshHome();
+  const S = 'u1b';
+  const F = path.join(tmpWork(), 'f.txt');
+  const at = (l10, l50) =>
+    Array.from({ length: 60 }, (_, i) => (i === 9 ? l10 : i === 49 ? l50 : `L${i}`)).join('\n') + '\n';
+  seedEdit(S, F, at('A0', 'B0'), at('A1', 'B0')); // #1 line 10
+  seedEdit(S, F, at('A1', 'B0'), at('A1', 'B1')); // #2 line 50 — chained, and nothing returns to line 10
+  // Nothing spans the two, so combining them would take away a decision the reader can currently make.
+  assert.equal(core.pendingGroups(S).size, 2, 'two regions, two units');
+  assert.deepEqual(core.groupMembers(S, 1), [1]);
+  assert.deepEqual(core.groupMembers(S, 2), [2]);
+});
+
+test('units: no line is claimed by two units — the displayed deltas sum to the net change', () => {
+  freshHome();
+  const S = 'u2';
+  const F = path.join(tmpWork(), 'f.txt');
+  threeEditsAroundOne(S, F);
+  const units = core.reviewEdits(S);
+  const sum = units.reduce(
+    (a, r) => {
+      const d = core.lineDelta(S, r);
+      return { added: a.added + d.added, removed: a.removed + d.removed };
+    },
+    { added: 0, removed: 0 }
+  );
+  // Two lines changed, net. Three rows of +1/-1 would total +3/-3 — a line counted twice, which is how
+  // a session that rewrote 2 lines comes to report 3 in every rollup that sums over review units
+  // (`cmdList`, the prompt rows, the change-map rollups all fold `lineDelta` over exactly this list).
+  // The assertion is the PROPERTY, not the unit count: however the units divide, they must divide the
+  // net change without overlapping it.
+  assert.deepEqual(sum, { added: 2, removed: 2 }, 'each changed line is owned by exactly one unit');
+});
+
+test('units: a broken chain resets ownership — nothing unions across it', () => {
+  freshHome();
+  const S = 'u3';
+  const F = path.join(tmpWork(), 'f.txt');
+  const at = (l10) => Array.from({ length: 60 }, (_, i) => (i === 9 ? l10 : `L${i}`)).join('\n') + '\n';
+  seedEdit(S, F, at('A0'), at('A1')); // #1 rewrites line 10
+  // Something outside the session rewrote the file between #1 and #2, so #2's before is NOT #1's
+  // after. Nothing before that point is attributable, however similar the text looks.
+  seedEdit(S, F, at('HUMAN'), at('A2')); // #2 rewrites line 10 — same line, different history
+  assert.equal(core.pendingGroups(S).size, 2, 'a broken chain is a wall, not a hint');
+  assert.deepEqual(core.groupMembers(S, 1), [1]);
+  assert.deepEqual(core.groupMembers(S, 2), [2]);
+});
+
 test('undo: fileBaseline reverts all pending edits (quick-diff baseline)', () => {
   freshHome();
   const S = 'baseline';
@@ -2300,6 +3210,77 @@ function decode(chunks) {
   return out;
 }
 const keysOf = (evs) => evs.filter((e) => e.t === 'key' && !e.ctrl && !e.alt).map((e) => e.key);
+
+test('session: the terminal front door — repo-scoped inside a repo, machine-wide newest outside', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const repo = fs.realpathSync(tmpWork());
+  fs.mkdirSync(path.join(repo, '.git')); // a workspace
+  const desk = fs.realpathSync(tmpWork()); // no .git — "$HOME/Desktop"
+  const write = (cwd, id, ts) => {
+    const proj = core.projectDir(cwd);
+    fs.mkdirSync(proj, { recursive: true });
+    const p = path.join(proj, id + '.jsonl');
+    fs.writeFileSync(
+      p,
+      [
+        JSON.stringify({ type: 'user', sessionId: id, cwd, timestamp: new Date(ts).toISOString(), message: { role: 'user', content: 'hi' } }),
+        JSON.stringify({ type: 'assistant', sessionId: id, timestamp: new Date(ts + 1).toISOString(), message: { role: 'assistant', id: 'm' + id, model: 'claude-opus-4-5', content: [], usage: {} } }),
+      ].join('\n') + '\n'
+    );
+    fs.utimesSync(p, new Date(ts), new Date(ts));
+  };
+  write(repo, 'repoOld0', 1_000_000);
+  write(desk, 'deskStale0', 500_000); // what the old walk-up would have found from the desk
+  const other = fs.realpathSync(tmpWork());
+  write(other, 'liveNow0', 2_000_000); // the machine-wide newest, in a different workspace
+  assert.equal(core.defaultTuiSession(repo), 'repoOld0', 'inside a repo, the workspace rules — even with newer activity elsewhere');
+  assert.equal(core.defaultTuiSession(desk), 'liveNow0', 'outside any repo, the machine-wide newest wins over ancestor leftovers');
+});
+
+test('tui/claude: the live tail renders — status row, feed rows, and the hint only when quiet', () => {
+  const base = dashFixture();
+  const live = {
+    ...base,
+    // The PANED layout, not the legacy single-screen chrome — the Claude window only exists there.
+    panes: {
+      minimized: tui.defaultMinimized(120, 48),
+      zoom: null,
+      focus: 'traces',
+      tab: {},
+      cursor: {},
+      scroll: {},
+      sizes: {},
+    },
+    views: {
+      ...base.views,
+      sessions: {
+        active: 'fixture0',
+        sessions: [{ id: 'fixture0', model: 'Opus 4.5', effort: 'high', active: true, tokens: 1234, durationMs: 60000 }],
+      },
+      multitask: { agents: [{ session: 'fixture0', self: true, phase: 'working', phaseConfidence: 'high' }], summary: {} },
+      feed: {
+        entries: [
+          { ts: 4_990_000, kind: 'action', label: 'Edit src/a.ts', ok: true },
+          { ts: 4_995_000, kind: 'reasoning', label: 'now the tests' },
+          { ts: 4_996_000, kind: 'action', label: 'Bash npm test', ok: false },
+        ],
+        mode: 'live',
+      },
+    },
+  };
+  // 48 rows: tall enough that the Claude window OPENS (it folds below ~40) — every shorter frame
+  // test exercises only the folded chip, which is how the whole body branch went untested.
+  const frame = tui.renderDashFrame(live, { cols: 120, rows: 48, color: false }).join('\n');
+  assert.match(frame, /Opus 4\.5/, 'the status row carries the model');
+  assert.match(frame, /Edit src\/a\.ts/, 'a tool call lands in the tail');
+  assert.match(frame, /now the tests/, 'assistant reasoning lands in the tail');
+  assert.match(frame, /Bash npm test/, 'a failed call still shows');
+  assert.ok(!/F1 again/.test(frame), 'a live tail spends no row on the resume hint');
+  const quiet = { ...live, views: { ...live.views, feed: { entries: [], mode: 'live' } } };
+  const frame2 = tui.renderDashFrame(quiet, { cols: 120, rows: 48, color: false }).join('\n');
+  assert.match(frame2, /F1 again/, 'a quiet tail offers the door back to Claude');
+});
 
 test('tui/changemap: aggregates by path prefix, so nothing is dropped and every row fits', () => {
   // A top-N ledger looks complete while hiding most of the churn — on a real session its top twenty
@@ -5678,7 +6659,9 @@ test('demoHeartbeat: bumps every demo transcript and writes nothing', async () =
 
 test('tour: demoTour is a complete, well-formed script for both editors', () => {
   const steps = core.demoTour();
-  const VIEWS = new Set(['overview', 'prompts', 'stats', 'edits', 'diffs', 'fileHistory', 'actions', 'observations', 'editor']);
+  // N15: the Edits and Diffs trees are gone — Review is the one review surface, so the closed view
+  // set shrank with the product.
+  const VIEWS = new Set(['overview', 'prompts', 'review', 'stats', 'fileHistory', 'actions', 'observations', 'editor']);
   const TABS = ['sessions', 'fleet', 'workflows', 'tasks', 'processes'];
   const ANCHORS = new Set([
     'nav-tabs', 'folders-strip', 'files-ledger', 'summary-bar', 'feed', 'nav-axes', 'accept-prompt',
@@ -5756,7 +6739,7 @@ test('tour: demoTour is a complete, well-formed script for both editors', () => 
   }
   assert.equal(new Set(used).size, byName.size, 'no anchor name is shared between panels');
   // The short track still has to be a coherent product story on its own.
-  for (const view of ['overview', 'prompts', 'edits', 'editor', 'actions']) {
+  for (const view of ['overview', 'prompts', 'review', 'editor', 'actions']) {
     assert.ok(essentials.some((s) => s.view === view), `the short track still reaches ${view}`);
   }
 });
@@ -5888,6 +6871,461 @@ function bashHook(session, cwd, event) {
 }
 const blobCount = (S) => fs.readdirSync(path.join(core.storeDir(S), 'blobs')).length;
 
+test('capture: two Bash commands overlapping in ONE directory record a change ONCE', () => {
+  // The end-to-end shape the store-level test cannot reach, and the one that matters most: a
+  // backgrounded command and a foreground command in the SAME cwd both hold a snapshot from before
+  // the change, so BOTH Posts would record it. Two identical rows is not just noise — undoing the
+  // first then refuses as a conflict with the second, and only `--force` clears it.
+  freshHome();
+  const S = 'bash-overlap';
+  const ws = fs.realpathSync(tmpWork());
+  const F = path.join(ws, 'f.txt');
+  fs.writeFileSync(F, 'v1\n');
+
+  bashHook(S, ws, 'PreToolUse'); // command A starts (backgrounded)
+  bashHook(S, ws, 'PreToolUse'); // command B starts beside it
+  fs.writeFileSync(F, 'v2\n'); // …one of them changes the file
+  bashHook(S, ws, 'PostToolUse'); // B finishes
+  bashHook(S, ws, 'PostToolUse'); // A finishes
+
+  const recs = core.readLog(S).filter((r) => r.file === F);
+  assert.equal(recs.length, 1, `the change is recorded once, got ${recs.length}`);
+  assert.equal(core.blobText(S, recs[0].beforeBlob), 'v1\n');
+  assert.equal(core.blobText(S, recs[0].afterBlob), 'v2\n');
+  assert.equal(core.pendingGroups(S).size, 1, 'and it is ONE decision, undoable without a conflict');
+});
+
+test('capture: a nested Bash command does not make the repo-root command re-record its change', () => {
+  // The same duplicate one directory down, and the shape this repo produces all day (gradle runs in
+  // packages/jetbrains beside npm at the root). Advancing only the snapshots whose root matched
+  // EXACTLY left the repo-root snapshot holding the pre-change content, so its Post recorded the
+  // subdirectory command's change a second time.
+  freshHome();
+  const S = 'bash-nested';
+  const ws = fs.realpathSync(tmpWork());
+  const sub = path.join(ws, 'pkg');
+  fs.mkdirSync(sub, { recursive: true });
+  const F = path.join(sub, 'f.txt');
+  fs.writeFileSync(F, 'v1\n');
+
+  bashHook(S, ws, 'PreToolUse'); // the repo-root command starts (backgrounded)
+  bashHook(S, sub, 'PreToolUse'); // a command in the subdirectory starts beside it
+  fs.writeFileSync(F, 'v2\n'); // …which changes a file there
+  bashHook(S, sub, 'PostToolUse'); // it finishes and records the change
+  bashHook(S, ws, 'PostToolUse'); // the repo-root command finishes
+
+  const recs = core.readLog(S).filter((r) => r.file === F);
+  assert.equal(recs.length, 1, `the change is recorded once, got ${recs.length}`);
+  assert.equal(core.pendingGroups(S).size, 1, 'and it is ONE decision, undoable without a conflict');
+});
+
+test('capture: advancing a snapshot never adds a file from OUTSIDE its own tree', () => {
+  // Containment cuts both ways. A repo-root command that records a NEW file must not write that key
+  // into a sibling subtree's pending snapshot: that command's Post walks a tree the file was never
+  // in, finds the key unseen, and reports it DELETED — inventing the very phantom this removes.
+  freshHome();
+  const S = 'bash-sibling';
+  const ws = fs.realpathSync(tmpWork());
+  const a = path.join(ws, 'a');
+  const b = path.join(ws, 'b');
+  fs.mkdirSync(a, { recursive: true });
+  fs.mkdirSync(b, { recursive: true });
+  fs.writeFileSync(path.join(a, 'keep.txt'), 'stay\n');
+
+  bashHook(S, a, 'PreToolUse'); // a command scoped to a/ starts
+  bashHook(S, ws, 'PreToolUse'); // a repo-root command starts beside it
+  const fresh = path.join(b, 'new.txt');
+  fs.writeFileSync(fresh, 'brand new\n'); // created under b/, which a/'s walk never visits
+  bashHook(S, ws, 'PostToolUse'); // the root command records the creation
+  // Read a/'s snapshot while it is STILL PENDING — after its Post consumes it there is nothing left
+  // to inspect, and an assertion over the empty set passes against any implementation at all.
+  const aSnapshot = core.readBashManifest(S, a);
+  assert.ok(aSnapshot, 'a/ still has its snapshot to diff against');
+  assert.ok(
+    !Object.prototype.hasOwnProperty.call(aSnapshot.files ?? {}, fresh),
+    'and it never gained a key for a file outside its own tree'
+  );
+  bashHook(S, a, 'PostToolUse'); // a/'s command finishes
+
+  const recs = core.readLog(S).filter((r) => r.file === fresh);
+  assert.equal(recs.length, 1, 'the creation is recorded once');
+  assert.equal(recs[0].beforeBlob, null, 'as a creation');
+  assert.ok(
+    !core.readLog(S).some((r) => r.file === fresh && r.afterBlob === null),
+    'and a/ never reports it deleted'
+  );
+});
+
+test('capture: a file CREATED under an overlapping command is recorded once', () => {
+  // The add path of the advance, which the change-shaped test above cannot reach: two commands in one
+  // directory straddle a creation, so both snapshots lack the file and both Posts would report it new.
+  freshHome();
+  const S = 'bash-create-overlap';
+  const ws = fs.realpathSync(tmpWork());
+  const F = path.join(ws, 'made.txt');
+  bashHook(S, ws, 'PreToolUse');
+  bashHook(S, ws, 'PreToolUse');
+  fs.writeFileSync(F, 'brand new\n');
+  bashHook(S, ws, 'PostToolUse');
+  bashHook(S, ws, 'PostToolUse');
+  const recs = core.readLog(S).filter((r) => r.file === F);
+  assert.equal(recs.length, 1, `the creation is recorded once, got ${recs.length}`);
+  assert.equal(recs[0].beforeBlob, null, 'as a creation');
+});
+
+test('capture: a file DELETED under an overlapping command is recorded once', () => {
+  // …and the remove path: both snapshots hold the file, so both Posts would report the deletion.
+  freshHome();
+  const S = 'bash-delete-overlap';
+  const ws = fs.realpathSync(tmpWork());
+  const F = path.join(ws, 'doomed.txt');
+  fs.writeFileSync(F, 'bye\n');
+  bashHook(S, ws, 'PreToolUse');
+  bashHook(S, ws, 'PreToolUse');
+  fs.unlinkSync(F);
+  bashHook(S, ws, 'PostToolUse');
+  bashHook(S, ws, 'PostToolUse');
+  const recs = core.readLog(S).filter((r) => r.file === F);
+  assert.equal(recs.length, 1, `the deletion is recorded once, got ${recs.length}`);
+  assert.equal(recs[0].afterBlob, null, 'as a deletion');
+});
+
+test('capture: a file under the root but OUTSIDE the walk is never reported deleted', () => {
+  // The trap in advancing by containment: `isUnderPath` is a path test, but the walk does not reach
+  // everything under its root — it refuses to descend BASH_SKIP_DIRS (`build`, `node_modules`, …),
+  // symlinked directories and unreadable ones. So a change recorded by a command INSIDE `build/`
+  // added a key the repo-root snapshot's own walk could never see, and its Post called the file
+  // deleted. Worse than a stray row: the pair chains into "file deleted", and undoing the real
+  // change then refuses as a conflict — the exact failure the advance was written to prevent.
+  freshHome();
+  const S = 'bash-skipdir';
+  const ws = fs.realpathSync(tmpWork());
+  const skipped = path.join(ws, 'build'); // in BASH_SKIP_DIRS — the root walk never descends it
+  fs.mkdirSync(skipped, { recursive: true });
+  const F = path.join(skipped, 'x.txt');
+  fs.writeFileSync(F, 'v1\n');
+
+  bashHook(S, ws, 'PreToolUse'); // repo-root command starts (its walk skips build/)
+  bashHook(S, skipped, 'PreToolUse'); // a command inside build/ starts
+  fs.writeFileSync(F, 'v2\n');
+  bashHook(S, skipped, 'PostToolUse'); // records v1→v2 and advances the root snapshot
+  bashHook(S, ws, 'PostToolUse'); // the root command finishes — must NOT invent a deletion
+
+  const recs = core.readLog(S).filter((r) => r.file === F);
+  assert.equal(recs.length, 1, `one record, got ${recs.length}: ${JSON.stringify(recs.map((r) => [r.beforeBlob, r.afterBlob]))}`);
+  assert.ok(!recs.some((r) => r.afterBlob === null), 'and nothing claims the file was deleted');
+  assert.equal(fs.readFileSync(F, 'utf8'), 'v2\n', 'the file is still on disk, which is the whole point');
+});
+
+test('capture: a real deletion IS still recorded (the guard above must not swallow one)', () => {
+  // The positive control for the existence guard: prove the instrument still fires.
+  freshHome();
+  const S = 'bash-realdel';
+  const ws = fs.realpathSync(tmpWork());
+  const F = path.join(ws, 'gone.txt');
+  fs.writeFileSync(F, 'bye\n');
+  bashHook(S, ws, 'PreToolUse');
+  fs.unlinkSync(F);
+  bashHook(S, ws, 'PostToolUse');
+  const recs = core.readLog(S).filter((r) => r.file === F);
+  assert.equal(recs.length, 1, 'the deletion is recorded');
+  assert.equal(recs[0].afterBlob, null, 'as a deletion');
+});
+
+test('capture: a previous build’s rootless snapshot never answers for a subdirectory', () => {
+  // The upgrade path. The old build wrote ONE shared `__bash__.json` with no root, and a rootless
+  // manifest matched any cwd — it even sorts first, so the first Post after an upgrade consumed it
+  // and reported every file outside its own directory as deleted.
+  freshHome();
+  const S = 'bash-legacy';
+  const ws = fs.realpathSync(tmpWork());
+  const sub = path.join(ws, 'packages');
+  fs.mkdirSync(sub, { recursive: true });
+  fs.writeFileSync(path.join(ws, 'README.md'), 'readme\n');
+  fs.writeFileSync(path.join(sub, 'a.txt'), 'a\n');
+  // A legacy snapshot of the whole tree, with no `root` — exactly what the shipped build wrote.
+  core.ensureStore(S);
+  core.writeBashManifest(S, {
+    files: { [path.join(ws, 'README.md')]: core.writeBlob(S, Buffer.from('readme\n')) },
+    ts: Date.now(),
+  });
+  bashHook(S, sub, 'PreToolUse');
+  bashHook(S, sub, 'PostToolUse'); // a command in packages/ that changed nothing
+  assert.deepEqual(core.readLog(S), [], 'no phantom deletions for files outside that command’s tree');
+});
+
+test('capture: NO INTERLEAVING of Bash and Edit records one change twice', () => {
+  // The standing guard against duplicate rows. Hooks arrive interleaved because a backgrounded Bash
+  // command runs beside the next tool call, so every ordering below happens in a normal session —
+  // and each one had a way to log the same disk transition twice, which shows up as two rows with
+  // identical deltas and consecutive ids, and makes undoing the first refuse as a conflict.
+  //
+  // The invariant is stronger than "no duplicate row": a file's records must form a CHAIN that ends
+  // on what is actually on disk. That catches a missing capture as loudly as a doubled one.
+  const chainOf = (S, file) => {
+    const recs = core.readLog(S).filter((r) => r.file === file).sort((a, b) => a.id - b.id);
+    for (let i = 1; i < recs.length; i++) {
+      assert.equal(recs[i].beforeBlob, recs[i - 1].afterBlob, `#${recs[i].id} does not continue #${recs[i - 1].id}`);
+    }
+    const last = recs[recs.length - 1];
+    if (last) {
+      const onDisk = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null;
+      assert.equal(last.afterBlob === null ? null : core.blobText(S, last.afterBlob), onDisk, 'the chain ends on what is on disk');
+    }
+    return recs;
+  };
+  const bash = (S, cwd, event) =>
+    core.handleHookPayload({ session_id: S, cwd, tool_name: 'Bash', tool_input: { command: 'x' }, hook_event_name: event });
+  const edit = (S, cwd, file, event) =>
+    core.handleHookPayload({ session_id: S, cwd, tool_name: 'Edit', tool_input: { file_path: file }, hook_event_name: event });
+
+  {
+    // 1. A backgrounded command's Post lands in the MIDDLE of an edit. Its walk sees the new content
+    //    while the edit's own Post is still coming — both used to record it.
+    freshHome();
+    const S = 'ilv-bash-mid-edit';
+    const ws = fs.realpathSync(tmpWork());
+    const F = path.join(ws, 'a.ts');
+    fs.writeFileSync(F, 'v0\n');
+    bash(S, ws, 'PreToolUse');
+    edit(S, ws, F, 'PreToolUse');
+    fs.writeFileSync(F, 'v1\n');
+    bash(S, ws, 'PostToolUse');
+    edit(S, ws, F, 'PostToolUse');
+    const recs = chainOf(S, F);
+    assert.equal(recs.length, 1, `one change, one record — got ${recs.length}`);
+    assert.equal(recs[0].tool, 'Edit', 'and it is attributed to the tool that made it');
+  }
+  {
+    // 2. The same pair, the other way round: the edit finishes first and the command's Post walks
+    //    after it. (The snapshot advance covers this one.)
+    freshHome();
+    const S = 'ilv-edit-then-bash';
+    const ws = fs.realpathSync(tmpWork());
+    const F = path.join(ws, 'a.ts');
+    fs.writeFileSync(F, 'v0\n');
+    bash(S, ws, 'PreToolUse');
+    edit(S, ws, F, 'PreToolUse');
+    fs.writeFileSync(F, 'v1\n');
+    edit(S, ws, F, 'PostToolUse');
+    bash(S, ws, 'PostToolUse');
+    assert.equal(chainOf(S, F).length, 1, 'one change, one record');
+  }
+  {
+    // 3. One backgrounded command spanning SEVERAL edits, to two files.
+    freshHome();
+    const S = 'ilv-span';
+    const ws = fs.realpathSync(tmpWork());
+    const A = path.join(ws, 'a.ts');
+    const B = path.join(ws, 'b.ts');
+    fs.writeFileSync(A, 'a0\n');
+    fs.writeFileSync(B, 'b0\n');
+    bash(S, ws, 'PreToolUse');
+    for (const [f, v] of [[A, 'a1\n'], [B, 'b1\n'], [A, 'a2\n']]) {
+      edit(S, ws, f, 'PreToolUse');
+      fs.writeFileSync(f, v);
+      edit(S, ws, f, 'PostToolUse');
+    }
+    bash(S, ws, 'PostToolUse');
+    assert.equal(chainOf(S, A).length, 2, 'two edits to a.ts, two records');
+    assert.equal(chainOf(S, B).length, 1, 'one edit to b.ts, one record');
+  }
+  {
+    // 4. Nested roots overlapping, and the command itself does the writing (no edit tool at all).
+    freshHome();
+    const S = 'ilv-nested';
+    const ws = fs.realpathSync(tmpWork());
+    const sub = path.join(ws, 'packages');
+    fs.mkdirSync(sub, { recursive: true });
+    const F = path.join(sub, 'c.ts');
+    fs.writeFileSync(F, 'c0\n');
+    bash(S, ws, 'PreToolUse');
+    bash(S, sub, 'PreToolUse');
+    fs.writeFileSync(F, 'c1\n');
+    bash(S, sub, 'PostToolUse');
+    bash(S, ws, 'PostToolUse');
+    assert.equal(chainOf(S, F).length, 1, 'one change, one record');
+  }
+  {
+    // 5. …and the capture is not merely silent: a command that really does change a file on its own
+    //    still records it (the positive control for every skip above).
+    freshHome();
+    const S = 'ilv-control';
+    const ws = fs.realpathSync(tmpWork());
+    const F = path.join(ws, 'd.ts');
+    fs.writeFileSync(F, 'd0\n');
+    bash(S, ws, 'PreToolUse');
+    fs.writeFileSync(F, 'd1\n');
+    bash(S, ws, 'PostToolUse');
+    const recs = chainOf(S, F);
+    assert.equal(recs.length, 1, 'the command’s own change is recorded');
+    assert.equal(recs[0].tool, 'Bash');
+  }
+});
+
+test('capture: an ABANDONED edit does not suppress the file forever', () => {
+  // The other side of deferring to an in-flight edit. Nothing reaps a staging record whose Post never
+  // arrived (an interrupted edit), and deferring to it indefinitely would mean every later change to
+  // that file went unrecorded — silently, which is worse than the duplicate the deferral prevents.
+  freshHome();
+  const S = 'stale-staging';
+  const ws = fs.realpathSync(tmpWork());
+  const F = path.join(ws, 'a.ts');
+  fs.writeFileSync(F, 'v0\n');
+  // An edit call that starts and never finishes.
+  core.handleHookPayload({ session_id: S, cwd: ws, tool_name: 'Edit', tool_input: { file_path: F }, hook_event_name: 'PreToolUse' });
+  const staging = fs.readdirSync(path.join(core.storeDir(S), 'staging')).filter((n) => n.endsWith('.json'));
+  assert.equal(staging.length, 1, 'the before-snapshot is waiting');
+  // Age it past the in-flight horizon, then let a Bash command see the change.
+  const old = Date.now() - 10 * 60 * 1000;
+  fs.utimesSync(path.join(core.storeDir(S), 'staging', staging[0]), old / 1000, old / 1000);
+  core.handleHookPayload({ session_id: S, cwd: ws, tool_name: 'Bash', tool_input: { command: 'x' }, hook_event_name: 'PreToolUse' });
+  fs.writeFileSync(F, 'v1\n');
+  core.handleHookPayload({ session_id: S, cwd: ws, tool_name: 'Bash', tool_input: { command: 'x' }, hook_event_name: 'PostToolUse' });
+  const recs = core.readLog(S).filter((r) => r.file === F);
+  assert.equal(recs.length, 1, 'the change is still recorded — by the walk, since nothing else will');
+  assert.equal(core.blobText(S, recs[0].afterBlob), 'v1\n');
+});
+
+test('capture: a change the in-flight edit will NOT cover is still recorded', () => {
+  // The other half of the deferral's safety. If the command changed the file BEFORE the edit's Pre
+  // ran, that edit's before-snapshot is the command's output — so its Post records a narrower hop and
+  // the earlier content would never be recorded by anyone. Deferring is only safe when the edit is
+  // covering this walk's own transition, which its before-blob is what proves.
+  freshHome();
+  const S = 'edit-after-write';
+  const ws = fs.realpathSync(tmpWork());
+  const F = path.join(ws, 'a.ts');
+  fs.writeFileSync(F, 'v0\n');
+  const bash = (ev) => core.handleHookPayload({ session_id: S, cwd: ws, tool_name: 'Bash', tool_input: { command: 'x' }, hook_event_name: ev });
+  const edit = (ev) => core.handleHookPayload({ session_id: S, cwd: ws, tool_name: 'Edit', tool_input: { file_path: F }, hook_event_name: ev });
+  bash('PreToolUse'); // snapshot at v0
+  fs.writeFileSync(F, 'v1\n'); // the COMMAND writes it…
+  edit('PreToolUse'); // …and only then does an edit start, snapshotting v1
+  fs.writeFileSync(F, 'v2\n');
+  bash('PostToolUse'); // the walk sees v0→v2; the edit will only ever cover v1→v2
+  edit('PostToolUse');
+  const recs = core.readLog(S).filter((r) => r.file === F).sort((a, b) => a.id - b.id);
+  assert.equal(core.blobText(S, recs[0].beforeBlob), 'v0\n', 'the chain still reaches v0 — nothing was dropped');
+  assert.equal(core.blobText(S, recs[recs.length - 1].afterBlob), 'v2\n', 'and it ends on what is on disk');
+  for (let i = 1; i < recs.length; i++) {
+    assert.equal(recs[i].beforeBlob, recs[i - 1].afterBlob, 'the chain is unbroken');
+  }
+});
+
+test('capture: a DENIED edit does not blind the walk to the file', () => {
+  // PreToolUse runs before the permission prompt and PostToolUse only fires on success, so a denied
+  // or failed edit leaves its before-snapshot behind. Deferring to one of those is how a file that is
+  // genuinely changing goes unrecorded with nothing said — the reason the window is seconds, not
+  // minutes, and the reason the deferral also demands a covering before-blob.
+  freshHome();
+  const S = 'denied-edit';
+  const ws = fs.realpathSync(tmpWork());
+  const F = path.join(ws, 'a.ts');
+  fs.writeFileSync(F, 'v0\n');
+  // The edit is proposed and denied: its Pre ran, its Post never will.
+  core.handleHookPayload({ session_id: S, cwd: ws, tool_name: 'Edit', tool_input: { file_path: F }, hook_event_name: 'PreToolUse' });
+  const bash = (ev) => core.handleHookPayload({ session_id: S, cwd: ws, tool_name: 'Bash', tool_input: { command: 'x' }, hook_event_name: ev });
+  bash('PreToolUse');
+  fs.writeFileSync(F, 'v1\n'); // a command changes the very file the denied edit had staged
+  bash('PostToolUse');
+  const recs = core.readLog(S).filter((r) => r.file === F);
+  assert.equal(recs.length, 1, 'the command’s change is recorded, not swallowed by a dead staging record');
+  assert.equal(core.blobText(S, recs[0].beforeBlob), 'v0\n', 'and it reaches the content that existed before it');
+});
+
+test('capture: randomised hook interleavings never duplicate a change (seeded fuzz)', () => {
+  // The five hand-written orderings above are the ones we thought of. This drives many more: several
+  // Bash windows open at once across nested roots, edit calls landing inside them, and a command's
+  // Post landing BETWEEN an edit's Pre and its Post — the ordering that produced the reported rows.
+  //
+  // Seeded, so a failure is reproducible. Instrument checked by mutation: with the already-recorded
+  // check removed this reports 22 duplicate pairs over these runs, so a green result means the
+  // generator really is producing the interleaving, not missing it.
+  let seed = 12345;
+  const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  const pick = (a) => a[Math.floor(rnd() * a.length)];
+  let dups = 0;
+  let breaks = 0;
+  let mismatches = 0;
+  let records = 0;
+  for (let iter = 0; iter < 12; iter++) {
+    freshHome();
+    const ws = fs.realpathSync(tmpWork());
+    const dirs = [ws, path.join(ws, 'packages'), path.join(ws, 'packages', 'core')];
+    for (const d of dirs) fs.mkdirSync(d, { recursive: true });
+    const files = dirs.map((d, i) => path.join(d, `f${i}.ts`));
+    files.forEach((f, i) => fs.writeFileSync(f, `start ${i}\n`));
+    const S = `fuzz${iter}`;
+    const hook = (cwd, tool, event, file) =>
+      core.handleHookPayload({
+        session_id: S, cwd, tool_name: tool, hook_event_name: event,
+        tool_input: tool === 'Bash' ? { command: 'x' } : { file_path: file },
+      });
+    const open = [];
+    let v = 0;
+    for (let step = 0; step < 24; step++) {
+      const r = rnd();
+      if (r < 0.3) {
+        const d = pick(dirs);
+        hook(d, 'Bash', 'PreToolUse');
+        open.push(d);
+      } else if (r < 0.5 && open.length) {
+        hook(open.shift(), 'Bash', 'PostToolUse');
+      } else {
+        const f = pick(files);
+        hook(path.dirname(f), 'Edit', 'PreToolUse', f);
+        fs.writeFileSync(f, `start x\nv${++v}\n`);
+        if (rnd() < 0.5 && open.length) hook(open.shift(), 'Bash', 'PostToolUse'); // mid-edit
+        hook(path.dirname(f), 'Edit', 'PostToolUse', f);
+      }
+    }
+    while (open.length) hook(open.shift(), 'Bash', 'PostToolUse');
+    for (const f of files) {
+      const recs = core.readLog(S).filter((r) => r.file === f).sort((a, b) => a.id - b.id);
+      records += recs.length;
+      for (let i = 1; i < recs.length; i++) {
+        if (recs[i].beforeBlob === recs[i - 1].beforeBlob && recs[i].afterBlob === recs[i - 1].afterBlob) dups++;
+        if (recs[i].beforeBlob !== recs[i - 1].afterBlob) breaks++;
+      }
+      const last = recs[recs.length - 1];
+      if (last) {
+        const disk = fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : null;
+        if ((last.afterBlob === null ? null : core.blobText(S, last.afterBlob)) !== disk) mismatches++;
+      }
+    }
+  }
+  assert.ok(records > 100, `the fuzz actually captured something (${records} records)`);
+  assert.equal(dups, 0, `${dups} duplicate record pairs`);
+  assert.equal(breaks, 0, `${breaks} broken chains — a capture went missing`);
+  assert.equal(mismatches, 0, `${mismatches} chains that do not end on what is on disk`);
+});
+
+test('capture: losing a file’s final newline is a real edit, not blank-line churn', () => {
+  // `split('\n')` makes a trailing terminator look like an empty last line, so the blank-line filter
+  // compared "two\n" equal to "two" — and the change vanished end to end: no record, no marker,
+  // nothing to undo, while git calls it out as `\ No newline at end of file` and linters fail on it.
+  freshHome();
+  const S = 'final-nl';
+  const ws = fs.realpathSync(tmpWork());
+  const F = path.join(ws, 'f.txt');
+  fs.writeFileSync(F, 'one\ntwo\n');
+  const hook = (event) =>
+    core.handleHookPayload({ session_id: S, cwd: ws, tool_name: 'Write', tool_input: { file_path: F }, hook_event_name: event });
+  hook('PreToolUse');
+  fs.writeFileSync(F, 'one\ntwo'); // ONLY the final newline goes
+  hook('PostToolUse');
+  const recs = core.readLog(S).filter((r) => r.file === F);
+  assert.equal(recs.length, 1, 'the edit is recorded');
+  assert.equal(core.blobText(S, recs[0].afterBlob), 'one\ntwo', 'with the newline genuinely gone');
+
+  // …and real blank-line churn is still not a row.
+  hook('PreToolUse');
+  fs.writeFileSync(F, 'one\n\n\ntwo');
+  hook('PostToolUse');
+  assert.equal(core.readLog(S).filter((r) => r.file === F).length, 1, 'blank lines alone still never earn a decision');
+});
+
 test('capture: a Bash command that creates ZERO-BYTE files records no "+0 −0" rows', () => {
   // The shape observed in a real store: 2,241 of 2,446 records had an EMPTY after-blob — postgres
   // relation stubs from `initdb`, plus .Xauthority, .tig_history, btmp. Every one rendered as
@@ -5963,7 +7401,10 @@ test('capture: Bash in $HOME snapshots nothing, and SAYS it captured nothing', (
     bashHook(S, proj, 'PreToolUse');
     assert.ok(core.readBashManifest(S), 'positive control: a project directory IS walked');
     bashHook(S, home, 'PreToolUse');
-    assert.equal(core.readBashManifest(S), null, 'and the refused command clears the stale manifest');
+    assert.equal(core.readBashManifest(S, home), null, 'the refused command has no snapshot of its own');
+    // …and it does NOT wipe the project command's, which may still be running beside it: snapshots
+    // are per-tree now, so a $HOME Post cannot consume a project snapshot anyway.
+    assert.ok(core.readBashManifest(S, proj), 'a concurrent project command keeps its snapshot');
     bashHook(S, home, 'PostToolUse');
     assert.equal(core.readLog(S).length, 0, 'so nothing from $HOME is diffed into the log');
 
@@ -6624,8 +8065,13 @@ test('observe: a compaction summary can never become the session title (0.8.6)',
     JSON.stringify({ timestamp: new Date(3000).toISOString(), type: 'user', message: { role: 'user', content: 'Third session' } }) + '\n'
   );
   core.ensureStore(S3);
+  // Every mtime in this fixture is set EXPLICITLY, a minute apart. S3 used to take `new Date()` while
+  // S2 kept whatever its write had just stamped — also "now" — so which of the two led was decided by
+  // sub-millisecond ordering, and a fast filesystem put S2 first (observed on CI, node 20).
   const newest = new Date();
   fs.utimesSync(path.join(proj, S3 + '.jsonl'), newest, newest);
+  const middle = new Date(Date.now() - 60_000);
+  fs.utimesSync(path.join(proj, S2 + '.jsonl'), middle, middle);
   const older2 = new Date(Date.now() - 120_000);
   // S2 and S3 are command-only stubs (no assistant record), so resolution stays on S even though S3 is
   // the newest file — the two properties now disagree, which is the only way this assertion can fail.
@@ -8322,15 +9768,26 @@ test('prompts: checkpointScope is the rewind boundary — group-expanded, ts-bou
   seedEdit(S, LATER, 'P\n', 'Q\n');                      // #4 ts4000 — window 3
   const w = core.promptWindows(cwd, S);
   assert.equal(w.length, 3, 'three asks, three windows');
-  // #2 and #3 are one same-code group, so the ROWS only ever show its representative (#3, in window 2).
-  assert.deepEqual(core.groupMembers(S, 3), [2, 3], 'the chain is one review unit');
-  assert.deepEqual(w[0].editIds, [], 'window 1 shows nothing — its edit was collapsed into the rep');
-  assert.deepEqual(w[1].editIds, [3], 'window 2 shows the representative');
+  // #2 and #3 touch the SAME line of the same file and chain perfectly — but they belong to different
+  // asks, and a review unit never spans two. That boundary is doing two jobs at once:
+  //
+  //  - every ask reports the work it caused. Merging these put both edits under #3's window and left
+  //    window 1 printing zero for an edit it made, which is what would render a per-ask review surface
+  //    blank for most of a session.
+  //  - a rewind from ask 2 no longer reverts an edit ask 1 made. Group expansion used to drag #2 in
+  //    through the back door, widening the blast radius past what the reader picked.
+  //
+  // Within one ask they would still combine; across asks the honest answer is two decisions, each with
+  // its own exact before→after pair.
+  assert.deepEqual(core.groupMembers(S, 3), [3], 'a unit does not cross an ask boundary');
+  assert.deepEqual(core.groupMembers(S, 2), [2]);
+  assert.deepEqual(w[0].editIds, [2], 'window 1 reports its own edit');
+  assert.deepEqual(w[1].editIds, [3], 'window 2 reports its own');
 
   const sc = core.checkpointScope(cwd, S, '2');
-  assert.deepEqual(sc.ids, [2, 3, 4], 'rewinding from ask 2 drags in #2 — the group member owned by an EARLIER window');
-  assert.equal(sc.pending, 3, 'three raw records would actually revert');
-  assert.equal(sc.units, 2, '…which the rows count as two review units (the chain plus #4)');
+  assert.deepEqual(sc.ids, [3, 4], 'rewinding from ask 2 takes ask 2 onward, and nothing ask 1 did');
+  assert.equal(sc.pending, 2, 'two raw records would actually revert');
+  assert.equal(sc.units, 2, '…which the rows count as two review units');
   assert.equal(sc.units, w[1].pending + w[2].pending, 'and that unit count is exactly what those rows print');
   assert.deepEqual(sc.files.map((f) => path.basename(f)).sort(), ['chain.txt', 'later.txt'], 'files come from the pending records');
   assert.deepEqual(core.checkpointScope(cwd, S, w[1].id).ids, sc.ids, 'the stable hash id resolves the same window as the index');
@@ -8341,12 +9798,13 @@ test('prompts: checkpointScope is the rewind boundary — group-expanded, ts-bou
   // The unassigned guard's whole point: nothing at or after the boundary may be silently skipped.
   const atOrAfter = core.reviewEdits(S).filter((r) => r.ts >= w[1].ts).map((r) => r.id);
   assert.ok(atOrAfter.length > 0 && atOrAfter.every((id) => sc.ids.includes(id)), 'every display record at or after the boundary is in scope');
-  assert.deepEqual(core.checkpointScope(cwd, S, 'nope'), { ids: [], pending: 0, units: 0, files: [] }, 'an unknown prompt is an empty scope, not a throw');
+  assert.deepEqual(core.checkpointScope(cwd, S, 'nope'), { ids: [], pending: 0, units: 0, fromEarlier: 0, files: [] }, 'an unknown prompt is an empty scope, not a throw');
 
   // Resolving the chain removes it from the scope's COUNTS while its ids stay addressable for redo.
   core.keepGroup(S, 3);
+  assert.equal(core.findRecord(S, 2).status, 'pending', "keeping ask 2's unit leaves ask 1's edit alone");
   const after = core.checkpointScope(cwd, S, '2');
-  assert.deepEqual(after.ids, [2, 3, 4], 'kept ids are still in scope (redo --from-prompt needs them)');
+  assert.deepEqual(after.ids, [3, 4], 'kept ids are still in scope (redo --from-prompt needs them)');
   assert.equal(after.pending, 1, 'but only the still-pending record would revert');
   assert.equal(after.units, 1, 'and it is one unit');
   assert.deepEqual(after.files.map((f) => path.basename(f)), ['later.txt'], 'the kept file drops out of the file list');
@@ -9455,10 +10913,14 @@ test('layout: the computed thresholds are where the spec says they are', () => {
 test('layout: panes tile the width exactly, with one seam between neighbours', () => {
   // An off-by-one here is invisible in a mockup and corrupts every frame, so it is checked by
   // arithmetic over a sweep rather than by eye at one width.
+  // The band membership is derived from each pane's DOCK, exactly as the product derives it — a
+  // test-side id list is how the first top-dock pane got silently swept into the band while this
+  // test kept passing.
+  const dockOf = (id) => tui.PANE_SPECS.find((p) => p.id === id).dock;
   for (let cols = 40; cols <= 200; cols += 1) {
     for (const rows of [24, 30, 36]) {
       const lay = L(cols, rows);
-      const band = lay.boxes.filter((b) => b.id !== 'dashboards' && b.id !== 'prompts').sort((a, b) => a.rect.x - b.rect.x);
+      const band = lay.boxes.filter((b) => dockOf(b.id) !== 'top' && dockOf(b.id) !== 'bottom').sort((a, b) => a.rect.x - b.rect.x);
       if (!band.length) continue;
       assert.equal(band[0].rect.x, 0, `${cols}x${rows}: band starts at 0`);
       for (let i = 1; i < band.length; i++) {
@@ -9532,17 +10994,18 @@ test('layout: the window bar leads the frame, in the order the reader was promis
   const lay = L(140, 36);
   // Order, keys and titles together: the bar is the frame's table of contents, and every one of the
   // three is something a reader navigates by.
-  // FIVE chips over four panes: Detail's two faces get a key each, so "show me the map" and "show me
-  // this diff" are one keystroke apart rather than a keystroke and then a swap.
+  // SIX chips over five panes: Claude leads (who is working, and the door back to the conversation),
+  // and Detail's two faces get a key each, so "show me the map" and "show me this diff" are one
+  // keystroke apart rather than a keystroke and then a swap.
   assert.deepEqual(
     lay.bar.map((c) => `F${c.key} ${c.title}`),
-    ['F1 Prompts', 'F2 Traces', 'F3 Map', 'F4 Diff', 'F5 Dashboards'],
-    'left to right: what was asked, what it changed, the map of it, the diff, then everything else'
+    ['F1 Claude', 'F2 Prompts', 'F3 Traces', 'F4 Map', 'F5 Diff', 'F6 Dashboards'],
+    'left to right: the agent, what was asked, what it changed, the map of it, the diff, then everything else'
   );
-  assert.deepEqual(lay.bar.map((c) => c.pane), ['prompts', 'traces', 'detail', 'detail', 'dashboards'],
+  assert.deepEqual(lay.bar.map((c) => c.pane), ['claude', 'prompts', 'traces', 'detail', 'detail', 'dashboards'],
     'and the two middle chips are ONE window');
   const f = tui.renderDashFrame(paneFixture(), { cols: 140, rows: 36, color: false });
-  assert.match(f[0], /F1 .?Prompts.*F2 .?Traces.*F3 .?Map.*F4 .?Diff.*F5 .?Dashboards/, 'and row 0 draws it');
+  assert.match(f[0], /F1 .?Claude.*F2 .?Prompts.*F3 .?Traces.*F4 .?Map.*F5 .?Diff.*F6 .?Dashboards/, 'and row 0 draws it');
   assert.match(f[1], /fixture/, 'the session bar follows it, on row 1');
   // The digits belong to EDITS now, so no chip may advertise a bare one.
   assert.doesNotMatch(f[0], /(^|\s)[0-9]\s+.?(Prompts|Traces|Dashboards|Diff|Map)/, 'no chip claims a digit');
@@ -9756,12 +11219,12 @@ test('panes: the selection is said ONCE, and stays legible with no colour at all
   const visible = lit.replace(/\x1b\[[0-9;]*m/g, '');
   assert.match(visible, /^ [?+x✓✗]/, `and the gutter is blank, not an arrow: ${JSON.stringify(visible.slice(0, 6))}`);
 
-  // An UNFOCUSED pane's cursor is marked too — differently, and not by dimming, which with the arrow
-  // gone would read as "disabled" rather than "selected".
+  // An UNFOCUSED pane paints NO band at all — the faint "context" band was tried and read as a
+  // second selected item both times a user looked at it (N7, then N16). One selection on screen.
   const un = paneFixture({ panes: { minimized: new Set(), zoom: null, focus: 'detail', tab: {}, cursor: { traces: 0 }, scroll: {} } });
   const other = tui.renderDashFrame(un, { cols: 120, rows: 30, color: 'truecolor' })[box.body.y];
-  assert.ok(/^\x1b\[48;2;/.test(other), `unfocused gets a band of its own, got ${JSON.stringify(other.slice(0, 14))}`);
-  assert.notEqual(other.slice(0, 8), lit.slice(0, 8), 'and it is not the focused one');
+  assert.ok(!/^\x1b\[7m/.test(other) && !/^\x1b\[48;2;/.test(other) && !/^\x1b\[100m/.test(other),
+    `an unfocused pane's cursor row carries no band, got ${JSON.stringify(other.slice(0, 14))}`);
 });
 
 test('panes: a size that cannot hold a window says what it would take', () => {
@@ -9769,7 +11232,7 @@ test('panes: a size that cannot hold a window says what it would take', () => {
   const status = f[f.length - 2];
   assert.match(status, /Detail needs 67 cols/, 'the status row names the cost, rather than the window just being gone');
   // And the window keeps its chip on the bar, so its jump key and counter never disappear.
-  assert.match(f[0], /F4 .?Diff/, 'Detail keeps both its chips when minimized');
+  assert.match(f[0], /F5 .?Diff/, 'Detail keeps both its chips when minimized');
 });
 
 test('panes: zoom announces itself, and names the edit it is showing', () => {
@@ -10324,8 +11787,8 @@ test('tui: an empty pane names its TAB, and says when a view never arrived', () 
     });
     const f = tui.renderDashFrame(st, { cols: 130, rows: 34, color: false });
     // The PANE HEADER, which carries the rule of dashes — not the window bar at row 0, which also says
-    // "F5 …Dashboards" and would have this reading the Prompts pane's message instead.
-    const at = f.findIndex((l) => /F5 Dashboards\s+-{5}/.test(l));
+    // "F6 …Dashboards" and would have this reading the Prompts pane's message instead.
+    const at = f.findIndex((l) => /F6 Dashboards\s+-{5}/.test(l));
     assert.ok(at >= 0, `the Dashboards pane header is on screen: ${JSON.stringify(f.slice(0, 3))}`);
     return f.slice(at + 1).find((l) => /has no data|nothing on/.test(l))?.trim() ?? '';
   };
@@ -10607,7 +12070,7 @@ test('panes: an overlay is a layer over the windows, not a different product', (
   // pressing `s` or `?` told the reader their windows had vanished.
   const st = paneFixture({ overlay: { title: 'switch session', lines: [' a', ' b'], scroll: 0, cursor: 0 } });
   const f = tui.renderDashFrame(st, { cols: 120, rows: 20, color: false });
-  assert.match(f[0], /F2 .?Traces/, 'the window bar survives an overlay');
+  assert.match(f[0], /F3 .?Traces/, 'the window bar survives an overlay');
   assert.doesNotMatch(f[0], /\b[5-8]\s+(Feed|Audit|Map)\b/, 'and the retired screen nav does not come back');
   assert.doesNotMatch(f[f.length - 1], /1-8 screens|j\/k/, 'nor does its key row');
 });
@@ -10761,9 +12224,18 @@ test('layout: a dragged seam resizes, and can never starve a pane below its mini
 });
 
 test('layout: every seam is grabbable, on both axes, and resizes a pane that honours it', () => {
-  const lay = tui.resolveLayout({ cols: 140, rows: 40, minimized: new Set(), focus: 'traces' });
-  assert.ok(lay.seams.length >= 3, 'columns and both docks all get a boundary');
-  const bandTop = lay.chrome.top + (lay.boxes.find((b) => b.id === 'prompts')?.rect.h ?? 0);
+  // 48 rows, not 40: at 40 the Claude strip opens with EXACTLY its min and no slack, so the
+  // "dragging must grow the target" property below cannot hold for its seam — a ceiling, not a bug.
+  const lay = tui.resolveLayout({ cols: 140, rows: 48, minimized: new Set(), focus: 'traces' });
+  assert.ok(lay.seams.length >= 4, 'columns, both docks and the Claude strip all get a boundary');
+  // The band's top is below EVERY top-dock box, summed — the same derivation hitTest uses. This line
+  // used to read only the prompts box, exactly mirroring the product's own single-top-pane assumption,
+  // so the pair passed together while both were wrong for a second top pane.
+  const bandTop =
+    lay.chrome.top +
+    lay.boxes
+      .filter((b) => tui.PANE_SPECS.find((p) => p.id === b.id).dock === 'top')
+      .reduce((a, b) => a + b.rect.h, 0);
   const ids = new Set(lay.boxes.map((b) => b.id));
 
   for (const sm of lay.seams) {
@@ -10783,10 +12255,21 @@ test('layout: every seam is grabbable, on both axes, and resizes a pane that hon
     const box = lay.boxes.find((b) => b.id === sm.target);
     const before = sm.axis === 'v' ? box.rect.w : box.rect.h;
     const after = tui.resolveLayout({
-      cols: 140, rows: 40, minimized: new Set(), focus: 'traces', sizes: { [sm.target]: before + 5 },
+      cols: 140, rows: 48, minimized: new Set(), focus: 'traces', sizes: { [sm.target]: before + 5 },
     }).boxes.find((b) => b.id === sm.target);
     const got = sm.axis === 'v' ? after.rect.w : after.rect.h;
     assert.ok(got > before, `dragging the ${sm.left}|${sm.right} seam must resize ${sm.target} (${before} -> ${got})`);
+  }
+});
+
+test('layout: sizes.claude clamps at min and never starves the columns', () => {
+  const min = tui.PANE_SPECS.find((p) => p.id === 'claude').min;
+  for (const want of [0, 1, 2, 3, 4, 10, 50, 500]) {
+    const lay = tui.resolveLayout({ cols: 140, rows: 48, minimized: new Set(), focus: 'traces', sizes: { claude: want } });
+    const cl = lay.boxes.find((b) => b.id === 'claude');
+    assert.ok(cl, `sized ${want}: claude stays open at this terminal size`);
+    assert.ok(cl.rect.h >= min, `sized ${want}: floored at min (got ${cl.rect.h})`);
+    assert.ok(lay.colH >= tui.COL_FLOOR, `sized ${want}: the columns keep their floor (got ${lay.colH})`);
   }
 });
 
@@ -11222,6 +12705,121 @@ function editHook(session, cwd, file, before, after) {
   core.handleHookPayload({ ...p, hook_event_name: 'PostToolUse' });
 }
 
+test('scopes: functions are detected per language, and a miss is a MISS — never a guess', () => {
+  const at = (file, text, line) => {
+    const s = core.detectScopes(text, file);
+    const hit = core.scopeAt(s, line);
+    return hit ? hit.name : null;
+  };
+  assert.equal(at('a.py', 'class P:\n    def parse(self):\n        return 1\n', 2), 'parse', 'python def');
+  assert.equal(at('a.py', 'class P:\n    def parse(self):\n        return 1\n', 0), 'P', 'python class');
+  assert.equal(at('a.ts', 'class Foo {\n  bar(x) {\n    return x;\n  }\n}\n', 2), 'bar', 'a bare TS method');
+  assert.equal(at('a.ts', 'const qux = async (n) => {\n  return n;\n};\n', 1), 'qux', 'an arrow assigned to a const');
+  assert.equal(at('a.go', 'func (s *S) Serve() {\n\treturn\n}\n', 1), 'Serve', 'a go method with a receiver');
+  assert.equal(at('a.rs', 'pub async fn run(x: u32) {\n    x\n}\n', 1), 'run', 'a rust fn with modifiers');
+  assert.equal(at('A.java', 'class A {\n  private static int add(int a) {\n    return a;\n  }\n}\n', 2), 'add', 'a java method');
+
+  // The innermost span wins, which is what makes "same function" mean the method and not its class.
+  assert.equal(at('a.ts', 'class Foo {\n  bar() {\n    return 1;\n  }\n}\n', 1), 'bar', 'the method, not the class it sits in');
+
+  // …and the traps. A control structure is not a function called `if`, a call statement is not a
+  // declaration, and a language the table does not cover answers null rather than something plausible.
+  assert.equal(at('a.ts', 'function real() {\n  if (x) {\n    go();\n  }\n}\n', 2), 'real', 'an if-body belongs to its function');
+  assert.equal(at('a.ts', 'doThing(x);\nother(y);\n', 0), null, 'a bare call declares nothing');
+  assert.equal(at('notes.md', '# hi\nsome text\n', 1), null, 'an unknown extension has no scopes, and says so');
+  assert.deepEqual(core.detectScopes('whatever\n', 'x.unknownext'), [], 'no guessing outside the coverage table');
+});
+
+test('units: two edits to DIFFERENT lines of the same function are one decision', () => {
+  freshHome();
+  const S = 'u4';
+  const F = path.join(tmpWork(), 'a.py');
+  // `parse` is revised twice — first the guard, then the return — and `helper` is touched in between.
+  // Neither parse edit touches the other's lines, so the same-LINES rule alone leaves three units; the
+  // same-FUNCTION rule is what makes the two parse edits one thing to accept.
+  const at = (guard, ret, helper) =>
+    [
+      'def parse(s):',
+      `    if ${guard}:`,
+      `    return ${ret}`,
+      '',
+      'def helper(x):',
+      `    return ${helper}`,
+      '',
+    ].join('\n');
+  seedEdit(S, F, at('a', '1', 'h'), at('b', '1', 'h')); // #1 parse, guard line
+  seedEdit(S, F, at('b', '1', 'h'), at('b', '1', 'j')); // #2 helper — a different function
+  seedEdit(S, F, at('b', '1', 'j'), at('b', '2', 'j')); // #3 parse again, a DIFFERENT line of it
+
+  assert.deepEqual(core.groupMembers(S, 3), [1, 2, 3], 'both parse edits are one unit; #2 rides the span');
+  assert.equal(core.pendingGroups(S).size, 1);
+
+  // …and the control: the same three edits with `helper` in a language the detector cannot read stay
+  // grouped only by lines, so the two `parse` edits do NOT merge on a name nobody detected.
+  freshHome();
+  const S2 = 'u5';
+  const G = path.join(tmpWork(), 'a.unknownext');
+  seedEdit(S2, G, at('a', '1', 'h'), at('b', '1', 'h'));
+  seedEdit(S2, G, at('b', '1', 'h'), at('b', '1', 'j'));
+  seedEdit(S2, G, at('b', '1', 'j'), at('b', '2', 'j'));
+  assert.equal(core.pendingGroups(S2).size, 3, 'no scopes detected -> no same-function merging, and no guess');
+});
+
+test('units: accepting an ask must expand its display units, or a row half-resolves', () => {
+  freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const cwd = fs.realpathSync(tmpWork());
+  const S = 'expand';
+  const proj = core.projectDir(cwd);
+  fs.mkdirSync(proj, { recursive: true });
+  fs.writeFileSync(
+    path.join(proj, S + '.jsonl'),
+    JSON.stringify({ timestamp: new Date(500).toISOString(), type: 'user', message: { role: 'user', content: 'do the thing' } }) + '\n'
+  );
+  const F = path.join(cwd, 'f.txt');
+  seedEdit(S, F, 'x\nA\ny\n', 'x\nB\ny\n'); // #1  ─ same line, same ask …
+  seedEdit(S, F, 'x\nB\ny\n', 'x\nC\ny\n'); // #2  ─ … so one review unit, represented by #2
+
+  const shown = core.promptEditIds(cwd, S, '1');
+  assert.deepEqual(shown, [2], 'the ask reports its DISPLAY unit — one row, the representative');
+
+  // The bug this pins: acting on what the row reports resolves #2 and strands #1 pending, at a state
+  // no surface names — the row vanishes while the pending count says one is left.
+  const expanded = [...new Set(shown.flatMap((id) => core.groupMembers(S, id)))].sort((a, b) => a - b);
+  assert.deepEqual(expanded, [1, 2], 'expansion recovers every member behind that row');
+  core.setStatusMany(S, expanded, 'kept');
+  assert.equal(core.findRecord(S, 1).status, 'kept', 'the member behind the row is resolved too');
+  assert.equal(core.findRecord(S, 2).status, 'kept');
+  assert.equal(core.reviewEdits(S).filter((r) => r.status === 'pending').length, 0, 'nothing is left half-resolved');
+});
+
+test('capture: blank-line-only churn is not recorded, but any real change still is', () => {
+  freshHome();
+  const S = 'blank';
+  const cwd = tmpWork();
+  const F = path.join(cwd, 'a.py');
+
+  editHook(S, cwd, F, 'def f():\n    return 1\n', 'def f():\n\n    return 1\n'); // + a blank line
+  assert.equal(core.readLog(S).length, 0, 'an added blank line is not a decision — nothing recorded');
+
+  editHook(S, cwd, F, 'a\n\n\nb\n', 'a\nb\n'); // - two blank lines
+  assert.equal(core.readLog(S).length, 0, 'removed blank lines are not a decision either');
+
+  editHook(S, cwd, F, 'x\n   \ny\n', 'x\ny\n'); // whitespace-only line: empty to the reader
+  assert.equal(core.readLog(S).length, 0, 'a whitespace-only line reads as blank, and is treated as one');
+
+  // POSITIVE CONTROL — the rule must not be swallowing real edits. Same shape, one character of
+  // content changed alongside the blank line.
+  editHook(S, cwd, F, 'def f():\n    return 1\n', 'def f():\n\n    return 2\n');
+  assert.equal(core.readLog(S).length, 1, 'a real change rides through, blank line and all');
+  const rec = core.readLog(S)[0];
+  assert.equal(
+    core.blobText(S, rec.afterBlob),
+    'def f():\n\n    return 2\n',
+    'and it is captured verbatim — the blank line is not stripped from the content, only from the DECISION'
+  );
+});
+
 test('ignore: a match records NOTHING — not the edit, and not a skip marker either', () => {
   // The trap this avoids: refusing in PreToolUse alone leaves Post with no staging record, so it
   // takes the appendSkip branch and writes "edit not captured — no before-snapshot" for a file the
@@ -11336,7 +12934,7 @@ test('ignore: the dash renders no ignore counters, because there are none to ren
   const mapFrame = tui.renderDashFrame({ ...base, panes: { ...base.panes, tab: { detail: 1 } } }, opts);
   assert.ok(!mapFrame.some((l) => /observatoryignore/.test(l)), 'no notice on the change-map header');
   const listFrame = tui.renderDashFrame(base, opts);
-  const title = listFrame.find((l) => /F2 Traces/.test(l));
+  const title = listFrame.find((l) => /F3 Traces/.test(l));
   assert.ok(title, 'positive control: the Traces title IS in the frame');
   assert.ok(!/hidden/.test(title), 'and it carries no hidden count');
 });
@@ -11444,7 +13042,7 @@ test('panes: a review verb on a window that is not open says so, instead of cras
     paneFixture({ panes: { minimized: new Set(['traces']), zoom: null, focus: 'traces', tab: {}, cursor: {}, scroll: {}, sizes: {} } }),
     { cols: 150, rows: 40, color: false },
   )[0];
-  assert.match(bar, /F2 .Traces/, 'the minimized window is still named and still reachable');
+  assert.match(bar, /F3 .Traces/, 'the minimized window is still named and still reachable');
 
   // The sizes where a pane folds by default are the ones a reader actually runs at.
   for (const [cols, rows] of [[120, 20], [100, 16], [80, 14]]) {
@@ -11804,7 +13402,7 @@ test('ignore: a session whose edits are ALL ignored renders as empty, and says n
   const base = paneFixture();
   const empty = { ...base, views: { ...base.views, list: { edits: [] } } };
   const frame = tui.renderDashFrame(empty, { cols: 150, rows: 34, color: false });
-  assert.ok(frame.find((l) => /F2 Traces/.test(l)), 'positive control: the pane is rendered');
+  assert.ok(frame.find((l) => /F3 Traces/.test(l)), 'positive control: the pane is rendered');
   assert.ok(!frame.some((l) => /observatoryignore/.test(l)),
     'no ignore notice — nothing was filtered, so there is nothing to explain');
 });

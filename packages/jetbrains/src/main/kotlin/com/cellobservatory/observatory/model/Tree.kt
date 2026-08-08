@@ -18,7 +18,15 @@ data class TreeFolderNode(val label: String, val path: String, val folders: List
     /** Every edit at-or-beneath this folder — for the folder-scoped Accept / Revert / Clear actions. */
     val allEdits: List<EditRecord> get() = files.flatMap { it.allEdits } + folders.flatMap { it.allEdits }
 }
-data class EditTree(val folders: List<TreeFolderNode>, val files: List<TreeFileNode>)
+/** @property hiddenIds every record inside a chain that cancels out — what no count may include.
+ *  Rides this payload rather than a spawn of its own: the plugin's status bar, nav axes and
+ *  project-view badges are derived from the raw store, so they need the same set the tree was built
+ *  with or they contradict it. Empty from an older CLI, which degrades to the previous behaviour. */
+data class EditTree(
+    val folders: List<TreeFolderNode>,
+    val files: List<TreeFileNode>,
+    val hiddenIds: Set<Int> = emptySet(),
+)
 
 object TreeParser {
     fun parse(json: String): EditTree? = try {
@@ -26,6 +34,7 @@ object TreeParser {
         EditTree(
             o.getAsJsonArray("folders").map { folder(it.asJsonObject) },
             o.getAsJsonArray("files").map { file(it.asJsonObject) },
+            o.getAsJsonArray("hiddenIds")?.mapNotNull { it.takeIf { e -> e.isJsonPrimitive }?.asInt }?.toSet() ?: emptySet(),
         )
     } catch (_: Exception) {
         null

@@ -1,7 +1,7 @@
 /**
  * `dash` — the terminal dashboard.
  *
- * Four windows over one session — Prompts, Traces and Dashboards docked around Detail — with the same
+ * Five windows over one session — Claude, Prompts, Traces and Dashboards docked around Detail — with the same
  * review operations the editors have. Everything that can be a value is one: the frame comes from
  * `renderDashFrame`, a pure function, and this file is only the runtime around it — terminal
  * setup, key decoding, and the guarantee that the terminal is handed back intact no matter how the
@@ -41,6 +41,7 @@ import {
   paneRowCount,
   paneScreenOf,
   paneVisible,
+  promptRowActions,
   renderDashFrame,
   renderOptions,
   resolveLayout,
@@ -90,6 +91,11 @@ const VIEWS_FOR: Record<string, string[]> = {
   // the failure this product forbids.
   observations: [...BASE, 'observations'],
   processes: [...BASE, 'processes'],
+  // The Claude strip reads only views BASE already carries (sessions · multitask · changemap) plus
+  // the prompts list for the newest ask. Review's PATCHES ride their own debounced spawn (`review
+  // --prompt` needs a prompt id, and `views` hands ONE argument list to every view it batches — so
+  // threading the id through would retarget the others and respawn the whole batch per selection).
+  claude: [...BASE, 'prompts', 'feed'],
 };
 
 const ALT_ON = '\x1b[?1049h';
@@ -152,6 +158,15 @@ export function runTui(core: Core, args: string[], resolveSession: (a: string[])
   const cols = Number(flag('--cols')) || process.stdout.columns || 100;
   const rows = Number(flag('--rows')) || process.stdout.rows || 30;
   const cwd = flag('--root') || process.cwd();
+  /** The newest session already hinted about, so the status line says each newcomer ONCE. */
+  let newerSessionHinted: string | null = null;
+  let newerSessionCheckedAt = 0;
+  /** The frame as last painted — what drag-to-copy extracts from, so the copied text is exactly
+   *  what was on screen when the reader selected it. */
+  let lastPainted: string[] = [];
+  /** An armed text selection: a left press on a body cell that may become a drag-to-copy. */
+  let textDrag: { startRow: number; lastRow: number; moved: boolean } | null = null;
+
   const session = resolveSession(args);
 
   const state: DashState = {
@@ -355,6 +370,7 @@ export function runTui(core: Core, args: string[], resolveSession: (a: string[])
       };
     }
     const lines = renderDashFrame(state, { cols: frameCols, rows: frameRows, color: colorDepth, glyphs });
+    lastPainted = lines; // drag-to-copy reads the frame the reader actually selected from
     // Home, then clear each line as it is written. Never \x1b[2J: erasing the whole screen before
     // drawing is what makes a repaint flicker.
     let buf = '\x1b[H';
@@ -423,11 +439,29 @@ export function runTui(core: Core, args: string[], resolveSession: (a: string[])
         : [];
       if (igProblems.length) state.status = igProblems[0];
       if (payload) {
+        // A long-lived dashboard resolves its session ONCE at launch; sessions started after that
+        // would go unnoticed forever. When the reader did not pin one with --session, say — once per
+        // newcomer — that a newer session is live. Never auto-switch: yanking the store out from
+        // under an open review would lose the reader's place mid-decision.
+        // Throttled to every 30s: outside a repo this is a machine-wide transcript scan (readdir +
+        // stat of every session), and running it on every 3-second tick was a measurable drag.
+        if (!args.includes('--session') && !process.env.CLAUDE_OBSERVATORY_SESSION && Date.now() - newerSessionCheckedAt > 30_000) {
+          newerSessionCheckedAt = Date.now();
+          // The SAME scope the launch default used (core.defaultTuiSession): inside a repo, that
+          // workspace's newest; outside any repo, the machine-wide newest.
+          const newest = core.defaultTuiSession(cwd);
+          if (newest && newest !== state.session && newest !== newerSessionHinted) {
+            newerSessionHinted = newest;
+            state.status = 'a newer session is live — press b to switch';
+          }
+        }
+        const follow = claudeAtTail(); // sampled against the frame the reader was actually looking at
         state.views = payload;
         const cm = payload.changemap as { summary?: { title?: string } } | null;
         state.sessionTitle = cm?.summary?.title || '';
         state.error = null;
         if (state.status === 'starting…') state.status = 'ready';
+        if (follow) followClaudeTail();
       }
       if (err) state.error = err;
       clampCursor();
@@ -442,6 +476,39 @@ export function runTui(core: Core, args: string[], resolveSession: (a: string[])
    * bottom of a 19-row window, so the highlighted row and the row `a`/`u` would act on were different
    * rows. `scroll` is a ROW index, matching `paneVisible`.
    */
+  /**
+   * The Claude pane is a LIVE TAIL: whenever fresh views land it re-pins to its newest row, so the
+   * session's activity reads bottom-up like any tail. A reader INSIDE the pane keeps their place —
+   * unless they sit on the LAST row, which is the follow position: `G` (or any walk to the bottom)
+   * genuinely re-latches, exactly as the help and DEMO say. `claudeAtTail()` samples the OLD rows
+   * before a refresh swaps them, because "was the reader at the bottom" is a fact about the frame
+   * they were looking at, not the one that just arrived.
+   */
+  const claudeAtTail = (): boolean => {
+    if (!state.panes || state.panes.focus !== 'claude') return true; // unfocused always follows
+    const box = layout().boxes.find((b) => b.id === 'claude');
+    if (!box) return true;
+    const rows = paneRowCount(state, box);
+    return !rows || state.cursor >= rows - 1;
+  };
+
+  const followClaudeTail = (): void => {
+    if (!state.panes) return;
+    const box = layout().boxes.find((b) => b.id === 'claude');
+    if (!box) return;
+    const rows = paneRowCount(state, box);
+    if (!rows) return;
+    state.panes = {
+      ...state.panes,
+      // SCROLL follows; the CURSOR moves only when the reader is IN the pane. An unfocused pane
+      // paints its persisted cursor as a faint band, so dragging it to the newest row every refresh
+      // put a moving "second selection" on screen beside whatever the reader actually clicked.
+      cursor: state.panes.focus === 'claude' ? { ...state.panes.cursor, claude: rows - 1 } : state.panes.cursor,
+      scroll: { ...state.panes.scroll, claude: Math.max(0, rows - paneListRows(state, box)) },
+    };
+    if (state.panes.focus === 'claude') state.cursor = rows - 1; // the live cursor is the focused one
+  };
+
   /** True when the focused pane is a SCROLLER — a diff is read top to bottom, not picked from — so
    *  there is no cursor to clamp and `scroll` is bounded by the viewport instead. */
   const scrollerBox = (): PaneBox | null => {
@@ -595,6 +662,17 @@ export function runTui(core: Core, args: string[], resolveSession: (a: string[])
     return hit ? { action: hit.action, node } : null;
   };
 
+  /**
+   * The [review] cell under a click on a Prompts row, or null — resolved through `promptRowActions`,
+   * the same function that laid the cell out, at the same width. Same contract as `mapActionAt`: one
+   * function owns the geometry, so the glyph and the pointer cannot disagree.
+   */
+  const promptActionAt = (box: PaneBox, col: number): boolean => {
+    const inner = Math.max(1, box.rect.w - 1);
+    const local = col - box.body.x - 1; // the cursor gutter is column 0 of every body row
+    return promptRowActions(inner).some((a) => local >= a.x && local < a.x + a.w);
+  };
+
   /** Swap Detail's face, explicitly. `null` hands it back to following the selection. */
   const setDetailFace = (face: 0 | 1 | null): void => {
     clearFind(); // the Map face is not the patch the find ran over
@@ -621,13 +699,26 @@ export function runTui(core: Core, args: string[], resolveSession: (a: string[])
   const reportMutation = (verb: string, asked: number) => (r: { ok: boolean; json: unknown; err: string | null }) => {
     const j = (r.json ?? {}) as Record<string, unknown>;
     if (!r.ok) state.error = r.err;
-    else {
+    else if (typeof j.status === 'string') {
+      // The single-unit verbs answer the engine's own result — its message IS the report, and a
+      // refusal arrives named (dependents, closure) rather than as a count.
+      const msg = typeof j.message === 'string' ? j.message : '';
+      state.status = j.status === 'conflict' ? `conflict — ${msg.split('. ')[0]}` : msg || `${verb}: done`;
+    } else {
       const n = Number(j.kept ?? j.undone ?? j.redone ?? asked) || 0;
       const conflicts = Number(j.conflicts ?? 0) || 0;
       const errors = Number(j.errors ?? 0) || 0;
       const first = typeof j.firstError === 'string' ? j.firstError : '';
+      // The first conflict's NAMING sentence only — the CLI-flavoured remedy tail stays off the
+      // status row (`u` on the named unit is one keystroke away here).
+      const conflictName = (typeof j.firstConflict === 'string' ? j.firstConflict : '').split('. ')[0];
       const parts = [`${verb}: ${n} edit(s)`];
-      if (conflicts) parts.push(`${conflicts} conflict(s) left — act on them one at a time to force`);
+      if (conflicts)
+        parts.push(
+          conflictName
+            ? `${conflicts} conflict(s) — ${conflictName}`
+            : `${conflicts} conflict(s) left — act on them one at a time to force`
+        );
       if (errors) parts.push(`${errors} refused${first ? ` — ${first}` : ''}`);
       state.status = parts.join(' · ');
     }
@@ -702,7 +793,7 @@ export function runTui(core: Core, args: string[], resolveSession: (a: string[])
       return schedulePaint();
     }
     if (focusedBox && paneScreenOf(state, focusedBox) === 'diff') {
-      state.status = `Detail is showing a diff — press F2 for Traces to ${verb} an edit`;
+      state.status = `Detail is showing a diff — press F3 for Traces to ${verb} an edit`;
       return schedulePaint();
     }
     // The FOCUSED pane's screen, not `state.screen` — acting on a list the reader is not looking at
@@ -766,6 +857,9 @@ export function runTui(core: Core, args: string[], resolveSession: (a: string[])
   const resumeTerminal = (): void => {
     enterTerminal();
     refreshSize(); // the child may have been resized, or resized the window itself
+    // A failed spawn fires BOTH 'error' and 'close', and each resumes — without this clear the
+    // first interval leaks and the dashboard polls (and spawns a CLI) at double rate forever.
+    if (tick) clearInterval(tick);
     tick = setInterval(() => {
       ask();
       schedulePaint();
@@ -789,8 +883,11 @@ export function runTui(core: Core, args: string[], resolveSession: (a: string[])
 
   /** Pending edits in the payload right now, or null when nothing has arrived yet. */
   function pendingCount(): number {
-    const list = (state.views?.list as { edits?: { status?: string }[] } | undefined)?.edits ?? [];
-    return list.filter((e) => e?.status === 'pending').length;
+    const list =
+      (state.views?.list as { edits?: { status?: string; cancelled?: boolean }[] } | undefined)?.edits ?? [];
+    // Cancelled chains are not rows in the pane, so they are not in its counter either — the payload
+    // flags them exactly so every renderer can agree on what "pending" means.
+    return list.filter((e) => e?.status === 'pending' && e?.cancelled !== true).length;
   }
 
   /**
@@ -851,6 +948,93 @@ export function runTui(core: Core, args: string[], resolveSession: (a: string[])
         state.status = `${parts[0]} exited ${code}`;
       } else {
         state.status = `back from ${parts[0]}`;
+      }
+      schedulePaint();
+    });
+  }
+
+  /**
+   * F1 again: hand the WHOLE terminal to `claude --resume <session>`, in the session's own workspace.
+   *
+   * The same suspend → spawn(stdio:'inherit') → resume pair `openInEditor` and ^Z use — Claude Code is
+   * a full-screen program and gets the real terminal, so typing there is 100% the real CLI: colours,
+   * mouse, slash commands, paste, resize. `resumeTerminal` already reports what moved while away,
+   * which matters more here than for $EDITOR, because what moved is exactly what Claude just did.
+   *
+   * Two refusals happen BEFORE any terminal handover, so failing leaves the dashboard exactly where
+   * it was:
+   *  - no workspace on this machine → refuse. Falling back to the terminal's cwd would launch a
+   *    WRITER in the wrong tree, which is strictly worse than not launching.
+   *  - the session is LIVE → ask first (the wall below). Resuming a live session opens a second
+   *    writer on the same transcript; `--fork-session` is the safe variant, and the reader chooses.
+   */
+  let claudeAsk: { live: boolean } | null = null;
+  function openClaude(): void {
+    // Liveness off the payload already on screen — core stamped both fields with its one 60s rule,
+    // so this costs no spawn. If NEITHER field arrived, ask anyway and say so: "probably fine" is not
+    // a thing this product prints.
+    const sess = ((view(state, 'sessions') as { sessions?: Record<string, unknown>[] } | null)?.sessions ?? []).find(
+      (s) => String(s.id) === state.session
+    );
+    const self = ((view(state, 'multitask') as { agents?: Record<string, unknown>[] } | null)?.agents ?? []).find(
+      (a) => a.self === true
+    );
+    const live = sess?.active === true || String(self?.phase ?? '') === 'working';
+    const known = sess !== undefined || self !== undefined;
+    if (live || !known) {
+      claudeAsk = { live };
+      state.status = live
+        ? 'this session is LIVE — Claude is writing its transcript now.  [r] resume anyway (two writers) · [f] fork a copy · [esc] cancel'
+        : 'could not tell if this session is live.  [r] resume · [f] fork a copy · [esc] cancel';
+      return schedulePaint();
+    }
+    launchClaude(false);
+  }
+
+  /**
+   * KNOWN LIMIT, deliberate for now: while Claude owns the terminal there is no key that returns to
+   * the observatory — the handoff is stdio-inherit, so OUR process cannot see keystrokes at all.
+   * Exiting Claude (`/exit`, ctrl+c) returns instantly, and F1-F1 relaunches `--resume` just as
+   * fast, so the loop is cheap. A true in-place toggle means owning Claude under a PTY and swapping
+   * screens — a real feature with a native-dependency decision (node-pty vs the zero-native-deps
+   * rule), queued for 0.10 rather than faked here.
+   */
+  function launchClaude(fork: boolean): void {
+    const ws = sessionRoot();
+    if (!ws) {
+      // Refuse, loudly. This session's transcript is not under any workspace this machine can see —
+      // resuming it from some other directory would hand a writer the wrong tree.
+      state.status = `this session's workspace is not on this machine — F1 needs it to run Claude there`;
+      return schedulePaint();
+    }
+    const bin = core.resolveClaudeBin();
+    const cliArgs = ['--resume', state.session, ...(fork ? ['--fork-session'] : [])];
+    suspendTerminal();
+    let child;
+    try {
+      child = core.spawnTool(bin, cliArgs, { stdio: 'inherit', cwd: ws });
+    } catch (e) {
+      resumeTerminal();
+      state.status = `could not run claude (${bin}): ${String((e as Error)?.message || e)} — set $CLAUDE_BIN or install the Claude Code CLI`;
+      return schedulePaint();
+    }
+    // Node emits BOTH 'error' and 'close' for a spawn that never started, and 'close' arrives last —
+    // remember the failure and let it win, or an ENOENT is overwritten by "back from Claude".
+    let failed = '';
+    child.on('error', (e: Error) => {
+      failed = `could not run claude (${bin}): ${e.message} — set $CLAUDE_BIN or install the Claude Code CLI`;
+      resumeTerminal();
+      state.status = failed;
+      schedulePaint();
+    });
+    child.on('close', (code: number | null) => {
+      resumeTerminal();
+      if (failed) {
+        state.status = failed; // the spawn never happened; 'close' says nothing about it
+      } else if (code) {
+        state.status = `claude exited ${code}`;
+      } else {
+        state.status = 'back from Claude';
       }
       schedulePaint();
     });
@@ -987,6 +1171,15 @@ export function runTui(core: Core, args: string[], resolveSession: (a: string[])
     state.scroll = state.panes!.scroll[id] ?? 0;
     const sc = paneScreen(id);
     if (sc !== 'diff') state.screen = sc as typeof state.screen;
+    // An explicit restore the carve then refuses must SAY so: the resolve latches the pane straight
+    // back into `minimized`, and without this line the key silently does nothing. The note names the
+    // exact row arithmetic, which is the only actionable answer ("make the terminal taller").
+    const l = layout();
+    if (l.forced.includes(id)) {
+      const title = PANE_SPECS.find((p) => p.id === id)!.title;
+      const note = l.notes.find((n) => n.startsWith(title));
+      if (note) state.status = note;
+    }
     ask();
     schedulePaint();
   }
@@ -1028,9 +1221,42 @@ export function runTui(core: Core, args: string[], resolveSession: (a: string[])
     schedulePaint();
   }
 
+  /** Copy screen rows [a..b] to the system clipboard via OSC 52 — the terminal-native path Claude
+   *  Code's own UI uses, working over SSH and tmux alike. Plain text only: escapes stripped, right
+   *  edges trimmed. */
+  const copyRows = (a: number, b: number): void => {
+    const text = lastPainted
+      .slice(a, b + 1)
+      .map((l) => l.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, ''))
+      .join('\n');
+    process.stdout.write(`\x1b]52;c;${Buffer.from(text, 'utf8').toString('base64')}\x07`);
+    state.status = `copied ${b - a + 1} line(s)`;
+    schedulePaint();
+  };
+
   // `button` is on the wire and always has been — 0 left, 1 middle, 2 right — it simply was not in
   // this signature, so the right button arrived and was handled as a left click.
   function onMouse(ev: { kind: string; row: number; col: number; button?: number }): void {
+    // An armed text selection owns move/up until the button comes up. Checked before the seam drag
+    // for the same reason the seam drag is checked before hit-testing: motion leaves the start cell
+    // immediately, and the press's own click has ALREADY done its work (selection is instant here).
+    if (textDrag) {
+      if (ev.kind === 'move') {
+        if (ev.row !== textDrag.startRow) textDrag.moved = true;
+        textDrag.lastRow = ev.row;
+        if (textDrag.moved) {
+          state.status = `selecting ${Math.abs(textDrag.lastRow - textDrag.startRow) + 1} line(s) — release to copy`;
+          schedulePaint();
+        }
+        return;
+      }
+      if (ev.kind === 'up') {
+        const td = textDrag;
+        textDrag = null;
+        if (td.moved) return copyRows(Math.min(td.startRow, td.lastRow), Math.max(td.startRow, td.lastRow));
+        return;
+      }
+    }
     // A drag in progress owns the mouse until the button comes up. Checked FIRST: once the pointer
     // is moving it will leave the seam column almost immediately, and re-hit-testing every motion
     // event would drop the drag the moment it started working.
@@ -1214,6 +1440,10 @@ export function runTui(core: Core, args: string[], resolveSession: (a: string[])
       return schedulePaint();
     }
     if (hit.t === 'body') {
+      // Arm a text selection: if the pointer MOVES before release, the visible span is copied to
+      // the clipboard (OSC 52); a press that never moves stays a plain click — which acts instantly,
+      // exactly as before.
+      if ((ev.button ?? 0) === 0) textDrag = { startRow: ev.row, lastRow: ev.row, moved: false };
       // Focus AND act, in one click. Returning here meant the first click into a pane only moved
       // focus, so selecting took two clicks and expanding a folder took three — which reads exactly
       // like "I have to click the next item to open this one".
@@ -1234,6 +1464,18 @@ export function runTui(core: Core, args: string[], resolveSession: (a: string[])
       if (paneScreenOf(state, box) === 'map') {
         const act = mapActionAt(box, i, ev.col);
         if (act) return mutateUnder(act.action, act.node);
+      }
+      // The Prompts row's [review] cell — same rule, same ordering: resolved through the function
+      // that drew it, and checked before the click becomes a selection.
+      if (paneScreenOf(state, box) === 'prompts' && promptActionAt(box, ev.col)) {
+        const row0 = rowsOf()[i];
+        if (row0?.ids.length) {
+          const m = /^#(\d+)/.exec(row0.cells.replace(/\x1b\[[0-9;]*m/g, ''));
+          state.cursor = i;
+          clampCursor();
+          syncPane();
+          return openReview(m ? Number(m[1]) : 0, row0.ids);
+        }
       }
       // A second click on the row already selected opens it — the drill-in gesture, without a
       // double-click timer that would make every single click feel late.
@@ -1279,7 +1521,7 @@ export function runTui(core: Core, args: string[], resolveSession: (a: string[])
     if (!state.panes) return;
     const id: PaneId = state.panes.focus;
     const lay = layout();
-    const axis: 'v' | 'h' = id === 'prompts' || id === 'dashboards' ? 'h' : 'v';
+    const axis: 'v' | 'h' = id === 'prompts' || id === 'dashboards' || id === 'claude' ? 'h' : 'v';
     // Detail is the flex centre: a size written for it is discarded, so nudge its neighbour instead
     // and invert, which keeps `<` meaning "the focused pane gets smaller" either way.
     const seam = lay.seams.find((sm) => sm.axis === axis && (sm.target === id || sm.left === id || sm.right === id));
@@ -1299,19 +1541,37 @@ export function runTui(core: Core, args: string[], resolveSession: (a: string[])
 
 
 
+  /**
+   * Put one ask under review: scope the Traces EDITS list to exactly its ids — same rows, same
+   * keys, ↵ on a unit opens its net diff, esc clears. The editors keep a Review LIST whose diffs
+   * open in the editor; in a terminal the filtered list IS that surface. (A dedicated Review tab
+   * shipped briefly and was removed: it duplicated this list behind a second fetch cadence, and
+   * rebuilding an entire ask's patches per refresh made a large session crawl.)
+   */
+  function openReview(index: number, ids: readonly number[]): void {
+    state.promptScope = { index, ids: new Set(ids) };
+    state.status = `prompt #${index} under review — esc clears`;
+    focusPane('traces');
+  }
+
   /** Enter / second click: open a map folder, else show the row's edit full screen. */
   function openSelected(): void {
     // The FOCUSED pane's rows. Reading `state.screen` here meant Enter on a change-map folder looked
     // up an EDIT row instead, found no `openPath`, and the folder never expanded.
     const row = rowsOf()[state.cursor];
     if (!row) return;
-    // A prompt is a unit of work: opening one scopes the edit list to what it produced, which is
-    // what both editors do. Focus follows, or the reader would have to guess where the result went.
-    if (state.panes && state.panes.focus === 'prompts' && row.ids.length) {
+    // A prompt is a unit of work: opening one puts it UNDER REVIEW — the Traces Edits list scopes to
+    // exactly that ask's rows, the terminal's equivalent of the editors' Review list. Focus follows,
+    // or the reader would have to guess where the result went.
+    if (state.panes && state.panes.focus === 'prompts') {
       const m = /^#(\d+)/.exec(row.cells.replace(/\x1b\[[0-9;]*m/g, ''));
-      state.promptScope = { index: m ? Number(m[1]) : 0, ids: new Set(row.ids) };
-      state.status = `Traces scoped to prompt #${m ? m[1] : '?'} — esc clears`;
-      return focusPane('traces');
+      if (!row.ids.length) {
+        // A silent no-op reads as a broken key. Say why there is nothing to open.
+        state.status = `ask #${m ? m[1] : '?'} produced no edits — nothing to review`;
+        return schedulePaint();
+      }
+      openReview(m ? Number(m[1]) : 0, row.ids);
+      return;
     }
     if (row.openPath !== undefined) {
       const open = new Set(state.open);
@@ -1329,7 +1589,7 @@ export function runTui(core: Core, args: string[], resolveSession: (a: string[])
       syncDetailDiff();
       state.panes = { ...state.panes!, zoom: 'detail', focus: 'detail', scroll: { ...state.panes!.scroll, detail: 0 } };
       state.scroll = 0;
-      state.status = `edit #${row.ids[0]} full screen — esc back`;
+      state.status = `edit #${row.ids[row.ids.length - 1]} full screen — esc back`;
       ask();
       schedulePaint();
     }
@@ -1836,7 +2096,11 @@ export function runTui(core: Core, args: string[], resolveSession: (a: string[])
     // map, which is what you want before you have picked anything, was a keystroke away and never the
     // thing you saw first. A cursor index cannot express this: `syncPane` writes 0 into the pane's
     // cursor on the first paint, so "index 0" and "nothing yet" are the same value.
-    const rows = rowsOf('edits', 'traces');
+    // The traces pane's ACTIVE tab, not a hardcoded 'edits' — on the Review tab the cursor walks
+    // review rows, and indexing the edits list with it would fetch a different row's diff.
+    const tracesBox = layout().boxes.find((b) => b.id === 'traces');
+    const tracesScreen = tracesBox ? paneScreenOf(state, tracesBox) : 'edits';
+    const rows = rowsOf(tracesScreen, 'traces');
     const row = picked ? rows[state.panes.cursor.traces ?? 0] : undefined;
     const id = row && row.ids.length === 1 ? row.ids[0] : -1;
     if (id === diffWanted) return;
@@ -2049,11 +2313,21 @@ export function runTui(core: Core, args: string[], resolveSession: (a: string[])
     const rows = rowsOf();
     if (state.panes?.focus === 'traces') picked = true; // moving the edit cursor IS choosing one
     const step = delta === 0 ? 0 : delta > 0 ? 1 : -1;
+    // What arrows STEP: in the Review list the edits are the targets and file headers are furniture
+    // (edit rows carry key `e<id>` and are the `cont` ones — the old skip-cont rule walked HEADERS
+    // and skipped every edit, the exact inversion of reviewing). Elsewhere continuation lines skip.
+    const box = state.panes ? layout().boxes.find((b) => b.id === state.panes!.focus) : null;
+    const editsList = (box ? paneScreenOf(state, box) : state.screen) === 'edits';
+    const skip = (r?: { cont?: boolean; key?: string }): boolean =>
+      // …and the cancelled-out footer, which is a target too: it advertises `a` to dismiss, so a
+      // cursor that could never land on it would be advertising a key the reader cannot press.
+      editsList ? !(r?.key?.startsWith('e') || r?.key === 'cancelled') : !!r?.cont;
     let next = state.cursor + delta;
-    while (rows[next]?.cont) next += step;
+    while (rows[next] && skip(rows[next])) next += step;
     if (next < 0) next = 0;
     if (next >= rows.length) next = Math.max(0, rows.length - 1);
-    while (rows[next]?.cont && next > 0) next--;
+    while (next > 0 && skip(rows[next])) next--;
+    while (next < rows.length - 1 && skip(rows[next])) next++;
     state.cursor = next;
     clampCursor();
     syncPane();
@@ -2109,7 +2383,7 @@ export function runTui(core: Core, args: string[], resolveSession: (a: string[])
         return schedulePaint();
       }
       if (state.promptScope) {
-        state.promptScope = null;
+        state.promptScope = null; // the Edits list widens back to the whole session
         state.cursor = 0;
         state.scroll = 0;
         state.status = 'showing every edit again';
@@ -2187,6 +2461,19 @@ export function runTui(core: Core, args: string[], resolveSession: (a: string[])
         return schedulePaint();
       }
       return; // everything else is swallowed while the question stands
+    }
+
+    // The Claude-launch question is a wall like the others: it owns the keyboard until answered, it
+    // was visible the moment it opened (the status row asked it), and every key it ADVERTISES is
+    // bound — the A/U prompt once rendered [y/n] with neither key handled, and this class of wall is
+    // how that stays fixed. Any other key cancels: the safe default for a question about opening a
+    // second writer on a live transcript.
+    if (claudeAsk) {
+      claudeAsk = null;
+      if (ev.key === 'r') return launchClaude(false);
+      if (ev.key === 'f') return launchClaude(true);
+      state.status = 'ready';
+      return schedulePaint();
     }
 
     // A pending mark letter is a one-key wall, for the same reason the others are: the very next key
@@ -2338,10 +2625,15 @@ export function runTui(core: Core, args: string[], resolveSession: (a: string[])
     // means "the map" and F4 means "this diff" rather than "the centre, and then find the swap".
     // Pressing the key for what is ALREADY showing zooms it, and again puts it back — the same
     // second-press-drills-in gesture the edit list uses, so full screen costs no new key and no timer.
+    // ONE exception, documented on BAR_ENTRIES: the Claude strip has nothing to zoom into, so its
+    // second press LAUNCHES Claude — the drill-in, applied to the pane whose drill-in is the agent.
     const fkey = BAR_ENTRIES.find((e) => ev.key === `f${e.key}`);
     if (fkey) {
       const showing = state.panes!.focus === fkey.pane && (fkey.face === undefined || fkey.face === detailFace(state));
-      if (showing && !state.overlay) return toggleZoom(fkey.pane);
+      if (showing && !state.overlay) {
+        if (fkey.pane === 'claude') return openClaude();
+        return toggleZoom(fkey.pane);
+      }
       if (fkey.face !== undefined) return setDetailFace(fkey.face as 0 | 1);
       return focusPane(fkey.pane);
     }
@@ -2445,7 +2737,7 @@ export function runTui(core: Core, args: string[], resolveSession: (a: string[])
     }
     // Verbs dispatch on the ACTION a key is bound to, not on the key itself — that indirection is
     // what makes the options window's rebinds real rather than a list of numbers it saves and nothing
-    // reads. Structural keys (F1-F5, arrows, Tab, Enter, Esc, Space, digits) are handled above and are
+    // reads. Structural keys (F1-F6, arrows, Tab, Enter, Esc, Space, digits) are handled above and are
     // deliberately not rebindable: several of them are the only way out of a mode.
     const verb = keys().get(ch) ?? null;
     switch (verb ?? ch) {
@@ -2834,25 +3126,30 @@ export function helpLines(prefs: import('@claude-observatory/core').Prefs): stri
     return rows.map(([action, what]) => `    ${keyFor(action).padEnd(14)} ${what}`);
   };
   // A real help surface, not a one-line status. It listed "1-6 screens" — a keymap that never
-  // existed in this build (there were eight, and now there are four windows), and `?` is the
+  // existed in this build (there were eight, and now there are five windows), and `?` is the
   // key the frame itself advertises, so it is the one thing that must not be stale.
   return [
       '  WINDOWS',
-      '    F1 / F2             focus Prompts / Traces',
-      '    F3 / F4             the CENTRE window, showing its Map or its Diff face',
-      '    F5                  focus Dashboards',
+      '    F1                  focus Claude — the live tail of what the agent is doing; press it',
+      '                        AGAIN to hand this terminal to `claude --resume` for this session',
+      '                        (a live session asks first; G follows the newest entry)',
+      '    F2 / F3             focus Prompts / Traces',
+      '    F4 / F5             the CENTRE window, showing its Map or its Diff face',
+      '    F6                  focus Dashboards',
       '                        (a minimized window comes back; pressing its key again zooms it',
-      '                         to the whole frame, and once more puts it back)',
+      '                         to the whole frame, and once more puts it back — except Claude,',
+      '                         whose second press launches the agent)',
       '    0 - 9               type an EDIT id, then Enter to select it — digits are not',
       '                        window keys; the F-keys are',
       '    Tab                 next open window        [ ]   previous / next tab in it',
       '    m                   minimize or restore     z     zoom the focused window',
       '    < / >               grow / shrink the focused window along its own axis — width for',
-      '                        Traces and Detail, height for Prompts and Dashboards (same as',
-      '                        dragging its seam)',
+      '                        Traces and Detail, height for Claude, Prompts and Dashboards',
+      '                        (same as dragging its seam)',
       '    =                   reset the layout, and any widths you set, to what this size gives',
       '',
       '    drag the seam between two windows to resize them.',
+      '    drag across a window body to copy those lines to the clipboard (OSC 52).',
       '',
       '  THE DETAIL NAVBAR  (click a button, or use the key)',
       '    Keep / Undo    a / u — act on the edit Detail is SHOWING',
@@ -2919,7 +3216,7 @@ export function helpLines(prefs: import('@claude-observatory/core').Prefs): stri
       '',
       '  Every key in the two lists above is READ FROM YOUR OWN KEYMAP, so a rebind shows here',
       '  the moment you make it. They can all be rebound from the options window; the structural',
-      '  keys cannot — F1-F5, the arrows, Tab, Enter, Esc, Space and the digits are how you leave',
+      '  keys cannot — F1-F6, the arrows, Tab, Enter, Esc, Space and the digits are how you leave',
       '  a mode, and a rebind that took one away would leave no way out.',
   ];
 }

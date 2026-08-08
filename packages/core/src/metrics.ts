@@ -10,7 +10,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { maxOf, rootDir } from './store';
-import { reviewEdits } from './groups';
+import { reviewEdits, visibleEdits } from './groups';
 import { lineDelta, friendlyModel } from './format';
 import { findTranscript } from './observe';
 import { parseActions, summarizeActions, parseCompactLine, CompactionEvent } from './actions';
@@ -605,7 +605,7 @@ function toolLatenciesUncached(transcriptPath: string): number[] {
 export function sessionMetrics(cwd: string, sessionId: string): SessionMetrics {
   // DISPLAY units (same-code collapsed), like the change map and the session listing — one meaning for
   // "edits" across the product. Counting raw records here made Stats disagree with the Overview.
-  const log = reviewEdits(sessionId);
+  const log = visibleEdits(sessionId);
   const edits: EditMetrics = { count: log.length, added: 0, removed: 0, pending: 0, kept: 0, undone: 0 };
   for (const r of log) {
     const d = lineDelta(sessionId, r);

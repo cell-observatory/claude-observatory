@@ -64,22 +64,28 @@ const snap = (caption) => {
 console.log('▸ replaying the demo, one snapshot per beat…');
 const res = await core.runDemo({ fast: true, cwd: ws, log: (line) => snap(line.trim()) });
 sessionId = res.session;
-snap(`✓ demo complete — ${res.edits} pending edits`);
+// The pane counts REVIEW UNITS minus the chains that cancel out; `res.edits` is raw records, so
+// captioning with it put a different number beside the list it describes.
+const pendingUnits = core.reviewUnits(res.session, 'pending').filter((u) => !u.cancelled).length;
+snap(`✓ demo complete — ${pendingUnits} pending change(s) to review`);
 console.log(`  ${beats.length} beats captured`);
 
 // --- render each beat through the REAL frame renderer, walking the windows -------------------------
-// The dashboard is Prompts, Traces and Dashboards docked around Detail, and Detail has TWO faces the
-// window bar reaches with their own keys (F3 Map, F4 Diff). So the tour walks focus and FACE rather
-// than a list of screens — cycling the retired screen ids here would still render, because the pane
-// compositor ignores `screen`, and would silently record a product that no longer exists.
+// The dashboard is Claude, Prompts, Traces and Dashboards docked around Detail, and Detail has TWO
+// faces the window bar reaches with their own keys (F4 Map, F5 Diff). So the tour walks focus and
+// FACE rather than a list of screens — cycling the retired screen ids here would still render,
+// because the pane compositor ignores `screen`, and would silently record a product that no longer
+// exists. The Claude window cannot OPEN at 26 recording rows (it folds below ~40), so its beat zooms
+// it instead — which is also the frame that shows the window whole.
 //
 // It also plants a real `diffPatch`. The previous tour set `diffLines`, a field that was removed, so
 // every recording showed Detail's diff face empty — the GIF advertised a blank centre pane.
 const TOUR = [
   { focus: 'prompts', tab: {} },
+  { focus: 'claude', tab: {}, zoom: 'claude' }, // F1 — the agent's own window, zoomed to fit 26 rows
   { focus: 'traces', tab: {} },
-  { focus: 'detail', tab: { detail: 1 } },   // F3 — the change map
-  { focus: 'detail', tab: { detail: 0 } },   // F4 — the selected edit's diff
+  { focus: 'detail', tab: { detail: 1 } },   // F4 — the change map
+  { focus: 'detail', tab: { detail: 0 } },   // F5 — the selected edit's diff
   { focus: 'dashboards', tab: { dashboards: 0 } },
   { focus: 'dashboards', tab: { dashboards: 3 } },
 ];
@@ -101,7 +107,7 @@ const frames = beats.map((b, i) => {
       screen: 'edits',
       panes: {
         minimized: tui.defaultMinimized(COLS, ROWS),
-        zoom: null,
+        zoom: step.zoom ?? null,
         focus: step.focus,
         tab: step.tab,
         cursor: { [step.focus]: Math.min(3, i) },

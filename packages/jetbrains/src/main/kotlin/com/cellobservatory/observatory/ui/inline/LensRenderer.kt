@@ -41,7 +41,10 @@ class LensRenderer(
     // Position counters, mirroring the status-bar nav bar (computed once): "edit n/m in file" is the
     // Diff axis, "file i/k" the File axis (shown only when more than one file has pending edits).
     private val posLabel: String = run {
-        val log = StoreReader.readLog(session)
+        // Cancelled-out chains are not stops on either axis (the nav bar and the overlay both skip
+        // them), so counting them here would print "edit 3/5" on a bar that steps two.
+        val svc = com.cellobservatory.observatory.services.ObservatoryService.getInstance(project)
+        val log = StoreReader.readLog(session).filter { !svc.isHidden(it) }
         val filePending = log.filter { it.file == rec.file && it.status == "pending" }.sortedBy { it.id }
         val editIdx = filePending.indexOfFirst { it.id == rec.id }
         val files = log.filter { it.status == "pending" }.map { it.file }.distinct().sorted()

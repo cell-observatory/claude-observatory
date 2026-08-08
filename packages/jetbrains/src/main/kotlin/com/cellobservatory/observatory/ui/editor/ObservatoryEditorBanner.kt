@@ -38,7 +38,9 @@ class ObservatoryEditorBanner : EditorNotificationProvider, DumbAware {
         service.currentSession() ?: return null
         // Cheap: cached folded log + path filter, no `locate` subprocess — safe on the provider's BGT.
         val key = ClaudePaths.storeKey(file.path) // hoisted: the provider runs per open file per refresh
-        val pendingInFile = service.log().count { it.pending && it.file == key }
+        // Not the cancelled-out chains: a banner reading "2 pending" over a file the Review tree
+        // shows nothing for, whose Prev/Next then have nowhere to go.
+        val pendingInFile = service.log().count { it.pending && !service.isHidden(it) && it.file == key }
         if (pendingInFile == 0) return null // null ⇒ no banner on files Claude hasn't touched
         return Function { fileEditor -> banner(project, service, file, pendingInFile, fileEditor) }
     }
@@ -170,7 +172,7 @@ class ObservatoryEditorBanner : EditorNotificationProvider, DumbAware {
         if (files.isEmpty()) return
         val idx = files.indexOf(ClaudePaths.storeKey(current))
         val target = files[((if (idx < 0) 0 else idx) + dir + files.size) % files.size]
-        val first = service.log().filter { it.pending && it.file == target }.minByOrNull { it.id } ?: return
+        val first = service.log().filter { it.pending && !service.isHidden(it) && it.file == target }.minByOrNull { it.id } ?: return
         Navigate.openFileAtEdit(project, s, first)
     }
 }

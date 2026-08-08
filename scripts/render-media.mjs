@@ -41,6 +41,11 @@ const CSS = `
   .trow .tw { color:var(--faint); width:12px; font-size:10px; }
   .trow .ic { width:16px; text-align:center; }
   .trow .meta { margin-left:auto; color:var(--faint); font-size:11px; white-space:nowrap; }
+  /* A file header carries the path AND its scope buttons. The panel WRAPS rather than truncating
+     (the product's own rule), so the mock has to wrap too — clipping "↩ file" off the edge would
+     depict a control the reader cannot see. */
+  .trow.fhead { flex-wrap:wrap; row-gap:1px; }
+  .trow.fhead b { overflow-wrap:anywhere; }
   .pill { font-size:10px; padding:1px 7px; border-radius:9px; border:1px solid currentColor; }
   .p-pending{color:var(--pending)} .p-kept{color:var(--kept)} .p-reverted{color:var(--reverted)}
   .strike { text-decoration:line-through; color:var(--faint); }
@@ -151,17 +156,26 @@ const scene = (w, body) =>
 const microscope = '🔬';
 
 // ---------- scene bits reused across images ----------
-const editsTree = `
-  <div class="viewhead">EDITS <span style="float:right;color:var(--faint)">session 0c396c6b</span></div>
-  <div class="trow"><span class="tw">▾</span><span class="ic">📁</span>src</div>
-  <div class="trow" style="padding-left:26px"><span class="tw">▾</span><span class="ic">🗎</span>features.py<span class="meta">1 edit · 1 pending</span></div>
-  <div class="trow mono" style="padding-left:60px"><span class="dot" style="background:var(--pending)"></span>&nbsp;#1&nbsp; +6 −1<span class="meta"><span class="pill p-pending">pending</span></span></div>
-  <div class="trow" style="padding-left:26px"><span class="tw">▾</span><span class="ic">🗎</span>train.py<span class="meta">1 edit · 1 pending</span></div>
-  <div class="trow mono" style="padding-left:60px"><span class="dot" style="background:var(--pending)"></span>&nbsp;#2&nbsp; +3 −2<span class="meta"><span class="pill p-pending">pending</span></span></div>
-  <div class="trow" style="padding-left:26px"><span class="tw">▾</span><span class="ic">📁</span>models</div>
-  <div class="trow" style="padding-left:42px"><span class="tw">▾</span><span class="ic">🗎</span>dataset.py<span class="meta">1 edit · 1 pending</span></div>
-  <div class="trow" style="padding-left:58px"><span class="tw">▾</span><span class="ic" style="color:var(--orange)">◆</span>class Dataset<span class="meta">1 edit · 1 pending</span></div>
-  <div class="trow mono" style="padding-left:76px"><span class="dot" style="background:var(--pending)"></span>&nbsp;#3&nbsp; +7 −0<span class="meta"><span class="pill p-pending">pending</span></span></div>`;
+// REVIEW is the sidebar's one review surface (0.9.4 removed the Edits and Diffs trees). It holds no
+// code: rows are GROUPED BY FILE under a header whose ✓/↩ act on exactly the pending work listed
+// beneath it, one row per piece of code however many times it was revised, and the panel ends with
+// the cancelled-out footer when the session has chains that go nowhere. Its own toolbar (search,
+// prev/next, keep/undo/redo all, clear resolved, session, refresh, inline toggle) sits in the view
+// title bar, which the platform draws — not part of this mock.
+const reviewList = `
+  <div class="viewhead">REVIEW <span style="float:right;color:var(--faint)">3 pending</span></div>
+  <div class="trow" style="padding-left:10px;gap:5px;font-size:11px;color:var(--dim)">
+    <span style="border:1px solid var(--line);border-radius:3px;padding:1px 5px">Open all in editor</span>
+    <span style="border:1px solid var(--line);border-radius:3px;padding:1px 5px">Keep all (3)</span>
+    <span style="border:1px solid var(--line);border-radius:3px;padding:1px 5px">Undo all</span>
+  </div>
+  <div class="trow mono fhead" style="padding-left:10px"><b>src/features.py</b><span class="meta">1 pending &nbsp;✓ file&nbsp; ↩ file</span></div>
+  <div class="trow mono" style="padding-left:20px"><span class="dot" style="background:var(--pending)"></span>&nbsp;#1<span class="meta">+6 −1 &nbsp;✓&nbsp; ↩</span></div>
+  <div class="trow mono fhead" style="padding-left:10px"><b>src/train.py</b><span class="meta">1 pending &nbsp;✓ file&nbsp; ↩ file</span></div>
+  <div class="trow mono" style="padding-left:20px"><span class="dot" style="background:var(--pending)"></span>&nbsp;#2<span class="meta">+3 −2 &nbsp;✓&nbsp; ↩</span></div>
+  <div class="trow mono fhead" style="padding-left:10px"><b>src/models/dataset.py</b><span class="meta">1 pending &nbsp;✓ file&nbsp; ↩ file</span></div>
+  <div class="trow mono" style="padding-left:20px"><span class="dot" style="background:var(--pending)"></span>&nbsp;#3<span class="meta">+7 −0 &nbsp;✓&nbsp; ↩</span></div>
+  <div class="trow mono" style="padding-left:10px;color:var(--faint)">2 cancelled-out chains — nothing to review<span class="meta">Dismiss</span></div>`;
 
 // The inline lens row, verbatim from InlineLensProvider.provideCodeLenses: one lens per pending edit,
 // shortened in 0.10.0 to `🔬 #N +A −R · n/m` (the Diff-axis position) plus the five verbs that fit a lens.
@@ -341,7 +355,8 @@ const conflictBody = () => `
     <div class="cmd"><span class="pr">$</span><span class="cursor">&nbsp;</span></div>
   </div>`;
 
-// a single edit opened as its own full diff tab (the Diffs surface), git colors, title-bar Prev/Next
+// a single edit opened as its own full diff tab (a row click in Review opens exactly this), git
+// colors, title-bar Prev/Next
 const diffTabBody = () => `
   <div class="difftab">
     <div class="tab">train.py  ⟷  Claude #2</div>
@@ -803,7 +818,7 @@ const scenes = {
         </div>
         <div style="width:320px;background:var(--side);border-right:1px solid var(--border);padding:12px 14px;">
           <div style="font-size:9.5px;font-weight:700;color:var(--coral);letter-spacing:.05em;margin-bottom:7px;">② SIDEBAR · Observatory Traces</div>
-          <div style="font-size:12px;color:var(--dim);line-height:1.55;"><b style="color:var(--ink)">Edits</b> (folder → file → class) · <b style="color:var(--ink)">Diffs</b> · <b style="color:var(--ink)">File&nbsp;History</b>.<br>Per-row Keep&nbsp;/&nbsp;Undo. Title bar: Search · Review&nbsp;◄► · Accept/Reject&nbsp;All · Clear&nbsp;Resolved · Switch&nbsp;session.</div>
+          <div style="font-size:12px;color:var(--dim);line-height:1.55;"><b style="color:var(--ink)">Review</b> (the session's changes, grouped by file — pending first-class, resolved greyed with redo/undo; diffs open in the editor) · <b style="color:var(--ink)">File&nbsp;History</b>.<br>Per-row Keep&nbsp;/&nbsp;Undo. Title bar: Search · Review&nbsp;◄► · Accept/Reject&nbsp;All · Clear&nbsp;Resolved · Switch&nbsp;session.</div>
         </div>
         <div style="flex:1;padding:12px 16px;">
           <div style="font-size:9.5px;font-weight:700;color:var(--coral);letter-spacing:.05em;margin-bottom:7px;">③ EDITOR</div>
@@ -844,10 +859,9 @@ const scenes = {
           <span style="opacity:.4">⚙</span>
         </div>
         <div style="position:relative;width:300px;background:var(--side);border-right:1px solid var(--border);box-shadow:inset 0 0 0 2px var(--coral);">
-          <span style="position:absolute;top:-8px;left:9px;background:var(--coral);color:#fff;font-size:9px;font-weight:700;letter-spacing:.04em;padding:1.5px 7px;border-radius:4px;z-index:5;white-space:nowrap;">① Activity bar · ② Sidebar (Observatory Traces: Edits·Diffs·File History)</span>
+          <span style="position:absolute;top:-8px;left:9px;background:var(--coral);color:#fff;font-size:9px;font-weight:700;letter-spacing:.04em;padding:1.5px 7px;border-radius:4px;z-index:5;white-space:nowrap;">① Activity bar · ② Sidebar (Observatory Traces: Review·File History)</span>
           <div style="padding:10px 14px 2px;font-size:11px;color:var(--dim);letter-spacing:.06em;">OBSERVATORY TRACES</div>
-          ${editsTree}
-          <div class="viewhead" style="border-top:1px solid var(--border);margin-top:8px;">DIFFS</div>
+          ${reviewList}
           <div class="viewhead" style="border-top:1px solid var(--border);">FILE HISTORY <span style="float:right;color:var(--faint)">features.py</span></div>
         </div>
         <div style="flex:1;display:flex;flex-direction:column;">
@@ -884,8 +898,7 @@ const scenes = {
         </div>
         <div style="width:300px;background:var(--side);border-right:1px solid var(--border);">
           <div style="padding:10px 14px 2px;font-size:11px;color:var(--dim);letter-spacing:.06em;">OBSERVATORY TRACES</div>
-          ${editsTree}
-          <div class="viewhead" style="border-top:1px solid var(--border);margin-top:8px;">DIFFS</div>
+          ${reviewList}
           <div class="viewhead" style="border-top:1px solid var(--border);">FILE HISTORY <span style="float:right;color:var(--faint)">features.py</span></div>
         </div>
         <div style="flex:1;display:flex;flex-direction:column;">
@@ -958,11 +971,11 @@ const scenes = {
       ${conflictBody()}
     </div>`),
 
-  // G. one edit as its own diff tab (the Diffs surface)
+  // G. one edit as its own diff tab — what a Review row opens
   'diffs': scene(980, `
     <div class="window">
       ${diffTabBody()}
-      <div class="statusbar"><span class="sb-warn">${microscope} 3</span><span style="color:var(--faint)">Diffs — click any edit in the tree for its before ⟷ after</span></div>
+      <div class="statusbar"><span class="sb-warn">${microscope} 3</span><span style="color:var(--faint)">Review — click any row for its before ⟷ after</span></div>
     </div>`),
 
   // H. file spotlight spotlight
