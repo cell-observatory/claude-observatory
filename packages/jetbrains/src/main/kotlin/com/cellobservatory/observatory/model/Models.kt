@@ -17,8 +17,16 @@ data class EditRecord(
 
 data class SessionInfo(val id: String, val edits: Int, val pending: Int, val lastMs: Long)
 
-/** Structured result of `undo/redo --json` — front-ends branch on [status], never on prose. */
-data class UndoResult(val ok: Boolean, val status: String, val message: String) {
+/** Structured result of `undo/redo --json` — front-ends branch on [status], never on prose.
+ *  [dependents]/[closure] arrive on a named-dependent undo conflict: the later units that rewrote
+ *  this change's lines, and the raw id set `undo --ids` takes to revert them together in one call. */
+data class UndoResult(
+    val ok: Boolean,
+    val status: String,
+    val message: String,
+    val dependents: List<Int> = emptyList(),
+    val closure: List<Int> = emptyList(),
+) {
     val conflict get() = status == "conflict"
 }
 

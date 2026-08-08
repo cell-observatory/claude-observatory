@@ -54,16 +54,20 @@ object ReviewOps {
     fun keep(project: Project, session: String, id: Int, advance: Boolean = true) {
         runBg(project, "Keeping edit #$id") {
             // Routine single-edit keep → transient status bar (no Event Log pile-up); failures stay balloons.
-            if (ObservatoryCli.keep(session, id, project.basePath)) {
-                doneQuiet(project, "Kept edit #$id")
-                // Queued AFTER doneQuiet's refresh, so advanceAfterResolve reads the POST-keep log — its
-                // "did this record actually leave pending" gate is the whole point and a stale log would
-                // answer it wrong.
-                ApplicationManager.getApplication().invokeLater {
-                    advanceAfterResolve(project, session, id, redo = false, advance = advance)
+            when (val kept = ObservatoryCli.keep(session, id, project.basePath)) {
+                null -> done(project, cliFailMsg("keep edit #$id"), NotificationType.ERROR)
+                // kept:0 is the CLI saying "nothing was pending here" — a stale button (the stacked
+                // review tab is a snapshot) or a re-click. Never a green ✓ over a no-op.
+                0 -> done(project, "Nothing to keep for #$id — it is no longer pending (already kept, or reverted)", NotificationType.WARNING)
+                else -> {
+                    doneQuiet(project, if (kept > 1) "Kept $kept edits for this change" else "Kept edit #$id")
+                    // Queued AFTER doneQuiet's refresh, so advanceAfterResolve reads the POST-keep log — its
+                    // "did this record actually leave pending" gate is the whole point and a stale log would
+                    // answer it wrong.
+                    ApplicationManager.getApplication().invokeLater {
+                        advanceAfterResolve(project, session, id, redo = false, advance = advance)
+                    }
                 }
-            } else {
-                done(project, cliFailMsg("keep edit #$id"), NotificationType.ERROR)
             }
         }
     }
@@ -146,6 +150,38 @@ object ReviewOps {
 
     private fun afterUndo(project: Project, session: String, rec: EditRecord, res: UndoResult, redo: Boolean, advance: Boolean = true) {
         if (res.conflict) {
+            // A named-dependent refusal carries the closure (raw member ids, from `undo --json`) —
+            // offer reverting the pair as ONE action beside the force fallback. Ordinary conflicts
+            // (a manual change) keep the single Force offer below.
+            if (!redo && res.closure.isNotEmpty()) {
+                val choice = Messages.showYesNoCancelDialog(
+                    project,
+                    "${res.message}\n\nUndo this change and the unit(s) that depend on it together?",
+                    "Claude Observatory — Conflict",
+                    "Undo Both",
+                    "Force-Restore File",
+                    "Cancel",
+                    Messages.getWarningIcon(),
+                )
+                if (choice == Messages.YES) {
+                    runBg(project, "Undo #${rec.id} with its dependents") {
+                        val r = ObservatoryCli.undoScopeIds(session, res.closure, project.basePath)
+                        refreshFile(rec.file)
+                        ApplicationManager.getApplication().invokeLater {
+                            ObservatoryService.getInstance(project).refresh(force = true)
+                            if (r == null) notify(project, cliFailMsg("undo the dependent units"), NotificationType.ERROR)
+                            else status(project, "Reverted ${r.undone} edit(s) together." + (if (r.conflicts > 0) " · ${r.conflicts} conflict(s) left" else "") + refusedSuffix(r))
+                        }
+                    }
+                } else if (choice == Messages.NO) {
+                    runBg(project, "Force restore #${rec.id}") {
+                        val forced = ObservatoryCli.undo(session, rec.id, force = true, project.basePath)
+                        refreshFile(rec.file)
+                        done(project, forced.message, if (forced.ok) NotificationType.INFORMATION else NotificationType.ERROR)
+                    }
+                }
+                return
+            }
             val force = Messages.showYesNoDialog(
                 project,
                 "${res.message}\n\nForce-${if (redo) "re-apply" else "restore"} the file? " +
@@ -247,7 +283,7 @@ object ReviewOps {
                 done(
                     project,
                     "Reverted ${res.undone} edit(s)" +
-                        (if (res.conflicts > 0) " · ${res.conflicts} conflict(s) — undo those individually to force" else "") +
+                        (if (res.conflicts > 0) " · ${res.conflicts} conflict(s) — undo those individually to force" + (res.firstConflict?.let { " — ${it.substringBefore(". ")}" } ?: "") else "") +
                         refusedSuffix(res),
                     if (res.errors > 0) NotificationType.WARNING else NotificationType.INFORMATION,
                 )
@@ -333,7 +369,7 @@ object ReviewOps {
                 done(
                     project,
                     "Reverted ${res.undone} edit(s) in $longScope" +
-                        (if (res.conflicts > 0) " · ${res.conflicts} conflict(s) — revert those individually to force" else "") +
+                        (if (res.conflicts > 0) " · ${res.conflicts} conflict(s) — revert those individually to force" + (res.firstConflict?.let { " — ${it.substringBefore(". ")}" } ?: "") else "") +
                         refusedSuffix(res),
                     if (res.errors > 0) NotificationType.WARNING else NotificationType.INFORMATION,
                 )
@@ -431,7 +467,11 @@ object ReviewOps {
                 // A file count of 0 alongside pending work means the build did not report the list — drop
                 // the clause rather than print a zero.
                 (if (p.files > 0) " across ${p.files} file(s)" else "") +
-                " made from this ask onward — including asks after it — by rewriting those files on disk. " +
+                " made from this ask onward — including asks after it" +
+                // A unit can span two asks when the file was absent in between, and a unit is the
+                // smallest revertible thing — so this reaches back. Named, not discovered afterwards.
+                (if (p.fromEarlier > 0) ", and ${p.fromEarlier} edit(s) from an EARLIER ask that cannot be separated from it" else "") +
+                " — by rewriting those files on disk. " +
                 "Redo can restore them. Overlapping edits may conflict."
         } ?: // No preflight (an old CLI, or a call that failed): name the scope, never a guessed number.
             "This reverts every pending edit made from this ask onward — including asks after it — by " +
@@ -471,7 +511,7 @@ object ReviewOps {
             val units = res.units?.let { " ($it review unit(s))" } ?: ""
             val across = if (files > 0) " across $files file(s)" else ""
             val msg = "Reverted ${res.undone} pending edit(s)$units$across from prompt $label onward" +
-                (if (res.conflicts > 0) " · ${res.conflicts} conflict(s) — revert those individually to force" else "") +
+                (if (res.conflicts > 0) " · ${res.conflicts} conflict(s) — revert those individually to force" + (res.firstConflict?.let { " — ${it.substringBefore(". ")}" } ?: "") else "") +
                 refusedSuffix(res)
             ApplicationManager.getApplication().invokeLater {
                 if (project.isDisposed) return@invokeLater
@@ -628,7 +668,7 @@ object ReviewOps {
                 done(
                     project,
                     "Rejected ${res.undone} edit(s) in $label" +
-                        (if (res.conflicts > 0) " · ${res.conflicts} conflict(s) — revert those individually to force" else "") +
+                        (if (res.conflicts > 0) " · ${res.conflicts} conflict(s) — revert those individually to force" + (res.firstConflict?.let { " — ${it.substringBefore(". ")}" } ?: "") else "") +
                         (if (res.errors > 0) " · ${res.errors} refused${res.firstError?.let { " — " + it } ?: ""}" else ""),
                     if (res.errors > 0) NotificationType.WARNING else NotificationType.INFORMATION,
                 )
@@ -670,7 +710,7 @@ object ReviewOps {
                 done(
                     project,
                     "Rejected ${res.undone} edit(s) in task “$label”" +
-                        if (res.conflicts > 0) " · ${res.conflicts} conflict(s) — revert those individually to force" else "",
+                        if (res.conflicts > 0) " · ${res.conflicts} conflict(s) — revert those individually to force" + (res.firstConflict?.let { " — ${it.substringBefore(". ")}" } ?: "") else "",
                 )
             }
         }

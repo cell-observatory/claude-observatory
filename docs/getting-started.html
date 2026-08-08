@@ -120,7 +120,7 @@
 
 <nav class="nav" id="nav">
   <div class="wrap row">
-    <a class="brand" href="showcase.html"><span class="m">🔬</span> Claude Observatory <span class="brandver" data-co-version>v0.9.3</span></a>
+    <a class="brand" href="showcase.html"><span class="m">🔬</span> Claude Observatory <span class="brandver" data-co-version>v0.9.4</span></a>
     <div class="links">
       <a href="showcase.html">Home</a>
       <a href="showcase.html#install">Install</a>
@@ -200,7 +200,10 @@
           <div style="white-space:nowrap">claude-observatory diff &lt;id&gt;         <span style="color:var(--ink-faint)"># colored before/after for one edit</span></div>
           <div style="white-space:nowrap">claude-observatory keep &lt;id&gt;         <span style="color:var(--ink-faint)"># mark reviewed; no disk change</span></div>
           <div style="white-space:nowrap">claude-observatory undo &lt;id&gt;         <span style="color:var(--ink-faint)"># surgically undo one edit</span></div>
-          <div style="white-space:nowrap">claude-observatory ignore            <span style="color:var(--ink-faint)"># the .observatoryignore rules in play; --check &lt;path&gt; says which one decided</span></div>
+          <div style="white-space:nowrap">claude-observatory review --prompt &lt;id&gt;<span style="color:var(--ink-faint)"># one ask as review units, each with its net patch (--json for tools)</span></div>
+            <div style="white-space:nowrap">claude-observatory oplog               <span style="color:var(--ink-faint)"># the reviewer's own operation journal; --revert-last undoes the last one</span></div>
+            <div style="white-space:nowrap">claude-observatory assign --ids &lt;a,b&gt; --prompt &lt;n&gt;<span style="color:var(--ink-faint)"># move edits to another ask when the recorded window got it wrong</span></div>
+            <div style="white-space:nowrap">claude-observatory ignore            <span style="color:var(--ink-faint)"># the .observatoryignore rules in play; --check &lt;path&gt; says which one decided</span></div>
           <div style="white-space:nowrap">claude-observatory task-keep &lt;id&gt;    <span style="color:var(--ink-faint)"># keep every pending edit in a task's strict in-progress span</span></div>
           <div style="white-space:nowrap">claude-observatory task-undo &lt;id&gt;    <span style="color:var(--ink-faint)"># revert every pending edit in that same strict span</span></div>
           <div style="white-space:nowrap">claude-observatory multitask --json  <span style="color:var(--ink-faint)"># every running agent across the repo's worktrees</span></div>
@@ -231,7 +234,7 @@
 <footer class="foot" id="footer">
   <div class="wrap">
     <div class="row">
-      <span class="brand"><span class="m">🔬</span> Claude Observatory <span class="brandver" data-co-version>v0.9.3</span></span>
+      <span class="brand"><span class="m">🔬</span> Claude Observatory <span class="brandver" data-co-version>v0.9.4</span></span>
       <div class="flinks">
         <a href="apps.html">Apps</a>
         <a href="concepts.html">Docs</a>

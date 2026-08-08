@@ -424,7 +424,7 @@
 
 <nav class="nav" id="nav">
   <div class="wrap row">
-    <a class="brand" href="#hero"><span class="m">🔬</span> Claude Observatory <span class="brandver" data-co-version>v0.9.3</span></a>
+    <a class="brand" href="#hero"><span class="m">🔬</span> Claude Observatory <span class="brandver" data-co-version>v0.9.4</span></a>
     <div class="links">
       <a href="showcase.html" aria-current="page">Home</a>
       <a href="#install">Install</a>
@@ -481,11 +481,12 @@
     <span class="eyebrow">What sets it apart</span>
     <h2>From one edit to the whole trace</h2>
     <ul>
-      <li><b>The record is built outside the model loop.</b> Capture runs in local hooks: it costs no tokens and changes nothing about what the agent sees or the decisions it makes. The record builds itself as the agent works, so it exists before you need it rather than being reconstructed once the context is gone. Everything stays on your machine; nothing is sent anywhere.</li>
-      <li><b>Any edit can be reversed on its own.</b> A position-anchored merge removes one change while the edits around it stay in place. When a later edit genuinely overlaps, the undo is refused rather than applied blindly: no clean git state is required, and nothing is silently overwritten.</li>
-      <li><b>Review follows the unit of work.</b> The edits one prompt produced read as one sequence, in the order the agent made them, across files; the same review scales down to a single edit or up to a task or a workflow run. Single edits give precision; sequences give the shape of the work.</li>
+      <li><b>The record is built outside the model loop.</b> Capture runs in local hooks: it costs no tokens and changes nothing about what the agent sees or the decisions it makes. Review units are derived deterministically from the exact snapshot pairs capture recorded — an exact join, never a heuristic reconcile of the working tree — and all review state is derived on read from the append-only record, so there is nothing stored to go stale. Everything stays on your machine; nothing is sent anywhere.</li>
+      <li><b>One change, however many tries.</b> Repeated edits to the same lines, or to the same detected function, read as one review unit showing the net diff, bounded by the prompt that produced them — a superseded intermediate state never asks for a decision. The editors&rsquo; Review tab lists the session this way &mdash; scoped to one ask when a prompt is selected &mdash; and opens the diffs in the editor: one unit per row, or the whole list as a single concatenated view; the terminal&rsquo;s Review list scopes the same way. The same review scales down to a single edit or up to a task or a workflow run.</li>
+      <li><b>Any edit can be reversed on its own.</b> A position-anchored merge removes one change while the edits around it stay in place. When a later edit genuinely overlaps, the undo is refused rather than applied blindly — and when the overlap is later work that built on the change, the refusal names the depending unit and offers reverting the pair as one action. No clean git state is required, and nothing is silently overwritten.</li>
+      <li><b>Your own decisions are on the record too.</b> Bulk accepts and reverts are journaled with before-images, listable and reversible (<code>oplog</code>) — the reviewer's actions get the same auditability as the agent's.</li>
       <li><b>Every edit is recorded.</b> Each text change is saved the moment the agent makes it, including the files a shell command changed. When a named file cannot be snapshotted — a binary, or one past the size cap — the record marks it an explicit skip rather than dropping it quietly. The shell walk is bounded: it skips vendor and build directories and stops at a file-count cap, so changes beneath those are not captured at all.</li>
-      <li><b>Every surface reads one store.</b> VS Code, JetBrains IDEs, and the terminal share the same local record, so review does not depend on a particular editor or on an outside service.</li>
+      <li><b>Every surface reads one store.</b> VS Code, JetBrains IDEs, and the terminal share the same local record, so review does not depend on a particular editor or on an outside service. The terminal is a two-way door: it shows the live session — Claude's own output as it works — and one key hands the terminal to <code>claude --resume</code> for that session, returning on exit.</li>
       <li><b>Every tool call is explained.</b> The transcript the session already produced yields Claude's reasoning, a timeline of each tool call, flags on risky shell commands, and the two audits: the edits and reads that landed outside the workspace, and everywhere the session reached off the machine.</li>
       <li><b>Many agents appear in one view.</b> When several agents run in parallel across git worktrees, the observatory unifies them: who is working, on what, and where their changes conflict.</li>
     </ul>
@@ -887,11 +888,11 @@
   <div class="wrap">
     <span class="eyebrow">Run it for real</span>
     <h2>The same session, in your editor</h2>
-    <p class="lede" style="margin-inline:auto;">The bundled demo replays through the real capture pipeline, in your own editor, at zero tokens. It goes further than this page: three prompts, six tasks and nine edits, a second agent holding the same file, a workflow still running, and a <b>guided tour</b> that drives the panels for you — forty-two steps, or thirteen if you are short of time.</p>
+    <p class="lede" style="margin-inline:auto;">The bundled demo replays through the real capture pipeline, in your own editor, at zero tokens. It goes further than this page: three prompts, six tasks and nine edits, a second agent holding the same file, a workflow still running, and a <b>guided tour</b> that drives the panels for you — forty-two steps, or fourteen if you are short of time.</p>
     <div class="cmd"><span class="pr">VS&nbsp;Code</span><code>Claude Observatory: Start Demo Mode</code><button class="copy" data-copy="Claude Observatory: Start Demo Mode">Copy</button></div>
-    <p class="cmd-note">…from the command palette, the ▶ on the Edits panel, or <b>Try the demo</b> in the empty panel.</p>
+    <p class="cmd-note">…from the command palette, the ▶ on the Review panel, or <b>Try the demo</b> in the empty panel.</p>
     <div class="cmd"><span class="pr">JetBrains</span><code>Claude Observatory: Start Demo Mode</code><button class="copy" data-copy="Claude Observatory: Start Demo Mode">Copy</button></div>
-    <p class="cmd-note">…from Find Action (<code>⇧⌘A</code>), the ▶ on the Edits panel, or the same empty-panel link.</p>
+    <p class="cmd-note">…from Find Action (<code>⇧⌘A</code>), the ▶ on the Review panel, or the same empty-panel link.</p>
     <div class="cmd"><span class="pr">❯</span><code>claude-observatory demo</code><button class="copy" data-copy="claude-observatory demo">Copy</button></div>
     <p class="cmd-note">In the terminal — and <code>demo --tour</code> prints the tour as prose (<code>--essentials</code> or <code>--remainder</code> for either half). The tour plays itself; Next, Back or a step jump hands you the wheel. <b>Exit Demo Mode</b> removes every trace.</p>
     <p class="cmd-note">Installation first — see <a href="#install" style="color:var(--accent-ink);text-decoration:underline">Install Claude Observatory</a>.</p>
@@ -906,14 +907,14 @@
   <div class="wrap rv">
     <span class="eyebrow">Open source</span>
     <h2>License &amp; credits</h2>
-    <p>Claude Observatory is developed in the open by the <a href="https://github.com/cell-observatory" style="color:var(--accent-ink);text-decoration:underline">Cell Observatory</a> project, licensed under <a href="https://github.com/cell-observatory/claude-observatory/blob/main/LICENSE" style="color:var(--accent-ink);text-decoration:underline">Apache-2.0</a>, with a <a href="https://github.com/cell-observatory/claude-observatory/blob/main/CODE_OF_CONDUCT.md" style="color:var(--accent-ink);text-decoration:underline">Contributor Covenant</a> code of conduct. It is built with and for <a href="https://claude.com/claude-code" style="color:var(--accent-ink);text-decoration:underline">Claude Code</a>. Adjacent work informed its direction: <a href="https://github.com/matt1398/claude-devtools" style="color:var(--accent-ink);text-decoration:underline">claude-devtools</a> on reading the on-disk transcript, <a href="https://github.com/ryoppippi/ccusage" style="color:var(--accent-ink);text-decoration:underline">ccusage</a> and <a href="https://github.com/chiphuyen/sniffly" style="color:var(--accent-ink);text-decoration:underline">sniffly</a> on local-first analytics, and the worktree-fleet tools (<a href="https://www.conductor.build/" style="color:var(--accent-ink);text-decoration:underline">Conductor</a>, <a href="https://github.com/smtg-ai/claude-squad" style="color:var(--accent-ink);text-decoration:underline">claude-squad</a>, <a href="https://github.com/BloopAI/vibe-kanban" style="color:var(--accent-ink);text-decoration:underline">vibe-kanban</a>) on running agents in parallel. The observatory adds the layer that observes them.</p>
+    <p>Claude Observatory is developed in the open by the <a href="https://github.com/cell-observatory" style="color:var(--accent-ink);text-decoration:underline">Cell Observatory</a> project, licensed under <a href="https://github.com/cell-observatory/claude-observatory/blob/main/LICENSE" style="color:var(--accent-ink);text-decoration:underline">Apache-2.0</a>, with a <a href="https://github.com/cell-observatory/claude-observatory/blob/main/CODE_OF_CONDUCT.md" style="color:var(--accent-ink);text-decoration:underline">Contributor Covenant</a> code of conduct. It is built with and for <a href="https://claude.com/claude-code" style="color:var(--accent-ink);text-decoration:underline">Claude Code</a>. Adjacent work informed its direction: <a href="https://github.com/matt1398/claude-devtools" style="color:var(--accent-ink);text-decoration:underline">claude-devtools</a> on reading the on-disk transcript, <a href="https://github.com/ryoppippi/ccusage" style="color:var(--accent-ink);text-decoration:underline">ccusage</a> and <a href="https://github.com/chiphuyen/sniffly" style="color:var(--accent-ink);text-decoration:underline">sniffly</a> on local-first analytics, and the worktree-fleet tools (<a href="https://www.conductor.build/" style="color:var(--accent-ink);text-decoration:underline">Conductor</a>, <a href="https://github.com/smtg-ai/claude-squad" style="color:var(--accent-ink);text-decoration:underline">claude-squad</a>, <a href="https://github.com/BloopAI/vibe-kanban" style="color:var(--accent-ink);text-decoration:underline">vibe-kanban</a>) on running agents in parallel. <a href="https://gitbutler.com" style="color:var(--accent-ink);text-decoration:underline">GitButler</a>'s hunk-dependency model and operations log informed the dependency-aware refusals and the reviewer's operation journal. The review model itself is convergent: <a href="https://cursor.com" style="color:var(--accent-ink);text-decoration:underline">Cursor</a>, <a href="https://code.visualstudio.com/docs/copilot/copilot-edits" style="color:var(--accent-ink);text-decoration:underline">GitHub Copilot's edit mode</a> and <a href="https://zed.dev/docs/ai/agent-panel" style="color:var(--accent-ink);text-decoration:underline">Zed's agent panel</a> all arrived at baseline-plus-net-diff review, and their public behavior shaped the review-unit design; the per-language function detection follows git's own <a href="https://git-scm.com/docs/gitattributes#_defining_a_custom_hunk_header" style="color:var(--accent-ink);text-decoration:underline"><code>xfuncname</code></a> tradition. The observatory adds the layer that observes them.</p>
   </div>
 </section>
 
 <footer class="foot" id="footer">
   <div class="wrap">
     <div class="row">
-      <span class="brand"><span class="m">🔬</span> Claude Observatory <span class="brandver" data-co-version>v0.9.3</span></span>
+      <span class="brand"><span class="m">🔬</span> Claude Observatory <span class="brandver" data-co-version>v0.9.4</span></span>
       <div class="flinks">
         <a href="apps.html">Apps</a>
         <a href="concepts.html">Docs</a>
@@ -1282,18 +1283,21 @@
       el('tk-in').textContent=TOK[0]+'k'; el('tk-out').textContent=TOK[1]+'k'; el('tk-cached').textContent=TOK[2]+'k';
       el('tk-hit').textContent=Math.round(100*TOK[2]/(TOK[2]+TOK[0]))+'%';
 
-      // ---- the Observatory Traces tree — folders by module, files with status dots + deltas ----
+      // ---- the Review list — rows GROUPED BY FILE, one row per unit, the way the panel draws it
+      // since 0.9.4 (the Edits and Diffs trees are gone; Review is the one review surface) ----
       var sh='';
       if(landed.length){
-        var byMod={};landed.forEach(function(e){(byMod[e.module]=byMod[e.module]||[]).push(e);});
-        Object.keys(byMod).forEach(function(m){
-          sh+='<div class="sr fold">\u25be '+esc(m)+'</div>';
-          byMod[m].forEach(function(e2){
+        var byFile={};landed.forEach(function(e){(byFile[e.file]=byFile[e.file]||[]).push(e);});
+        Object.keys(byFile).forEach(function(f){
+          var pend=byFile[f].filter(function(e3){return statusOf(e3.id,step,res)==='pending';}).length;
+          sh+='<div class="sr fold'+(f===fn?' on':'')+'"><span class="sn">'+esc(f.split('/').pop())+'</span>'+
+              '<span class="sc">'+(pend?pend+' pending':'resolved')+'</span></div>';
+          byFile[f].forEach(function(e2){
             var s5=statusOf(e2.id,step,res);
-            sh+='<div class="sr'+(e2.file===fn?' on':'')+'"><span class="sd '+s5+'"></span><span class="sn">'+esc(e2.file.split('/').pop())+'</span><span class="sc"><span class="p">+'+e2.plus+'</span> <span class="m">\u2212'+e2.minus+'</span></span></div>';
+            sh+='<div class="sr'+(e2.file===fn?' on':'')+'" style="padding-left:18px"><span class="sd '+s5+'"></span><span class="sn">#'+e2.id+'</span><span class="sc"><span class="p">+'+e2.plus+'</span> <span class="m">\u2212'+e2.minus+'</span></span></div>';
           });
         });
-      }else sh='<div class="empty">Edits appear here as Claude works.</div>';
+      }else sh='<div class="empty">Changes appear here as Claude works.</div>';
       el('side-tree').innerHTML=sh;
 
       // ---- Observatory Timeline: prompts and observations, newest first ----
@@ -1343,7 +1347,7 @@
       if(st.gate==='acceptall'&&!res[step]) bulk+='<button id="ov-acceptall" class="hint">✓✓ Accept All</button>';
       else bulk+='<span class="tk">✓✓ Accept All</span>';
       bulk+='<span class="tu">↩ Reject All</span><span class="ts">Clear Resolved</span><span class="ts">Export</span></span>';
-      var view='<span class="g"><span class="ts">Search</span><span class="ts">Active only</span><span class="sep"></span><span class="ts">Spotlight</span><span class="ts">Refresh</span><span class="on"><span data-co-version>v0.9.3</span> ▾</span></span>';
+      var view='<span class="g"><span class="ts">Search</span><span class="ts">Active only</span><span class="sep"></span><span class="ts">Spotlight</span><span class="ts">Refresh</span><span class="on"><span data-co-version>v0.9.4</span> ▾</span></span>';
       var bar='<div class="row">'+axes+'</div><div class="row split">'+bulk+view+'</div>';
       el('ovbar').innerHTML=bar;
       var ab=el('ov-acceptall');

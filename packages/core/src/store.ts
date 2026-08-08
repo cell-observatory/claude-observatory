@@ -412,6 +412,40 @@ export function readStaging(sessionId: string, key: string): StagingRecord | nul
   }
 }
 
+/**
+ * How long this before-snapshot has been waiting for its PostToolUse, or null when there is none.
+ *
+ * A Bash tree walk defers to an edit that is still in flight, because that call's own Post will
+ * record the change with the right tool name. But nothing reaps an ABANDONED staging record — an
+ * interrupted edit leaves one behind — and deferring to it forever would mean every later change to
+ * that file went unrecorded, silently, which is far worse than the duplicate row the deferral
+ * prevents. Age is what tells the two apart: an edit's Pre and Post are milliseconds apart.
+ */
+/**
+ * The most recent record for one file, or null when the log holds none.
+ *
+ * Reads the log's TAIL rather than the whole file: this runs inside every Edit/Write commit, and the
+ * question it answers ("has this change already been captured by the Bash walk that is running
+ * alongside me") only ever concerns the last few appends.
+ */
+export function lastRecordFor(sessionId: string, file: string): EditRecord | null {
+  const want = canonPath(file);
+  const log = readLog(sessionId);
+  for (let i = log.length - 1; i >= 0; i--) {
+    if (canonPath(log[i].file) === want) return log[i];
+  }
+  return null;
+}
+
+export function stagingAgeMs(sessionId: string, key: string): number | null {
+  const p = path.join(stagingDir(sessionId), `${key}.json`);
+  try {
+    return Date.now() - fs.statSync(p).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
 export function deleteStaging(sessionId: string, key: string): void {
   const p = path.join(stagingDir(sessionId), `${key}.json`);
   try {
@@ -427,29 +461,245 @@ export function deleteStaging(sessionId: string, key: string): void {
 export interface BashManifest {
   files: Record<string, string | null>;
   ts: number;
+  /** The directory this snapshot walked. A Post that diffs its walk against a manifest of a
+   *  DIFFERENT root invents changes wholesale, so the root is part of the manifest's identity. */
+  root?: string;
 }
 
-const BASH_MANIFEST = '__bash__.json';
+/**
+ * ONE FILE PER PRE, not one per session.
+ *
+ * A single `__bash__.json` was written by every Pre and deleted by every Post, which is correct only
+ * while Bash calls never overlap — and they overlap constantly (any backgrounded command runs
+ * alongside the next foreground one). A repo-root walk diffed against a subtree snapshot reports
+ * every file outside that subtree as CREATED; the mirror image reports them DELETED; and the
+ * partner's Post then found no manifest at all and silently captured nothing. One file
+ * (`.gitignore`) alternated created/deleted sixteen times without being touched once.
+ *
+ * Measured on the session that reported it, counting records that sit in a chain returning to the
+ * content it started from: 3,050 of 3,378, with 3,211 of those records written by Bash. (An earlier
+ * count of the same session, taken mid-session under a stricter "identical triple" definition, read
+ * 2,073 of 3,337 — the two measure different things, so both are stated rather than reconciled.)
+ *
+ * So each Pre writes its own manifest, and each Post consumes the OLDEST one whose root matches its
+ * own cwd — pairing that is exact across different roots and FIFO within one root (where both
+ * snapshots are of the same tree anyway, so the diff stays a real diff of that tree).
+ */
+const BASH_MANIFEST_PREFIX = '__bash__';
 
-export function writeBashManifest(sessionId: string, m: BashManifest): void {
-  fs.writeFileSync(path.join(stagingDir(sessionId), BASH_MANIFEST), JSON.stringify(m), { mode: 0o600 });
+/** Roots are compared as strings, so they must be spelled one way: `canonPath` fixes the drive
+ *  letter (#43) and this drops a trailing separator, the other way two hook events for one command
+ *  have been seen to disagree. A mismatch would strand the snapshot and capture nothing.
+ *
+ *  Trimmed by scanning, not by `/[\\/]+$/`: that regex backtracks polynomially on a path of many
+ *  separators, and this input arrives from a hook payload (CodeQL flags it as a ReDoS). One pass
+ *  from the end is linear and says the same thing. */
+function normalizeRoot(root: string | undefined): string | undefined {
+  if (root === undefined) return undefined;
+  const r = canonPath(root);
+  let end = r.length;
+  while (end > 1 && (r[end - 1] === '/' || r[end - 1] === '\\')) end--;
+  return r.slice(0, end);
 }
 
-export function readBashManifest(sessionId: string): BashManifest | null {
-  const p = path.join(stagingDir(sessionId), BASH_MANIFEST);
-  if (!fs.existsSync(p)) return null;
+function manifestFiles(sessionId: string): string[] {
   try {
-    return JSON.parse(fs.readFileSync(p, 'utf8')) as BashManifest;
+    return fs
+      .readdirSync(stagingDir(sessionId))
+      .filter((n) => n.startsWith(BASH_MANIFEST_PREFIX) && n.endsWith('.json'))
+      .sort(); // the token starts with the timestamp, so lexical order IS oldest-first
   } catch {
-    return null;
+    return [];
   }
 }
 
-export function deleteBashManifest(sessionId: string): void {
+/**
+ * Drop manifests whose Post never ran (interrupted command, crashed hook): each one pins a blob for
+ * every candidate file in its tree and keeps `hasInflightCapture` true, which excludes the session
+ * from reaping forever.
+ *
+ * A DAY, not minutes: the horizon must sit far above the longest a Bash tool call can legitimately
+ * run (Claude Code's own ceiling is 10 minutes and users raise it), or a still-running command's
+ * snapshot is deleted out from under its Post and that command captures nothing, silently.
+ */
+export function reapStaleManifests(sessionId: string, maxAgeMs = 24 * 60 * 60 * 1000): void {
+  const now = Date.now();
+  let names: string[] = manifestFiles(sessionId);
+  // …plus any abandoned temp from a writer that died mid-rename. `manifestFiles` matches `.json`
+  // only, so these were invisible to every reaper — and `hasInflightCapture` counts ANY staging
+  // entry, so one stray temp kept a finished session out of the collector forever.
   try {
-    fs.unlinkSync(path.join(stagingDir(sessionId), BASH_MANIFEST));
+    names = names.concat(
+      fs.readdirSync(stagingDir(sessionId)).filter((n) => n.startsWith(BASH_MANIFEST_PREFIX) && n.endsWith('.tmp'))
+    );
   } catch {
-    /* already gone */
+    /* no staging dir — nothing to reap */
+  }
+  for (const name of names) {
+    const p = path.join(stagingDir(sessionId), name);
+    try {
+      if (now - fs.statSync(p).mtimeMs > maxAgeMs) fs.unlinkSync(p);
+    } catch {
+      /* raced with another hook — fine either way */
+    }
+  }
+}
+
+/** Write this Pre's own manifest; returns its token, which its Post does not need (it pairs by root)
+ *  but which keeps the filename unique across concurrent hook processes. */
+export function writeBashManifest(sessionId: string, m: BashManifest): string {
+  reapStaleManifests(sessionId);
+  const token = `${Date.now().toString(36)}-${process.pid.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const dest = path.join(stagingDir(sessionId), `${BASH_MANIFEST_PREFIX}${token}.json`);
+  // tmp + rename, like every other store write: a concurrent Post reads this directory unlocked, and
+  // a half-written manifest is a snapshot that says files do not exist.
+  const tmp = `${dest}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify({ ...m, root: normalizeRoot(m.root) }), { mode: 0o600 });
+  fs.renameSync(tmp, dest);
+  return token;
+}
+
+/**
+ * Advance OTHER pending snapshots past what this Post just recorded.
+ *
+ * Two commands overlapping in the same directory both hold a snapshot from before the change, so
+ * both of their Posts would record it — the same edit twice, and the second one is unresolvable
+ * (undo of the earlier row conflicts with the later one and only `--force` clears it). Neither
+ * pairing order nor exact Pre→Post matching helps, because both windows genuinely contain the
+ * change. Moving the baseline does: once a change is in the log, every other pending snapshot of
+ * that tree is updated to the state that was recorded, so nobody records it again.
+ *
+ * Scoped by CONTAINMENT, not by an equal root: a walk of `<repo>` covers `<repo>/packages/core`, so
+ * a subdirectory command that records a change must advance the repo-root snapshot too — matching
+ * roots exactly left it holding the pre-change content, and the repo-root Post recorded the same
+ * change again (this repo does it all day: gradle in `packages/jetbrains` beside npm at the root).
+ * A file is only ADDED to a snapshot whose tree contains it: writing a key for a file outside that
+ * tree would make its own Post walk, never see it, and report it DELETED — the exact phantom this
+ * whole mechanism exists to stop. Removing a key is safe anywhere, so deletions are not restricted.
+ */
+export function advancePendingManifests(sessionId: string, seen: Map<string, string | null>): void {
+  if (!seen.size) return;
+  // Under the same lock the Pre takes to publish its snapshot. This is a read-modify-write over a
+  // file other hook processes are writing: unsynchronized, two Posts advancing one manifest lost an
+  // update in 20 of 20 forced rounds at a realistic 4,000-key manifest — and a lost advance is a
+  // stale baseline, which is the duplicate row this function exists to prevent.
+  withBashPreLock(sessionId, () => advanceUnlocked(sessionId, seen));
+}
+
+function advanceUnlocked(sessionId: string, seen: Map<string, string | null>): void {
+  for (const name of manifestFiles(sessionId)) {
+    const p = path.join(stagingDir(sessionId), name);
+    try {
+      const m = JSON.parse(fs.readFileSync(p, 'utf8')) as BashManifest;
+      if (!m || !m.files) continue;
+      let touched = false;
+      for (const [file, after] of seen) {
+        const known = Object.prototype.hasOwnProperty.call(m.files, file);
+        if (after === null) {
+          if (!known) continue;
+          delete m.files[file];
+          touched = true;
+          continue;
+        }
+        // A rootless manifest (an older build's) never gains a key: its tree is unknown, and a
+        // duplicate row is a far smaller failure than an invented deletion.
+        if (!known && !(m.root !== undefined && isUnderPath(file, m.root))) continue;
+        if (m.files[file] === after) continue;
+        m.files[file] = after;
+        touched = true;
+      }
+      if (!touched) continue;
+      // The manifest may have been CONSUMED by its own Post while this ran; renaming onto its path
+      // would resurrect a spent snapshot, and the next command would diff against it.
+      if (!fs.existsSync(p)) continue;
+      // pid-scoped, like every other writer here (`writeStaging`, `clearResolved`): a shared temp
+      // name lets one advancer rename another's half-written file into place.
+      const tmp = `${p}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(m), { mode: 0o600 });
+      fs.renameSync(tmp, p);
+    } catch {
+      /* unreadable or raced — the reap and the parse guard handle it */
+    }
+  }
+}
+
+/** The oldest pending manifest taken of `root` (any root when undefined), with its path so a caller
+ *  can consume it. Unparseable files are dropped as they are met — never diff against half a
+ *  snapshot. */
+function findBashManifest(sessionId: string, root: string | undefined): { path: string; m: BashManifest } | null {
+  const want = normalizeRoot(root);
+  for (const name of manifestFiles(sessionId)) {
+    const p = path.join(stagingDir(sessionId), name);
+    let m: BashManifest;
+    try {
+      m = JSON.parse(fs.readFileSync(p, 'utf8')) as BashManifest;
+    } catch {
+      // Only delete one that is OLD. A fresh unparseable file is a write in flight, and deleting it
+      // costs its owner every record of that command.
+      try {
+        if (Date.now() - fs.statSync(p).mtimeMs > 60_000) fs.unlinkSync(p);
+      } catch {
+        /* gone already */
+      }
+      continue;
+    }
+    if (m.root !== undefined && want !== undefined && m.root !== want) continue; // another command's tree
+    // A ROOTLESS manifest is a previous build's shared `__bash__.json`, and it matched everything —
+    // including a Post in a subdirectory, whose walk then reported every file outside that directory
+    // as deleted (the very mass-phantom shape described above, arriving on the first command after an
+    // upgrade; it even sorts first, so it was always consumed first). Only honour one when the caller
+    // has no root of its own to compare it against; the next Pre clears it either way.
+    if (m.root === undefined && want !== undefined) continue;
+    return { path: p, m };
+  }
+  return null;
+}
+
+/** Peek: is a snapshot pending for this tree? Does NOT consume — `takeBashManifest` is the one a
+ *  Post uses. */
+export function readBashManifest(sessionId: string, root?: string): BashManifest | null {
+  return findBashManifest(sessionId, root)?.m ?? null;
+}
+
+/**
+ * The manifest this Post should diff against: the oldest one taken of the SAME root, consumed as it
+ * is read. A manifest with no root (an older build's) matches anything — honouring it once beats
+ * dropping a real capture.
+ */
+export function takeBashManifest(sessionId: string, root: string | undefined): BashManifest | null {
+  const hit = findBashManifest(sessionId, root);
+  if (!hit) return null;
+  try {
+    fs.unlinkSync(hit.path);
+  } catch {
+    /* another Post took it first — its content is still a valid snapshot of this tree */
+  }
+  return hit.m;
+}
+
+/**
+ * Drop the pending manifests this command owns: its own tree, plus any ROOTLESS one (an older
+ * build's, which would otherwise match anybody). Scoped on purpose — the refuse-to-walk path calls
+ * this, and wiping every manifest there destroyed a concurrent command's snapshot, so that command
+ * captured nothing at all and said nothing about it.
+ */
+export function deleteBashManifest(sessionId: string, root?: string): void {
+  const want = normalizeRoot(root);
+  for (const name of manifestFiles(sessionId)) {
+    const p = path.join(stagingDir(sessionId), name);
+    if (want !== undefined) {
+      try {
+        const m = JSON.parse(fs.readFileSync(p, 'utf8')) as BashManifest;
+        if (m && m.root !== undefined && m.root !== want) continue; // someone else's tree — not ours to clear
+      } catch {
+        /* unparseable — clearing it is the safe direction */
+      }
+    }
+    try {
+      fs.unlinkSync(p);
+    } catch {
+      /* already gone */
+    }
   }
 }
 
@@ -639,6 +889,107 @@ function retainedOpLines(sessionId: string): string[] {
   return out;
 }
 
+/**
+ * One journaled REVIEWER operation: a bulk status flip with each record's BEFORE-status. Appended by
+ * `setStatusMany` in the same write as the flips it describes; `oplog` lists and reverts them — the
+ * reviewer's own actions get the same auditability as the agent's. NO top-level `id` on this line:
+ * an op line carrying both `id` and `file` would parse as an EditRecord in the JetBrains
+ * StoreReader (its port-fidelity test pins the rule). 'clear' is reserved — a log rewrite discards
+ * the records themselves, so there is nothing a revert could restore.
+ */
+export interface BatchOp {
+  op: 'batch';
+  kind: 'keep' | 'undo' | 'redo' | 'clear';
+  ids: number[];
+  prev: Record<string, EditStatus>;
+  ts: number;
+}
+
+/** A [BatchOp] as `oplog` presents it: parsed, labeled, newest first. */
+export interface OperationEntry {
+  kind: BatchOp['kind'];
+  ids: number[];
+  prev: Record<string, EditStatus>;
+  ts: number;
+  label: string; // "kept 12 edit(s)" — the human line oplog prints
+}
+
+const OP_LABEL: Record<BatchOp['kind'], string> = {
+  keep: 'kept',
+  undo: 'reverted',
+  redo: 're-applied',
+  clear: 'cleared',
+};
+
+/** The journaled reviewer operations, NEWEST first. An empty store answers an empty list, never an error. */
+export function readOperations(sessionId: string): OperationEntry[] {
+  const p = logPath(sessionId);
+  if (!fs.existsSync(p)) return [];
+  const out: OperationEntry[] = [];
+  for (const line of fs.readFileSync(p, 'utf8').split('\n')) {
+    const t = line.trim();
+    if (!t || t.indexOf('"batch"') === -1) continue;
+    try {
+      const o = JSON.parse(t) as Partial<BatchOp>;
+      if (o.op !== 'batch' || !o.kind || !Array.isArray(o.ids) || !o.ids.length) continue;
+      out.push({
+        kind: o.kind,
+        ids: o.ids,
+        prev: o.prev ?? {},
+        ts: o.ts ?? 0,
+        label: `${OP_LABEL[o.kind] ?? o.kind} ${o.ids.length} edit(s)`,
+      });
+    } catch {
+      /* torn line — not an op we can vouch for */
+    }
+  }
+  return out.reverse();
+}
+
+/** An attribution override (`assign`): these RECORD ids belong to prompt [prompt]; absent prompt =
+ *  clear. Like every op line: NO top-level `id`, survives rewrites via retainedOpLines. */
+export interface ScopeOp {
+  op: 'scope';
+  ids: number[];
+  prompt?: string;
+  ts: number;
+}
+
+/** Append an attribution override for `ids` (raw record ids). `promptId` null clears them. */
+export function appendScopeOverride(sessionId: string, ids: number[], promptId: string | null): void {
+  if (!ids.length) return;
+  const op: ScopeOp = { op: 'scope', ids, ...(promptId ? { prompt: promptId } : {}), ts: Date.now() };
+  withLock(sessionId, APPEND_LOCK_BUDGET_MS, () =>
+    fs.appendFileSync(logPath(sessionId), JSON.stringify(op) + '\n', { mode: 0o600 })
+  );
+}
+
+/** Raw record id → its overriding prompt id, LAST op wins (a clear removes the entry). Memoized on
+ *  the log like every derived fact. */
+export function readScopeOverrides(sessionId: string): Map<number, string> {
+  return cachedByFiles('scopeOverrides', [logPath(sessionId)], () => {
+    const out = new Map<number, string>();
+    const p = logPath(sessionId);
+    if (!fs.existsSync(p)) return out;
+    for (const line of fs.readFileSync(p, 'utf8').split('\n')) {
+      const t = line.trim();
+      if (!t || t.indexOf('"scope"') === -1) continue;
+      try {
+        const o = JSON.parse(t) as Partial<ScopeOp>;
+        if (o.op !== 'scope' || !Array.isArray(o.ids)) continue;
+        for (const id of o.ids) {
+          if (typeof id !== 'number') continue;
+          if (typeof o.prompt === 'string' && o.prompt) out.set(id, o.prompt);
+          else out.delete(id);
+        }
+      } catch {
+        /* torn line — not an op we can vouch for */
+      }
+    }
+    return out;
+  });
+}
+
 /** The 'skip' markers in a session's log (dropped, untracked changes). */
 export function readSkips(sessionId: string): SkipOp[] {
   const p = logPath(sessionId);
@@ -749,18 +1100,6 @@ export function setStatus(sessionId: string, id: number, status: EditStatus): Ed
 }
 
 /**
- * Set the status of MANY edits at once — one parse, one lock, one append.
- *
- * The per-edit [setStatus] is O(log) each time: it resolves the record through `readLog`, whose memo the
- * append it then performs immediately invalidates. Looping it over a bulk scope is therefore quadratic,
- * and at real scale that is not a slow path but a broken one — accepting 26,000 pending edits took eight
- * minutes before this existed, against a few milliseconds now. Every bulk verb (Accept All, accept a
- * file, a folder, a task, a prompt) must come through here.
- *
- * Returns the ids that actually changed; an edit already in [status] is skipped rather than re-stated,
- * which is what keeps the log from doubling on a second Accept All.
- */
-/**
  * Memoize one derived FACT about a session on disk, keyed to a stamp the caller owns.
  *
  * Every editor surface runs in fresh CLI processes a few seconds apart, so an in-process memo never
@@ -795,15 +1134,40 @@ export function sidecarMemo<T>(sessionId: string, field: string, stamp: string, 
   return value;
 }
 
+/**
+ * Set the status of MANY edits at once — one parse, one lock, one append.
+ *
+ * The per-edit [setStatus] is O(log) each time: it resolves the record through `readLog`, whose memo the
+ * append it then performs immediately invalidates. Looping it over a bulk scope is therefore quadratic,
+ * and at real scale that is not a slow path but a broken one — accepting 26,000 pending edits took eight
+ * minutes before this existed, against a few milliseconds now. Every bulk verb (Accept All, accept a
+ * file, a folder, a task, a prompt) must come through here.
+ *
+ * Returns the ids that actually changed; an edit already in [status] is skipped rather than re-stated,
+ * which is what keeps the log from doubling on a second Accept All.
+ */
 export function setStatusMany(sessionId: string, ids: Iterable<number>, status: EditStatus): number[] {
   const want = new Set(ids);
   if (!want.size) return [];
-  const changed = readLog(sessionId)
-    .filter((r) => want.has(r.id) && r.status !== status)
-    .map((r) => r.id);
-  if (!changed.length) return [];
+  const changedRecs = readLog(sessionId).filter((r) => want.has(r.id) && r.status !== status);
+  if (!changedRecs.length) return [];
+  const changed = changedRecs.map((r) => r.id);
   const ts = Date.now();
-  const payload = changed.map((id) => JSON.stringify({ op: 'status', id, status, ts })).join('\n') + '\n';
+  // ≥2 records is a bulk action a reviewer may want back: journal it as a `batch` op carrying each
+  // record's BEFORE-status, in the SAME append (atomic under the one lock). A single flip journals
+  // nothing — it is cheap to reverse by hand. Reverting an op flows back through here, so the revert
+  // is journaled too and `oplog --revert-last` twice lands where it started.
+  const OP_KIND: Record<EditStatus, BatchOp['kind']> = { kept: 'keep', undone: 'undo', pending: 'redo' };
+  const opObj: BatchOp = {
+    op: 'batch',
+    kind: OP_KIND[status],
+    ids: changed,
+    prev: Object.fromEntries(changedRecs.map((r) => [r.id, r.status])),
+    ts,
+  };
+  const journal = changed.length >= 2 ? JSON.stringify(opObj) + '\n' : '';
+  const payload =
+    journal + changed.map((id) => JSON.stringify({ op: 'status', id, status, ts })).join('\n') + '\n';
   withLock(sessionId, MAINT_LOCK_BUDGET_MS, () =>
     fs.appendFileSync(logPath(sessionId), payload, { mode: 0o600 })
   );
@@ -854,6 +1218,11 @@ export function listSessions(): SessionInfo[] {
  * needs, leaving a permanently non-undoable record pointing at a missing blob.
  */
 function gcSessionCore(sessionId: string): { removed: number; bytes: number } {
+  // A snapshot whose command never came back pins a blob for every candidate file in its tree AND
+  // keeps the session looking mid-capture forever (so `clean --completed` can never reclaim it).
+  // Reaping only when a NEW Bash command runs never reaches a session that has gone quiet — which is
+  // exactly the session this collector is here for.
+  reapStaleManifests(sessionId);
   const referenced = new Set<string>();
   for (const r of readLog(sessionId)) {
     if (r.beforeBlob) referenced.add(r.beforeBlob);
@@ -868,9 +1237,16 @@ function gcSessionCore(sessionId: string): { removed: number; bytes: number } {
     staged = [];
   }
   for (const name of staged) {
-    if (name === BASH_MANIFEST) {
-      const m = readBashManifest(sessionId);
-      if (m) for (const sha of Object.values(m.files)) if (sha) referenced.add(sha);
+    // EVERY pending Bash snapshot, not one well-known name: each Pre now writes its own manifest
+    // (overlapping commands used to overwrite each other's), and a blob only a pending manifest
+    // references is exactly the before-side an in-flight command is about to record against.
+    if (name.startsWith(BASH_MANIFEST_PREFIX) && name.endsWith('.json')) {
+      try {
+        const m = JSON.parse(fs.readFileSync(path.join(sdir, name), 'utf8')) as BashManifest;
+        if (m && m.files) for (const sha of Object.values(m.files)) if (sha) referenced.add(sha);
+      } catch {
+        /* unparseable manifest — its blobs are not provably referenced */
+      }
     } else if (name.endsWith('.json')) {
       try {
         const rec = JSON.parse(fs.readFileSync(path.join(sdir, name), 'utf8')) as StagingRecord;

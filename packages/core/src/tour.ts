@@ -20,13 +20,14 @@
  * step for a surface an older editor build has never heard of.
  */
 
-/** A surface the tour can bring forward. `editor` means the file itself, not a panel. */
+/** A surface the tour can bring forward. `editor` means the file itself, not a panel. N15 removed
+ *  `edits`/`diffs` with their trees — Review is the one review surface; older renderers seeing an
+ *  unknown view degrade to text-only by contract, so shrinking the set is additive-safe. */
 export type DemoView =
   | 'overview'
   | 'prompts'
+  | 'review'
   | 'stats'
-  | 'edits'
-  | 'diffs'
   | 'fileHistory'
   | 'actions'
   | 'observations'
@@ -306,6 +307,15 @@ function allSteps(): DemoStep[] {
       },
     },
     {
+      id: 'review-tab',
+      essential: true,
+      title: 'Review — one ask, as a list',
+      body:
+        'Selecting an ask — as you just did — scopes the Review list to exactly that prompt’s work. Repeated edits to the same code arrive combined into one unit — a superseded intermediate state never asks for a decision. The list holds no code: a row opens that unit’s NET diff in the editor, and "Open all in editor" reads the pending work as one concatenated view, each diff with its own Keep/Undo/Chat. Keep or undo act per unit, or on everything listed at once.',
+      view: 'review',
+      tip: 'One row per piece of code the ask changed, however many times Claude revised it.',
+    },
+    {
       id: 'fleet',
       essential: true,
       title: 'Fleet — every agent working in this repo',
@@ -462,36 +472,27 @@ function allSteps(): DemoStep[] {
       id: 'search',
       title: 'Search and Active only',
       body:
-        'Search filters the Edits and Diffs trees by path, and Active only narrows the Overview to what is still moving \u2014 agents and runs in flight, edits still awaiting review. Both persist, so a large session can be worked in slices.',
+        'Search filters the Review list and the Overview ledger by path, and Active only narrows the Overview to what is still moving \u2014 agents and runs in flight, edits still awaiting review. Both persist, so a large session can be worked in slices.',
       view: 'overview',
       tab: 'fleet',
       tip: 'Search filters by path; Active only hides what has settled.',
     },
     {
-      id: 'edits-tree',
+      id: 'review-list',
       essential: true,
-      title: 'Edits — folder, file, class, edit',
+      title: 'Review — every change, one decision each',
       body:
-        'The sidebar holds the running list: every change Claude made, grouped down to the class it touched, each with its own Keep and Undo. Successive edits to the same code collapse into one unit, because keeping an edit that a later edit already overwrote would not mean anything.',
-      view: 'edits',
-      tip: 'Every change, down to the class, each with its own Keep and Undo.',
+        'The sidebar holds the running list: every change Claude made, grouped by file, each with its own Keep and Undo. Successive edits to the same code collapse into one unit, because keeping an edit that a later edit already overwrote would not mean anything. Decided rows stay listed, greyed — an undone one offers redo, a kept one can still be reverted.',
+      view: 'review',
+      tip: 'Every change, grouped by file, each with its own Keep and Undo.',
       action: { mode: 'wait', kind: 'keep-edit', hint: 'Keep any one edit — the tour is watching for it.' },
-    },
-    {
-      id: 'diffs-tree',
-      title: 'Diffs — the same tree, opened as diffs',
-      body:
-        'The Diffs view mirrors the Edits tree, but selecting an entry opens the before and after side by side instead of jumping to the file. It is the same records and the same Keep and Undo; only what a click opens is different.',
-      view: 'diffs',
-      tip: 'The same edits \u2014 a click opens the before/after instead of the file.',
-      tryIt: 'Open any entry to see exactly what Claude changed, and nothing else.',
     },
     {
       id: 'explorer-badges',
       title: 'Pending edits show up in the file tree',
       body:
         'Files with edits still awaiting review carry a badge in the editor\u2019s own project tree, so work in progress is visible from where you already navigate rather than only inside the observatory.',
-      view: 'edits',
+      view: 'review',
       tip: 'Your file explorer badges the files that still have pending edits.',
     },
     {
@@ -499,7 +500,7 @@ function allSteps(): DemoStep[] {
       title: 'Clearing what you have already decided',
       body:
         'Accepting and rejecting resolve an edit but keep it in the log, so the record of what happened stays complete. Clear Resolved drops the ones you have settled and leaves the pending ones \u2014 the way to shorten a long session without losing what is still to review.',
-      view: 'edits',
+      view: 'review',
       tip: 'Resolved edits stay in the log until you clear them.',
     },
     {

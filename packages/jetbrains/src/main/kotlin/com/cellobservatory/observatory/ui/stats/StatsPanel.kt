@@ -294,7 +294,9 @@ class StatsPanel(private val project: Project) : JPanel(BorderLayout()), com.int
     private fun reviewFirst() {
         val service = ObservatoryService.getInstance(project)
         val session = service.currentSession() ?: return
-        val first = service.log().filter { it.pending }.minByOrNull { it.id } ?: return
+        // Same set the review walk uses: off the raw log this jumped to a chain the walk skips, so the
+        // scoreboard and "review next" disagreed about where reviewing starts.
+        val first = service.log().filter { it.pending && !service.isHidden(it) }.minByOrNull { it.id } ?: return
         com.cellobservatory.observatory.ui.Navigate.openFileAtEdit(project, session, first)
     }
 

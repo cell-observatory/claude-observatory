@@ -5,6 +5,7 @@ set -u
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 CLI="$REPO/packages/cli/dist/index.js"
 CAPTURE="$REPO/packages/cli/dist/capture.js"
+CORE="$REPO/packages/core/dist/index.js"
 SETLINE="$REPO/test/setline.js"
 if [ ! -f "$CLI" ] || [ ! -f "$CAPTURE" ]; then echo "build first: npm run build"; exit 1; fi
 
@@ -654,7 +655,7 @@ ok "--essentials and --remainder together is an error, not a guess"    "! ( cd \
 # Action steps: both labels present, well formed, and never doubled up with a tryIt line.
 ok "demo --tour: action steps are well formed, both modes present"     "printf '%s' \"\$DTOUR\" | jq -e '([.steps[]|select(.action)]|length)>=4 and ([.steps[]|select(.action.mode==\"wait\")]|length)>=1 and ([.steps[]|select(.action.mode==\"auto\")]|length)>=1 and ([.steps[]|select(.action and .tryIt)]|length)==0 and ([.steps[]|select(.action and (.action.mode==\"auto\") and (.action.done|not))]|length)==0' >/dev/null"
 ok "…and every step in it is in the full tour, in the same order"      "[ \"\$(printf '%s' \"\$DTOURE\" | jq -r '[.steps[].id]|join(\",\")')\" = \"\$(printf '%s' \"\$DTOUR\" | jq -r --argjson e \"\$(printf '%s' \"\$DTOURE\" | jq -c '[.steps[].id]')\" '[.steps[].id|select(. as \$i|\$e|index(\$i))]|join(\",\")')\" ]"
-ok "demo --tour covers every shipped panel, Diffs included"            "printf '%s' \"\$DTOUR\" | jq -e '[.steps[].view]|unique|sort == [\"actions\",\"diffs\",\"editor\",\"edits\",\"fileHistory\",\"observations\",\"overview\",\"prompts\",\"stats\"]' >/dev/null"
+ok "demo --tour covers every shipped panel (Edits/Diffs trees are gone)" "printf '%s' \"\$DTOUR\" | jq -e '[.steps[].view]|unique|sort == [\"actions\",\"editor\",\"fileHistory\",\"observations\",\"overview\",\"prompts\",\"review\",\"stats\"]' >/dev/null"
 # The heartbeat keeps a paced tour inside the fleet's 60s active window — mtime only, never a write.
 DBYTES=$(wc -c < "$HOME/.claude/projects/$(printf '%s' "$DEMOWS" | sed 's/[^a-zA-Z0-9]/-/g')/$DSESS.jsonl")
 ok "demo --touch bumps both transcripts and the workflow state"        "( cd \"\$DEMOWS\" && node \"\$CLI\" demo --touch --json ) | jq -e '([.touched[]|select(endswith(\".jsonl\"))]|length)==2 and ([.touched[]|select(endswith(\"wf_demo.json\"))]|length)==1' >/dev/null"
@@ -689,6 +690,11 @@ ok "demo --clean drops both demo usage cursors, keeping the others"    "[ \"\$DC
 # `indexOf` returns -1 and the filter removed argument zero — so every view described a DIFFERENT session
 # while looking perfectly plausible. That is what these pin.)
 echo "════════ E2E 23: views batching must not change a single answer ════════"
+# `multitask` carries fleet liveness, and isFleetActive is `now - transcript mtime <= 60s`. The single
+# and batched invocations below run seconds apart, ~2/3 into a multi-minute suite — a transcript aging
+# PAST 60s BETWEEN the two flips active/folded and the bytes differ (observed as an intermittent
+# failure). Freshening the mtime pins both sides of every pair well inside the window.
+touch "$HOME/.claude/projects/$MANGLE/$SESSION.jsonl"
 VJ=$( cc views --session "$SESSION" --root "$WS" --json )
 # Non-empty FIRST: without this the comparisons below pass when both sides fail, which is how the first
 # version of this section reported four green ticks against two empty strings.
@@ -814,14 +820,14 @@ ok "tui --once emits no escapes under --no-color"      "! printf '%s' \"\$DASH\"
 # 4-byte emoji occupying 2 columns reads as 4 and the check fails on a correct frame. That ruler is
 # itself pinned by unit tests against known widths, so this is not circular.
 ok "tui --once holds the column budget"                "printf '%s\n' \"\$DASH\" | node -e \"const c=require('\$REPO/packages/tui/dist/index.js');const ls=require('fs').readFileSync(0,'utf8').split('\\n');const bad=ls.filter(l=>c.displayWidth(l)>96);if(bad.length){console.error('over budget: '+bad.length);process.exit(1)}\""
-# The window bar names all four windows at EVERY size — a minimized window keeps its chip, its jump
+# The window bar names all five windows at EVERY size — a minimized window keeps its chip, its jump
 # key and its counter, so the reader can always see what exists and press a key for it.
 #
 # Checked against the BAR ROW, not the whole frame. Grepping the frame passed against a bar that had
 # dropped every chip, because the same words appear in the blocked-size status line underneath: the
 # check reported healthy for precisely the failure it existed to catch.
 BAR=$( printf '%s\n' "$DASH" | sed -n 1p )
-ok "tui names every window on its bar, at a size that cannot show them all" "printf '%s' \"\$BAR\" | grep -q 'F1 .Prompts' && printf '%s' \"\$BAR\" | grep -q 'F2 .Traces' && printf '%s' \"\$BAR\" | grep -q 'F3 .Map' && printf '%s' \"\$BAR\" | grep -q 'F4 .Diff' && printf '%s' \"\$BAR\" | grep -q 'F5 .Dashboards'"
+ok "tui names every window on its bar, at a size that cannot show them all" "printf '%s' \"\$BAR\" | grep -q 'F1 .Claude' && printf '%s' \"\$BAR\" | grep -q 'F2 .Prompts' && printf '%s' \"\$BAR\" | grep -q 'F3 .Traces' && printf '%s' \"\$BAR\" | grep -q 'F4 .Map' && printf '%s' \"\$BAR\" | grep -q 'F5 .Diff' && printf '%s' \"\$BAR\" | grep -q 'F6 .Dashboards'"
 ok "and says what a window it cannot open would cost"  "printf '%s' \"\$DASH\" | grep -qE 'needs [0-9]+ (cols|body rows)'"
 # The keys row must not advertise a key the runtime does not answer. `j`/`k` are gone; arrows moved in.
 ok "the key row advertises arrows, not j/k"             "printf '%s\n' \"\$DASH\" | tail -1 | grep -q '↑↓' && ! printf '%s\n' \"\$DASH\" | tail -1 | grep -q 'j/k'"
@@ -921,6 +927,195 @@ else
   echo "  ·  skipped — git could not create a scratch repo here"
 fi
 rm -rf "$GITW"
+
+echo "════════ E2E 28: every view answers for the SESSION's workspace, not the terminal's ════════"
+# The class of bug this exists for, in one sentence: a dashboard opened OUTSIDE the workspace showed an
+# empty Fleet, empty Prompts and untitled sessions, with no error anywhere — because those views are
+# transcript-derived, a transcript is found under the mangled LAUNCH cwd, and they read `process.cwd()`
+# instead of the `--root` they were given. `changemap`, `multitask` and `observations` honoured it;
+# `prompts`, `feed`, `risk`, `egress` and `processes` did not; and a shared `noTranscript()` guard
+# ignored it for all of them, short-circuiting before any caller's own root could matter.
+#
+# Asserted as an EQUIVALENCE — the same query from a foreign directory must answer exactly what it
+# answers from inside the workspace — because that is the property, and it holds for every view at once
+# rather than for the handful anyone remembers to re-check by hand.
+FOREIGN="$(mktemp -d)"
+# Push every transcript OUT of the fleet-liveness window (FLEET_ACTIVE_MS = 60s) first. A sibling's
+# `active` is `now - mtime <= 60s`, so a transcript sitting near that boundary answers `true` for the
+# first call and `false` for the second — the two payloads then differ for a reason that has nothing
+# to do with `--root`, which is the only thing this loop is asserting. It bit on Linux CI, where
+# `views multitask` takes tens of seconds and the pair straddles the edge.
+find "$HOME/.claude/projects" -name '*.jsonl' -exec touch -t 202607250000 {} + 2>/dev/null || true
+for v in multitask prompts changemap observations processes risk egress feed sessions; do
+  inside="$( cd "$WS" && node "$CLI" views --views "$v" --json --session "$SESSION" 2>/dev/null )"
+  outside="$( cd "$FOREIGN" && node "$CLI" views --views "$v" --json --session "$SESSION" --root "$WS" 2>/dev/null )"
+  ok "views --root answers identically for \`$v\` from outside the workspace" \
+     "[ -n \"\$inside\" ] && [ \"\$inside\" = \"\$outside\" ]"
+done
+# …and the positive control: WITHOUT --root from the same foreign directory, the transcript-derived
+# views must differ. Without this the equivalence above would also pass if --root did nothing at all.
+bare="$( cd "$FOREIGN" && node "$CLI" views --views prompts --json --session "$SESSION" 2>/dev/null )"
+inside_prompts="$( cd "$WS" && node "$CLI" views --views prompts --json --session "$SESSION" 2>/dev/null )"
+ok "positive control: without --root the same query does NOT find the transcript" \
+   "[ \"\$bare\" != \"\$inside_prompts\" ]"
+rm -rf "$FOREIGN"
+
+
+echo "════════ E2E 29: review — the session's units, with --prompt scoping to one ask ════════"
+# A dedicated workspace + transcript: the ask boundary is what decides which units belong to which
+# prompt, so this needs a real conversation beside the store rather than the shared fixture.
+RVW="$(cd "$(mktemp -d)" && pwd -P)"; RVS="rvw-0000000000000001"   # canonical path (see $TMP above)
+mkdir -p "$RVW"
+node -e '
+const core = require(process.argv[1]), fs = require("fs"), path = require("path");
+const cwd = fs.realpathSync(process.argv[2]), S = process.argv[3];
+const proj = core.projectDir(cwd); fs.mkdirSync(proj, { recursive: true });
+const ask = (ts, t) => JSON.stringify({ timestamp: new Date(ts).toISOString(), type: "user", message: { role: "user", content: t } });
+fs.writeFileSync(path.join(proj, S + ".jsonl"), ask(500, "tighten the parser") + "\n" + ask(3500, "now the tests") + "\n");
+core.ensureStore(S);
+const F = path.join(cwd, "parser.py"), G = path.join(cwd, "test_parser.py");
+const mk = (f, b, a, ts) => core.appendLog(S, { ts, tool: "Edit", file: f, beforeBlob: core.writeBlob(S, Buffer.from(b)), afterBlob: core.writeBlob(S, Buffer.from(a)), status: "pending" });
+mk(F, "def p():\n    return 0\n", "def p():\n    return 1\n", 1000);
+mk(F, "def p():\n    return 1\n", "def p():\n    return 2\n", 2000);
+mk(G, "assert p()==0\n", "assert p()==2\n", 4000);
+fs.writeFileSync(F, "def p():\n    return 2\n"); fs.writeFileSync(G, "assert p()==2\n");
+' "$CORE" "$RVW" "$RVS"
+rv(){ ( cd "$RVW" && node "$CLI" review --session "$RVS" --root "$RVW" "$@" ); }
+RJ="$(rv --prompt 1 --json)"
+ok "review --prompt lists that ask's units"            "printf '%s' \"\$RJ\" | jq -e '.units|length == 1' >/dev/null"
+ok "…two edits to one line are ONE unit"               "printf '%s' \"\$RJ\" | jq -e '.units[0].members|length == 2' >/dev/null"
+ok "…whose patch is the NET change, not the steps"     "printf '%s' \"\$RJ\" | jq -e '.units[0].patch | test(\"return 0\") and test(\"return 2\") and (test(\"return 1\")|not)' >/dev/null"
+ok "…and its delta is not double-counted"              "printf '%s' \"\$RJ\" | jq -e '.summary.added == 1 and .summary.removed == 1' >/dev/null"
+ok "ids are RAW and group-expanded, for keep/undo"     "printf '%s' \"\$RJ\" | jq -e '.ids == [1,2]' >/dev/null"
+RJ2="$(rv --prompt 2 --json)"
+ok "a unit never crosses an ask boundary"              "printf '%s' \"\$RJ2\" | jq -e '(.units|length) == 1 and (.units[0].rel|endswith(\"test_parser.py\"))' >/dev/null"
+ok "--no-patch answers without the diff bodies"        "printf '%s' \"\$(rv --prompt 1 --no-patch --json)\" | jq -e '.units[0]|has(\"patch\")|not' >/dev/null"
+ok "an unknown prompt fails loudly, not emptily"       "! rv --prompt 99 --json >/dev/null 2>&1"
+# Without --prompt the answer is the WHOLE session — the Review tab's default view: every unit
+# across both asks, a null prompt, and the same group-expanded id set the scoped calls partition.
+RJA="$(rv --json --no-patch)"
+ok "review without --prompt answers the whole session" "printf '%s' \"\$RJA\" | jq -e '.prompt == null and (.units|length) == 2' >/dev/null"
+ok "…with the session-wide group-expanded id set"      "printf '%s' \"\$RJA\" | jq -e '.ids == [1,2,3]' >/dev/null"
+# --pending — the Review tabs' filter: a resolved unit leaves the list AND the id set; without the
+# flag it still answers (the control that proves the filter, not the fixture, shrank the list).
+( cd "$RVW" && node "$CLI" keep 3 --session "$RVS" ) >/dev/null
+RJP="$(rv --json --no-patch --pending)"
+ok "review --pending hides the resolved unit"          "printf '%s' \"\$RJP\" | jq -e '(.units|length) == 1 and .units[0].members == [1,2] and .ids == [1,2]' >/dev/null"
+ok "…and without the flag both units still answer"     "printf '%s' \"\$(rv --json --no-patch)\" | jq -e '(.units|length) == 2' >/dev/null"
+# A chain that CANCELS OUT — a file created then deleted — is not a row at all: it rides `cancelled`
+# with the ids that dismiss it, so nothing is silently dropped and nobody is asked to decide about a
+# file that no longer exists and never did. (Added last: it changes this fixture's id set.)
+node -e '
+const core = require(process.argv[1]), fs = require("fs"), path = require("path");
+const cwd = fs.realpathSync(process.argv[2]), S = process.argv[3];
+const G = path.join(cwd, "ghost.txt");
+core.appendLog(S, { ts: 4500, tool: "Write", file: G, beforeBlob: null, afterBlob: core.writeBlob(S, Buffer.from("tmp\n")), status: "pending" });
+core.appendLog(S, { ts: 4600, tool: "Edit",  file: G, beforeBlob: core.writeBlob(S, Buffer.from("tmp\n")), afterBlob: null, status: "pending" });
+' "$CORE" "$RVW" "$RVS"
+RJC="$(rv --json --no-patch)"
+ok "a cancelled-out chain is NOT a review row"          "printf '%s' \"\$RJC\" | jq -e '(.units|map(.rel)|index(\"ghost.txt\")) == null' >/dev/null"
+ok "…it rides cancelled, with the ids that dismiss it" "printf '%s' \"\$RJC\" | jq -e '.summary.cancelled == 1 and (.cancelled|length) == 1 and .cancelledIds == [4,5]' >/dev/null"
+ok "…and the scope's id set still covers it"            "printf '%s' \"\$RJC\" | jq -e '(.ids|index(4)) != null and (.ids|index(5)) != null' >/dev/null"
+ok "list --json marks it for the terminal's footer"     "( cd \"\$RVW\" && node \"\$CLI\" list --json --session \"\$RVS\" ) | jq -e '[.edits[]|select(.cancelled == true)]|length == 1' >/dev/null"
+rm -rf "$RVW"
+
+echo "════════ E2E 30: a 3-member unit reverts in ONE call ════════"
+# undoGroup sums the unit's chain into its net blob pair — one merge, one status batch. Three chained
+# same-line edits are the smallest unit where the old member-by-member walk did extra work.
+U3W="$(cd "$(mktemp -d)" && pwd -P)"; U3S="u3-0000000000000001"
+node -e '
+const core = require(process.argv[1]), fs = require("fs"), path = require("path");
+const cwd = fs.realpathSync(process.argv[2]), S = process.argv[3];
+core.ensureStore(S);
+const F = path.join(cwd, "three.txt");
+const mk = (b, a, ts) => core.appendLog(S, { ts, tool: "Edit", file: F, beforeBlob: core.writeBlob(S, Buffer.from(b)), afterBlob: core.writeBlob(S, Buffer.from(a)), status: "pending" });
+mk("L1\nA\nL3\n", "L1\nB\nL3\n", 1000);
+mk("L1\nB\nL3\n", "L1\nC\nL3\n", 2000);
+mk("L1\nC\nL3\n", "L1\nD\nL3\n", 3000);
+fs.writeFileSync(F, "L1\nD\nL3\n");
+' "$CORE" "$U3W" "$U3S"
+# `diff` on a unit REP renders the unit's whole NET change (span-first before → rep after), never
+# the raw last hop — the same collapsed record every row and diff surface shows.
+U3D="$( cd "$U3W" && node "$CLI" diff 3 --patch --session "$U3S" )"
+ok "diff on a unit rep is the NET change"              "printf '%s' \"\$U3D\" | grep -q -- '-A' && printf '%s' \"\$U3D\" | grep -q -- '+D'"
+ok "…with no intermediate hop leaking in"              "! printf '%s' \"\$U3D\" | grep -qE '^[+-][BC]\$'"
+U3J="$( cd "$U3W" && node "$CLI" undo 3 --json --session "$U3S" )"
+ok "a 3-member unit reverts in one call"               "printf '%s' \"\$U3J\" | jq -e '.status == \"undone\"' >/dev/null"
+ok "…back to the span's FIRST before-state"            "[ \"\$(sed -n 2p \"\$U3W/three.txt\")\" = \"A\" ]"
+ok "…and every member is undone"                       "( cd \"\$U3W\" && node \"\$CLI\" list --json --session \"\$U3S\" ) | jq -e '[.edits[].status]|unique == [\"undone\"]' >/dev/null"
+# The dependency edge: a later PENDING unit (#5) rewrote a line this KEPT unit (#4) produced, so the
+# merge refuses — and the refusal names the dependent and carries the one-call closure.
+node -e '
+const core = require(process.argv[1]), fs = require("fs"), path = require("path");
+const cwd = fs.realpathSync(process.argv[2]), S = process.argv[3];
+const F = path.join(cwd, "dep.txt");
+const mk = (b, a, ts) => core.appendLog(S, { ts, tool: "Edit", file: F, beforeBlob: core.writeBlob(S, Buffer.from(b)), afterBlob: core.writeBlob(S, Buffer.from(a)), status: "pending" });
+mk("L1\nX\nL3\n", "L1\nA\nL3\n", 4000);
+core.setStatusMany(S, [4], "kept");
+mk("L1\nA\nL3\n", "L1\nB\nL3\n", 5000);
+fs.writeFileSync(F, "L1\nB\nL3\n");
+' "$CORE" "$U3W" "$U3S"
+DEPJ="$( cd "$U3W" && node "$CLI" undo 4 --json --session "$U3S" )" || true   # a conflict exits 1, with a full payload
+# #4 is KEPT: the dependent is named, but no `--ids` closure is offered — that verb reverts pending
+# records only, so the suggestion would be a no-op loop (the executed-probe finding this pins).
+ok "a depended-on undo refuses, naming the dependent"  "printf '%s' \"\$DEPJ\" | jq -e '.status == \"conflict\" and .dependents == [5] and (has(\"closure\")|not)' >/dev/null"
+ok "…and says the chain is partly accepted"            "printf '%s' \"\$DEPJ\" | jq -e '.message | test(\"already accepted\")' >/dev/null"
+# A bulk revert must carry the first conflict's MESSAGE, not only a count.
+printf 'L1\nMANUAL\nL3\n' > "$U3W/dep.txt"
+BULKJ="$( cd "$U3W" && node "$CLI" undo --all --json --session "$U3S" )"
+ok "bulk undo carries firstConflict for its readers"   "printf '%s' \"\$BULKJ\" | jq -e '.conflicts == 1 and (.firstConflict | type == \"string\" and length > 0)' >/dev/null"
+rm -rf "$U3W"
+
+echo "════════ E2E 31: oplog — the reviewer's own operations, journaled and reversible ════════"
+OPW="$(cd "$(mktemp -d)" && pwd -P)"; OPS="op-0000000000000001"
+node -e '
+const core = require(process.argv[1]), fs = require("fs"), path = require("path");
+const cwd = fs.realpathSync(process.argv[2]), S = process.argv[3];
+core.ensureStore(S);
+const mk = (f, b, a, ts) => core.appendLog(S, { ts, tool: "Edit", file: path.join(cwd, f), beforeBlob: core.writeBlob(S, Buffer.from(b)), afterBlob: core.writeBlob(S, Buffer.from(a)), status: "pending" });
+mk("a.txt", "a\n", "b\n", 1000);
+mk("b.txt", "x\n", "y\n", 2000);
+fs.writeFileSync(path.join(cwd, "a.txt"), "b\n");
+fs.writeFileSync(path.join(cwd, "b.txt"), "y\n");
+' "$CORE" "$OPW" "$OPS"
+op(){ ( cd "$OPW" && node "$CLI" "$@" --session "$OPS" ); }
+# Positive control first: an untouched store answers an EMPTY list, not an error.
+ok "an untouched store answers an empty oplog"          "op oplog --json | jq -e '.operations == []' >/dev/null"
+op keep --ids 1,2 --json >/dev/null
+ok "a bulk keep lands in the oplog with its ids"        "op oplog --json | jq -e '(.operations|length) == 1 and .operations[0].kind == \"keep\" and .operations[0].ids == [1,2]' >/dev/null"
+ok "oplog --revert-last puts the statuses back"         "op oplog --revert-last --json | jq -e '.restored == 2' >/dev/null && op list --json | jq -e '[.edits[].status]|unique == [\"pending\"]' >/dev/null"
+op undo --all --json >/dev/null
+ok "the bulk undo reverted the files"                   "[ \"\$(cat \"\$OPW/a.txt\")\" = \"a\" ]"
+ok "reverting the bulk undo re-applies them byte-for-byte" "op oplog --revert-last --json | jq -e '.result.redone == 2' >/dev/null && [ \"\$(cat \"\$OPW/a.txt\")\" = \"b\" ] && [ \"\$(cat \"\$OPW/b.txt\")\" = \"y\" ]"
+rm -rf "$OPW"
+
+echo "════════ E2E 32: assign — attribution moves, and every read side follows ════════"
+ASW="$(cd "$(mktemp -d)" && pwd -P)"; ASS="asg-0000000000000001"
+node -e '
+const core = require(process.argv[1]), fs = require("fs"), path = require("path");
+const cwd = fs.realpathSync(process.argv[2]), S = process.argv[3];
+const proj = core.projectDir(cwd); fs.mkdirSync(proj, { recursive: true });
+const ask = (ts, t) => JSON.stringify({ timestamp: new Date(ts).toISOString(), type: "user", message: { role: "user", content: t } });
+fs.writeFileSync(path.join(proj, S + ".jsonl"), ask(500, "first ask") + "\n" + ask(3500, "second ask") + "\n");
+core.ensureStore(S);
+const mk = (f, b, a, ts) => core.appendLog(S, { ts, tool: "Edit", file: path.join(cwd, f), beforeBlob: core.writeBlob(S, Buffer.from(b)), afterBlob: core.writeBlob(S, Buffer.from(a)), status: "pending" });
+mk("one.py", "a = 1\n", "a = 2\n", 1000);
+mk("two.py", "b = 1\n", "b = 2\n", 4000);
+fs.writeFileSync(path.join(cwd, "one.py"), "a = 2\n");
+fs.writeFileSync(path.join(cwd, "two.py"), "b = 2\n");
+' "$CORE" "$ASW" "$ASS"
+as(){ ( cd "$ASW" && node "$CLI" "$@" --session "$ASS" --root "$ASW" ); }
+ok "assign moves an edit to another ask"                "as assign --ids 2 --prompt 1 --json | jq -e '.assigned == true and .ids == [2]' >/dev/null"
+ok "review --prompt follows the assignment"             "as review --prompt 1 --json | jq -e '(.units|length) == 2' >/dev/null && as review --prompt 2 --json | jq -e '(.units|length) == 0' >/dev/null"
+ok "prompts rows agree"                                 "as prompts --json | jq -e '.prompts[0].editIds == [1,2] and .prompts[1].editIds == []' >/dev/null"
+ok "assign --clear restores the recorded window"        "as assign --ids 2 --clear --json >/dev/null && as prompts --json | jq -e '.prompts[1].editIds == [2]' >/dev/null"
+ok "an unknown prompt fails loudly"                     "! as assign --ids 2 --prompt 99 >/dev/null 2>&1"
+# A stored override can go stale (a copied store, a rewritten transcript): it must be SAID, never
+# silently dropped — the edit falls back to its temporal window and prompts --json names the mismatch.
+node -e 'require(process.argv[1]).appendScopeOverride(process.argv[2], [1], "p_bogus")' "$CORE" "$ASS"
+ok "a stale override is said, not swallowed"            "as prompts --json | jq -e '(.assignErrors|length) == 1 and (.assignErrors[0] | test(\"p_bogus\"))' >/dev/null"
+ok "…and the edit stays in its temporal window"         "as prompts --json | jq -e '.prompts[0].editIds == [1]' >/dev/null"
+rm -rf "$ASW"
 
 echo "════════════════════════════════════════════════════════"
 echo "E2E RESULT: $pass passed, $fail failed"

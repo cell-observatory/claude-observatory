@@ -35,10 +35,18 @@ object StoreReader {
             } catch (_: Exception) {
                 continue
             }
-            if (o.get("op")?.takeIf { it.isJsonPrimitive }?.asString == "status") {
-                val id = o.get("id")?.asIntOrNull() ?: continue
-                val status = o.get("status")?.asStringOrNull() ?: continue
-                records[id]?.let { records[id] = it.copy(status = status) }
+            // Any line with an `op` is a CONTROL line, never an edit record — op wins over id,
+            // exactly like core's parseLogFile: fold 'status', ignore the rest ('skip', 'swept',
+            // 'batch', and anything future). Without the unconditional continue, an op line carrying
+            // both `id` and `file` would fall through, parse as an EditRecord, and OVERWRITE the
+            // real record at that id (resetting its status to "pending"). Pinned by the port test.
+            val opKind = o.get("op")?.takeIf { it.isJsonPrimitive }?.asString
+            if (opKind != null) {
+                if (opKind == "status") {
+                    val id = o.get("id")?.asIntOrNull() ?: continue
+                    val status = o.get("status")?.asStringOrNull() ?: continue
+                    records[id]?.let { records[id] = it.copy(status = status) }
+                }
                 continue
             }
             val id = o.get("id")?.asIntOrNull() ?: continue
@@ -66,6 +74,18 @@ object StoreReader {
             Files.readString(ClaudePaths.blobPath(sessionId, sha))
         } catch (_: Exception) {
             ""
+        }
+    }
+
+    /** Like [readBlob], but a MISSING or unreadable blob answers null instead of "" — "" is real
+     *  content (an empty file), and a surface that must not render a vanished blob as an empty side
+     *  needs to tell the two apart. A null sha still answers "" (no file on that side, honestly). */
+    fun readBlobOrNull(sessionId: String, sha: String?): String? {
+        if (sha == null) return ""
+        return try {
+            Files.readString(ClaudePaths.blobPath(sessionId, sha))
+        } catch (_: Exception) {
+            null
         }
     }
 

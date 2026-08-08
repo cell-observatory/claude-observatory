@@ -27,9 +27,11 @@ import {
   writeBlob,
   writeStaging,
   readStaging,
+  lastRecordFor,
   deleteStaging,
   writeBashManifest,
-  readBashManifest,
+  takeBashManifest,
+  advancePendingManifests,
   deleteBashManifest,
   readBashStatCache,
   writeBashStatCache,
@@ -38,9 +40,11 @@ import {
   appendLog,
   appendSkip,
   sweepIgnoredIfChanged,
+  readBlob,
   EMPTY_BLOB,
   type BashStatCache,
 } from './store';
+import { blankLineOnlyChange } from './merge';
 
 const MAX_BYTES = 5 * 1024 * 1024; // skip files larger than 5 MB
 const CAPTURED_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
@@ -92,6 +96,28 @@ function isBinary(buf: Buffer): boolean {
     if (buf[i] === 0) return true;
   }
   return false;
+}
+
+/**
+ * Is the difference between these two snapshots nothing but blank lines?
+ *
+ * Fails CLOSED in every uncertain case — a create, a delete, an unreadable blob, or content that does
+ * not round-trip as UTF-8 all answer `false` and get recorded. Dropping a change because we could not
+ * check it would be the one outcome worse than recording a blank line.
+ */
+function blankLineOnly(session: string, beforeBlob: string | null, afterBlob: string | null): boolean {
+  if (!beforeBlob || !afterBlob) return false; // a create or a delete is never "just whitespace"
+  try {
+    const b = readBlob(session, beforeBlob);
+    const a = readBlob(session, afterBlob);
+    // A file that does not survive a UTF-8 round-trip has no line model we can trust; `isBinary` only
+    // screens for NUL, so Latin-1 and UTF-16 reach here.
+    if (!Buffer.from(b.toString('utf8'), 'utf8').equals(b)) return false;
+    if (!Buffer.from(a.toString('utf8'), 'utf8').equals(a)) return false;
+    return blankLineOnlyChange(b.toString('utf8'), a.toString('utf8'));
+  } catch {
+    return false;
+  }
 }
 
 function snapshot(file: string): Snapshot {
@@ -189,6 +215,31 @@ function handlePost(session: string, payload: HookPayload): void {
     return;
   }
 
+  // …nor a change that is only blank lines. Same rule, one step weaker: there is no decision for a
+  // reviewer to make about an added or removed empty line, and an agent reformatting around an edit
+  // produces them constantly. Recording one costs a row, a pending count and a click, and answers
+  // nothing.
+  if (blankLineOnly(session, staging.beforeBlob, afterBlob)) {
+    deleteStaging(session, key);
+    return;
+  }
+
+  // ALREADY RECORDED. A backgrounded Bash command's Post walks the tree in the middle of an edit and
+  // logs what it finds, so both captures see one change — two rows, byte-identical, one attributed to
+  // `Bash`, and undoing the first then refuses as a conflict with the second.
+  //
+  // The EDIT is the side that yields, never the walk: the walk's record is already in the log and its
+  // snapshot is gone, so declining there loses the change outright when the edit turns out never to
+  // land (PreToolUse fires before the permission prompt, and PostToolUse only on success — every
+  // denied or failed edit leaves its staging record behind). Matching on the END STATE rather than on
+  // the whole hop also covers the case where the command's walk recorded a WIDER transition than this
+  // call did: appending the narrower one would break the file's chain.
+  const lastForFile = lastRecordFor(session, file);
+  if (lastForFile && lastForFile.afterBlob === afterBlob) {
+    deleteStaging(session, key);
+    return;
+  }
+
   // Publish the after-blob on the staging record BEFORE appending. Until the record lands, nothing
   // else references this blob, and a concurrent GC (clean / clearResolved) would collect it — leaving
   // a committed edit pointing at a missing blob. gcSessionCore reads staging, so this closes the gap.
@@ -202,6 +253,11 @@ function handlePost(session: string, payload: HookPayload): void {
     afterBlob,
     status: 'pending',
   });
+  // A Bash snapshot taken BEFORE this edit still holds the old content, so that command's Post would
+  // diff this change out of its own tree and record it a second time — as `tool: "Bash"`, with the
+  // duplicate that makes undoing the first refuse. Same baseline advance the Bash path does; it just
+  // never covered the edits captured beside it.
+  advancePendingManifests(session, new Map([[file, afterBlob]]));
   deleteStaging(session, key);
 }
 
@@ -328,7 +384,9 @@ function handlePreBash(session: string, payload: HookPayload): void {
     // The manifest MUST be cleared before returning. `handlePostBash` no-ops only when there is no
     // manifest, so leaving a previous command's behind would have it diff that against a walk of the
     // very tree this branch exists to refuse — turning a guard into the bug it was written to stop.
-    withBashPreLock(session, () => deleteBashManifest(session));
+    // OUR tree only: a refused $HOME command used to wipe every pending snapshot, so a repo command
+    // running beside it captured nothing and never said so.
+    withBashPreLock(session, () => deleteBashManifest(session, cwd));
     // A marker, not silence: a real Bash command ran and its changes are genuinely not captured, and
     // that is exactly what SkipOp exists to say. Written once per command, like the truncation case,
     // and AFTER the lock is released (appendSkip takes the same one).
@@ -337,7 +395,9 @@ function handlePreBash(session: string, payload: HookPayload): void {
   }
   ensureStore(session);
   const truncated = withBashPreLock(session, () => {
-    deleteBashManifest(session); // clear any stale manifest from an interrupted command
+    // NOTE: no longer clears other manifests. Each Pre owns its own file and each Post consumes the
+    // one taken of its own tree, because Bash calls overlap (any backgrounded command runs beside
+    // the next one) and a shared manifest had them diffing against each other's snapshots.
     const cache = readBashStatCache(session);
     const blobs = blobPresence(session);
     const files: Record<string, string | null> = {};
@@ -348,7 +408,7 @@ function handlePreBash(session: string, payload: HookPayload): void {
     });
     writeBashStatCache(session, cache); // verdicts are facts either way — persist even on truncation
     if (!ok) return true;
-    writeBashManifest(session, { files, ts: Date.now() });
+    writeBashManifest(session, { files, ts: Date.now(), root: cwd });
     return false;
   });
   if (truncated) {
@@ -366,8 +426,10 @@ function handlePostBash(session: string, payload: HookPayload): string[] {
   // C:\ against a Post walk keyed c:\ made every file a phantom create + delete pair.
   const cwd = payload.cwd ? canonPath(payload.cwd) : payload.cwd;
   if (!cwd) return [];
-  const manifest = readBashManifest(session);
-  if (!manifest) return []; // Pre skipped/truncated — nothing reliable to diff
+  // OUR command's snapshot: the oldest one taken of this same tree, consumed as it is read. Taking
+  // "the manifest" unconditionally is what let a subtree walk diff against a repo-root snapshot.
+  const manifest = takeBashManifest(session, cwd);
+  if (!manifest) return []; // Pre skipped/truncated, or its manifest belongs to another tree
   const before = manifest.files;
   const seen = new Set<string>();
   const cache = readBashStatCache(session);
@@ -389,6 +451,9 @@ function handlePostBash(session: string, payload: HookPayload): string[] {
   /** Directories this command actually recorded into — what the ignore sweep must stamp. The walk
    *  reaches any depth under cwd, so cwd alone is not the answer (see `editedDirs`). */
   const wrote = new Set<string>();
+  /** file → the content this command recorded for it, so every other pending snapshot of this tree
+   *  can be advanced past it (see `advancePendingManifests`). */
+  const recorded = new Map<string, string | null>();
   const ok = walkCandidates(cwd, (abs) => {
     if (isSecretName(path.basename(abs))) return; // symmetric with Pre: secrets are out of scope
     seen.add(abs);
@@ -397,20 +462,55 @@ function handlePostBash(session: string, payload: HookPayload): string[] {
     const beforeBlob = Object.prototype.hasOwnProperty.call(before, abs) ? before[abs] : null;
     if (beforeBlob === afterBlob) return; // unchanged — no edit
     if (beforeBlob === null && afterBlob === EMPTY_BLOB) return void emptyNoise++;
+    if (blankLineOnly(session, beforeBlob, afterBlob)) return; // blank-line churn is not a review unit
     wrote.add(path.dirname(abs));
-    appendLog(session, { ts: Date.now(), tool: 'Bash', file: abs, beforeBlob, afterBlob, status: 'pending' });
+    recorded.set(abs, afterBlob);
+    // Attributed to the EDIT TOOL when one is mid-flight on this file (staging exists only between an
+    // Edit/Write/MultiEdit's Pre and its Post). The walk is the capture that has to win — its snapshot
+    // is consumed and cannot be replayed, so it never defers — but the row would otherwise blame
+    // `Bash` for a change an edit tool made, purely because a backgrounded command's Post happened to
+    // land first. That call's own Post then finds its end state already recorded and declines.
+    const inflight = readStaging(session, pathKey(abs));
+    appendLog(session, {
+      ts: Date.now(),
+      tool: inflight?.tool || 'Bash',
+      file: abs,
+      beforeBlob,
+      afterBlob,
+      status: 'pending',
+    });
   });
   // Deletions: present before, gone now. Only trust this when the post-walk wasn't truncated.
   if (ok) {
     for (const abs of Object.keys(before)) {
       if (seen.has(abs) || before[abs] === null) continue;
+      // STILL ON DISK — so this walk simply never visited it, and "deleted" would be a lie. The walk
+      // does not reach everything under its root: it refuses to descend `BASH_SKIP_DIRS`, symlinked
+      // directories and unreadable ones. A snapshot can hold such a key because a command running in
+      // a SUBDIRECTORY recorded a change there and every pending snapshot containing that file was
+      // advanced past it — so an ancestor's Post, whose own walk skips `build/`, would report the
+      // file gone. The pair then chains into "file deleted", and undoing the real change refuses as
+      // a conflict: the exact failure the advance exists to prevent. One stat per unseen key, and
+      // only for keys a walk did not reach.
+      if (fs.existsSync(abs)) continue;
       if (before[abs] === EMPTY_BLOB) {
         emptyNoise++; // symmetric with the creation case: an empty file removed has nothing to review
         continue;
       }
       wrote.add(path.dirname(abs));
+      recorded.set(abs, null);
       appendLog(session, { ts: Date.now(), tool: 'Bash', file: abs, beforeBlob: before[abs], afterBlob: null, status: 'pending' });
     }
+  }
+  if (!ok) {
+    // The walk stopped at the file cap, so "present before, gone now" cannot be told from "never
+    // reached" — the deletion pass above is skipped. Say so: a command that removed a file and left
+    // no record of it is exactly the silent miss this store refuses to ship.
+    appendSkip(
+      session,
+      '<bash-tree>',
+      `Bash working tree exceeds ${BASH_MAX_FILES} files — deletions by this command were not captured`
+    );
   }
   if (emptyNoise) {
     appendSkip(
@@ -420,7 +520,14 @@ function handlePostBash(session: string, payload: HookPayload): string[] {
     );
   }
   writeBashStatCache(session, cache);
-  deleteBashManifest(session);
+  // NOT deleteBashManifest: `takeBashManifest` already consumed OURS, and wiping the rest would
+  // destroy the snapshot an overlapping command is about to diff against — the second half of the
+  // shared-manifest bug (its partner then captured nothing at all, silently).
+  //
+  // Instead, move those snapshots' baseline past what this command just recorded, or the overlapping
+  // Post records the SAME change again — two identical rows, the second of which makes undoing the
+  // first refuse as a conflict.
+  advancePendingManifests(session, recorded);
   return [...wrote];
 }
 

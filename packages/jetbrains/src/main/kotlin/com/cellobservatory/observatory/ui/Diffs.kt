@@ -12,9 +12,11 @@ import com.intellij.diff.tools.fragmented.UnifiedDiffTool
 import com.intellij.diff.util.DiffUserDataKeys
 import com.intellij.diff.util.DiffUserDataKeysEx
 import com.intellij.icons.AllIcons
+import com.intellij.notification.NotificationType
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.fileTypes.FileTypeManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
@@ -85,6 +87,28 @@ object Diffs {
                 )
                 DiffManager.getInstance().showDiff(project, prompt.preferUnified())
             }
+        }
+    }
+
+    /** The scope's changes CONCATENATED into a single editor tab — the plugin's own stacked review
+     *  editor ([ReviewAllEditor]): every listed pending unit an embedded hunks-only diff with
+     *  Keep/Undo/Chat on its header. The editor pages itself (ten blocks at a time, blobs read per
+     *  page off the EDT — the eager build measurably froze the IDE at 2,922 units), so opening here
+     *  just hands it the SPECS. Re-opening replaces the previous "Claude changes" tab: the tab is a
+     *  snapshot, and stacking stale snapshots with live buttons multiplies wrong targets. */
+    fun showAll(project: Project, session: String, recs: List<Triple<EditRecord, String, Int>>) {
+        if (recs.isEmpty()) {
+            // The button only renders over a non-empty list, so an empty call means the log moved
+            // between paint and click — say so rather than doing nothing.
+            ReviewOps.notify(project, "Nothing to open — the session's log changed under the Review list", NotificationType.WARNING)
+            return
+        }
+        ApplicationManager.getApplication().invokeLater {
+            if (project.isDisposed) return@invokeLater
+            val fem = FileEditorManager.getInstance(project)
+            fem.openFiles.filterIsInstance<ReviewAllVirtualFile>().forEach { fem.closeFile(it) }
+            val specs = recs.map { (rec, rel, delta) -> ReviewAllSpec(rec, rel, delta) }
+            fem.openFile(ReviewAllVirtualFile(session, specs, "Claude changes (${specs.size})"), true)
         }
     }
 

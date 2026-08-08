@@ -2,6 +2,7 @@ package com.cellobservatory.observatory.ui
 
 import com.cellobservatory.observatory.core.ClaudePaths
 import com.cellobservatory.observatory.model.EditRecord
+import com.cellobservatory.observatory.model.EditTree
 import com.cellobservatory.observatory.model.TreeFileNode
 import com.cellobservatory.observatory.model.TreeFolderNode
 import com.cellobservatory.observatory.model.relTime
@@ -90,7 +91,10 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
         }
     }
 
-    private fun selectedEdit(): EditRecord? =
+    /** The selected edit. PUBLIC because the Review tab draws its own per-edit action toolbar over
+     *  this tree: a context menu alone reads as "there are no actions" to anyone who does not
+     *  right-click, which is exactly how it was reported. */
+    fun selectedEdit(): EditRecord? =
         ((tree.lastSelectedPathComponent as? DefaultMutableTreeNode)?.userObject as? NodeData.Edit)?.rec
 
     private fun selectedFile(): NodeData.FileN? =
@@ -101,11 +105,74 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
 
     // --- tree building (renders core's `tree --json` view-model; no local tree/class logic) ---
 
+    /** When set, the tree shows ONLY these raw edit ids — the Review tab's prompt scope. Pruned
+     *  client-side over the shared view-model, so one `tree` payload serves every scope. */
+    @Volatile var idFilter: Set<Int>? = null
+
+    /** Ids the tree must NOT show whatever the scope says — the cancelled-out chains, which the
+     *  Review tab accounts for in its footer instead of as rows. */
+    @Volatile var hiddenIds: Set<Int> = emptySet()
+
+    /** Every edit id the payload carries — the base set when only [hiddenIds] is narrowing. */
+    private fun allTreeIds(vm: EditTree?): Set<Int> {
+        if (vm == null) return emptySet()
+        val out = mutableSetOf<Int>()
+        fun file(f: TreeFileNode) {
+            for (c in f.classes) for (e in c.edits) out.add(e.rec.id)
+            for (e in f.loose) out.add(e.rec.id)
+        }
+        fun folder(f: TreeFolderNode) {
+            f.folders.forEach(::folder)
+            f.files.forEach(::file)
+        }
+        vm.folders.forEach(::folder)
+        vm.files.forEach(::file)
+        return out
+    }
+
+    private fun filterFile(file: TreeFileNode, ids: Set<Int>): TreeFileNode? {
+        val classes = file.classes.mapNotNull { cls ->
+            val kept = cls.edits.filter { it.rec.id in ids }
+            if (kept.isEmpty()) null else cls.copy(edits = kept)
+        }
+        val loose = file.loose.filter { it.rec.id in ids }
+        if (classes.isEmpty() && loose.isEmpty()) return null
+        return file.copy(classes = classes, loose = loose)
+    }
+
+    private fun filterFolder(f: TreeFolderNode, ids: Set<Int>): TreeFolderNode? {
+        val folders = f.folders.mapNotNull { filterFolder(it, ids) }
+        val files = f.files.mapNotNull { filterFile(it, ids) }
+        if (folders.isEmpty() && files.isEmpty()) return null
+        return f.copy(folders = folders, files = files)
+    }
+
     fun rebuild() {
-        val vm = service().editTree()
+        val vm0 = service().editTree()
+        val hidden = hiddenIds
+        // One predicate for both prunes: the scope's id set (when scoped) minus whatever the host
+        // hides outright, so a cancelled chain cannot reappear through the scope filter.
+        val ids = when {
+            idFilter == null && hidden.isEmpty() -> null
+            idFilter == null -> allTreeIds(vm0) - hidden
+            else -> (idFilter as Set<Int>) - hidden
+        }
+        val vm = if (vm0 == null || ids == null) vm0 else EditTree(
+            folders = vm0.folders.mapNotNull { filterFolder(it, ids) },
+            files = vm0.files.mapNotNull { filterFile(it, ids) },
+        )
         val q = service().filterQuery
         tree.emptyText.clear()
         when {
+            // A prompt scope with nothing left is about the SCOPE, never about the session — the
+            // "no edits in this session / switch session" copy would be false here, and its
+            // session-switch link a trap inside the Review tab. Keyed on the PROMPT scope, not on
+            // whether anything was pruned: hidden cancelled chains narrow the same id set without
+            // an ask being picked at all.
+            idFilter != null -> {
+                tree.emptyText.appendLine("Nothing from this ask to show")
+                tree.emptyText.appendLine("Its records may have been cleared — Clear Scope shows the whole session.")
+            }
             q.isNotBlank() -> tree.emptyText.appendLine("No edits match \"$q\"")
             !com.cellobservatory.observatory.core.ClaudePaths.hooksInstalled() -> {
                 tree.emptyText.appendLine("No tracked Claude edits yet")
@@ -150,6 +217,11 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
                 }
             }
         }
+        // The store ticks whenever ANY session on this machine writes, and `reload()` clears the
+        // selection — so without this the reader's selected row (and every action that acts on it)
+        // vanished every couple of seconds while Claude worked anywhere. Re-select the same EDIT ID
+        // after the rebuild; no scrolling, or the tree would yank itself around under the reader.
+        val keepId = selectedEdit()?.id
         root.removeAllChildren()
         if (vm != null) {
             for (f in vm.folders) addFolderNode(root, f)
@@ -157,6 +229,20 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
         }
         model.reload()
         expandAllBounded(tree)
+        if (keepId != null) reselect(keepId)
+    }
+
+    /** Put the selection back on edit [id] after a rebuild, if that row still exists. */
+    private fun reselect(id: Int) {
+        val stack = ArrayDeque<DefaultMutableTreeNode>().apply { add(root) }
+        while (stack.isNotEmpty()) {
+            val node = stack.removeLast()
+            if ((node.userObject as? NodeData.Edit)?.rec?.id == id) {
+                tree.selectionPath = javax.swing.tree.TreePath(node.path)
+                return
+            }
+            for (i in 0 until node.childCount) stack.add(node.getChildAt(i) as DefaultMutableTreeNode)
+        }
     }
 
     private fun addFolderNode(parent: DefaultMutableTreeNode, f: TreeFolderNode) {
@@ -302,6 +388,11 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
         action("Redo", AllIcons.Actions.Redo) {
             selectedEdit()?.takeIf { it.undone }?.let { rec -> withSession { s -> ReviewOps.undoOrRedo(project, s, rec, redo = true) } }
         },
+        // Zero-token handoff: assembles this edit's context onto the clipboard (parity with the
+        // diff viewer's Chat action and VS Code's per-edit Chat).
+        action("Chat About This Edit", NavTint.CHAT) {
+            selectedEdit()?.let { rec -> withSession { s -> ReviewOps.chatAbout(project, s, rec.id) } }
+        },
         action("Open File", AllIcons.Actions.MenuOpen) {
             val file = selectedEdit()?.file ?: selectedFile()?.file
             file?.let {
@@ -430,7 +521,10 @@ class EditsTreePanel(private val project: Project, private val mode: Mode) :
             override fun getActionUpdateThread() = ActionUpdateThread.BGT
             override fun update(e: AnActionEvent) {
                 val path = activeFilePath()
-                e.presentation.isEnabledAndVisible = path != null && service().log().any { it.pending && it.file == ClaudePaths.storeKey(path) }
+                // `hiddenIds` too: a file whose only pending records sit in a cancelled-out chain shows
+                // no rows in this tree, so offering a verb for it promises work that is not there.
+                e.presentation.isEnabledAndVisible = path != null &&
+                    service().log().any { it.pending && it.file == ClaudePaths.storeKey(path) && it.id !in hiddenIds }
             }
 
             override fun actionPerformed(e: AnActionEvent) {

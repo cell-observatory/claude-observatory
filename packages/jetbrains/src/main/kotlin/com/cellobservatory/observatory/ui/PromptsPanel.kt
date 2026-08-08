@@ -166,12 +166,30 @@ class PromptsPanel(private val project: Project) : JPanel(BorderLayout()) {
         repaint(service().prompts())
     }
 
-    // The window's only job is picking the ask that scopes the Overview — no per-ask review actions.
-    // Those live where the review happens: the Overview's Prompt axis on the nav bar, and its bulk
-    // buttons ("Accept All in #N") once an ask is selected. The one toolbar action is Clear Scope, the
-    // mirror of the VS Code window's clear button.
+    // Two toolbar actions: Review (list the picked ask's changes in the Traces window's Review tab —
+    // diffs open in the editor; 0.9.4, mirroring the VS Code prompt row's review button) and Clear
+    // Scope. Everything else lives where the review happens: the Overview's Prompt axis and its bulk
+    // buttons.
+    //
+    // NOT ReviewNavBar.revealPrompt, deliberately: that helper resolves the ask's first PENDING edit
+    // and returns early when there is none — so on a fully-reviewed ask it would silently do nothing,
+    // and on any ask it opens a file as a side effect. The Review tab is exactly for reading an ask
+    // whether or not anything is still pending.
     private fun toolbar(): Component {
         val group = DefaultActionGroup().apply {
+            add(object : AnAction("Review", "List this prompt's changes in the Review tab — diffs open in the editor", AllIcons.Actions.PreviewDetails) {
+                override fun getActionUpdateThread() = ActionUpdateThread.BGT
+                override fun update(e: AnActionEvent) {
+                    e.presentation.isEnabled = service().selectedPromptId != null
+                }
+                override fun actionPerformed(e: AnActionEvent) {
+                    val tw = com.intellij.openapi.wm.ToolWindowManager.getInstance(project).getToolWindow("Observatory Traces") ?: return
+                    tw.activate({
+                        val cm = tw.contentManager
+                        cm.contents.firstOrNull { it.displayName == "Review" }?.let { cm.setSelectedContent(it) }
+                    }, true)
+                }
+            })
             add(object : AnAction("Clear Scope", "Clear the prompt scope — the Overview goes back to the whole session", AllIcons.Actions.Cancel) {
                 // Reads one service field; no UI state. EDT here cost a hop per toolbar expansion.
                 override fun getActionUpdateThread() = ActionUpdateThread.BGT

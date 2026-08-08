@@ -21,7 +21,7 @@ export type GlyphPref = 'auto' | 'ascii' | 'safe' | 'block';
 /**
  * Every rebindable verb.
  *
- * Structural keys are deliberately absent: F1–F5, the arrows, Tab, Enter, Escape, Space and the
+ * Structural keys are deliberately absent: F1–F6, the arrows, Tab, Enter, Escape, Space and the
  * digits are the frame's navigation, several are the only way out of a mode, and a reader who
  * rebinds their way into a dashboard they cannot leave has been handed a footgun by a settings
  * screen. The options window says as much rather than offering a field that quietly refuses.
@@ -297,7 +297,7 @@ export function editorLabel(command: string, editors: readonly EditorChoice[]): 
   return editors.find((e) => e.command === command)?.label ?? '';
 }
 
-export type StartFocus = 'traces' | 'prompts' | 'detail' | 'dashboards';
+export type StartFocus = 'claude' | 'traces' | 'prompts' | 'detail' | 'dashboards';
 /** How the Traces list is ordered. `recent` is the payload's own order — newest first. */
 export type SortKey = 'recent' | 'path' | 'churn';
 export const SORT_KEYS: SortKey[] = ['recent', 'path', 'churn'];
@@ -308,7 +308,7 @@ export const THEME_NAMES = ['default', 'colorblind', 'mono'];
 export type StartFace = 'auto' | 'map' | 'diff';
 
 const COLORS: ColorPref[] = ['auto', 'truecolor', '256', '16', 'none'];
-export const START_FOCUS: StartFocus[] = ['traces', 'prompts', 'detail', 'dashboards'];
+export const START_FOCUS: StartFocus[] = ['traces', 'prompts', 'detail', 'dashboards', 'claude'];
 export const START_FACE: StartFace[] = ['auto', 'map', 'diff'];
 const GLYPHS: GlyphPref[] = ['auto', 'ascii', 'safe', 'block'];
 

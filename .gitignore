@@ -14,3 +14,7 @@ observatory-demo/
 
 # Bun compile scratch (temp artifacts from `bun build --compile`)
 *.bun-build
+
+# Internal working notes (review findings, comparisons). They inform the work; they are not
+# part of what the project publishes, and a link to one from the site is a 404 waiting to happen.
+docs/internal/

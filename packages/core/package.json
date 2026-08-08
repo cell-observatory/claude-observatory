@@ -1,6 +1,6 @@
 {
   "name": "@claude-observatory/core",
-  "version": "0.9.3",
+  "version": "0.9.4",
   "private": true,
   "description": "Capture + git-free snapshot store + surgical undo engine for Claude Observatory. No model calls.",
   "main": "dist/index.js",
@@ -15,7 +15,7 @@
     "diff": "^9.0.0"
   },
   "devDependencies": {
-    "@types/node": "^26.1.2"
+    "@types/node": "^26.1.1"
   },
   "license": "Apache-2.0",
   "repository": {

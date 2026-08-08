@@ -28,7 +28,7 @@ import javax.swing.JComponent
  * move-editor-to-new-window, which works — so the two editors differ here on purpose.
  *
  * It can never be a TAB of the existing Claude Observatory window: that window's panes are `Content`s
- * and only one shows at a time, so the step that says "look at the Edits tree" would hide the tour
+ * and only one shows at a time, so the step that says "look at the Review list" would hide the tour
  * explaining it.
  *
  * A step's TEXT lives in the tour window only. The control it names is RINGED, by a glass-pane painter —
@@ -669,9 +669,9 @@ class TourController(private val project: Project) : com.intellij.openapi.Dispos
                 com.cellobservatory.observatory.ui.PromptsPanel.of(project)?.tourAnchor(step.anchor)
                     ?: ChangeMapPanel.of(project)?.tourAnchor(step.anchor)
             }
-            "edits", "diffs", "fileHistory", "actions", "observations" -> {
-                // Actions + Observations moved to the Timeline window (0.9.0); the per-edit trees stay
-                // in Traces. Route each tab to the window that actually holds it.
+            "review", "fileHistory", "actions", "observations" -> {
+                // Actions + Observations moved to the Timeline window (0.9.0); the per-edit surfaces —
+                // Review included (0.9.4) — stay in Traces. Route each tab to the window that holds it.
                 val inTimeline = step.view == "actions" || step.view == "observations"
                 val tw = mgr.getToolWindow(if (inTimeline) "Observatory Timeline" else "Observatory Traces") ?: return null
                 tw.show(null)
@@ -682,8 +682,17 @@ class TourController(private val project: Project) : com.intellij.openapi.Dispos
                     // forward and rings nothing, rather than outlining the whole pane.
                     return if (step.anchor != null) panel else null
                 }
+                if (step.view == "review") {
+                    // The Review tab narrates the PICKED ask. A reader who skipped the prompt-scope
+                    // step (or autoplay) must not face the empty state mid-tour: pick the demo's
+                    // second ask — the one that step talks about — exactly as its Review button would.
+                    val svc = com.cellobservatory.observatory.services.ObservatoryService.getInstance(project)
+                    if (svc.selectedPromptId == null) {
+                        svc.prompts()?.prompts?.getOrNull(1)?.let { svc.selectedPromptId = it.id }
+                    }
+                }
                 val name = when (step.view) {
-                    "edits" -> "Edits"; "diffs" -> "Diffs"; else -> "File History"
+                    "review" -> "Review"; else -> "File History"
                 }
                 val cm = tw.contentManager
                 cm.contents.firstOrNull { it.displayName == name }?.let { cm.setSelectedContent(it) }

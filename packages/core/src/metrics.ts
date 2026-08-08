@@ -10,7 +10,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { maxOf, rootDir } from './store';
-import { reviewEdits } from './groups';
+import { reviewEdits, visibleEdits } from './groups';
 import { lineDelta, friendlyModel } from './format';
 import { findTranscript } from './observe';
 import { parseActions, summarizeActions, parseCompactLine, CompactionEvent } from './actions';
@@ -110,8 +110,12 @@ export interface SessionTokens {
  * where a full re-parse would be ~120ms on a 56MB session; the delta is microseconds. A shrunken file
  * (replaced/GC'd) discards the cursor and rescans from byte 0.
  */
-export function sessionUsage(cwd: string, sessionId: string): SessionTokens & { durationMs: number } {
-  const transcript = findTranscript(cwd, sessionId);
+export function sessionUsage(cwd: string, sessionId: string, at?: string): SessionTokens & { durationMs: number } {
+  // `at` is the transcript's KNOWN path. A caller listing every workspace's sessions has already found
+  // the file; without this it is re-resolved from `cwd`, and `findTranscript` only walks UP from there
+  // — so every session belonging to a different workspace silently costs zero. That is how the session
+  // picker came to print a blank token column for every row but the current repo's.
+  const transcript = at ?? findTranscript(cwd, sessionId);
   if (!transcript) return emptyUsage();
   const adv = advanceCursor(transcript);
   if (!adv) return emptyUsage();
@@ -541,9 +545,9 @@ export interface SessionVitals {
  * The session's model / effort / compaction / context-fill vitals. Shares sessionUsage's incremental
  * cursor: calling both back-to-back (as the stats panels do) parses the transcript once.
  */
-export function sessionVitals(cwd: string, sessionId: string): SessionVitals {
+export function sessionVitals(cwd: string, sessionId: string, at?: string): SessionVitals {
   const empty: SessionVitals = { model: null, models: [], effort: null, compactions: [] };
-  const transcript = findTranscript(cwd, sessionId);
+  const transcript = at ?? findTranscript(cwd, sessionId); // see sessionUsage — `at` is the known path
   if (!transcript) return empty;
   const adv = advanceCursor(transcript);
   if (!adv) return empty;
@@ -601,7 +605,7 @@ function toolLatenciesUncached(transcriptPath: string): number[] {
 export function sessionMetrics(cwd: string, sessionId: string): SessionMetrics {
   // DISPLAY units (same-code collapsed), like the change map and the session listing — one meaning for
   // "edits" across the product. Counting raw records here made Stats disagree with the Overview.
-  const log = reviewEdits(sessionId);
+  const log = visibleEdits(sessionId);
   const edits: EditMetrics = { count: log.length, added: 0, removed: 0, pending: 0, kept: 0, undone: 0 };
   for (const r of log) {
     const d = lineDelta(sessionId, r);

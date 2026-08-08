@@ -48,17 +48,8 @@ type TlRunNode = { kind: 'tlrun'; file: string; edits: core.EditRecord[] }; // T
 type Node = FolderNode | FileNode | ClassNode | EditNode | TlRunNode;
 
 // Active "Search edits" filter — matches on workspace-relative path; empty = show everything.
-// Module-level so the Edits and Diffs trees filter together (parity with the JetBrains service filter).
+// Module-level so the Review list and the Overview ledger filter together (parity with the JetBrains service filter).
 let editFilter = '';
-
-// Map the shared core view-model nodes to VS Code tree nodes. The tree STRUCTURE (folder compaction,
-// class grouping, deltas, Search filtering) is computed once in core.buildEditTree — these just wrap it.
-function toFolderNode(f: core.TreeFolder): FolderNode {
-  return { kind: 'folder', label: f.label, path: f.path, folders: f.folders, files: f.files };
-}
-function toFileNode(f: core.TreeFile): FileNode {
-  return { kind: 'file', file: f.file, edits: [...f.classes.flatMap((c) => c.edits), ...f.loose], classes: f.classes, loose: f.loose };
-}
 
 /** #43: `Uri.fsPath` LOWER-CASES the Windows drive letter, while store records are canonical
  *  (`C:\…`) — so a raw fsPath never matches a record path on Windows. Every record↔editor path
@@ -102,6 +93,19 @@ function currentSession(): string | undefined {
 // ≈ 38ms) per NODE. These caches key every result on the source file's (mtimeMs, size), so a cache
 // hit costs one stat() instead of a parse, and staleness is impossible by construction.
 
+/**
+ * The stamp of everything a CANCELLED-aware derivation depends on: the log, and the transcript that
+ * fixes the ask boundaries the unit split reads.
+ *
+ * Caches keyed on the log alone served a stale hidden set: a boundary can appear BETWEEN existing
+ * edits (a store seeded before its first ask lands, or a transcript rewrite) and change which chains
+ * cancel out without the log moving a byte. `cachedTranscript` already stamps both files — this is
+ * the same rule, named once so the next cache cannot forget half of it.
+ */
+function reviewKey(session: string): string {
+  const t = core.findTranscript(workspaceRoot() ?? process.cwd(), session);
+  return `${fileKey(logPath(session))}|${t ? fileKey(t) : 'none'}`;
+}
 function fileKey(p: string): string {
   try {
     const st = fs.statSync(p);
@@ -127,7 +131,7 @@ const logCache = new Map<string, { key: string; log: core.EditRecord[] }>();
  */
 const reviewCache = new Map<string, { key: string; log: core.EditRecord[] }>();
 function cachedReview(session: string): core.EditRecord[] {
-  const key = fileKey(logPath(session));
+  const key = reviewKey(session);
   const hit = reviewCache.get(session);
   if (hit && hit.key === key) return hit.log;
   const log = core.reviewEdits(session);
@@ -209,10 +213,6 @@ function aggregateIcon(edits: core.EditRecord[]): vscode.ThemeIcon {
   return statusIcon('undone');
 }
 
-function shortId(session: string): string {
-  return session.length > 8 ? session.slice(0, 8) : session;
-}
-
 /** Strike through text for reverted edits (combining long-stroke overlay — TreeItem has no strikethrough). */
 function strike(s: string): string {
   return Array.from(s).map((c) => c + '̶').join('');
@@ -270,185 +270,27 @@ class StatusDecorationProvider implements vscode.FileDecorationProvider {
 }
 const statusDecorations = new StatusDecorationProvider();
 
-class EditsProvider implements vscode.TreeDataProvider<Node> {
-  private readonly _changed = new vscode.EventEmitter<void>();
-  readonly onDidChangeTreeData = this._changed.event;
-  view?: vscode.TreeView<Node>;
-
-  // 'edits' → click opens the file at that edit; 'diffs' → before↔after diff; 'timeline' → flat, newest-first.
-  constructor(private readonly mode: 'edits' | 'diffs' | 'timeline') {}
-
-  /** The root tree, computed at most once per REFRESH CYCLE — the ActionsProvider.cycle pattern.
-   *  buildEditTree re-reads and re-hashes every edited file (~48ms warm on a real session), VS Code
-   *  calls getChildren(root) more than once per render, and two of these providers exist — so without
-   *  this, one refresh paid the build 2–4×. Dropped by refresh(); never stamp-keyed, because refresh IS
-   *  the invalidation signal here. */
-  private cycleTree?: core.EditTree;
-
-  refresh(): void {
-    this.cycleTree = undefined; // a new cycle rebuilds from the store
-    this._changed.fire();
-    this.updateBadge();
-  }
-
-  /** Reflect pending count as an activity-bar badge and the session id in the view description. */
-  updateBadge(): void {
-    if (!this.view) return;
-    const session = currentSession();
-    const pending = session
-      ? cachedReview(session).filter((r) => r.status === 'pending').length
-      : 0;
-    this.view.badge = pending
-      ? { value: pending, tooltip: `${pending} pending Claude edit${pending === 1 ? '' : 's'} to review` }
-      : undefined;
-    const base = session ? `session ${shortId(session)}` : undefined;
-    // Timeline isn't filtered by Search, so only the Edits/Diffs views advertise the active filter.
-    const showFilter = editFilter && this.mode !== 'timeline';
-    this.view.description = showFilter ? `search “${editFilter}”${base ? ` · ${base}` : ''}` : base;
-  }
-
-  getChildren(node?: Node): Node[] {
-    const session = currentSession();
-    if (!session) return [];
-    // Timeline: a newest-first change feed. Adjacent edits to the SAME file coalesce into one run
-    // (collapsible ×N); lone edits are shown directly. Chronological, grouped, summarized.
-    if (this.mode === 'timeline') {
-      if (!node) {
-        const log = cachedLog(session).slice().sort((a, b) => b.ts - a.ts); // newest first
-        const feed: Node[] = [];
-        for (let i = 0; i < log.length; ) {
-          let j = i + 1;
-          while (j < log.length && log[j].file === log[i].file) j++; // maximal same-file run
-          const run = log.slice(i, j);
-          feed.push(run.length === 1 ? { kind: 'edit', rec: run[0], feed: true } : { kind: 'tlrun', file: run[0].file, edits: run });
-          i = j;
-        }
-        return feed;
-      }
-      if (node.kind === 'tlrun') return node.edits.map((rec) => ({ kind: 'edit', rec }));
-      return [];
-    }
-    // edits/diffs: folder → file → (class → edits) + loose edits, from the shared core view-model.
-    if (!node) {
-      const tree = (this.cycleTree ??= core.buildEditTree(session, { root: workspaceRoot(), filter: editFilter }));
-      return [...tree.folders.map(toFolderNode), ...tree.files.map(toFileNode)];
-    }
-    if (node.kind === 'folder') return [...node.folders.map(toFolderNode), ...node.files.map(toFileNode)];
-    if (node.kind === 'file')
-      return [
-        ...node.classes.map((c): ClassNode => ({ kind: 'class', file: node.file, name: c.name, edits: c.edits })),
-        ...node.loose.map((rec): EditNode => ({ kind: 'edit', rec })),
-      ];
-    if (node.kind === 'class') return node.edits.map((rec): EditNode => ({ kind: 'edit', rec }));
-    return [];
-  }
-
-  getTreeItem(node: Node): vscode.TreeItem {
-    if (node.kind === 'folder') {
-      const item = new vscode.TreeItem(node.label, vscode.TreeItemCollapsibleState.Expanded);
-      item.iconPath = vscode.ThemeIcon.Folder;
-      item.contextValue = 'folder';
-      return item;
-    }
-    if (node.kind === 'class') {
-      const item = new vscode.TreeItem(node.name, vscode.TreeItemCollapsibleState.Expanded);
-      item.iconPath = new vscode.ThemeIcon('symbol-class');
-      const pending = node.edits.filter((e) => e.status === 'pending').length;
-      item.description = `${node.edits.length} edit${node.edits.length === 1 ? '' : 's'}${pending ? ` · ${pending} pending` : ''}`;
-      item.tooltip = `class ${node.name} · ${path.basename(node.file)}`;
-      item.contextValue = 'class';
-      return item;
-    }
-    if (node.kind === 'file') {
-      const item = new vscode.TreeItem(path.basename(node.file), vscode.TreeItemCollapsibleState.Expanded);
-      const n = node.edits.length;
-      const pending = node.edits.filter((e) => e.status === 'pending').length;
-      item.description = `${n} edit${n === 1 ? '' : 's'}${pending ? ` · ${pending} pending` : ''}`;
-      item.iconPath = vscode.ThemeIcon.File;
-      item.tooltip = node.file;
-      item.contextValue = 'file';
-      item.resourceUri = vscode.Uri.file(node.file);
-      item.command = { command: 'claudeObservatory.openFile', title: 'Open File', arguments: [node] };
-      return item;
-    }
-    // Timeline run: adjacent same-file edits collapsed into one row (×N + combined delta + summary).
-    if (node.kind === 'tlrun') {
-      const session = currentSession();
-      const cwd = workspaceRoot();
-      const newest = node.edits[0];
-      const d = new Date(newest.ts);
-      const hhmm = [d.getHours(), d.getMinutes()].map((x) => String(x).padStart(2, '0')).join(':');
-      let added = 0;
-      let removed = 0;
-      if (session)
-        for (const e of node.edits) {
-          const dd = cachedDelta(session, e);
-          added += dd.added;
-          removed += dd.removed;
-        }
-      const reasoning = cwd && session ? cachedTranscript(cwd, session).reasoning.get(newest.id) : undefined;
-      const summary = reasoning ? firstLine(reasoning) : session ? core.summarize(session, newest) : '';
-      const item = new vscode.TreeItem(
-        `${hhmm}  ${path.basename(node.file)}  ×${node.edits.length}`,
-        vscode.TreeItemCollapsibleState.Collapsed
-      );
-      item.description = `+${added} −${removed}${summary ? ` · ${summary}` : ''}`;
-      item.tooltip = `${node.file}\n${node.edits.length} edits · +${added} −${removed}${reasoning ? `\n\n${reasoning}` : ''}`;
-      item.iconPath = aggregateIcon(node.edits);
-      item.contextValue = 'file'; // reuse the file-scoped Keep-all / Undo-all / Open-file actions
-      item.resourceUri = vscode.Uri.file(node.file);
-      return item;
-    }
-    const rec = node.rec;
-    const session = currentSession();
-    const { added, removed } = session
-      ? cachedDelta(session, rec)
-      : { added: 0, removed: 0 };
-
-    // Timeline change-feed row. Top-level (feed) rows lead with `HH:MM file`; run children lead with
-    // `#id` and carry the time in the description. Both show `+a −b · <summary>`.
-    if (this.mode === 'timeline') {
-      const d = new Date(rec.ts);
-      const hhmm = [d.getHours(), d.getMinutes()].map((n) => String(n).padStart(2, '0')).join(':');
-      const cwd = workspaceRoot();
-      const reasoning = cwd && session ? cachedTranscript(cwd, session).reasoning.get(rec.id) : undefined;
-      const summary = reasoning ? firstLine(reasoning) : session ? core.summarize(session, rec) : '';
-      const isFeed = node.feed === true;
-      let label = isFeed ? `${hhmm}  ${path.basename(rec.file)}` : `#${rec.id}`;
-      if (rec.status === 'undone') label = strike(label);
-      const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.None);
-      const timePart = isFeed ? '' : `${hhmm} · `; // run children lead with #id, so put their time here
-      item.description = `${timePart}+${added} −${removed}${summary ? ` · ${summary}` : ''}`;
-      item.tooltip = `${rec.file}\n${rec.tool} · ${rec.status} · +${added} −${removed} · ${d.toLocaleTimeString()}${reasoning ? `\n\n${reasoning}` : ''}`;
-      item.contextValue = rec.status === 'undone' ? 'editUndone' : 'edit';
-      item.iconPath = statusIcon(rec.status);
-      item.resourceUri = editItemUri(rec); // greys kept/undone via StatusDecorationProvider
-      item.command = { command: 'claudeObservatory.openFileAtEdit', title: 'Open File at Edit', arguments: [node] };
-      return item;
-    }
-
-    // Edits / Diffs: lead with the edit id + line delta (no timestamp — that lives in Timeline).
-    let label = `#${rec.id}  +${added} −${removed}`;
-    if (rec.status === 'undone') label = strike(label); // cross out reverted edits
-    const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.None);
-    item.description = `${rec.status} · ${rec.tool}`;
-    item.tooltip = `${rec.file}\n${rec.tool} · ${rec.status}`;
-    // Undone edits offer Redo; live (pending/kept) edits offer Keep/Undo.
-    item.contextValue = rec.status === 'undone' ? 'editUndone' : 'edit';
-    item.iconPath = statusIcon(rec.status);
-    item.resourceUri = editItemUri(rec); // greys kept/undone via StatusDecorationProvider
-    item.command =
-      this.mode === 'diffs'
-        ? { command: 'claudeObservatory.openDiff', title: 'Open Diff', arguments: [node] }
-        : { command: 'claudeObservatory.openFileAtEdit', title: 'Open File at Edit', arguments: [node] };
-    return item;
-  }
-}
 
 class BlobContentProvider implements vscode.TextDocumentContentProvider {
   provideTextDocumentContent(uri: vscode.Uri): string {
     const q = new URLSearchParams(uri.query);
     const session = q.get('s') || '';
+    // `pv=<budget>` serves a BOUNDED window of the edit's diff instead of the whole blob — what the
+    // "Open all in editor" rows use so one 13,000-line rewrite cannot become a wall to scroll past.
+    // Both sides must be built from the same call, or their windows would not align.
+    const pv = Number(q.get('pv') || 0);
+    const id = editIdFromUri(uri);
+    if (pv > 0 && id != null) {
+      const rec = core.reviewEdits(session).find((r) => r.id === id) ?? core.findRecord(session, id);
+      if (rec) {
+        try {
+          const p = core.previewPair(session, rec, pv);
+          return uri.path.startsWith('/before/') ? p.before : p.after;
+        } catch {
+          /* fall through to the raw blob — a preview that cannot be built is not a reason to show nothing */
+        }
+      }
+    }
     const blob = q.get('b') || 'empty';
     if (blob === 'empty') return '';
     try {
@@ -456,6 +298,100 @@ class BlobContentProvider implements vscode.TextDocumentContentProvider {
     } catch {
       return '';
     }
+  }
+}
+
+/** First changed line of the DISPLAYED pair — the after document against its `pb=` before (the pair
+ *  the diff is showing; resolving through reviewEdits mis-anchored raw diffs). Trim-compared,
+ *  because the editor folds trim-whitespace-only lines as unchanged by default. This is where the
+ *  per-diff review bar anchors: line 0 sits inside the leading hidden-unchanged fold. */
+function firstChangedLine(doc: vscode.TextDocument): number {
+  let line = 0;
+  try {
+    const q = new URLSearchParams(doc.uri.query);
+    const session = q.get('s') || '';
+    const pb = q.get('pb');
+    // A PREVIEWED row displays a windowed pair, so the full `pb` blob is not what is on screen —
+    // comparing against it mismatches at line 0 and hands back the one answer this function exists
+    // to avoid. Build the same window the provider served and compare against that.
+    const pv = Number(q.get('pv') || 0);
+    const id = editIdFromUri(doc.uri);
+    let before: string[] | null = null;
+    if (pv > 0 && id != null) {
+      const rec = core.reviewEdits(session).find((x) => x.id === id) ?? core.findRecord(session, id);
+      if (rec) before = core.previewPair(session, rec, pv).before.split('\n');
+    } else if (pb && pb !== 'empty') {
+      before = core.readBlob(session, pb).toString('utf8').split('\n');
+    }
+    if (before) {
+      const after = doc.getText().split('\n');
+      while (line < after.length && before[line] !== undefined && before[line].trim() === after[line].trim()) line++;
+      if (line >= after.length) line = Math.max(0, after.length - 1);
+    }
+  } catch {
+    line = 0;
+  }
+  return line;
+}
+
+/**
+ * Per-diff review bars INSIDE diff editors — one comment-thread band per visible claude-edit AFTER
+ * document, the multi-diff ("Open all in editor") rows included: the same surface as the floating
+ * review bar over a file.
+ *
+ * The placement was settled by elimination, and the eliminations are all verified rather than
+ * assumed. The multi-diff row toolbar (`multiDiffEditor/resource/title`) and the divider hunk
+ * toolbar (`diffEditor/gutter/hunk`, where VS Code draws its own → and + buttons — the placement
+ * actually wanted) are BOTH proposed API in the shipped workbench source
+ * (`proposed:"contribMultiDiffEditorMenus"`, `proposed:"contribDiffEditorGutterToolBarMenus"`), so a
+ * published extension's entries there are dropped without a word. Code lenses render but were
+ * rejected. That leaves this: a one-row band, anchored at the first CHANGED line of the displayed
+ * pair so it never lands inside the leading "N hidden lines" fold.
+ *
+ * Threads are born with a throwaway comment and emptied immediately (the chevron trick EditPeek
+ * documents at length) and never reply-able, which is what renders them as a bar rather than a
+ * comment box.
+ */
+class DiffBars implements vscode.Disposable {
+  private readonly controller = vscode.comments.createCommentController('claudeObservatoryDiffBar', 'Claude Observatory Review');
+  private readonly threads = new Map<string, vscode.CommentThread>();
+  constructor() {
+    this.controller.commentingRangeProvider = { provideCommentingRanges: () => [] };
+  }
+  /** Reconcile bars with the visible editors: one thread per after-doc on screen, none elsewhere. */
+  sync(): void {
+    const want = new Map<string, vscode.TextDocument>();
+    for (const ed of vscode.window.visibleTextEditors) {
+      const u = ed.document.uri;
+      if (u.scheme === SCHEME && u.path.startsWith('/after/') && editIdFromUri(u) != null) want.set(u.toString(), ed.document);
+    }
+    for (const [k, t] of this.threads) {
+      if (!want.has(k)) {
+        t.dispose();
+        this.threads.delete(k);
+      }
+    }
+    for (const [k, doc] of want) {
+      if (this.threads.has(k)) continue;
+      const id = editIdFromUri(doc.uri)!;
+      const line = firstChangedLine(doc);
+      const thread = this.controller.createCommentThread(doc.uri, new vscode.Range(line, 0, line, 0), [
+        { author: { name: '' }, body: '', mode: vscode.CommentMode.Preview } as vscode.Comment,
+      ]);
+      thread.comments = [];
+      thread.canReply = false;
+      // A PREVIEWED row says so on its bar and offers the whole thing — a bounded view that did not
+      // announce itself would let a reviewer keep a change on the strength of a fraction of it.
+      const pv = Number(new URLSearchParams(doc.uri.query).get('pv') || 0);
+      thread.contextValue = pv > 0 ? 'claudeDiffEditPreview' : 'claudeDiffEdit';
+      thread.label = pv > 0 ? `Claude edit #${id} — preview of the first ${pv} changed lines` : `Claude edit #${id}`;
+      thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
+      this.threads.set(k, thread);
+    }
+  }
+  dispose(): void {
+    for (const t of this.threads.values()) t.dispose();
+    this.controller.dispose();
   }
 }
 
@@ -949,9 +885,26 @@ class EditPeek implements vscode.Disposable {
 
 /** URI for one side of a diff. Path carries the real basename so VS Code picks the language mode;
  *  the optional editId rides in the query so the diff's title-bar actions can resolve their edit. */
-function blobUri(session: string, sha: string | null, file: string, side: string, editId?: number): vscode.Uri {
-  const q = `s=${encodeURIComponent(session)}&b=${encodeURIComponent(sha ?? 'empty')}` + (editId != null ? `&e=${editId}` : '');
+/** `pairedBefore` (after-side only): the DISPLAYED before blob, so the code-lens anchor can find the
+ *  first changed line of the exact pair on screen — resolving the before through reviewEdits instead
+ *  put the lens at a line the RAW diffs (file history, revision stepping) never change, i.e. inside
+ *  the hidden-unchanged fold, invisible. */
+function blobUri(session: string, sha: string | null, file: string, side: string, editId?: number, pairedBefore?: string | null, preview?: number): vscode.Uri {
+  const q = `s=${encodeURIComponent(session)}&b=${encodeURIComponent(sha ?? 'empty')}`
+    + (editId != null ? `&e=${editId}` : '')
+    + (pairedBefore !== undefined ? `&pb=${encodeURIComponent(pairedBefore ?? 'empty')}` : '')
+    + (preview ? `&pv=${preview}` : '');
   return vscode.Uri.from({ scheme: SCHEME, path: `/${side}/${path.basename(file)}`, query: q });
+}
+
+/** Resolve whatever a diff toolbar handed its command — a plain URI, or a multi-diff resource object
+ *  carrying one — to the URI that holds our `e=` edit id. Duck-typed (`scheme` string), NOT
+ *  instanceof: the marshalled multi-diff argument is not guaranteed to be a real Uri instance, and
+ *  the smoke harness's vscode mock has no Uri class at all. */
+function diffArgUri(arg: unknown): vscode.Uri | undefined {
+  const o = arg as { scheme?: unknown; modifiedUri?: vscode.Uri; resource?: vscode.Uri; uri?: vscode.Uri } | null | undefined;
+  if (o && typeof o.scheme === 'string') return o as unknown as vscode.Uri;
+  return o?.modifiedUri ?? o?.resource ?? o?.uri;
 }
 
 /** The edit id encoded in a claude-edit diff URI (the diff title-bar Keep/Undo/Chat commands get this URI). */
@@ -967,7 +920,7 @@ async function openDiff(node: EditNode): Promise<void> {
   const rec = node.rec;
   // Edit id on BOTH sides so the diff's title-bar commands resolve it whichever side VS Code hands them.
   const left = blobUri(session, rec.beforeBlob, rec.file, 'before', rec.id);
-  const right = blobUri(session, rec.afterBlob, rec.file, 'after', rec.id);
+  const right = blobUri(session, rec.afterBlob, rec.file, 'after', rec.id, rec.beforeBlob);
   // Claude's reasoning rides in the diff title (VS Code truncates long titles, but shows what fits).
   const cwd = workspaceRoot();
   const why = cwd ? cachedTranscript(cwd, session).reasoning.get(rec.id)?.trim() : undefined;
@@ -1002,7 +955,12 @@ async function stepDiffEdit(uri: vscode.Uri | undefined, dir: 1 | -1): Promise<v
   const id = editIdFromUri(uri);
   const rec = s && id != null ? core.findRecord(s, id) : null;
   if (!s || !rec) return;
-  const list = cachedLog(s).filter((r) => r.file === rec.file && r.status === 'pending').sort((a, b) => a.id - b.id);
+  // The same stops the nav bar and the review loop use — off the raw log this walked onto a cancelled
+  // chain, in a diff tab whose Keep button then acted on a change no panel admits exists.
+  const stepHidden = core.cancelledMemberIds(s, 'pending');
+  const list = cachedLog(s)
+    .filter((r) => r.file === rec.file && r.status === 'pending' && !stepHidden.has(r.id))
+    .sort((a, b) => a.id - b.id);
   if (!list.length) return;
   const idx = list.findIndex((r) => r.id === id);
   const prev = vscode.window.tabGroups?.activeTabGroup?.activeTab;
@@ -1099,13 +1057,35 @@ async function blockedByDirtyBuffer(file: string): Promise<boolean> {
   return dirty;
 }
 
+
+/** The bulk-conflict note, NAMING the first refusal when the engine did (a dependent unit) — a bare
+ *  count hides the one fact that tells the reader what to do next. */
+function conflictNote(res: { conflicts: number; firstConflict?: string }, remedy: string): string {
+  if (!res.conflicts) return '';
+  const name = res.firstConflict ? ` — ${res.firstConflict.split('. ')[0]}` : '';
+  return ` · ${res.conflicts} conflict(s) left (${remedy})${name}`;
+}
+
 async function undoOne(session: string, id: number): Promise<void> {
   const rec = core.findRecord(session, id);
   if (rec && (await blockedByDirtyBuffer(rec.file))) return;
   const res = core.undoGroup(session, id); // reverts the whole same-code review unit (collapsed group)
   if (res.status === 'conflict') {
-    const pick = await vscode.window.showWarningMessage(res.message, { modal: true }, 'Force-restore file');
-    if (pick === 'Force-restore file') {
+    // A named-dependent refusal carries the closure (raw member ids) — offer it as ONE action
+    // beside the force fallback. An ordinary conflict (manual change) keeps the single offer.
+    const closure = res.closure ?? [];
+    const buttons = closure.length ? ['Undo both', 'Force-restore file'] : ['Force-restore file'];
+    const pick = await vscode.window.showWarningMessage(res.message, { modal: true }, ...buttons);
+    if (pick === 'Undo both') {
+      const r2 = core.undoScope(session, { ids: closure });
+      // BOTH halves of the outcome — a phantom-guard refusal inside the closure must not read as a
+      // bare "Nothing reverted" with no reason (and a conflict must not vanish either).
+      const note =
+        (r2.conflicts ? ` · ${r2.conflicts} conflict(s) left` : '') +
+        (r2.errors ? ` · ${r2.errors} refused${r2.firstError ? ` — ${r2.firstError}` : ''}` : '');
+      if (r2.undone) vscode.window.showInformationMessage(`Reverted ${r2.undone} edit(s) together${note}.`);
+      else vscode.window.showWarningMessage(`Nothing reverted${note}.`);
+    } else if (pick === 'Force-restore file') {
       const r2 = core.restoreFile(session, id);
       // The force path can itself refuse (#43 phantom guard) — a refusal reads as a warning.
       if (!r2.ok) vscode.window.showWarningMessage(r2.message);
@@ -1215,21 +1195,33 @@ async function chatAction(ref: core.ChatContextRef): Promise<void> {
  *  covers every member of a collapsed review group, not just the reps the tree renders. */
 function keepEditsInFile(session: string, file: string, _edits: core.EditRecord[]): void {
   // One parse, one append — a per-edit loop is quadratic and unusable on a long session.
-  const kept = core.setStatusMany(
-    session,
-    core.readLog(session).filter((e) => e.file === file && e.status === 'pending').map((e) => e.id),
-    'kept'
-  ).length;
+  // Exactly what the Review list offers for this file — its header's ✓ acts on this same set. Acting
+  // on more and then reporting "Kept 3 edit(s)" over a panel showing one is how a bulk verb becomes
+  // untrustworthy; cancelled chains are cleared by the footer's Dismiss, which says what it does.
+  const hidden = core.cancelledMemberIds(session, 'pending');
+  const inFile = core.readLog(session).filter((e) => e.file === file && e.status === 'pending');
+  const kept = core.setStatusMany(session, inFile.filter((e) => !hidden.has(e.id)).map((e) => e.id), 'kept').length;
+  const skipped = inFile.length - kept;
   vscode.window.showInformationMessage(
-    kept ? `Kept ${kept} edit(s) in ${path.basename(file)}.` : 'No pending edits to keep in this file.'
+    kept
+      ? `Kept ${kept} edit(s) in ${path.basename(file)}.${skipped ? ` ${skipped} in cancelled-out chains left for Dismiss.` : ''}`
+      : skipped
+        ? `Nothing to keep in this file — its ${skipped} pending record(s) are cancelled-out chains (Dismiss clears them).`
+        : 'No pending edits to keep in this file.'
   );
 }
 
 /** Surgically undo every PENDING edit in one file, newest-first, after a confirm + dirty-buffer
  *  guard (shared by undoFile and undoOpenFile). Accepted edits are left on disk — revert individually. */
 async function undoEditsInFile(session: string, file: string, _edits: core.EditRecord[]): Promise<void> {
-  // Raw log (not the collapsed reps) so we undo every member of a review group in the file, newest-first.
-  const targets = core.readLog(session).filter((e) => e.file === file && e.status === 'pending').sort((a, b) => b.id - a.id);
+  // Raw log (not the collapsed reps) so we undo every member of a review group in the file, newest-first
+  // — minus the cancelled-out chains, which are what the Review header's ↩ leaves alone too. Reverting
+  // a chain that ends where it began writes the same bytes back and would still count itself out loud.
+  const undoHidden = core.cancelledMemberIds(session, 'pending');
+  const targets = core
+    .readLog(session)
+    .filter((e) => e.file === file && e.status === 'pending' && !undoHidden.has(e.id))
+    .sort((a, b) => b.id - a.id);
   const base = path.basename(file);
   if (targets.length === 0) {
     vscode.window.showInformationMessage(`Nothing to undo in ${base}.`);
@@ -1242,10 +1234,12 @@ async function undoEditsInFile(session: string, file: string, _edits: core.EditR
     'Undo all'
   );
   if (choice !== 'Undo all') return;
-  const res = core.undoScope(session, { under: file });
+  // By ids, not by path: `under` would sweep the cancelled members back in and undo more than the
+  // dialog just counted.
+  const res = core.undoScope(session, { ids: targets.map((e) => e.id) });
   vscode.window.showInformationMessage(
     `Undid ${res.undone} edit(s) in ${base}` +
-      (res.conflicts ? ` · ${res.conflicts} conflict(s) left — undo individually to force-restore` : '') +
+      conflictNote(res, 'undo individually to force-restore') +
       (res.errors ? ` · ${res.errors} refused — ${res.firstError ?? ''}` : '') +
       '.'
   );
@@ -1295,63 +1289,9 @@ async function undoEditsInFolder(session: string, folder: string): Promise<void>
   const res = core.undoScope(session, { ids: targets.map((t) => t.id) });
   vscode.window.showInformationMessage(
     `Undid ${res.undone} edit(s) in ${label}` +
-      (res.conflicts ? ` · ${res.conflicts} conflict(s) left — undo individually to force-restore` : '') +
+      conflictNote(res, 'undo individually to force-restore') +
       (res.errors ? ` · ${res.errors} refused — ${res.firstError ?? ''}` : '') +
       '.'
-  );
-}
-
-/** Accept (keep) every pending edit at-or-beneath a file/folder path — the scoped Accept action. */
-function keepEditsUnder(session: string, scope: string, label: string): void {
-  const targets = core.readLog(session).filter((r) => r.status === 'pending' && core.isUnderPath(r.file, scope));
-  core.setStatusMany(session, targets.map((r) => r.id), 'kept');
-  vscode.window.showInformationMessage(
-    targets.length ? `Accepted ${targets.length} edit(s) in ${label}.` : `No pending edits to accept in ${label}.`
-  );
-}
-
-/** Revert every PENDING edit at-or-beneath a path, newest-first, after a confirm + dirty-buffer
- *  guard (raw log, so every member of a review group in scope is undone). Accepted edits are left on
- *  disk — revert individually. */
-async function undoEditsUnder(session: string, scope: string, label: string): Promise<void> {
-  const targets = core
-    .readLog(session)
-    .filter((r) => r.status === 'pending' && core.isUnderPath(r.file, scope))
-    .sort((a, b) => b.id - a.id);
-  if (targets.length === 0) {
-    vscode.window.showInformationMessage(`Nothing to revert in ${label}.`);
-    return;
-  }
-  const dirty = [...new Set(targets.map((t) => t.file))].filter((f) =>
-    vscode.workspace.textDocuments.some((d) => canonFsPath(d.uri) === f && d.isDirty)
-  );
-  if (dirty.length) {
-    await vscode.window.showWarningMessage(
-      `Save or revert unsaved changes first: ${dirty.map((f) => path.basename(f)).join(', ')}.`,
-      { modal: true }
-    );
-    return;
-  }
-  const choice = await vscode.window.showWarningMessage(
-    `Revert ${targets.length} edit(s) in ${label}? Overlapping edits may conflict.`,
-    { modal: true },
-    'Revert all'
-  );
-  if (choice !== 'Revert all') return;
-  const res = core.undoScope(session, { under: scope });
-  vscode.window.showInformationMessage(
-    `Reverted ${res.undone} edit(s) in ${label}` +
-      (res.conflicts ? ` · ${res.conflicts} conflict(s) left (revert individually to force)` : '') +
-      (res.errors ? ` · ${res.errors} refused — ${res.firstError ?? ''}` : '') +
-      '.'
-  );
-}
-
-/** Clear resolved (kept/undone) edits at-or-beneath a path — the scoped Clear action. */
-function clearResolvedUnder(session: string, scope: string, label: string): void {
-  const n = core.clearResolved(session, scope);
-  vscode.window.showInformationMessage(
-    n ? `Cleared ${n} resolved edit(s) in ${label}.` : `No resolved edits to clear in ${label}.`
   );
 }
 
@@ -1478,7 +1418,7 @@ async function undoAllSession(session: string): Promise<void> {
   const res = core.undoScope(session);
   vscode.window.showInformationMessage(
     `Reverted ${res.undone} edit(s)` +
-      (res.conflicts ? ` · ${res.conflicts} conflict(s) left (revert individually to force)` : '') +
+      conflictNote(res, 'revert individually to force') +
       (res.errors ? ` · ${res.errors} refused — ${res.firstError ?? ''}` : '') +
       '.'
   );
@@ -1511,7 +1451,7 @@ async function redoAllSession(session: string): Promise<void> {
   const res = core.redoScope(session);
   vscode.window.showInformationMessage(
     `Re-applied ${res.redone} edit(s)` +
-      (res.conflicts ? ` · ${res.conflicts} conflict(s) left (redo individually to force)` : '') +
+      conflictNote(res, 'redo individually to force') +
       '.'
   );
 }
@@ -1561,7 +1501,7 @@ async function undoTaskScope(session: string, taskId: string): Promise<void> {
   const res = core.undoTask(cwd, session, taskId);
   vscode.window.showInformationMessage(
     `Reverted ${res.undone} edit(s) in this task` +
-      (res.conflicts ? ` · ${res.conflicts} conflict(s) left (revert individually to force)` : '') +
+      conflictNote(res, 'revert individually to force') +
       (res.errors ? ` · ${res.errors} refused — ${res.firstError ?? ''}` : '') +
       '.'
   );
@@ -1582,11 +1522,20 @@ function clearTaskScope(session: string, taskId: string): void {
 // core.promptEditIds resolves the id — an index or the stable hash — to exactly that set. Same shape as
 // the task ops above: resolve in core, act here, and never invent a scope the data doesn't name.
 
-/** Accept — keep every PENDING edit one prompt produced. */
+/**
+ * Accept — keep every PENDING edit one prompt produced.
+ *
+ * `promptEditIds` answers in DISPLAY units — the representative of each review unit, not its members.
+ * Acting on that set directly resolves the representative and strands the rest of its unit pending, at
+ * an intermediate state no surface can name: the row disappears, the count does not. That is the exact
+ * failure `core.test.js` pins as "an id set must be expanded, or a collapsed row half-resolves", and the
+ * terminal already guards it (`tui/src/backend.ts`). Every id is expanded through `groupMembers` here
+ * for the same reason.
+ */
 function keepPrompt(session: string, promptId: string): void {
   const cwd = workspaceRoot();
   if (!cwd) return;
-  const ids = new Set(core.promptEditIds(cwd, session, promptId));
+  const ids = new Set(core.promptEditIds(cwd, session, promptId).flatMap((id) => core.groupMembers(session, id)));
   const kept = core.setStatusMany(
     session,
     core.readLog(session).filter((r) => ids.has(r.id) && r.status === 'pending').map((r) => r.id),
@@ -1597,11 +1546,13 @@ function keepPrompt(session: string, promptId: string): void {
   );
 }
 
-/** Reject — revert every PENDING edit one prompt produced, after a confirm + dirty-buffer guard. */
+/** Reject — revert every PENDING edit one prompt produced, after a confirm + dirty-buffer guard.
+ *  Group-expanded for the same reason as `keepPrompt`: reverting a unit's representative alone leaves
+ *  its earlier members applied, so the file keeps content the reader just rejected. */
 async function undoPrompt(session: string, promptId: string): Promise<void> {
   const cwd = workspaceRoot();
   if (!cwd) return;
-  const ids = new Set(core.promptEditIds(cwd, session, promptId));
+  const ids = new Set(core.promptEditIds(cwd, session, promptId).flatMap((id) => core.groupMembers(session, id)));
   const targets = core.readLog(session).filter((r) => ids.has(r.id) && r.status === 'pending');
   if (targets.length === 0) {
     vscode.window.showInformationMessage('Nothing to reject from this prompt.');
@@ -1626,7 +1577,7 @@ async function undoPrompt(session: string, promptId: string): Promise<void> {
   const res = core.undoScope(session, { ids: targets.map((t) => t.id) });
   vscode.window.showInformationMessage(
     `Reverted ${res.undone} edit(s) from this prompt` +
-      (res.conflicts ? ` · ${res.conflicts} conflict(s) left (revert individually to force)` : '') +
+      conflictNote(res, 'revert individually to force') +
       (res.errors ? ` · ${res.errors} refused — ${res.firstError ?? ''}` : '') +
       '.'
   );
@@ -1671,7 +1622,12 @@ async function rewindFromPrompt(session: string, promptId: string): Promise<void
   const units = `${scope.units} review unit${scope.units === 1 ? '' : 's'}`;
   const files = `${scope.files.length} file${scope.files.length === 1 ? '' : 's'}`;
   const choice = await vscode.window.showWarningMessage(
-    `Rewind to before ${label}? This reverts ${scope.pending} pending edit(s) (${units}) across ${files} made from this ask onward — including asks after it — by rewriting those files on disk. Redo can restore them. Overlapping edits may conflict.`,
+    `Rewind to before ${label}? This reverts ${scope.pending} pending edit(s) (${units}) across ${files} made from this ask onward — including asks after it${
+      // A file deleted in one ask and re-created in the next is ONE unit, and a unit is the smallest
+      // thing that can be reverted — so the rewind reaches back. The modal names it rather than
+      // letting it be discovered afterwards.
+      scope.fromEarlier ? `, and ${scope.fromEarlier} edit(s) from an EARLIER ask that cannot be separated from it` : ''
+    } — by rewriting those files on disk. Redo can restore them. Overlapping edits may conflict.`,
     { modal: true },
     'Rewind'
   );
@@ -1680,7 +1636,7 @@ async function rewindFromPrompt(session: string, promptId: string): Promise<void
   const restore = res.ids.slice(); // exactly what moved — a blanket redo would re-apply unrelated edits
   const action = await vscode.window.showInformationMessage(
     `Rewound ${res.undone} edit(s)` +
-      (res.conflicts ? ` · ${res.conflicts} conflict(s) left (revert individually to force)` : '') +
+      conflictNote(res, 'revert individually to force') +
       (res.errors ? ` · ${res.errors} refused — ${res.firstError ?? ''}` : '') +
       '.',
     ...(restore.length ? ['Redo'] : [])
@@ -1807,12 +1763,18 @@ function anchorLines(p: Placement): number[] {
  *  log changes (keyed on its stamp). */
 const pendingByFileCache = new Map<string, { key: string; byFile: Map<string, core.EditRecord[]> }>();
 function pendingByFile(session: string): Map<string, core.EditRecord[]> {
-  const key = fileKey(logPath(session));
+  const key = reviewKey(session); // …and the transcript: this map now hides cancelled chains
+
   const hit = pendingByFileCache.get(session);
   if (hit && hit.key === key) return hit.byFile;
   const byFile = new Map<string, core.EditRecord[]>();
+  // A chain that cancels out owns no line to annotate and no decision to offer, so it earns no
+  // gutter mark, no ghost and no lens — the same rule the review list follows. Dropping its members
+  // cannot disturb the composition below: the chain returns to the content it started from, so the
+  // state before it and after it are the same text.
+  const cancelled = core.cancelledMemberIds(session, 'pending');
   for (const rec of cachedLog(session)) {
-    if (rec.status !== 'pending') continue;
+    if (rec.status !== 'pending' || cancelled.has(rec.id)) continue;
     const arr = byFile.get(rec.file);
     if (arr) arr.push(rec);
     else byFile.set(rec.file, [rec]);
@@ -1886,15 +1848,15 @@ function pendingAtCursor(session: string): core.EditRecord | undefined {
 /** Files with at least one pending edit, sorted by path — the nav bar's File axis (matches the Edits tree). */
 function pendingFilesOf(session: string): string[] {
   const files = new Set<string>();
-  for (const r of cachedLog(session)) if (r.status === 'pending') files.add(r.file);
+  for (const [file, recs] of pendingByFile(session)) if (recs.length) files.add(file);
   return [...files].sort();
 }
 
 /** One file's pending edits, oldest→newest — the nav bar's Diff axis. */
 function pendingEditsInFile(session: string, file: string): core.EditRecord[] {
-  return cachedLog(session)
-    .filter((r) => r.file === file && r.status === 'pending')
-    .sort((a, b) => a.id - b.id);
+  // Through the same index the gutter uses, so the axis steps exactly what is annotated — a cancelled
+  // chain is neither.
+  return [...(pendingByFile(session).get(file) ?? [])].sort((a, b) => a.id - b.id);
 }
 
 /** A file's "folder" — the change-map's module-bucket DISPLAY LABEL (`(root)`, `(external)`, or the
@@ -1909,15 +1871,17 @@ function folderLabelOf(file: string): string {
 /** Distinct folders (module-bucket labels) that still have pending edits, path-sorted — the Folder axis. */
 function pendingFoldersOf(session: string): string[] {
   const folders = new Set<string>();
-  for (const r of cachedLog(session)) if (r.status === 'pending') folders.add(folderLabelOf(r.file));
+  // Through `pendingByFile`, like the File axis three lines up: two axes over the same session that
+  // disagree about what is pending is the bug, not the feature.
+  for (const [file, recs] of pendingByFile(session)) if (recs.length) folders.add(folderLabelOf(file));
   return [...folders].sort();
 }
 
 /** One folder's (exact bucket, not the subtree) pending edits, oldest→newest — the Folder axis members. */
 function pendingEditsInFolder(session: string, folder: string): core.EditRecord[] {
-  return cachedLog(session)
-    .filter((r) => r.status === 'pending' && folderLabelOf(r.file) === folder)
-    .sort((a, b) => a.id - b.id);
+  const out: core.EditRecord[] = [];
+  for (const [file, recs] of pendingByFile(session)) if (folderLabelOf(file) === folder) out.push(...recs);
+  return out.sort((a, b) => a.id - b.id);
 }
 
 /** A one-line red-ghost preview of removed lines: first non-blank line (trimmed, truncated), with a
@@ -3682,7 +3646,7 @@ function tourShell(): string {
   .dot.seen { opacity:.6; }
   </style>`;
   // Plain string interpolation only: the step text is core's, and textContent keeps it inert.
-  const script = `
+  const tourScript = `
   const vs = acquireVsCodeApi();
   var N = 0, LAST = null, WAITING = false, PLAYING = true, AUTOSECS = 0;
   /** A wait step relabels Next to Skip. It is never DISABLED — nothing about an action can trap you. */
@@ -3760,7 +3724,7 @@ function tourShell(): string {
     `<button id="dock" title="Move the tour between its own window and a tab beside your code">Dock</button>` +
     `<button id="exit">Exit demo</button></div>` +
     `<div class="dots" id="dots"></div>` +
-    `<script nonce="${nonce}">${script}</script></body></html>`
+    `<script nonce="${nonce}">${tourScript}</script></body></html>`
   );
 }
 
@@ -4134,7 +4098,9 @@ function timelineShell(): string {
   .rq-list { flex:1; overflow-y:auto; min-height:0; padding:6px 9px 10px; }
   .rq-row { border:1px solid var(--cm-border); border-radius:5px; margin-bottom:5px; padding:5px 8px; cursor:pointer; }
   .rq-row:hover { background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.08)); }
-  .rq-row.sel { border-color: var(--cm-accent); background: var(--vscode-list-activeSelectionBackground, rgba(80,120,200,0.16)); }
+  .rq-row.sel { border-color: var(--cm-accent); border-left:3px solid var(--cm-accent); background: var(--vscode-list-activeSelectionBackground, rgba(80,120,200,0.16)); }
+  .rq-review { background:transparent; border:1px solid var(--cm-border); border-radius:99px; color: var(--vscode-descriptionForeground); font:inherit; font-size:9px; padding:0 8px; cursor:pointer; flex:none; }
+  .rq-review.on { background: var(--cm-accent); border-color: var(--cm-accent); color: var(--vscode-editor-background, #1e1e1e); font-weight:600; }
   /* the row's facts line — wraps rather than clipping, like every other list in this product */
   .rq-facts { display:flex; align-items:center; gap:7px; flex-wrap:wrap; }
   .rq-ix { font-family: var(--cm-mono); font-size:10px; flex:none; font-variant-numeric:tabular-nums; }
@@ -4619,8 +4585,9 @@ const TIMELINE_SCRIPT = `
             (r.endTs?'':'<span class="rq-live" title="this is the ask still being answered">now</span>')+
             facts(r)+
             '<span class="rq-meta" title="'+(r.endTs?'from this ask to the next one':'still being answered — elapsed so far')+'">'+(r.endTs?'':'~')+fmtDur(r.durationMs)+'</span>'+
-            // The one row button: expand Claude's reply to this ask. Review actions live in the Overview's
-            // Prompt axis / bulk buttons once the ask is selected; this is purely "let me read the response".
+            // Two row buttons: put the ask under review (the Review view lists its changes; diffs open
+            // in the editor), and expand Claude's reply to it.
+            '<button class="rq-review'+(sel?' on':'')+'" data-rev="'+esc(r.id)+'" title="'+(sel?'Under review — open the Review view':'Review this prompt: the Review view lists its changes, diffs open in the editor')+'">'+(sel?'▸ reviewing':'review')+'</button>'+
             '<button class="rq-exp'+(open?' on':'')+'" data-exp="'+esc(r.id)+'" title="'+(open?'Hide':'Read')+' Claude’s response to this prompt">'+(open?'▾':'▸')+' response</button>'+
             '</div>'+
             // The ask itself, whole and wrapped — never clipped.
@@ -4640,6 +4607,9 @@ const TIMELINE_SCRIPT = `
     var rows=list? list.querySelectorAll('.rq-row') : [];
     for(var q=0;q<rows.length;q++){
       rows[q].addEventListener('click', function(ev){
+        // The review button first: it PICKS the ask (never toggles it off) and opens the Review view.
+        var rv=ev.target && ev.target.closest ? ev.target.closest('.rq-review') : null;
+        if(rv){ ev.stopPropagation(); SEL=rv.getAttribute('data-rev'); renderPrompts(); renderTabs(); vscode.postMessage({type:'review', id:SEL}); return; }
         // A click on the expand caret toggles the response, never the scope selection.
         var e=ev.target && ev.target.closest ? ev.target.closest('.rq-exp') : null;
         if(e){ ev.stopPropagation(); toggleResp(e.getAttribute('data-exp')); return; }
@@ -5043,6 +5013,12 @@ class TimelineViewProvider implements vscode.WebviewViewProvider {
       else if (m.type === 'select') {
         this.selected = typeof m.id === 'string' && m.id ? m.id : null;
         this.onSelect?.(this.selected);
+      } else if (m.type === 'review') {
+        // The row's Review button: pick the ask (a pick, never a toggle) and bring the Review view
+        // forward. Selection flows through the same onSelect as a row click, so nothing forks.
+        this.selected = typeof m.id === 'string' && m.id ? m.id : null;
+        this.onSelect?.(this.selected);
+        void vscode.commands.executeCommand('claudeObservatory.reviewList.focus');
       } else if (m.type === 'expand' && typeof m.id === 'string') this.fetchResponse(m.id);
       // Which tabs are on screen. A tab that has just come forward is served immediately — waiting for
       // the next store change would leave it on "Reading…" for as long as nothing happened.
@@ -5189,7 +5165,9 @@ class StatsUsageViewProvider implements vscode.WebviewViewProvider {
     // Overview summary and sessionMetrics all collapsed same-code chains, so one window showed 2,800
     // pending in the Stats panel and 1,855 for the same session two panels away. reviewEdits is ~120ms
     // cold on that session and ~1ms after, so the scoreboard can still ride every store change.
-    const log = session ? core.reviewEdits(session) : [];
+    // …minus the chains that cancel out, for the same reason: one meaning per word, everywhere.
+    const skip = session ? core.cancelledMemberIds(session) : new Set<number>();
+    const log = session ? core.reviewEdits(session).filter((r) => !skip.has(r.id)) : [];
     const c = {
       pending: log.filter((r) => r.status === 'pending').length,
       kept: log.filter((r) => r.status === 'kept').length,
@@ -5277,6 +5255,427 @@ class StatsUsageViewProvider implements vscode.WebviewViewProvider {
   private postStatsError(): void {
     if (!this.statsEverLoaded) this.view?.webview.postMessage({ type: 'statsError' });
   }
+}
+
+/**
+ * The Review view — the session's changes as a LIST, in the Traces sidebar; selecting a prompt
+ * scopes the list to that ask. Every diff opens in the editor (a row's net pair, or the whole
+ * scope concatenated via the multi-diff editor).
+ *
+ * Repeated edits to the same code arrive here already combined: each row is a review UNIT (core's
+ * collapse), its net change the unit's whole story, so a superseded intermediate state never asks
+ * for a decision. The pick has exactly one owner — `ChangeMapViewProvider` — and this view READS it
+ * through the injected getter rather than keeping a second copy a reload could disagree with.
+ *
+ * Data is built in-process (this extension bundles core); JetBrains renders the same payload from
+ * `review --prompt --json`, which is the contract that keeps the three surfaces identical.
+ */
+class ReviewViewProvider implements vscode.WebviewViewProvider {
+  constructor(private readonly getPrompt: () => string | null) {}
+  private view?: vscode.WebviewView;
+  /** Fires after a webview-initiated mutation, wired to `refreshAll` in activate — the same "one
+   *  refresh, every surface" rule every other mutation path follows. */
+  onMutate?: () => void;
+  resolveWebviewView(view: vscode.WebviewView): void {
+    this.view = view;
+    view.webview.options = { enableScripts: true };
+    view.webview.html = reviewShell();
+    view.webview.onDidReceiveMessage((m: { type?: string; id?: number; file?: string; ids?: unknown }) => {
+      if (!m) return;
+      if (m.type === 'ready') this.refresh();
+      else if (m.type === 'open' && typeof m.id === 'number') {
+        const s = currentSession();
+        if (!s) return;
+        const rec = core.reviewEdits(s).find((r) => r.id === m.id) ?? core.findRecord(s, m.id);
+        // The native diff for the row that was clicked — the collapsed record, so the two sides ARE
+        // the unit's whole change. The panel itself shows no code; the editor is the diff surface.
+        if (rec) void openDiff({ rec } as unknown as EditNode);
+      } else if (m.type === 'keep' && typeof m.id === 'number') {
+        const s = currentSession();
+        if (!s) return;
+        core.keepGroup(s, m.id);
+        this.onMutate?.();
+      } else if (m.type === 'undo' && typeof m.id === 'number') {
+        const s = currentSession();
+        if (!s) return;
+        void undoOne(s, m.id).then(() => this.onMutate?.());
+      } else if (m.type === 'keepAll') {
+        const s = currentSession();
+        if (!s) return;
+        const p = this.getPrompt();
+        // Session scope reuses the SAME command the status bar's Accept/Reject All run, so the
+        // confirmation dialogs and counts are identical wherever the gesture starts.
+        if (p) {
+          keepPrompt(s, p);
+          this.onMutate?.();
+        } else void vscode.commands.executeCommand('claudeObservatory.keepAll', s).then(() => this.onMutate?.());
+      } else if (m.type === 'undoAll') {
+        const s = currentSession();
+        if (!s) return;
+        const p = this.getPrompt();
+        if (p) void undoPrompt(s, p).then(() => this.onMutate?.());
+        else void vscode.commands.executeCommand('claudeObservatory.undoAll', s).then(() => this.onMutate?.());
+      } else if (m.type === 'openAll') {
+        const s = currentSession();
+        if (s) void this.openAllInEditor(s, this.getPrompt());
+      } else if (m.type === 'dismissCancelled' && Array.isArray(m.ids)) {
+        // They were never a decision: keeping them is how the ledger records "seen, nothing to do".
+        const s = currentSession();
+        if (!s || !m.ids.length) return;
+        const n = core.setStatusMany(s, m.ids as number[], 'kept').length;
+        vscode.window.setStatusBarMessage(`Claude Observatory: dismissed ${n} cancelled-out edit(s)`, 3000);
+        this.onMutate?.();
+      } else if (m.type === 'clearResolved') {
+        // The SAME command the Overview toolbar runs — its confirm dialog and counts included.
+        const s = currentSession();
+        if (s) void vscode.commands.executeCommand('claudeObservatory.clearResolved', s).then(() => this.onMutate?.());
+      } else if (m.type === 'redo' && typeof m.id === 'number') {
+        // Review is the ONLY review surface now — the redo verb the Edits tree used to carry lives
+        // on the greyed undone rows here. Through redoOne, NOT core.redoGroup directly: the shared
+        // path carries the dirty-buffer guard and the conflict "Force re-apply" offer.
+        const s = currentSession();
+        if (!s) return;
+        void redoOne(s, m.id).then(() => this.onMutate?.());
+      } else if ((m.type === 'keepFile' || m.type === 'undoFile') && typeof m.file === 'string') {
+        // The structural scope the tree's file nodes used to carry: act on every PENDING record in
+        // ONE file, group-safe because the id set is raw records, not display units.
+        const s = currentSession();
+        if (!s) return;
+        const file = m.file;
+        // EXACTLY the view's scope — the listed pending units' members, never a session-wide file
+        // sweep: with Review scoped to one ask, a whole-log filter would silently accept OTHER
+        // asks' pending edits in the same file, beyond what the header's count claimed.
+        const ids = this.scopedPendingIdsForFile(s, file);
+        if (!ids.length) return;
+        if (m.type === 'keepFile') {
+          const n = core.setStatusMany(s, ids, 'kept').length;
+          vscode.window.showInformationMessage(`Accepted ${n} edit(s) in ${path.basename(file)}.`);
+          this.onMutate?.();
+        } else {
+          void (async () => {
+            // Same dirty-buffer guard as every sibling revert path: reverting under an unsaved
+            // buffer means the user's next save silently re-applies the rejected content.
+            if (await blockedByDirtyBuffer(file)) return;
+            const choice = await vscode.window.showWarningMessage(
+              `Reject ${ids.length} pending edit(s) in ${path.basename(file)}?`, { modal: true }, 'Reject');
+            if (choice !== 'Reject') return;
+            const res = core.undoScope(s, { ids });
+            vscode.window.showInformationMessage(
+              `Reverted ${res.undone} edit(s)` + conflictNote(res, 'revert individually to force') + '.');
+            this.onMutate?.();
+          })();
+        }
+      }
+    });
+    view.onDidChangeVisibility(() => {
+      if (view.visible) this.refresh();
+    });
+  }
+  /**
+   * The whole scope in ONE editor view — the selected ask's units, or every unit in the session when
+   * no prompt is picked: the native multi-diff editor (`vscode.changes`) fed each unit's net blob
+   * pair — the same URIs the per-unit header opens, concatenated the way VS Code itself renders a
+   * changeset. Falls back to a single `.diff` document when the command is missing (an older fork),
+   * so the gesture never dies silently.
+   */
+  private async openAllInEditor(session: string, promptId: string | null): Promise<void> {
+    const root = workspaceRoot() ?? process.cwd();
+    const r = promptId ? (core.sessionPrompts(root, session).find((x) => x.id === promptId) ?? null) : null;
+    const byId = new Map(core.reviewEdits(session).map((rec) => [rec.id, rec]));
+    // Exactly the rows the panel lists: pending, and never a cancelled-out chain — opening "all"
+    // over units the list hides would put empty-vs-empty diffs in the tab and make its "N change(s)"
+    // title disagree with the panel beside it.
+    const cancelled = core.cancelledGroups(session);
+    const recs = (r ? r.editIds : [...byId.keys()])
+      .map((id) => byId.get(id))
+      .filter((x): x is core.EditRecord => !!x && x.status === 'pending' && !cancelled.has(x.id));
+    if (!recs.length) {
+      vscode.window.setStatusBarMessage(`Claude Observatory: nothing pending ${r ? 'from this ask' : 'in this session'}`, 3000);
+      return;
+    }
+    // The EXACT triple shape the multi-diff editor is proven to render (real file as the row
+    // resource, the same /before//after blob URIs the single diff uses). A "nicer" shared-path
+    // variant shipped once and broke the view — this shape is load-bearing; per-row actions ride in
+    // as comment-thread review bars on the after documents instead (DiffBars).
+    // Long diffs are PREVIEWED here — bounded to the budget, with what is missing named inside the
+    // row and on its bar — because the multi-diff editor caps nothing per row and one wholesale
+    // rewrite otherwise buries every other change in the ask.
+    const budget = Math.max(0, vscode.workspace.getConfiguration('claudeObservatory').get<number>('openAllPreviewLines', 50));
+    const resources = recs.map((rec) => {
+      const d = core.lineDelta(session, rec);
+      const pv = budget > 0 && d.added + d.removed > budget ? budget : undefined;
+      return [
+        vscode.Uri.file(rec.file),
+        blobUri(session, rec.beforeBlob, rec.file, 'before', rec.id, undefined, pv),
+        blobUri(session, rec.afterBlob, rec.file, 'after', rec.id, rec.beforeBlob, pv),
+      ];
+    });
+    const title = `${r ? `prompt #${r.index}` : 'session'} — ${recs.length} change(s)`;
+    try {
+      await vscode.commands.executeCommand('vscode.changes', title, resources);
+      // Rows stay EXPANDED and lean on the diff editor's own hidden-unchanged folds ("N hidden
+      // lines", with the chevron that reveals them) — the shape the reader asked for. Collapsing
+      // every row was tried and hid the changes behind a second click; the folds bound the height
+      // where there IS unchanged text, and a wholesale rewrite is honestly tall.
+    } catch {
+      const patch = recs.map((rec) => core.coloredDiff(session, rec, false)).join('\n');
+      const doc = await vscode.workspace.openTextDocument({ content: patch, language: 'diff' });
+      await vscode.window.showTextDocument(doc, { preview: false });
+    }
+  }
+
+  /** The raw member ids behind THIS view's pending units for one file — prompt-scoped when a prompt
+   *  is picked. The file headers' bulk verbs act on exactly these, so a click never reaches beyond
+   *  what the header's count displayed. */
+  private scopedPendingIdsForFile(session: string, file: string): number[] {
+    const root = workspaceRoot() ?? process.cwd();
+    const promptId = this.getPrompt();
+    const r = promptId ? (core.sessionPrompts(root, session).find((x) => x.id === promptId) ?? null) : null;
+    const byId = new Map(core.reviewEdits(session).map((rec) => [rec.id, rec]));
+    const hidden = core.cancelledMemberIds(session, 'pending');
+    const ids = (r ? r.editIds : [...byId.keys()])
+      .map((id) => byId.get(id))
+      .filter((x): x is core.EditRecord => !!x && x.status === 'pending' && x.file === file && !hidden.has(x.id))
+      .flatMap((x) => core.groupMembers(session, x.id));
+    return [...new Set(ids)];
+  }
+
+  // The panel shows NO code — it is the list (id, path, ±counts, keep/undo); every diff renders in
+  // the editor, one unit per row click or the whole scope at once. So the payload here is rows only:
+  // no patch HTML, no size budget. The DEFAULT scope is the whole session — a tab with no prompt
+  // picked loses nothing — and selecting a prompt filters it to that ask.
+  refresh(): void {
+    if (!this.view) return;
+    const session = currentSession();
+    // The badge's whole job is signaling while you are NOT looking at the view — set it BEFORE the
+    // visibility gate (cheap: reviewEdits is memoized), or an Accept All with the container closed
+    // freezes the count until the next reveal. (A webview view resolves lazily, so before its first
+    // reveal there is still no badge at all — a platform limit, noted rather than hidden.)
+    // Cancelled chains are excluded here for the same reason the list excludes them: a badge that
+    // counts rows the panel refuses to show sends you to look for work that is not there.
+    const badgeHidden = session ? core.cancelledMemberIds(session, 'pending') : new Set<number>();
+    const badgeCount = session
+      ? core.reviewEdits(session).filter((x) => x.status === 'pending' && !badgeHidden.has(x.id)).length
+      : 0;
+    this.view.badge = badgeCount ? { value: badgeCount, tooltip: `${badgeCount} pending edit(s)` } : undefined;
+    if (!this.view.visible) return;
+    if (!session) {
+      this.view.webview.postMessage({ type: 'review', data: null });
+      return;
+    }
+    const root = workspaceRoot() ?? process.cwd();
+    const promptId = this.getPrompt();
+    // The title bar's bulk verbs are SESSION-wide; the body's are scoped to the picked ask. Offering
+    // both at once put a one-click "accept everything" directly above a button reading "Keep all (7)"
+    // — same words, a different blast radius. While a prompt is picked, the scoped ones are the only
+    // ones shown, so the count on screen is the work the button acts on.
+    void vscode.commands.executeCommand('setContext', 'claudeObservatory.reviewScoped', !!promptId);
+    // A stale pick (a prompt id the session no longer answers) falls back to the session-wide list
+    // rather than a blank panel.
+    const r = promptId ? (core.sessionPrompts(root, session).find((x) => x.id === promptId) ?? null) : null;
+    const byId = new Map(core.reviewEdits(session).map((rec) => [rec.id, rec]));
+    const unitIds = r ? r.editIds : [...byId.keys()];
+    const errors: string[] = [];
+    // Chains that go nowhere (created then deleted, or put back) are not rows — they are one footer
+    // line with a Dismiss, because a row that costs a decision and shows an empty diff says nothing.
+    const cancelledMap = core.cancelledGroups(session);
+    // …and one that was already dismissed is still nothing to look at: `cancelledGroups` answers the
+    // PENDING question (what Dismiss acts on), so without this the same chains came straight back as
+    // greyed rows the moment they were kept — thousands of them on a real session.
+    const hidden = core.cancelledMemberIds(session);
+    const cancelledIds: number[] = [];
+    let cancelledUnits = 0;
+    const units = unitIds.flatMap((id) => {
+      const rec = byId.get(id);
+      if (!rec) {
+        // A display id with no record behind it is a bug upstream, not an empty unit — say so rather
+        // than posting a hole the panel would draw as "no changes" (same rule as the CLI's review).
+        errors.push(`unit #${id} is named by this prompt but has no record in the log`);
+        return [];
+      }
+      const cancelledMembers = cancelledMap.get(id);
+      if (cancelledMembers) {
+        cancelledUnits++;
+        cancelledIds.push(...cancelledMembers);
+        return [];
+      }
+      if (hidden.has(id)) return []; // a cancelled chain that has already been decided
+      const d = core.lineDelta(session, rec);
+      const members = core.groupMembers(session, id);
+      return [{
+        id,
+        rel: core.relPath(root, rec.file),
+        file: rec.file,
+        status: rec.status,
+        added: d.added,
+        removed: d.removed,
+        members: members.length,
+      }];
+    });
+    // Search-edits narrows THIS list too — with the trees gone, a search that skipped the one
+    // review surface would search everywhere except where you review. Bulk actions hide while a
+    // filter is active (they act on prompt/session scope, wider than what a filtered list shows).
+    const listed = editFilter ? units.filter((u) => u.rel.toLowerCase().includes(editFilter.toLowerCase())) : units;
+    const pending = listed.filter((u) => u.status === 'pending').length;
+    // The filter rides the payload: without it the renderer could not tell "this session has no
+    // changes" from "your search matched none of them", and its bulk buttons showed the FILTERED
+    // count while acting on the whole scope — the comment above claimed they hid, and nothing did it.
+    const filter = editFilter || '';
+    this.view.webview.postMessage({
+      type: 'review',
+      data: {
+        scoped: !!r,
+        filter,
+        index: r ? r.index : null,
+        title: r ? r.title : '',
+        pending,
+        // The FILTERED rows, matching the counts beside them: posting every unit under a narrowed
+        // "Keep all (N)" made the buttons act on more than the list showed.
+        units: listed,
+        cancelled: cancelledUnits,
+        cancelledIds,
+        errors,
+      },
+    });
+  }
+}
+
+const REVIEW_SCRIPT = `
+(function(){
+  var vscode = acquireVsCodeApi();
+  var DATA = null;
+  function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+  function glyph(st){ return st==='kept' ? '✓' : st==='undone' ? '↩' : '●'; }
+  function render(){
+    var host = document.getElementById('rv');
+    if(!DATA){
+      host.innerHTML = '<div class="rv-empty">No session is under observation yet. Once Claude works in this workspace, this panel lists the session’s changes — repeated edits to the same code read as ONE change. Click a row for its net diff, or open the whole list as one editor view; picking a prompt (the review button on its <b>Prompts</b> row, or the nav bar’s Prompt axis) scopes the list to that ask.</div>';
+      return;
+    }
+    var scope = DATA.scoped ? 'this ask produced' : 'in this session';
+    var h = (DATA.scoped
+        ? '<div class="rv-head"><span class="rv-ix">#'+esc(DATA.index)+'</span><span class="rv-title">'+esc(DATA.title)+'</span></div>'
+        : '<div class="rv-head"><span class="rv-title">Changes this session</span><span class="rv-hint">pick a prompt to scope</span></div>')+
+      (DATA.units.length && !DATA.filter?
+        '<div class="rv-acts">'+
+        '<button class="rv-btn" data-act="openAll" title="Every pending change '+scope+', concatenated into one editor view">Open all in editor</button>'+
+        (DATA.pending?
+          '<button class="rv-btn" data-act="keepAll" title="Keep every pending edit '+scope+'">Keep all ('+DATA.pending+')</button>'+
+          '<button class="rv-btn" data-act="undoAll" title="Revert every pending edit '+scope+'">Undo all</button>' : '')+
+        (DATA.units.some(function(u){return u.status!=='pending';})?
+          '<button class="rv-btn" data-act="clearResolved" title="Drop the kept/reverted records and keep the pending ones — shortens a long session">Clear resolved</button>' : '')+
+        '</div>'
+        : (DATA.units.length && DATA.filter
+            ? '<div class="rv-filter">filtered by <b>'+esc(DATA.filter)+'</b> — bulk actions act on the whole '+(DATA.scoped?'ask':'session')+', so they are hidden while a filter is on</div>'
+            : ''));
+    if(!DATA.units.length && !(DATA.errors&&DATA.errors.length)) h += '<div class="rv-empty">'+(DATA.filter
+      ? 'No changes match <b>'+esc(DATA.filter)+'</b>. Clear the search to see the rest.'
+      : 'No changes '+(DATA.scoped?'from this ask':'in this session')+' yet.')+'</div>';
+    for(var j=0;j<(DATA.errors||[]).length;j++) h += '<div class="rv-err">'+esc(DATA.errors[j])+'</div>';
+    // Grouped by FILE — the structural scope the old Edits tree carried. Rows keep log order inside
+    // their file; a PENDING unit is first-class, a resolved record renders greyed with the verb that
+    // still applies to it (kept → undo, undone → redo). This list is the ONLY review surface.
+    var groups = Object.create(null); var order = []; /* null-proto: a file named "constructor" must not collide with Object.prototype */
+    for(var i=0;i<DATA.units.length;i++){ var u0=DATA.units[i]; if(!groups[u0.rel]){ groups[u0.rel]=[]; order.push(u0.rel); } groups[u0.rel].push(u0); }
+    for(var g=0;g<order.length;g++){
+      var rel = order[g]; var us = groups[rel];
+      var pend = 0; for(var p=0;p<us.length;p++) if(us[p].status==='pending') pend++;
+      h += '<div class="rv-file"><span class="rv-frel">'+esc(rel)+'</span><span class="rv-fmeta">'+(pend?pend+' pending':'resolved')+'</span>'+
+        (pend? '<span class="rv-ubtns">'+
+          '<button class="rv-btn" data-keepfile="'+esc(us[0].file)+'" title="Keep every pending edit in this file">✓ file</button>'+
+          '<button class="rv-btn" data-undofile="'+esc(us[0].file)+'" title="Revert every pending edit in this file">↩ file</button></span>' : '')+
+        '</div>';
+      for(var k=0;k<us.length;k++){
+        var u = us[k];
+        var mem = (u.status==='pending' && u.members>1) ? '<span class="rv-mem" title="'+u.members+' edits to the same code, combined — its diff is their net change">'+u.members+' edits</span>' : '';
+        var acts = u.status==='pending'
+          ? '<span class="rv-ubtns"><button class="rv-btn" data-keep="'+u.id+'" title="Keep this change">✓</button>'+
+            '<button class="rv-btn" data-undo="'+u.id+'" title="Surgically revert this change">↩</button></span>'
+          : u.status==='undone'
+            ? '<span class="rv-ubtns"><button class="rv-btn" data-redo="'+u.id+'" title="Re-apply this reverted edit">↻</button></span>'
+            : '<span class="rv-ubtns"><button class="rv-btn" data-undo="'+u.id+'" title="Revert this kept edit">↩</button></span>';
+        h += '<div class="rv-unit'+(u.status==='pending'?'':' rv-res')+'">'+
+          '<div class="rv-uhead" data-open="'+u.id+'" title="Open this change’s diff in the editor">'+
+            '<span class="rv-st rv-'+esc(u.status)+'">'+glyph(u.status)+'</span>'+
+            '<span class="rv-id">#'+u.id+'</span>'+
+            '<span class="rv-delta"><span class="rv-add">+'+u.added+'</span> <span class="rv-del">−'+u.removed+'</span></span>'+mem+acts+
+          '</div>'+
+          '</div>';
+      }
+    }
+    // The footer: cancelled-out chains are accounted for, never silently dropped, and one click
+    // clears them all.
+    if(DATA.cancelled){
+      h += '<div class="rv-cancel">'+DATA.cancelled+' cancelled-out chain'+(DATA.cancelled===1?'':'s')+
+        ' <span class="rv-fmeta">created then deleted, or put back — nothing to review</span>'+
+        '<button class="rv-btn" data-act="dismissCancelled" title="Mark these kept — they were never a decision">Dismiss</button></div>';
+    }
+    host.innerHTML = h;
+  }
+  document.addEventListener('click', function(ev){
+    var t = ev.target && ev.target.closest ? ev.target.closest('[data-act],[data-keep],[data-undo],[data-redo],[data-keepfile],[data-undofile],[data-open]') : null;
+    if(!t) return;
+    // Buttons FIRST: they sit inside the header, and the header click means "open the diff".
+    var keep = t.getAttribute('data-keep');
+    if(keep!=null){ ev.stopPropagation(); vscode.postMessage({type:'keep', id:+keep}); return; }
+    var undo = t.getAttribute('data-undo');
+    if(undo!=null){ ev.stopPropagation(); vscode.postMessage({type:'undo', id:+undo}); return; }
+    var redo = t.getAttribute('data-redo');
+    if(redo!=null){ ev.stopPropagation(); vscode.postMessage({type:'redo', id:+redo}); return; }
+    var kf = t.getAttribute('data-keepfile');
+    if(kf!=null){ ev.stopPropagation(); vscode.postMessage({type:'keepFile', file:kf}); return; }
+    var uf = t.getAttribute('data-undofile');
+    if(uf!=null){ ev.stopPropagation(); vscode.postMessage({type:'undoFile', file:uf}); return; }
+    var act = t.getAttribute('data-act');
+    if(act === 'dismissCancelled'){ vscode.postMessage({type:act, ids:(DATA&&DATA.cancelledIds)||[]}); return; }
+    if(act){ vscode.postMessage({type:act}); return; }
+    var open = t.getAttribute('data-open');
+    if(open!=null) vscode.postMessage({type:'open', id:+open});
+  });
+  window.addEventListener('message', function(ev){
+    var m = ev.data || {};
+    if(m.type==='review'){ DATA = m.data; render(); }
+  });
+  render();
+  vscode.postMessage({type:'ready'});
+})();
+`;
+
+function reviewShell(): string {
+  const nonce = getNonce();
+  const csp = `default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';`;
+  const style = `<style>
+  body { margin:0; padding:8px 10px 12px; font-family: var(--vscode-font-family); font-size:11.5px; color: var(--vscode-foreground); }
+  .rv-filter { padding:4px 2px 10px; color: var(--vscode-descriptionForeground); font-size:11px; }
+  .rv-empty { padding:10px 2px; color: var(--vscode-descriptionForeground); line-height:1.55; }
+  .rv-head { display:flex; align-items:baseline; gap:7px; margin-bottom:6px; }
+  .rv-ix { font-family: var(--vscode-editor-font-family, monospace); color: var(--vscode-charts-blue, #4c8bf5); font-weight:600; }
+  .rv-title { white-space:pre-wrap; overflow-wrap:anywhere; }
+  .rv-hint { color: var(--vscode-descriptionForeground); font-size:10px; white-space:nowrap; }
+  .rv-acts { display:flex; gap:6px; align-items:center; margin-bottom:10px; }
+  .rv-btn { background: var(--vscode-button-secondaryBackground, rgba(127,127,127,0.15)); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); border:1px solid var(--vscode-widget-border, rgba(127,127,127,0.25)); border-radius:4px; padding:2px 8px; font-size:10.5px; font-family:inherit; cursor:pointer; }
+  .rv-btn:hover { background: var(--vscode-button-secondaryHoverBackground, rgba(127,127,127,0.25)); }
+  .rv-unit { margin-bottom:5px; }
+  .rv-uhead { display:flex; align-items:center; gap:6px; padding:3px 4px; border:1px solid var(--vscode-widget-border, rgba(127,127,127,0.25)); border-radius:5px; background: var(--vscode-editorWidget-background, rgba(127,127,127,0.07)); cursor:pointer; }
+  .rv-uhead:hover { background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.12)); }
+  .rv-st.rv-pending { color: var(--vscode-charts-yellow, #d9a441); }
+  .rv-st.rv-kept { color: var(--vscode-charts-green, #3fb950); }
+  .rv-st.rv-undone { color: var(--vscode-descriptionForeground); }
+  .rv-id { font-family: var(--vscode-editor-font-family, monospace); color: var(--vscode-charts-blue, #4c8bf5); }
+  .rv-delta { font-family: var(--vscode-editor-font-family, monospace); font-size:10.5px; }
+  .rv-add { color: var(--vscode-gitDecoration-addedResourceForeground); }
+  .rv-del { color: var(--vscode-gitDecoration-deletedResourceForeground); }
+  .rv-mem { font-size:9.5px; color: var(--vscode-descriptionForeground); border:1px solid var(--vscode-widget-border, rgba(127,127,127,0.25)); border-radius:99px; padding:0 6px; white-space:nowrap; }
+  .rv-ubtns { display:flex; gap:3px; }
+  .rv-err { color: var(--vscode-errorForeground, #f14c4c); font-size:10.5px; padding:2px 0 6px; }
+  .rv-file { display:flex; align-items:center; gap:7px; margin:10px 0 4px; padding:2px 0; border-bottom:1px solid var(--vscode-widget-border, rgba(127,127,127,0.25)); }
+  .rv-frel { font-weight:600; overflow-wrap:anywhere; }
+  .rv-fmeta { color: var(--vscode-descriptionForeground); font-size:10px; white-space:nowrap; flex:1; }
+  .rv-res { opacity:.55; }
+  .rv-cancel { display:flex; align-items:center; gap:7px; margin-top:12px; padding-top:8px; border-top:1px solid var(--vscode-widget-border, rgba(127,127,127,0.25)); color: var(--vscode-descriptionForeground); font-size:10.5px; }
+  </style>`;
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="${csp}">${style}</head>
+  <body><div id="rv"></div><script nonce="${nonce}">${REVIEW_SCRIPT}</script></body></html>`;
 }
 
 /** The combined Overview panel (0.8.0 round 3): shells out to BOTH `multitask --json` (the left-nav
@@ -5441,6 +5840,7 @@ class ChangeMapViewProvider implements vscode.WebviewViewProvider {
             const conflicts = Number(r.conflicts ?? 0) || 0;
             const errors = Number(r.errors ?? 0) || 0;
             const first = typeof r.firstError === 'string' ? r.firstError : '';
+            const firstC = typeof r.firstConflict === 'string' ? r.firstConflict.split('. ')[0] : '';
             if (data === null) {
               vscode.window.showErrorMessage(`Could not ${act} ${name} — is the claude-observatory CLI installed?`);
             } else if (conflicts || errors) {
@@ -5448,7 +5848,7 @@ class ChangeMapViewProvider implements vscode.WebviewViewProvider {
               // has to act on that rather than catch it in three seconds of peripheral vision.
               void vscode.window.showWarningMessage(
                 `Claude Observatory: ${act === 'keep' ? 'kept' : 'undid'} ${n} edit(s) in ${name}` +
-                  (conflicts ? ` · ${conflicts} conflict(s) left — revert those individually to force` : '') +
+                  (conflicts ? ` · ${conflicts} conflict(s) left — revert those individually to force${firstC ? ` — ${firstC}` : ''}` : '') +
                   (errors ? ` · ${errors} refused${first ? ` — ${first}` : ''}` : '')
               );
             } else {
@@ -7594,13 +7994,9 @@ export function activate(context: vscode.ExtensionContext): void {
     })();
     return; // activate for real on the next load — this window stays with the already-active build
   }
-  const editsProvider = new EditsProvider('edits');
-  const diffsProvider = new EditsProvider('diffs');
-  // `showCollapseAll` puts VS Code's native Collapse-All button in each tree's title bar — the same one
-  // the file Explorer has — so a deep folder→file→class Edits tree (or the grouped Actions/Observations
-  // trees) can be folded to its top level in one click. Harmless on the flat File History list.
-  const editsView = vscode.window.createTreeView('claudeObservatory.edits', { treeDataProvider: editsProvider, showCollapseAll: true });
-  const diffsView = vscode.window.createTreeView('claudeObservatory.diffs', { treeDataProvider: diffsProvider, showCollapseAll: true });
+  // 0.9.4: the Edits and Diffs trees are GONE — Review is the one review surface (greyed resolved
+  // rows carry redo/undo; file headers carry the structural scopes). The raw records stay in the
+  // backend; File History still reads them per file.
   // 0.10.0: Observations and Actions are no longer views of their own. VS Code stacks panel views under
   // collapsible headers and offers no tab strip, so the three timeline surfaces became ONE webview with
   // real tabs — these two providers still own the feeds it renders.
@@ -7619,8 +8015,12 @@ export function activate(context: vscode.ExtensionContext): void {
   // The Timeline window (Prompts · Actions · Observations, one webview with tabs): picking an ask on the
   // Prompts tab scopes the Overview beside it.
   const promptsProvider = new TimelineViewProvider(insightsProvider, actionsProvider);
+  // Review reads the pick through the owner's getter — one owner, no second copy to disagree after a
+  // reload. It refreshes on every pick from EITHER path (the list click below, pickPrompt beside it).
+  const reviewProvider = new ReviewViewProvider(() => changeMapProvider.getPrompt());
   promptsProvider.onSelect = (id) => {
     changeMapProvider.setPrompt(id);
+    reviewProvider.refresh();
     updateStatusItem(); // the nav bar's Prompt counter must move with the click, not the next refresh
   };
   /**
@@ -7633,10 +8033,13 @@ export function activate(context: vscode.ExtensionContext): void {
   const pickPrompt = (id: string | null) => {
     changeMapProvider.setPrompt(id);
     promptsProvider.setSelection(id);
+    reviewProvider.refresh();
   };
   const tourPanel = new DemoTourPanel(context.globalState);
-  editsProvider.view = editsView; // badge lives on the primary view
-  editsProvider.updateBadge();
+  // Per-diff review bars in every claude-edit diff (multi-diff rows included) — synced to the
+  // visible editors, initial sweep included.
+  const diffBars = new DiffBars();
+  diffBars.sync();
 
   // --- demo mode + the guided tour (0.8.9) ---------------------------------------------------------
   // The steps are core's, so this renders the same script the CLI prints and the JetBrains plugin
@@ -7834,8 +8237,6 @@ export function activate(context: vscode.ExtensionContext): void {
   /** The tree views a tour step can bring forward. `actions` and `observations` are NOT here: they are
    *  tabs of the Timeline webview now, brought forward by focusing it and naming the tab. */
   const TOUR_TREES: Record<string, unknown> = {
-    edits: editsView,
-    diffs: diffsView,
     fileHistory: fileHistoryView,
   };
   /** The tour views that are Timeline TABS. Core's anchor/view set is closed and not ours to extend —
@@ -7886,6 +8287,17 @@ export function activate(context: vscode.ExtensionContext): void {
       // forward instead of revealing a view that no longer exists.
       await vscode.commands.executeCommand('claudeObservatory.timeline.focus');
       promptsProvider.setTab(TOUR_TIMELINE_TABS[step.view]);
+    } else if (step.view === 'review') {
+      // The Review view narrates the PICKED ask. The step lands right after prompt-scope invited a
+      // pick, but a reader who skipped it (or autoplay) must not face the empty state mid-tour — pick
+      // the demo's second ask, the one prompt-scope talks about, exactly as the review button would.
+      if (!changeMapProvider.getPrompt()) {
+        const s = currentSession();
+        const root = workspaceRoot();
+        const second = s && root ? core.promptWindows(root, s)[1] : undefined;
+        if (second) pickPrompt(second.id);
+      }
+      await vscode.commands.executeCommand('claudeObservatory.reviewList.focus');
     } else if (step.view === 'stats') {
       await vscode.commands.executeCommand(`claudeObservatory.${step.view}.focus`);
     } else if (step.view === 'editor') {
@@ -8095,7 +8507,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const undoEditBtn = mkStatusBtn('$(discard) Undo', 'Claude Observatory: undo this edit', 'claudeObservatory.navUndo', 94, 'charts.red');
   // File group (Overview G3) — the pending-file axis + per-file Accept/Reject.
   const filePrevBtn = mkStatusBtn('$(chevron-left)', 'Claude Observatory: previous changed file', 'claudeObservatory.navFilePrev', 92, 'charts.blue');
-  const fileCountBtn = mkStatusBtn('', 'Claude Observatory: files with pending edits — click to open the Edits view', 'claudeObservatory.edits.focus', 91);
+  const fileCountBtn = mkStatusBtn('', 'Claude Observatory: files with pending edits — click to open the Review view', 'claudeObservatory.reviewList.focus', 91);
   const fileNextBtn = mkStatusBtn('$(chevron-right)', 'Claude Observatory: next changed file', 'claudeObservatory.navFileNext', 90, 'charts.blue');
   const acceptFileBtn = mkStatusBtn('$(check-all) Accept File', 'Claude Observatory: accept every pending edit in this file', 'claudeObservatory.keepOpenFile', 89, 'charts.green');
   const rejectFileBtn = mkStatusBtn('$(close-all) Reject File', 'Claude Observatory: reject (revert) every pending edit in this file', 'claudeObservatory.undoOpenFile', 88, 'charts.red');
@@ -8140,7 +8552,8 @@ export function activate(context: vscode.ExtensionContext): void {
   const updateStatusItem = () => {
     const session = currentSession();
     // DISPLAY units — the same collapse the Overview and the Sessions rows use. See `cachedReview`.
-    const log = session ? cachedReview(session) : [];
+    const skip = session ? core.cancelledMemberIds(session) : new Set<number>();
+    const log = session ? cachedReview(session).filter((r) => !skip.has(r.id)) : [];
     const pendingRecs = log.filter((r) => r.status === 'pending');
     const pending = pendingRecs.length;
     const kept = log.filter((r) => r.status === 'kept').length;
@@ -8260,7 +8673,11 @@ export function activate(context: vscode.ExtensionContext): void {
   const syncActiveFileContext = () => {
     const s = currentSession();
     const file = activeEditorFile();
-    const has = Boolean(s && file && cachedLog(s).some((r) => r.status === 'pending' && r.file === file));
+    // Through `pendingByFile`, not the raw log: a file whose only pending records sit in a cancelled
+    // chain shows no rows, no gutter mark and an empty Diff counter — but this key lit the whole
+    // per-file toolbar for it, and its Prev/Next/Keep/Undo verbs then returned silently because the
+    // nav cursor had nothing to point at. An enabled control that does nothing is the worst of both.
+    const has = Boolean(s && file && (pendingByFile(s).get(file) ?? []).length > 0);
     void vscode.commands.executeCommand('setContext', 'claudeObservatory.activeFileHasPending', has);
   };
   updateStatusItem(); // visible from activation, not just after the first store event
@@ -8285,7 +8702,14 @@ export function activate(context: vscode.ExtensionContext): void {
    */
   const pickNextPending = (dir: 1 | -1, fromId?: number): core.EditRecord | undefined => {
     const s = currentSession();
-    let pending = s ? cachedLog(s).filter((r) => r.status === 'pending').sort((a, b) => a.id - b.id) : [];
+    // DISPLAY units, not raw records — the walk visits one stop per review decision, exactly what
+    // the terminal's rows and the JetBrains stepPendingEdit walk. Stepping the raw log visited every
+    // member of every collapsed unit individually (3,001 stops where the surfaces show 151).
+    // A cancelled chain is not a stop: the loop would park on an empty diff with nothing to decide.
+    const skip = s ? core.cancelledMemberIds(s, 'pending') : new Set<number>();
+    let pending = s
+      ? core.reviewEdits(s).filter((r) => r.status === 'pending' && !skip.has(r.id)).sort((a, b) => a.id - b.id)
+      : [];
     if (reviewScopeIds) {
       const inScope = new Set(reviewScopeIds);
       const scoped = pending.filter((r) => inScope.has(r.id));
@@ -8510,9 +8934,6 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }
     void vscode.commands.executeCommand('setContext', 'claudeObservatory.demoPresent', demoOnDisk);
-    editsView.message = prior
-      ? `Session ${session ? session.slice(0, 8) : '—'} is fresh; last session ${prior.id.slice(0, 8)} has ${prior.edits} tracked edit(s).`
-      : undefined;
   };
   updateEmptyStateContext(); // correct welcome variant from activation, matching updateStatusItem above
 
@@ -8540,8 +8961,6 @@ export function activate(context: vscode.ExtensionContext): void {
     // the verdict a wait step is looking for.
     checkTourWatch();
     updateEmptyStateContext();
-    editsProvider.refresh();
-    diffsProvider.refresh();
     // The two feeds the Timeline window renders. Dropped HERE as well as in that window's own refresh:
     // this is the one place that knows the store changed, and the Actions cycle carries time-derived
     // "active" flags that must never survive a change. Both drops are free and idempotent.
@@ -8550,12 +8969,17 @@ export function activate(context: vscode.ExtensionContext): void {
     fileHistoryProvider.refresh();
     statsProvider.refresh();
     promptsProvider.refresh(force);
+    reviewProvider.refresh();
     changeMapProvider.refresh(force);
     statusDecorations.refresh();
     updateStatusItem();
     refreshInline();
   };
   forceRefreshAll = () => refreshAll(true); // the bulk verbs run outside this closure
+  // FORCED, like every other mutation path (withSession/withBulkScope force too): the Overview drops
+  // unforced refreshes while a spawn is in flight, so an unforced tick here could leave it painting
+  // pre-mutation counts with nothing to correct them.
+  reviewProvider.onMutate = () => refreshAll(true);
 
 
   // --- nav bar handlers (drive the status-bar review toolbar built above) ---
@@ -8620,8 +9044,6 @@ export function activate(context: vscode.ExtensionContext): void {
     updateStatusItem();
   };
   context.subscriptions.push(
-    editsView,
-    diffsView,
     fileHistoryView,
     statusItem,
     inlineDecoration,
@@ -8631,9 +9053,12 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.languages.registerCodeLensProvider({ scheme: 'file' }, inlineLens),
     vscode.window.registerWebviewViewProvider('claudeObservatory.stats', statsProvider),
     vscode.window.registerWebviewViewProvider('claudeObservatory.timeline', promptsProvider),
+    vscode.window.registerWebviewViewProvider('claudeObservatory.reviewList', reviewProvider),
     vscode.window.registerWebviewViewProvider('claudeObservatory.changemap', changeMapProvider),
     vscode.window.registerFileDecorationProvider(statusDecorations),
     vscode.workspace.registerTextDocumentContentProvider(SCHEME, new BlobContentProvider()),
+    diffBars,
+    vscode.window.onDidChangeVisibleTextEditors(() => diffBars.sync()),
     vscode.workspace.registerTextDocumentContentProvider(MD_SCHEME, obsMd),
     editPeek
   );
@@ -8648,7 +9073,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // Refresh on panel-visible / window-focus (covers new sessions the watcher may miss), on active
   // editor change, and on buffer edits (debounced) so decorations track the live buffer.
-  for (const v of [editsView, diffsView, fileHistoryView]) {
+  for (const v of [fileHistoryView]) {
     v.onDidChangeVisibility((e) => e.visible && refreshAll());
   }
   let debounce: ReturnType<typeof setTimeout> | undefined;
@@ -8691,7 +9116,13 @@ export function activate(context: vscode.ExtensionContext): void {
     // Stats navbar: jump to the FIRST (oldest) pending edit, and filter edits from the Stats search box.
     vscode.commands.registerCommand('claudeObservatory.reviewFirst', async () => {
       const s = currentSession();
-      const pending = s ? cachedLog(s).filter((r) => r.status === 'pending').sort((a, b) => a.id - b.id) : [];
+      // Same set the review loop walks (`pickNextPending`) — off the raw log these two entry points
+      // answered differently for one session: "review first" opened a cancelled chain that "review
+      // next" correctly skipped.
+      const skipFirst = s ? core.cancelledMemberIds(s, 'pending') : new Set<number>();
+      const pending = s
+        ? cachedLog(s).filter((r) => r.status === 'pending' && !skipFirst.has(r.id)).sort((a, b) => a.id - b.id)
+        : [];
       if (!pending.length) {
         vscode.window.setStatusBarMessage('Claude Observatory: no pending edits to review 🎉', 3000);
         return;
@@ -8866,7 +9297,7 @@ export function activate(context: vscode.ExtensionContext): void {
       const doc = await vscode.workspace.openTextDocument({ content: res.stdout, language: 'markdown' });
       await vscode.window.showTextDocument(doc);
     }),
-    // Search: filter the Edits/Diffs trees by file path. Empty input clears the filter.
+    // Search: filter the Review list by file path (and the Overview's ledger). Empty input clears it.
     vscode.commands.registerCommand('claudeObservatory.searchEdits', async () => {
       const q = await vscode.window.showInputBox({
         title: 'Search edits',
@@ -9611,19 +10042,29 @@ export function activate(context: vscode.ExtensionContext): void {
         if (opts?.advance !== false) await advanceAfterResolve(s, id);
       })()
     ),
-    // Diff title-bar actions: the editor/title command receives the diff's resource URI, which carries
-    // the edit id in its query — resolve it, then reuse the id-based keep/undo/chat commands.
-    vscode.commands.registerCommand('claudeObservatory.diffKeep', (uri?: vscode.Uri) => {
-      const id = editIdFromUri(uri);
+    // Keep/Undo/Chat for a claude-edit diff, invoked from the single diff's title bar or from a
+    // per-diff review bar (a comment-thread title command receives its THREAD, which carries the
+    // after URI). Argument shapes vary by invoker — resolve every known shape to the URI whose
+    // query carries our edit id, and no-op on anything else.
+    vscode.commands.registerCommand('claudeObservatory.diffKeep', (arg?: unknown) => {
+      const id = editIdFromUri(diffArgUri(arg));
       if (id != null) void vscode.commands.executeCommand('claudeObservatory.inlineKeep', id, { advance: false });
     }),
-    vscode.commands.registerCommand('claudeObservatory.diffUndo', (uri?: vscode.Uri) => {
-      const id = editIdFromUri(uri);
+    vscode.commands.registerCommand('claudeObservatory.diffUndo', (arg?: unknown) => {
+      const id = editIdFromUri(diffArgUri(arg));
       if (id != null) void vscode.commands.executeCommand('claudeObservatory.inlineUndo', id, { advance: false });
     }),
-    vscode.commands.registerCommand('claudeObservatory.diffChat', (uri?: vscode.Uri) => {
-      const id = editIdFromUri(uri);
+    vscode.commands.registerCommand('claudeObservatory.diffChat', (arg?: unknown) => {
+      const id = editIdFromUri(diffArgUri(arg));
       if (id != null) void vscode.commands.executeCommand('claudeObservatory.chatEdit', id);
+    }),
+    // The whole diff behind a previewed row — the ordinary single-diff editor, unbounded.
+    vscode.commands.registerCommand('claudeObservatory.diffOpenFull', (arg?: unknown) => {
+      const id = editIdFromUri(diffArgUri(arg));
+      const s = currentSession();
+      if (id == null || !s) return;
+      const rec = core.reviewEdits(s).find((r) => r.id === id) ?? core.findRecord(s, id);
+      if (rec) void openDiff({ rec } as unknown as EditNode);
     }),
     vscode.commands.registerCommand('claudeObservatory.toggleInline', async () => {
       const cfg = vscode.workspace.getConfiguration('claudeObservatory');
@@ -9646,16 +10087,8 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
     // (clearFile removed in 0.8.3 — the session-wide Clear Resolved covers it; this was the last
     // leftover wiring, JetBrains never had it.)
-    // Folder-row inline actions: accept / revert / clear every edit at-or-beneath the folder.
-    vscode.commands.registerCommand('claudeObservatory.keepFolder', (n: FolderNode) =>
-      withSession((s) => keepEditsUnder(s, n.path, n.label))()
-    ),
-    vscode.commands.registerCommand('claudeObservatory.undoFolder', (n: FolderNode) =>
-      withSession((s) => undoEditsUnder(s, n.path, n.label))()
-    ),
-    vscode.commands.registerCommand('claudeObservatory.clearFolder', (n: FolderNode) =>
-      withSession((s) => clearResolvedUnder(s, n.path, n.label))()
-    ),
+    // N15: the folder-row actions went with the Edits tree (their only invokers were its context
+    // menus); folder-scoped ops live on the Overview's change map.
     // Accept / revert every pending edit in the ACTIVE editor's file — what the per-file surfaces use.
     vscode.commands.registerCommand('claudeObservatory.keepOpenFile', () =>
       withSession((s) => {
@@ -9800,6 +10233,10 @@ export function activate(context: vscode.ExtensionContext): void {
   };
   context.subscriptions.push(
     vscode.commands.registerCommand('claudeObservatory.showPrompts', () => showTimelineTab('prompts')),
+    // Reveal the Review view. With no ask picked it opens on its empty state, which says how to pick one.
+    vscode.commands.registerCommand('claudeObservatory.showReview', () =>
+      vscode.commands.executeCommand('claudeObservatory.reviewList.focus')
+    ),
     vscode.commands.registerCommand('claudeObservatory.showActions', () => showTimelineTab('actions')),
     vscode.commands.registerCommand('claudeObservatory.showObservations', () => showTimelineTab('observations'))
   );

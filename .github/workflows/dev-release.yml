@@ -41,6 +41,19 @@ jobs:
           node scripts/version.mjs "$VER"
           echo "VER=$VER" >> "$GITHUB_ENV"
           echo "stamped $VER"
+      # THE ROLLING CHANNEL MUST ONLY EVER GO FORWARD.
+      #
+      # `dev`'s committed version is the next stable TARGET, and a promote can silently pull it
+      # backwards: `main` carries the release it just cut, and because main contains dev after the
+      # promote, `git merge main` into dev is a fast-forward — no conflict, no warning, and dev's
+      # 0.10.0 quietly becomes 0.9.3. Nothing downstream notices. `version:check` still passes,
+      # because it only proves the files agree with EACH OTHER, and they agree perfectly at the wrong
+      # number. The first symptom would be this workflow publishing `0.9.3-dev.N` over a live
+      # `0.10.0-dev.M`, which strands every pre-release install above the version line — auto-update
+      # compares and finds nothing newer, so it simply goes quiet.
+      #
+      # Checked against what is actually PUBLISHED rather than against a constant, and with core's own
+      # comparator — the one that already knows `0.10.0-dev.4 < 0.10.0` and is unit-tested for it.
       - run: npm ci
       - run: npm test
       - run: bash test/e2e.sh
@@ -52,6 +65,33 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - run: ./gradlew buildPlugin --console=plain
         working-directory: packages/jetbrains
+      # Placed here, not beside the stamp: it uses core's own comparator, and core has to be BUILT
+      # first — the first version of this ran before `npm ci` and died on a missing dist. Late is fine:
+      # the only thing it has to beat is the publish below, and it fails CLOSED.
+      - name: The rolling version must outrank the one already published
+        run: |
+          node -e '
+            const { execSync } = require("child_process");
+            const { isNewer } = require("./packages/core/dist/index.js");
+            const want = process.env.VER;
+            let live = "";
+            try {
+              const rel = JSON.parse(execSync("gh release view dev-latest --json name -q .name", { encoding: "utf8" }));
+              live = String(rel || "");
+            } catch { live = execSync("gh release view dev-latest --json name -q .name || true", { encoding: "utf8" }).trim(); }
+            const m = live.match(/\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?/);
+            if (!m) { console.log("no published pre-release to compare against — first run, allowed"); process.exit(0); }
+            const published = m[0];
+            if (!isNewer(want, published)) {
+              console.error(`::error::${want} does not outrank the published pre-release ${published}. ` +
+                `dev'"'"'s committed version has gone BACKWARDS — almost certainly a promote merged into dev ` +
+                `without re-stamping. Fix: node scripts/version.mjs <next target> on dev.`);
+              process.exit(1);
+            }
+            console.log(`${want} outranks the published ${published}`);
+          '
+        env:
+          GH_TOKEN: ${{ github.token }}
       - name: Refresh the rolling pre-release
         env:
           GH_TOKEN: ${{ github.token }}

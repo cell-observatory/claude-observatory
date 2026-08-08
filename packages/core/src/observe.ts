@@ -12,7 +12,7 @@ import { projectDir, resolveSessionId, listWorkspaces, bridgeInfo } from './sess
 import { claudeConfigDir } from './paths';
 import { cachedAnalysis } from './analyze';
 import { cachedByFiles, readLines } from './fscache';
-import { reviewEdits } from './groups';
+import { reviewEdits, visibleEdits } from './groups';
 // NOTE: metrics.ts imports `findTranscript` from this module, so this pair is CIRCULAR. It is safe only
 // because both directions are used at CALL time, never at module-init time — nothing here runs during
 // load. `test/core.test.js` requires each module first in a child process to keep that true.
@@ -516,14 +516,16 @@ export function sessionMeta(cwd: string, reviewing?: string | null): SessionMeta
     let model = '';
     let effort = '';
     try {
-      const u = sessionUsage(cwd, id);
+      // Cost this session from ITS OWN transcript, not from a lookup rooted at the caller's cwd —
+      // `transcript` above is the exact file, found by scanning every workspace.
+      const u = sessionUsage(cwd, id, transcript);
       tokens = u.total;
       // Cache traffic is COUNTED SEPARATELY, never folded into the headline. The two reconcile by
       // construction — `tokens + cached` is exactly the old blended figure — so nothing is hidden,
       // it is just no longer the case that 98.8% of "tokens" is the same context restated.
       cached = u.cacheRead + u.cacheCreation;
       durationMs = u.durationMs;
-      const v = sessionVitals(cwd, id);
+      const v = sessionVitals(cwd, id, transcript);
       model = v.model?.label ?? ''; // the display label ('Opus 4.8'), so renderers stay thin
       effort = v.effort?.level ?? '';
     } catch {
@@ -582,9 +584,10 @@ export interface SessionCounts {
   removed: number;
 }
 
-// 5: counts are over DISPLAY units (same-code collapsed), matching the change map; 4: line deltas moved
-// to the per-blob-pair cache (deltaCache); 2: added `files`.
-const COUNTS_SIDECAR_VERSION = 5;
+// 6: chains that cancel out are not counted (a file created then deleted is not an edit to review);
+// 5: counts are over DISPLAY units (same-code collapsed), matching the change map; 4: line deltas
+// moved to the per-blob-pair cache (deltaCache); 2: added `files`.
+const COUNTS_SIDECAR_VERSION = 6;
 
 /**
  * A session's captured-edit counts, cached in the same sidecar the title uses and keyed to the LOG's
@@ -621,7 +624,9 @@ export function sessionCounts(sessionId: string): SessionCounts {
   // change map draws. Counting raw records here made the Sessions row and the Overview's summary bar
   // disagree about the same session under the same word: 5,198 pending against 3,609, and +939,803
   // against +355,905, because 1,589 records collapsed away. One product, one meaning for "pending".
-  const log = reviewEdits(sessionId);
+  // …and not the chains that CANCEL OUT: a file created and then deleted is not an edit anybody can
+  // review, and the review list, the change map and this row have to mean the same thing by "pending".
+  const log = visibleEdits(sessionId);
   const counts = { ...empty };
   const files = new Set<string>();
   for (const r of log) {
@@ -1242,7 +1247,9 @@ const HEURISTIC_STEP_CAP = 8;
 
 /** Session-level heuristic next-steps (zero-token). */
 export function heuristicSuggestions(sessionId: string): string[] {
-  const log = reviewEdits(sessionId); // DISPLAY units, so this agrees with the panels it advises about
+  // DISPLAY units minus the chains that cancel out, so this agrees with the panels it advises about
+  // — telling someone to review 652 edits that no panel will show them is worse than saying nothing.
+  const log = visibleEdits(sessionId);
   const out: string[] = [];
   const pending = log.filter((r) => r.status === 'pending').length;
   if (pending) out.push(`${pending} edit(s) still pending review — Accept or Revert them.`);

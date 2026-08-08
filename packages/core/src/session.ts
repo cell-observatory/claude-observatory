@@ -85,6 +85,43 @@ export interface WorkspaceDir {
   dir: string;
 }
 
+/**
+ * The workspace a session was launched in, found from the session id ALONE.
+ *
+ * `findTranscript` walks UP from a cwd, which answers "is this session mine?" and cannot answer "where
+ * does this session live?" — from anywhere outside the workspace it returns null. That gap is what
+ * emptied the terminal's Fleet, Prompts and session titles at once: all three are transcript-derived,
+ * so a dashboard opened outside the repo (or pointed at another workspace's session by the picker) had
+ * no transcript to read, while Traces kept working because it reads the store by id. One cause, three
+ * symptoms, and no error anywhere — the panes just rendered empty.
+ *
+ * Scans the project dirs, which is a readdir over a directory that already exists for the picker, and
+ * takes the cwd from the transcript's own first line: append-only, so it is a fact about the session
+ * rather than an inference. Null when nothing on this machine holds it — a remote session, or a
+ * transcript that has not been written yet — and every caller must treat that as "use the default".
+ */
+export function sessionWorkspace(sessionId: string): string | null {
+  if (!sessionId) return null;
+  const base = path.join(claudeConfigDir(), 'projects');
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(base);
+  } catch {
+    return null;
+  }
+  for (const slug of names) {
+    const p = path.join(base, slug, `${sessionId}.jsonl`);
+    try {
+      if (!fs.statSync(p).isFile()) continue;
+    } catch {
+      continue;
+    }
+    const first = firstCwdLine(p);
+    if (first?.cwd) return first.cwd;
+  }
+  return null;
+}
+
 export function listWorkspaces(): WorkspaceDir[] {
   const base = path.join(claudeConfigDir(), 'projects');
   let names: string[] = [];
@@ -175,6 +212,57 @@ export function resolveSessionId(cwd: string): string | null {
     if (parent === dir) return null;
     dir = parent;
   }
+}
+
+/**
+ * The newest session on this MACHINE, across every workspace. Same demotion rule as
+ * [newestSessionIn]: a transcript with no assistant record yet loses to one that has some. The
+ * assistant probe reads file heads, so it is bounded to the newest few dozen candidates.
+ */
+export function newestSessionGlobal(): string | null {
+  const base = path.join(claudeConfigDir(), 'projects');
+  let slugs: string[];
+  try {
+    slugs = fs.readdirSync(base);
+  } catch {
+    return null;
+  }
+  const candidates: { id: string; mtime: number; file: string }[] = [];
+  for (const slug of slugs) {
+    const dir = path.join(base, slug);
+    let entries: string[];
+    try {
+      entries = fs.readdirSync(dir);
+    } catch {
+      continue;
+    }
+    for (const name of entries) {
+      if (!name.endsWith('.jsonl')) continue;
+      const file = path.join(dir, name);
+      try {
+        candidates.push({ id: name.slice(0, -'.jsonl'.length), mtime: fs.statSync(file).mtimeMs, file });
+      } catch {
+        /* raced away */
+      }
+    }
+  }
+  if (!candidates.length) return null;
+  candidates.sort((a, b) => b.mtime - a.mtime);
+  for (const c of candidates.slice(0, 25)) {
+    if (hasAssistantRecord(c.file)) return c.id;
+  }
+  return candidates[0].id;
+}
+
+/**
+ * The terminal front door's DEFAULT session. Inside a repo, the workspace rules: that repo's newest
+ * session, exactly as every CLI verb resolves. OUTSIDE any repo — a shell at $HOME, the Desktop —
+ * there is no workspace to scope to, and the walk-up used to land on whatever stale session was
+ * once launched from an ancestor directory; "open the observatory" from nowhere means "show me what
+ * Claude is doing NOW", so the machine-wide newest wins there.
+ */
+export function defaultTuiSession(cwd: string): string | null {
+  return repoRoot(cwd) ? resolveSessionId(cwd) : newestSessionGlobal() ?? resolveSessionId(cwd);
 }
 
 /**
