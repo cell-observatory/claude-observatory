@@ -2,7 +2,7 @@
  * Presentation helpers shared by front-ends: per-edit line deltas and a colored unified diff.
  * Uses the `diff` package, so it is loaded only by review commands — never by the capture hook.
  */
-import { createPatch, diffLines } from 'diff';
+import { createPatch, diffLines, structuredPatch } from 'diff';
 import { EditRecord, blobText as storeBlobText, hasBlob } from './store';
 
 const RESET = '\x1b[0m';
@@ -112,6 +112,93 @@ export function friendlyModel(m: string): string {
   const fam = mm[1].charAt(0).toUpperCase() + mm[1].slice(1);
   const ver = mm[3] ? `${mm[2]}.${mm[3]}` : mm[2];
   return `${fam} ${ver}${/\[1m\]|-1m\b/i.test(m) ? ' (1M)' : ''}`;
+}
+
+export interface DiffPreview {
+  /** The windowed pair — a real diff of the part it shows, aligned by construction. */
+  before: string;
+  after: string;
+  shownHunks: number;
+  totalHunks: number;
+  /** Changed lines left out. Zero means the preview IS the whole diff. */
+  omittedLines: number;
+}
+
+/**
+ * A BOUNDED window on one edit's diff: whole hunks until `maxLines` of changed lines, rebuilt into a
+ * before/after pair.
+ *
+ * A unit that rewrote thousands of lines renders as a wall in any viewer that stacks diffs (VS
+ * Code's multi-diff editor caps nothing per row), so the only lever left is the content handed to
+ * it. Whole hunks are what keeps this honest: both sides are rebuilt from the same hunk lines, so
+ * the window is a faithful diff of the part it shows rather than two independently truncated files
+ * whose alignment is a coincidence. What is left out is NAMED — the caller renders `omittedLines`
+ * beside the row, and one trailing marker line, identical on both sides so it can only ever read as
+ * unchanged context, says the same thing inside the diff.
+ */
+export function previewPair(sessionId: string, rec: EditRecord, maxLines = 200): DiffPreview {
+  const before = blobText(sessionId, rec.beforeBlob);
+  const after = blobText(sessionId, rec.afterBlob);
+  const hunks = structuredPatch(rec.file, rec.file, before, after, '', '', { context: 3 }).hunks;
+  const changed = (h: { lines: string[] }) => h.lines.filter((l) => l.startsWith('+') || l.startsWith('-')).length;
+  const total = hunks.reduce((n, h) => n + changed(h), 0);
+  if (total <= maxLines) {
+    return { before, after, shownHunks: hunks.length, totalHunks: hunks.length, omittedLines: 0 };
+  }
+  // Line-by-line rather than hunk-by-hunk: ONE hunk can be the whole rewrite (measured on a real
+  // session: a single 13,083-line hunk), so a budget that only stops between hunks never stops.
+  //
+  // The budget is spent PER SIDE, half each. A unified hunk lists every `-` before every `+`, so a
+  // single running counter spends the whole budget on removals and hands the reader a preview that
+  // reads "−200 +0" for an edit the panel calls +500 −500 — Claude deleting a function and writing
+  // nothing. Two counters make the window the first N removed lines against the first N added ones,
+  // which is what the shape of a rewrite actually looks like.
+  const half = Math.max(1, Math.floor(maxLines / 2));
+  const b: string[] = [];
+  const a: string[] = [];
+  let spentDel = 0;
+  let spentAdd = 0;
+  let shown = 0;
+  for (const h of hunks) {
+    if (spentDel >= half && spentAdd >= half) break;
+    let took = 0;
+    for (const line of h.lines) {
+      // `\ No newline at end of file` is diff METADATA, not content — emitting it would put a line
+      // in the review that exists in neither blob.
+      if (line.startsWith('\\')) continue;
+      const text = line.slice(1);
+      if (line.startsWith('-')) {
+        if (spentDel >= half) continue;
+        b.push(text);
+        spentDel++;
+      } else if (line.startsWith('+')) {
+        if (spentAdd >= half) continue;
+        a.push(text);
+        spentAdd++;
+      } else {
+        // Context rides along only while there is still room on both sides, or a long tail of
+        // unchanged lines would pad a preview whose changes are already cut.
+        if (spentDel >= half && spentAdd >= half) continue;
+        b.push(text);
+        a.push(text);
+      }
+      took++;
+    }
+    if (took) shown++;
+  }
+  const omitted = total - spentDel - spentAdd;
+  // Markers are IDENTICAL on both sides — one that differed would render as a change the agent never
+  // made — and they carry what a windowed view otherwise loses: where in the file this starts (the
+  // preview's own line numbers count from 1), and how much is not here.
+  const head = `⋯ preview of #${rec.id} from line ${hunks[0]?.newStart ?? 1} — hunk${shown === 1 ? '' : 's'} 1–${shown} of ${hunks.length} ⋯`;
+  const tail = `⋯ ${omitted.toLocaleString()} more changed line${omitted === 1 ? '' : 's'} — open the full diff for #${rec.id} ⋯`;
+  return {
+    before: [head, ...b, tail].join('\n') + '\n',
+    after: [head, ...a, tail].join('\n') + '\n',
+    shownHunks: shown,
+    totalHunks: hunks.length,
+    omittedLines: omitted,
+  };
 }
 
 /** ANSI-colored unified diff for one edit, ready to print to a terminal. */

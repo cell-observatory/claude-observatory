@@ -8,6 +8,8 @@ export * from './format';
 export * from './install';
 export * from './ranges';
 export * from './classes';
+export * from './scopes';
+export * from './units';
 export * from './observe';
 export * from './stats';
 export * from './analyze';

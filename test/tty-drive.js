@@ -264,7 +264,7 @@ const check = (name, cond, detail) => {
 
 const KEY = {
   down: '\x1b[B', up: '\x1b[A', left: '\x1b[D', right: '\x1b[C',
-  f1: '\x1bOP', f2: '\x1bOQ', f3: '\x1bOR', f4: '\x1bOS', f5: '\x1b[15~',
+  f1: '\x1bOP', f2: '\x1bOQ', f3: '\x1bOR', f4: '\x1bOS', f5: '\x1b[15~', f6: '\x1b[17~',
   tab: '\t', enter: '\r', esc: '\x1b',
   // Raw control bytes. ^D is 0x04 and ^U is 0x15 — the decoder names them {key:'d'|'u', ctrl:true}.
   ctrlD: '\x04', ctrlU: '\x15', ctrlF: '\x06', ctrlB: '\x02', ctrlR: '\x12', ctrlA: '\x01',
@@ -302,15 +302,15 @@ async function main() {
   await sleep(200);
 
   // ---- the window bar leads, in the promised order ------------------------------------------
-  check('the window bar is row 0, F1..F5 left to right',
-    /F1 .Prompts.*F2 .Traces.*F3 .Map.*F4 .Diff.*F5 .Dashboards/.test(rowText(0)),
+  check('the window bar is row 0, F1..F6 left to right',
+    /F1 .Claude.*F2 .Prompts.*F3 .Traces.*F4 .Map.*F5 .Diff.*F6 .Dashboards/.test(rowText(0)),
     JSON.stringify(rowText(0).slice(0, 80)));
 
   // ---- arrows move the selection in Traces --------------------------------------------------
-  // NOT `send(KEY.f2)` first: focus already starts on Traces, and a pane's own key ZOOMS the pane it
+  // NOT `send(KEY.f3)` first: focus already starts on Traces, and a pane's own key ZOOMS the pane it
   // is already showing. Pressing it here put the whole harness in a one-pane frame and every check
   // after it measured a layout the reader never asked for.
-  const tracesTop = find(/F2 Traces/);
+  const tracesTop = find(/F3 Traces/);
   const body = () => raw(tracesTop + 1, tracesTop + 14);
   // How many edits this store actually holds. A cursor cannot move through a one-row list, so on a
   // small fixture "the frame did not change" is the CORRECT answer — asserting movement there would
@@ -340,7 +340,11 @@ async function main() {
   // Every edit used to print its own full path, so a file touched twice produced two identical
   // headers and the pane read as a wall of repeated paths. The seed edits src/app.ts twice.
   {
-    const traces = raw(tracesTop, tracesTop + 16).split('\n').map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
+    // The TRACES column only — everything left of the ▐ pane divider. Since arrows step EDIT rows
+    // (N16), the Detail pane beside shows the selected edit's own path at some screen row, and a
+    // whole-row grep counted that as a second "header".
+    const traces = raw(tracesTop, tracesTop + 16).split('\n')
+      .map((l) => l.replace(/\x1b\[[0-9;]*m/g, '').split('▐')[0]);
     const headers = traces.filter((l) => /app\.ts/.test(l));
     check('Traces shows one header per file, not one per edit',
       headers.length === 1, `app.ts appears on ${headers.length} header rows: ${JSON.stringify(headers)}`);
@@ -368,33 +372,46 @@ async function main() {
   await sleep(250);
   check('Tab moves focus to another window', focusedPane() !== f0, `focus stayed on ${f0}`);
 
-  // ---- F3 and F4 are the two faces of ONE window --------------------------------------------
+  // ---- F4 and F5 are the two faces of ONE window --------------------------------------------
   // The title names the face, with the key that reaches it, so this reads the same thing the reader
   // does rather than an internal flag.
-  const faceTitle = () => { const m = titleRow().find((t) => /F[34] (Map|Diff)/.test(t)); return m ? (m.match(/F([34]) (Map|Diff)/) || []).slice(1).join(' ') : ''; };
-  send(KEY.f3);
-  await sleep(250);
-  check('F3 shows the change Map', faceTitle() === '3 Map', `title says ${JSON.stringify(faceTitle())}`);
-  check('and focuses that window', focusedPane() === 'Map', `focus is on ${focusedPane()}`);
+  const faceTitle = () => { const m = titleRow().find((t) => /F[45] (Map|Diff)/.test(t)); return m ? (m.match(/F([45]) (Map|Diff)/) || []).slice(1).join(' ') : ''; };
   send(KEY.f4);
+  await sleep(250);
+  check('F4 shows the change Map', faceTitle() === '4 Map', `title says ${JSON.stringify(faceTitle())}`);
+  check('and focuses that window', focusedPane() === 'Map', `focus is on ${focusedPane()}`);
+  send(KEY.f5);
   // Wait for the FACE to settle, not for a duration: pressing the key again before the first press
   // has been applied is read as "this face is not showing yet", so it swaps instead of zooming — a
   // race the test would report as a broken zoom.
-  await until('the Diff face', () => faceTitle() === '4 Diff');
-  check('F4 shows the Diff, in the same window', faceTitle() === '4 Diff', `title says ${JSON.stringify(faceTitle())}`);
-  send(KEY.f4);
+  await until('the Diff face', () => faceTitle() === '5 Diff');
+  check('F5 shows the Diff, in the same window', faceTitle() === '5 Diff', `title says ${JSON.stringify(faceTitle())}`);
+  send(KEY.f5);
   await until('the zoom', () => /ZOOM/.test(rowText(0)), 3000).catch(() => {});
-  check('F4 again zooms it', /ZOOM/.test(rowText(0)), JSON.stringify(rowText(0).slice(-40)));
+  check('F5 again zooms it', /ZOOM/.test(rowText(0)), JSON.stringify(rowText(0).slice(-40)));
   send(KEY.esc);
   await sleep(300); // a lone ESC resolves on the decoder's flush timer
   check('esc leaves the zoom', !/ZOOM/.test(rowText(0)));
 
+  // ---- the Claude window: folded at this size, and honest about why -------------------------
+  // At 34 rows (30 body) the Claude window cannot open beside everything else (COL_FLOOR + the
+  // carved Prompts and Dashboards heights + its own min exceed the body). F1 tries to restore it,
+  // the carve refuses and latches it back — and the refusal must NAME the row arithmetic on the
+  // status row rather than silently doing nothing.
+  send(KEY.f1);
+  await until('the fold note', () => find(/Claude minimized: it needs \d+ body rows/) >= 0, 3000).catch(() => {});
+  check(
+    'F1 at 34 rows says exactly why Claude cannot open',
+    find(/Claude minimized: it needs \d+ body rows/) >= 0,
+    'no fold note appeared'
+  );
+
   // ---- the change map moves under the arrows, and its rows carry their numbers ---------------
-  send(KEY.f3);
+  send(KEY.f4);
   await sleep(300);
-  // Anchored on the TITLE (`F3 Map ----`), not on the bare words: row 0's chip says `F3 ▾Map` too,
+  // Anchored on the TITLE (`F4 Map ----`), not on the bare words: row 0's chip says `F4 ▾Map` too,
   // and a plain `find` returns that first — measuring the top of the frame and calling the map frozen.
-  const mapTop = find(/F3 Map -/) + 2; // title, summary, column headings, then the rows
+  const mapTop = find(/F4 Map -/) + 2; // title, summary, column headings, then the rows
   const mapBody = () => raw(mapTop, mapTop + 10);
   const mapText = () => frame().slice(mapTop, mapTop + 10).join('\n');
   // A map with nothing in it has no cursor to move and no row to carry numbers. Say so rather than
@@ -476,7 +493,7 @@ async function main() {
    * after a bare `=` the centre can legitimately still be showing a diff and the map never appears.
    * That is what timed out on macOS: not a slow paint, a frame that was never going to say CHANGE MAP.
    *
-   * `esc`, not F3. Both land on the map, but F3 also FOCUSES the centre window — and that leaked into
+   * `esc`, not F4. Both land on the map, but F4 also FOCUSES the centre window — and that leaked into
    * a later check, where `↓` then moved a short map list already at its end and the frame did not
    * change. `esc` is the product's own way of saying "nothing selected", which is precisely the state
    * whose face is the map, and it leaves focus where it was.
@@ -491,7 +508,7 @@ async function main() {
     // FORCE the state that broke CI before resetting: pick an edit, so the centre window's `auto` face
     // is the DIFF and the change map is genuinely not on screen. Without this the reset is only ever
     // exercised from a state where the map was already up, and the recovery it exists for is untested.
-    send(KEY.f2); await sleep(150); send(KEY.down); await sleep(150); send(KEY.f4); await sleep(300);
+    send(KEY.f3); await sleep(150); send(KEY.down); await sleep(150); send(KEY.f5); await sleep(300);
     check('positive control: with an edit selected the map is NOT on screen',
       !frame().some((l) => /CHANGE MAP/.test(l)),
       JSON.stringify(frame().slice(0, 3).map((l) => l.trim().slice(0, 50))));
@@ -512,12 +529,12 @@ async function main() {
   // ---- esc unselects, and the centre window goes back to the map -----------------------------
   if (SEED) {
     await reset();
-    send(KEY.f2); await sleep(200);            // Traces
+    send(KEY.f3); await sleep(200);            // Traces
     send(KEY.down); await sleep(300);          // pick an edit — Detail follows it to the Diff face
-    await until('the Diff face after a selection', () => faceTitle() === '4 Diff', 4000);
+    await until('the Diff face after a selection', () => faceTitle() === '5 Diff', 4000);
     send(KEY.esc); await sleep(350);
     check('esc clears the selection and the centre window returns to the Map',
-      faceTitle() === '3 Map', `title says ${JSON.stringify(faceTitle())}`);
+      faceTitle() === '4 Map', `title says ${JSON.stringify(faceTitle())}`);
     check('and it says so rather than changing silently',
       frame().some((l) => /nothing selected/.test(l)),
       JSON.stringify(frame().slice(-2).map((l) => l.trim().slice(0, 70))));
@@ -630,21 +647,21 @@ async function main() {
 
   // ---- the Prompts window has the ask that produced the edits --------------------------------
   await reset();
-  send(KEY.f1);
+  send(KEY.f2);
   await sleep(350);
   // The pane TITLE row, not the window bar — the bar names every window at all times, so matching it
   // would pass against a product that never moved focus at all.
-  const promptsTitle = frame().find((l) => /^.F1 Prompts /.test(l)) || '';
-  check('F1 focuses Prompts', /^>F1 Prompts/.test(promptsTitle), JSON.stringify(promptsTitle.slice(0, 60)));
+  const promptsTitle = frame().find((l) => /^.F2 Prompts /.test(l)) || '';
+  check('F2 focuses Prompts', /^>F2 Prompts/.test(promptsTitle), JSON.stringify(promptsTitle.slice(0, 60)));
   check('…and it lists the ask, not an empty pane',
     frame().some((l) => /tidy up the app/.test(l)),
     'the seeded prompt never appeared');
 
   // ---- Dashboards tabs walk with the arrows --------------------------------------------------
   await reset();
-  send(KEY.f5);
+  send(KEY.f6);
   await sleep(350);
-  const dashTop = frame().findIndex((l) => /^.F5 Dashboards /.test(l));
+  const dashTop = frame().findIndex((l) => /^.F6 Dashboards /.test(l));
   if (dashTop >= 0) {
     const tabRow = rowText(dashTop + 1);
     check('Dashboards carries its tab strip', /Fleet|Workflows|Tasks/.test(tabRow),
@@ -662,7 +679,7 @@ async function main() {
   // acted without a counted confirm would be the worst bug in the product, so the confirm is the
   // assertion — and `esc` must leave the store untouched.
   await reset();
-  send(KEY.f2);
+  send(KEY.f3);
   await sleep(300);
   send('A');
   await sleep(400);
@@ -705,7 +722,7 @@ async function main() {
   // their own checks above, which put them in a state where the answer is unambiguous. What is left
   // here is the set whose effect does not depend on what is selected — the set an unbound key hides in.
   const unconditional = [
-    ['Tab', KEY.tab], ['F1', KEY.f1], ['F3', KEY.f3], ['F4', KEY.f4], ['F5', KEY.f5],
+    ['Tab', KEY.tab], ['F2', KEY.f2], ['F4', KEY.f4], ['F5', KEY.f5], ['F6', KEY.f6],
     ['m', 'm'], ['z', 'z'], ['e', 'e'], ['o', 'o'], ['b', 'b'], ['s', 's'], ['/', '/'], ['?', '?'],
     ['A', 'A'], ['U', 'U'],
   ];
@@ -724,7 +741,7 @@ async function main() {
 
   // ---- the new movement, copy and command keys ----------------------------------------------
   await reset();
-  send(KEY.f2); await sleep(200);
+  send(KEY.f3); await sleep(200);
   {
     const body = () => raw(tracesTop + 1, tracesTop + 12);
     // g/G jump to the ends; j/k move like the arrows do. j/k are bound but NOT advertised — a vim
@@ -780,7 +797,7 @@ async function main() {
 
     // ---- P jumps to a file, rather than narrowing to it ---------------------------------------
     {
-      send(KEY.f2); await sleep(250);
+      send(KEY.f3); await sleep(250);
       send('g'); await sleep(200);
       send('P');
       await checkSoon('P opens a go-to-file picker', () => /go to file/.test(frame().join('\n')),
@@ -794,7 +811,7 @@ async function main() {
 
     // ---- RIGHT-CLICK opens the row's verbs -----------------------------------------------------
     {
-      send(KEY.f2); await sleep(250);
+      send(KEY.f3); await sleep(250);
       send('g'); await sleep(200);
       // Find a body row of the Traces pane on screen, then right-click it. SGR mouse: ESC [ < 2 ; col ; row M
       const tracesRow = frame().findIndex((l) => /#\d+\s/.test(l));
@@ -820,7 +837,7 @@ async function main() {
 
     // ---- MARKS: set one, walk away, come back ------------------------------------------------
     {
-      send(KEY.f2); await sleep(250);
+      send(KEY.f3); await sleep(250);
       // Onto an EDIT row, not a file header: Traces groups by file, and a header stands for every edit
       // in its file, so a mark — which is one id — is correctly refused there. `g` then one `down` is
       // header, then its first edit.
@@ -847,7 +864,7 @@ async function main() {
 
     // ---- MULTI-SELECT: mark several rows, act once -------------------------------------------
     {
-      send(KEY.f2); await sleep(250);
+      send(KEY.f3); await sleep(250);
       send('g'); await sleep(200);       // back to the top: the marks block above moved the cursor
       send(KEY.down); await sleep(200);
       send('x');
@@ -882,7 +899,7 @@ async function main() {
     {
       const pendingNow = () => (frame().join('\n').match(/(\d+)\s+pending/) || [])[1] ?? null;
       for (const [what, open, close] of [[':', ':', KEY.esc], ['/', '/', KEY.esc]]) {
-        send(KEY.f2); await sleep(200);
+        send(KEY.f3); await sleep(200);
         const before = pendingNow();
         send(open); await sleep(200);
         send('a'); await sleep(150);
@@ -909,7 +926,7 @@ async function main() {
     // ("unselect") is conditional on something being picked, and it RETURNS. With nothing selected the
     // block falls through to the wall's own handler and esc appears to work, so a check that does not
     // select first passes against the bug.
-    send(KEY.f2); await sleep(200);
+    send(KEY.f3); await sleep(200);
     send(KEY.down); await sleep(250);        // picked = true
     send(':'); await sleep(250);
     for (const ch of 'stat') { send(ch); await sleep(40); }
@@ -948,7 +965,7 @@ async function main() {
     // the switch dispatches on the key name and only ^C/^D were intercepted — so ^A ran `keep`, ^E
     // handed the terminal to $EDITOR and ^U, the kill-line reflex of every terminal there is, reverted
     // an edit.
-    send(KEY.f2); await sleep(250);
+    send(KEY.f3); await sleep(250);
     const pending = () => (frame().join('\n').match(/(\d+)\s+pending/) || [])[1] ?? null;
     const pendingBefore = pending();
     send(KEY.ctrlA); await sleep(450);
@@ -979,8 +996,8 @@ async function main() {
   // a disk reload the product does not perform — the first version of this check did exactly that and
   // failed against a correct fix.
   await reset();
-  send(KEY.f5); await sleep(200);
-  send(KEY.f2); await sleep(200);
+  send(KEY.f6); await sleep(200);
+  send(KEY.f3); await sleep(200);
   send(KEY.down); await sleep(250);            // select an edit, so `e` has a file to open
   {
     const savedE = process.env.EDITOR, savedV = process.env.VISUAL;
@@ -1030,8 +1047,8 @@ async function main() {
   // 'error' and overwrote the message, and `state.error` is cleared by the very refresh that
   // `resumeTerminal` restarts, so the frame came back reading "ready".
   await reset();
-  send(KEY.f5); await sleep(200);
-  send(KEY.f2); await sleep(200);
+  send(KEY.f6); await sleep(200);
+  send(KEY.f3); await sleep(200);
   send(KEY.down); await sleep(250);
   const goodEditor = process.env.EDITOR;
   process.env.EDITOR = 'definitely-not-a-real-editor-binary';

@@ -6,7 +6,7 @@ needs facts that run did not produce — from the bundled `claude-observatory de
 capture pipeline against a real transcript. Nothing is staged; the session id in each block's header says
 which run it came from.
 
-![The observatory layout — the sidebar "Observatory Traces" (Edits · Diffs · File History), the bottom panel "Observatory Dashboards" (Overview · Stats), and the "Observatory Timeline" panel (Prompts · Observations · Actions)](media/layout.png)
+![The observatory layout — the sidebar "Observatory Traces" (Review · File History), the bottom panel "Observatory Dashboards" (Overview · Stats), and the "Observatory Timeline" panel (Prompts · Observations · Actions)](media/layout.png)
 
 > The **[visual showcase](https://cell-observatory.github.io/claude-observatory/showcase.html)** presents
 > the same material in the browser (rendered from [showcase.html](showcase.html) via GitHub Pages).
@@ -58,13 +58,13 @@ once, which is what the test suite uses; `--no-fleet` leaves out the second agen
 ## The guided tour
 
 The tour walks **forty-two steps** covering every panel the product ships and every named feature —
-including the Diffs view, revision navigation, Spotlight, search, the chat handoff, export, the status
+including revision navigation, Spotlight, search, the chat handoff, export, the status
 bar, the Explorer badges, the Timeline's session selector, context sources and file memory. It lives in core, so the terminal and both
 editors show the same steps: a step added to a panel reaches every editor at once, and none of them can
 drift into its own wording.
 
-It opens with a choice of **two tracks**: **Essentials** (13 steps — the review model, the agents, the
-audits) or **Everything** (all 42). Finishing the short one offers the other 29 as its own track, in both
+It opens with a choice of **two tracks**: **Essentials** (14 steps — the review model, the agents, the
+audits) or **Everything** (all 42). Finishing the short one offers the other 28 as its own track, in both
 editors and in the terminal (`demo --tour --remainder`). The short track is a filter over the same list, in the same order, so
 the two can never tell different stories. In the terminal, `demo --tour --essentials` prints the short one.
 
@@ -326,7 +326,7 @@ in the others instantly. The layout is deliberately identical; only the host chr
 | --- | --- | --- |
 | Install | `claude-observatory install-extensions` installs into both families at once (or `code --install-extension claude-observatory.vsix`) | `claude-observatory install-extensions` (or `./scripts/install-jetbrains.sh`, or Install Plugin from Disk) |
 | Auto-update | daily background check → one-click **Update now** | add the [plugin repository](../packages/jetbrains/README.md#auto-updates) once → IDE-native updates |
-| **Edits · Diffs · File History** (the sidebar) | **Observatory Traces** — microscope in the Activity Bar, badged with the pending count | **Observatory Traces** tool window, left stripe |
+| **Review · File History** (the sidebar) | **Observatory Traces** — microscope in the Activity Bar, badged with the pending count | **Observatory Traces** tool window, left stripe |
 | **Overview · Stats** (the bottom panel) | **Observatory Dashboards** bottom panel, side by side (like Terminal/Problems). The Overview can also be docked as a full-height **editor tab** — palette: *Open Overview in Editor*, or set `claudeObservatory.overviewLocation`; whichever host holds it drives the refresh, never both | **Observatory Dashboards** tool window, bottom stripe |
 | **Prompts · Observations · Actions** (the Timeline) | the **Observatory Timeline** panel — one webview whose tab strip carries all three (0.10.0 consolidated the former `claudeObservatory.prompts` / `.actions` / `.observations` views into it) | the **Observatory Timeline** tool window, right stripe — one content, the same three as tabs |
 | **Group tabs** (beside both tab strips) | a toggle beside the Overview's and the Timeline's tab strips: columns instead of tabs, each resizable by dragging the divider (double-click resets the pair) and foldable to a named rail that is itself the button back. Widths and folds ride the webview's own state | the same toggle, same groupings, on an `ActionToolbar` beside each tab strip; widths and folds persist in `claude-observatory.xml` |
@@ -340,8 +340,9 @@ in the others instantly. The layout is deliberately identical; only the host chr
 | Scoreboard | status-bar `🔬 N` (amber while pending) + live bar in Stats | status-bar `🔬 N` + live bar in Stats |
 | Keyboard loop | `⌥⌘N` next · `⌥⌘Y` keep · `⌥⌘U` undo · `⌥⌘-`/`⌥⌘=` revisions (`Ctrl+Alt` on Win/Linux) | `⌥⌘N` next · `⌥⌘Y` keep · `⌥⌘U` undo · `⌥⌘[`/`⌥⌘]` revisions |
 
-The **sidebar** ("Observatory Traces") carries the three per-edit review panes — **Edits · Diffs · File
-History**. The timeline-shaped surfaces — **Prompts · Observations · Actions** — are tabs of one window,
+The **sidebar** ("Observatory Traces") carries the review panes — **Review · File History** (0.9.4
+removed the Edits and Diffs trees: Review is the one review surface, its rows grouped by file, with
+resolved rows greyed and still actionable). The timeline-shaped surfaces — **Prompts · Observations · Actions** — are tabs of one window,
 the **Observatory Timeline** panel. In 0.10.0 VS Code caught up to the shape JetBrains already had: the
 three separate views `claudeObservatory.prompts`, `.actions` and `.observations` were consolidated into a
 single `claudeObservatory.timeline` webview whose tab strip carries all three, so the two editors now
@@ -350,7 +351,7 @@ describe the same window. (The old standalone Timeline pane is long gone — its
 Overview it scopes; **Actions** moved up there in 0.8.0; and the former multi-agent window folded into
 **Overview** as its **Fleet** tab.) Both front-ends drive the review
 surfaces from **icon-only tabs** (hover for the label), and JetBrains is at full **feature parity** with
-VS Code: the toggle-inline button, **Accept/Revert this file** on the Edits toolbar, revision-nav
+VS Code: the toggle-inline button, per-file **Keep/Undo** on the Review list's file headers, revision-nav
 buttons, Overview bulk actions, the Observations panel's clear / switch-session / doctor actions, a 5th
 **⧉ View diff** lens segment,
 and a pending badge on the tool-window stripe. Two long-standing gaps closed in 0.10.0: JetBrains now
@@ -372,23 +373,44 @@ The **status-bar microscope** shows the pending count in realtime — the moment
 change. Click it (or **Review next pending edit**) to jump straight to the oldest unreviewed edit;
 review, decide, click again. That's the surgical loop, in either editor.
 
-![The observatory in PyCharm — Edits tree, the inline lens with Claude's reasoning + actions, and the Dashboards window](media/pyc-layout.png)
+![The observatory in PyCharm — the Review tree, the inline lens with Claude's reasoning + actions, and the Dashboards window](media/pyc-layout.png)
 
-### Edits — folder → file → class
+### Review — the session's changes
+
+The same review units, presented the way each IDE presents things. **JetBrains** draws a tree —
+folder → file → class → unit — under a counts header, with Open all / Keep all / Undo all / Clear
+resolved above it, a labelled Keep · Undo · Redo · Chat · Diff toolbar for the selected row, and the
+file/folder scopes on the row's context menu. **VS Code** draws a flat list grouped by file, with the
+scope buttons on each file header and its own title-bar toolbar:
 
 ```text
-▾ src
-  ▾ models
-      dataset.py              2 edits
-      ◆ class Dataset         2 · 1 pending
-          #1  +11 −0          reverted
-          #2  +4 −0           kept
-  train.py                    1 edit
-      #3  +4 −0               pending
+src/models/dataset.py         1 pending   [✓ file] [↩ file]
+  ● #2  +4 −0                 [✓] [↩]
+  ↩ #1  +11 −0                (greyed — reverted; ↻ redo)
+src/train.py                  1 pending   [✓ file] [↩ file]
+  ● #3  +4 −0                 [✓] [↩]
 ```
 
-Edits nest under the class they land in (detected heuristically for JS/TS/Python). Hover a file or
-class for **Keep all / Undo all** in that scope; click an edit to open the file at that change.
+One row per change (same-code edits arrive combined into one unit), grouped by file. A file header's
+**✓/↩** act on exactly the pending work listed under it; a row click opens that unit's net diff in
+the editor; resolved rows stay listed greyed — an undone row offers **redo**, a kept row can still be
+reverted. The view's own toolbar carries Search edits, previous/next edit, Keep all, Undo all, Redo
+all, Clear resolved, Switch session, Refresh, Toggle inline review, and an overflow with the exports,
+Doctor and Clean store.
+
+A file that was deleted and re-created is **one** row showing the real before→after: absence is not a
+state anyone can review, so it is not a boundary between two decisions. A chain that ends where it
+started — created then deleted, or an edit put back — is nothing to review at all, and instead of
+rows the panel ends with one honest line:
+
+```text
+974 cancelled-out chains — created then deleted, or put back: nothing to review   [Dismiss]
+```
+
+Dismiss marks every record behind it kept; they stay out of the list afterwards rather than returning
+as greyed rows. The CLI says the same thing (`review` and `list` print the count and the exact
+`keep --ids … --session …` that clears them), and the terminal renders it as a row whose `a` does the
+same job.
 
 ### Inline overlay
 
@@ -608,8 +630,8 @@ simply omits it rather than inventing a default. Beside it sits a **compaction**
 `⤺ 2 compactions · last dropped 986k` — how many times the harness summarized the conversation away and
 how much context the last one dropped. It is a fact, not a chart: the per-turn context series that used
 to be plotted below the token cells was removed in 0.8.7, along with the chart it fed. A session that was
-never compacted shows nothing here rather than a zero. (The Search-edits box moved out in 0.7.5 — the
-**Edits** / **Diffs** title-bar search is the single entry point.) Right below the title, a **Session
+never compacted shows nothing here rather than a zero. (Search Edits lives on the Review title bar and the Overview's toolbar
+and filters the Review list and the Overview ledger together.) Right below the title, a **Session
 tokens** section (0.8.6) shows this session's cumulative spend split the way the API bills it —
 **input** (uncached) / **output** / **cached** reads, plus the **cache hit rate** (reads ÷ all context
 sent); cache-write totals live in the tooltip. Then, under an **Edits** heading, the live **review
@@ -1223,19 +1245,28 @@ Everything above is available in one live screen, with the same review actions:
 claude-observatory            # no verb needed — the app is the front door
 ```
 
-Four windows mirroring the editors, named on the top row so what exists is visible before you press
-anything. Focus one with its F-key — press it again to zoom — or with a click:
+Six windows over five panes (Map and Diff share the centre), named on the top row so what exists is
+visible before you press anything. Focus one with its F-key — press it again to zoom — or with a click:
 
 | Window | Key | What it answers |
 | --- | --- | --- |
-| **Prompts** *(top)* | `F1` | your own turns, and the edits each one produced |
-| **Observatory Traces** *(left)* | `F2` | every review unit, newest first — id, age, ±lines, file |
-| **Map / Diff** *(centre)* | `F3` / `F4` | one window, two faces: the session's change map, or the selected edit's before-and-after |
-| **Observatory Dashboards** *(bottom)* | `F5` | Fleet · Workflows · Tasks · Observations · Actions · Processes · Feed |
+| **Claude** *(top)* | `F1` | the agent itself — model, liveness, pending count, the newest ask, and beneath them a **live tail** of the session: Claude's own activity as it lands, followed automatically. Press `F1` **again** to hand this terminal to `claude --resume` for the session under review (a live session asks first) |
+| **Prompts** *(top)* | `F2` | your own turns, and the edits each one produced |
+| **Observatory Traces** *(left)* | `F3` | every review unit, newest first; opening a prompt scopes the list to exactly that ask (`esc` clears) |
+| **Map / Diff** *(centre)* | `F4` / `F5` | one window, two faces: the session's change map, or the selected edit's before-and-after |
+| **Observatory Dashboards** *(bottom)* | `F6` | Fleet · Workflows · Tasks · Observations · Actions · Processes · Feed |
 
 The centre is **one window with two faces** rather than two windows, because you are only ever
-looking at one of them. `F3` shows the Map, `F4` the Diff, and the title says which face is up with
+looking at one of them. `F4` shows the Map, `F5` the Diff, and the title says which face is up with
 that face's own key. With nothing selected it opens on the Map.
+
+The Claude window is the one whose second press does not zoom — `F1` again launches the agent
+instead: the dashboard suspends, the real Claude CLI takes the whole terminal, and on exit the
+dashboard returns and reports what moved while you were away. Its body is a live tail of the session
+feed — tool calls dim, the agent's own words at full weight, failures tinted — that follows the
+newest entry unless you are scrolled up inside it (`G` follows again). It resizes like any window
+(drag its seam, or `<`/`>`), and when rows run short it folds first, keeping its chip and the launch
+gesture.
 
 **The Map face** is the change map — a folder tree where each row carries lines added, lines removed,
 edits pending and edits kept, plus a **✓ / ↩** pair that accepts or reverts everything beneath it.

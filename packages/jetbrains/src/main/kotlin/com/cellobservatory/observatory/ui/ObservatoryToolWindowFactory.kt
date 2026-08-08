@@ -21,15 +21,22 @@ private fun iconTab(factory: ContentFactory, component: JComponent, label: Strin
         isCloseable = false
     }
 
-/** "Observatory Traces" — the sidebar review window (VS Code activity-bar analog): Edits + Diffs +
- *  File History. 0.9.0: Actions and Observations moved to the Observatory Timeline window, with
- *  Prompts — the timeline-shaped surfaces live together, and this window is purely per-edit review. */
+/** "Observatory Traces" — the sidebar review window (VS Code activity-bar analog): Review + File
+ *  History. 0.9.0: Actions and Observations moved to the Observatory Timeline window,
+ *  with Prompts — the timeline-shaped surfaces live together, and this window is purely per-edit
+ *  review. 0.9.4 added Review, first and default: the session's pending changes as a list (a prompt
+ *  pick scopes it) — a row opens its net diff in the editor, or the whole scope as one concatenated
+ *  view. */
 class ObservatoryToolWindowFactory : ToolWindowFactory, DumbAware {
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
         val factory = ContentFactory.getInstance()
         val cm = toolWindow.contentManager
-        cm.addContent(iconTab(factory, EditsTreePanel(project, EditsTreePanel.Mode.EDITS), "Edits", Icons.Microscope))
-        cm.addContent(iconTab(factory, EditsTreePanel(project, EditsTreePanel.Mode.DIFFS), "Diffs", AllIcons.Actions.Diff))
+        // Review FIRST — the default tab, mirroring the VS Code sidebar order exactly: the session's
+        // changes are the thing a reviewer opens this window for; the raw trees are the drill-downs.
+        cm.addContent(iconTab(factory, ReviewPanel(project), "Review", AllIcons.Actions.PreviewDetails))
+        // N15: the Edits and Diffs trees are GONE — Review is the one review surface (greyed
+        // resolved rows carry redo/undo; file headers carry the structural scopes). Raw records
+        // stay backend-only; File History still reads them per file.
         cm.addContent(iconTab(factory, FileHistoryPanel(project), "File History", AllIcons.Vcs.History))
     }
 }
@@ -67,7 +74,7 @@ class ObservatoryTimelineFactory : ToolWindowFactory, DumbAware {
  *    · Overview — the combined MASTER–DETAIL: a Fleet · Workflows · Tasks · Processes nav on the left
  *                 driving the change-map detail on the right.
  *    · Stats    — session metrics.
- *  Observations moved to the sidebar window (with Edits / Diffs / File History / Actions) to make room. */
+ *  Observations moved to the sidebar window (with Review / File History) to make room. */
 class ObservatoryDashboardsFactory : ToolWindowFactory, DumbAware {
 
     companion object {

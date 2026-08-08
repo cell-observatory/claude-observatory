@@ -10,7 +10,12 @@ if (!names.length) { console.log('INSTRUMENT BROKEN: no <script nonce> injection
 
 // Pull each one's template literal out by scanning to the matching unescaped backtick.
 function literalFor(name) {
-  const m = new RegExp(`(?:const|let|var)\\s+${name}\\s*(?::[^=]*)?=\\s*\``).exec(src);
+  // TWO definitions under one injected name means every copy after the first ships UNCHECKED — the
+  // tour webview did exactly that (both shells used a local `script`), provably green with broken JS
+  // planted inside. Refuse to vouch for what was not parsed.
+  const defs = [...src.matchAll(new RegExp(`(?:const|let|var)\\s+${name}\\s*(?::[^=]*)?=\\s*\``, 'g'))];
+  if (defs.length > 1) return { duplicate: defs.length };
+  const m = defs[0];
   if (!m) return null;
   let i = m.index + m[0].length, depth = 0;
   for (; i < src.length; i++) {
@@ -27,6 +32,10 @@ let ok = 0; const fails = [];
 for (const n of names) {
   const body = literalFor(n);
   if (body == null) { fails.push(`${n}: could not locate its template literal`); continue; }
+  if (typeof body === 'object') {
+    fails.push(`${n}: defined ${body.duplicate} times — every copy after the first ships unchecked; give each webview its own name`);
+    continue;
+  }
   const neutral = body.replace(/\$\{[^{}]*(\{[^{}]*\}[^{}]*)*\}/g, '0'); // host-side interpolation → a literal
   // EVALUATE the template literal before parsing it. The engine resolves its escapes first, so the
   // text that ships is not the text in the source: `\'` here is a valid escape and reaches the browser

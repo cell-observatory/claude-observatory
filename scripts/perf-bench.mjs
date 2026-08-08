@@ -50,6 +50,74 @@ out['appendLog (1 record, incl. nextId)'] = ms(() =>
 );
 out['readLog cold'] = ms(() => core.readLog(SESSION));
 out['readLog warm x100'] = ms(() => { for (let i = 0; i < 100; i++) core.readLog(SESSION); });
+// The review-unit derivation itself. It sits under buildEditTree and `list`, and EVERY capture
+// invalidates its memo, so a cold number is what a session actually pays per new edit — not a rarity.
+out['pendingGroups cold'] = ms(() => core.pendingGroups(SESSION));
+out['pendingGroups warm'] = best(() => core.pendingGroups(SESSION));
+
+// MANY SPANS IN ONE FILE — the shape the fixture above cannot make (its 20 edits per file all touch
+// one region, so each file collapses to a single unit). Every per-file pass that walks spans against
+// each other is quadratic HERE and nowhere else: a cancel-out scan written that way cost 1.2 s at
+// 8,000 spans while this benchmark's number did not move at all. Distinct line per edit ⇒ one span
+// per edit.
+const SPANS = parseInt(process.argv[4] ?? '1200', 10);
+const S2 = 'bench-spans-000000000000001';
+core.ensureStore(S2);
+{
+  const f2 = path.join(ws, 'src', 'wide.py');
+  let prev = Array.from({ length: SPANS + 20 }, (_, k) => `line ${k}`).join('\n') + '\n';
+  for (let i = 0; i < SPANS; i++) {
+    const next = prev.replace(`line ${i}\n`, `line ${i} touched\n`);
+    core.appendLog(S2, {
+      ts: t0 + i * 10, tool: 'Edit', file: f2,
+      beforeBlob: core.writeBlob(S2, Buffer.from(prev)),
+      afterBlob: core.writeBlob(S2, Buffer.from(next)),
+      status: 'pending',
+    });
+    prev = next;
+  }
+}
+out[`pendingGroups cold (${SPANS} spans, ONE file)`] = ms(() => core.pendingGroups(S2));
+out['…spans it found'] = core.pendingGroups(S2).size;
+
+// SPANS THAT MEET AT ABSENCE — every span above carries real blobs on both sides, so the fold's
+// merge-across-null pass and its chain extension never run. This is the shape the Bash-capture bug
+// produced in bulk (one file deleted and re-created over and over), and the one where PASS 1 merges
+// maximally and PASS 2's chain becomes the whole file: exactly where a quadratic term would show.
+const S3 = 'bench-nulls-000000000000001';
+core.ensureStore(S3);
+{
+  const f3 = path.join(ws, 'src', 'flicker.py');
+  const text = Array.from({ length: 40 }, (_, k) => `line ${k}`).join('\n') + '\n';
+  const sha = core.writeBlob(S3, Buffer.from(text));
+  for (let i = 0; i < SPANS; i++) {
+    const del = i % 2 === 0;
+    core.appendLog(S3, {
+      ts: t0 + i * 10, tool: 'Bash', file: f3,
+      beforeBlob: del ? sha : null,
+      afterBlob: del ? null : sha,
+      status: 'pending',
+    });
+  }
+}
+out[`pendingGroups cold (${SPANS} null-alternating spans, ONE file)`] = ms(() => core.pendingGroups(S3));
+out['…units it found'] = core.pendingGroups(S3).size;
+out['reviewEdits cold'] = ms(() => core.reviewEdits(SESSION));
+// The dependency walk shares its hop shapes with the unit walk above, so its cold cost should be
+// bookkeeping, not diffing. Gate: pendingGroups cold + unitDeps cold must stay ≤ 1.6× pendingGroups
+// alone at 3000/150, ≤ 1.4× at 2000/1 — past that the set translation has gone quadratic.
+out['unitDeps cold'] = ms(() => core.unitDeps(SESSION));
+// How much the collapse actually buys, and how big it lets a single decision get. A unit that swallows
+// a whole file is the failure mode this design exists to avoid, so the bench reports it rather than
+// leaving it to be discovered on a real session.
+{
+  const groups = core.pendingGroups(SESSION);
+  const sizes = [...groups.values()].map((m) => m.length);
+  out['#units'] = sizes.length;
+  out['#records'] = core.readLog(SESSION).filter((r) => r.status === 'pending').length;
+  out['max unit size'] = sizes.length ? Math.max(...sizes) : 0;
+  out['multi-member units'] = sizes.filter((n) => n > 1).length;
+}
 out['buildEditTree cold'] = ms(() => core.buildEditTree(SESSION, { root: ws }));
 out['buildEditTree warm'] = best(() => core.buildEditTree(SESSION, { root: ws }));
 out['buildChangeMap cold'] = ms(() => core.buildChangeMap(ws, SESSION, { root: ws }));
@@ -59,6 +127,14 @@ if (core.sessionMeta) out['sessionMeta'] = best(() => core.sessionMeta(ws));
 out['changemap --json spawn'] = ms(() =>
   execFileSync('node', [CLI, 'changemap', '--json', '--session', SESSION], { cwd: ws, env: process.env, maxBuffer: 64 * 1024 * 1024 })
 );
+// Bulk revert — LAST, it mutates the store the rows above measured. The scoped path used to append
+// one status op per record, invalidating the readLog memo each time: O(N) full log parses per bulk
+// revert. With the deferred one-flush write this is ~O(N) file work instead.
+{
+  for (const [f, content] of fileState) fs.writeFileSync(f, content); // disk at the final state
+  const ids = core.readLog(SESSION).filter((r) => r.status === 'pending').map((r) => r.id).slice(-500);
+  out['undoScope 500 ids'] = ms(() => core.undoScope(SESSION, { ids }));
+}
 
 console.log(JSON.stringify({ edits: N, files: FILES, node: process.version, timings_ms: Object.fromEntries(Object.entries(out).map(([k, v]) => [k, Math.round(v * 10) / 10])) }, null, 2));
 fs.rmSync(tmp, { recursive: true, force: true });

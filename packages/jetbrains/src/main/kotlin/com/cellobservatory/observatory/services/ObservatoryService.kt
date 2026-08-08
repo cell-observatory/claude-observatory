@@ -110,13 +110,13 @@ class ObservatoryService(private val project: Project) : Disposable {
         val key = "$session:${StoreReader.logKey(session)}"
         if (key != cachedKey) {
             cachedLog = StoreReader.readLog(session)
-            pendingByFile = cachedLog.filter { it.pending }.groupingBy { it.file }.eachCount() // for the Project-view decorator
+            pendingByFile = cachedLog.filter { it.pending && !isHidden(it) }.groupingBy { it.file }.eachCount() // for the Project-view decorator
             // …and the FILE AXIS, derived here for the same reason: it was recomputed by every caller
             // on every toolbar tick — a filter, a distinct and a SORT over every record in the session
             // — and there are a lot of callers. The floating bar alone expands 14 actions per tick, the
             // status-bar nav bar and the editor banner ask again, and three of them had their own copy
             // of the expression. One derivation, cached on the same key as the log it comes from.
-            pendingFilesCache = cachedLog.filter { it.pending }.map { it.file }.distinct().sorted()
+            pendingFilesCache = cachedLog.filter { it.pending && !isHidden(it) }.map { it.file }.distinct().sorted()
             cachedKey = key
         }
         return cachedLog
@@ -169,7 +169,15 @@ class ObservatoryService(private val project: Project) : Disposable {
     fun prevPendingEdit(): EditRecord? = stepPendingEdit(-1)
 
     private fun stepPendingEdit(dir: Int): EditRecord? {
-        val pending = log().filter { it.pending }.sortedBy { it.id }
+        // Step review UNITS, not raw records. `tree --json` already carries core's collapse (its edit
+        // rows are unit representatives), so filtering the raw walk to ids the tree shows makes this
+        // cursor visit each combined change ONCE — the other two front ends already did, and stepping
+        // through a unit's superseded members one by one was this plugin's last raw-record surface.
+        // With no tree yet (first refresh, or a CLI too old to answer), the raw walk is the honest
+        // fallback: visiting more stops loses nothing, where visiting none would strand the cursor.
+        val reps = editTree()?.let { t -> (t.files.flatMap { it.allEdits } + t.folders.flatMap { it.allEdits }).map { it.id }.toSet() }
+        val all = log().filter { it.pending }
+        val pending = (if (reps.isNullOrEmpty()) all else all.filter { it.id in reps }.ifEmpty { all }).sortedBy { it.id }
         if (pending.isEmpty()) {
             reviewCursorId = null
             return null
@@ -204,6 +212,19 @@ class ObservatoryService(private val project: Project) : Disposable {
     @Volatile private var editTreeCache: EditTree? = null
     @Volatile private var editTreeKey: String = ""
 
+    /**
+     * Records inside a chain that CANCELS OUT — a file created then deleted, or an edit put back.
+     * They are not decisions, so no count, badge, axis or lens may include them: this plugin derives
+     * those from the raw store, and without the set they contradicted the very tree they sit beside
+     * (status bar "5", Review tree "1"). Filled by `tree --json`; empty until the first one lands,
+     * which is the pre-0.9.4 behaviour rather than a wrong answer of its own.
+     */
+    @Volatile var hiddenIds: Set<Int> = emptySet()
+        private set
+
+    /** True when this record is one of the above — the single test every derived count uses. */
+    fun isHidden(rec: EditRecord): Boolean = hiddenIds.isNotEmpty() && rec.id in hiddenIds
+
     fun editTree(): EditTree? {
         refreshEditTree()
         return editTreeCache
@@ -224,6 +245,12 @@ class ObservatoryService(private val project: Project) : Disposable {
                 editTreeKey = "" // fetch failed — retry on the next refresh
             } else {
                 editTreeCache = parsed
+                // Publish the set BEFORE the fan-out, so the counts every listener recomputes below
+                // agree with the tree that just landed rather than lagging it by one tick.
+                if (parsed.hiddenIds != hiddenIds) {
+                    hiddenIds = parsed.hiddenIds
+                    cachedKey = "" // the derived pending caches were built with the previous set
+                }
                 ApplicationManager.getApplication().invokeLater { listeners.forEach { it.run() } }
             }
         }
@@ -431,7 +458,9 @@ class ObservatoryService(private val project: Project) : Disposable {
     data class Counts(val pending: Int, val kept: Int, val undone: Int, val oldestPendingTs: Long?)
 
     fun counts(): Counts {
-        val log = log()
+        // Cancelled-out chains are not work at any status — the same rule the Review tree, the change
+        // map and every VS Code counter follow. Without this the status bar read 5 where the tree read 1.
+        val log = log().filter { !isHidden(it) }
         return Counts(
             pending = log.count { it.pending },
             kept = log.count { it.kept },

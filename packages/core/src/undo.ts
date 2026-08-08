@@ -15,17 +15,24 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import { diffArrays } from 'diff';
-import { EditRecord, findRecord, isUnderPath, logPath, readBlob, readLog, readLogRaw, setStatus, setStatusMany } from './store';
+import { EditRecord, EditStatus, OperationEntry, findRecord, isUnderPath, readBlob, readLog, readLogRaw, setStatus, setStatusMany } from './store';
 import { canonPath } from './paths';
 import { groupMembers } from './groups';
+import { unitDependents } from './units';
 import { taskEditIds } from './changemap';
+import { threeWayMerge } from './merge';
 
 
 export interface UndoResult {
   ok: boolean;
   status: 'undone' | 'redone' | 'deleted' | 'conflict' | 'noop' | 'error';
   message: string;
+  /** On an undo conflict caused by LATER UNITS that rewrote this change's lines: their unit reps,
+   *  ascending. Absent on ordinary conflicts (a manual/external change). Additive — never renamed. */
+  dependents?: number[];
+  /** With [dependents]: the whole closure as RAW member ids, newest first — exactly the set
+   *  `undo --ids` takes to revert this change and its dependents in one call. */
+  closure?: number[];
 }
 
 /** Raw blob bytes (exactly what capture stored) — the fidelity-preserving read. */
@@ -64,82 +71,9 @@ function writeEnsuringDir(file: string, content: Buffer | string): void {
   fs.writeFileSync(file, content);
 }
 
-/** Split into lines that KEEP their trailing "\n" (last line may lack one); join('') round-trips. */
-function tokenizeLines(s: string): string[] {
-  return s.match(/[^\n]*\n|[^\n]+$/g) || [];
-}
-
-interface LineChange {
-  start: number; // base token index
-  del: number; // base tokens removed
-  ins: string[]; // tokens inserted
-}
-
-/** Changes base->other in base-token coordinates, via diffArrays over newline-terminated lines. */
-function lineChanges(base: string, other: string): LineChange[] {
-  const parts = diffArrays(tokenizeLines(base), tokenizeLines(other));
-  const out: LineChange[] = [];
-  let baseIdx = 0;
-  let i = 0;
-  while (i < parts.length) {
-    if (!parts[i].added && !parts[i].removed) {
-      baseIdx += parts[i].value.length;
-      i++;
-      continue;
-    }
-    const start = baseIdx;
-    let del = 0;
-    const ins: string[] = [];
-    while (i < parts.length && (parts[i].added || parts[i].removed)) {
-      if (parts[i].removed) {
-        del += parts[i].value.length;
-        baseIdx += parts[i].value.length;
-      } else {
-        ins.push(...parts[i].value);
-      }
-      i++;
-    }
-    out.push({ start, del, ins });
-  }
-  return out;
-}
-
-/**
- * Position-anchored 3-way line merge. base = after_N; ours = current (base + later edits);
- * theirs = before_N (base with edit N undone). Returns merged text, or null on a genuine overlap.
- *
- * Anchoring on base line positions (not fuzzy text search) makes it safe against duplicated content;
- * zero-context change regions avoid the spurious "nearby edits" conflicts that a patch-level merge
- * produces when two edits fall within a context window of each other.
- */
-function threeWayMerge(base: string, ours: string, theirs: string): string | null {
-  const A = lineChanges(base, ours);
-  const B = lineChanges(base, theirs);
-  for (const a of A) {
-    for (const b of B) {
-      const a0 = a.start,
-        a1 = a.start + a.del,
-        b0 = b.start,
-        b1 = b.start + b.del;
-      const overlap = a0 < b1 && b0 < a1;
-      const bothInsertSamePoint = a.del === 0 && b.del === 0 && a0 === b0;
-      const insertInsideReplace =
-        (a.del === 0 && a0 > b0 && a0 < b1) || (b.del === 0 && b0 > a0 && b0 < a1);
-      if (overlap || bothInsertSamePoint || insertInsideReplace) return null;
-    }
-  }
-  const baseTok = tokenizeLines(base);
-  const all = [...A, ...B].sort((x, y) => x.start - y.start || x.del - y.del);
-  const res: string[] = [];
-  let i = 0;
-  for (const ch of all) {
-    while (i < ch.start) res.push(baseTok[i++]);
-    res.push(...ch.ins);
-    i = ch.start + ch.del;
-  }
-  while (i < baseTok.length) res.push(baseTok[i++]);
-  return res.join('');
-}
+// The line-merge primitives moved to `merge.ts` when `units.ts` needed `tokenizeLines` for its
+// hop-shape diffs; importing this module from there would have closed a cycle. Same implementation,
+// one copy — see that file's header.
 
 /**
  * The file's baseline for a quick-diff: `current` with every still-PENDING edit reverted, computed
@@ -180,9 +114,25 @@ export function fileBaseline(sessionId: string, file: string, current: string): 
 export function undoEdit(sessionId: string, id: number): UndoResult {
   const rec = findRecord(sessionId, id);
   if (!rec) return { ok: false, status: 'error', message: `no edit #${id} in this session` };
+  return undoRecord(sessionId, rec, [id]);
+}
+
+/**
+ * Undo one CHANGE: a record, or a whole review unit summed into its net blob pair. `rec` may be
+ * synthetic — a unit's rep carrying the span's FIRST beforeBlob, exactly the record `reviewEdits`
+ * renders — and `memberIds` are the records whose ledger status the outcome covers, flipped in ONE
+ * append. The decision tree is the single-edit one, branch for branch; on conflict the DISK IS
+ * UNTOUCHED and no status is written. `defer` skips the status write so a scoped caller can flush
+ * one batch at the end instead of invalidating the readLog memo once per record.
+ */
+function undoRecord(sessionId: string, rec: EditRecord, memberIds: number[], defer = false): UndoResult {
+  const id = rec.id;
   if (rec.status === 'undone') {
     return { ok: true, status: 'noop', message: `edit #${id} is already undone` };
   }
+  const markUndone = (): void => {
+    if (!defer) setStatusMany(sessionId, memberIds, 'undone');
+  };
 
   const beforeBuf = blobBuf(sessionId, rec.beforeBlob);
   let currentBuf: Buffer | null;
@@ -193,18 +143,67 @@ export function undoEdit(sessionId: string, id: number): UndoResult {
   }
   const currentSha = currentBuf ? sha256(currentBuf) : null;
 
-  const conflict = (): UndoResult => ({
-    ok: false,
-    status: 'conflict',
-    message:
-      `edit #${id} overlaps a later change to ${path.basename(rec.file)}. ` +
-      `Run \`claude-observatory undo ${id} --force\` to restore the file to its pre-edit-#${id} ` +
-      `state (this also drops later edits to this file).`,
-  });
+  const conflict = (): UndoResult => {
+    // A dependent unit by definition rewrote lines this change produced, so the merge already
+    // refused on its own — the dependency edge's job is to turn that anonymous refusal into a named
+    // one with a one-call closure. A conflict with NO dependent unit keeps the original wording: it
+    // means a manual or external change, and `--ids` would not help there.
+    const dependents = unitDependents(sessionId, id).filter(
+      (d) => findRecord(sessionId, d)?.status !== 'undone'
+    );
+    if (dependents.length) {
+      const many = dependents.length > 1;
+      const members = [...new Set([...dependents, id].flatMap((d) => groupMembers(sessionId, d)))];
+      // The one-call closure exists only when `undo --ids` can actually perform it — that verb
+      // reverts PENDING records alone. A kept unit anywhere in the set (this one, or a dependent)
+      // would make the suggestion a no-op that re-prints itself; name the edge, offer --force.
+      const allPending = members.every((m) => findRecord(sessionId, m)?.status === 'pending');
+      if (allPending) {
+        const closure = members.sort((a, b) => b - a); // newest first — the order undoScope reverts in
+        return {
+          ok: false,
+          status: 'conflict',
+          dependents,
+          closure,
+          message:
+            `edit #${id} overlaps later work: unit${many ? 's' : ''} #${dependents.join(', #')} ` +
+            `depend${many ? '' : 's'} on it. Undo ${many ? 'them together' : 'both'} with ` +
+            `\`claude-observatory undo --ids ${closure.join(',')}\`, or --force to restore the whole file.`,
+        };
+      }
+      return {
+        ok: false,
+        status: 'conflict',
+        dependents,
+        message:
+          `edit #${id} overlaps later work: unit${many ? 's' : ''} #${dependents.join(', #')} ` +
+          `depend${many ? '' : 's'} on it, and part of that chain is already accepted — ` +
+          `review ${many ? 'those units' : 'that unit'} first, or --force to restore the whole file.`,
+      };
+    }
+    return {
+      ok: false,
+      status: 'conflict',
+      message:
+        `edit #${id} overlaps a later change to ${path.basename(rec.file)}. ` +
+        `Run \`claude-observatory undo ${id} --force\` to restore the file to its pre-edit-#${id} ` +
+        `state (this also drops later edits to this file).`,
+    };
+  };
 
   // New-file create -> undo deletes the file, but ONLY if no later edit changed it since (compare by
   // sha of the raw bytes, never a UTF-8 round-trip).
   if (rec.beforeBlob === null) {
+    // A unit whose FIRST member created the file and whose rep DELETED it nets to both blobs null:
+    // "no file existed, none should exist". There is nothing of ours to remove — a file at that path
+    // now is someone else's, its content captured in NO blob, so unlinking it would be unrecoverable
+    // data loss (the old vacuous `rec.afterBlob !== null &&` guard did exactly that). Refuse when a
+    // file exists; absent, the undo is a pure ledger flip.
+    if (rec.afterBlob === null) {
+      if (currentBuf !== null) return conflict();
+      markUndone();
+      return { ok: true, status: 'undone', message: `edit #${id} created and removed ${rec.file} — nothing to restore` };
+    }
     // #43 phantom guard: this "creation" is one half of a capture artifact, not Claude's work, and the
     // content check below cannot save the file (the phantom's snapshot IS the untouched file, so it
     // always matches). Refuse and name the repair. Gated on the file still EXISTING: that is what
@@ -212,13 +211,13 @@ export function undoEdit(sessionId: string, id: number): UndoResult {
     // removed it) has the same record shape but no file on disk, and its undo stays a harmless no-op.
     const twin = currentBuf === null ? undefined : phantomTwinOf(sessionId, rec);
     if (twin) return phantomRefusal(id, twin.id);
-    if (currentSha !== null && rec.afterBlob !== null && currentSha !== rec.afterBlob) return conflict();
+    if (currentSha !== null && currentSha !== rec.afterBlob) return conflict();
     try {
       if (currentBuf !== null) fs.unlinkSync(rec.file);
     } catch (e) {
       return { ok: false, status: 'error', message: `could not delete ${rec.file}: ${String(e)}` };
     }
-    setStatus(sessionId, id, 'undone');
+    markUndone();
     return { ok: true, status: 'deleted', message: `deleted ${rec.file} (created by edit #${id})` };
   }
 
@@ -226,14 +225,14 @@ export function undoEdit(sessionId: string, id: number): UndoResult {
   if (rec.afterBlob === null) {
     if (currentBuf !== null) return conflict();
     writeEnsuringDir(rec.file, beforeBuf as Buffer);
-    setStatus(sessionId, id, 'undone');
+    markUndone();
     return { ok: true, status: 'undone', message: `restored ${rec.file}` };
   }
 
   // Normal in-place edit; file missing now -> restore wholesale (raw bytes).
   if (currentBuf === null) {
     writeEnsuringDir(rec.file, beforeBuf as Buffer);
-    setStatus(sessionId, id, 'undone');
+    markUndone();
     return {
       ok: true,
       status: 'undone',
@@ -244,7 +243,7 @@ export function undoEdit(sessionId: string, id: number): UndoResult {
   // No later edits touched this file -> clean, exact byte-for-byte revert.
   if (currentSha === rec.afterBlob) {
     fs.writeFileSync(rec.file, beforeBuf as Buffer);
-    setStatus(sessionId, id, 'undone');
+    markUndone();
     return { ok: true, status: 'undone', message: `undid edit #${id} (${rec.file})` };
   }
 
@@ -261,7 +260,7 @@ export function undoEdit(sessionId: string, id: number): UndoResult {
   );
   if (merged === null) return conflict(); // edit #id and a later edit genuinely overlap
   fs.writeFileSync(rec.file, merged);
-  setStatus(sessionId, id, 'undone');
+  markUndone();
   return {
     ok: true,
     status: 'undone',
@@ -276,9 +275,10 @@ export function undoEdit(sessionId: string, id: number): UndoResult {
  * computes against a file that no longer matches its blobs (a spurious conflict).
  */
 function markLaterSameFileDropped(sessionId: string, file: string, afterId: number): void {
-  for (const r of readLog(sessionId)) {
-    if (r.file === file && r.id > afterId && r.status !== 'undone') setStatus(sessionId, r.id, 'undone');
-  }
+  const ids = readLog(sessionId)
+    .filter((r) => r.file === file && r.id > afterId && r.status !== 'undone')
+    .map((r) => r.id);
+  setStatusMany(sessionId, ids, 'undone'); // one parse + one append, however many were dropped
 }
 
 /**
@@ -360,9 +360,20 @@ export function restoreFile(sessionId: string, id: number): UndoResult {
 export function redoEdit(sessionId: string, id: number): UndoResult {
   const rec = findRecord(sessionId, id);
   if (!rec) return { ok: false, status: 'error', message: `no edit #${id} in this session` };
+  return redoRecord(sessionId, rec, [id]);
+}
+
+/** The forward mirror of [undoRecord]: re-apply one change (a record, or a unit's net pair), its
+ *  members returning to 'pending' in ONE append. Same synthetic-rec contract, same conflict contract
+ *  (disk untouched, no status write), same `defer` contract for scoped callers. */
+function redoRecord(sessionId: string, rec: EditRecord, memberIds: number[], defer = false): UndoResult {
+  const id = rec.id;
   if (rec.status !== 'undone') {
     return { ok: true, status: 'noop', message: `edit #${id} is not undone — nothing to redo` };
   }
+  const markPending = (): void => {
+    if (!defer) setStatusMany(sessionId, memberIds, 'pending');
+  };
 
   const afterBuf = blobBuf(sessionId, rec.afterBlob);
   const beforeBuf = blobBuf(sessionId, rec.beforeBlob);
@@ -384,9 +395,17 @@ export function redoEdit(sessionId: string, id: number): UndoResult {
 
   // Redo a creation -> re-create the file with `after` (raw bytes).
   if (rec.beforeBlob === null) {
-    if (currentSha !== null && rec.afterBlob !== null && currentSha !== rec.afterBlob) return conflict();
+    // The both-null net (a create→…→delete unit): re-applying it means the file STAYS absent. A file
+    // there now is someone else's — fabricating an empty file over it (the old `?? Buffer.alloc(0)`)
+    // was never a state any captured snapshot held.
+    if (rec.afterBlob === null) {
+      if (currentBuf !== null) return conflict();
+      markPending();
+      return { ok: true, status: 'redone', message: `re-applied edit #${id} — ${rec.file} stays removed` };
+    }
+    if (currentSha !== null && currentSha !== rec.afterBlob) return conflict();
     writeEnsuringDir(rec.file, afterBuf ?? Buffer.alloc(0));
-    setStatus(sessionId, id, 'pending');
+    markPending();
     return { ok: true, status: 'redone', message: `re-applied edit #${id} — created ${rec.file}` };
   }
 
@@ -398,20 +417,20 @@ export function redoEdit(sessionId: string, id: number): UndoResult {
     } catch (e) {
       return { ok: false, status: 'error', message: `could not delete ${rec.file}: ${String(e)}` };
     }
-    setStatus(sessionId, id, 'pending');
+    markPending();
     return { ok: true, status: 'deleted', message: `re-applied edit #${id} — deleted ${rec.file}` };
   }
 
   // Normal edit: file missing now -> write after wholesale (raw bytes).
   if (currentBuf === null) {
     writeEnsuringDir(rec.file, afterBuf as Buffer);
-    setStatus(sessionId, id, 'pending');
+    markPending();
     return { ok: true, status: 'redone', message: `re-applied edit #${id} (${rec.file})` };
   }
   // No later edits -> clean forward apply (raw bytes).
   if (currentSha === rec.beforeBlob) {
     fs.writeFileSync(rec.file, afterBuf as Buffer);
-    setStatus(sessionId, id, 'pending');
+    markPending();
     return { ok: true, status: 'redone', message: `re-applied edit #${id} (${rec.file})` };
   }
   // Later edits exist -> 3-way merge with before_N as the common base (text-domain by necessity).
@@ -429,7 +448,7 @@ export function redoEdit(sessionId: string, id: number): UndoResult {
   );
   if (merged === null) return conflict();
   fs.writeFileSync(rec.file, merged);
-  setStatus(sessionId, id, 'pending');
+  markPending();
   return {
     ok: true,
     status: 'redone',
@@ -462,34 +481,46 @@ export function keepGroup(sessionId: string, id: number): { kept: number; ids: n
 }
 
 /**
- * Undo every edit in the review group containing `id`, NEWEST-first — a clean sequential revert back
- * to the group's earliest before-state (the members are a chained overlap, so each step reverts
- * cleanly). Stops and returns the conflict if a member genuinely conflicts with an out-of-group edit.
+ * Undo the whole review unit containing `id` as ONE merge. A unit's members are contiguous, so its
+ * net change IS the blob pair `(first.beforeBlob, rep.afterBlob)` — the same synthetic record
+ * `reviewEdits` renders. The old member-by-member walk paid k × (file read + whole-file merge +
+ * locked append) and could conflict against the unit's OWN chain, stopping half-reverted; summing
+ * the chain into one pair makes that impossible. A conflict now means a LATER unrelated edit or a
+ * manual change — never the chain itself — and every member flips in one append.
  */
 export function undoGroup(sessionId: string, id: number): GroupResult {
-  const ids = [...groupMembers(sessionId, id)].sort((a, b) => b - a); // newest → oldest
+  const ids = [...groupMembers(sessionId, id)].sort((a, b) => a - b); // oldest → newest
   // Singleton (the common case) keeps the exact single-edit semantics: noop / error / conflict / undone.
   if (ids.length === 1) return { ...undoEdit(sessionId, ids[0]), ids };
-  let undone = 0;
-  for (const m of ids) {
-    const res = undoEdit(sessionId, m);
-    if (!res.ok && res.status !== 'noop') return { ...res, ids }; // conflict or error → stop + report
-    if (res.status !== 'noop') undone++;
+  const first = findRecord(sessionId, ids[0]);
+  const rep = findRecord(sessionId, ids[ids.length - 1]);
+  if (!first || !rep) return { ok: false, status: 'error', message: `no edit #${id} in this session`, ids };
+  const res = undoRecord(sessionId, { ...rep, beforeBlob: first.beforeBlob }, ids);
+  if (res.ok && res.status !== 'noop') {
+    const message = res.status === 'deleted'
+      ? `deleted ${rep.file} (created by this change — ${ids.length} edit(s))`
+      : `reverted this change — ${ids.length} edit(s)`;
+    return { ...res, message, ids };
   }
-  return { ok: true, status: 'undone', message: `reverted this change — ${undone} edit(s)`, ids };
+  return { ...res, ids };
 }
 
-/** Re-apply every undone edit in a group, OLDEST-first (rebuilds the chain). Mirror of undoGroup. */
+/** Re-apply a whole undone unit as ONE merge — the forward mirror of [undoGroup]: base is the span's
+ *  first `before`, `theirs` its rep's `after`, and every member returns to 'pending' in one append. */
 export function redoGroup(sessionId: string, id: number): GroupResult {
   const ids = [...groupMembers(sessionId, id)].sort((a, b) => a - b); // oldest → newest
   if (ids.length === 1) return { ...redoEdit(sessionId, ids[0]), ids };
-  let redone = 0;
-  for (const m of ids) {
-    const res = redoEdit(sessionId, m);
-    if (!res.ok && res.status !== 'noop') return { ...res, ids };
-    if (res.status !== 'noop') redone++;
+  const first = findRecord(sessionId, ids[0]);
+  const rep = findRecord(sessionId, ids[ids.length - 1]);
+  if (!first || !rep) return { ok: false, status: 'error', message: `no edit #${id} in this session`, ids };
+  const res = redoRecord(sessionId, { ...rep, beforeBlob: first.beforeBlob }, ids);
+  if (res.ok && res.status !== 'noop') {
+    const message = res.status === 'deleted'
+      ? `re-applied this change — deleted ${rep.file}`
+      : `re-applied this change — ${ids.length} edit(s)`;
+    return { ...res, message, ids };
   }
-  return { ok: true, status: 'redone', message: `re-applied this change — ${redone} edit(s)`, ids };
+  return { ...res, ids };
 }
 
 /** Force a redo: write the edit's `after` content wholesale (dropping later edits to the file). */
@@ -522,6 +553,7 @@ export interface UndoScopeResult {
   conflicts: number; // edits left in place because a later change overlapped (offer per-edit --force)
   errors: number; // edits refused outright (e.g. the #43 phantom guard) — without this the bulk totals lie
   firstError?: string; // the first refusal's message — its remediation pointer must reach the user
+  firstConflict?: string; // the first conflict's message — a named-dependent refusal must reach the reader too
   total: number; // pending edits that matched the scope
   ids: number[]; // the reverted edit ids
 }
@@ -556,22 +588,35 @@ export function undoScope(
   let conflicts = 0;
   let errors = 0;
   let firstError: string | undefined;
+  let firstConflict: string | undefined;
   const ids: number[] = [];
-  for (const t of targets) {
-    const r = undoEdit(sessionId, t.id);
-    if (r.status === 'conflict') conflicts++;
-    else if (r.ok) {
-      undone++;
-      ids.push(t.id);
-    } else {
-      // A refusal (status 'error') is not a conflict and must not vanish from the arithmetic: on a
-      // #43-corrupted store, "Reject All" hits the phantom guard for every phantom create, and the
-      // refusal message is the only place the repair (`clean --phantoms`) is named.
-      errors++;
-      if (firstError === undefined) firstError = r.message;
+  try {
+    for (const t of targets) {
+      // Deferred status write: each per-record append would invalidate the readLog memo, making the
+      // NEXT iteration re-parse the whole log — O(N) full parses per bulk revert. The successes flush
+      // as ONE setStatusMany below instead.
+      const r = undoRecord(sessionId, t, [t.id], true);
+      if (r.status === 'conflict') {
+        conflicts++;
+        if (firstConflict === undefined) firstConflict = r.message;
+      } else if (r.ok) {
+        undone++;
+        ids.push(t.id);
+      } else {
+        // A refusal (status 'error') is not a conflict and must not vanish from the arithmetic: on a
+        // #43-corrupted store, "Reject All" hits the phantom guard for every phantom create, and the
+        // refusal message is the only place the repair (`clean --phantoms`) is named.
+        errors++;
+        if (firstError === undefined) firstError = r.message;
+      }
     }
+  } finally {
+    // The files already rewritten must not lose their ledger flip to a mid-loop throw (one EACCES
+    // target aborting the walk) — flush whatever succeeded before the error propagates, or every
+    // reverted-but-still-"pending" record answers a spurious conflict forever after.
+    setStatusMany(sessionId, ids, 'undone');
   }
-  return { undone, conflicts, errors, firstError, total: targets.length, ids };
+  return { undone, conflicts, errors, firstError, firstConflict, total: targets.length, ids };
 }
 
 export interface RedoScopeResult {
@@ -607,15 +652,63 @@ export function redoScope(
   let redone = 0;
   let conflicts = 0;
   const ids: number[] = [];
-  for (const t of targets) {
-    const r = redoEdit(sessionId, t.id);
-    if (r.status === 'conflict') conflicts++;
-    else if (r.ok) {
-      redone++;
-      ids.push(t.id);
+  try {
+    for (const t of targets) {
+      // Deferred status write — same rationale as undoScope: one flush below, not one append per record.
+      const r = redoRecord(sessionId, t, [t.id], true);
+      if (r.status === 'conflict') conflicts++;
+      else if (r.ok) {
+        redone++;
+        ids.push(t.id);
+      }
     }
+  } finally {
+    setStatusMany(sessionId, ids, 'pending'); // flush survives a mid-loop throw — see undoScope
   }
   return { redone, conflicts, total: targets.length, ids };
+}
+
+/**
+ * Reverse ONE journaled reviewer operation (store.ts `BatchOp`, listed by `oplog`).
+ *
+ * A 'keep' is a pure ledger change — restoring each record's journaled BEFORE-status is the whole
+ * revert. An 'undo'/'redo' rewrote FILES, so statuses alone would lie about disk: those replay
+ * through redoScope/undoScope and surface conflicts exactly like every other scoped verb. Every
+ * path flows back through setStatusMany, so the revert is journaled too — `oplog --revert-last`
+ * twice lands back where it started, never in a hidden state.
+ */
+export function revertOperation(
+  session: string,
+  entry: OperationEntry
+): { kind: OperationEntry['kind']; restored?: number; result?: UndoScopeResult | RedoScopeResult } {
+  // Disk verbs replay ONLY for records whose journaled BEFORE-status matches the disk operation the
+  // kind names: an 'undo' rewrote files flipping pending→undone, a 'redo' flipping undone→pending.
+  // Any other before-status means the journaled flip was ledger-only for that record — reverting a
+  // keep journals kind 'redo' with prev 'kept', and replaying that through undoScope would rewrite
+  // disk for an operation that never touched it (and land on 'undone', not back at 'kept').
+  const canonical: EditStatus | null = entry.kind === 'undo' ? 'pending' : entry.kind === 'redo' ? 'undone' : null;
+  const diskIds: number[] = [];
+  const byPrev = new Map<EditStatus, number[]>();
+  for (const id of entry.ids) {
+    const prev = entry.prev[String(id)];
+    if (!prev) continue;
+    if (canonical !== null && prev === canonical) {
+      diskIds.push(id);
+    } else {
+      const arr = byPrev.get(prev);
+      if (arr) arr.push(id);
+      else byPrev.set(prev, [id]);
+    }
+  }
+  let restored = 0;
+  for (const [status, ids] of byPrev) restored += setStatusMany(session, ids, status).length;
+  if (entry.kind === 'undo' && diskIds.length) {
+    return { kind: entry.kind, ...(restored ? { restored } : {}), result: redoScope(session, { ids: diskIds }) };
+  }
+  if (entry.kind === 'redo' && diskIds.length) {
+    return { kind: entry.kind, ...(restored ? { restored } : {}), result: undoScope(session, { ids: diskIds }) };
+  }
+  return { kind: entry.kind, restored };
 }
 
 /**

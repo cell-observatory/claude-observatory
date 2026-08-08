@@ -4,7 +4,7 @@
  * both editors export the identical markdown (e.g. to paste into a PR).
  */
 import { minOf, maxOf } from './store';
-import { reviewEdits } from './groups';
+import { reviewEdits, visibleEdits } from './groups';
 import { lineDelta } from './format';
 
 export interface ReviewFileSummary {
@@ -31,8 +31,9 @@ export interface ReviewSummary {
 }
 
 export function reviewSummary(session: string): ReviewSummary {
-  // DISPLAY units, like every other count in the product (see sessionCounts).
-  const log = reviewEdits(session);
+  // DISPLAY units, like every other count in the product (see sessionCounts) — minus the chains
+  // that cancel out, which are not edits anybody is asked to decide about.
+  const log = visibleEdits(session);
   const byFile = new Map<string, ReviewFileSummary>();
   let kept = 0;
   let undone = 0;

@@ -301,8 +301,20 @@ object ObservatoryCli {
     fun cleanCompletedPreview(workDir: String?): CliResult =
         run(listOf("clean", "--completed", "--dry-run", "--json"), workDir)
 
-    fun keep(session: String, id: Int, workDir: String?): Boolean =
-        run(listOf("keep", id.toString(), "--session", session, "--json"), workDir).ok
+    /** Single-id keep (group-aware in the CLI). Returns the number of records actually flipped —
+     *  0 is a REAL answer (the edit is already kept, or reverted), null a failed spawn. The CLI
+     *  exits 0 with `kept: 0` on a no-op, so `.ok` alone painted a green "kept" over nothing —
+     *  which the snapshot-style stacked review tab turned from a milliseconds-wide race into a
+     *  standing lie. */
+    fun keep(session: String, id: Int, workDir: String?): Int? {
+        val r = run(listOf("keep", id.toString(), "--session", session, "--json"), workDir)
+        if (!r.ok) return null
+        return try {
+            JsonParser.parseString(r.stdout).asJsonObject.get("kept")?.takeIf { !it.isJsonNull }?.asInt ?: 0
+        } catch (_: Exception) {
+            null
+        }
+    }
 
     /** `keep --ids <a,b,c>` — accept an explicit set in ONE process. A scoped accept used to spawn the
      *  CLI once per edit, which on a long session is thousands of processes; this is one. Returns the
@@ -344,6 +356,8 @@ object ObservatoryCli {
         /** Review units the reverted set collapses to; null unless this was a `--from-prompt` rewind,
          *  whose two counts differ (raw records vs the units the Prompts rows print). */
         val units: Int? = null,
+        /** The FIRST conflict's message — a named-dependent refusal must reach bulk readers too. */
+        val firstConflict: String? = null,
     )
 
     private fun parseUndoScope(stdout: String): UndoScopeResult? = try {
@@ -354,6 +368,7 @@ object ObservatoryCli {
             o.get("firstError")?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString,
             intList(o, "ids"),
             o.get("units")?.takeIf { it.isJsonPrimitive }?.asInt,
+            firstConflict = o.get("firstConflict")?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString,
         )
     } catch (_: Exception) {
         null
@@ -478,6 +493,10 @@ object ObservatoryCli {
          * nothing. Cheap to keep, and it guards the most destructive verb in the product.
          */
         val performed: Boolean = false,
+        /** How many of [pending] were made BEFORE the ask this rewind points at. One review unit can
+         *  span two asks when the file was absent in between, and a unit is the smallest revertible
+         *  thing — so the rewind reaches back, and the dialog says so. 0 from an older CLI. */
+        val fromEarlier: Int = 0,
     )
 
     /** Parse the preflight payload. `internal` so the shape is unit-testable without a subprocess. */
@@ -490,7 +509,12 @@ object ObservatoryCli {
             dry -> {
                 val pending = int("pending") ?: return null
                 val units = int("units") ?: return null
-                RewindPreview(pending, units, o.get("files")?.takeIf { it.isJsonArray }?.asJsonArray?.size() ?: 0)
+                RewindPreview(
+                    pending,
+                    units,
+                    o.get("files")?.takeIf { it.isJsonArray }?.asJsonArray?.size() ?: 0,
+                    fromEarlier = int("fromEarlier") ?: 0,
+                )
             }
             // NOT a preview but a completed revert: this build dropped the flag and did the work.
             o.has("undone") -> RewindPreview(int("undone") ?: 0, int("units") ?: 0, 0, performed = true)
@@ -748,6 +772,8 @@ object ObservatoryCli {
         val total: Int,
         val errors: Int = 0,
         val firstError: String? = null,
+        /** The FIRST conflict's message — a named-dependent refusal must reach task-scoped readers too. */
+        val firstConflict: String? = null,
     )
 
     /** `task-undo <taskId>` — revert every PENDING edit in a task's STRICT span, newest-first.
@@ -761,6 +787,7 @@ object ObservatoryCli {
                 o.get("undone").asInt, o.get("conflicts").asInt, o.get("total").asInt,
                 o.get("errors")?.takeIf { !it.isJsonNull }?.asInt ?: 0,
                 o.get("firstError")?.takeIf { !it.isJsonNull }?.asString,
+                firstConflict = o.get("firstConflict")?.takeIf { !it.isJsonNull }?.asString,
             )
         } catch (_: Exception) {
             null
@@ -782,6 +809,7 @@ object ObservatoryCli {
                 o.get("total")?.asInt ?: 0,
                 o.get("errors")?.takeIf { !it.isJsonNull }?.asInt ?: 0,
                 o.get("firstError")?.takeIf { !it.isJsonNull }?.asString,
+                firstConflict = o.get("firstConflict")?.takeIf { !it.isJsonNull }?.asString,
             )
         } catch (_: Exception) {
             null
@@ -904,6 +932,25 @@ object ObservatoryCli {
      *  Fetched on demand because it can be large. */
     fun promptResponseJson(session: String, promptId: String, workDir: String?): String? {
         val r = run(listOf("prompts", "--id", promptId, "--response", "--session", session, "--json"), workDir)
+        return if (r.ok) r.stdout else null
+    }
+
+    /** The session's work as review units — the Review tab's whole payload; a null promptId answers
+     *  the WHOLE session (the tab's default view), a prompt id scopes to one ask. This is also where
+     *  this plugin finally gets core's same-code collapse: it reads raw records off disk everywhere
+     *  else, and units exist only in core, served over this seam. `--no-patch` because the panel is a
+     *  LIST — every diff renders in the editor, so shipping patch text here would be pure weight.
+     *  Fetched on demand, like promptResponseJson — deliberately not batched: `views` hands one
+     *  argument list to every view it runs, and this one's scope changes with the pick. */
+    fun reviewJson(session: String, promptId: String?, workDir: String?): String? {
+        val args = buildList {
+            add("review")
+            if (promptId != null) { add("--prompt"); add(promptId) }
+            // Everything, not just pending: Review is the ONLY review surface (the Edits/Diffs trees
+            // are gone) — resolved records render greyed with redo/undo, pending units first-class.
+            add("--session"); add(session); add("--json"); add("--no-patch")
+        }
+        val r = run(args, workDir)
         return if (r.ok) r.stdout else null
     }
 
@@ -1169,9 +1216,13 @@ object ObservatoryCli {
 
     fun isDemoSession(id: String?): Boolean = id != null && DEMO_ID.matches(id)
 
-    private fun parseUndo(r: CliResult): UndoResult = try {
+    // internal, not private: the port-fidelity test constructs CliResults and pins every field read.
+    internal fun parseUndo(r: CliResult): UndoResult = try {
         val o = JsonParser.parseString(r.stdout).asJsonObject
-        UndoResult(o.get("ok").asBoolean, o.get("status").asString, o.get("message").asString)
+        UndoResult(
+            o.get("ok").asBoolean, o.get("status").asString, o.get("message").asString,
+            intList(o, "dependents"), intList(o, "closure"),
+        )
     } catch (_: Exception) {
         UndoResult(false, "error", r.stderr.ifBlank { "claude-observatory CLI not found — install it and set its path in Settings → Tools → Claude Observatory" })
     }

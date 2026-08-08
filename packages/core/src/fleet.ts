@@ -15,6 +15,7 @@ import * as path from 'path';
 import { claudeConfigDir } from './paths';
 import { projectDir, commonDir, repoKeyForSession, firstCwdLine } from './session';
 import { readLog, isSafeSessionId, sidecarMemo } from './store';
+import { cancelledMemberIds } from './units';
 import { parseTranscriptActions, agentPhaseDetail } from './actions';
 import { sessionCounts } from './observe';
 
@@ -125,8 +126,15 @@ function buildSibling(
   const distinct: string[] = [];
   const seen = new Set<string>();
   const pendingSeen = new Set<string>(); // distinct files with a PENDING edit — the live-overlap set
+  // …and a chain that cancels out is not an overlap. This set drives the cross-agent collision
+  // warning, so a phantom create/delete pair would raise "two agents are both editing this file"
+  // about a file neither of them changed — and the row beside it would read `0 pending`.
+  // Pending-only, deliberately: this set gates the PENDING-file overlap below, and it runs once per
+  // sibling in a fresh process where nothing is memoized — the all-status form added ~43% to
+  // `listSiblings` on large siblings for two walks whose answers this loop never reads.
+  const settled = cancelledMemberIds(id, 'pending');
   for (const r of log) {
-    if (r.status === 'pending') {
+    if (r.status === 'pending' && !settled.has(r.id)) {
       pendingSeen.add(r.file);
     }
     if (!seen.has(r.file)) {
@@ -166,8 +174,9 @@ function buildSibling(
     // DISPLAY units — the same collapse the Overview and the Sessions rows apply, so "N pending across
     // siblings" cannot disagree with the row the reader clicks into. sessionCounts is sidecar-cached on
     // disk, so this stays one stat() per sibling on a warm store rather than 31 collapses per tick.
-    // The FILE sets above stay raw on purpose: collapsing merges chained edits within one file, so the
-    // distinct-file and pending-file sets are identical either way, and recomputing them would cost.
+    // The DISTINCT-file set above stays raw on purpose: collapsing merges chained edits within one
+    // file, so that set is identical either way. The PENDING-file set is not — a file whose only
+    // pending records cancel out has nothing to collide over — so that one is filtered.
     edits: counts.edits,
     pending: counts.pending,
     files: distinct.slice(0, FILE_CAP),

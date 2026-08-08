@@ -13,6 +13,7 @@ import * as crypto from 'crypto';
 import { locateEditsInCurrent } from './ranges';
 import { matchesQuery } from './filter';
 import { reviewEdits } from './groups';
+import { cancelledMemberIds } from './units';
 
 export interface TreeEdit {
   id: number;
@@ -314,8 +315,13 @@ export function buildEditTree(session: string, opts: { root?: string; filter?: s
   };
   // Collapse same-code pending edits into one review unit (shared with the CLI `list`).
   const display = reviewEdits(session);
+  // A chain that goes nowhere is not work, so it is not on the map either. Counting it here is what
+  // let a file read "16 pending" in the Overview while the review list showed it nothing to decide —
+  // and on a session full of them the map's totals were mostly noise.
+  const cancelled = cancelledMemberIds(session);
   const grouped = new Map<string, { file: string; edits: EditRecord[] }>();
   for (const rec of display) {
+    if (cancelled.has(rec.id)) continue;
     const rel = relOf(rec.file);
     if (filter && !matchesQuery(rel, filter)) continue;
     if (!grouped.has(rel)) grouped.set(rel, { file: rec.file, edits: [] });

@@ -23,7 +23,7 @@ import { renderRichDiff } from './richdiff';
 import { highlightSource } from './syntax';
 import { REBINDABLE, SortKey } from '@claude-observatory/core';
 
-export type ScreenId = 'edits' | 'map' | 'prompts' | 'tasks' | 'workflows' | 'agents' | 'feed' | 'audit' | 'observations' | 'processes';
+export type ScreenId = 'edits' | 'claude' | 'map' | 'prompts' | 'tasks' | 'workflows' | 'agents' | 'feed' | 'audit' | 'observations' | 'processes';
 
 /**
  * Every key the dashboard binds, under the NAME `tui/input`'s decoder emits for it.
@@ -43,12 +43,13 @@ export const KEY_BINDINGS: ReadonlySet<string> = new Set([
   'P', 'N',
   // STRUCTURAL keys. Not rebindable, on purpose: several are the only way out of a mode, and a
   // settings screen that lets a reader lock themselves into a dashboard has handed them a footgun.
-  // Five window keys over four panes, because Detail's two faces get one each.
-  'f1', 'f2', 'f3', 'f4', 'f5', 'tab', '+', '<', ',', '>', '.', '_', '[', ']',
+  // Six window keys over five panes, because Detail's two faces get one each.
+  'f1', 'f2', 'f3', 'f4', 'f5', 'f6', 'tab', '+', '<', ',', '>', '.', '_', '[', ']',
   'up', 'down', 'left', 'right', 'pgup', 'pgdn', 'enter', 'escape', 'backspace', 'delete', ' ',
   '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
-  // Answering a confirmation.
-  'y', 'Y', 'N',
+  // Answering a confirmation. `r`/`f` answer the Claude-launch wall (`r` is also the refresh verb's
+  // fallback below; `f` exists ONLY as that wall's answer).
+  'y', 'Y', 'N', 'f',
   // ^C and ^D both arrive named, with `ctrl` set
   'c', 'd',
   // …plus every VERB, at its default key. Derived rather than listed, so a new action or a changed
@@ -62,14 +63,17 @@ export const KEY_BINDINGS: ReadonlySet<string> = new Set([
  * so every width from 96 to 100 silently cut the last keys and the row read "q qui".
  */
 export const KEY_HINTS: readonly string[] = [
-  'F1-F5 window (twice zooms) · 0-9 edit · Tab next · ↑↓ move · ←→ tab · space fold · x mark · a keep · u undo · y copy · e $EDITOR · s sort · b sessions · : command · o options · ? keys · q quit',
-  'F1-F5 window · 0-9 edit · Tab · ↑↓ · ←→ · space fold · a/u · y · e · o · ? · q',
-  'F1-F5 · 0-9 · Tab · ↑↓ · ←→ · a/u · e · o · ? · q',
+  'F1-F6 window (twice zooms) · 0-9 edit · Tab next · ↑↓ move · ←→ tab · space fold · x mark · a keep · u undo · y copy · e $EDITOR · s sort · b sessions · : command · o options · ? keys · q quit',
+  'F1-F6 window · 0-9 edit · Tab · ↑↓ · ←→ · space fold · a/u · y · e · o · ? · q',
+  'F1-F6 · 0-9 · Tab · ↑↓ · ←→ · a/u · e · o · ? · q',
   '? keys · q quit',
 ];
 
 export const SCREENS: { id: ScreenId; label: string }[] = [
-  { id: 'edits', label: 'Edits' },
+  // N15: the one review surface, labelled like the editors' Review tab. The internal id stays
+  // 'edits' — it keys cursor/scroll/tab state everywhere and renaming it would break nothing FOR
+  // the user while touching dozens of sites.
+  { id: 'edits', label: 'Review' },
   { id: 'map', label: 'Map' },
   { id: 'prompts', label: 'Prompts' },
   { id: 'tasks', label: 'Tasks' },
@@ -245,6 +249,23 @@ function pad(s: string, w: number): string {
   return gap > 0 ? s + ' '.repeat(gap) : s;
 }
 
+/**
+ * The Prompts row's one action cell — its label and its GEOMETRY, in one place.
+ *
+ * The renderer draws from this and the mouse resolves clicks through it, which is the only way the
+ * glyph and the pointer agree about where "review" is — the same contract `mapRowActions` keeps for
+ * the change map's per-row buttons. The x is fixed: every column before the cell is fixed-width
+ * (`#NNNN ` 6 · relTime 8+1 · count 4 · ` edits  ` 8), so the cell cannot drift with content.
+ */
+const PROMPT_ACT = '[review]';
+const PROMPT_ACT_ON = '▸review ';
+const PROMPT_ACT_X = 27;
+export function promptRowActions(inner: number): { action: 'review'; x: number; w: number }[] {
+  // Too narrow to draw the cell AND any title after it → the cell is not drawn, so it is not clickable.
+  if (inner < PROMPT_ACT_X + displayWidth(PROMPT_ACT) + 9) return [];
+  return [{ action: 'review', x: PROMPT_ACT_X, w: displayWidth(PROMPT_ACT) }];
+}
+
 function statusGlyph(s: string, g: Glyphs): string {
   return s === 'kept' ? g.kept : s === 'undone' ? g.undone : g.pending;
 }
@@ -330,10 +351,25 @@ function rowsForUncached(state: DashState, cols = 100, g: Glyphs = defaultGlyphs
      */
     const scope = state.promptScope;
     const byFile = new Map<string, { label: string; edits: Record<string, unknown>[] }>();
+    // Chains that go nowhere (created then deleted, or put back) are not rows — they are one footer
+    // row below, whose ids are all of them, so the ordinary `a` keeps the lot.
+    const cancelledIds: number[] = [];
+    let cancelledUnits = 0;
     for (const e of arr(view<{ edits?: unknown[] }>(state, 'list')?.edits)) {
       const file = str(e.file);
       if (!keep(file)) continue;
       if (scope && !scope.ids.has(num(e.id))) continue;
+      if (e.cancelled === true) {
+        // Only the PENDING ones are still a decision, so only they earn a place in the footer's
+        // count and in the ids `a` dismisses; an already-decided chain just leaves the list. (The
+        // payload carries `members` on exactly those, which is what makes this one test.)
+        const members = Array.isArray(e.members) ? e.members : [];
+        if (members.length) {
+          cancelledUnits++;
+          for (const m of members) cancelledIds.push(num(m));
+        }
+        continue;
+      }
       const label = str(e.rel) || tail(file);
       let g0 = byFile.get(file);
       if (!g0) byFile.set(file, (g0 = { label, edits: [] }));
@@ -372,16 +408,31 @@ function rowsForUncached(state: DashState, cols = 100, g: Glyphs = defaultGlyphs
         // rests on the glyph, so this is all still legible with colour off.
         const st = str(e.status);
         const stateKey: 'pending' | 'kept' | 'undone' = st === 'kept' ? 'kept' : st === 'undone' ? 'undone' : 'pending';
-        const delta = pad(`${tint(`+${num(e.added)}`, 'kept', depth)} ${tint(`−${num(e.removed)}`, 'risk', depth)}`, 12);
+        // Resolved rows dim WHOLE (parity with both editors' greyed Review rows) — pending work is
+        // the only thing that shouts; the glyph still names which kind of resolved.
+        const dim = stateKey !== 'pending';
+        const delta = dim
+          ? pad(`${tint(`+${num(e.added)}`, 'undone', depth)} ${tint(`−${num(e.removed)}`, 'undone', depth)}`, 12)
+          : pad(`${tint(`+${num(e.added)}`, 'kept', depth)} ${tint(`−${num(e.removed)}`, 'risk', depth)}`, 12);
         rows.push({
           ids: [id],
           key: `e${id}`,
           // Indented under its file, and carrying the glyph itself: a nested row still has to say
           // whether IT is pending, because the header only says whether ANY of them is.
-          cells: `   ${tint(statusGlyph(st, g), stateKey, depth)} ${tint(`#${String(id).padEnd(5)}`, 'accent', depth)} ${relTime(num(e.ts), state.now).padEnd(8)} ${delta}`,
+          cells: `   ${tint(statusGlyph(st, g), stateKey, depth)} ${tint(`#${String(id).padEnd(5)}`, dim ? 'undone' : 'accent', depth)} ${relTime(num(e.ts), state.now).padEnd(8)} ${delta}`,
           cont: true,
         });
       }
+    }
+    // The cancelled-out footer. It is a ROW, not a note, and its ids are every cancelled record —
+    // so `a` on it dismisses them all through the verb the reader already knows, with no new key.
+    if (cancelledUnits) {
+      const label = `${cancelledUnits} cancelled-out chain${cancelledUnits === 1 ? '' : 's'} — created then deleted, or put back: nothing to review (a dismisses)`;
+      rows.push({
+        ids: cancelledIds,
+        key: 'cancelled',
+        cells: `${tint(g.kept, 'undone', depth)} ${tint(label, 'undone', depth)}`,
+      });
     }
   } else if (state.screen === 'map') {
     const cm = view<{ files?: unknown[] }>(state, 'changemap');
@@ -402,11 +453,102 @@ function rowsForUncached(state: DashState, cols = 100, g: Glyphs = defaultGlyphs
       const title = str(p.title) || str(p.text);
       if (!keep(title)) continue;
       const ids = Array.isArray(p.editIds) ? (p.editIds as number[]) : [];
+      // The ask under review says so ON THE ROW, through the same channel marked rows use — the
+      // cursor highlight cannot carry this, because it walks away the moment focus does. The action
+      // cell is drawn by the SAME function the mouse resolves clicks through (promptRowActions), so
+      // the glyph and the pointer cannot disagree about where "review" is.
+      const reviewing = state.promptScope?.index === num(p.index);
+      const act = promptRowActions(cols).length
+        ? `${reviewing ? tint(PROMPT_ACT_ON, 'live', depth) : tint(PROMPT_ACT, 'undone', depth)} `
+        : '';
       rows.push({
         ids,
         key: `p${str(p.id) || num(p.index)}`,
-        cells: `${tint(`#${num(p.index)}`.padEnd(5), 'accent', depth)} ${relTime(num(p.ts), state.now).padEnd(8)} ${String(ids.length).padStart(4)} edits  ${title}`,
+        cells:
+          `${tint(`#${num(p.index)}`.padEnd(5), 'accent', depth)} ${relTime(num(p.ts), state.now).padEnd(8)} ` +
+          `${String(num(p.edits)).padStart(4)} edits  ${act}${reviewing ? tint(title, 'accent', depth) : title}`,
       });
+    }
+    } else if (state.screen === 'claude') {
+    // The agent's own window: row one is who is working and on what; the rows beneath are a LIVE
+    // TAIL of the session feed — Claude's activity as it lands, newest at the bottom, followed
+    // automatically unless the reader is inside the pane (app.ts followClaudeTail). Overlong lines
+    // wrap at render (paneVisible), never clip. The `F1 again` invitation rides the last row only
+    // when the tail is quiet — a live pane spends its rows on the work.
+    const sess = arr(view<{ sessions?: unknown[] }>(state, 'sessions')?.sessions).find((s) => str(s.id) === state.session) as
+      | Record<string, unknown>
+      | undefined;
+    const self = arr(view<{ agents?: unknown[] }>(state, 'multitask')?.agents).find((a) => a.self === true) as
+      | Record<string, unknown>
+      | undefined;
+    const summary = view<{ summary?: Record<string, unknown> }>(state, 'changemap')?.summary ?? {};
+    if (!sess && !self) {
+      // Distinguish "no data yet" from "measured zero": with neither payload there is nothing honest
+      // to draw, and the empty-state path (which names the missing view) handles it.
+    } else {
+      const phase = str(self?.phase);
+      const active = sess?.active === true || phase === 'working';
+      const pk: StateKey = phase === 'working' ? 'live' : phase === 'done' ? 'kept' : 'undone';
+      const heur = str(self?.phaseConfidence) === 'heuristic';
+      const shownPhase = phase ? (depth === 'none' ? phase : `${heur ? '\x1b[2m' : ''}${tint(phase, pk, depth)}`) : active ? tint('live', 'live', depth) : tint('idle', 'undone', depth);
+      const pending = num(summary.pending);
+      const modelBits = [str(sess?.model), str(sess?.effort)].filter(Boolean).join(' · ');
+      const bits = [
+        `${tint(g.closed, active ? 'live' : 'undone', depth)} ${shownPhase}`,
+        modelBits ? tint(modelBits, 'accent', depth) : '',
+        pending ? tint(`${pending} pending`, 'pending', depth) : '',
+        num(sess?.tokens) ? `${compactTokens(num(sess?.tokens))} tok` : '',
+        num(sess?.durationMs) ? compactDuration(num(sess?.durationMs)) : '',
+      ].filter(Boolean);
+      rows.push({ ids: [], key: 'cl1', cells: bits.join('  ·  ') });
+      // The newest ask, and whether it is still being answered — endTs 0 is core's "current" rule.
+      const asks = arr(view<{ prompts?: unknown[] }>(state, 'prompts')?.prompts);
+      const last = asks[asks.length - 1] as Record<string, unknown> | undefined;
+      if (last) {
+        const live = num(last.endTs) === 0;
+        rows.push({
+          ids: [],
+          key: 'cl2',
+          cells: `${tint(`ask #${num(last.index)}`, 'accent', depth)} ${live ? tint('answering…', 'live', depth) : relTime(num(last.ts), state.now)}  ${str(last.title)}`,
+          cont: false,
+        });
+      }
+      const feedEntries = arr(view<{ entries?: unknown[] }>(state, 'feed')?.entries);
+      let shown = 0;
+      for (let i = 0; i < feedEntries.length; i++) {
+        const e = feedEntries[i] as Record<string, unknown>;
+        const label = str(e.label);
+        if (!label) continue;
+        const t = num(e.ts);
+        // The timestamp column only where there is width for it — the label is the load-bearing part.
+        const stamp = cols >= 70 && t ? relTime(t, state.now).padEnd(8) : '';
+        const detail = str(e.detail);
+        const text = `${stamp}${label}${detail ? `  ${detail}` : ''}`;
+        // Tool calls read dim with the TOOL NAME accented (the eye scans the verbs); output fully
+        // dim; assistant reasoning at full weight; a failed call carries the risk tint.
+        const styled = (() => {
+          if (depth === 'none') return text;
+          if (e.ok === false) return tint(text, 'risk', depth);
+          const kind = str(e.kind);
+          if (kind === 'reasoning') return text;
+          if (kind === 'action') {
+            const sp = label.indexOf(' ');
+            const head = sp > 0 ? label.slice(0, sp) : label;
+            const rest = sp > 0 ? label.slice(sp) : '';
+            return `${stamp ? `\x1b[2m${stamp}\x1b[0m` : ''}${tint(head, 'accent', depth)}\x1b[2m${rest}${detail ? `  ${detail}` : ''}\x1b[0m`;
+          }
+          return `\x1b[2m${text}\x1b[0m`;
+        })();
+        rows.push({ ids: [], key: `clf${i}`, cells: styled });
+        shown++;
+      }
+      if (!shown) {
+        rows.push({
+          ids: [],
+          key: 'cl3',
+          cells: depth === 'none' ? `F1 again ${g.wrap} claude --resume (hands this terminal to Claude)` : `\x1b[2mF1 again ${g.wrap} claude --resume (hands this terminal to Claude)\x1b[0m`,
+        });
+      }
     }
   } else if (state.screen === 'tasks') {
     // Tasks ride inside `multitask`, joined to changemap's per-task rollup for the review counts. The
@@ -697,8 +839,18 @@ function paneCounter(state: DashState, id: PaneId): string[] {
   };
   if (id === 'traces') {
     const sc = state.promptScope;
-    if (sc) return [`prompt #${sc.index} · ${sc.ids.size} edits · esc clears`, `#${sc.index} · ${sc.ids.size}`, `#${sc.index}`];
-    const c = n('list', 'edits');
+    // The SCOPED count has to follow the same rule as the unscoped one below: `sc.ids` is the ask's
+    // whole mutation set (it drives keep/undo, so it keeps every cancelled member), which read as
+    // "2 edits" over a pane drawing one row and a footer.
+    if (sc) {
+      const shown = arr(view<{ edits?: unknown[] }>(state, 'list')?.edits).filter(
+        (e) => e.cancelled !== true && sc.ids.has(num(e.id))
+      ).length;
+      return [`prompt #${sc.index} · ${shown} edits · esc clears`, `#${sc.index} · ${shown}`, `#${sc.index}`];
+    }
+    // The rows this pane LISTS: cancelled-out chains are accounted for in its footer, not as rows,
+    // so counting them here would put "4 edits" over a pane showing two.
+    const c = arr(view<{ edits?: unknown[] }>(state, 'list')?.edits).filter((e) => e.cancelled !== true).length;
     // This list is ignore-FILTERED, so when it drops rows it has to say so — otherwise "12 edits"
     // over a session that made 400 is indistinguishable from a session that made 12. The hidden
     // count rides the widest tiers and falls away first, like every other secondary number here.
@@ -707,6 +859,13 @@ function paneCounter(state: DashState, id: PaneId): string[] {
   if (id === 'prompts') {
     const c = n('prompts', 'prompts');
     return c ? [`${c} asked`, `${c}`] : [];
+  }
+  if (id === 'claude') {
+    // The safety-relevant number for the agent strip is what still awaits review. Liveness is already
+    // in the pane's own body; the counter carries the count so it survives minimizing.
+    const summary = view<{ summary?: { pending?: number } }>(state, 'changemap')?.summary;
+    const p = typeof summary?.pending === 'number' ? summary.pending : 0;
+    return p ? [`${p} pending`, `${p}`] : [];
   }
   if (id === 'dashboards') {
     const a = n('multitask', 'agents');
@@ -990,14 +1149,17 @@ export function paneVisible(
       agents: 'multitask', workflows: 'multitask', tasks: 'multitask',
       prompts: 'prompts', feed: 'feed', observations: 'observations',
       processes: 'processes', edits: 'list', audit: 'risk',
+      claude: 'sessions',
     };
     const feed = feeds[screen];
     const missing = feed !== undefined && view(state, feed) === null;
     const why = state.filter
       ? `nothing on ${title} matching /${state.filter} — esc clears the filter`
       : missing
-        ? `${title} has no data to draw: the “${feed}” view did not arrive in this refresh`
-        : `nothing on ${title} yet — it fills in as Claude works`;
+          ? `${title} has no data to draw: the “${feed}” view did not arrive in this refresh`
+          : screen === 'workflows'
+            ? 'no Workflow-tool runs in this session — plain subagent fan-outs appear on Fleet'
+            : `nothing on ${title} yet — it fills in as Claude works`;
     for (const part of wrapVisible(why, Math.max(1, inner - 2))) {
       out.push({ text: depth === 'none' ? `  ${part}` : `\x1b[2m  ${part}\x1b[0m`, row: -1 });
     }
@@ -1057,10 +1219,16 @@ function paneBody(state: DashState, box: PaneBox, g: Glyphs, depth: ColorDepth):
   const gut = (mark: string, t: string) => fit(`${mark}${t}`);
   const cursorRow = state.panes?.cursor?.[box.id] ?? -1;
   // A two-line edit highlights BOTH lines: they are one subject, and banding only the first makes
-  // the stats line look like it belongs to the edit below it.
+  // the stats line look like it belongs to the edit below it. SAME SUBJECT ONLY (the ids must
+  // match): `cont` alone also marks every nested Review row, so with the cursor resting on edit
+  // rows (N16 stepping) a bare cont test banded the NEXT edit too — two edits highlighted, verbs
+  // acting on one.
   const screen = paneScreenOf(state, box);
   const rowsNow = state.views === null || screen === 'diff' ? [] : rowsFor({ ...state, screen: screen as ScreenId }, Math.max(1, box.rect.w - 1), g);
-  const inCursor = (r: number) => r === cursorRow || (r === cursorRow + 1 && rowsNow[r]?.cont === true);
+  const sameSubject = (a?: { ids?: readonly number[] }, b?: { ids?: readonly number[] }) =>
+    !!a?.ids && !!b?.ids && a.ids.length === b.ids.length && a.ids.every((x, i) => x === b.ids![i]);
+  const inCursor = (r: number) =>
+    r === cursorRow || (r === cursorRow + 1 && rowsNow[r]?.cont === true && sameSubject(rowsNow[r], rowsNow[cursorRow]));
   const vis = paneVisible(state, box, g, depth);
   const out: string[] = [];
   for (let i = 0; i < h; i++) {
@@ -1072,22 +1240,21 @@ function paneBody(state: DashState, box: PaneBox, g: Glyphs, depth: ColorDepth):
     const on = v.row >= 0 && inCursor(v.row);
     // NO ARROW when there is colour. The selection used to be stated twice — a `>` in the gutter AND
     // a band — and two marks for one fact is one mark of noise on every list on screen. The marker is
-    // what is left when colour is gone, so it survives at depth 'none' and only there. The gutter
-    // column itself stays reserved either way, so pane geometry does not change with the palette.
-    const line = gut(on && depth === 'none' ? '>' : ' ', v.text);
+    // what is left when colour is gone, so it survives at depth 'none' and only there — and only in
+    // the FOCUSED pane: monochrome must follow the same one-selection rule as every colour depth.
+    const line = gut(on && depth === 'none' && box.focused ? '>' : ' ', v.text);
     if (!on || depth === 'none') {
       out.push(line);
       continue;
     }
-    // Several lists means several cursors, and only the focused pane's is what a keep or undo acts
-    // on. The focused one is reverse video; the others get a faint band. Not DIMMING: with the arrow
-    // gone, a dimmed row reads as disabled, which is the opposite of selected.
+    // ONE selection on screen, ever: only the FOCUSED pane's cursor row highlights. The unfocused
+    // faint band was tried (as "context") and read as a second selected item both times a user
+    // looked at it — the cursor position persists per pane regardless, so nothing is lost.
     if (box.focused) {
       out.push(`\x1b[7m${line}\x1b[0m`);
       continue;
     }
-    const rest = depth === 'truecolor' ? '\x1b[48;2;54;58;70m' : '\x1b[100m';
-    out.push(`${rest}${line}\x1b[0m`);
+    out.push(line);
   }
   return out;
 }
@@ -1254,16 +1421,17 @@ function renderPanes(state: DashState, opts: FrameOpts, lay: Layout, g: Glyphs, 
   const out: string[] = [windowBar(lay, cols, g, depth), sessionRow(state, cols, g, depth)];
 
   const grid: string[] = [];
-  // The horizontal band is the COLUMN docks only. Filtering on "not dashboards" swept the new top
-  // dock into the band and the compositor tried to place Prompts side-by-side with Traces, which
-  // left the whole column band unrendered.
-  const band = lay.boxes.filter((b) => b.id !== 'dashboards' && b.id !== 'prompts').sort((a, b) => a.rect.x - b.rect.x);
-  const top = lay.boxes.find((b) => b.id === 'prompts');
+  // The horizontal band is the COLUMN docks only, decided by DOCK rather than by naming panes — a
+  // hand-kept id list is how the first top-dock pane got swept into the band and composed side-by-side
+  // with Traces, leaving the whole column band unrendered.
+  const dockOf = (id: PaneId) => PANE_SPECS.find((p) => p.id === id)!.dock;
+  const band = lay.boxes.filter((b) => dockOf(b.id) !== 'top' && dockOf(b.id) !== 'bottom').sort((a, b) => a.rect.x - b.rect.x);
+  const tops = lay.boxes.filter((b) => dockOf(b.id) === 'top').sort((a, b) => a.rect.y - b.rect.y);
   const rendered = new Map<PaneId, string[]>();
   for (const b of lay.boxes) rendered.set(b.id, paneLines(state, b, g, depth));
 
-  // The top dock is drawn ABOVE the column band, full width.
-  if (top) for (let y = 0; y < top.rect.h; y++) grid.push(rendered.get('prompts')![y] ?? pad('', cols));
+  // The top dock is drawn ABOVE the column band, full width, in y order (Claude strip, then Prompts).
+  for (const top of tops) for (let y = 0; y < top.rect.h; y++) grid.push(rendered.get(top.id)![y] ?? pad('', cols));
   // The seam is the panel edge: dim enough not to compete with content, present enough to divide.
   const seam = depth === 'none' ? g.bar : `\x1b[38;2;72;78;92m${g.bar}\x1b[0m`;
   for (let y = 0; y < lay.colH; y++) {
@@ -1280,7 +1448,7 @@ function renderPanes(state: DashState, opts: FrameOpts, lay: Layout, g: Glyphs, 
     .map((b) => `${PANE_SPECS.find((p) => p.id === b.pane)!.title} needs ${b.need ? `${b.need} cols` : `${b.needRows} body rows`}`)
     .join(' · ');
   const status = state.confirm
-    ? tint(`${state.confirm.verb} ${state.confirm.ids.length} edit(s) — ${state.confirm.label}?  [y/n]`, 'pending', depth)
+    ? tint(`${state.confirm.verb}${state.confirm.ids.length ? ` ${state.confirm.ids.length} edit(s)` : ''} — ${state.confirm.label}?  [y/n]`, 'pending', depth)
     : state.error
       ? tint(`! ${state.error}`, 'risk', depth)
       : state.goto
@@ -1399,7 +1567,7 @@ export function renderDashFrame(state: DashState, opts: FrameOpts): string[] {
   }
 
   const statusText = state.confirm
-    ? tint(`${state.confirm.verb} ${state.confirm.ids.length} edit(s) — ${state.confirm.label}?  [y/n]`, 'pending', depth)
+    ? tint(`${state.confirm.verb}${state.confirm.ids.length ? ` ${state.confirm.ids.length} edit(s)` : ''} — ${state.confirm.label}?  [y/n]`, 'pending', depth)
     : state.error
       ? tint(`! ${state.error}`, 'risk', depth)
       : state.status;

@@ -180,6 +180,21 @@ export function createBackend(opts: {
       // interleave. Mutations are never deduped and never dropped — a reviewer's decision is not
       // something to coalesce.
       const p = queue.then(async () => {
+        // ONE unit selected → the single-id verb, not `--ids`. The single path is where the engine's
+        // whole-unit semantics live: `undo <rep>` sums the chain into one merge (it cannot stop
+        // half-reverted) and a refusal arrives as the full named message — dependents, closure and
+        // all — instead of a bare conflict count. `--ids` stays for multi-selections, where a
+        // per-record scope is the honest semantics.
+        if (ids.length === 1 && (verb === 'undo' || verb === 'redo')) {
+          const { out, err, code } = await spawnSelf([verb, String(ids[0]), '--session', session, '--json']);
+          let json: unknown = null;
+          try {
+            json = out.trim() ? JSON.parse(out) : null;
+          } catch {
+            /* reported through err below */
+          }
+          return { ok: json !== null, json, err: json === null ? err || `${verb} exited ${code ?? '?'}` : null };
+        }
         // EXPAND EVERY ID TO ITS REVIEW GROUP FIRST. What a surface displays as one row is often
         // several raw records: `reviewEdits` collapses a same-code chain (a→ab→a) into a single unit
         // and shows the most recent member's id. `--ids` is group-UNAWARE — it acts on raw records —

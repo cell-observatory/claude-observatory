@@ -35,7 +35,7 @@
 
 import { displayWidth } from './textwidth';
 
-export type PaneId = 'prompts' | 'traces' | 'detail' | 'dashboards';
+export type PaneId = 'claude' | 'prompts' | 'traces' | 'detail' | 'dashboards';
 export type Dock = 'top' | 'left' | 'centre' | 'bottom';
 /** `wide` is both columns; `stack` is one; `dock-only` is neither, leaving Prompts and Dashboards. */
 export type LayoutMode = 'wide' | 'stack' | 'dock-only';
@@ -44,8 +44,9 @@ export interface PaneSpec {
   id: PaneId;
   /**
    * The function key that reaches this pane — see `BAR_ENTRIES`, which is the authority when a pane
-   * has more than one (Detail answers to both F3 and F4, one per face). Pressing a pane's key when
-   * it is already showing zooms it, and again puts it back.
+   * has more than one (Detail answers to both F4 and F5, one per face). Pressing a pane's key when
+   * it is already showing zooms it, and again puts it back — except Claude, whose second press
+   * launches the agent (see BAR_ENTRIES).
    *
    * The digits are not available for this — they name EDITS, and an edit id is the thing a reviewer
    * says out loud ("undo 122"), so it outranks a window shortcut for the shorter key.
@@ -210,29 +211,33 @@ export const DRAG_COL_FLOOR = 6;
  * are absent until they render; the docs say which, rather than the strip implying otherwise.
  */
 export const PANE_SPECS: readonly PaneSpec[] = [
-  // DECLARATION ORDER IS WINDOW-BAR ORDER, and the bar reads left to right as F1, F2, F3, F4. The
-  // keys number the regions in the order a review moves through them — what was asked, what it
-  // changed, what else is going on — and Detail is last because it is what the other three point at.
+  // DECLARATION ORDER IS WINDOW-BAR ORDER, and the bar reads left to right as F1..F6. The keys number
+  // the regions in the order a review moves through them — who is doing the work, what was asked, what
+  // it changed, what else is going on — and Detail is last because it is what the others point at.
   //
-  // Prompts leads, directly under the session selector: the session says WHOSE work this is and the
-  // prompt says WHAT was asked, and every row below is downstream of those two facts.
-  { id: 'prompts', n: 1, dock: 'top', title: 'Prompts', min: 3, want: 6, yield: 0, tabs: [] },
-  // Edits and Diffs are ONE list. They were never two things — a diff is what an edit contains, so
-  // splitting them made the reader switch tabs to see the thing they had already selected.
+  // Claude leads: the agent's own window — a status row (model, liveness, pending count, the last
+  // ask), a LIVE TAIL of the session feed beneath it, and the door back into the conversation
+  // (F1 again hands this terminal to `claude --resume`). `min` 4 is the smallest honest live pane:
+  // title + status + two tail rows; `want` 10 gives the tail room without displacing a workspace.
+  { id: 'claude', n: 1, dock: 'top', title: 'Claude', min: 4, want: 10, yield: 0, tabs: [] },
+  // Prompts sits under it: the session says WHOSE work this is, the prompt says WHAT was asked, and
+  // every row below is downstream of those two facts.
+  { id: 'prompts', n: 2, dock: 'top', title: 'Prompts', min: 3, want: 6, yield: 0, tabs: [] },
+  // ONE list (labelled Review, like the editors); opening a prompt scopes it to the picked ask (esc clears).
   // Titled for the WINDOW, not its contents: the editors call this Observatory Traces, and a reader
   // moving between the terminal and an IDE should not have to learn two names for one thing.
-  { id: 'traces', n: 2, dock: 'left', title: 'Traces', min: 30, want: 42, yield: 3, tabs: [] },
+  { id: 'traces', n: 3, dock: 'left', title: 'Traces', min: 30, want: 42, yield: 3, tabs: [] },
   // The centre carries TWO faces — the selected edit's diff, and the session's change map — and only
   // ever one at a time. They are the same question at two scales, so giving each its own window would
   // put a third column in the band and take the whole layout back over 98 terminal columns to show
   // two things nobody reads at once. `nav` buys the row that carries the swap, and the review
   // buttons, without spending a second chrome row on a tab strip.
-  { id: 'detail', n: 3, dock: 'centre', title: 'Detail', min: 36, want: 0, yield: 4, nav: true, tabs: [] },
+  { id: 'detail', n: 4, dock: 'centre', title: 'Detail', min: 36, want: 0, yield: 4, nav: true, tabs: [] },
   // Everything that is not the edit under review. Observations and Actions arrived here when the
   // right-hand sidebar went. Ordered by what a review reaches for: who did the work and under what
   // plan, then what was observed and what was run, then the machinery.
   {
-    id: 'dashboards', n: 5, dock: 'bottom', title: 'Dashboards', min: 7, want: 10, yield: 2,
+    id: 'dashboards', n: 6, dock: 'bottom', title: 'Dashboards', min: 7, want: 10, yield: 2,
     tabs: ['Fleet', 'Workflows', 'Tasks', 'Observations', 'Actions', 'Processes', 'Feed'],
   },
 ];
@@ -241,10 +246,14 @@ export const PANE_SPECS: readonly PaneSpec[] = [
 /**
  * The window bar, chip by chip — and the function key that jumps to each.
  *
- * FIVE chips over four panes. Detail's two faces get a key each, because "show me the map" and "show
+ * SIX chips over five panes. Detail's two faces get a key each, because "show me the map" and "show
  * me this diff" are two different intentions and making the reader press one key and then swap is a
  * step for nothing. They are still ONE window: pressing either key focuses Detail and sets its face,
  * and only one of the two chips is ever marked current.
+ *
+ * One documented exception to "a pane's key pressed again zooms it": the Claude strip has nothing to
+ * zoom into, so F1 again LAUNCHES Claude instead — the drill-in gesture, applied to the pane whose
+ * drill-in is the agent itself.
  */
 export interface BarEntry {
   key: number;
@@ -253,11 +262,12 @@ export interface BarEntry {
   face?: number;
 }
 export const BAR_ENTRIES: readonly BarEntry[] = [
-  { key: 1, pane: 'prompts', title: 'Prompts' },
-  { key: 2, pane: 'traces', title: 'Traces' },
-  { key: 3, pane: 'detail', title: 'Map', face: 1 },
-  { key: 4, pane: 'detail', title: 'Diff', face: 0 },
-  { key: 5, pane: 'dashboards', title: 'Dashboards' },
+  { key: 1, pane: 'claude', title: 'Claude' },
+  { key: 2, pane: 'prompts', title: 'Prompts' },
+  { key: 3, pane: 'traces', title: 'Traces' },
+  { key: 4, pane: 'detail', title: 'Map', face: 1 },
+  { key: 5, pane: 'detail', title: 'Diff', face: 0 },
+  { key: 6, pane: 'dashboards', title: 'Dashboards' },
 ];
 
 /**
@@ -268,6 +278,7 @@ export const BAR_ENTRIES: readonly BarEntry[] = [
  * mirror whatever was already selected in the list beside it.
  */
 export const TAB_SCREEN: Record<PaneId, readonly string[]> = {
+  claude: ['claude'],
   prompts: ['prompts'],
   traces: ['edits'],
   // Detail has no strip. Its face comes from the swap in its action bar, and from the selection when
@@ -363,11 +374,33 @@ export function resolveLayout(req: LayoutRequest): Layout {
       dashH = Math.min(Math.max(BY_ID.dashboards.min, req.sizes?.dashboards ?? BY_ID.dashboards.want), room);
     }
   }
-  const colH = bodyH - dashH - topH;
+  // The Claude strip is carved LAST, above Prompts on screen but below everything in priority: it is
+  // a status readout, and every other window is a workspace. When rows run short it goes first —
+  // before Prompts, before Dashboards — and folded it keeps its chip and the F1 launch
+  // gesture, so nothing is lost but two rows of summary.
+  let clH = 0;
+  const clOpen = zoom === 'claude' || (!min.has('claude') && zoom === null);
+  if (clOpen && open.length) {
+    const room = bodyH - COL_FLOOR - topH - dashH;
+    if (room < BY_ID.claude.min) {
+      min.add('claude');
+      forced.push('claude');
+      notes.push(`Claude minimized: it needs ${COL_FLOOR + topH + dashH + BY_ID.claude.min} body rows; this terminal has ${bodyH}`);
+    } else {
+      // Floored at `min` like the Dashboards dock: a drag can shrink the strip, never crush it to a
+      // row that cannot hold its status line.
+      clH = Math.min(Math.max(BY_ID.claude.min, req.sizes?.claude ?? BY_ID.claude.want), room);
+    }
+  } else if (zoom === 'claude') {
+    clH = bodyH;
+  }
+
+  const colH = bodyH - dashH - topH - clH;
 
   const boxes: PaneBox[] = [];
-  if (topH > 0) boxes.push(makeBox('prompts', 0, CHROME_TOP, cols, topH, focus === 'prompts', 0));
-  const y0 = CHROME_TOP + topH;
+  if (clH > 0) boxes.push(makeBox('claude', 0, CHROME_TOP, cols, clH, focus === 'claude', 0));
+  if (topH > 0) boxes.push(makeBox('prompts', 0, CHROME_TOP + clH, cols, topH, focus === 'prompts', 0));
+  const y0 = CHROME_TOP + clH + topH;
   if (open.length && colH > 0) {
     const avail = cols - (open.length - 1); // one seam column between adjacent panes
     let widths: number[];
@@ -407,8 +440,12 @@ export function resolveLayout(req: LayoutRequest): Layout {
     boxes.push(makeBox('dashboards', 0, y0 + colH, cols, dashH, focus === 'dashboards', req.tab?.dashboards ?? BY_ID.dashboards.defaultTab ?? 0));
   }
   if (zoom === 'prompts' && !boxes.length) boxes.push(makeBox('prompts', 0, CHROME_TOP, cols, bodyH, true, 0));
+  // Zooming the Claude strip when the column band is already gone must still produce a box — a zoom
+  // that renders NOTHING is a blank terminal, which is how an unlisted pane fails here (measured: the
+  // first cut of this pane returned boxes:[] for exactly this call).
+  if (zoom === 'claude' && !boxes.length) boxes.push(makeBox('claude', 0, CHROME_TOP, cols, bodyH, true, 0));
 
-  // Every pane keeps a chip whether or not it has a box, so a minimized pane never loses its counter.
+  // Every pane keeps a chip whether or not it has a box, so a minimized pane never leaves the bar.
   const bar: BarChip[] = [];
   let bx = 0;
   for (const e of BAR_ENTRIES) {
@@ -442,9 +479,25 @@ export function resolveLayout(req: LayoutRequest): Layout {
     if (!boxes.some((b) => b.id === 'dashboards') && bodyH - COL_FLOOR < BY_ID.dashboards.min && open.length) {
       blocked.push({ pane: 'dashboards', needRows: COL_FLOOR + BY_ID.dashboards.min });
     }
+    // The TOP dock refuses loudly too. This was a real gap before the Claude strip arrived: a short
+    // terminal force-minimized Prompts with a note that nothing rendered, so F2 focused a boxless pane
+    // in silence. `blocked` is what the status row reads, so Prompts reports there when rows — not the
+    // reader — are what closed it.
+    //
+    // The CLAUDE strip is deliberately exempt. `blocked` exists because a folded pane's function is
+    // otherwise LOST; folded Claude loses nothing a status line could restore — the chip stays on the
+    // bar, and F1 still focuses it and launches the agent. Reporting it would park
+    // "Claude needs 32 body rows" on the status row of every ~34-row terminal permanently, hiding the
+    // messages that row exists to carry (mutation results, errors, "nothing selected").
+    if (!boxes.some((b) => b.id === 'prompts') && bodyH - COL_FLOOR < BY_ID.prompts.min && open.length) {
+      blocked.push({ pane: 'prompts', needRows: COL_FLOOR + BY_ID.prompts.min });
+    }
   }
 
-  const band = boxes.filter((b) => b.id !== 'dashboards' && b.id !== 'prompts').sort((a, b) => a.rect.x - b.rect.x);
+  // "Not the column band" is decided by DOCK, never by a hand-kept list of ids — the list is exactly
+  // how a new dock pane ends up composed side-by-side with Traces (the failure renderPanes records
+  // for the Prompts dock).
+  const band = boxes.filter((b) => BY_ID[b.id].dock !== 'top' && BY_ID[b.id].dock !== 'bottom').sort((a, b) => a.rect.x - b.rect.x);
   const seams: Layout['seams'][number][] = band.slice(0, -1).map((b, i) => {
     const right = band[i + 1].id;
     // Resize whichever side is NOT the flex centre; dragging toward a right-hand target shrinks it.
@@ -463,6 +516,12 @@ export function resolveLayout(req: LayoutRequest): Layout {
   if (dashBox && band.length) {
     // The dock grows UPWARD, so moving the pointer down shrinks it.
     seams.push({ axis: 'h', x: -1, y: dashBox.rect.y - 1, left: band[0].id, right: 'dashboards', target: 'dashboards', sign: -1 });
+  }
+  const clBox = boxes.find((bx) => bx.id === 'claude');
+  if (clBox && (topBox || band.length)) {
+    // Same rule as the Prompts seam: the strip's LAST row is the grab row (the row below is the next
+    // pane's clickable title). Target claude, growing downward.
+    seams.push({ axis: 'h', x: -1, y: clBox.rect.y + clBox.rect.h - 1, left: 'claude', right: topBox ? 'prompts' : band[0].id, target: 'claude', sign: 1 });
   }
 
   return {
@@ -602,7 +661,10 @@ export function hitTest(layout: Layout, col: number, row: number): Hit {
   if (row === 1) return { t: 'chrome', part: 'session' };
   if (row === layout.rows - 2) return { t: 'chrome', part: 'status' };
   if (row === layout.rows - 1) return { t: 'chrome', part: 'keys' };
-  const bandTop = layout.chrome.top + (layout.boxes.find((b) => b.id === 'prompts')?.rect.h ?? 0);
+  // The band starts below EVERY top-dock box, summed — not below "the prompts box", which was true
+  // only while the top dock held exactly one pane. With two, the single-pane version offsets every
+  // vertical-seam grab by the height of the strip it forgot.
+  const bandTop = layout.chrome.top + layout.boxes.filter((b) => BY_ID[b.id].dock === 'top').reduce((a, b) => a + b.rect.h, 0);
   for (let i = 0; i < layout.seams.length; i++) {
     const sm = layout.seams[i];
     const hit =
@@ -641,6 +703,13 @@ export function defaultMinimized(cols: number, rows: number): Set<PaneId> {
   const out = new Set<PaneId>();
   const bodyH = Math.max(0, rows - CHROME_TOP - CHROME_BOTTOM);
   if (bodyH - COL_FLOOR < BY_ID.dashboards.min) out.add('dashboards');
+  // The Claude strip starts closed unless the terminal can hold EVERYTHING else at its preferred
+  // size and still spare its rows — it is the lowest-priority window, and a first paint that opens
+  // it by folding a workspace would invert that. Same step-function shape as the rest. With min 4,
+  // prompts.want 6, dashboards.want 10 and COL_FLOOR 16 this folds below 36 body rows (a 40-row
+  // terminal) — acceptable: the seam, `<`/`>`, zoom and F1 all reopen it larger on demand.
+  const dashRows = out.has('dashboards') ? 0 : BY_ID.dashboards.want;
+  if (bodyH - COL_FLOOR - BY_ID.prompts.want - dashRows < BY_ID.claude.min) out.add('claude');
   // Detail yields before Traces at startup: with one column left, the list you act ON is worth more
   // than a diff of something you can no longer select.
   if (needCols(COLUMNS) > cols) out.add('detail');

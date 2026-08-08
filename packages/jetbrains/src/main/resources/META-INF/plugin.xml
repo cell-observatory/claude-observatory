@@ -29,6 +29,10 @@
     <toolWindow id="Claude Observatory Tour" anchor="right" canCloseContents="false"
                 icon="/icons/toolWindowObservatory.svg"
                 factoryClass="com.cellobservatory.observatory.ui.tour.TourToolWindowFactory"/>
+    <!-- The "Open all in editor" tab: our own stacked review editor over a ReviewAllVirtualFile
+         (public diff APIs — the platform's combined diff is internal surface with no per-block
+         action seam). -->
+    <fileEditorProvider implementation="com.cellobservatory.observatory.ui.ReviewAllEditorProvider"/>
     <statusBarWidgetFactory id="claudeObservatoryStatus" order="first"
                             implementation="com.cellobservatory.observatory.ui.ObservatoryStatusBarWidgetFactory"/>
     <statusBarWidgetFactory id="claudeObservatoryActions" order="after claudeObservatoryStatus"
@@ -151,7 +155,7 @@
       <action id="ClaudeObservatory.SearchEdits"
               class="com.cellobservatory.observatory.actions.SearchEditsAction"
               text="Claude Observatory: Search Edits"
-              description="Filter the Edits/Diffs trees by file path"/>
+              description="Filter the Review list and the Overview ledger by file path"/>
       <!-- Demo mode (0.8.9). Cancel is the replay's own progress-bar Cancel; Restart is the reset, and
            it is the same operation as Start because a run clears any previous demo before replaying. -->
       <action id="ClaudeObservatory.StartDemo"

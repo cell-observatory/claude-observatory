@@ -139,10 +139,8 @@
     <div class="tw">
       <div class="tw-head">
         <span class="tw-tabs">
-          <span class="tw-tab on" title="Edits">🔬</span>
-          <span class="tw-tab" title="Diffs">⇆</span>
+          <span class="tw-tab on" title="Review">🔬</span>
           <span class="tw-tab" title="File History">🕘</span>
-          <span class="tw-tab" title="Actions">⚡</span>
         </span>
         <span class="tools">
           <span title="Search">⌕</span><span title="Review previous">⏮</span><span title="Review next">⏭</span>
@@ -151,6 +149,16 @@
           <span class="sep">·</span>
           <span title="Refresh">⟳</span><span title="More">⋮</span>
         </span>
+      </div>
+      <!-- ReviewPanel wraps the tree: a counts header, the four scope verbs, and (below) the
+           per-selection toolbar and the cancelled-out footer. The tab strip alone was updated once
+           and left the body looking like the removed Edits tab. -->
+      <div class="trow" style="color:var(--dim);font-size:11px;padding:2px 8px">3 unit(s) · 3 pending · +16 −3</div>
+      <div class="trow" style="gap:5px;font-size:11px;color:var(--dim);padding:0 8px 4px">
+        <span class="pill">Open all in editor</span><span class="pill">Keep all</span><span class="pill">Undo all</span><span class="pill">Clear resolved</span>
+      </div>
+      <div class="trow" style="gap:8px;font-size:11px;color:var(--dim);padding:2px 8px;border-top:1px solid var(--line);border-bottom:1px solid var(--line)">
+        <span style="color:var(--green-bright)">✓ Keep</span><span>↩ Undo</span><span>↻ Redo</span><span>💬 Chat</span><span>⇆ Diff</span>
       </div>
       <div class="tree">
         <div class="trow"><span class="arrow">▾</span><span class="tw-ic">▦</span>src</div>
@@ -162,6 +170,7 @@
         <div class="trow" style="padding-left:26px"><span class="arrow">▾</span><span class="tw-ic" style="color:var(--yellow)">PY</span>dataset.py<span class="meta">1 edit(s) · 1 pending</span></div>
         <div class="trow" style="padding-left:44px"><span class="arrow">▾</span><span class="tw-ic" style="color:#c77dbb">◆</span>class Dataset<span class="meta">1 edit(s) · 1 pending</span></div>
         <div class="trow" style="padding-left:62px"><span class="tw-ic" style="color:var(--yellow)">●</span><span class="id">#3</span><span class="delta">+7 −0</span><span style="color:var(--dim);font-size:11px">pending · Edit</span><span class="meta"><span class="pill pending">pending</span></span></div>
+        <div class="trow" style="color:var(--dim);font-size:11px"><span style="padding-left:8px">2 cancelled-out chains — nothing to review</span><span class="meta"><span class="pill">Dismiss</span></span></div>
       </div>
     </div>
     <div class="ed">
