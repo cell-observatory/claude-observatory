@@ -940,6 +940,12 @@ echo "════════ E2E 28: every view answers for the SESSION's work
 # answers from inside the workspace — because that is the property, and it holds for every view at once
 # rather than for the handful anyone remembers to re-check by hand.
 FOREIGN="$(mktemp -d)"
+# Push every transcript OUT of the fleet-liveness window (FLEET_ACTIVE_MS = 60s) first. A sibling's
+# `active` is `now - mtime <= 60s`, so a transcript sitting near that boundary answers `true` for the
+# first call and `false` for the second — the two payloads then differ for a reason that has nothing
+# to do with `--root`, which is the only thing this loop is asserting. It bit on Linux CI, where
+# `views multitask` takes tens of seconds and the pair straddles the edge.
+find "$HOME/.claude/projects" -name '*.jsonl' -exec touch -t 202607250000 {} + 2>/dev/null || true
 for v in multitask prompts changemap observations processes risk egress feed sessions; do
   inside="$( cd "$WS" && node "$CLI" views --views "$v" --json --session "$SESSION" 2>/dev/null )"
   outside="$( cd "$FOREIGN" && node "$CLI" views --views "$v" --json --session "$SESSION" --root "$WS" 2>/dev/null )"
