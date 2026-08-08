@@ -34,6 +34,13 @@ updates:
     target-branch: dev
     schedule:
       interval: weekly
+    # One PR a week for ALL of them, the way npm's dev-dependencies already group. Ungrouped, this
+    # ecosystem is the loudest in the repo: every action moves on its own cadence (codeql-action alone
+    # went 4.37.3 -> 4.37.6 inside a week) and each bump opened, built and merged separately — a full
+    # CI matrix per one-line change to a `uses:` pin.
+    groups:
+      github-actions:
+        patterns: ['*']
 
   - package-ecosystem: gradle
     directory: /packages/jetbrains
