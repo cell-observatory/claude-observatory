@@ -10065,6 +10065,83 @@ test('channel: persisted at the store root; resolveReleaseFromList picks per cha
   assert.deepEqual(vj, { current: require('../../cli/package.json').version, channel: 'stable' }, 'version --json = installed + channel, no network');
 });
 
+test('update: resolveUpdatePlan follows the channel in BOTH directions (0.9.5)', () => {
+  const STABLE = { tag_name: 'v0.9.5', prerelease: false, assets: [{ name: 'claude-observatory-0.9.5.tgz' }] };
+  const DEV = {
+    tag_name: 'dev-latest',
+    name: 'Pre-release 0.10.0-dev.12 (rolling, from dev)',
+    prerelease: true,
+    assets: [{ name: 'claude-observatory-vscode-dev.vsix' }],
+  };
+  const LIST = [STABLE, DEV];
+  const at = (v) => [{ surface: 'vscode', label: 'VS Code', version: v }];
+  const one = (plan) => plan.surfaces[0];
+
+  // THE REPORTED BUG. A locally-built 0.10.0 sorts ABOVE every 0.10.0-dev.N the dev channel
+  // publishes, so an isNewer gate called it "up to date" forever — on BOTH channels, silently.
+  const stranded = core.resolveUpdatePlan(LIST, 'dev', at('0.10.0'));
+  assert.equal(stranded.target, '0.10.0-dev.12', 'the dev channel targets its rolling build');
+  assert.equal(one(stranded).reason, 'ahead', 'an install above the channel line is stranded, not current');
+  assert.equal(stranded.actions.length, 1, 'and it is acted on — following a channel means matching it');
+
+  const strandedOnStable = core.resolveUpdatePlan(LIST, 'stable', at('0.10.0'));
+  assert.equal(strandedOnStable.target, '0.9.5');
+  assert.equal(one(strandedOnStable).reason, 'ahead', 'the same install is stranded on stable too');
+
+  // The ordinary case, and the switch back down — the direction isNewer could never express.
+  assert.equal(one(core.resolveUpdatePlan(LIST, 'dev', at('0.10.0-dev.8'))).reason, 'behind');
+  const down = core.resolveUpdatePlan(LIST, 'stable', at('0.10.0-dev.12'), { switching: true });
+  assert.equal(down.target, '0.9.5');
+  assert.equal(one(down).reason, 'ahead', 'dev → stable is a downgrade, and it still happens');
+
+  // Nothing to do is its own answer, and a same-version channel switch still reinstalls so the bits
+  // provably come from the channel the config now names.
+  const current = core.resolveUpdatePlan(LIST, 'dev', at('0.10.0-dev.12'));
+  assert.equal(one(current).reason, 'current');
+  assert.equal(current.actions.length, 0, 'current surfaces produce no action');
+  assert.equal(current.surfaces.length, 1, 'but they are still reported — "up to date" ≠ "not checked"');
+  assert.equal(one(core.resolveUpdatePlan(LIST, 'dev', at('0.10.0-dev.12'), { switching: true })).reason, 'switching');
+  assert.equal(one(core.resolveUpdatePlan(LIST, 'dev', at('0.10.0-dev.12'), { force: true })).reason, 'forced');
+  assert.equal(one(core.resolveUpdatePlan(LIST, 'dev', at(null))).reason, 'missing', 'not installed is not "current"');
+
+  // POST-PROMOTE: the chip used to take the newest prerelease directly while the updater used
+  // resolveReleaseFromList, so the two named different versions. One resolution now, and it says so.
+  const promoted = core.resolveUpdatePlan(
+    [{ tag_name: 'v0.10.0', prerelease: false }, DEV],
+    'dev',
+    at('0.10.0-dev.12')
+  );
+  assert.equal(promoted.target, '0.10.0', 'dev serves the stable when it outranks the rolling build');
+  assert.equal(promoted.degradedToStable, true, 'and the caller can say so instead of advertising a prerelease');
+  assert.equal(one(promoted).reason, 'behind');
+
+  // Every surface is decided by the same rule; a non-actionable one stays in the plan so the caller
+  // can report it loudly rather than skipping in silence.
+  const multi = core.resolveUpdatePlan(LIST, 'stable', [
+    { surface: 'cli', label: 'CLI', version: '0.9.4' },
+    { surface: 'vscode', label: 'Cursor', version: '0.9.5' },
+    { surface: 'jetbrains', label: 'JetBrains', version: '0.9.1', actionable: false },
+  ]);
+  assert.deepEqual(multi.surfaces.map((s) => s.reason), ['behind', 'current', 'behind']);
+  assert.deepEqual(multi.actions.map((a) => a.label), ['CLI', 'JetBrains']);
+  assert.equal(multi.actions[1].actionable, false, 'installed but unactionable is carried, not dropped');
+
+  // No usable release degrades to an empty plan, never to a fake target.
+  const none = core.resolveUpdatePlan([{ tag_name: 'x', draft: true }], 'stable', at('0.9.4'));
+  assert.equal(none.release, null);
+  assert.equal(none.target, '');
+  assert.deepEqual(none.actions, []);
+
+  // Assets are matched by KIND, never by name — the two channels name them differently.
+  assert.equal(core.assetFor(DEV.assets, 'vscode').name, 'claude-observatory-vscode-dev.vsix');
+  assert.equal(core.assetFor(STABLE.assets, 'cli').name, 'claude-observatory-0.9.5.tgz');
+  assert.equal(core.assetFor(STABLE.assets, 'vscode'), null, 'a missing asset is null, not a guess');
+  assert.equal(
+    core.assetFor([{ name: 'claude-observatory-jetbrains-v0.9.5.zip' }], 'jetbrains').name,
+    'claude-observatory-jetbrains-v0.9.5.zip'
+  );
+});
+
 test('cli: the update/switch mechanism WORKS end-to-end — mock releases API, real downloads, real installs, both directions (0.9.0)', async () => {
   // The whole flow, minus github.com itself: a LOCAL mock of the releases API (the
   // CLAUDE_OBSERVATORY_RELEASES_API seam) serving one stable and one prerelease whose assets are
@@ -10159,7 +10236,96 @@ test('cli: the update/switch mechanism WORKS end-to-end — mock releases API, r
     assert.equal(vj.channel, 'stable');
     assert.equal(vj.stableLatest, '9.9.9');
     assert.equal(vj.devLatest, '9.10.0-dev.7');
-    assert.equal(vj.updateAvailable, core.isNewer('9.9.9', vj.current), 'updateAvailable is the active-channel compare');
+    assert.equal(vj.updateAvailable, core.compareVersions('9.9.9', vj.current) !== 0, 'updateAvailable is any DIFFERENCE from the channel, not just a higher number');
+    assert.equal(vj.stranded, core.compareVersions('9.9.9', vj.current) < 0, 'stranded says which way the difference points');
+  } finally {
+    srv.close();
+  }
+});
+
+test('cli: an install ABOVE the channel is pulled back onto it, and --json changes nothing (0.9.5)', async () => {
+  // THE REPORTED BUG, end to end. A build whose version outranks everything the channel publishes —
+  // a local build, or the state left by a channel switched downward — used to report a green "up to
+  // date" on every surface, forever, because the gate was `isNewer`. Following a channel means
+  // MATCHING it. The target here is deliberately 0.0.1: lower than any version this repo can ever
+  // carry, so the test states "installed sorts ABOVE the channel" without depending on the CI stamp.
+  const home = freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const http = require('http');
+  const work = fs.realpathSync(tmpWork());
+  const pkgDir = path.join(work, 'fakecli');
+  fs.mkdirSync(pkgDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(pkgDir, 'package.json'),
+    JSON.stringify({ name: 'claude-observatory', version: '0.0.1', bin: { 'claude-observatory': 'co.js' } })
+  );
+  fs.writeFileSync(path.join(pkgDir, 'co.js'), '#!/usr/bin/env node\nconsole.log("fake 0.0.1");\n');
+  cp.execSync('npm pack --silent', { cwd: pkgDir, stdio: ['ignore', 'ignore', 'ignore'] });
+  const tgz = path.join(pkgDir, 'claude-observatory-0.0.1.tgz');
+
+  const srv = http.createServer((req, res) => {
+    if (req.url.startsWith('/releases')) {
+      const base = `http://127.0.0.1:${srv.address().port}`;
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify([
+        { tag_name: 'v0.0.1', name: 'Claude Observatory v0.0.1', prerelease: false, assets: [{ name: 'claude-observatory-0.0.1.tgz', browser_download_url: `${base}/a/s.tgz` }] },
+      ]));
+    } else if (req.url === '/a/s.tgz') res.end(fs.readFileSync(tgz));
+    else { res.statusCode = 404; res.end(); }
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+
+  const prefix = path.join(work, 'npm-prefix');
+  fs.mkdirSync(prefix, { recursive: true });
+  const env = {
+    ...process.env,
+    HOME: home,
+    USERPROFILE: home,
+    CLAUDE_OBSERVATORY_RELEASES_API: `http://127.0.0.1:${srv.address().port}`,
+    npm_config_prefix: prefix,
+    CLAUDE_OBSERVATORY_NO_UPDATE_CHECK: '1',
+  };
+  delete env.CLAUDE_CONFIG_DIR;
+  const run = (args) =>
+    new Promise((resolve, reject) => {
+      cp.execFile('node', [CLI, ...args], { env, encoding: 'utf8' }, (err, stdout, stderr) => {
+        if (err) reject(new Error(`${args.join(' ')} failed: ${stderr || stdout || err.message}`));
+        else resolve(stdout);
+      });
+    });
+  const installedPkgJson = () => {
+    for (const p of [
+      path.join(prefix, 'lib', 'node_modules', 'claude-observatory', 'package.json'),
+      path.join(prefix, 'node_modules', 'claude-observatory', 'package.json'),
+    ]) if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, 'utf8'));
+    return null;
+  };
+
+  try {
+    // The plan says `ahead`, in words a human can act on — not "up to date".
+    const chk = await run(['update', '--check', '--cli-only']);
+    assert.match(chk, /not on this channel — will be replaced/, 'the stranded install is named, not silently passed');
+    assert.doesNotMatch(chk, /CLI: up to date/, 'and never reported as current');
+
+    // --json reports the same verdict, structurally, and installs NOTHING.
+    const before = installedPkgJson();
+    const pj = JSON.parse(await run(['update', '--json', '--cli-only']));
+    const cliRow = pj.surfaces.find((s) => s.surface === 'cli');
+    assert.equal(cliRow.reason, 'ahead', 'the structured hand-off carries the reason, so no editor has to grep prose');
+    assert.equal(cliRow.to, '0.0.1');
+    assert.equal(pj.upToDate, false);
+    assert.deepEqual(installedPkgJson(), before, '--json is read-only — it reports the plan and changes nothing');
+
+    // And a PLAIN update — no --force, no --channel — actually moves it back onto the channel.
+    await run(['update', '--cli-only']);
+    assert.equal(installedPkgJson()?.version, '0.0.1', 'the stranded install was pulled back onto the channel');
+
+    // Documented limitation, asserted so it cannot drift: the CLI row reports the version of the
+    // process doing the reporting, which is still the old binary until the next invocation. The
+    // install landed (asserted above); this run cannot see its own replacement.
+    const after = await run(['update', '--json', '--cli-only']);
+    assert.equal(JSON.parse(after).surfaces.find((s) => s.surface === 'cli').reason, 'ahead',
+      'the CLI row reflects the RUNNING build, not the one just written to the prefix');
   } finally {
     srv.close();
   }
@@ -10689,6 +10855,32 @@ test('install-extensions: detects an editor that does NOT yet have our extension
     });
     d = await check();
     assert.equal(vsc().installed, '0.9.0', 'the installed version is read from the folder name');
+
+    // 0.9.5 — THE EDITOR'S OWN REGISTRY WINS OVER LEFTOVER FOLDERS.
+    //
+    // An editor does not delete the previous version's folder when it installs a new one, and the
+    // scan took the highest folder it could find. So after a switch DOWN to stable, the abandoned
+    // higher folder made us keep reporting the version we had just replaced — the machine looked
+    // permanently current and could never be moved again. extensions.json lists what is LOADED, one
+    // row per extension, which is the only thing an update should reason about.
+    const extDir = path.join(home, '.vscode', 'extensions');
+    fs.mkdirSync(path.join(extDir, 'cell-observatory.claude-observatory-vscode-0.10.0-dev.12'), { recursive: true });
+    fs.writeFileSync(
+      path.join(extDir, 'extensions.json'),
+      JSON.stringify([
+        { identifier: { id: 'cell-observatory.claude-observatory-vscode' }, version: '0.9.0', relativeLocation: 'cell-observatory.claude-observatory-vscode-0.9.0' },
+      ])
+    );
+    d = await check();
+    assert.equal(vsc().installed, '0.9.0', 'the registry decides, so an orphaned higher folder cannot re-strand the install');
+
+    // Corrupt or absent registry is NOT "nothing installed" — fall back to the folders rather than
+    // reporting a clean absence we never verified.
+    fs.writeFileSync(path.join(extDir, 'extensions.json'), '{ this is not json');
+    d = await check();
+    assert.equal(vsc().installed, '0.10.0-dev.12', 'an unreadable registry falls back to the folder scan');
+    fs.rmSync(path.join(extDir, 'extensions.json'));
+    fs.rmSync(path.join(extDir, 'cell-observatory.claude-observatory-vscode-0.10.0-dev.12'), { recursive: true });
 
     // A JetBrains IDE with no plugin of ours — again, present and actionable.
     const jb = path.join(home, 'Library', 'Application Support', 'JetBrains', 'PyCharm2026.1', 'plugins');

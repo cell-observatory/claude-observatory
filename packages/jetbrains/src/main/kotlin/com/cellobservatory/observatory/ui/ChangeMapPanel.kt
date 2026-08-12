@@ -1991,12 +1991,20 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
                     )
                 val rows = mutableListOf<AnAction>()
                 val chLatest = if (v.channel == "dev") v.devLatest ?: v.stableLatest else v.stableLatest
+                // WHAT IS INSTALLED, per surface (VS Code parity). "Update Now" moves the plugin AND
+                // the CLI, which carry independent versions — showing one number for both is how the
+                // dropdown came to disagree with what was actually on the machine. These rows are a
+                // report: disabled, nothing to click.
+                rows += infoRow("Plugin", pluginVersion(), if (v.stranded) "not on this channel" else null)
+                rows += infoRow("CLI", v.current, if (v.stranded) "not on this channel" else null)
+                rows += com.intellij.openapi.actionSystem.Separator.getInstance()
                 // ALWAYS present (user call 2026-07-28, VS Code parity): clicking while current is a
-                // safe no-op — runUpdateCli branches on the CLI's up-to-date output and shows a
-                // balloon instead of the restart dialog — and doubles as a manual re-check.
-                // "up to date" is only claimed when the release feed actually answered.
+                // safe no-op — runUpdateCli reads the plan and shows a balloon instead of the restart
+                // dialog — and doubles as a manual re-check. "up to date" is only claimed when the
+                // release feed actually answered.
                 val updateText =
-                    if (v.updateAvailable && chLatest != null) "Update Now — v$chLatest"
+                    if (v.stranded && chLatest != null) "Move onto the channel — v$chLatest"
+                    else if (v.updateAvailable && chLatest != null) "Update Now — v$chLatest"
                     else if (chLatest != null) "Update Now — up to date (v${v.current.ifEmpty { "—" }})"
                     else "Update Now"
                 rows += action(updateText, AllIcons.Actions.Download, "Update the CLI + both editor plugins; reports up to date when nothing is newer") { runUpdateCli(null) }
@@ -2024,13 +2032,20 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
         val what = when (channel) { null -> "Updating Claude Observatory"; "dev" -> "Switching to the Pre-release channel"; else -> "Switching to the Stable channel" }
         ReviewOps.notify(project, "$what — this refreshes the CLI and both editor plugins…")
         ApplicationManager.getApplication().executeOnPooledThread {
+            // ASK FIRST, as data. Whether this plugin is about to be rewritten decides whether a
+            // restart is worth demanding, and the old way of finding out — searching the CLI's prose
+            // for "everything is up to date" — is a contract nobody was enforcing. It also matched
+            // the substring inside "CLI is up to date (…); no editor extensions detected locally.",
+            // so a run that installed nothing at all could still claim otherwise, and vice versa.
+            val before = ObservatoryCli.updatePlan(channel, project.basePath)
+            val pluginWillMove = before == null || before.any { it.surface == "jetbrains" && it.reason != "current" }
             val (ok, out) = ObservatoryCli.update(channel, project.basePath)
             versionFetchedAtMs = 0L
             refreshVersionInfo(force = true)
             ApplicationManager.getApplication().invokeLater {
                 when {
                     !ok -> ReviewOps.notify(project, "$what failed: ${out.take(300).ifBlank { "is the claude-observatory CLI installed?" }}", NotificationType.ERROR)
-                    out.contains("everything is up to date") || out.contains("CLI is up to date") ->
+                    !pluginWillMove ->
                         ReviewOps.notify(project, "$what done — already on the newest build, no restart needed.")
                     else -> {
                         val restart = Messages.showYesNoDialog(
@@ -2101,6 +2116,20 @@ class ChangeMapPanel(private val project: Project) : SimpleToolWindowPanel(true,
             @Suppress("OVERRIDE_DEPRECATION") // displayTextInToolbar: still honored; renders the label
             override fun displayTextInToolbar() = true
             override fun actionPerformed(e: AnActionEvent) = run()
+        }
+
+    /** A non-clickable REPORT row for the version dropdown: "<what> — v<version> · <note>". Disabled
+     *  on purpose — it states what is installed on this machine, and there is nothing to press. An
+     *  absent version renders "—" rather than borrowing a number from another surface. */
+    private fun infoRow(what: String, version: String, note: String?): AnAction =
+        object : AnAction("$what — v${version.ifEmpty { "—" }}" + (note?.let { " · $it" } ?: "")), DumbAware {
+            @Suppress("OVERRIDE_DEPRECATION") // displayTextInToolbar: still honored; renders the label
+            override fun displayTextInToolbar() = true
+            override fun getActionUpdateThread() = ActionUpdateThread.BGT
+            override fun update(e: AnActionEvent) {
+                e.presentation.isEnabled = false
+            }
+            override fun actionPerformed(e: AnActionEvent) = Unit
         }
 
     /** The same button WITHOUT its label — glyph only, the verb carried by the tooltip. [action]'s
