@@ -48,20 +48,52 @@ function nvmBins(name: string): string[] {
   }
 }
 
+/** fnm, like nvm, keeps one bin dir per installed node — globals land under
+ *  <fnm dir>/node-versions/<ver>/installation/bin. FNM_DIR wins when the user set it. */
+function fnmBins(name: string): string[] {
+  const roots = [
+    process.env.FNM_DIR,
+    path.join(os.homedir(), '.local', 'share', 'fnm'),
+    path.join(os.homedir(), 'Library', 'Application Support', 'fnm'),
+  ].filter(Boolean) as string[];
+  for (const root of roots) {
+    try {
+      const vers = fs.readdirSync(path.join(root, 'node-versions')).sort().reverse();
+      return vers.map((v) => path.join(root, 'node-versions', v, 'installation', 'bin', name));
+    } catch {
+      /* not this root */
+    }
+  }
+  return [];
+}
+
 /** Best-effort location of a globally-installed bin (`claude`, `claude-observatory`) — GUI apps and
  *  SSH-launched remote hosts often lack ~/.local/bin and the nvm/volta dirs on PATH. Shared by the
  *  CLI resolver below and the VS Code stats subprocess so the candidate list lives in exactly one place. */
 export function resolveBin(name: string, opts: { configured?: string; env?: string } = {}): string {
+  const home = os.homedir();
   const cands = [
     opts.configured,
     opts.env ? process.env[opts.env] : undefined,
-    path.join(os.homedir(), '.local', 'bin', name),
+    path.join(home, '.local', 'bin', name),
     `/opt/homebrew/bin/${name}`,
     `/usr/local/bin/${name}`,
-    path.join(os.homedir(), '.npm-global', 'bin', name),
-    path.join(os.homedir(), '.volta', 'bin', name),
+    `/usr/bin/${name}`,
+    path.join(home, '.npm-global', 'bin', name),
+    path.join(home, '.volta', 'bin', name),
+    // The rest of the JS toolchain zoo. Every one of these is a real place a `-g` install lands, and
+    // an editor launched from a Dock/Finder icon inherits none of them on PATH — which reads to the
+    // user as "the update button does nothing", with no way to tell why.
+    path.join(home, '.bun', 'bin', name),
+    process.env.PNPM_HOME ? path.join(process.env.PNPM_HOME, name) : undefined,
+    path.join(home, 'Library', 'pnpm', name), // pnpm's default PNPM_HOME on macOS
+    path.join(home, '.local', 'share', 'pnpm', name), // …and on Linux
+    path.join(home, '.asdf', 'shims', name),
     ...nvmBins(name),
+    ...fnmBins(name),
     process.env.APPDATA ? path.join(process.env.APPDATA, 'npm', `${name}.cmd`) : undefined,
+    process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Volta', 'bin', `${name}.exe`) : undefined,
+    process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'pnpm', `${name}.cmd`) : undefined,
   ].filter(Boolean) as string[];
   for (const c of cands) {
     try {

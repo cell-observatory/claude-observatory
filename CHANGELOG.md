@@ -7,9 +7,48 @@ Per-tag release artifacts and auto-generated notes are on the
 
 ## [Unreleased]
 
-
 <!-- Every feature/fix PR into `dev` appends its line here; a promote renames this section to the
      release version and opens a fresh one. -->
+
+### Fixed
+
+- **Updating and switching release channels now works in both directions, and stops going quiet.**
+  A surface is refreshed whenever its version *differs* from the channel's newest — not only when the
+  release is higher. The old `isNewer` gate could not express the downgrade half of a channel switch,
+  and it silently ignored anything sitting *above* the channel line: a build installed from a `dev`
+  checkout is newer than every `-dev.<n>` the pre-release channel publishes, so every surface
+  reported a green "up to date", forever, on both channels. Such an install is now named
+  (`not on this channel`) and pulled back onto it. One decision serves every front end
+  (`core.resolveUpdatePlan`), replacing three call sites that compared three different ways.
+- **The VS Code extension installs its own `.vsix`, so updating needs nothing on `PATH`.** *Update
+  now* and *Switch release channel* went through the CLI, whose install step needs the editor's shell
+  command (`code`, `cursor`, `code-insiders`); a Dock-launched editor often has none, so the buttons
+  people actually press were the ones that failed. They now use the editor's own extension service —
+  the path the background notifier already used. The CLI is asked only to refresh itself and the
+  JetBrains plugin, and its absence is reported as a partial result rather than a failed update.
+- **The version dropdown names what is actually installed, per surface.** *Update now* moves the
+  extension, the CLI and the JetBrains plugin, which carry independent versions — the menu showed one
+  number, so whenever they differed it described something other than what the button changed. Each
+  surface now carries its own version and verdict, a CLI that cannot be found says so, and a build
+  that is installed but not yet loaded reads `pending reload` instead of reporting the old version.
+- **A channel switch can no longer half-apply.** The choice is persisted *after* the installs are
+  attempted, not before, so a blocked install cannot leave the config naming one channel while the
+  binaries came from another.
+- **The editors stop inferring success from the CLI's prose.** `claude-observatory update --json`
+  reports the whole plan as data — every surface, its version, and why it will or will not be touched
+  — and installs nothing. Both editors read that instead of searching stdout for
+  `everything is up to date`, a string that also occurs inside a message meaning the opposite.
+- **VS Code Insiders is detected.** It has its own extensions directory and its own CLI name, and
+  having neither in the table made every Insiders user invisible to `update` and `install-extensions`.
+- **A leftover extension folder can no longer re-strand an install.** Editors keep the previous
+  version's folder after installing, and detection took the highest folder it found — so after a
+  switch *down* to stable, the abandoned higher folder kept being reported as installed. The editor's
+  own `extensions.json` registry decides now, with the folder scan as the fallback.
+- **"Couldn't check" no longer looks like "up to date".** The release feed is queried anonymously and
+  can rate-limit; that state is now its own, in both the chip and the CLI.
+- **The CLI is found in more places.** `resolveBin` also looks in bun, pnpm, fnm, asdf and
+  `/usr/bin` — an editor launched from a Dock icon inherits none of them on `PATH`, which reads to
+  the user as a button that does nothing.
 
 ### Added
 

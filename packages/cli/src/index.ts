@@ -16,7 +16,7 @@
  *
  * The `capture` path lazy-loads only the zero-dep capture module (no `diff`) so the hook stays fast.
  */
-import type { EditRecord, InstallResult, StatMetrics } from '@claude-observatory/core';
+import type { EditRecord, InstallResult, StatMetrics, InstalledSurface, UpdateAction, UpdatePlan } from '@claude-observatory/core';
 
 /** Version read from the package manifest at runtime — one source of truth, so it can never drift. */
 function version(): string {
@@ -3410,6 +3410,10 @@ const VSCODE_EXT_ID_OLD = 'claude-observatory.claude-observatory-vscode';
 // real editor we fail to find.)
 const VSCODE_EDITORS: { label: string; extDirs: string[]; cli: string; app: string; winApp: string }[] = [
   { label: 'VS Code', extDirs: ['.vscode/extensions', '.vscode-server/extensions'], cli: 'code', app: 'Visual Studio Code', winApp: 'Microsoft VS Code' },
+  // Insiders is a SEPARATE install with its own extensions dir and its own CLI name — omitting it
+  // did not degrade anything gracefully, it made every Insiders user invisible to `update` and
+  // `install-extensions`, which then reported "no editor detected" and did nothing, forever.
+  { label: 'VS Code Insiders', extDirs: ['.vscode-insiders/extensions', '.vscode-server-insiders/extensions'], cli: 'code-insiders', app: 'Visual Studio Code - Insiders', winApp: 'Microsoft VS Code Insiders' },
   { label: 'Cursor', extDirs: ['.cursor/extensions'], cli: 'cursor', app: 'Cursor', winApp: 'cursor' },
   { label: 'VSCodium', extDirs: ['.vscodium/extensions'], cli: 'codium', app: 'VSCodium', winApp: 'VSCodium' },
   { label: 'Windsurf', extDirs: ['.windsurf/extensions'], cli: 'windsurf', app: 'Windsurf', winApp: 'Windsurf' },
@@ -3564,6 +3568,43 @@ function resolveEditorCli(cli: string, app: string, winApp: string): string | nu
   return null;
 }
 
+/**
+ * What the editor itself says is installed in `dir`, from its own `extensions.json` registry:
+ * `{ '<publisher>.<name>': '<version>' }`. Null when the file is absent or unreadable — then the
+ * caller falls back to scanning folders.
+ *
+ * This has to come first, because a folder scan answers a DIFFERENT question. An editor leaves the
+ * previous version's folder on disk after an install, and picking the newest folder made a downgrade
+ * un-redoable: after a dev→stable switch the higher `…-0.10.0-dev.12` folder lingered, so the CLI
+ * kept reporting the version it had just replaced, decided there was nothing to do, and left the
+ * user on a build the registry no longer even loads. The registry lists what is LOADED, one row per
+ * extension — which is the thing an update has to reason about.
+ */
+function registeredExtVersions(dir: string): Record<string, string> | null {
+  const fs = require('fs');
+  const path = require('path');
+  let raw: string;
+  try {
+    raw = fs.readFileSync(path.join(dir, 'extensions.json'), 'utf8');
+  } catch {
+    return null; // no registry here (older editors, a bare server dir) — the folder scan answers
+  }
+  try {
+    const list = JSON.parse(raw);
+    if (!Array.isArray(list)) return null;
+    const out: Record<string, string> = {};
+    for (const e of list) {
+      const id = String(e?.identifier?.id ?? '').toLowerCase();
+      const v = e?.version;
+      if (id && typeof v === 'string' && v) out[id] = v;
+    }
+    return out;
+  } catch {
+    // Present but corrupt is NOT "nothing installed" — fall back rather than report a clean absence.
+    return null;
+  }
+}
+
 /** Parse the version out of a VS Code extension folder named `<id>-<version>` (fallback: its
  *  package.json). Returns null if neither yields a semver. */
 function versionFromExtFolder(folderPath: string, folderName: string, id: string): string | null {
@@ -3587,6 +3628,9 @@ type EditorRow = {
   extDirs: string[];
   extRoots: string[];
   cli: string | null;
+  /** The bare command name (`code`, `code-insiders`, `cursor`, …) — what to tell a human to install
+   *  when `cli` is null. Hardcoding "code" sent Insiders and Cursor users after the wrong command. */
+  cliName: string;
   version: string | null;
   hasOld: boolean;
 };
@@ -3607,6 +3651,15 @@ function vscodeEditors(): EditorRow[] {
       let entries: string[] = [];
       try { entries = fs.readdirSync(dir); } catch { continue; }
       extRoots.push(dir); // readdir succeeded, so this editor has run here at least once
+      // The editor's own registry is authoritative about what is LOADED; folders are only evidence
+      // of what has ever been unpacked. See registeredExtVersions.
+      const reg = registeredExtVersions(dir);
+      if (reg) {
+        if (reg[VSCODE_EXT_ID_OLD]) hasOld = true;
+        const v = reg[VSCODE_EXT_ID];
+        if (v && (best === null || core.isNewer(v, best))) best = v;
+        continue;
+      }
       for (const e of entries) {
         // VS Code names extension folders `<publisher>.<name>-<version>` (lowercased).
         const id = [VSCODE_EXT_ID, VSCODE_EXT_ID_OLD].find((i) => e.toLowerCase().startsWith(i + '-'));
@@ -3616,7 +3669,7 @@ function vscodeEditors(): EditorRow[] {
         if (v && (best === null || core.isNewer(v, best))) best = v;
       }
     }
-    out.push({ label: ed.label, extDirs: ed.extDirs, extRoots, cli: resolveEditorCli(ed.cli, ed.app, ed.winApp), version: best, hasOld });
+    out.push({ label: ed.label, extDirs: ed.extDirs, extRoots, cli: resolveEditorCli(ed.cli, ed.app, ed.winApp), cliName: ed.cli, version: best, hasOld });
   }
   return out;
 }
@@ -3627,12 +3680,30 @@ function editorPresent(e: EditorRow): boolean {
   return e.extRoots.length > 0 || e.cli !== null;
 }
 
-/** VS Code-family installs of OUR extension. Unchanged contract: `update` refreshes only editors that
- *  already carry it, and never installs into one that does not. */
-function vscodeInstalls(): { label: string; version: string; cli: string | null; extDirs: string[]; hasOld: boolean }[] {
-  return vscodeEditors()
-    .filter((e) => e.version !== null)
-    .map((e) => ({ label: e.label, version: e.version as string, cli: e.cli, extDirs: e.extDirs, hasOld: e.hasOld }));
+/**
+ * Every surface an update touches, in the shape `core.resolveUpdatePlan` decides over: this CLI, each
+ * VS Code-family editor, each JetBrains IDE plugin dir. `version: null` = not installed here.
+ *
+ * This is the ONE place that reads what is on disk. Before it existed, `update`, `install-extensions`
+ * and the version chip each gathered their own idea of "installed" and compared it with their own
+ * idea of "stale", which is how they came to disagree.
+ */
+function installedSurfaces(): InstalledSurface[] {
+  const fs = require('fs');
+  const path = require('path');
+  const out: InstalledSurface[] = [{ surface: 'cli', label: 'CLI', version: version() }];
+  for (const e of vscodeEditors()) {
+    if (!editorPresent(e)) continue;
+    // An editor with no CLI is still reported — "installed but we cannot drive an update" has to be
+    // said out loud, and the plan is what carries it to whoever prints.
+    out.push({ surface: 'vscode', label: e.label, version: e.version, actionable: e.cli !== null, ref: e });
+  }
+  for (const d of jetbrainsPluginDirs()) {
+    const pluginDir = path.join(d, JB_PLUGIN_DIRNAME);
+    if (!fs.existsSync(pluginDir)) continue;
+    out.push({ surface: 'jetbrains', label: `JetBrains (${path.basename(path.dirname(d))})`, version: jbInstalledVersion(pluginDir), ref: d });
+  }
+  return out;
 }
 
 /** Install `vsixPath` into each target with `--install-extension --force`, handle the 0.8.6 publisher
@@ -3678,43 +3749,41 @@ function hasExtFolder(extDirs: string[], id: string): boolean {
 }
 
 /** Refresh the VS Code-family extension in every editor that already has it (never installs into an
- *  editor that lacks it). Downloads the .vsix once and `--install-extension --force`s it. */
+ *  editor that lacks it — that is `install-extensions`' job). Downloads the .vsix once and
+ *  `--install-extension --force`s it. The DECISION of what is stale came from `resolveUpdatePlan`;
+ *  this only applies it. */
 async function refreshVscodeExtension(
   assets: ReleaseAsset[],
-  latest: string,
-  force: boolean
+  plan: UpdatePlan
 ): Promise<'updated' | 'current' | 'blocked' | 'absent'> {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
-  const installs = vscodeInstalls();
+  const here = plan.surfaces.filter((s) => s.surface === 'vscode');
+  const installs = here.filter((s) => s.reason !== 'missing');
   if (installs.length === 0) return 'absent'; // genuinely not installed — the only OK silent case
-  const stale = installs.filter((h) => force || core.isNewer(latest, h.version));
+  const stale = installs.filter((s) => s.reason !== 'current');
   if (stale.length === 0) {
-    process.stdout.write(c.green('✓ ') + `VS Code extension up to date (${installs[0].version})\n`);
+    process.stdout.write(c.green('✓ ') + `VS Code extension up to date (${installs[0].from})\n`);
     return 'current';
   }
   // Installed but no CLI could be located: SURFACE it loudly with a fix — never skip in silence.
-  const noCli = stale.filter((h) => !h.cli);
-  for (const h of noCli) {
+  for (const s of stale.filter((s) => !s.actionable)) {
+    const ed = s.ref as EditorRow;
     process.stdout.write(
       c.yellow('  ⚠ ') +
-        `${h.label} extension ${h.version} is installed, but its CLI wasn't found on PATH or in the usual app locations — can't auto-update it.\n` +
-        c.dim(`    Fix: in ${h.label}, ⇧⌘P → "Shell Command: Install 'code' command in PATH", then re-run \`claude-observatory update\`;\n`) +
-        c.dim(`    or install claude-observatory-vscode-v${latest}.vsix from the release manually.\n`)
+        `${s.label} extension ${s.from} is installed, but its CLI wasn't found on PATH or in the usual app locations — can't auto-update it.\n` +
+        c.dim(`    Fix: in ${s.label}, ⇧⌘P → "Shell Command: Install '${ed?.cliName || 'code'}' command in PATH", then re-run \`claude-observatory update\`;\n`) +
+        c.dim(`    or install claude-observatory-vscode-v${plan.target}.vsix from the release manually.\n`)
     );
   }
-  const actionable = stale.filter((h) => h.cli);
+  const actionable = stale.filter((s) => s.actionable);
   let installed = 0;
   if (actionable.length) {
-    const vsix = assets.find((a) => /\.vsix$/i.test(a.name));
+    const vsix = core.assetFor(assets, 'vscode');
     if (!vsix) {
-      process.stdout.write(c.yellow(`  ⚠ release v${latest} has no .vsix asset — could not update the VS Code extension\n`));
+      process.stdout.write(c.yellow(`  ⚠ release v${plan.target} has no .vsix asset — could not update the VS Code extension\n`));
     } else {
       const dest = await downloadAsset(vsix);
-      installed = applyVsix(
-        actionable.map((h) => ({ label: h.label, extDirs: h.extDirs, extRoots: [], cli: h.cli, version: h.version, hasOld: h.hasOld })),
-        dest,
-        latest
-      );
+      installed = applyVsix(actionable.map((s) => s.ref as EditorRow), dest, plan.target);
     }
   }
   // 'blocked' when any stale install couldn't be applied (no CLI, no asset, or a failed install).
@@ -3825,30 +3894,24 @@ function jetbrainsAutoUpdateHint(): string {
  *  sentinel written beside the plugin. */
 async function refreshJetbrainsPlugin(
   assets: ReleaseAsset[],
-  latest: string,
-  force: boolean
+  plan: UpdatePlan
 ): Promise<'updated' | 'current' | 'blocked' | 'absent'> {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
-  const fs = require('fs');
-  const path = require('path');
-  const holders = jetbrainsPluginDirs().filter((d) => fs.existsSync(path.join(d, JB_PLUGIN_DIRNAME)));
+  const holders = plan.surfaces.filter((s) => s.surface === 'jetbrains');
   if (holders.length === 0) return 'absent';
-  const stale = holders.filter((d) => {
-    const v = jbInstalledVersion(path.join(d, JB_PLUGIN_DIRNAME));
-    return force || v === null || core.isNewer(latest, v);
-  });
+  const stale = holders.filter((s) => s.reason !== 'current');
   if (stale.length === 0) {
-    process.stdout.write(c.green('✓ ') + `JetBrains plugin up to date (${latest})\n`);
+    process.stdout.write(c.green('✓ ') + `JetBrains plugin up to date (${plan.target})\n`);
     return 'current';
   }
   if (!zipToolReady()) return 'blocked';
-  const zip = assets.find((a) => /jetbrains.*\.zip$/i.test(a.name));
+  const zip = core.assetFor(assets, 'jetbrains');
   if (!zip) {
-    process.stdout.write(c.yellow(`  ⚠ release v${latest} has no JetBrains .zip asset — could not update the plugin\n`));
+    process.stdout.write(c.yellow(`  ⚠ release v${plan.target} has no JetBrains .zip asset — could not update the plugin\n`));
     return 'blocked';
   }
   const dest = await downloadAsset(zip);
-  const installed = applyJetbrainsZip(stale, dest, latest);
+  const installed = applyJetbrainsZip(stale.map((s) => s.ref as string), dest, plan.target);
   return installed === stale.length ? 'updated' : 'blocked'; // any dir that failed to extract → surface it
 }
 
@@ -4028,15 +4091,13 @@ async function cmdInstallExtensions(args: string[]): Promise<void> {
   let detected = 0; // surfaces that exist at all — distinguishes "nothing here" from "all current"
 
   if (doVscode) {
-    // isNewer, not `!==`: a string compare re-installed on every run and DOWNGRADED anything newer
-    // than the channel's release (install a dev build, then re-run plain). `update` has always used
-    // isNewer for the same decision. An explicit --channel is a SWITCH, so it installs that channel's
-    // newest in either direction — matching `update --channel`.
+    // The SAME rule core.resolveUpdatePlan applies for `update`: follow the channel in either
+    // direction, so a version DIFFERENCE is the trigger, not `isNewer`. The old gate refused to
+    // touch anything sitting ABOVE the channel's release, which is exactly how a locally-built
+    // 0.10.0 became permanently "already current" on every channel. `!==` cannot loop: once
+    // installed === target the next run is a no-op.
     const stale = (installed: string | null) =>
-      force ||
-      vsixArg !== null ||
-      installed === null ||
-      (requested !== null ? installed !== target : core.isNewer(target, installed));
+      force || vsixArg !== null || installed === null || core.compareVersions(installed, target) !== 0;
     const actionable = editors.filter((e) => e.cli && stale(e.version));
     const noCli = editors.filter((e) => !e.cli);
     for (const e of noCli) {
@@ -4044,7 +4105,7 @@ async function cmdInstallExtensions(args: string[]): Promise<void> {
       process.stdout.write(
         c.yellow('  ⚠ ') +
           `${e.label} is installed but its CLI wasn't found — can't install into it.\n` +
-          c.dim(`    Fix: in ${e.label}, ⇧⌘P → "Shell Command: Install 'code' command in PATH", then re-run.\n`)
+          c.dim(`    Fix: in ${e.label}, ⇧⌘P → "Shell Command: Install '${e.cliName}' command in PATH", then re-run.\n`)
       );
       blocked++;
     }
@@ -4076,7 +4137,7 @@ async function cmdInstallExtensions(args: string[]): Promise<void> {
         if (force || zipArg !== null) return true;
         const v = jbInstalledVersion(path.join(d, JB_PLUGIN_DIRNAME));
         if (v === null) return true;
-        return requested !== null ? v !== target : core.isNewer(target, v);
+        return core.compareVersions(v, target) !== 0; // follow the channel, either direction
       });
       if (!targets.length) process.stdout.write(c.green('✓ ') + `JetBrains plugin already at ${target}\n`);
       else {
@@ -4125,12 +4186,23 @@ async function cmdInstallExtensions(args: string[]): Promise<void> {
   if (!did) process.stdout.write(c.green('✓ ') + 'nothing to install — every detected editor is already current.\n');
 }
 
+/** Write the channel choice, once the installs that follow it have actually been attempted. Silent
+ *  when nothing changed. Kept a function so BOTH exits from `cmdUpdate` (--cli-only and the full
+ *  run) persist at the same point in the sequence, rather than one of them doing it early. */
+function persistChannel(requested: 'stable' | 'dev' | null): void {
+  const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
+  if (requested === null || requested === core.getUpdateChannel()) return;
+  core.setUpdateChannel(requested);
+  process.stdout.write(c.green('✓ ') + `switched to the ${CHANNEL_LABEL[requested]} channel\n`);
+}
+
 async function cmdUpdate(args: string[]): Promise<void> {
   const core = require('@claude-observatory/core') as typeof import('@claude-observatory/core');
   const current = version();
   const cliOnly = args.includes('--cli-only');
   const checkOnly = args.includes('--check');
   const force = args.includes('--force');
+  const json = args.includes('--json');
   // --channel <stable|dev>: SWITCH channels — persist the choice and install that channel's newest
   // in the same breath (a switch installs even when the target version isn't "newer": moving from a
   // dev build back to stable is a downgrade by semver and must still happen).
@@ -4143,19 +4215,49 @@ async function cmdUpdate(args: string[]): Promise<void> {
   const channel = requested ?? core.getUpdateChannel();
 
   const releases = await fetchReleases();
-  const release: any = core.resolveReleaseFromList(releases, channel);
-  if (!release) fail('no published release found for the repository.');
-  if (channel === 'dev' && release.prerelease !== true)
+  // ONE decision for every surface, in core: a surface is acted on when its installed version
+  // DIFFERS from the channel's newest — in either direction. `isNewer` could not express the
+  // downgrade half of a channel switch, and it silently ignored anything sitting ABOVE the channel
+  // line (a local build at 0.10.0 outranks every 0.10.0-dev.N the dev channel publishes).
+  const surfaces = cliOnly ? installedSurfaces().filter((s) => s.surface === 'cli') : installedSurfaces();
+  const plan = core.resolveUpdatePlan(releases, channel, surfaces, { switching, force });
+  if (!plan.release) fail('no published release found for the repository.');
+  if (plan.degradedToStable)
     process.stdout.write(c.dim('no pre-release published yet — the stable release is the newest there is.\n'));
-  const latest = core.versionOfRelease(release) ?? '';
-  if (!latest) fail('no published release found for the repository.');
-  const assets: ReleaseAsset[] = release.assets || [];
-  const cliStale = switching ? latest !== current : core.isNewer(latest, current);
+  const latest = plan.target;
+  const assets: ReleaseAsset[] = (plan.release as any).assets || [];
+  const cliSurface = plan.surfaces.find((s) => s.surface === 'cli');
+  const cliStale = cliSurface !== undefined && cliSurface.reason !== 'current';
+
+  if (json) {
+    // The STRUCTURED hand-off, and deliberately READ-ONLY: `--json` reports the plan and changes
+    // nothing, whether or not `--check` was passed. The editors used to infer what happened by
+    // grepping this command's prose (`out.includes('everything is up to date')`), which is how a
+    // real switch could toast "nothing to reload". They now read the plan, do their own part, run
+    // the plain command for the rest, and READ THE PLAN AGAIN to see the result — an outcome that
+    // was observed rather than one that was claimed.
+    emitJson({
+      channel,
+      following: core.getUpdateChannel(),
+      switching,
+      target: latest,
+      degradedToStable: plan.degradedToStable,
+      surfaces: plan.surfaces.map((s) => ({
+        surface: s.surface,
+        label: s.label,
+        from: s.from,
+        to: s.to,
+        reason: s.reason,
+        actionable: s.actionable,
+      })),
+      upToDate: plan.actions.length === 0,
+    });
+    return;
+  }
 
   if (checkOnly) {
     // A PREVIEW is honest about being one: `--check --channel dev` shows what the switch WOULD do —
-    // it never persists, its rows use switch semantics (a switch installs on any version DIFFERENCE,
-    // downgrades included), and the closing hint names the command that actually applies it.
+    // it never persists, and the closing hint names the command that actually applies it.
     process.stdout.write(
       c.dim(
         switching
@@ -4163,23 +4265,28 @@ async function cmdUpdate(args: string[]): Promise<void> {
           : `channel: ${CHANNEL_LABEL[channel]}\n`
       )
     );
-    const stale = (v: string) => (switching ? latest !== v : core.isNewer(latest, v));
-    process.stdout.write(cliStale ? c.yellow(`CLI: update available ${current} → ${latest}\n`) : c.green(`CLI: up to date (${current})\n`));
+    for (const s of plan.surfaces) {
+      if (s.reason === 'current') {
+        process.stdout.write(c.green(`${s.label}: up to date (${s.from})\n`));
+        continue;
+      }
+      // `update` refreshes only what is ALREADY installed; putting a present-but-empty editor in the
+      // action list would promise an install this command is about to skip on purpose.
+      if (s.reason === 'missing') {
+        process.stdout.write(c.dim(`${s.label}: not installed — \`claude-observatory install-extensions\` adds it\n`));
+        continue;
+      }
+      // 'ahead' is its own sentence. Reading "0.10.0 → 0.9.5" as an update is confusing; reading it
+      // as nothing at all is what stranded people for weeks.
+      const how = s.reason === 'ahead' ? ' (not on this channel — will be replaced)' : '';
+      process.stdout.write(
+        c.yellow(`${s.label}: ${s.from} → ${latest}${how}`) +
+          (s.actionable ? '\n' : c.yellow(`  (installed but no CLI found to update — install the shell \`${(s.ref as EditorRow)?.cliName || 'code'}\` command)\n`))
+      );
+    }
     if (!cliOnly) {
-      const vs = vscodeInstalls();
-      if (vs.length === 0) process.stdout.write(c.dim('VS Code: extension not detected\n'));
-      else for (const h of vs) {
-        if (!stale(h.version)) process.stdout.write(c.green(`${h.label}: up to date (${h.version})\n`));
-        else process.stdout.write(c.yellow(`${h.label}: ${h.version} → ${latest}`) + (h.cli ? '\n' : c.yellow('  (installed but no CLI found to update — install the shell `code` command)\n')));
-      }
-      const fs = require('fs');
-      const path = require('path');
-      const jb = jetbrainsPluginDirs().filter((d) => fs.existsSync(path.join(d, JB_PLUGIN_DIRNAME)));
-      if (jb.length === 0) process.stdout.write(c.dim('JetBrains: plugin not detected\n'));
-      else for (const d of jb) {
-        const v = jbInstalledVersion(path.join(d, JB_PLUGIN_DIRNAME));
-        process.stdout.write(v && !stale(v) ? c.green(`JetBrains: up to date (${v})\n`) : c.yellow(`JetBrains: ${v || 'installed'} → ${latest} (${d})\n`));
-      }
+      if (!plan.surfaces.some((s) => s.surface === 'vscode')) process.stdout.write(c.dim('VS Code: extension not detected\n'));
+      if (!plan.surfaces.some((s) => s.surface === 'jetbrains')) process.stdout.write(c.dim('JetBrains: plugin not detected\n'));
     }
     if (channel === 'stable') {
       // The pre-release channel's tip, one dim line — the list is already in hand, and this is the
@@ -4195,23 +4302,22 @@ async function cmdUpdate(args: string[]): Promise<void> {
     return;
   }
 
-  // Persist the switch only once the target channel RESOLVED — a typo or an offline check must not
-  // strand the config on a channel whose release was never even looked up.
-  if (requested !== null && requested !== core.getUpdateChannel()) {
-    core.setUpdateChannel(requested);
-    process.stdout.write(c.green('✓ ') + `switched to the ${CHANNEL_LABEL[requested]} channel\n`);
-  }
-
   if (cliOnly) {
     if (cliStale) await updateCliBinary(assets, latest, current);
     else process.stdout.write(c.green('✓ ') + `claude-observatory CLI is up to date (${current})\n`);
+    persistChannel(requested);
     return;
   }
 
   if (cliStale) await updateCliBinary(assets, latest, current); // refreshes the status line itself
   else refreshInstalledStatusline(); // CLI already current — still heal a statusline.sh an older CLI wrote
-  const vscode = await refreshVscodeExtension(assets, latest, force || switching);
-  const jetbrains = await refreshJetbrainsPlugin(assets, latest, force || switching);
+  const vscode = await refreshVscodeExtension(assets, plan);
+  const jetbrains = await refreshJetbrainsPlugin(assets, plan);
+  // Persist the switch AFTER the installs, not before. Doing it first meant a blocked install left
+  // the config naming one channel while the binaries came from the other — the split-brain the
+  // channel file is supposed to make impossible — and the failure toast made it look like nothing
+  // had happened at all.
+  persistChannel(requested);
   if (vscode === 'blocked' || jetbrains === 'blocked') {
     // Something is installed but couldn't be updated — never let this pass as success/silence.
     // On STDERR, not stdout: this is the failure reason, and an editor surfacing this run reads
@@ -4273,18 +4379,29 @@ async function cmdVersion(args: string[]): Promise<void> {
     latestTag: stableLatest,
     latestDevTag: devLatest,
   }); // an explicit check also freshens the daily nudge
-  const newer = core.isNewer(latest, cur);
+  // Following a channel means MATCHING it, so any difference is actionable — not just a higher
+  // number. `stranded` is the difference that points the other way: an install sitting ABOVE the
+  // channel (a local build, or a channel just switched downward), which the old isNewer check read
+  // as "up to date" and left there permanently.
+  const cmp = core.compareVersions(latest, cur);
+  const differs = cmp !== 0;
+  const stranded = cmp < 0;
   if (json) {
     // The editors' version dropdown: one call answers the chip, the Update row, and both channel rows.
-    emitJson({ current: cur, channel, latest, updateAvailable: newer, stableLatest, devLatest });
+    emitJson({ current: cur, channel, latest, updateAvailable: differs, stranded, stableLatest, devLatest });
     return;
   }
   process.stdout.write(
     `installed   ${c.bold(cur)}   ${c.dim(`(${CHANNEL_LABEL[channel]} channel)`)}\n` +
-      `latest      ${c.bold(latest)}   ${newer ? c.yellow('← update available') : c.green('✓ up to date')}\n` +
+      `latest      ${c.bold(latest)}   ${differs ? c.yellow(stranded ? '← not on this channel' : '← update available') : c.green('✓ up to date')}\n` +
       (channel === 'stable' && devLatest ? c.dim(`pre-release ${devLatest}   (switch: \`update --channel dev\`)\n`) : '')
   );
-  if (newer) {
+  if (stranded) {
+    process.stdout.write(
+      c.dim(`the installed build is newer than anything the ${CHANNEL_LABEL[channel]} channel publishes — probably a local build.\n`) +
+        c.dim('run `claude-observatory update` to move onto the channel, or switch channels with `update --channel dev`.\n')
+    );
+  } else if (differs) {
     process.stdout.write(c.dim('run `claude-observatory update` to apply, or `update --check` to see every surface.\n'));
   }
 }
@@ -4306,11 +4423,14 @@ function usage(): void {
       `                       install the editor extensions into whatever editors are on this machine\n` +
       `                       (VS Code family + JetBrains); --vsix/--jetbrains-zip use local build\n` +
       `                       outputs instead of the release; --check reports without installing\n` +
-      `  update [--check] [--cli-only] [--force] [--channel stable|dev]\n` +
+      `  update [--check] [--json] [--cli-only] [--force] [--channel stable|dev]\n` +
       `                       update the CLI AND refresh the locally-installed editor extensions from\n` +
       `                       the followed release channel (VS Code via \`code --install-extension\`;\n` +
       `                       JetBrains by unzip into plugin dirs), and refresh the bundled status\n` +
-      `                       line when ours is installed. --check reports only; --cli-only\n` +
+      `                       line when ours is installed. A surface is updated whenever it DIFFERS\n` +
+      `                       from the channel's newest — including builds newer than it, which is\n` +
+      `                       what makes switching channels work in both directions. --check reports\n` +
+      `                       only; --json reports the plan as JSON and changes nothing; --cli-only\n` +
       `                       skips the extensions; --force reinstalls even if already current;\n` +
       `                       --channel switches between stable and the rolling pre-release (dev)\n` +
       `                       and installs that channel's newest in the same run\n` +
@@ -4494,8 +4614,17 @@ async function refreshUpdateCache(): Promise<void> {
     );
     const releases: any[] = Array.isArray(list) ? list : [];
     const stable: any = core.resolveReleaseFromList(releases, 'stable');
-    const dev: any = releases.find((r: any) => r?.prerelease === true && !r?.draft) ?? null;
-    writeUpdateCache({ checkedMs: Date.now(), latestTag: core.versionOfRelease(stable), latestDevTag: core.versionOfRelease(dev) });
+    // resolveReleaseFromList, NOT a raw `.find(prerelease)` — the two disagree right after a promote,
+    // when the freshly-tagged stable outranks the rolling build and IS what the dev channel serves.
+    // The raw find had the nudge advertising a pre-release the updater would not have installed.
+    // Null when the dev channel degraded to stable, so the consumer falls back to latestTag rather
+    // than being told the pre-release equals the stable.
+    const dev: any = core.resolveReleaseFromList(releases, 'dev');
+    writeUpdateCache({
+      checkedMs: Date.now(),
+      latestTag: core.versionOfRelease(stable),
+      latestDevTag: dev && dev.prerelease === true ? core.versionOfRelease(dev) : null,
+    });
   } catch {
     /* offline / rate-limited: the parent already wrote a throttle timestamp; keep the old tag */
   }
@@ -4524,11 +4653,20 @@ function maybeCheckForUpdate(cmd: string | undefined, rest: string[]): void {
   // The nudge follows the ACTIVE channel: a dev-channel install compares against the rolling
   // pre-release tag, never against stable (which is older than every dev build by construction).
   const channelTag = core.getUpdateChannel() === 'dev' ? cache?.latestDevTag ?? cache?.latestTag : cache?.latestTag;
-  if (channelTag && core.isNewer(channelTag, cur)) {
+  // Any DIFFERENCE from the channel, not just a higher number — the nudge went silent for exactly
+  // the people who most needed it: installs sitting above the channel line, which never self-heal.
+  if (channelTag && core.compareVersions(channelTag, cur) !== 0) {
+    const behind = core.isNewer(channelTag, cur);
     // Print AFTER the command's output, once, to stderr — never pollutes stdout / --json consumers.
     process.on('exit', () => {
       try {
-        process.stderr.write(c.dim(`\nupdate available (${cur} → ${channelTag}) — run \`claude-observatory update\`\n`));
+        process.stderr.write(
+          c.dim(
+            behind
+              ? `\nupdate available (${cur} → ${channelTag}) — run \`claude-observatory update\`\n`
+              : `\nthis build (${cur}) is not on your ${CHANNEL_LABEL[core.getUpdateChannel()]} channel (${channelTag}) — run \`claude-observatory update\`\n`
+          )
+        );
       } catch {
         /* stream already closed */
       }

@@ -21,7 +21,7 @@ Think of it as the Cursor "keep/undo each change" experience, but for Claude Cod
 
 ## Updates
 
-The extension checks GitHub Releases in the background (at most once a day) and offers a one-click **Update now** when a newer version ships — no Marketplace required. Trigger it anytime from the Command Palette: **“Claude Observatory: Check for updates.”** The downloaded `.vsix` is sha256-verified before it installs. (The bundled `claude-observatory update` CLI updates this extension too.)
+The extension checks GitHub Releases in the background (at most once a day) and offers a one-click **Update now** whenever your installed version *differs* from the channel you follow — no Marketplace required. Trigger it anytime from the Command Palette: **“Claude Observatory: Check for updates.”** The downloaded `.vsix` is sha256-verified before it installs, through the editor's own extension service — so updating and switching channels need nothing on your `PATH`, no `code` shell command, and no CLI. (The bundled `claude-observatory update` CLI updates this extension too.)
 
 ## Views
 
