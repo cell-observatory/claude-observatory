@@ -9,7 +9,7 @@
 [![Pages](https://github.com/cell-observatory/claude-observatory/actions/workflows/pages.yml/badge.svg)](https://github.com/cell-observatory/claude-observatory/actions/workflows/pages.yml)
 [![Release](https://github.com/cell-observatory/claude-observatory/actions/workflows/release.yml/badge.svg)](https://github.com/cell-observatory/claude-observatory/actions/workflows/release.yml)
 [![Dependabot](https://img.shields.io/badge/dependabot-enabled-025E8C?logo=dependabot&logoColor=white)](https://github.com/cell-observatory/claude-observatory/blob/main/.github/dependabot.yml)
-[![Version](https://img.shields.io/badge/version-v0.10.0-blue)](https://github.com/cell-observatory/claude-observatory/releases/latest)
+[![Version](https://img.shields.io/badge/version-v0.10.0--dev.0-blue)](https://github.com/cell-observatory/claude-observatory/releases/latest)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/cell-observatory/claude-observatory/blob/main/LICENSE)
 
 
@@ -188,8 +188,15 @@ The one-liner in [Quickstart](#quickstart) covers most people. The details:
 
 `claude-observatory update` refreshes **everything installed** — the CLI, the VS Code extension, and
 the JetBrains plugin — from the release channel you follow (add `--check` to preview without
-installing); re-running the [one-liner](#quickstart) does the same. The CLI also nudges you once a
-day when a newer release exists (opt out with `CLAUDE_OBSERVATORY_NO_UPDATE_CHECK=1`).
+installing, or `--json` for the same plan as data); re-running the [one-liner](#quickstart) does the
+same. The CLI also nudges you once a day when your installed build differs from the channel's newest
+(opt out with `CLAUDE_OBSERVATORY_NO_UPDATE_CHECK=1`).
+
+**Following a channel means matching it.** A surface is refreshed whenever its version *differs*
+from the channel's newest — not only when the release is higher. That is what makes switching
+channels work in both directions, and it is what rescues a build that sits *above* the channel: a
+local build, or anything installed from a `dev` checkout, reports `not on this channel` and is pulled
+back onto it. (Before 0.9.5 such an install reported "up to date" on every channel, forever.)
 
 There are **two release channels** (full story: [the Releases page](https://cell-observatory.github.io/claude-observatory/releases.html)):
 
@@ -197,16 +204,19 @@ There are **two release channels** (full story: [the Releases page](https://cell
 - **Pre-release** — a rolling build of the `dev` branch, republished on every push, versioned
   `<next>-dev.<n>`. Newest features, less soak time.
 
-Switch from the **version chip** at the right edge of the Overview's toolbar in either editor
-(it shows the running version; its menu offers **Update now** and the channel switch), or from the
-terminal: `claude-observatory update --channel dev` (back with `--channel stable` — switching
-installs that channel's newest immediately, downgrades included, and updates follow it from then
-on). Beyond that, each surface can keep **itself** current:
+Switch from the **version chip** at the right edge of the Overview's toolbar in either editor (its
+menu lists what each surface has installed — extension, CLI, plugin — and offers **Update now** and
+the channel switch), or from the terminal: `claude-observatory update --channel dev` (back with
+`--channel stable` — switching installs that channel's newest immediately, downgrades included, and
+updates follow it from then on). Beyond that, each surface can keep **itself** current:
 
 - **CLI** — `claude-observatory update`, or the daily nudge above; `claude-observatory version --check`
   shows your installed version next to the latest release at any time.
 - **VS Code** — a background check (once a day) offers a one-click **Update now**; or run
   **“Claude Observatory: Check for updates”** from the Command Palette. Downloads are sha256-verified.
+  The extension installs its own `.vsix` through the editor, so updating and switching channels need
+  nothing on your `PATH` — no `code` shell command, and no CLI. The CLI is used only to refresh
+  *itself* and the JetBrains plugin, and if it is absent the extension says so and updates anyway.
 - **JetBrains** — add the self-hosted plugin repository **once** and the IDE auto-updates the plugin
   like any Marketplace plugin (see [the JetBrains guide](packages/jetbrains/README.md#auto-updates)):
   **Settings → Plugins → ⚙ → Manage Plugin Repositories → +**, then paste

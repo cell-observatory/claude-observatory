@@ -15,6 +15,11 @@ observatory-demo/
 # Bun compile scratch (temp artifacts from `bun build --compile`)
 *.bun-build
 
+# A scratch copy of the VS Code API declarations (`vscode.d.ts`), handy to grep while working on the
+# extension. The real one ships in packages/vscode/node_modules/@types/vscode — this is a local aid,
+# never a source file, and must not ride along in a release.
+/vsd.ts
+
 # Internal working notes (review findings, comparisons). They inform the work; they are not
 # part of what the project publishes, and a link to one from the site is a 404 waiting to happen.
 docs/internal/

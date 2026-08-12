@@ -3180,7 +3180,40 @@ function dashFixture(over = {}) {
         ],
       },
       prompts: { prompts: [{ id: 'p1', index: 1, ts: 1000, title: 'do the thing', editIds: [1, 3] }] },
-      multitask: { agents: [{ session: 's', phase: 'working', phaseConfidence: 'heuristic', diff: { added: 4, removed: 1 }, sparkline: '▁▂▅' }], summary: { active: 1, conflicts: 2 } },
+      multitask: {
+        agents: [{ session: 's', phase: 'working', phaseConfidence: 'heuristic', diff: { added: 4, removed: 1 }, sparkline: '▁▂▅' }],
+        // A workflow run with BOTH shapes the Workflows screen has to render: agents that sit in a
+        // declared phase, and agents that do not (the common case on a live run, where the phases come
+        // from the script meta while the agents still carry journal keys). One label is DERIVED, so
+        // the heuristic marker has something to mark.
+        workflows: [
+          {
+            id: 'wf_fix',
+            name: 'roadmap-deep-eval',
+            description: 'deep eval of the ADO roadmap',
+            phases: ['Find', 'Verify'],
+            phaseGroups: [{ title: 'Find', done: 2, total: 2 }, { title: 'Verify', done: 1, total: 2 }],
+            agents: [
+              { agentId: 'v2:aaaaaaaa', label: 'find:consistency', labelDerived: false, phase: 'Find', done: true, tokens: 12000, durationMs: 240000, edits: 1, added: 5, removed: 2, model: 'Opus 4.8', effort: '', sparkline: [1, 2] },
+              { agentId: 'bbbbbbbb', label: 'find:evidence', labelDerived: true, phase: 'Find', done: true, tokens: 31000, durationMs: 540000, edits: 0, added: 0, removed: 0, model: '', effort: '', sparkline: [] },
+              { agentId: 'cccccccc', label: 'verify:external', labelDerived: false, phase: 'Verify', done: true, tokens: 88000, durationMs: 1080000, edits: 2, added: 3, removed: 1, model: '', effort: 'high', sparkline: [] },
+              { agentId: 'dddddddd', label: null, labelDerived: false, phase: null, agentType: 'workflow-subagent', done: false, tokens: 102000, durationMs: 1320000, edits: 0, added: 0, removed: 0, model: '', effort: '', sparkline: [] },
+            ],
+            running: true,
+            lastActivityMs: 1000,
+            agentCount: 6,
+            tokens: 601000,
+            durationMs: 2760000,
+            edits: 3,
+            added: 12,
+            removed: 3,
+            startedTs: 1,
+            lastTs: 2,
+            sparkline: [1, 3, 2],
+          },
+        ],
+        summary: { active: 1, conflicts: 2 },
+      },
       feed: { entries: [{ ts: 1000, label: 'ran tests' }], mode: 'live' },
       risk: { high: 1, count: 2, risky: [{ ts: 1, tool: 'Bash', target: 'rm -rf x', level: 'high', reasons: [] }], outsideWrites: [{ file: '/etc/hosts', count: 1 }] },
       egress: { remote: 1, channels: [{ kind: 'web', target: 'example.com', scope: 'remote', count: 1 }] },
@@ -3510,6 +3543,145 @@ test('dashframe: every screen fits its budget at every width', () => {
       }
     }
   }
+});
+
+test('dashframe: the Workflows screen renders the per-phase breakdown, like both editors (0.9.5)', () => {
+  // The terminal used to render ONE flat line per run, built from `w.phase` — a field WorkflowRun
+  // has never had — so the column was always empty and collapsed to a running/done the glyph already
+  // showed. Everything below was on the wire the whole time.
+  // The glyph tier is PINNED. It is chosen from the platform and the locale at runtime — native
+  // Windows gets `safe`, whose ramp is ASCII (`..::-=+#`) rather than the block eighths — so a test
+  // that hardcodes one tier's characters passes on the author's machine and fails on someone else's.
+  // (It did: CI's Windows runners rendered `:#=` where this asserted `▁▂▃▄▅▆▇█`.)
+  const g = tui.glyphs('block');
+  const RAMP = new RegExp(`[${g.ramp.join('')}]`);
+  const frame = tui.renderDashFrame(dashFixture({ screen: 'workflows' }), { cols: 200, rows: 40, color: false, glyphs: g });
+  const text = frame.join('\n');
+  const line = (re) => frame.find((l) => re.test(l));
+
+  // Header: the run's state, the phase summary, and the DESCRIPTION (not the bare name — that is
+  // what the editors show, and it is the half a human recognises).
+  const head = line(/deep eval of the ADO roadmap/);
+  assert.ok(head, 'the run header carries the description');
+  assert.match(head, /running/, 'and whether it is running');
+  assert.match(head, /Find 2\/2 · Verify 1\/2/, 'and the phase summary, joined the way the editors join it');
+
+  // Metrics, on their own row so the description keeps its full line. The field set is the editors'
+  // metrics line: sparkline · ±lines · agents · tok · dur · edits.
+  const met = line(/601k tok/);
+  assert.ok(met, 'the metrics row is rendered');
+  assert.match(met, RAMP, 'the run sparkline — both editors draw one, and the terminal has a ramp for it');
+  assert.match(met, /\+12/, 'lines added');
+  assert.match(met, /−3/, 'lines removed');
+  assert.match(met, /6 agents/, 'the agent count');
+  assert.match(met, /46m/, 'the wall time');
+  // w.edits (3), NOT the change-map rollup the old row used — all three front ends must say the same
+  // number for the same run.
+  assert.match(met, /3 edits/, "the run's OWN edit count");
+
+  // The NAME, under the description, when they differ — VS Code's `mt-wsub`. Both are real
+  // identifiers and the reader should not have to choose which one they were shown.
+  assert.ok(line(/^\s+roadmap-deep-eval\s*$/), "the run's name rides its own row when it differs from the description");
+
+  // Phase headings, then the agents that belong to them, then the ones that belong to none.
+  for (const want of [/^\s+Find 2\/2\s*$/, /^\s+Verify 1\/2\s*$/, /^\s+other\s*$/]) {
+    assert.ok(frame.some((l) => want.test(l)), `a heading row matching ${want} is rendered`);
+  }
+  // An agent row carries what the editors' `wagRow` carries: sparkline · ±lines · model · effort ·
+  // tok · dur · edits.
+  assert.ok(line(/find:consistency/), 'a phase agent is rendered');
+  assert.match(line(/find:consistency/), /Opus 4\.8/, 'with its model when one is known');
+  assert.match(line(/find:consistency/), RAMP, 'and its OWN sparkline, as both editors draw');
+  assert.match(line(/find:consistency/), /\+5 −2/, 'and its own ±lines');
+  assert.match(line(/find:consistency/), /1 edit\b/, 'and its own edit count');
+  assert.ok(line(/verify:external/), 'agents in the second phase are rendered too');
+  assert.match(line(/verify:external/), /high/, 'and effort when it was actually stated');
+  assert.doesNotMatch(line(/find:consistency/), /high|low|medium/, 'an unstated effort is left out, never guessed');
+  // ±lines only when there ARE any — a column of `+0 −0` reads as a finding rather than as silence.
+  assert.doesNotMatch(line(/find:evidence~/), /\+0 −0/, 'an agent that changed nothing shows no ± at all');
+
+  // A DERIVED label is marked and never asserted.
+  assert.match(text, /find:evidence~/, 'a prompt-derived label carries the heuristic marker');
+  assert.doesNotMatch(text, /find:consistency~/, 'a real label does not');
+
+  // The phase-less agent falls under `other`, identified by type + short id since it has no label.
+  assert.ok(line(/workflow-subagent dddddd/), 'an unlabelled agent falls back to its type and a short id');
+
+  // Ordering: headings before their agents, `other` last.
+  const at = (re) => frame.findIndex((l) => re.test(l));
+  assert.ok(at(/deep eval/) < at(/601k tok/), 'the metrics row follows its header');
+  assert.ok(at(/Find 2\/2\s*$/) < at(/find:consistency/), 'a phase heading precedes its agents');
+  assert.ok(at(/find:consistency/) < at(/Verify 1\/2\s*$/), 'phases are rendered in order');
+  assert.ok(at(/other/) > at(/verify:external/), 'the leftovers come last');
+  assert.ok(at(/other/) < at(/workflow-subagent/), 'under their own heading');
+
+  // Only the run itself is a cursor stop — its breakdown is `cont`, exactly like the agents screen's
+  // nested subagents. Asserted through the selection surface rather than by reading the rows.
+  const st = dashFixture({ screen: 'workflows' });
+  assert.deepEqual(tui.selectionIds(st, 'all'), [], 'a workflow row selects no edits');
+
+  // And the field the old renderer depended on is never read: a run WITHOUT the breakdown still
+  // renders its header rather than a blank or a crash.
+  const bare = dashFixture({ screen: 'workflows' });
+  bare.views.multitask.workflows = [{ id: 'w0', name: 'bare', running: false, edits: 0, added: 0, removed: 0, tokens: 0, durationMs: 0, agents: [], phaseGroups: [] }];
+  const bareFrame = tui.renderDashFrame(bare, { cols: 120, rows: 24, color: false });
+  assert.ok(bareFrame.some((l) => /bare/.test(l)), 'a run with no phases and no agents still renders');
+  assert.ok(!bareFrame.some((l) => /\bother\b/.test(l)), 'and shows no stray "other" heading with nothing to put under it');
+});
+
+test('dashframe: a WRAPPED row keeps its indent, because the indent is the nesting (0.9.5)', () => {
+  // Nesting in every dashboard list is carried by leading spaces — a workflow's per-phase agents,
+  // Fleet's subagents. `wrapVisible` splits on ' ', so an indent arrived as a run of empty words and
+  // was collapsed: a nested row that wrapped came back flush against the margin, where it reads as a
+  // top-level row. Latent for years; reachable the moment a nested row got long enough to wrap.
+  const st = paneFixture({
+    // The Dashboards pane, on its Workflows tab (index 1) — the real surface, resolved the way the
+    // renderer resolves it, not a screen name set by hand.
+    panes: { minimized: new Set(), zoom: null, focus: 'dashboards', tab: { dashboards: 1 }, cursor: {}, scroll: {} },
+    views: {
+      changemap: { rollupByWorkflow: [] },
+      multitask: {
+        workflows: [
+          {
+            id: 'w1',
+            name: 'w',
+            description: 'w',
+            phaseGroups: [{ title: 'Find', done: 1, total: 1 }],
+            agents: [
+              {
+                agentId: 'a1',
+                // Long enough to wrap at 60 columns once the extras are appended, and made of real
+                // words so it WORD-wraps — the realistic case. (A single unbreakable token is
+                // hard-broken instead, which puts the glyph alone on the first line.)
+                label: 'verify external evidence for every roadmap claim',
+                labelDerived: false,
+                phase: 'Find',
+                done: true,
+                tokens: 1000, durationMs: 1000, edits: 1, added: 2, removed: 3,
+                model: 'Opus 4.8', effort: 'high', sparkline: [1, 2, 3],
+              },
+            ],
+            running: false,
+            agentCount: 1, tokens: 1000, durationMs: 1000, edits: 1, added: 2, removed: 3,
+            sparkline: [1, 2, 3],
+          },
+        ],
+      },
+    },
+  });
+  // `selTab` is what paneScreenOf reads — 1 is Workflows in the Dashboards strip.
+  const box = { id: 'dashboards', selTab: 1, rect: { x: 0, y: 0, w: 60, h: 20 }, body: { h: 18 } };
+  // Pinned tier, for the same reason as the Workflows test: the continuation marker is `▸` on a
+  // block/safe terminal and `>` on an ascii one, so asserting either literal is a platform bet.
+  const g = tui.glyphs('block');
+  const lines = tui.paneVisible(st, box, g, 'none').map((v) => v.text);
+  const agent = lines.find((l) => /verify external/.test(l));
+  assert.ok(agent, 'the long agent row is rendered');
+  assert.match(agent, /^ {4,}/, 'and it is still INDENTED — a wrapped nested row must not jump to the margin');
+  // The tail is not lost either: it continues on a marked row rather than being cut.
+  assert.ok(lines.some((l) => l.trimStart().startsWith(g.wrap)), 'the remainder continues on its own marked row');
+  assert.ok(lines.some((l) => /1 edit/.test(l)), 'and the tail of the row survives the wrap');
+  for (const l of lines) assert.ok(tui.displayWidth(l) <= 60, `"${l}" overflows the pane`);
 });
 
 test('dashframe: no width silently truncates the key hints', () => {
@@ -10065,6 +10237,83 @@ test('channel: persisted at the store root; resolveReleaseFromList picks per cha
   assert.deepEqual(vj, { current: require('../../cli/package.json').version, channel: 'stable' }, 'version --json = installed + channel, no network');
 });
 
+test('update: resolveUpdatePlan follows the channel in BOTH directions (0.9.5)', () => {
+  const STABLE = { tag_name: 'v0.9.5', prerelease: false, assets: [{ name: 'claude-observatory-0.9.5.tgz' }] };
+  const DEV = {
+    tag_name: 'dev-latest',
+    name: 'Pre-release 0.10.0-dev.12 (rolling, from dev)',
+    prerelease: true,
+    assets: [{ name: 'claude-observatory-vscode-dev.vsix' }],
+  };
+  const LIST = [STABLE, DEV];
+  const at = (v) => [{ surface: 'vscode', label: 'VS Code', version: v }];
+  const one = (plan) => plan.surfaces[0];
+
+  // THE REPORTED BUG. A locally-built 0.10.0 sorts ABOVE every 0.10.0-dev.N the dev channel
+  // publishes, so an isNewer gate called it "up to date" forever — on BOTH channels, silently.
+  const stranded = core.resolveUpdatePlan(LIST, 'dev', at('0.10.0'));
+  assert.equal(stranded.target, '0.10.0-dev.12', 'the dev channel targets its rolling build');
+  assert.equal(one(stranded).reason, 'ahead', 'an install above the channel line is stranded, not current');
+  assert.equal(stranded.actions.length, 1, 'and it is acted on — following a channel means matching it');
+
+  const strandedOnStable = core.resolveUpdatePlan(LIST, 'stable', at('0.10.0'));
+  assert.equal(strandedOnStable.target, '0.9.5');
+  assert.equal(one(strandedOnStable).reason, 'ahead', 'the same install is stranded on stable too');
+
+  // The ordinary case, and the switch back down — the direction isNewer could never express.
+  assert.equal(one(core.resolveUpdatePlan(LIST, 'dev', at('0.10.0-dev.8'))).reason, 'behind');
+  const down = core.resolveUpdatePlan(LIST, 'stable', at('0.10.0-dev.12'), { switching: true });
+  assert.equal(down.target, '0.9.5');
+  assert.equal(one(down).reason, 'ahead', 'dev → stable is a downgrade, and it still happens');
+
+  // Nothing to do is its own answer, and a same-version channel switch still reinstalls so the bits
+  // provably come from the channel the config now names.
+  const current = core.resolveUpdatePlan(LIST, 'dev', at('0.10.0-dev.12'));
+  assert.equal(one(current).reason, 'current');
+  assert.equal(current.actions.length, 0, 'current surfaces produce no action');
+  assert.equal(current.surfaces.length, 1, 'but they are still reported — "up to date" ≠ "not checked"');
+  assert.equal(one(core.resolveUpdatePlan(LIST, 'dev', at('0.10.0-dev.12'), { switching: true })).reason, 'switching');
+  assert.equal(one(core.resolveUpdatePlan(LIST, 'dev', at('0.10.0-dev.12'), { force: true })).reason, 'forced');
+  assert.equal(one(core.resolveUpdatePlan(LIST, 'dev', at(null))).reason, 'missing', 'not installed is not "current"');
+
+  // POST-PROMOTE: the chip used to take the newest prerelease directly while the updater used
+  // resolveReleaseFromList, so the two named different versions. One resolution now, and it says so.
+  const promoted = core.resolveUpdatePlan(
+    [{ tag_name: 'v0.10.0', prerelease: false }, DEV],
+    'dev',
+    at('0.10.0-dev.12')
+  );
+  assert.equal(promoted.target, '0.10.0', 'dev serves the stable when it outranks the rolling build');
+  assert.equal(promoted.degradedToStable, true, 'and the caller can say so instead of advertising a prerelease');
+  assert.equal(one(promoted).reason, 'behind');
+
+  // Every surface is decided by the same rule; a non-actionable one stays in the plan so the caller
+  // can report it loudly rather than skipping in silence.
+  const multi = core.resolveUpdatePlan(LIST, 'stable', [
+    { surface: 'cli', label: 'CLI', version: '0.9.4' },
+    { surface: 'vscode', label: 'Cursor', version: '0.9.5' },
+    { surface: 'jetbrains', label: 'JetBrains', version: '0.9.1', actionable: false },
+  ]);
+  assert.deepEqual(multi.surfaces.map((s) => s.reason), ['behind', 'current', 'behind']);
+  assert.deepEqual(multi.actions.map((a) => a.label), ['CLI', 'JetBrains']);
+  assert.equal(multi.actions[1].actionable, false, 'installed but unactionable is carried, not dropped');
+
+  // No usable release degrades to an empty plan, never to a fake target.
+  const none = core.resolveUpdatePlan([{ tag_name: 'x', draft: true }], 'stable', at('0.9.4'));
+  assert.equal(none.release, null);
+  assert.equal(none.target, '');
+  assert.deepEqual(none.actions, []);
+
+  // Assets are matched by KIND, never by name — the two channels name them differently.
+  assert.equal(core.assetFor(DEV.assets, 'vscode').name, 'claude-observatory-vscode-dev.vsix');
+  assert.equal(core.assetFor(STABLE.assets, 'cli').name, 'claude-observatory-0.9.5.tgz');
+  assert.equal(core.assetFor(STABLE.assets, 'vscode'), null, 'a missing asset is null, not a guess');
+  assert.equal(
+    core.assetFor([{ name: 'claude-observatory-jetbrains-v0.9.5.zip' }], 'jetbrains').name,
+    'claude-observatory-jetbrains-v0.9.5.zip'
+  );
+});
+
 test('cli: the update/switch mechanism WORKS end-to-end — mock releases API, real downloads, real installs, both directions (0.9.0)', async () => {
   // The whole flow, minus github.com itself: a LOCAL mock of the releases API (the
   // CLAUDE_OBSERVATORY_RELEASES_API seam) serving one stable and one prerelease whose assets are
@@ -10159,7 +10408,136 @@ test('cli: the update/switch mechanism WORKS end-to-end — mock releases API, r
     assert.equal(vj.channel, 'stable');
     assert.equal(vj.stableLatest, '9.9.9');
     assert.equal(vj.devLatest, '9.10.0-dev.7');
-    assert.equal(vj.updateAvailable, core.isNewer('9.9.9', vj.current), 'updateAvailable is the active-channel compare');
+    assert.equal(vj.updateAvailable, core.compareVersions('9.9.9', vj.current) !== 0, 'updateAvailable is any DIFFERENCE from the channel, not just a higher number');
+    assert.equal(vj.stranded, core.compareVersions('9.9.9', vj.current) < 0, 'stranded says which way the difference points');
+  } finally {
+    srv.close();
+  }
+});
+
+test('update: assetFor decides exactly what the regexes did, in linear time (0.9.5)', () => {
+  // `/jetbrains.*\.zip$/i` is polynomial — an unanchored literal, then `.*`, then a suffix, so the
+  // engine retries from every starting position and a name like `jetbrainsjetbrains…` costs
+  // quadratic time. Asset names arrive from a release API (overridable to a mirror), which makes
+  // that reachable rather than theoretical (CodeQL: js/polynomial-redos).
+  //
+  // Every repair for this class risks MOVING the accepted set, which on an installer's
+  // "which file do I download and execute" decision is not a trade worth making — so the original
+  // regexes are kept here as oracles and the two are compared over a hostile sample.
+  const ORACLE = { cli: /\.tgz$/i, vscode: /\.vsix$/i, jetbrains: /jetbrains.*\.zip$/i };
+  const parts = ['', 'a', '.', '-', 'jetbrains', 'JetBrains', 'JETBRAINS', 'zip', '.zip', '.ZIP',
+    'vsix', '.vsix', 'tgz', '.tgz', 'claude-observatory', 'v0.9.4', 'dev', 'updatePlugins.xml'];
+  let compared = 0;
+  for (const a of parts) for (const b of parts) for (const c of parts) {
+    const n = a + b + c;
+    for (const surface of ['cli', 'vscode', 'jetbrains']) {
+      assert.equal(
+        core.assetFor([{ name: n }], surface) !== null,
+        ORACLE[surface].test(n),
+        `assetFor(${surface}) disagrees with the original regex on ${JSON.stringify(n)}`
+      );
+      compared++;
+    }
+  }
+  assert.ok(compared > 10_000, `the comparison must be broad (only ${compared} cases)`);
+
+  // The real names both channels publish, asserted by identity rather than by predicate.
+  assert.equal(core.assetFor([{ name: 'claude-observatory-jetbrains-v0.9.4.zip' }], 'jetbrains').name, 'claude-observatory-jetbrains-v0.9.4.zip');
+  assert.equal(core.assetFor([{ name: 'claude-observatory-jetbrains-dev.zip' }], 'jetbrains').name, 'claude-observatory-jetbrains-dev.zip');
+  assert.equal(core.assetFor([{ name: 'updatePlugins.xml' }], 'jetbrains'), null, 'the repo descriptor is not the plugin');
+
+  // …and the input the alert named. The old regex took ~6.5 s on this; the bound is generous
+  // because the margin is six thousandfold, not because the answer is close.
+  const evil = 'jetbrains'.repeat(20_000);
+  const t0 = Date.now();
+  assert.equal(core.assetFor([{ name: evil }], 'jetbrains'), null);
+  const ms = Date.now() - t0;
+  assert.ok(ms < 100, `assetFor must stay linear (took ${ms} ms — js/polynomial-redos)`);
+});
+
+test('cli: an install ABOVE the channel is pulled back onto it, and --json changes nothing (0.9.5)', async () => {
+  // THE REPORTED BUG, end to end. A build whose version outranks everything the channel publishes —
+  // a local build, or the state left by a channel switched downward — used to report a green "up to
+  // date" on every surface, forever, because the gate was `isNewer`. Following a channel means
+  // MATCHING it. The target here is deliberately 0.0.1: lower than any version this repo can ever
+  // carry, so the test states "installed sorts ABOVE the channel" without depending on the CI stamp.
+  const home = freshHome();
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const http = require('http');
+  const work = fs.realpathSync(tmpWork());
+  const pkgDir = path.join(work, 'fakecli');
+  fs.mkdirSync(pkgDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(pkgDir, 'package.json'),
+    JSON.stringify({ name: 'claude-observatory', version: '0.0.1', bin: { 'claude-observatory': 'co.js' } })
+  );
+  fs.writeFileSync(path.join(pkgDir, 'co.js'), '#!/usr/bin/env node\nconsole.log("fake 0.0.1");\n');
+  cp.execSync('npm pack --silent', { cwd: pkgDir, stdio: ['ignore', 'ignore', 'ignore'] });
+  const tgz = path.join(pkgDir, 'claude-observatory-0.0.1.tgz');
+
+  const srv = http.createServer((req, res) => {
+    if (req.url.startsWith('/releases')) {
+      const base = `http://127.0.0.1:${srv.address().port}`;
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify([
+        { tag_name: 'v0.0.1', name: 'Claude Observatory v0.0.1', prerelease: false, assets: [{ name: 'claude-observatory-0.0.1.tgz', browser_download_url: `${base}/a/s.tgz` }] },
+      ]));
+    } else if (req.url === '/a/s.tgz') res.end(fs.readFileSync(tgz));
+    else { res.statusCode = 404; res.end(); }
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+
+  const prefix = path.join(work, 'npm-prefix');
+  fs.mkdirSync(prefix, { recursive: true });
+  const env = {
+    ...process.env,
+    HOME: home,
+    USERPROFILE: home,
+    CLAUDE_OBSERVATORY_RELEASES_API: `http://127.0.0.1:${srv.address().port}`,
+    npm_config_prefix: prefix,
+    CLAUDE_OBSERVATORY_NO_UPDATE_CHECK: '1',
+  };
+  delete env.CLAUDE_CONFIG_DIR;
+  const run = (args) =>
+    new Promise((resolve, reject) => {
+      cp.execFile('node', [CLI, ...args], { env, encoding: 'utf8' }, (err, stdout, stderr) => {
+        if (err) reject(new Error(`${args.join(' ')} failed: ${stderr || stdout || err.message}`));
+        else resolve(stdout);
+      });
+    });
+  const installedPkgJson = () => {
+    for (const p of [
+      path.join(prefix, 'lib', 'node_modules', 'claude-observatory', 'package.json'),
+      path.join(prefix, 'node_modules', 'claude-observatory', 'package.json'),
+    ]) if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, 'utf8'));
+    return null;
+  };
+
+  try {
+    // The plan says `ahead`, in words a human can act on — not "up to date".
+    const chk = await run(['update', '--check', '--cli-only']);
+    assert.match(chk, /not on this channel — will be replaced/, 'the stranded install is named, not silently passed');
+    assert.doesNotMatch(chk, /CLI: up to date/, 'and never reported as current');
+
+    // --json reports the same verdict, structurally, and installs NOTHING.
+    const before = installedPkgJson();
+    const pj = JSON.parse(await run(['update', '--json', '--cli-only']));
+    const cliRow = pj.surfaces.find((s) => s.surface === 'cli');
+    assert.equal(cliRow.reason, 'ahead', 'the structured hand-off carries the reason, so no editor has to grep prose');
+    assert.equal(cliRow.to, '0.0.1');
+    assert.equal(pj.upToDate, false);
+    assert.deepEqual(installedPkgJson(), before, '--json is read-only — it reports the plan and changes nothing');
+
+    // And a PLAIN update — no --force, no --channel — actually moves it back onto the channel.
+    await run(['update', '--cli-only']);
+    assert.equal(installedPkgJson()?.version, '0.0.1', 'the stranded install was pulled back onto the channel');
+
+    // Documented limitation, asserted so it cannot drift: the CLI row reports the version of the
+    // process doing the reporting, which is still the old binary until the next invocation. The
+    // install landed (asserted above); this run cannot see its own replacement.
+    const after = await run(['update', '--json', '--cli-only']);
+    assert.equal(JSON.parse(after).surfaces.find((s) => s.surface === 'cli').reason, 'ahead',
+      'the CLI row reflects the RUNNING build, not the one just written to the prefix');
   } finally {
     srv.close();
   }
@@ -10689,6 +11067,32 @@ test('install-extensions: detects an editor that does NOT yet have our extension
     });
     d = await check();
     assert.equal(vsc().installed, '0.9.0', 'the installed version is read from the folder name');
+
+    // 0.9.5 — THE EDITOR'S OWN REGISTRY WINS OVER LEFTOVER FOLDERS.
+    //
+    // An editor does not delete the previous version's folder when it installs a new one, and the
+    // scan took the highest folder it could find. So after a switch DOWN to stable, the abandoned
+    // higher folder made us keep reporting the version we had just replaced — the machine looked
+    // permanently current and could never be moved again. extensions.json lists what is LOADED, one
+    // row per extension, which is the only thing an update should reason about.
+    const extDir = path.join(home, '.vscode', 'extensions');
+    fs.mkdirSync(path.join(extDir, 'cell-observatory.claude-observatory-vscode-0.10.0-dev.12'), { recursive: true });
+    fs.writeFileSync(
+      path.join(extDir, 'extensions.json'),
+      JSON.stringify([
+        { identifier: { id: 'cell-observatory.claude-observatory-vscode' }, version: '0.9.0', relativeLocation: 'cell-observatory.claude-observatory-vscode-0.9.0' },
+      ])
+    );
+    d = await check();
+    assert.equal(vsc().installed, '0.9.0', 'the registry decides, so an orphaned higher folder cannot re-strand the install');
+
+    // Corrupt or absent registry is NOT "nothing installed" — fall back to the folders rather than
+    // reporting a clean absence we never verified.
+    fs.writeFileSync(path.join(extDir, 'extensions.json'), '{ this is not json');
+    d = await check();
+    assert.equal(vsc().installed, '0.10.0-dev.12', 'an unreadable registry falls back to the folder scan');
+    fs.rmSync(path.join(extDir, 'extensions.json'));
+    fs.rmSync(path.join(extDir, 'cell-observatory.claude-observatory-vscode-0.10.0-dev.12'), { recursive: true });
 
     // A JetBrains IDE with no plugin of ours — again, present and actionable.
     const jb = path.join(home, 'Library', 'Application Support', 'JetBrains', 'PyCharm2026.1', 'plugins');
@@ -11827,10 +12231,19 @@ test('tui: every dashboard names its rows, and never shows a bare id', () => {
   assert.match(t[2], /task 3/, 'an unnamed row names its KIND rather than showing a raw id');
   assert.ok(!t[2].includes('cc88bb22ddee'), 'the digest is not the label');
 
-  const w = cells('workflows', {
-    multitask: { workflows: [{ id: '0f1e2d3c4b5a' }, { id: 'x', name: 'find-flaky-tests' }] },
-    changemap: { rollupByWorkflow: [] },
-  });
+  // A workflow run is several rows now (header · metrics · phases · agents), so the HEADERS are the
+  // named ones — picked by `cont`, the same flag the cursor uses to decide what is a row of its own,
+  // rather than by position.
+  const w = tui
+    .rowsFor(
+      st('workflows', {
+        multitask: { workflows: [{ id: '0f1e2d3c4b5a' }, { id: 'x', name: 'find-flaky-tests' }] },
+        changemap: { rollupByWorkflow: [] },
+      }),
+      120
+    )
+    .filter((r) => !r.cont)
+    .map((r) => r.cells);
   assert.match(w[0], /workflow 0f1e2d3c/, 'an unnamed workflow is named as one, with a trimmed id');
   assert.match(w[1], /find-flaky-tests/, 'and a named one shows its name');
 
