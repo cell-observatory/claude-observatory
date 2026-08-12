@@ -3549,7 +3549,13 @@ test('dashframe: the Workflows screen renders the per-phase breakdown, like both
   // The terminal used to render ONE flat line per run, built from `w.phase` — a field WorkflowRun
   // has never had — so the column was always empty and collapsed to a running/done the glyph already
   // showed. Everything below was on the wire the whole time.
-  const frame = tui.renderDashFrame(dashFixture({ screen: 'workflows' }), { cols: 200, rows: 40, color: false });
+  // The glyph tier is PINNED. It is chosen from the platform and the locale at runtime — native
+  // Windows gets `safe`, whose ramp is ASCII (`..::-=+#`) rather than the block eighths — so a test
+  // that hardcodes one tier's characters passes on the author's machine and fails on someone else's.
+  // (It did: CI's Windows runners rendered `:#=` where this asserted `▁▂▃▄▅▆▇█`.)
+  const g = tui.glyphs('block');
+  const RAMP = new RegExp(`[${g.ramp.join('')}]`);
+  const frame = tui.renderDashFrame(dashFixture({ screen: 'workflows' }), { cols: 200, rows: 40, color: false, glyphs: g });
   const text = frame.join('\n');
   const line = (re) => frame.find((l) => re.test(l));
 
@@ -3564,7 +3570,7 @@ test('dashframe: the Workflows screen renders the per-phase breakdown, like both
   // metrics line: sparkline · ±lines · agents · tok · dur · edits.
   const met = line(/601k tok/);
   assert.ok(met, 'the metrics row is rendered');
-  assert.match(met, /[▁▂▃▄▅▆▇█]/, 'the run sparkline — both editors draw one, and the terminal has a ramp for it');
+  assert.match(met, RAMP, 'the run sparkline — both editors draw one, and the terminal has a ramp for it');
   assert.match(met, /\+12/, 'lines added');
   assert.match(met, /−3/, 'lines removed');
   assert.match(met, /6 agents/, 'the agent count');
@@ -3585,7 +3591,7 @@ test('dashframe: the Workflows screen renders the per-phase breakdown, like both
   // tok · dur · edits.
   assert.ok(line(/find:consistency/), 'a phase agent is rendered');
   assert.match(line(/find:consistency/), /Opus 4\.8/, 'with its model when one is known');
-  assert.match(line(/find:consistency/), /[▁▂▃▄▅▆▇█]/, 'and its OWN sparkline, as both editors draw');
+  assert.match(line(/find:consistency/), RAMP, 'and its OWN sparkline, as both editors draw');
   assert.match(line(/find:consistency/), /\+5 −2/, 'and its own ±lines');
   assert.match(line(/find:consistency/), /1 edit\b/, 'and its own edit count');
   assert.ok(line(/verify:external/), 'agents in the second phase are rendered too');
@@ -3665,12 +3671,15 @@ test('dashframe: a WRAPPED row keeps its indent, because the indent is the nesti
   });
   // `selTab` is what paneScreenOf reads — 1 is Workflows in the Dashboards strip.
   const box = { id: 'dashboards', selTab: 1, rect: { x: 0, y: 0, w: 60, h: 20 }, body: { h: 18 } };
-  const lines = tui.paneVisible(st, box, undefined, 'none').map((v) => v.text);
+  // Pinned tier, for the same reason as the Workflows test: the continuation marker is `▸` on a
+  // block/safe terminal and `>` on an ascii one, so asserting either literal is a platform bet.
+  const g = tui.glyphs('block');
+  const lines = tui.paneVisible(st, box, g, 'none').map((v) => v.text);
   const agent = lines.find((l) => /verify external/.test(l));
   assert.ok(agent, 'the long agent row is rendered');
   assert.match(agent, /^ {4,}/, 'and it is still INDENTED — a wrapped nested row must not jump to the margin');
   // The tail is not lost either: it continues on a marked row rather than being cut.
-  assert.ok(lines.some((l) => /^\s*▸/.test(l)), 'the remainder continues on its own marked row');
+  assert.ok(lines.some((l) => l.trimStart().startsWith(g.wrap)), 'the remainder continues on its own marked row');
   assert.ok(lines.some((l) => /1 edit/.test(l)), 'and the tail of the row survives the wrap');
   for (const l of lines) assert.ok(tui.displayWidth(l) <= 60, `"${l}" overflows the pane`);
 });
