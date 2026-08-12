@@ -214,14 +214,27 @@ feature/fix branch ──PR──▶ dev (pre-release channel) ──PR──▶
 - **When dev has soaked**, a `dev → main` PR promotes everything at once; merging it is followed by a
   version bump if needed and a `vX.Y.Z` tag, which the [Release workflow](.github/workflows/release.yml)
   turns into the official GitHub Release — the stable channel. After a promote, bump `dev`'s
-  committed version to the next target (the rolling builds derive `<next>-dev.<n>` from it).
+  committed version to the next target **as a prerelease of it** — `node scripts/version.mjs
+  0.11.0-dev.0`, not `0.11.0` (see *Version numbering*).
 - `main` stays the default branch (installer URLs and docs point at `raw/main`), and history that
   shipped keeps the names it shipped with — the changelog's past entries are immutable.
 
-**Version numbering.** `dev`'s committed version is the NEXT stable target (currently the next
-minor), so rolling builds are `<target>-dev.<n>`. The target is a FLOOR: at promote time you may
-raise it (bump, then tag higher) but never tag below it — a stable below the published dev builds
-strands the pre-release channel above the version line, and its auto-update goes quiet.
+**Version numbering.** `dev`'s committed version is the NEXT stable target, written as a prerelease
+of it — `0.10.0-dev.0` — so rolling builds are `<target>-dev.<n>`. The target is a FLOOR: at promote
+time you may raise it (bump, then tag higher) but never tag below it — a stable below the published
+dev builds strands the pre-release channel above the version line.
+
+The `-dev.0` suffix matters and is not cosmetic. By semver a prerelease sorts BELOW its release, so a
+committed plain `0.10.0` outranks every `0.10.0-dev.<n>` CI publishes — which means anyone who built
+and installed from a `dev` checkout (`./install.sh`, or `code --install-extension` on a local .vsix)
+landed above the channel line and stopped receiving updates entirely, on both channels, while every
+surface reported a green "up to date". Committing `0.10.0-dev.0` puts a local build BELOW the
+rolling ones, where it belongs. `scripts/version.mjs` accepts the form and CI strips the suffix
+before re-stamping (`BASE="${BASE%%-*}"`), so nothing downstream changes.
+
+The updater no longer depends on getting this right — it acts on any DIFFERENCE from the channel's
+newest, in either direction, so a stranded install is pulled back onto the channel rather than
+ignored. The stamp keeps the ordering honest anyway; both belong.
 
 **Hotfixes.** A critical fix that must reach STABLE users before the next promote does not ship
 from `dev` (which carries unreleased work). Instead: land the fix on `dev` as usual, then
@@ -229,7 +242,8 @@ cherry-pick it onto `main` (or a branch from the last release tag, if `main` has
 patch version (`node scripts/version.mjs 0.9.1`), add a `[0.9.1]` changelog section, and tag — the
 Release workflow publishes it. The ordering stays coherent by construction: stable users get the
 patch, and pre-release users — whose `<next>-dev.<n>` builds already carry the fix and outrank the
-patch — correctly ignore it.
+patch — correctly ignore it. Landing on `dev` FIRST is what makes that true; a hotfix that only ever
+touches `main` never reaches the pre-release channel at all.
 
 The user-facing story of the two channels lives on
 [the Releases page](https://cell-observatory.github.io/claude-observatory/releases.html).
