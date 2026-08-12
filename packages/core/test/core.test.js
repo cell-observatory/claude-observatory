@@ -10406,6 +10406,46 @@ test('cli: the update/switch mechanism WORKS end-to-end — mock releases API, r
   }
 });
 
+test('update: assetFor decides exactly what the regexes did, in linear time (0.9.5)', () => {
+  // `/jetbrains.*\.zip$/i` is polynomial — an unanchored literal, then `.*`, then a suffix, so the
+  // engine retries from every starting position and a name like `jetbrainsjetbrains…` costs
+  // quadratic time. Asset names arrive from a release API (overridable to a mirror), which makes
+  // that reachable rather than theoretical (CodeQL: js/polynomial-redos).
+  //
+  // Every repair for this class risks MOVING the accepted set, which on an installer's
+  // "which file do I download and execute" decision is not a trade worth making — so the original
+  // regexes are kept here as oracles and the two are compared over a hostile sample.
+  const ORACLE = { cli: /\.tgz$/i, vscode: /\.vsix$/i, jetbrains: /jetbrains.*\.zip$/i };
+  const parts = ['', 'a', '.', '-', 'jetbrains', 'JetBrains', 'JETBRAINS', 'zip', '.zip', '.ZIP',
+    'vsix', '.vsix', 'tgz', '.tgz', 'claude-observatory', 'v0.9.4', 'dev', 'updatePlugins.xml'];
+  let compared = 0;
+  for (const a of parts) for (const b of parts) for (const c of parts) {
+    const n = a + b + c;
+    for (const surface of ['cli', 'vscode', 'jetbrains']) {
+      assert.equal(
+        core.assetFor([{ name: n }], surface) !== null,
+        ORACLE[surface].test(n),
+        `assetFor(${surface}) disagrees with the original regex on ${JSON.stringify(n)}`
+      );
+      compared++;
+    }
+  }
+  assert.ok(compared > 10_000, `the comparison must be broad (only ${compared} cases)`);
+
+  // The real names both channels publish, asserted by identity rather than by predicate.
+  assert.equal(core.assetFor([{ name: 'claude-observatory-jetbrains-v0.9.4.zip' }], 'jetbrains').name, 'claude-observatory-jetbrains-v0.9.4.zip');
+  assert.equal(core.assetFor([{ name: 'claude-observatory-jetbrains-dev.zip' }], 'jetbrains').name, 'claude-observatory-jetbrains-dev.zip');
+  assert.equal(core.assetFor([{ name: 'updatePlugins.xml' }], 'jetbrains'), null, 'the repo descriptor is not the plugin');
+
+  // …and the input the alert named. The old regex took ~6.5 s on this; the bound is generous
+  // because the margin is six thousandfold, not because the answer is close.
+  const evil = 'jetbrains'.repeat(20_000);
+  const t0 = Date.now();
+  assert.equal(core.assetFor([{ name: evil }], 'jetbrains'), null);
+  const ms = Date.now() - t0;
+  assert.ok(ms < 100, `assetFor must stay linear (took ${ms} ms — js/polynomial-redos)`);
+});
+
 test('cli: an install ABOVE the channel is pulled back onto it, and --json changes nothing (0.9.5)', async () => {
   // THE REPORTED BUG, end to end. A build whose version outranks everything the channel publishes —
   // a local build, or the state left by a channel switched downward — used to report a green "up to
