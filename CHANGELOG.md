@@ -49,6 +49,17 @@ Per-tag release artifacts and auto-generated notes are on the
 - **The CLI is found in more places.** `resolveBin` also looks in bun, pnpm, fnm, asdf and
   `/usr/bin` — an editor launched from a Dock icon inherits none of them on `PATH`, which reads to
   the user as a button that does nothing.
+- **The terminal's Workflows tab renders the per-phase breakdown**, carrying the same fields VS Code
+  and PyCharm do: the run's phase summary, its metrics (activity sparkline, ±lines, agents, tokens,
+  time, edits), its name when the description differs, then one heading per phase with its agents
+  nested beneath — each with its own sparkline, ±lines, model, effort, tokens, time and edits — and an
+  `other` heading for agents in no declared phase. It had been rendering one flat line built from
+  `w.phase` — a field `WorkflowRun` does not have — so the column was always empty, and its edit
+  count came from a different source than the editors', giving three front ends two answers.
+- **A wrapped dashboard row keeps its indent.** Nesting is carried by leading spaces, and the wrapper
+  splits on spaces — so any indented row long enough to wrap came back flush against the margin and
+  read as a top-level row. Latent across every nested list; reachable as soon as a row got long.
+
 
 ### Added
 

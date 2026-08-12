@@ -1256,6 +1256,20 @@ visible before you press anything. Focus one with its F-key — press it again t
 | **Map / Diff** *(centre)* | `F4` / `F5` | one window, two faces: the session's change map, or the selected edit's before-and-after |
 | **Observatory Dashboards** *(bottom)* | `F6` | Fleet · Workflows · Tasks · Observations · Actions · Processes · Feed |
 
+**Workflows** renders the same breakdown the editors do, carrying the same fields: the run's
+running/done state and its phase summary on the header row; its metrics beneath (activity
+**sparkline · ±lines · agents · tokens · time · edits**); the run's **name** on its own row when the
+description is something else; then one heading per declared phase with that phase's agents nested
+under it, each agent with its **own** sparkline, ±lines, model, effort, tokens, time and edits. An
+`other` heading collects agents that belong to no declared phase — the common case on a *running*
+workflow, whose phases come from the script meta while its agents still carry journal keys.
+
+A label the runner has not confirmed yet is derived from the agent's prompt and marked `~`; model and
+effort appear only when they were actually stated, and an agent that changed nothing shows no ± at
+all rather than a column of `+0 −0`. Like the Fleet's nested subagents, the breakdown is not a cursor
+stop — the cursor steps between runs. Rows wrap rather than clip, and a wrapped row keeps its indent,
+so nesting survives a narrow terminal.
+
 The centre is **one window with two faces** rather than two windows, because you are only ever
 looking at one of them. `F4` shows the Map, `F5` the Diff, and the title says which face is up with
 that face's own key. With nothing selected it opens on the Map.
