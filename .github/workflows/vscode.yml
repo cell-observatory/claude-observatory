@@ -22,6 +22,14 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      # `npm run release` also builds the JetBrains plugin, through the committed wrapper. The wrapper
+      # fetches the Gradle distribution itself with NO cache and exactly one attempt ("Attempt 1/1"),
+      # so any blip on services.gradle.org reds this job on a commit that is perfectly fine — which is
+      # what a 503 did here. setup-gradle caches the distribution and the Gradle user home, which is
+      # why jetbrains.yml (which already uses it) sailed through the same outage on the same commit.
+      # Nothing else about the build changes: release.sh still drives ./gradlew, and the JDK stays the
+      # runner's default, which is what this job has always used.
+      - uses: gradle/actions/setup-gradle@v4
       - run: npm run release
       - uses: actions/upload-artifact@v4
         with:
