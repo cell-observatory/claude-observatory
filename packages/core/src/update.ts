@@ -147,10 +147,23 @@ export function resolveUpdatePlan(
   };
 }
 
-/** The release asset a surface installs from, by extension. The two channels name their assets
- *  differently (`…-v0.9.4.vsix` vs `…-vscode-dev.vsix`), so matching is by KIND, never by name —
- *  a name pattern would have to know which channel it is on. */
+/**
+ * The release asset a surface installs from, by KIND rather than by name — the two channels name
+ * their assets differently (`…-v0.9.4.vsix` vs `…-vscode-dev.vsix`), so a name pattern would have to
+ * know which channel it is on.
+ *
+ * String predicates, deliberately, not regexes. `/jetbrains.*\.zip$/` is polynomial: an unanchored
+ * literal followed by `.*` and a suffix backtracks over every starting position, so a name like
+ * `jetbrainsjetbrains…` costs quadratic time. These names arrive from a release API (overridable to
+ * a mirror), which makes that reachable rather than theoretical — the same class already fixed once
+ * in `versionOfRelease`. `includes`/`endsWith` are linear and say the intent more plainly anyway.
+ */
 export function assetFor<T extends { name?: string }>(assets: T[], surface: UpdateSurface): T | null {
-  const re = surface === 'cli' ? /\.tgz$/i : surface === 'vscode' ? /\.vsix$/i : /jetbrains.*\.zip$/i;
-  return (assets ?? []).find((a) => re.test(String(a?.name ?? ''))) ?? null;
+  const matches = (raw: string): boolean => {
+    const n = raw.toLowerCase();
+    if (surface === 'cli') return n.endsWith('.tgz');
+    if (surface === 'vscode') return n.endsWith('.vsix');
+    return n.includes('jetbrains') && n.endsWith('.zip');
+  };
+  return (assets ?? []).find((a) => matches(String(a?.name ?? ''))) ?? null;
 }

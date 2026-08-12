@@ -4143,7 +4143,7 @@ async function cmdInstallExtensions(args: string[]): Promise<void> {
       else {
         let src = zipArg;
         if (src === null) {
-          const zip = assets.find((a) => /jetbrains.*\.zip$/i.test(a.name));
+          const zip = core.assetFor(assets, 'jetbrains');
           if (!zip) fail(`release v${target} has no JetBrains .zip asset to install.`);
           src = await downloadAsset(zip!);
         }
