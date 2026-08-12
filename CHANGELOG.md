@@ -10,6 +10,65 @@ Per-tag release artifacts and auto-generated notes are on the
 <!-- Every feature/fix PR into `dev` appends its line here; a promote renames this section to the
      release version and opens a fresh one. -->
 
+## [0.9.5] — 2026-08-12
+
+### Fixed
+
+- **Updating and switching release channels now works in both directions, and stops going quiet.**
+  A surface is refreshed whenever its version *differs* from the channel's newest — not only when the
+  release is higher. The old `isNewer` gate could not express the downgrade half of a channel switch,
+  and it silently ignored anything sitting *above* the channel line: a build installed from a `dev`
+  checkout is newer than every `-dev.<n>` the pre-release channel publishes, so every surface
+  reported a green "up to date", forever, on both channels. Such an install is now named
+  (`not on this channel`) and pulled back onto it. One decision serves every front end
+  (`core.resolveUpdatePlan`), replacing three call sites that compared three different ways.
+- **The VS Code extension installs its own `.vsix`, so updating needs nothing on `PATH`.** *Update
+  now* and *Switch release channel* went through the CLI, whose install step needs the editor's shell
+  command (`code`, `cursor`, `code-insiders`); a Dock-launched editor often has none, so the buttons
+  people actually press were the ones that failed. They now use the editor's own extension service —
+  the path the background notifier already used. The CLI is asked only to refresh itself and the
+  JetBrains plugin, and its absence is reported as a partial result rather than a failed update.
+- **The version dropdown names what is actually installed, per surface.** *Update now* moves the
+  extension, the CLI and the JetBrains plugin, which carry independent versions — the menu showed one
+  number, so whenever they differed it described something other than what the button changed. Each
+  surface now carries its own version and verdict, a CLI that cannot be found says so, and a build
+  that is installed but not yet loaded reads `pending reload` instead of reporting the old version.
+- **A channel switch can no longer half-apply.** The choice is persisted *after* the installs are
+  attempted, not before, so a blocked install cannot leave the config naming one channel while the
+  binaries came from another.
+- **The editors stop inferring success from the CLI's prose.** `claude-observatory update --json`
+  reports the whole plan as data — every surface, its version, and why it will or will not be touched
+  — and installs nothing. Both editors read that instead of searching stdout for
+  `everything is up to date`, a string that also occurs inside a message meaning the opposite.
+- **VS Code Insiders is detected.** It has its own extensions directory and its own CLI name, and
+  having neither in the table made every Insiders user invisible to `update` and `install-extensions`.
+- **A leftover extension folder can no longer re-strand an install.** Editors keep the previous
+  version's folder after installing, and detection took the highest folder it found — so after a
+  switch *down* to stable, the abandoned higher folder kept being reported as installed. The editor's
+  own `extensions.json` registry decides now, with the folder scan as the fallback.
+- **"Couldn't check" no longer looks like "up to date".** The release feed is queried anonymously and
+  can rate-limit; that state is now its own, in both the chip and the CLI.
+- **The CLI is found in more places.** `resolveBin` also looks in bun, pnpm, fnm, asdf and
+  `/usr/bin` — an editor launched from a Dock icon inherits none of them on `PATH`, which reads to
+  the user as a button that does nothing.
+- **The terminal's Workflows tab renders the per-phase breakdown**, carrying the same fields VS Code
+  and PyCharm do: the run's phase summary, its metrics (activity sparkline, ±lines, agents, tokens,
+  time, edits), its name when the description differs, then one heading per phase with its agents
+  nested beneath — each with its own sparkline, ±lines, model, effort, tokens, time and edits — and an
+  `other` heading for agents in no declared phase. It had been rendering one flat line built from
+  `w.phase` — a field `WorkflowRun` does not have — so the column was always empty, and its edit
+  count came from a different source than the editors', giving three front ends two answers.
+- **A wrapped dashboard row keeps its indent.** Nesting is carried by leading spaces, and the wrapper
+  splits on spaces — so any indented row long enough to wrap came back flush against the margin and
+  read as a top-level row. Latent across every nested list; reachable as soon as a row got long.
+
+### Changed
+
+- **`dev`'s committed version is now a prerelease of its target** (`0.10.0-dev.0`, not `0.10.0`).
+  By semver a prerelease sorts below its release, so the plain form outranked every rolling build CI
+  publishes and put anyone who built locally above the channel line. CI strips the suffix before
+  re-stamping, so nothing downstream changes.
+
 ## [0.9.4] — 2026-08-07
 
 ### Added

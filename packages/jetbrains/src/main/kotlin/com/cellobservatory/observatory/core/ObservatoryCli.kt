@@ -1012,9 +1012,49 @@ object ObservatoryCli {
         val channel: String, // "stable" | "dev"
         val latest: String?,
         val updateAvailable: Boolean,
+        /** The installed build sorts ABOVE the channel's newest — a local build, or a channel just
+         *  switched downward. It is still actionable (following a channel means matching it), but it
+         *  is not an "update", and calling it one confused everyone who hit it. */
+        val stranded: Boolean,
         val stableLatest: String?,
         val devLatest: String?,
     )
+
+    /** One row of `update --json`: what a surface has installed, and what the channel says it should
+     *  have. `reason` is core's UpdateReason — current / behind / ahead / switching / missing / forced. */
+    data class UpdateSurface(val surface: String, val label: String, val from: String?, val to: String, val reason: String)
+
+    /**
+     * `update --json` — the whole plan, as DATA, installing nothing.
+     *
+     * This exists so the plugin can stop deciding what happened by grepping the CLI's prose
+     * (`out.contains("everything is up to date")`), which broke the moment the wording moved and gave
+     * people "no restart needed" after a real install. Ask before, act, ask again.
+     */
+    fun updatePlan(channel: String?, workDir: String?): List<UpdateSurface>? {
+        val args = buildList {
+            add("update"); add("--json")
+            if (channel != null) { add("--channel"); add(channel) }
+        }
+        val r = run(args, workDir, timeoutMs = 60_000)
+        if (!r.ok) return null
+        return try {
+            val arr = JsonParser.parseString(r.stdout).asJsonObject.getAsJsonArray("surfaces")
+            arr.map { el ->
+                val o = el.asJsonObject
+                fun s(k: String) = o.get(k)?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString
+                UpdateSurface(
+                    surface = s("surface") ?: "",
+                    label = s("label") ?: "",
+                    from = s("from"),
+                    to = s("to") ?: "",
+                    reason = s("reason") ?: "",
+                )
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
 
     /** `version --check --json` — the version dropdown's payload: the installed CLI version, the
      *  followed channel, and both channels' newest releases (one GitHub fetch, CLI-side). Null when
@@ -1030,6 +1070,7 @@ object ObservatoryCli {
                 channel = s("channel") ?: "stable",
                 latest = s("latest"),
                 updateAvailable = o.get("updateAvailable")?.takeIf { it.isJsonPrimitive }?.asBoolean ?: false,
+                stranded = o.get("stranded")?.takeIf { it.isJsonPrimitive }?.asBoolean ?: false,
                 stableLatest = s("stableLatest"),
                 devLatest = s("devLatest"),
             )

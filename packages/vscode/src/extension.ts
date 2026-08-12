@@ -2961,6 +2961,8 @@ function changeMapShell(): string {
   .ov-vermenu .vm-sec { border-top:1px solid var(--cm-border); margin:4px 2px; }
   .ov-vermenu .vm-ver { margin-left:auto; font-family:var(--cm-mono); font-size:10.5px; color:var(--vscode-descriptionForeground); }
   .ov-vermenu .vm-note { padding:3px 8px 5px; font-size:10px; color:var(--vscode-descriptionForeground); }
+  /* The per-surface rows read as a table, not as buttons — they are a report, nothing to click. */
+  .ov-vermenu .vm-surf { display:flex; align-items:baseline; justify-content:space-between; gap:10px; padding:2px 8px; }
   .ov-tb { display:inline-flex; align-items:center; gap:5px; background:transparent; border:1px solid var(--cm-border); border-radius:5px; color: var(--vscode-descriptionForeground); font:inherit; font-size:11px; padding:3px 9px; cursor:pointer; white-space:nowrap; }
   .ov-tb:hover { background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.12)); color: var(--vscode-foreground); }
   /* session chip: show the FULL name — let a long one wrap/break inside the chip instead of overflowing */
@@ -7035,6 +7037,15 @@ const OVERVIEW_SCRIPT = `
     chip.title=(v.updateAvailable?'Update available — ':'')+'Claude Observatory version — update, or switch between the stable and pre-release channels';
     var chLatest=v.channel==='dev'?(v.devLatest||v.stableLatest):v.stableLatest;
     var h='';
+    // WHAT IS INSTALLED, per surface — the chip's own number is only the extension, while "Update
+    // now" moves the extension, the CLI and the JetBrains plugin. Showing one number for three
+    // things is what made the dropdown disagree with reality; so does showing the RUNNING build
+    // after an install has already landed, which is why 'pending reload' is its own state.
+    if(v.surfaces&&v.surfaces.length){ h+='<div class="vm-sec"></div>';
+      for(var si=0;si<v.surfaces.length;si++){ var sf=v.surfaces[si];
+        h+='<div class="vm-note vm-surf"><span>'+esc(sf.label)+'</span><span class="vm-ver">'+(sf.version?'v'+esc(sf.version):'—')+
+           (sf.reason&&sf.reason!=='current'?' · '+esc(sf.reason):'')+'</span></div>'; }
+      h+='<div class="vm-sec"></div>'; }
     // ALWAYS present (user call 2026-07-28): a menu whose main action appears only sometimes reads
     // as broken. Clicking while current is a safe no-op — the host shows the up-to-date toast with
     // no reload offer — and doubles as a manual re-check. "up to date" is only claimed when the
@@ -7748,54 +7759,173 @@ function fetchReleaseList(): Promise<any[]> {
   });
 }
 
-async function fetchLatestRelease(): Promise<any> {
-  const release = core.resolveReleaseFromList(await fetchReleaseList(), core.getUpdateChannel());
+async function fetchLatestRelease(channel?: core.UpdateChannel): Promise<any> {
+  const release = core.resolveReleaseFromList(await fetchReleaseList(), channel ?? core.getUpdateChannel());
   if (!release) throw new Error('no published release found');
   return release;
 }
 
-/** Run the CLI's `update` (the one updater for every surface) with a progress notification, then
- *  offer a window reload. Windows: the CLI is an npm `.cmd` shim, which needs cmd.exe — core/spawn
- *  handles that, and the quoting, for every CLI spawn in this file. */
-function runObservatoryUpdate(args: string[], title: string, doneMsg: string, upToDateMsg: string): Thenable<void> {
-  const bin = resolveObservatoryBin();
-  return vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title },
-    () =>
-      new Promise<void>((resolve) => {
-        core.execFileTool(bin, args, { timeout: 300000 }, (err, stdout, stderr) => {
-          versionInfoCache = null; // the chip must re-learn the world after an install
-          if (err) {
-            // core.cliFailureMessage, not `stderr || stdout`: that ordering is what put a Node
-            // deprecation warning in this toast instead of the reason (#45).
-            vscode.window.showErrorMessage(
-              `Claude Observatory: update failed — ${core.cliFailureMessage(stdout, stderr, err.message)}`
-            );
-            resolve();
-            return;
-          }
-          // The reload pop-up appears only when something was actually INSTALLED. The CLI prints one
-          // of these exact lines precisely when nothing changed (its final-summary guard) — a reload
-          // offer on a no-op would teach people the button cries wolf.
-          const out = String(stdout || '');
-          const nothingInstalled = out.includes('everything is up to date') || out.includes('CLI is up to date');
-          if (nothingInstalled) {
-            vscode.window.showInformationMessage(upToDateMsg);
-          } else {
-            void vscode.window.showInformationMessage(doneMsg, 'Reload Window').then((pick) => {
-              if (pick === 'Reload Window') void vscode.commands.executeCommand('workbench.action.reloadWindow');
-            });
-          }
-          resolve();
-        });
-      })
-  );
+/** Run the CLI once, resolving to its stdout — or to an Error. Windows: the CLI is an npm `.cmd`
+ *  shim, which needs cmd.exe; core/spawn handles that, and the quoting, for every CLI spawn here. */
+function runCli(args: string[], timeoutMs = 300000): Promise<string> {
+  return new Promise((resolve, reject) => {
+    core.execFileTool(resolveObservatoryBin(), args, { timeout: timeoutMs }, (err, stdout, stderr) => {
+      // core.cliFailureMessage, not `stderr || stdout`: that ordering is what put a Node deprecation
+      // warning in this toast instead of the reason (#45).
+      if (err) reject(new Error(core.cliFailureMessage(stdout, stderr, err.message)));
+      else resolve(String(stdout || ''));
+    });
+  });
+}
+
+/** The CLI's own view of the world, network-free: its version and the channel it follows. Null when
+ *  the CLI cannot be found or run — which is a normal state (the extension installs fine on its own)
+ *  and must be reported as "not found", never as a failed update. */
+async function cliVersionInfo(): Promise<{ current: string; channel: core.UpdateChannel } | null> {
+  try {
+    // Seconds, not the install timeout: this runs while a webview waits to paint, and it does no
+    // network at all — anything slower than this is a wedged process, not a slow answer.
+    const out = await runCli(['version', '--json'], 10000);
+    const j = JSON.parse(out);
+    return { current: String(j?.current ?? ''), channel: j?.channel === 'dev' ? 'dev' : 'stable' };
+  } catch {
+    return null;
+  }
+}
+
+/** Ask the CLI for the whole update plan as data. `--json` never installs anything, so this is safe
+ *  to call from a chip render. Null = the CLI is absent or the release feed was unreachable. */
+async function fetchUpdatePlan(channel?: core.UpdateChannel): Promise<any | null> {
+  try {
+    // One release-feed fetch, so a minute is generous; the 5-minute install budget is not for a read.
+    return JSON.parse(await runCli(channel ? ['update', '--json', '--channel', channel] : ['update', '--json'], 60000));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Apply an update, or switch channels — the ONE path behind both buttons.
+ *
+ * The .vsix is installed BY THIS EXTENSION, through VS Code's own extension service, and never by
+ * shelling `code --install-extension`. That distinction is the whole bug: the notifier's installer
+ * needs nothing on PATH (see installVsixUpdate), while the CLI's needs the editor's shell command,
+ * which a Dock-launched editor frequently does not have — so the button people actually press was
+ * the one that failed.
+ *
+ * The CLI is still asked to refresh ITSELF and the JetBrains plugin. Its absence is a PARTIAL
+ * result, reported as such, not a failure: an extension-only install is a supported way to run this.
+ *
+ * Success is never inferred from the CLI's prose. We install what we install, and read the plan back
+ * to see what actually moved.
+ */
+async function applyUpdate(target: core.UpdateChannel | null): Promise<void> {
+  const switching = target !== null && target !== core.getUpdateChannel();
+  const label = target === 'dev' ? 'Pre-release' : 'Stable';
+  const title = switching
+    ? `Claude Observatory: switching to the ${label} channel…`
+    : 'Claude Observatory: updating…';
+  const done: string[] = [];
+  const skipped: string[] = []; // could not be done, and the user may be able to fix it
+  const notes: string[] = []; // deliberately not done — a supported setup, not a failure
+  let extensionMoved = false;
+
+  await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title }, async () => {
+    const plan = await fetchUpdatePlan(target ?? undefined);
+    // 1. This extension, in-process. The plan tells us the target; if the CLI could not produce one
+    //    we fall back to our own release lookup, so a missing CLI never blocks our own update.
+    let release: any = null;
+    try {
+      release = await fetchLatestRelease(target ?? undefined);
+    } catch {
+      /* offline — reported below */
+    }
+    const latest = core.versionOfRelease(release) ?? '';
+    if (!latest) {
+      skipped.push('could not reach the release feed');
+    } else if (core.compareVersions(latest, extensionVersion) !== 0 || switching) {
+      const vsix = core.assetFor((release.assets || []) as { name?: string }[], 'vscode') as any;
+      if (!vsix) skipped.push(`release ${latest} has no .vsix asset`);
+      else {
+        try {
+          await installVsix(vsix.browser_download_url, latest, vsix.digest);
+          done.push(`extension → ${latest}`);
+          extensionMoved = true;
+        } catch (e) {
+          skipped.push(`extension: ${String((e as Error)?.message || e)}`);
+        }
+      }
+    } else {
+      done.push(`extension already ${extensionVersion}`);
+    }
+
+    // 2. Persist the channel ourselves. The CLI used to own this and wrote it BEFORE installing, so
+    //    a blocked install left the config naming one channel and the binaries from the other.
+    if (switching && target) {
+      try {
+        core.setUpdateChannel(target);
+      } catch (e) {
+        skipped.push(String((e as Error)?.message || e));
+      }
+    }
+
+    // 3. The CLI and the JetBrains plugin, via the CLI. `--force` is unnecessary: the CLI now acts on
+    //    any DIFFERENCE from the channel, in either direction.
+    //
+    //    A machine with no CLI is a SUPPORTED setup, not a failed update — the extension installs and
+    //    updates itself. So "not installed" is a note; only a CLI that exists and then FAILED is a
+    //    problem worth a warning.
+    //
+    //    Whether the CLI EXISTS is asked network-free (`version --json`), never inferred from the
+    //    plan: `update --json` also fails when the release feed is unreachable, so keying off it
+    //    reported "CLI not found" to people whose CLI was installed and whose network was not.
+    const cli = await cliVersionInfo();
+    if (!cli) {
+      notes.push('CLI not found — the extension updated on its own');
+    } else if (plan === null || (plan.surfaces || []).some((s: any) => s.surface !== 'vscode' && s.reason !== 'current')) {
+      // plan === null: the CLI is there but could not tell us the plan. Run it anyway and let it
+      // report its own reason, rather than skipping on a guess.
+      try {
+        await runCli(target ? ['update', '--channel', target] : ['update']);
+        done.push('CLI and JetBrains plugin refreshed');
+      } catch (e) {
+        skipped.push(`CLI: ${String((e as Error)?.message || e)}`);
+      }
+    } else {
+      done.push('CLI and JetBrains plugin already current');
+    }
+    versionInfoCache = null; // the chip must re-learn the world after an install
+  });
+
+  // What MOVED, per surface — never one verdict for three things. A reload is offered exactly when
+  // this extension's own bits changed, which is the only case a reload is what fixes.
+  const headline = switching ? `Switched to the ${label} channel.` : 'Claude Observatory update:';
+  const detail = [done.join('; '), notes.join('; '), skipped.length ? `not done — ${skipped.join('; ')}` : '']
+    .filter(Boolean)
+    .join(' · ');
+  if (extensionMoved) {
+    const pick = await vscode.window.showInformationMessage(`${headline} ${detail}`, 'Reload Window');
+    if (pick === 'Reload Window') void vscode.commands.executeCommand('workbench.action.reloadWindow');
+  } else if (skipped.length) {
+    vscode.window.showWarningMessage(`${headline} ${detail}`);
+  } else {
+    vscode.window.showInformationMessage(`${headline} ${detail}`);
+  }
 }
 
 /** The version chip's payload: the running extension's own version, the followed channel, and both
  *  channels' newest tags (1h in-memory cache — the chip renders instantly, the menu stays honest). */
 let versionInfoCache: { at: number; stableLatest: string | null; devLatest: string | null } | null = null;
 let extensionVersion = ''; // set once in activate() from the extension's own manifest
+/**
+ * A newer build is ON DISK but this extension host is still running the old one.
+ *
+ * `extensionVersion` comes from `context.extension.packageJSON` at activation and can never change
+ * for the life of the host — so after an install the chip kept reporting the pre-update number with
+ * nothing to say that the update had, in fact, worked. That read as "the dropdown shows a different
+ * version to what's installed". The chip now says "installed, pending reload" instead of lying.
+ */
+let pendingReloadVersion: string | null = null;
 /** `publisher.name` for this extension, read from the host at activation. Used to scope VS Code's
  *  settings UI — `@ext:` with a wrong id filters to nothing and reads as a dead button, so it is
  *  never spelled out by hand. Empty under the smoke-test mock, which has no `context.extension`. */
@@ -7808,6 +7938,8 @@ async function versionChipInfo(): Promise<{
   devLatest: string | null;
   updateAvailable: boolean;
   offline?: boolean;
+  pendingReload?: string | null;
+  surfaces?: { label: string; version: string | null; reason: string }[];
 }> {
   const current = extensionVersion;
   const channel = core.getUpdateChannel();
@@ -7818,23 +7950,62 @@ async function versionChipInfo(): Promise<{
   if (!cached || Date.now() - cached.at > 60 * 60 * 1000) {
     try {
       const list = await fetchReleaseList();
+      // resolveReleaseFromList for BOTH rows, not a raw `.find(prerelease)` for the dev one. The two
+      // disagree right after a promote — when the freshly-tagged stable outranks the rolling build
+      // and IS what the dev channel serves — so the menu advertised a pre-release that "Update now"
+      // would not have installed. Null when dev degraded to stable, so the row can say "none yet".
+      const dev = core.resolveReleaseFromList(list, 'dev');
       cached = {
         at: Date.now(),
         stableLatest: core.versionOfRelease(core.resolveReleaseFromList(list, 'stable')),
-        devLatest: core.versionOfRelease(list.find((r: any) => r?.prerelease === true && !r?.draft) ?? null),
+        devLatest: dev && (dev as any).prerelease === true ? core.versionOfRelease(dev) : null,
       };
       versionInfoCache = cached;
     } catch {
+      // Offline / rate-limited is NOT "up to date". Both used to render identically, so a user behind
+      // a 403 saw a confident green chip. `offline` is its own state and the menu says so.
       if (!cached) return { current, channel, stableLatest: null, devLatest: null, updateAvailable: false, offline: true };
     }
   }
   const latest = channel === 'dev' ? cached.devLatest ?? cached.stableLatest : cached.stableLatest;
+  // EVERY surface the update touches, each with its own installed version — because "Update now"
+  // updates three things and the chip used to show the number for exactly one of them. The CLI's is
+  // network-free (`version --json`); a missing CLI is reported as missing, not as a failure.
+  const surfaces: { label: string; version: string | null; reason: string }[] = [
+    {
+      label: 'Extension',
+      version: pendingReloadVersion ?? current,
+      reason: pendingReloadVersion
+        ? 'pending reload'
+        : latest && core.compareVersions(latest, current) !== 0
+          ? core.isNewer(latest, current)
+            ? 'update available'
+            : 'not on this channel'
+          : 'current',
+    },
+  ];
+  const cli = await cliVersionInfo();
+  surfaces.push({
+    label: 'CLI',
+    version: cli?.current ?? null,
+    reason: !cli
+      ? 'not found'
+      : latest && core.compareVersions(latest, cli.current) !== 0
+        ? core.isNewer(latest, cli.current)
+          ? 'update available'
+          : 'not on this channel'
+        : 'current',
+  });
   return {
     current,
     channel,
     stableLatest: cached.stableLatest,
     devLatest: cached.devLatest,
-    updateAvailable: Boolean(latest && current && core.isNewer(latest, current)),
+    // Any DIFFERENCE from the channel, in either direction — an install sitting ABOVE the channel is
+    // the case that silently stranded people, and it is precisely the one isNewer called "current".
+    updateAvailable: surfaces.some((s) => s.reason === 'update available' || s.reason === 'not on this channel'),
+    pendingReload: pendingReloadVersion,
+    surfaces,
   };
 }
 
@@ -7877,21 +8048,30 @@ function verifyVsixDigest(file: string, digest?: string): void {
   if (actual !== expected) throw new Error(`integrity check failed (sha256 ${actual} ≠ ${expected})`);
 }
 
-/** Download the .vsix and install it via VS Code's own extension service (no `code` CLI needed — works
- *  regardless of PATH), then offer a window reload. Falls back to opening the download in a browser if
- *  anything fails. */
+/**
+ * Download the .vsix and install it through VS Code's OWN extension service. Throws on any failure.
+ *
+ * This is the install path that works everywhere: `workbench.extensions.installExtension` is served
+ * by the running editor, so it needs nothing on PATH — no `code`, no `cursor`, no `code-insiders`.
+ * It also installs in either direction, which is what makes a downgrade to the stable channel land.
+ */
+async function installVsix(url: string, latest: string, digest?: string): Promise<void> {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-observatory-'));
+  const dest = path.join(dir, `claude-observatory-${latest}.vsix`);
+  await downloadFile(url, dest);
+  verifyVsixDigest(dest, digest); // sha256 parity with the CLI — refuse a tampered .vsix
+  await vscode.commands.executeCommand('workbench.extensions.installExtension', vscode.Uri.file(dest));
+  pendingReloadVersion = latest;
+  versionInfoCache = null;
+}
+
+/** The notifier's install: `installVsix` wrapped in its own progress + reload prompt. Falls back to
+ *  opening the download in a browser if anything fails. */
 async function installVsixUpdate(url: string, latest: string, digest?: string): Promise<void> {
   try {
     await vscode.window.withProgress(
       { location: vscode.ProgressLocation.Notification, title: `Installing Claude Observatory ${latest}…` },
-      async () => {
-        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-observatory-'));
-        const dest = path.join(dir, `claude-observatory-${latest}.vsix`);
-        await downloadFile(url, dest);
-        verifyVsixDigest(dest, digest); // sha256 parity with the CLI — refuse a tampered .vsix
-        // VS Code's built-in installer accepts a .vsix file Uri — no dependency on the `code` CLI.
-        await vscode.commands.executeCommand('workbench.extensions.installExtension', vscode.Uri.file(dest));
-      }
+      () => installVsix(url, latest, digest)
     );
     const reload = await vscode.window.showInformationMessage(
       `Claude Observatory ${latest} installed. Reload the window to activate it.`,
@@ -7934,19 +8114,26 @@ async function checkForUpdate(context: vscode.ExtensionContext, manual: boolean)
   }
   context.globalState.update('updateCheck.lastMs', Date.now());
   const latest = core.versionOfRelease(release) ?? '';
-  if (!latest || !core.isNewer(latest, current)) {
+  // Follow the channel: act on any DIFFERENCE, not only on a higher number. A build sitting ABOVE
+  // the channel (a local build, or a channel switched downward) is exactly what the old isNewer gate
+  // reported as "up to date" — permanently, and with a green checkmark.
+  const cmp = latest ? core.compareVersions(latest, current) : 0;
+  if (!latest || cmp === 0) {
     if (manual) vscode.window.showInformationMessage(`Claude Observatory is up to date (${current}).`);
     return;
   }
+  const stranded = cmp < 0;
   if (!manual && context.globalState.get<string>('updateCheck.skip') === latest) return; // dismissed
-  const vsix = (release.assets || []).find((a: any) => /\.vsix$/i.test(a.name));
+  const vsix = core.assetFor((release.assets || []) as { name?: string }[], 'vscode') as any;
   const downloadUrl = vsix?.browser_download_url || release.html_url;
   // One-click install goes through VS Code's own extension service (no `code` CLI needed); if the
   // release has no .vsix asset we fall back to opening the download + manual "Install from VSIX…".
   const canInstall = Boolean(vsix);
-  const primary = canInstall ? 'Update now' : 'Download .vsix';
+  const primary = canInstall ? (stranded ? 'Install it' : 'Update now') : 'Download .vsix';
   const choice = await vscode.window.showInformationMessage(
-    `Claude Observatory ${latest} is available (you have ${current}).`,
+    stranded
+      ? `You have Claude Observatory ${current}, which is not on the ${core.getUpdateChannel() === 'dev' ? 'Pre-release' : 'Stable'} channel (${latest}) — probably a local build. Move onto the channel?`
+      : `Claude Observatory ${latest} is available (you have ${current}).`,
     primary,
     'Release notes',
     'Skip this version'
@@ -10269,9 +10456,9 @@ export function activate(context: vscode.ExtensionContext): void {
   // Marketplace-free update nudge: a manual command + a throttled background check on activation.
   context.subscriptions.push(
     vscode.commands.registerCommand('claudeObservatory.checkForUpdates', () => checkForUpdate(context, true)),
-    // Switch release channels (stable ⇄ the rolling pre-release). ONE CLI run does everything —
-    // `update --channel X` persists the choice and refreshes the CLI, both editor plugins, and the
-    // status line — so afterwards only a window reload is needed to load the new build.
+    // Switch release channels (stable ⇄ the rolling pre-release). `applyUpdate` installs THIS
+    // extension itself and asks the CLI only for the CLI and the JetBrains plugin, so a machine
+    // without the shell `code` command — or without the CLI at all — still switches.
     vscode.commands.registerCommand('claudeObservatory.switchChannel', async (ch?: string) => {
       let target: 'stable' | 'dev' | undefined = ch === 'stable' || ch === 'dev' ? ch : undefined;
       if (!target) {
@@ -10285,28 +10472,13 @@ export function activate(context: vscode.ExtensionContext): void {
         if (!pick) return;
         target = pick.ch;
       }
-      const label = target === 'dev' ? 'Pre-release' : 'Stable';
-      if (target === core.getUpdateChannel()) {
-        vscode.window.showInformationMessage(`Claude Observatory is already on the ${label} channel.`);
-        return;
-      }
-      await runObservatoryUpdate(
-        ['update', '--channel', target],
-        `Claude Observatory: switching to the ${label} channel…`,
-        `Switched to the ${label} channel — the CLI and both editor plugins were refreshed. Reload to load the new build.`,
-        `Switched to the ${label} channel — already on its newest build, nothing to reload.`
-      );
+      // Already on it is NOT a no-op offer: the channel can say one thing while the bits say another
+      // (a blocked install, a local build), and refusing to act was how people got stuck. Re-running
+      // the same channel reconciles it.
+      await applyUpdate(target);
     }),
-    // The chip's Update now: the FULL update — CLI + both editor plugins + status line — exactly what
-    // the docs promise and what JetBrains' chip runs; the vsix-only notifier flow stays its own thing.
-    vscode.commands.registerCommand('claudeObservatory.updateNow', () =>
-      runObservatoryUpdate(
-        ['update'],
-        'Claude Observatory: updating (CLI + editor plugins)…',
-        'Updated — the CLI and both editor plugins were refreshed. Reload to load the new build.',
-        'Claude Observatory is already up to date.'
-      )
-    )
+    // The chip's Update now: the FULL update — this extension + CLI + JetBrains plugin + status line.
+    vscode.commands.registerCommand('claudeObservatory.updateNow', () => applyUpdate(null))
   );
   // The demo offer takes precedence for this activation. Two unsolicited notifications on the first
   // launch after an update is precisely the noise "Never ask" exists to stop, and the update check is

@@ -121,7 +121,7 @@
 
 <nav class="nav" id="nav">
   <div class="wrap row">
-    <a class="brand" href="showcase.html"><span class="m">🔬</span> Claude Observatory <span class="brandver" data-co-version>v0.9.4</span></a>
+    <a class="brand" href="showcase.html"><span class="m">🔬</span> Claude Observatory <span class="brandver" data-co-version>v0.9.5</span></a>
     <div class="links">
       <a href="showcase.html">Home</a>
       <a href="showcase.html#install">Install</a>
@@ -155,7 +155,7 @@
     <h2>Stable and Pre-release</h2>
     <div class="term" id="stable">
       <h3><a href="#stable">Stable</a></h3>
-      <p><b>Current stable: <a href="https://github.com/cell-observatory/claude-observatory/releases/latest" style="color:var(--accent-ink);text-decoration:underline;text-underline-offset:3px"><span data-co-version id="rel-stable">v0.9.4</span></a></b> · current pre-release: <span id="rel-dev">rolling</span> — read live from the releases feed (the static value is the fallback from this page’s last deploy). Every release’s changes: the <a href="https://github.com/cell-observatory/claude-observatory/blob/main/CHANGELOG.md" style="color:var(--accent-ink);text-decoration:underline;text-underline-offset:3px">full changelog</a>.</p>
+      <p><b>Current stable: <a href="https://github.com/cell-observatory/claude-observatory/releases/latest" style="color:var(--accent-ink);text-decoration:underline;text-underline-offset:3px"><span data-co-version id="rel-stable">v0.9.5</span></a></b> · current pre-release: <span id="rel-dev">rolling</span> — read live from the releases feed (the static value is the fallback from this page’s last deploy). Every release’s changes: the <a href="https://github.com/cell-observatory/claude-observatory/blob/main/CHANGELOG.md" style="color:var(--accent-ink);text-decoration:underline;text-underline-offset:3px">full changelog</a>.</p>
       <p><b>Tagged releases, cut from <code>main</code>.</b> Each one is a version like <code>v0.9.0</code>: the full three-OS test matrix and the end-to-end suite ran on the exact commit, the artifacts (CLI tarball, VS&nbsp;Code <code>.vsix</code>, JetBrains plugin zip) are attached to the GitHub Release, and the changelog names what changed. This is the default channel — <code>releases/latest</code> serves it, and nothing on it ever moves after it is published.</p>
     </div>
     <div class="term" id="prerelease">
@@ -172,11 +172,16 @@
     <p class="glede">Both editors pin a <b>version chip</b> at the right edge of the Overview's toolbar. It shows the version you are running; when the channel you follow has something newer, a dot appears. Its menu holds everything this page describes:</p>
     <div class="term">
       <h3>Update now</h3>
-      <p>Always in the menu. Installs the newest release of the channel you follow — the CLI, both editor plugins, and the bundled status line, all in one pass — then offers the reload (VS&nbsp;Code) or restart (JetBrains) that loads it. When nothing is newer it says so and installs nothing; clicking it also re-checks the release feed.</p>
+      <p>Always in the menu. Installs the newest release of the channel you follow — the CLI, both editor plugins, and the bundled status line, all in one pass — then offers the reload (VS&nbsp;Code) or restart (JetBrains) that loads it. When nothing differs it says so and installs nothing; clicking it also re-checks the release feed. The menu lists what each surface currently has, separately: they carry independent versions, and one number could only ever describe one of them.</p>
+    </div>
+    <div class="term">
+      <h3>Following a channel means matching it</h3>
+      <p>A surface is refreshed whenever its version <em>differs</em> from the channel's newest, in either direction — not only when the release is higher. That is what makes the switch work both ways, and what rescues a build sitting <em>above</em> the channel: install a local build from a <code>dev</code> checkout and it is newer than every <code>-dev.&lt;n&gt;</code> the channel publishes, so a "newer only" check would call it up to date and never touch it again. It now reports <code>not on this channel</code> and is pulled back onto it.</p>
     </div>
     <div class="term">
       <h3>Stable ⇄ Pre-release</h3>
-      <p>Switching persists the choice and installs the target channel's newest immediately — including the deliberate downgrade when you leave the pre-release channel for stable. Updates follow the chosen channel from then on: the CLI's once-a-day nudge, VS&nbsp;Code's background check, and the chip itself all compare against it.</p>
+      <p>Switching installs the target channel's newest immediately — including the deliberate downgrade when you leave the pre-release channel for stable — and persists the choice <em>after</em> the install, so the recorded channel and the installed bits can never disagree. Updates follow the chosen channel from then on: the CLI's once-a-day nudge, VS&nbsp;Code's background check, and the chip itself all compare against it.</p>
+      <p>In VS&nbsp;Code the extension installs its own <code>.vsix</code> through the editor, so switching needs nothing on your <code>PATH</code> — no <code>code</code> shell command, and no CLI. The CLI is asked only to refresh itself and the JetBrains plugin.</p>
     </div>
     <div class="term">
       <h3>The terminal equivalents</h3>
@@ -188,13 +193,14 @@ pre-release channel: 0.10.0-dev.37 — switch with `claude-observatory update --
 run `claude-observatory update` to apply.
 
 <span class="p">$</span> claude-observatory update --channel dev
-<span class="ok">✓</span> switched to the pre-release (dev) channel
 downloading claude-observatory-cli-dev.tgz …
 <span class="ok">✓</span> updated the CLI 0.9.0 → 0.10.0-dev.37
 <span class="p">…the editor plugins and the status line refresh the same way…</span>
+<span class="ok">✓</span> switched to the pre-release (dev) channel
 
 <span class="p">$</span> claude-observatory update --channel stable   <span class="p"># back, any time</span></pre>
-      <p><code>claude-observatory version --check</code> reports the installed version, the followed channel, and both channels' newest at any time. The channel itself is one word in <code>~/.claude/claude-observatory/channel</code> — no other state.</p>
+      <p>The channel is recorded <em>last</em>, once the installs have been attempted — a switch that could not install must not leave the config claiming a channel the binaries did not come from.</p>
+      <p><code>claude-observatory version --check</code> reports the installed version, the followed channel, and both channels' newest at any time; <code>claude-observatory update --json</code> reports the whole plan — every surface, its installed version, and why it will or will not be touched — and installs nothing. The channel itself is one word in <code>~/.claude/claude-observatory/channel</code> — no other state.</p>
     </div>
     <div class="term">
       <h3>JetBrains IDE-native updates, per channel</h3>
@@ -273,7 +279,7 @@ downloading claude-observatory-cli-dev.tgz …
 <footer class="foot" id="footer">
   <div class="wrap">
     <div class="row">
-      <span class="brand"><span class="m">🔬</span> Claude Observatory <span class="brandver" data-co-version>v0.9.4</span></span>
+      <span class="brand"><span class="m">🔬</span> Claude Observatory <span class="brandver" data-co-version>v0.9.5</span></span>
       <div class="flinks">
         <a href="apps.html">Apps</a>
         <a href="concepts.html">Docs</a>

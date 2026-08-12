@@ -1596,6 +1596,32 @@ test('extension: three views, click commands, inline annotations, chat, status s
       assert.match(elFor('ov-vermenu').innerHTML, /Update now<span class="vm-ver">—/, 'with no feed data the Update row shows an em-dash');
       assert.doesNotMatch(elFor('ov-vermenu').innerHTML, /up to date/, 'and does not assert up to date it never verified');
 
+      // 0.9.5 — THE DROPDOWN MUST NAME WHAT IS ACTUALLY INSTALLED, per surface. "Update now" moves
+      // the extension, the CLI and the JetBrains plugin, but the menu showed ONE number (the
+      // extension's), so whenever they differed it described something other than what the button
+      // changed. Each surface now carries its own version and its own verdict.
+      solo.post({ type: 'version', v: { current: '0.10.0', channel: 'dev', stableLatest: '0.9.5', devLatest: '0.10.0-dev.12', updateAvailable: true,
+        surfaces: [
+          { label: 'Extension', version: '0.10.0', reason: 'not on this channel' },
+          { label: 'CLI', version: '0.10.0-dev.12', reason: 'current' },
+        ] } });
+      let menu = elFor('ov-vermenu').innerHTML;
+      assert.match(menu, /Extension<\/span><span class="vm-ver">v0\.10\.0 · not on this channel/, 'the extension row names its own version AND why it is wrong');
+      assert.match(menu, /CLI<\/span><span class="vm-ver">v0\.10\.0-dev\.12</, 'the CLI row names the CLI version, which is a DIFFERENT number');
+      assert.doesNotMatch(menu, /CLI<\/span><span class="vm-ver">v0\.10\.0-dev\.12 ·/, 'a current surface carries no verdict suffix');
+
+      // A missing CLI is reported as missing — an extension-only install is supported, not broken.
+      solo.post({ type: 'version', v: { current: '0.9.5', channel: 'stable', stableLatest: '0.9.5', devLatest: null, updateAvailable: false,
+        surfaces: [{ label: 'Extension', version: '0.9.5', reason: 'current' }, { label: 'CLI', version: null, reason: 'not found' }] } });
+      menu = elFor('ov-vermenu').innerHTML;
+      assert.match(menu, /CLI<\/span><span class="vm-ver">— · not found/, 'a CLI that could not be located says so rather than showing the extension version');
+
+      // After an install lands, the running host is still the OLD build. Saying nothing made the
+      // update look like it had failed; the row says the new version is in, pending a reload.
+      solo.post({ type: 'version', v: { current: '0.9.4', channel: 'stable', stableLatest: '0.9.5', devLatest: null, updateAvailable: false, pendingReload: '0.9.5',
+        surfaces: [{ label: 'Extension', version: '0.9.5', reason: 'pending reload' }] } });
+      assert.match(elFor('ov-vermenu').innerHTML, /Extension<\/span><span class="vm-ver">v0\.9\.5 · pending reload/, 'an installed-but-not-loaded build is named as such');
+
       // ---- 0.10.0: the grouped left nav, EXECUTED both ways -----------------------------------------
       // Five tabs or two group tabs of side-by-side columns, decided by one persisted value. Asserted by
       // running the shipped script rather than by reading its source: the hazard here is a column whose
