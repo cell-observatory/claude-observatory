@@ -60,6 +60,13 @@ Per-tag release artifacts and auto-generated notes are on the
   splits on spaces — so any indented row long enough to wrap came back flush against the margin and
   read as a top-level row. Latent across every nested list; reachable as soon as a row got long.
 
+### Changed
+
+- **`dev`'s committed version is now a prerelease of its target** (`0.10.0-dev.0`, not `0.10.0`).
+  By semver a prerelease sorts below its release, so the plain form outranked every rolling build CI
+  publishes and put anyone who built locally above the channel line. CI strips the suffix before
+  re-stamping, so nothing downstream changes.
+
 
 ### Added
 
