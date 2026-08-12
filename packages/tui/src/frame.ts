@@ -576,21 +576,110 @@ function rowsForUncached(state: DashState, cols = 100, g: Glyphs = defaultGlyphs
       });
     }
   } else if (state.screen === 'workflows') {
-    const roll = new Map<string, Record<string, unknown>>();
-    for (const r of arr(view<{ rollupByWorkflow?: unknown[] }>(state, 'changemap')?.rollupByWorkflow)) {
-      roll.set(str(r.workflowId), r);
-    }
+    // The SAME breakdown both editors render from this payload (extension.ts renderWorkflows): a run
+    // header, its metrics, then per-phase headings with the agents that belong to them. All of it was
+    // already on the wire — `multitask.workflows` is the full WorkflowRun[] — and the terminal was
+    // showing one flat line built from `w.phase`, a field WorkflowRun does not have, so the column
+    // was always empty and fell back to a bare running/done that the glyph already said.
     for (const w of arr(view<{ workflows?: unknown[] }>(state, 'multitask')?.workflows)) {
-      const label = named([str(w.name)], 'workflow', str(w.id));
+      // Description first, then name — what the editors show as `w.description || w.name`.
+      const label = named([str(w.description), str(w.name)], 'workflow', str(w.id));
       if (!keep(label)) continue;
-      const r = roll.get(str(w.id)) ?? {};
       const live = w.running === true;
-      const phase = str(w.phase) || (live ? 'running' : 'done');
+      const wk: StateKey = live ? 'live' : 'kept';
+      const groups = arr(w.phaseGroups);
+      const agents = arr(w.agents);
+      const summary = groups.map((p) => `${str(p.title)} ${num(p.done)}/${num(p.total)}`).join(' · ');
       rows.push({
         ids: [],
         key: `w${str(w.id)}`,
-        cells: `${live ? tint(g.closed, 'live', depth) : ' '} ${phase.padEnd(12)} ${String(num(r.edits)).padStart(4)} edits  ${label}`,
+        cells: `${live ? tint(g.closed, 'live', depth) : ' '} ${tint((live ? 'running' : 'done').padEnd(8), wk, depth)} ${summary ? `${tint(summary, 'agent', depth)}  ` : ''}${tail(label)}`,
       });
+      // Metrics ride their own row so the run's description keeps the full width of its line — the
+      // editors split them the same way, and this file's standing rule is to wrap, never truncate.
+      // Field order matches the editors' metrics line: sparkline · ±lines · agents · tok · dur · edits.
+      const wspark = Array.isArray(w.sparkline) ? sparkline(w.sparkline as number[], g) : '';
+      rows.push({
+        ids: [],
+        key: `w${str(w.id)}m`,
+        cont: true,
+        cells: `     ${wspark ? `${tint(pad(wspark, 10), wk, depth)} ` : ''}${tint(`+${num(w.added)}`, 'kept', depth)} ${tint(`−${num(w.removed)}`, 'risk', depth)}  ${tint(
+          [
+            `${num(w.agentCount) || agents.length} agents`,
+            `${compactTokens(num(w.tokens))} tok`,
+            compactDuration(num(w.durationMs)),
+            // w.edits — the run's OWN tool-call count, which is what both editors show. The old row
+            // took this from changemap.rollupByWorkflow instead, so the terminal and the editors
+            // reported different numbers for the same run.
+            `${num(w.edits)} edit${num(w.edits) === 1 ? '' : 's'}`,
+          ].join(' · '),
+          'undone',
+          depth
+        )}`,
+      });
+      // The run's NAME, when the description is something else. Both are real identifiers — the
+      // description is the readable one and the name is the one that appears in a script and in the
+      // journal — so the editors show the name underneath rather than making you pick (VS Code's
+      // `mt-wsub`). Only when they differ; repeating one string twice is noise.
+      if (str(w.description) && str(w.name) && str(w.description) !== str(w.name)) {
+        rows.push({ ids: [], key: `w${str(w.id)}n`, cont: true, cells: `     ${tint(str(w.name), 'undone', depth)}` });
+      }
+      // Agents grouped under their declared phase, then whatever is left under `other`. On a LIVE run
+      // the phases come from the script meta while the agents may still carry journal keys, so the
+      // `other` bucket is the common case, not an edge one. The heading appears ONLY when phases were
+      // declared — a run with none shows a plain agent list, not a lone "other".
+      const placed = new Set<number>();
+      const agentRow = (a: Record<string, unknown>, i: number): void => {
+        const done = a.done === true;
+        const ak: StateKey = done ? 'kept' : 'live';
+        const sid = str(a.agentId).replace(/^v\d+:/, '').slice(0, 6);
+        // A DERIVED label is marked with `~` and never asserted — on a running workflow the label is
+        // guessed from the agent's prompt, and the runner's real labels only land at completion.
+        const lbl = str(a.label) ? `${str(a.label)}${a.labelDerived === true ? '~' : ''}` : `${str(a.agentType) || 'agent'}${sid ? ` ${sid}` : ''}`;
+        // Model and effort only when stated. An unknown effort is left OUT rather than guessed: the
+        // default differs by build and by model, so a placeholder would be fiction. Everything after
+        // the label is what the editors' agent rows carry, in their order:
+        // sparkline · ±lines · model · effort · tok · dur · edits.
+        const aspark = Array.isArray(a.sparkline) ? sparkline(a.sparkline as number[], g) : '';
+        // ±lines only when there ARE any — PyCharm's rule, and the one the Fleet's nested subagent
+        // rows in this file already follow. A run of `+0 −0` down the column reads as a finding.
+        const ad = num(a.added) || num(a.removed)
+          ? `${tint(`+${num(a.added)}`, 'kept', depth)} ${tint(`−${num(a.removed)}`, 'risk', depth)}  `
+          : '';
+        const extras = [
+          str(a.model),
+          str(a.effort),
+          `${compactTokens(num(a.tokens))} tok`,
+          compactDuration(num(a.durationMs)),
+          `${num(a.edits)} edit${num(a.edits) === 1 ? '' : 's'}`,
+        ]
+          .filter(Boolean)
+          .join(' · ');
+        rows.push({
+          ids: [],
+          key: `w${str(w.id)}a${str(a.agentId) || i}`,
+          cont: true,
+          cells: `       ${tint(done ? g.kept : g.closed, ak, depth)} ${tint(pad(lbl, 22), ak, depth)} ${aspark ? `${tint(pad(aspark, 10), ak, depth)} ` : ''}${ad}${tint(extras, 'undone', depth)}`,
+        });
+      };
+      for (const [gi, p] of groups.entries()) {
+        rows.push({
+          ids: [],
+          key: `w${str(w.id)}p${gi}`,
+          cont: true,
+          cells: `     ${tint(`${str(p.title)} ${num(p.done)}/${num(p.total)}`, 'agent', depth)}`,
+        });
+        agents.forEach((a, i) => {
+          if (str(a.phase) !== str(p.title)) return;
+          placed.add(i);
+          agentRow(a, i);
+        });
+      }
+      const rest = agents.map((a, i) => [a, i] as const).filter(([, i]) => !placed.has(i));
+      if (rest.length && groups.length) {
+        rows.push({ ids: [], key: `w${str(w.id)}pother`, cont: true, cells: `     ${tint('other', 'agent', depth)}` });
+      }
+      for (const [a, i] of rest) agentRow(a, i);
     }
   } else if (state.screen === 'agents') {
     // MODEL and EFFORT are not on the agent — they are per-session, and the editors join the two to
@@ -1079,8 +1168,15 @@ export function paneVisible(
     // Wrap ONCE, at one width, and never rejoin: wrapping to the full width and re-wrapping the
     // remainder welded a hard-broken token back together with a space, so `…handler.md` rendered as
     // `…handle` + `r.md` — a path that does not exist and the reader cannot tell is wrong.
-    const parts = wrapVisible(text, wrapWidth);
-    out.push({ text: parts[0] ?? '', row });
+    //
+    // The LEADING INDENT is held out of the wrap and put back. Nesting is carried by that indent —
+    // it is how a workflow's per-phase agents, and Fleet's subagents, read as belonging to the row
+    // above them — and `wrapVisible` splits on spaces, so the indent arrived as a run of empty words
+    // and was silently collapsed. An indented row that wrapped came back flush against the margin,
+    // where it reads as a top-level row: not a lost space, a lost relationship.
+    const indent = /^ */.exec(text)?.[0] ?? '';
+    const parts = wrapVisible(text.slice(indent.length), Math.max(1, wrapWidth - indent.length));
+    out.push({ text: `${indent}${parts[0] ?? ''}`, row });
     for (const part of parts.slice(1)) out.push({ text: `  ${g.wrap}${part}`, row });
   };
 

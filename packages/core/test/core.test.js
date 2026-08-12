@@ -3180,7 +3180,40 @@ function dashFixture(over = {}) {
         ],
       },
       prompts: { prompts: [{ id: 'p1', index: 1, ts: 1000, title: 'do the thing', editIds: [1, 3] }] },
-      multitask: { agents: [{ session: 's', phase: 'working', phaseConfidence: 'heuristic', diff: { added: 4, removed: 1 }, sparkline: '▁▂▅' }], summary: { active: 1, conflicts: 2 } },
+      multitask: {
+        agents: [{ session: 's', phase: 'working', phaseConfidence: 'heuristic', diff: { added: 4, removed: 1 }, sparkline: '▁▂▅' }],
+        // A workflow run with BOTH shapes the Workflows screen has to render: agents that sit in a
+        // declared phase, and agents that do not (the common case on a live run, where the phases come
+        // from the script meta while the agents still carry journal keys). One label is DERIVED, so
+        // the heuristic marker has something to mark.
+        workflows: [
+          {
+            id: 'wf_fix',
+            name: 'roadmap-deep-eval',
+            description: 'deep eval of the ADO roadmap',
+            phases: ['Find', 'Verify'],
+            phaseGroups: [{ title: 'Find', done: 2, total: 2 }, { title: 'Verify', done: 1, total: 2 }],
+            agents: [
+              { agentId: 'v2:aaaaaaaa', label: 'find:consistency', labelDerived: false, phase: 'Find', done: true, tokens: 12000, durationMs: 240000, edits: 1, added: 5, removed: 2, model: 'Opus 4.8', effort: '', sparkline: [1, 2] },
+              { agentId: 'bbbbbbbb', label: 'find:evidence', labelDerived: true, phase: 'Find', done: true, tokens: 31000, durationMs: 540000, edits: 0, added: 0, removed: 0, model: '', effort: '', sparkline: [] },
+              { agentId: 'cccccccc', label: 'verify:external', labelDerived: false, phase: 'Verify', done: true, tokens: 88000, durationMs: 1080000, edits: 2, added: 3, removed: 1, model: '', effort: 'high', sparkline: [] },
+              { agentId: 'dddddddd', label: null, labelDerived: false, phase: null, agentType: 'workflow-subagent', done: false, tokens: 102000, durationMs: 1320000, edits: 0, added: 0, removed: 0, model: '', effort: '', sparkline: [] },
+            ],
+            running: true,
+            lastActivityMs: 1000,
+            agentCount: 6,
+            tokens: 601000,
+            durationMs: 2760000,
+            edits: 3,
+            added: 12,
+            removed: 3,
+            startedTs: 1,
+            lastTs: 2,
+            sparkline: [1, 3, 2],
+          },
+        ],
+        summary: { active: 1, conflicts: 2 },
+      },
       feed: { entries: [{ ts: 1000, label: 'ran tests' }], mode: 'live' },
       risk: { high: 1, count: 2, risky: [{ ts: 1, tool: 'Bash', target: 'rm -rf x', level: 'high', reasons: [] }], outsideWrites: [{ file: '/etc/hosts', count: 1 }] },
       egress: { remote: 1, channels: [{ kind: 'web', target: 'example.com', scope: 'remote', count: 1 }] },
@@ -3510,6 +3543,136 @@ test('dashframe: every screen fits its budget at every width', () => {
       }
     }
   }
+});
+
+test('dashframe: the Workflows screen renders the per-phase breakdown, like both editors (0.9.5)', () => {
+  // The terminal used to render ONE flat line per run, built from `w.phase` — a field WorkflowRun
+  // has never had — so the column was always empty and collapsed to a running/done the glyph already
+  // showed. Everything below was on the wire the whole time.
+  const frame = tui.renderDashFrame(dashFixture({ screen: 'workflows' }), { cols: 200, rows: 40, color: false });
+  const text = frame.join('\n');
+  const line = (re) => frame.find((l) => re.test(l));
+
+  // Header: the run's state, the phase summary, and the DESCRIPTION (not the bare name — that is
+  // what the editors show, and it is the half a human recognises).
+  const head = line(/deep eval of the ADO roadmap/);
+  assert.ok(head, 'the run header carries the description');
+  assert.match(head, /running/, 'and whether it is running');
+  assert.match(head, /Find 2\/2 · Verify 1\/2/, 'and the phase summary, joined the way the editors join it');
+
+  // Metrics, on their own row so the description keeps its full line. The field set is the editors'
+  // metrics line: sparkline · ±lines · agents · tok · dur · edits.
+  const met = line(/601k tok/);
+  assert.ok(met, 'the metrics row is rendered');
+  assert.match(met, /[▁▂▃▄▅▆▇█]/, 'the run sparkline — both editors draw one, and the terminal has a ramp for it');
+  assert.match(met, /\+12/, 'lines added');
+  assert.match(met, /−3/, 'lines removed');
+  assert.match(met, /6 agents/, 'the agent count');
+  assert.match(met, /46m/, 'the wall time');
+  // w.edits (3), NOT the change-map rollup the old row used — all three front ends must say the same
+  // number for the same run.
+  assert.match(met, /3 edits/, "the run's OWN edit count");
+
+  // The NAME, under the description, when they differ — VS Code's `mt-wsub`. Both are real
+  // identifiers and the reader should not have to choose which one they were shown.
+  assert.ok(line(/^\s+roadmap-deep-eval\s*$/), "the run's name rides its own row when it differs from the description");
+
+  // Phase headings, then the agents that belong to them, then the ones that belong to none.
+  for (const want of [/^\s+Find 2\/2\s*$/, /^\s+Verify 1\/2\s*$/, /^\s+other\s*$/]) {
+    assert.ok(frame.some((l) => want.test(l)), `a heading row matching ${want} is rendered`);
+  }
+  // An agent row carries what the editors' `wagRow` carries: sparkline · ±lines · model · effort ·
+  // tok · dur · edits.
+  assert.ok(line(/find:consistency/), 'a phase agent is rendered');
+  assert.match(line(/find:consistency/), /Opus 4\.8/, 'with its model when one is known');
+  assert.match(line(/find:consistency/), /[▁▂▃▄▅▆▇█]/, 'and its OWN sparkline, as both editors draw');
+  assert.match(line(/find:consistency/), /\+5 −2/, 'and its own ±lines');
+  assert.match(line(/find:consistency/), /1 edit\b/, 'and its own edit count');
+  assert.ok(line(/verify:external/), 'agents in the second phase are rendered too');
+  assert.match(line(/verify:external/), /high/, 'and effort when it was actually stated');
+  assert.doesNotMatch(line(/find:consistency/), /high|low|medium/, 'an unstated effort is left out, never guessed');
+  // ±lines only when there ARE any — a column of `+0 −0` reads as a finding rather than as silence.
+  assert.doesNotMatch(line(/find:evidence~/), /\+0 −0/, 'an agent that changed nothing shows no ± at all');
+
+  // A DERIVED label is marked and never asserted.
+  assert.match(text, /find:evidence~/, 'a prompt-derived label carries the heuristic marker');
+  assert.doesNotMatch(text, /find:consistency~/, 'a real label does not');
+
+  // The phase-less agent falls under `other`, identified by type + short id since it has no label.
+  assert.ok(line(/workflow-subagent dddddd/), 'an unlabelled agent falls back to its type and a short id');
+
+  // Ordering: headings before their agents, `other` last.
+  const at = (re) => frame.findIndex((l) => re.test(l));
+  assert.ok(at(/deep eval/) < at(/601k tok/), 'the metrics row follows its header');
+  assert.ok(at(/Find 2\/2\s*$/) < at(/find:consistency/), 'a phase heading precedes its agents');
+  assert.ok(at(/find:consistency/) < at(/Verify 1\/2\s*$/), 'phases are rendered in order');
+  assert.ok(at(/other/) > at(/verify:external/), 'the leftovers come last');
+  assert.ok(at(/other/) < at(/workflow-subagent/), 'under their own heading');
+
+  // Only the run itself is a cursor stop — its breakdown is `cont`, exactly like the agents screen's
+  // nested subagents. Asserted through the selection surface rather than by reading the rows.
+  const st = dashFixture({ screen: 'workflows' });
+  assert.deepEqual(tui.selectionIds(st, 'all'), [], 'a workflow row selects no edits');
+
+  // And the field the old renderer depended on is never read: a run WITHOUT the breakdown still
+  // renders its header rather than a blank or a crash.
+  const bare = dashFixture({ screen: 'workflows' });
+  bare.views.multitask.workflows = [{ id: 'w0', name: 'bare', running: false, edits: 0, added: 0, removed: 0, tokens: 0, durationMs: 0, agents: [], phaseGroups: [] }];
+  const bareFrame = tui.renderDashFrame(bare, { cols: 120, rows: 24, color: false });
+  assert.ok(bareFrame.some((l) => /bare/.test(l)), 'a run with no phases and no agents still renders');
+  assert.ok(!bareFrame.some((l) => /\bother\b/.test(l)), 'and shows no stray "other" heading with nothing to put under it');
+});
+
+test('dashframe: a WRAPPED row keeps its indent, because the indent is the nesting (0.9.5)', () => {
+  // Nesting in every dashboard list is carried by leading spaces — a workflow's per-phase agents,
+  // Fleet's subagents. `wrapVisible` splits on ' ', so an indent arrived as a run of empty words and
+  // was collapsed: a nested row that wrapped came back flush against the margin, where it reads as a
+  // top-level row. Latent for years; reachable the moment a nested row got long enough to wrap.
+  const st = paneFixture({
+    // The Dashboards pane, on its Workflows tab (index 1) — the real surface, resolved the way the
+    // renderer resolves it, not a screen name set by hand.
+    panes: { minimized: new Set(), zoom: null, focus: 'dashboards', tab: { dashboards: 1 }, cursor: {}, scroll: {} },
+    views: {
+      changemap: { rollupByWorkflow: [] },
+      multitask: {
+        workflows: [
+          {
+            id: 'w1',
+            name: 'w',
+            description: 'w',
+            phaseGroups: [{ title: 'Find', done: 1, total: 1 }],
+            agents: [
+              {
+                agentId: 'a1',
+                // Long enough to wrap at 60 columns once the extras are appended, and made of real
+                // words so it WORD-wraps — the realistic case. (A single unbreakable token is
+                // hard-broken instead, which puts the glyph alone on the first line.)
+                label: 'verify external evidence for every roadmap claim',
+                labelDerived: false,
+                phase: 'Find',
+                done: true,
+                tokens: 1000, durationMs: 1000, edits: 1, added: 2, removed: 3,
+                model: 'Opus 4.8', effort: 'high', sparkline: [1, 2, 3],
+              },
+            ],
+            running: false,
+            agentCount: 1, tokens: 1000, durationMs: 1000, edits: 1, added: 2, removed: 3,
+            sparkline: [1, 2, 3],
+          },
+        ],
+      },
+    },
+  });
+  // `selTab` is what paneScreenOf reads — 1 is Workflows in the Dashboards strip.
+  const box = { id: 'dashboards', selTab: 1, rect: { x: 0, y: 0, w: 60, h: 20 }, body: { h: 18 } };
+  const lines = tui.paneVisible(st, box, undefined, 'none').map((v) => v.text);
+  const agent = lines.find((l) => /verify external/.test(l));
+  assert.ok(agent, 'the long agent row is rendered');
+  assert.match(agent, /^ {4,}/, 'and it is still INDENTED — a wrapped nested row must not jump to the margin');
+  // The tail is not lost either: it continues on a marked row rather than being cut.
+  assert.ok(lines.some((l) => /^\s*▸/.test(l)), 'the remainder continues on its own marked row');
+  assert.ok(lines.some((l) => /1 edit/.test(l)), 'and the tail of the row survives the wrap');
+  for (const l of lines) assert.ok(tui.displayWidth(l) <= 60, `"${l}" overflows the pane`);
 });
 
 test('dashframe: no width silently truncates the key hints', () => {
@@ -12019,10 +12182,19 @@ test('tui: every dashboard names its rows, and never shows a bare id', () => {
   assert.match(t[2], /task 3/, 'an unnamed row names its KIND rather than showing a raw id');
   assert.ok(!t[2].includes('cc88bb22ddee'), 'the digest is not the label');
 
-  const w = cells('workflows', {
-    multitask: { workflows: [{ id: '0f1e2d3c4b5a' }, { id: 'x', name: 'find-flaky-tests' }] },
-    changemap: { rollupByWorkflow: [] },
-  });
+  // A workflow run is several rows now (header · metrics · phases · agents), so the HEADERS are the
+  // named ones — picked by `cont`, the same flag the cursor uses to decide what is a row of its own,
+  // rather than by position.
+  const w = tui
+    .rowsFor(
+      st('workflows', {
+        multitask: { workflows: [{ id: '0f1e2d3c4b5a' }, { id: 'x', name: 'find-flaky-tests' }] },
+        changemap: { rollupByWorkflow: [] },
+      }),
+      120
+    )
+    .filter((r) => !r.cont)
+    .map((r) => r.cells);
   assert.match(w[0], /workflow 0f1e2d3c/, 'an unnamed workflow is named as one, with a trimmed id');
   assert.match(w[1], /find-flaky-tests/, 'and a named one shows its name');
 
