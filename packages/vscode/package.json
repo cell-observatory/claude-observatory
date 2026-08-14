@@ -1395,11 +1395,11 @@
   },
   "devDependencies": {
     "@claude-observatory/core": "0.10.0-dev.0",
-    "@types/node": "^26.1.2",
+    "@types/node": "^26.2.0",
     "@types/vscode": "^1.85.0",
     "@vscode/codicons": "^0.0.45",
     "@vscode/vsce": "^3.0.0",
-    "esbuild": "^0.28.1",
+    "esbuild": "^0.28.2",
     "typescript": "^5.9.3"
   },
   "license": "Apache-2.0",
